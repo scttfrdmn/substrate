@@ -1,0 +1,24 @@
+# Build output
+bin/
+*.exe
+
+# Test and coverage
+coverage.out
+coverage.html
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+events.db
+state.db
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Go
+vendor/

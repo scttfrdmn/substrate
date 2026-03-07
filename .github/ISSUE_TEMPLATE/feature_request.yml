@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a new feature or improvement.
+labels: ["type: feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request, please check the
+        [milestones](https://github.com/scttfrdmn/substrate/milestones) and existing
+        [issues](https://github.com/scttfrdmn/substrate/issues) to avoid duplicates.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem does this feature solve? Who is affected?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature and, if applicable, your preferred API.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why you rejected them.
+
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Suggested milestone
+      options:
+        - "v0.1.0 — Event sourcing foundation"
+        - "v0.2.0 — Core server and plugins"
+        - "v0.3.0 — IAM"
+        - "v0.4.0 — Quotas, consistency, costs"
+        - "v0.5.0 — S3 plugin"
+        - "v0.6.0 — Betty integration"
+        - "v1.0.0 — Production release"
+        - "Future / unscheduled"
