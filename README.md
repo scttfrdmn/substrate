@@ -68,7 +68,7 @@ WARNING: High S3 PUT rate — consider batching (save ~99%)
 ### Install
 
 ```bash
-go install github.com/scttfrdmn/substrate/cmd/substrate@v0.3.0-alpha
+go install github.com/scttfrdmn/substrate/cmd/substrate@latest
 ```
 
 Or build from source:
@@ -156,13 +156,14 @@ const client = new IAMClient({
 });
 ```
 
-### Supported services (v0.3.0-alpha)
+### Supported services
 
 | Service | Operations | Status |
 |---------|-----------|--------|
 | IAM | CreateUser, GetUser, DeleteUser, ListUsers, CreateRole, GetRole, DeleteRole, ListRoles, CreateGroup, GetGroup, DeleteGroup, ListGroups, AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies, AttachRolePolicy, DetachRolePolicy, ListAttachedRolePolicies, CreatePolicy, GetPolicy, DeletePolicy, ListPolicies, CreateAccessKey, DeleteAccessKey, ListAccessKeys (25 ops) | ✓ Implemented |
 | STS | GetCallerIdentity, AssumeRole, GetSessionToken | ✓ Implemented |
-| S3 | — | Planned (v0.5.0) |
+| S3 | CreateBucket, HeadBucket, DeleteBucket, ListBuckets, PutObject, GetObject, HeadObject, DeleteObject, CopyObject, ListObjects, ListObjectsV2, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload, ListMultipartUploads (16 ops) | ✓ Implemented |
+| Betty integration | BettyClient.Deploy (CFN), StartRecording, StopRecording, ValidateRecording, DebugSession | ✓ Implemented |
 | Lambda | — | Planned |
 | DynamoDB | — | Planned |
 | EC2 | — | Planned |
@@ -185,10 +186,11 @@ const client = new IAMClient({
 |-----------|--------|
 | [v0.1.0 — Event sourcing foundation](https://github.com/scttfrdmn/substrate/milestone/1) | Complete |
 | [v0.2.0 — Core server and plugins](https://github.com/scttfrdmn/substrate/milestone/2) | Complete |
-| [v0.3.0 — IAM implementation](https://github.com/scttfrdmn/substrate/milestone/3) | Complete (v0.3.0-alpha released) |
-| [v0.4.0 — Quotas, consistency, costs](https://github.com/scttfrdmn/substrate/milestone/4) | Planned |
-| [v0.5.0 — S3 plugin](https://github.com/scttfrdmn/substrate/milestone/5) | Planned |
-| [v1.0.0 — Production release](https://github.com/scttfrdmn/substrate/milestone/7) | Planned |
+| [v0.3.0 — IAM implementation](https://github.com/scttfrdmn/substrate/milestone/3) | Complete |
+| [v0.4.0 — Quotas, consistency, costs](https://github.com/scttfrdmn/substrate/milestone/4) | Complete |
+| [v0.5.0 — S3 plugin](https://github.com/scttfrdmn/substrate/milestone/5) | Complete |
+| [v0.6.0 — Betty integration](https://github.com/scttfrdmn/substrate/milestone/6) | Complete |
+| [v1.0.0 — Production release](https://github.com/scttfrdmn/substrate/milestone/7) | In Progress |
 
 ## Quick Start
 
@@ -199,19 +201,24 @@ go get github.com/scttfrdmn/substrate
 ```go
 import "github.com/scttfrdmn/substrate"
 
-store  := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
-tc     := substrate.NewTimeController(time.Now())
-engine := substrate.NewReplayEngine(store, nil, tc, substrate.NewPluginRegistry(),
-    substrate.ReplayConfig{}, logger)
+store    := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
+state    := substrate.NewMemoryStateManager()
+tc       := substrate.NewTimeController(time.Now())
+registry := substrate.NewPluginRegistry()
 
-session, _ := engine.StartRecording(ctx, "my-test")
-// ... run tests against AWS SDK at localhost:4566 ...
-engine.StopRecording(ctx, session)
+betty := substrate.NewBettyClient(registry, store, state, tc, logger)
 
-results, _ := engine.Replay(ctx, session.StreamID)
-fmt.Printf("replayed %d events, %d differences\n",
-    results.TotalEvents, len(results.Differences))
+// Deploy a CloudFormation template — all in-process, no HTTP server needed.
+result, _ := betty.Deploy(ctx, cfnTemplate, substrate.Intent{MaxCost: 1.0})
+
+// Record and validate operations.
+session, _ := betty.StartRecording(ctx, "my-test")
+// ... run operations against the emulator ...
+report, _ := betty.StopRecording(ctx, session)
+fmt.Printf("status=%s cost=$%.4f\n", report.PassFail, report.Cost.Total)
 ```
+
+See [`examples/betty_workflow/main.go`](examples/betty_workflow/main.go) for a complete runnable example.
 
 ## Development
 

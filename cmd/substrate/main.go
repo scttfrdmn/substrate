@@ -107,7 +107,44 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(stsPlugin)
 
-			srv := substrate.NewServer(*cfg, registry, store, state, tc, logger)
+			s3Plugin := &substrate.S3Plugin{}
+			if err := s3Plugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize s3 plugin: %w", err)
+			}
+			registry.Register(s3Plugin)
+
+			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
+
+			consistencyCtrl, err := substrate.NewConsistencyController(
+				func() substrate.ConsistencyConfig {
+					cc, e := cfg.Consistency.ToConsistencyConfig()
+					if e != nil {
+						// Validate already ran; this should not happen.
+						logger.Warn("consistency config parse failed, disabling", "err", e)
+						return substrate.ConsistencyConfig{Enabled: false}
+					}
+					return cc
+				}(),
+				tc,
+			)
+			if err != nil {
+				return fmt.Errorf("initialize consistency controller: %w", err)
+			}
+
+			costCtrl := substrate.NewCostController(cfg.Costs.ToCostConfig())
+
+			srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
+				substrate.ServerOptions{
+					Quota:       quotaCtrl,
+					Consistency: consistencyCtrl,
+					Costs:       costCtrl,
+				})
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()

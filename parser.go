@@ -36,9 +36,14 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	params := make(map[string]string)
 	if err := r.ParseForm(); err == nil {
 		for k, vs := range r.Form {
+			v := ""
 			if len(vs) > 0 {
-				params[k] = vs[0]
+				v = vs[0]
 			}
+			if v == "" {
+				v = "1" // bare key (e.g. ?uploads, ?versions)
+			}
+			params[k] = v
 		}
 	}
 
@@ -50,7 +55,15 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	target := r.Header.Get("X-Amz-Target")
 	authHeader := r.Header.Get("Authorization")
 
+	// S3 virtual-hosted-style URL normalisation.
+	// mybucket.s3[.<region>].amazonaws.com → service="s3", path="/mybucket/..."
+	effectivePath := r.URL.Path
 	service := extractService(target, host, r.URL.Path)
+	if _, normPath, ok := normalizeS3VirtualHost(host, r.URL.Path); ok {
+		effectivePath = normPath
+		service = "s3"
+	}
+
 	operation := extractOperation(target, params, r.Method)
 	region := extractRegion(host, authHeader)
 	account := extractAccount(authHeader)
@@ -60,6 +73,7 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 		Operation: operation,
 		Headers:   headers,
 		Params:    params,
+		Path:      effectivePath,
 	}
 
 	reqCtx := &RequestContext{
@@ -206,7 +220,8 @@ func extractRegion(host, authHeader string) string {
 }
 
 // extractRegionFromHost parses the region segment from a Host header value
-// such as "s3.us-west-2.amazonaws.com".
+// such as "s3.us-west-2.amazonaws.com" or
+// "mybucket.s3.us-east-1.amazonaws.com" (virtual-hosted S3).
 func extractRegionFromHost(host string) string {
 	// Strip port if present.
 	if colon := strings.LastIndexByte(host, ':'); colon > 0 {
@@ -216,14 +231,64 @@ func extractRegionFromHost(host string) string {
 	if !strings.HasSuffix(host, ".amazonaws.com") {
 		return ""
 	}
-	host = strings.TrimSuffix(host, ".amazonaws.com")
+	trimmed := strings.TrimSuffix(host, ".amazonaws.com")
 
-	// "<service>.<region>" — only two parts means global service (no region).
-	parts := strings.SplitN(host, ".", 2)
+	parts := strings.Split(trimmed, ".")
+
+	// For S3 virtual-hosted and path-style hosts the region (if present) is the
+	// segment immediately after the literal "s3" token.
+	for i, p := range parts {
+		if p == "s3" {
+			if i+1 < len(parts) {
+				return parts[i+1]
+			}
+			return "" // s3 at the end → global, no region
+		}
+	}
+
+	// Non-S3: "<service>.<region>" or just "<service>".
 	if len(parts) < 2 {
 		return ""
 	}
 	return parts[1]
+}
+
+// normalizeS3VirtualHost detects an S3 virtual-hosted-style request
+// (e.g., mybucket.s3[.<region>].amazonaws.com) and returns the bucket name,
+// the normalised path (with bucket prepended), and ok=true when detected.
+// For path-style S3 (s3[.<region>].amazonaws.com) and non-S3 hosts ok is false.
+func normalizeS3VirtualHost(host, urlPath string) (bucket, normPath string, ok bool) {
+	// Strip port if present.
+	if colon := strings.LastIndexByte(host, ':'); colon > 0 {
+		host = host[:colon]
+	}
+
+	if !strings.HasSuffix(host, ".amazonaws.com") {
+		return "", "", false
+	}
+	trimmed := strings.TrimSuffix(host, ".amazonaws.com")
+
+	// Find the "s3" segment.
+	parts := strings.Split(trimmed, ".")
+	s3Idx := -1
+	for i, p := range parts {
+		if p == "s3" {
+			s3Idx = i
+			break
+		}
+	}
+
+	// s3Idx == 0 means path-style (s3.amazonaws.com or s3.<region>.amazonaws.com).
+	// s3Idx < 0 means not an S3 host at all.
+	if s3Idx <= 0 {
+		return "", "", false
+	}
+
+	// Bucket is everything before the "s3" token.
+	bucket = strings.Join(parts[:s3Idx], ".")
+	// Normalised path: /<bucket><urlPath>.
+	normPath = "/" + bucket + urlPath
+	return bucket, normPath, true
 }
 
 // extractRegionFromAuth parses the credential scope embedded in a SigV4

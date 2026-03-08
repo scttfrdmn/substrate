@@ -21,3 +21,8 @@ func IAMGroupARNForTest(accountID, path, name string) string {
 func IAMPolicyARNForTest(accountID, path, name string) string {
 	return iamPolicyARN(accountID, path, name)
 }
+
+// NormalizeS3VirtualHostForTest wraps normalizeS3VirtualHost for external tests.
+func NormalizeS3VirtualHostForTest(host, urlPath string) (bucket, normPath string, ok bool) {
+	return normalizeS3VirtualHost(host, urlPath)
+}

@@ -2,6 +2,7 @@ package substrate
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -11,6 +12,22 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
+
+// ServerOptions holds optional middleware controllers for the server pipeline.
+// A nil field disables that feature.
+type ServerOptions struct {
+	// Quota enforces per-service and per-operation rate limits. Nil disables
+	// quota checking.
+	Quota *QuotaController
+
+	// Consistency simulates eventual-consistency propagation delays. Nil
+	// disables consistency simulation.
+	Consistency *ConsistencyController
+
+	// Costs computes per-request cost estimates recorded in the event store.
+	// Nil means cost=0 for every request.
+	Costs *CostController
+}
 
 // Server is the Substrate HTTP server. It receives AWS SDK requests, parses
 // them, dispatches them to the appropriate [Plugin] via a [PluginRegistry],
@@ -23,6 +40,7 @@ type Server struct {
 	state    StateManager
 	tc       *TimeController
 	logger   Logger
+	opts     ServerOptions
 	httpSrv  *http.Server
 }
 
@@ -35,6 +53,7 @@ func NewServer(
 	state StateManager,
 	tc *TimeController,
 	logger Logger,
+	opts ...ServerOptions,
 ) *Server {
 	s := &Server{
 		config:   cfg,
@@ -43,6 +62,9 @@ func NewServer(
 		state:    state,
 		tc:       tc,
 		logger:   logger,
+	}
+	if len(opts) > 0 {
+		s.opts = opts[0]
 	}
 	s.router = s.buildRouter()
 	return s
@@ -118,9 +140,13 @@ func (s *Server) buildRouter() *chi.Mux {
 // handleAWSRequest is the single catch-all handler for all AWS API requests.
 // Pipeline:
 //  1. Parse → AWSRequest + RequestContext
-//  2. Route via PluginRegistry
-//  3. Record event (always, even on error)
-//  4. Write HTTP response
+//  2. quota.CheckQuota()        → 429 ThrottlingException
+//  3. consistency.CheckRead()   → 409 InconsistentStateException
+//  4. registry.RouteRequest()   (plugin dispatch)
+//  5. cost := costs.CostForRequest(req)
+//  6. if success && mutating: consistency.RecordWrite(req)
+//  7. store.RecordRequest(…, cost, routeErr)
+//  8. write response
 func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -141,12 +167,60 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// For query-protocol services (IAM, STS) the AWS SDK sends
+	// application/x-www-form-urlencoded bodies. ParseAWSRequest calls
+	// r.ParseForm which consumes the body into req.Params; the body read
+	// above therefore yields empty bytes. Rebuild req.Body as JSON from
+	// the parsed parameters so plugin handlers can use json.Unmarshal.
+	if len(req.Body) == 0 && len(req.Params) > 0 &&
+		(req.Service == "iam" || req.Service == "sts") {
+		if jsonBody, jsonErr := json.Marshal(req.Params); jsonErr == nil {
+			req.Body = jsonBody
+		}
+	}
+
+	// Step 2: quota enforcement.
+	if s.opts.Quota != nil {
+		if quotaErr := s.opts.Quota.CheckQuota(reqCtx, req); quotaErr != nil {
+			duration := time.Since(start)
+			if recordErr := s.store.RecordRequest(r.Context(), reqCtx, req, nil, duration, 0, quotaErr); recordErr != nil {
+				s.logger.Warn("failed to record quota event", "err", recordErr)
+			}
+			s.writeError(w, quotaErr)
+			return
+		}
+	}
+
+	// Step 3: consistency check for reads.
+	if s.opts.Consistency != nil {
+		if consErr := s.opts.Consistency.CheckRead(reqCtx, req); consErr != nil {
+			duration := time.Since(start)
+			if recordErr := s.store.RecordRequest(r.Context(), reqCtx, req, nil, duration, 0, consErr); recordErr != nil {
+				s.logger.Warn("failed to record consistency event", "err", recordErr)
+			}
+			s.writeError(w, consErr)
+			return
+		}
+	}
+
+	// Step 4: route to plugin.
 	resp, routeErr := s.registry.RouteRequest(reqCtx, req)
+
+	// Step 5: compute cost.
+	var cost float64
+	if s.opts.Costs != nil {
+		cost = s.opts.Costs.CostForRequest(req)
+	}
+
+	// Step 6: record write for consistency tracking on success.
+	if routeErr == nil && s.opts.Consistency != nil && isMutating(req.Operation) {
+		s.opts.Consistency.RecordWrite(reqCtx, req)
+	}
 
 	duration := time.Since(start)
 
-	// Always record the event regardless of routing outcome.
-	if recordErr := s.store.RecordRequest(r.Context(), reqCtx, req, resp, duration, 0, routeErr); recordErr != nil {
+	// Step 7: always record the event regardless of routing outcome.
+	if recordErr := s.store.RecordRequest(r.Context(), reqCtx, req, resp, duration, cost, routeErr); recordErr != nil {
 		s.logger.Warn("failed to record event", "err", recordErr)
 	}
 

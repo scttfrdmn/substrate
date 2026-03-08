@@ -22,3 +22,32 @@ log:
   level: "info"
   # Log format: text (human-readable) | json (structured, for log aggregation)
   format: "text"
+
+# Quota enforcement — token-bucket rate limits per service / operation.
+# Operation-specific rules (e.g. "iam/CreateUser") take precedence over
+# service-level rules (e.g. "iam"). Omitting rules uses built-in AWS defaults.
+quotas:
+  enabled: true
+  # rules:
+  #   iam:             { rate: 100, burst: 100 }
+  #   iam/CreateUser:  { rate: 20,  burst: 20  }
+  #   sts:             { rate: 100, burst: 100 }
+  #   sts/AssumeRole:  { rate: 50,  burst: 50  }
+
+# Eventual-consistency simulation.
+# When enabled, reads to a recently mutated resource within propagation_delay
+# return HTTP 409 InconsistentStateException. Disabled by default to preserve
+# backward compatibility with tests that do write → immediate read.
+consistency:
+  enabled: false
+  propagation_delay: "2s"
+  affected_services:
+    - "iam"
+
+# Per-request cost estimation.
+# Built-in table: IAM/STS=$0, s3/PutObject=$0.000005, s3/GetObject=$0.0000004,
+# dynamodb/GetItem=$0.00000025, lambda/Invoke=$0.0000002. Add overrides below.
+costs:
+  enabled: true
+  # overrides:
+  #   "s3/PutObject": 0.000006

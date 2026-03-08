@@ -16,18 +16,19 @@
 //
 // # Quick Start
 //
-// Start a recording session, run your tests against the emulator, then replay:
+// Use [BettyClient] to deploy a CloudFormation template, record operations,
+// and validate the results in a single workflow:
 //
-//	engine := substrate.NewReplayEngine(store, state, tc, registry, cfg, log)
+//	betty := substrate.NewBettyClient(registry, store, state, tc, logger)
 //
-//	session, err := engine.StartRecording(ctx, "my-integration-test")
+//	result, err := betty.Deploy(ctx, cfnTemplate, substrate.Intent{MaxCost: 1.0})
 //	if err != nil { ... }
 //
-//	// Run tests against AWS SDK pointed at localhost:4566
+//	session, err := betty.StartRecording(ctx, "my-integration-test")
+//	// ... run operations against the emulator ...
+//	report, err := betty.StopRecording(ctx, session)
 //
-//	count, err := engine.StopRecording(ctx, session)
-//
-//	results, err := engine.Replay(ctx, session.StreamID)
+// See examples/betty_workflow/main.go for a complete runnable example.
 //
 // # Architecture
 //
@@ -37,4 +38,10 @@
 //
 // Service emulation is provided by [Plugin] implementations registered with
 // a [PluginRegistry]. State is persisted via the [StateManager] interface.
+//
+// S3 emulation is provided by [S3Plugin] with 17 REST+XML operations including
+// multipart uploads. The [BettyClient] integrates CloudFormation deployment
+// ([StackDeployer]), recording, [ValidateRecording], and [DebugSession]
+// time-travel into a single high-level API for AI-generated infrastructure
+// validation.
 package substrate

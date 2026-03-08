@@ -22,6 +22,10 @@ type AWSRequest struct {
 
 	// Params contains parsed query-string or form parameters.
 	Params map[string]string
+
+	// Path is the effective URL path of the HTTP request. For S3 virtual-hosted
+	// requests the bucket is prepended so the plugin always sees /bucket[/key].
+	Path string
 }
 
 // AWSResponse represents an AWS API response produced by the emulator.

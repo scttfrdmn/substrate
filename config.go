@@ -3,6 +3,7 @@ package substrate
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -20,6 +21,15 @@ type Config struct {
 
 	// Log controls log level and format.
 	Log LogCfg `mapstructure:"log"`
+
+	// Quotas controls per-service and per-operation rate limiting.
+	Quotas QuotaCfg `mapstructure:"quotas"`
+
+	// Consistency controls eventual-consistency simulation.
+	Consistency ConsistencyCfg `mapstructure:"consistency"`
+
+	// Costs controls per-request cost estimation.
+	Costs CostCfg `mapstructure:"costs"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -95,6 +105,96 @@ type LogCfg struct {
 	Format string `mapstructure:"format"`
 }
 
+// QuotaCfg is the YAML-friendly configuration for quota enforcement.
+// Use [QuotaCfg.ToQuotaConfig] to convert it for use with [NewQuotaController].
+type QuotaCfg struct {
+	// Enabled gates quota enforcement. Default true.
+	Enabled bool `mapstructure:"enabled"`
+
+	// Rules maps service or service/operation keys to rate rules.
+	// When empty the built-in defaults from [defaultQuotaRules] are used.
+	Rules map[string]RateRuleCfg `mapstructure:"rules"`
+}
+
+// RateRuleCfg is the YAML representation of a token-bucket rate rule.
+type RateRuleCfg struct {
+	// Rate is the sustained token replenishment rate in tokens per second.
+	Rate float64 `mapstructure:"rate"`
+
+	// Burst is the maximum burst capacity.
+	Burst float64 `mapstructure:"burst"`
+}
+
+// ToQuotaConfig converts QuotaCfg to the [QuotaConfig] type used by
+// [NewQuotaController]. When no rules are configured the built-in defaults
+// are used.
+func (c QuotaCfg) ToQuotaConfig() QuotaConfig {
+	rules := make(map[string]RateRule, len(c.Rules))
+	if len(c.Rules) == 0 {
+		rules = defaultQuotaRules()
+	} else {
+		for k, r := range c.Rules {
+			rules[k] = RateRule(r)
+		}
+	}
+	return QuotaConfig{
+		Enabled: c.Enabled,
+		Rules:   rules,
+	}
+}
+
+// ConsistencyCfg is the YAML-friendly configuration for eventual-consistency
+// simulation. Use [ConsistencyCfg.ToConsistencyConfig] to convert it for use
+// with [NewConsistencyController].
+type ConsistencyCfg struct {
+	// Enabled gates consistency simulation. Default false.
+	Enabled bool `mapstructure:"enabled"`
+
+	// PropagationDelay is the duration string (e.g. "2s") during which reads
+	// to a recently mutated resource are rejected.
+	PropagationDelay string `mapstructure:"propagation_delay"`
+
+	// AffectedServices is the list of services that participate in the
+	// simulation. Default: ["iam"].
+	AffectedServices []string `mapstructure:"affected_services"`
+}
+
+// ToConsistencyConfig converts ConsistencyCfg to the [ConsistencyConfig] type
+// used by [NewConsistencyController]. It returns an error when
+// PropagationDelay is non-empty but cannot be parsed as a duration.
+func (c ConsistencyCfg) ToConsistencyConfig() (ConsistencyConfig, error) {
+	delay := 2 * time.Second
+	if c.PropagationDelay != "" {
+		d, err := time.ParseDuration(c.PropagationDelay)
+		if err != nil {
+			return ConsistencyConfig{}, fmt.Errorf("parse propagation_delay %q: %w", c.PropagationDelay, err)
+		}
+		delay = d
+	}
+	return ConsistencyConfig{
+		Enabled:          c.Enabled,
+		PropagationDelay: delay,
+		AffectedServices: c.AffectedServices,
+	}, nil
+}
+
+// CostCfg is the YAML-friendly configuration for cost tracking.
+// Use [CostCfg.ToCostConfig] to convert it for use with [NewCostController].
+type CostCfg struct {
+	// Enabled gates cost estimation. Default true.
+	Enabled bool `mapstructure:"enabled"`
+
+	// Overrides maps "service/operation" or "service" keys to USD per request,
+	// overriding the built-in pricing table.
+	Overrides map[string]float64 `mapstructure:"overrides"`
+}
+
+// ToCostConfig converts CostCfg to the [CostConfig] type used by
+// [NewCostController].
+func (c CostCfg) ToCostConfig() CostConfig {
+	return CostConfig(c)
+}
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -118,6 +218,18 @@ func DefaultConfig() *Config {
 		Log: LogCfg{
 			Level:  "info",
 			Format: "text",
+		},
+		Quotas: QuotaCfg{
+			Enabled: true,
+			// Rules left empty so ToQuotaConfig falls back to defaultQuotaRules.
+		},
+		Consistency: ConsistencyCfg{
+			Enabled:          false,
+			PropagationDelay: "2s",
+			AffectedServices: []string{"iam"},
+		},
+		Costs: CostCfg{
+			Enabled: true,
 		},
 	}
 }
@@ -146,6 +258,11 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("state.path", defaults.State.Path)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
+	v.SetDefault("quotas.enabled", defaults.Quotas.Enabled)
+	v.SetDefault("consistency.enabled", defaults.Consistency.Enabled)
+	v.SetDefault("consistency.propagation_delay", defaults.Consistency.PropagationDelay)
+	v.SetDefault("consistency.affected_services", defaults.Consistency.AffectedServices)
+	v.SetDefault("costs.enabled", defaults.Costs.Enabled)
 
 	// Environment variable overrides.
 	v.SetEnvPrefix("SUBSTRATE")
@@ -205,6 +322,22 @@ func Validate(cfg *Config) error {
 	validFormats := map[string]bool{"text": true, "json": true}
 	if !validFormats[cfg.Log.Format] {
 		return fmt.Errorf("log.format %q is not valid; choose text or json", cfg.Log.Format)
+	}
+
+	for key, rule := range cfg.Quotas.Rules {
+		if rule.Rate <= 0 {
+			return fmt.Errorf("quotas.rules[%q].rate must be > 0", key)
+		}
+		if rule.Burst <= 0 {
+			return fmt.Errorf("quotas.rules[%q].burst must be > 0", key)
+		}
+	}
+
+	if cfg.Consistency.PropagationDelay != "" {
+		if _, err := time.ParseDuration(cfg.Consistency.PropagationDelay); err != nil {
+			return fmt.Errorf("consistency.propagation_delay %q is not a valid duration: %w",
+				cfg.Consistency.PropagationDelay, err)
+		}
 	}
 
 	return nil

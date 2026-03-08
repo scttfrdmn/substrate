@@ -237,3 +237,105 @@ func TestParseAWSRequest_Params(t *testing.T) {
 	assert.Equal(t, "2016-11-15", req.Params["Version"])
 	assert.Equal(t, "DescribeInstances", req.Operation)
 }
+
+func TestParseAWSRequest_BareQueryKey(t *testing.T) {
+	// ?uploads is a bare key with no value — must map to "1".
+	r := httptest.NewRequest(http.MethodGet, "http://s3.amazonaws.com/mybucket/mykey?uploads", nil)
+	r.Host = "s3.amazonaws.com"
+
+	req, _, err := substrate.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "1", req.Params["uploads"])
+}
+
+func TestParseAWSRequest_S3VirtualHosted(t *testing.T) {
+	tests := []struct {
+		name        string
+		host        string
+		urlPath     string
+		wantService string
+		wantPath    string
+		wantRegion  string
+	}{
+		{
+			name:        "virtual-hosted simple",
+			host:        "mybucket.s3.amazonaws.com",
+			urlPath:     "/mykey.txt",
+			wantService: "s3",
+			wantPath:    "/mybucket/mykey.txt",
+			wantRegion:  "us-east-1",
+		},
+		{
+			name:        "virtual-hosted regional",
+			host:        "mybucket.s3.us-west-2.amazonaws.com",
+			urlPath:     "/data/file.json",
+			wantService: "s3",
+			wantPath:    "/mybucket/data/file.json",
+			wantRegion:  "us-west-2",
+		},
+		{
+			name:        "virtual-hosted bucket root",
+			host:        "mybucket.s3.amazonaws.com",
+			urlPath:     "/",
+			wantService: "s3",
+			wantPath:    "/mybucket/",
+			wantRegion:  "us-east-1",
+		},
+		{
+			name:        "path-style unchanged",
+			host:        "s3.us-east-1.amazonaws.com",
+			urlPath:     "/mybucket/mykey",
+			wantService: "s3",
+			wantPath:    "/mybucket/mykey",
+			wantRegion:  "us-east-1",
+		},
+		{
+			name:        "global path-style unchanged",
+			host:        "s3.amazonaws.com",
+			urlPath:     "/mybucket/mykey",
+			wantService: "s3",
+			wantPath:    "/mybucket/mykey",
+			wantRegion:  "us-east-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "http://"+tt.host+tt.urlPath, nil)
+			r.Host = tt.host
+
+			req, reqCtx, err := substrate.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantService, req.Service)
+			assert.Equal(t, tt.wantPath, req.Path)
+			assert.Equal(t, tt.wantRegion, reqCtx.Region)
+		})
+	}
+}
+
+func TestNormalizeS3VirtualHost(t *testing.T) {
+	tests := []struct {
+		host       string
+		urlPath    string
+		wantBucket string
+		wantPath   string
+		wantOK     bool
+	}{
+		{"mybucket.s3.amazonaws.com", "/key", "mybucket", "/mybucket/key", true},
+		{"mybucket.s3.us-east-1.amazonaws.com", "/k/p", "mybucket", "/mybucket/k/p", true},
+		{"my.bucket.s3.amazonaws.com", "/obj", "my.bucket", "/my.bucket/obj", true},
+		{"s3.amazonaws.com", "/bucket/key", "", "", false},
+		{"s3.us-east-1.amazonaws.com", "/bucket/key", "", "", false},
+		{"iam.amazonaws.com", "/", "", "", false},
+		{"dynamodb.us-east-1.amazonaws.com", "/", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host+tt.urlPath, func(t *testing.T) {
+			bucket, normPath, ok := substrate.NormalizeS3VirtualHostForTest(tt.host, tt.urlPath)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantBucket, bucket)
+			assert.Equal(t, tt.wantPath, normPath)
+		})
+	}
+}

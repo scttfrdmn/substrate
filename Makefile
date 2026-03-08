@@ -1,4 +1,4 @@
-.PHONY: build test lint coverage clean tidy vet
+.PHONY: build test lint coverage clean tidy vet bench e2e
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
@@ -23,6 +23,12 @@ coverage: ## Generate coverage report
 tidy: ## Tidy and verify go modules
 	go mod tidy
 	go mod verify
+
+bench: ## Run benchmarks
+	go test -bench=. -benchmem -benchtime=5s ./...
+
+e2e: ## Run end-to-end tests
+	cd test/e2e && go test -v -race ./...
 
 clean: ## Remove build artifacts
 	rm -rf bin/ coverage.out coverage.html
