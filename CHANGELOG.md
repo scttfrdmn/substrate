@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v1.0.0] - 2026-03-07
+## [v0.7.0] - 2026-03-07
 
 ### Added
 
@@ -108,8 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `substrate.yaml.example` extended with `quotas`, `consistency`, and `costs`
   sections and inline comments.
 
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v1.0.0...HEAD
-[v1.0.0]: https://github.com/scttfrdmn/substrate/compare/v0.3.0-alpha...v1.0.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.7.0...HEAD
+[v0.7.0]: https://github.com/scttfrdmn/substrate/compare/v0.3.0-alpha...v0.7.0
 
 ## [v0.3.0-alpha] - 2026-03-08
 
