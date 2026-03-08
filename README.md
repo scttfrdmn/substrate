@@ -63,13 +63,129 @@ Total: $1,247.50/month
 WARNING: High S3 PUT rate — consider batching (save ~99%)
 ```
 
+## Getting Started
+
+### Install
+
+```bash
+go install github.com/scttfrdmn/substrate/cmd/substrate@v0.3.0-alpha
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/scttfrdmn/substrate
+cd substrate
+make build          # produces ./bin/substrate
+```
+
+### Start the server
+
+```bash
+substrate server
+# Listening on :4566
+```
+
+Configuration via `substrate.yaml` or environment variables (see `substrate.yaml.example`).
+
+### Configure your AWS SDK
+
+#### AWS CLI
+
+```bash
+aws iam create-user --user-name alice \
+    --endpoint-url http://localhost:4566 \
+    --region us-east-1 \
+    --no-sign-request
+```
+
+Or set permanently in `~/.aws/config`:
+
+```ini
+[profile substrate]
+region = us-east-1
+endpoint_url = http://localhost:4566
+```
+
+Then:
+```bash
+aws --profile substrate iam list-users
+```
+
+#### Go SDK v2
+
+```go
+import (
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/service/iam"
+)
+
+cfg, _ := config.LoadDefaultConfig(context.TODO(),
+    config.WithRegion("us-east-1"),
+    config.WithBaseEndpoint("http://localhost:4566"),
+    config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+        "test", "test", "",
+    )),
+)
+client := iam.NewFromConfig(cfg)
+```
+
+#### Python (boto3)
+
+```python
+import boto3
+
+client = boto3.client(
+    "iam",
+    region_name="us-east-1",
+    endpoint_url="http://localhost:4566",
+    aws_access_key_id="test",
+    aws_secret_access_key="test",
+)
+```
+
+#### Node.js (AWS SDK v3)
+
+```javascript
+import { IAMClient } from "@aws-sdk/client-iam";
+
+const client = new IAMClient({
+  region: "us-east-1",
+  endpoint: "http://localhost:4566",
+  credentials: { accessKeyId: "test", secretAccessKey: "test" },
+});
+```
+
+### Supported services (v0.3.0-alpha)
+
+| Service | Operations | Status |
+|---------|-----------|--------|
+| IAM | CreateUser, GetUser, DeleteUser, ListUsers, CreateRole, GetRole, DeleteRole, ListRoles, CreateGroup, GetGroup, DeleteGroup, ListGroups, AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies, AttachRolePolicy, DetachRolePolicy, ListAttachedRolePolicies, CreatePolicy, GetPolicy, DeletePolicy, ListPolicies, CreateAccessKey, DeleteAccessKey, ListAccessKeys (25 ops) | ✓ Implemented |
+| STS | GetCallerIdentity, AssumeRole, GetSessionToken | ✓ Implemented |
+| S3 | — | Planned (v0.5.0) |
+| Lambda | — | Planned |
+| DynamoDB | — | Planned |
+| EC2 | — | Planned |
+
+### Known limitations
+
+- **Managed policies**: 47 bundled AWS managed policies are available for attachment but permissions
+  are evaluated only within Substrate's IAM engine — not cross-service. No service other than IAM
+  and STS is enforced in this release.
+- **Persistence**: all state is in-memory; restarting the server resets it.
+- **Authentication**: Substrate accepts any AWS credentials without signature verification; use
+  `--no-sign-request` or static test credentials.
+- **Regions**: single-region only; all resources live in `us-east-1` by default.
+
+---
+
 ## Status
 
 | Milestone | Status |
 |-----------|--------|
-| [v0.1.0 — Event sourcing foundation](https://github.com/scttfrdmn/substrate/milestone/1) | In progress |
-| [v0.2.0 — Core server and plugins](https://github.com/scttfrdmn/substrate/milestone/2) | Planned |
-| [v0.3.0 — IAM implementation](https://github.com/scttfrdmn/substrate/milestone/3) | Planned |
+| [v0.1.0 — Event sourcing foundation](https://github.com/scttfrdmn/substrate/milestone/1) | Complete |
+| [v0.2.0 — Core server and plugins](https://github.com/scttfrdmn/substrate/milestone/2) | Complete |
+| [v0.3.0 — IAM implementation](https://github.com/scttfrdmn/substrate/milestone/3) | Complete (v0.3.0-alpha released) |
 | [v0.4.0 — Quotas, consistency, costs](https://github.com/scttfrdmn/substrate/milestone/4) | Planned |
 | [v0.5.0 — S3 plugin](https://github.com/scttfrdmn/substrate/milestone/5) | Planned |
 | [v1.0.0 — Production release](https://github.com/scttfrdmn/substrate/milestone/7) | Planned |

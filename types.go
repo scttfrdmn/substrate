@@ -102,6 +102,22 @@ type StateManager interface {
 	List(ctx context.Context, namespace, prefix string) ([]string, error)
 }
 
+// SnapshotableStateManager extends [StateManager] with the ability to capture
+// and restore its entire contents as opaque bytes, and to wipe all state.
+type SnapshotableStateManager interface {
+	StateManager
+
+	// Snapshot serialises the entire state into opaque bytes.
+	Snapshot(ctx context.Context) ([]byte, error)
+
+	// Restore deserialises previously snapshotted bytes back into the manager,
+	// replacing all existing state.
+	Restore(ctx context.Context, data []byte) error
+
+	// Reset wipes all state, leaving the manager empty.
+	Reset(ctx context.Context) error
+}
+
 // TimeController provides a controllable clock for deterministic testing.
 // By replacing the system clock, Substrate produces identical event timestamps
 // across replay runs.

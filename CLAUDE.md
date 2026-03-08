@@ -41,6 +41,14 @@ Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections.
 2. Add the comparison link at the bottom of `CHANGELOG.md`.
 3. Tag: `git tag -s vX.Y.Z -m "vX.Y.Z"` then `git push origin vX.Y.Z`.
 
+## AWS service emulation
+
+When implementing or modifying any AWS service behaviour, **always consult the
+official AWS documentation as the authoritative source of truth** — not built-in
+knowledge or assumptions. Verify request/response shapes, error codes, pagination
+behaviour, and IAM condition keys against the AWS API reference for the relevant
+service before writing code or tests.
+
 ## Key files
 
 | File | Purpose |

@@ -151,7 +151,7 @@ func NewEventStore(config EventStoreConfig) *EventStore {
 // RecordEvent appends event to the store, assigning it a sequence number and
 // generating an ID if one was not provided. It is a no-op when
 // [EventStoreConfig.Enabled] is false.
-func (e *EventStore) RecordEvent(ctx context.Context, event *Event) error {
+func (e *EventStore) RecordEvent(_ context.Context, event *Event) error {
 	if !e.config.Enabled {
 		return nil
 	}
@@ -219,7 +219,7 @@ func (e *EventStore) RecordRequest(
 
 // GetEvent retrieves a single event by ID.
 // Returns an error if the event does not exist.
-func (e *EventStore) GetEvent(ctx context.Context, id string) (*Event, error) {
+func (e *EventStore) GetEvent(_ context.Context, id string) (*Event, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -233,7 +233,7 @@ func (e *EventStore) GetEvent(ctx context.Context, id string) (*Event, error) {
 }
 
 // GetEvents returns all events matching filter, in sequence order.
-func (e *EventStore) GetEvents(ctx context.Context, filter EventFilter) ([]*Event, error) {
+func (e *EventStore) GetEvents(_ context.Context, filter EventFilter) ([]*Event, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -248,7 +248,7 @@ func (e *EventStore) GetEvents(ctx context.Context, filter EventFilter) ([]*Even
 }
 
 // GetStream returns all events belonging to streamID, in sequence order.
-func (e *EventStore) GetStream(ctx context.Context, streamID string) ([]*Event, error) {
+func (e *EventStore) GetStream(_ context.Context, streamID string) ([]*Event, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -321,7 +321,7 @@ func (e *EventStore) CreateSnapshot(ctx context.Context, streamID string, state 
 }
 
 // GetSnapshot retrieves a snapshot by ID.
-func (e *EventStore) GetSnapshot(ctx context.Context, id string) (*Snapshot, error) {
+func (e *EventStore) GetSnapshot(_ context.Context, id string) (*Snapshot, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -334,7 +334,7 @@ func (e *EventStore) GetSnapshot(ctx context.Context, id string) (*Snapshot, err
 
 // GetLatestSnapshot returns the most recent snapshot for streamID.
 // Returns an error if no snapshot exists for the stream.
-func (e *EventStore) GetLatestSnapshot(ctx context.Context, streamID string) (*Snapshot, error) {
+func (e *EventStore) GetLatestSnapshot(_ context.Context, streamID string) (*Snapshot, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -394,7 +394,7 @@ func (i *ReplayIterator) Reset() {
 
 // Flush persists in-memory events to the configured backend.
 // It is a no-op for the "memory" backend.
-func (e *EventStore) Flush(ctx context.Context) error {
+func (e *EventStore) Flush(_ context.Context) error {
 	if e.config.Backend == "memory" {
 		return nil
 	}
@@ -413,7 +413,7 @@ func (e *EventStore) Flush(ctx context.Context) error {
 
 // Load restores events from the configured backend.
 // It is a no-op for the "memory" backend.
-func (e *EventStore) Load(ctx context.Context) error {
+func (e *EventStore) Load(_ context.Context) error {
 	if e.config.Backend == "memory" {
 		return nil
 	}
@@ -456,7 +456,7 @@ type EventStoreStats struct {
 }
 
 // GetStats returns aggregate statistics for all recorded events.
-func (e *EventStore) GetStats(ctx context.Context) *EventStoreStats {
+func (e *EventStore) GetStats(_ context.Context) *EventStoreStats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -594,7 +594,11 @@ func matchesFilter(event *Event, filter EventFilter) bool {
 }
 
 // serializeState serialises the current state into bytes for snapshotting.
-func (e *EventStore) serializeState(_ context.Context, _ StateManager) ([]byte, error) {
-	// TODO(#5): implement full state serialisation.
+// When state implements [SnapshotableStateManager] its Snapshot method is used;
+// otherwise a minimal placeholder is returned so the caller can proceed.
+func (e *EventStore) serializeState(ctx context.Context, state StateManager) ([]byte, error) {
+	if ss, ok := state.(SnapshotableStateManager); ok {
+		return ss.Snapshot(ctx)
+	}
 	return []byte("{}"), nil
 }

@@ -11,9 +11,6 @@ linters:
     - staticcheck     # comprehensive static analysis
     - unused          # detect unused code
     - godot           # doc comments must end with a period
-    - gofmt           # enforce gofmt formatting
-    - goimports       # enforce goimports import grouping
-    - gosimple        # simplification suggestions
     - nilerr          # return nil instead of errors.New("")
     - unconvert       # remove unnecessary type conversions
 
@@ -41,6 +38,11 @@ linters-settings:
     period: true
   misspell:
     locale: US
+
+formatters:
+  enable:
+    - gofmt           # enforce gofmt formatting
+    - goimports       # enforce goimports import grouping
 
 issues:
   max-issues-per-linter: 0

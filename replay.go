@@ -3,6 +3,7 @@ package substrate
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -22,6 +23,10 @@ type ReplayEngine struct {
 
 	// currentReplay is the in-progress replay session, if any.
 	currentReplay *ActiveReplay
+
+	// rng is the seeded random source for deterministic replay.
+	// It is nil when config.RandomSeed is zero (unseeded).
+	rng *rand.Rand
 }
 
 // ReplayConfig controls the behaviour of a [ReplayEngine].
@@ -195,7 +200,9 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 		}
 	}
 
-	// TODO(#6): seed the RNG for deterministic replay when config.RandomSeed != 0.
+	if r.config.RandomSeed != 0 {
+		r.rng = rand.New(rand.NewPCG(uint64(r.config.RandomSeed), 0)) //nolint:gosec
+	}
 
 	start := time.Now()
 
@@ -531,7 +538,7 @@ type RecordingSession struct {
 // StartRecording begins a new recording session named name.
 // All events tagged with the returned [RecordingSession.StreamID] are
 // grouped together for later replay.
-func (r *ReplayEngine) StartRecording(ctx context.Context, name string) (*RecordingSession, error) {
+func (r *ReplayEngine) StartRecording(_ context.Context, name string) (*RecordingSession, error) {
 	streamID := fmt.Sprintf("recording-%s-%d", name, time.Now().UnixNano())
 
 	session := &RecordingSession{
@@ -567,8 +574,15 @@ func generateReplayID() string {
 }
 
 // resetState clears all emulator state in preparation for a fresh replay.
-func (r *ReplayEngine) resetState(_ context.Context) error {
-	// TODO(#5): clear all state manager namespaces.
+// When the state manager implements [SnapshotableStateManager] its Reset method
+// is called; otherwise this is a no-op.
+func (r *ReplayEngine) resetState(ctx context.Context) error {
+	if r.stateManager == nil {
+		return nil
+	}
+	if ss, ok := r.stateManager.(SnapshotableStateManager); ok {
+		return ss.Reset(ctx)
+	}
 	return nil
 }
 
@@ -582,13 +596,52 @@ func (r *ReplayEngine) loadFromSnapshot(ctx context.Context, streamID string) er
 }
 
 // restoreState deserialises state bytes back into the state manager.
-func (r *ReplayEngine) restoreState(_ context.Context, _ []byte) error {
-	// TODO(#5): deserialise state into the state manager.
+// When the state manager implements [SnapshotableStateManager] its Restore
+// method is called; otherwise this is a no-op.
+func (r *ReplayEngine) restoreState(ctx context.Context, data []byte) error {
+	if r.stateManager == nil {
+		return nil
+	}
+	if ss, ok := r.stateManager.(SnapshotableStateManager); ok {
+		return ss.Restore(ctx, data)
+	}
 	return nil
 }
 
 // computeStateHash returns a SHA-256 hash of the current state manager contents.
-func (r *ReplayEngine) computeStateHash(_ context.Context) string {
-	// TODO(#5): implement deterministic state hashing.
-	return ""
+// Returns an empty string when no state manager is set or it does not implement
+// [SnapshotableStateManager].
+func (r *ReplayEngine) computeStateHash(ctx context.Context) string {
+	if r.stateManager == nil {
+		return ""
+	}
+	ss, ok := r.stateManager.(SnapshotableStateManager)
+	if !ok {
+		return ""
+	}
+	data, err := ss.Snapshot(ctx)
+	if err != nil {
+		return ""
+	}
+	return hashBytes(data)
+}
+
+// RandFloat64 returns a pseudo-random float64 in [0, 1).
+// When a seed was configured via [ReplayConfig.RandomSeed] the result is
+// deterministic; otherwise it falls back to the global random source.
+func (r *ReplayEngine) RandFloat64() float64 {
+	if r.rng != nil {
+		return r.rng.Float64()
+	}
+	return rand.Float64()
+}
+
+// RandInt64 returns a non-negative pseudo-random int64.
+// When a seed was configured via [ReplayConfig.RandomSeed] the result is
+// deterministic; otherwise it falls back to the global random source.
+func (r *ReplayEngine) RandInt64() int64 {
+	if r.rng != nil {
+		return r.rng.Int64()
+	}
+	return rand.Int64()
 }

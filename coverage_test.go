@@ -61,7 +61,7 @@ func (m *memStateManager) List(_ context.Context, namespace, prefix string) ([]s
 // mockPlugin is a minimal Plugin for registry tests.
 type mockPlugin struct{ name string }
 
-func (p *mockPlugin) Name() string                                              { return p.name }
+func (p *mockPlugin) Name() string                                                 { return p.name }
 func (p *mockPlugin) Initialize(_ context.Context, _ substrate.PluginConfig) error { return nil }
 func (p *mockPlugin) HandleRequest(_ *substrate.RequestContext, _ *substrate.AWSRequest) (*substrate.AWSResponse, error) {
 	return &substrate.AWSResponse{StatusCode: 200}, nil

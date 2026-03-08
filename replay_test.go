@@ -27,6 +27,46 @@ func newTestEngine(t *testing.T) *substrate.ReplayEngine {
 	return substrate.NewReplayEngine(store, nil, tc, registry, substrate.ReplayConfig{}, &testLogger{})
 }
 
+func TestReplayEngine_ReplayWithStateManager(t *testing.T) {
+	// Use a SnapshotableStateManager so resetState exercises the Reset() path.
+	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
+	ctx := context.Background()
+
+	const streamID = "state-stream"
+	require.NoError(t, store.RecordEvent(ctx, &substrate.Event{
+		StreamID:  streamID,
+		Service:   "s3",
+		Operation: "PutObject",
+		Timestamp: time.Now(),
+	}))
+
+	state := substrate.NewMemoryStateManager()
+	tc := substrate.NewTimeController(time.Now())
+	engine := substrate.NewReplayEngine(store, state, tc, substrate.NewPluginRegistry(),
+		substrate.ReplayConfig{}, &testLogger{})
+
+	results, err := engine.Replay(ctx, streamID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, results.TotalEvents)
+}
+
+func TestReplayEngine_RandFloat64(t *testing.T) {
+	engine := newTestEngine(t)
+	for range 10 {
+		v := engine.RandFloat64()
+		assert.GreaterOrEqual(t, v, 0.0)
+		assert.Less(t, v, 1.0)
+	}
+}
+
+func TestReplayEngine_RandInt64(t *testing.T) {
+	engine := newTestEngine(t)
+	for range 10 {
+		v := engine.RandInt64()
+		assert.GreaterOrEqual(t, v, int64(0))
+	}
+}
+
 func TestReplayEngine_StartStopRecording(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
@@ -170,4 +210,108 @@ func TestPluginRegistry_RouteRequest_NoPlugin(t *testing.T) {
 func TestAWSError_Error(t *testing.T) {
 	err := &substrate.AWSError{Code: "NoSuchBucket", Message: "the bucket does not exist"}
 	assert.Equal(t, "NoSuchBucket: the bucket does not exist", err.Error())
+}
+
+func TestReplayEngine_UseSnapshots_WithSnapshot(t *testing.T) {
+	// UseSnapshots=true with an existing snapshot exercises loadFromSnapshot → restoreState.
+	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
+	ctx := context.Background()
+	const streamID = "snap-stream"
+
+	require.NoError(t, store.RecordEvent(ctx, &substrate.Event{
+		StreamID:  streamID,
+		Service:   "s3",
+		Operation: "PutObject",
+		Timestamp: time.Now(),
+	}))
+
+	state := substrate.NewMemoryStateManager()
+	_, err := store.CreateSnapshot(ctx, streamID, state)
+	require.NoError(t, err)
+
+	tc := substrate.NewTimeController(time.Now())
+	engine := substrate.NewReplayEngine(store, state, tc, substrate.NewPluginRegistry(),
+		substrate.ReplayConfig{UseSnapshots: true}, &testLogger{})
+
+	results, err := engine.Replay(ctx, streamID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, results.TotalEvents)
+}
+
+func TestReplayEngine_UseSnapshots_MissingSnapshot(t *testing.T) {
+	// UseSnapshots=true but no snapshot: should warn and continue (not fail).
+	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
+	ctx := context.Background()
+	const streamID = "no-snap-stream"
+
+	require.NoError(t, store.RecordEvent(ctx, &substrate.Event{
+		StreamID:  streamID,
+		Service:   "s3",
+		Operation: "PutObject",
+		Timestamp: time.Now(),
+	}))
+
+	tc := substrate.NewTimeController(time.Now())
+	engine := substrate.NewReplayEngine(store, nil, tc, substrate.NewPluginRegistry(),
+		substrate.ReplayConfig{UseSnapshots: true}, &testLogger{})
+
+	results, err := engine.Replay(ctx, streamID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, results.TotalEvents)
+}
+
+func TestReplayEngine_ValidateState_HashMismatch(t *testing.T) {
+	// ValidateState=true with non-empty StateHashBefore exercises computeStateHash.
+	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
+	ctx := context.Background()
+	const streamID = "validate-stream"
+
+	require.NoError(t, store.RecordEvent(ctx, &substrate.Event{
+		StreamID:        streamID,
+		Service:         "s3",
+		Operation:       "PutObject",
+		Timestamp:       time.Now(),
+		StateHashBefore: "expected-before",
+		StateHashAfter:  "expected-after",
+		Request:         &substrate.AWSRequest{Service: "s3", Operation: "PutObject"},
+	}))
+
+	state := substrate.NewMemoryStateManager()
+	tc := substrate.NewTimeController(time.Now())
+	engine := substrate.NewReplayEngine(store, state, tc, substrate.NewPluginRegistry(),
+		substrate.ReplayConfig{ValidateState: true, StopOnError: false}, &testLogger{})
+
+	results, err := engine.Replay(ctx, streamID)
+	require.NoError(t, err)
+	// Hash mismatch differences are recorded; StateValid set to false.
+	assert.False(t, results.StateValid)
+}
+
+func TestReplayEngine_RandWithSeed(t *testing.T) {
+	// After Replay() with RandomSeed set, r.rng is initialised;
+	// RandFloat64/RandInt64 use the deterministic seeded path.
+	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
+	ctx := context.Background()
+	const streamID = "seed-stream"
+
+	require.NoError(t, store.RecordEvent(ctx, &substrate.Event{
+		StreamID:  streamID,
+		Service:   "s3",
+		Operation: "Get",
+		Timestamp: time.Now(),
+	}))
+
+	tc := substrate.NewTimeController(time.Now())
+	engine := substrate.NewReplayEngine(store, nil, tc, substrate.NewPluginRegistry(),
+		substrate.ReplayConfig{RandomSeed: 42}, &testLogger{})
+
+	_, err := engine.Replay(ctx, streamID)
+	require.NoError(t, err)
+
+	v := engine.RandFloat64()
+	assert.GreaterOrEqual(t, v, 0.0)
+	assert.Less(t, v, 1.0)
+
+	n := engine.RandInt64()
+	assert.GreaterOrEqual(t, n, int64(0))
 }
