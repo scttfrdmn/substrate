@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,4 +144,109 @@ func TestEventStoreCfg_ToEventStoreConfig(t *testing.T) {
 	assert.Equal(t, "/tmp/events", esCfg.PersistPath)
 	assert.True(t, esCfg.IncludeBodies)
 	assert.True(t, esCfg.IncludeStateHashes)
+}
+
+func TestQuotaCfg_ToQuotaConfig_Defaults(t *testing.T) {
+	// Empty rules — should fall back to built-in defaults.
+	cfg := substrate.QuotaCfg{Enabled: true, Rules: nil}
+	qc := cfg.ToQuotaConfig()
+	assert.True(t, qc.Enabled)
+	assert.NotEmpty(t, qc.Rules, "default rules must be populated")
+}
+
+func TestQuotaCfg_ToQuotaConfig_CustomRules(t *testing.T) {
+	cfg := substrate.QuotaCfg{
+		Enabled: true,
+		Rules: map[string]substrate.RateRuleCfg{
+			"s3/PutObject": {Rate: 10, Burst: 20},
+		},
+	}
+	qc := cfg.ToQuotaConfig()
+	assert.True(t, qc.Enabled)
+	require.Contains(t, qc.Rules, "s3/PutObject")
+	assert.Equal(t, float64(10), qc.Rules["s3/PutObject"].Rate)
+	assert.Equal(t, float64(20), qc.Rules["s3/PutObject"].Burst)
+}
+
+func TestConsistencyCfg_ToConsistencyConfig_Defaults(t *testing.T) {
+	cfg := substrate.ConsistencyCfg{Enabled: false}
+	cc, err := cfg.ToConsistencyConfig()
+	require.NoError(t, err)
+	assert.False(t, cc.Enabled)
+	assert.Equal(t, 2*time.Second, cc.PropagationDelay)
+}
+
+func TestConsistencyCfg_ToConsistencyConfig_CustomDelay(t *testing.T) {
+	cfg := substrate.ConsistencyCfg{
+		Enabled:          true,
+		PropagationDelay: "500ms",
+		AffectedServices: []string{"s3"},
+	}
+	cc, err := cfg.ToConsistencyConfig()
+	require.NoError(t, err)
+	assert.True(t, cc.Enabled)
+	assert.Equal(t, int64(500_000_000), int64(cc.PropagationDelay))
+	assert.Equal(t, []string{"s3"}, cc.AffectedServices)
+}
+
+func TestConsistencyCfg_ToConsistencyConfig_BadDelay(t *testing.T) {
+	cfg := substrate.ConsistencyCfg{PropagationDelay: "not-a-duration"}
+	_, err := cfg.ToConsistencyConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse propagation_delay")
+}
+
+func TestCostCfg_ToCostConfig(t *testing.T) {
+	cfg := substrate.CostCfg{
+		Enabled:   true,
+		Overrides: map[string]float64{"s3/PutObject": 0.001},
+	}
+	cc := cfg.ToCostConfig()
+	assert.True(t, cc.Enabled)
+	assert.Equal(t, 0.001, cc.Overrides["s3/PutObject"])
+}
+
+func TestToFaultConfig(t *testing.T) {
+	fc := substrate.FaultCfg{
+		Enabled: true,
+		Rules: []substrate.FaultRuleCfg{
+			{
+				Service:     "s3",
+				Operation:   "PutObject",
+				FaultType:   "error",
+				ErrorCode:   "InternalError",
+				HTTPStatus:  500,
+				ErrorMsg:    "injected",
+				Probability: 0.5,
+			},
+			{
+				Service:   "dynamodb",
+				FaultType: "latency",
+				LatencyMs: 100,
+			},
+		},
+	}
+	cfg := fc.ToFaultConfig()
+	assert.True(t, cfg.Enabled)
+	require.Len(t, cfg.Rules, 2)
+	assert.Equal(t, "s3", cfg.Rules[0].Service)
+	assert.Equal(t, "PutObject", cfg.Rules[0].Operation)
+	assert.Equal(t, "error", cfg.Rules[0].FaultType)
+	assert.Equal(t, "InternalError", cfg.Rules[0].ErrorCode)
+	assert.Equal(t, float64(0.5), cfg.Rules[0].Probability)
+	assert.Equal(t, "dynamodb", cfg.Rules[1].Service)
+	assert.Equal(t, "latency", cfg.Rules[1].FaultType)
+	assert.Equal(t, 100, cfg.Rules[1].LatencyMs)
+}
+
+func TestToTracingConfig(t *testing.T) {
+	tc := substrate.TracingCfg{
+		Enabled:      true,
+		OTLPEndpoint: "http://localhost:4317",
+		ServiceName:  "substrate-test",
+	}
+	cfg := tc.ToTracingConfig()
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, "http://localhost:4317", cfg.OTLPEndpoint)
+	assert.Equal(t, "substrate-test", cfg.ServiceName)
 }

@@ -252,3 +252,29 @@ func TestQuotaController_Integration_Returns429XMLBody(t *testing.T) {
 	require.NoError(t, xml.Unmarshal(body, &errResp))
 	assert.Equal(t, "ThrottlingException", errResp.Error.Code)
 }
+
+func TestQuotaController_UpdateConfig(t *testing.T) {
+	tc := substrate.NewTimeController(time.Now())
+	cfg := substrate.QuotaConfig{
+		Enabled: true,
+		Rules: map[string]substrate.RateRule{
+			"s3": {Rate: 10, Burst: 10},
+		},
+	}
+	qc := substrate.NewQuotaController(cfg, tc)
+
+	// Replace config with higher-rate rules.
+	newCfg := substrate.QuotaConfig{
+		Enabled: true,
+		Rules: map[string]substrate.RateRule{
+			"s3":       {Rate: 1000, Burst: 1000},
+			"dynamodb": {Rate: 500, Burst: 500},
+		},
+	}
+	qc.UpdateConfig(newCfg)
+	// After update with high burst, the first request should pass.
+	req := &substrate.AWSRequest{Service: "s3", Operation: "PutObject"}
+	reqCtx := makeQuotaReqCtx()
+	err := qc.CheckQuota(reqCtx, req)
+	require.NoError(t, err, "first request after UpdateConfig should pass")
+}

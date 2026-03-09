@@ -251,3 +251,28 @@ func TestConsistencyController_Integration_Returns409(t *testing.T) {
 	resp = sendGet()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
+
+func TestConsistencyController_UpdateConfig(t *testing.T) {
+	tc := substrate.NewTimeController(time.Now())
+	cfg := substrate.ConsistencyConfig{
+		Enabled:          true,
+		PropagationDelay: 2 * time.Second,
+		AffectedServices: []string{"iam"},
+	}
+	cc, err := substrate.NewConsistencyController(cfg, tc)
+	require.NoError(t, err)
+
+	// Disable consistency.
+	newCfg := substrate.ConsistencyConfig{
+		Enabled:          false,
+		PropagationDelay: 0,
+		AffectedServices: []string{},
+	}
+	cc.UpdateConfig(newCfg)
+	// After disabling, CheckRead should be a no-op (no error).
+	req := &substrate.AWSRequest{Service: "iam", Operation: "GetUser"}
+	checkErr := cc.CheckRead(nil, req)
+	if checkErr != nil {
+		t.Errorf("unexpected error after UpdateConfig(disabled): %v", checkErr)
+	}
+}

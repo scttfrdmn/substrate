@@ -4,13 +4,14 @@ package substrate_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/scttfrdmn/substrate"
+	substrate "github.com/scttfrdmn/substrate"
 )
 
 // memStateManager is a simple in-memory StateManager used in tests.
@@ -170,13 +171,26 @@ func TestEventStore_GetLatestSnapshot_NoSnapshot(t *testing.T) {
 }
 
 func TestEventStore_Flush_NonMemory(t *testing.T) {
-	// Non-memory backend — flush is a no-error stub.
-	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "sqlite"})
+	dir := t.TempDir()
+	store := substrate.NewEventStore(substrate.EventStoreConfig{
+		Enabled:     true,
+		Backend:     "sqlite",
+		PersistPath: dir,
+		DSN:         "flush_test.db",
+	})
+	t.Cleanup(func() { assert.NoError(t, store.Close()) })
 	assert.NoError(t, store.Flush(context.Background()))
 }
 
 func TestEventStore_Load_NonMemory(t *testing.T) {
-	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "sqlite"})
+	dir := t.TempDir()
+	store := substrate.NewEventStore(substrate.EventStoreConfig{
+		Enabled:     true,
+		Backend:     "sqlite",
+		PersistPath: dir,
+		DSN:         "load_test.db",
+	})
+	t.Cleanup(func() { assert.NoError(t, store.Close()) })
 	assert.NoError(t, store.Load(context.Background()))
 }
 
@@ -535,4 +549,122 @@ func TestReplayEngine_Replay_MatchingError(t *testing.T) {
 	require.NoError(t, err)
 	// Same error = expected, no difference added.
 	assert.Empty(t, results.Differences)
+}
+
+// ---------------------------------------------------------------------------
+// IAMPlugin.authorize coverage for inline policies and permission boundaries
+// ---------------------------------------------------------------------------
+
+func TestIAMPlugin_Authorize_WithInlinePolicy(t *testing.T) {
+	// Set up a state with a user, an inline policy that allows s3:GetObject, and
+	// an attached managed AdministratorAccess policy to confirm fast-path too.
+	state := substrate.NewMemoryStateManager()
+	ctx := context.Background()
+	logger := substrate.NewDefaultLogger(0, false)
+
+	// Create the user in state.
+	user := substrate.IAMUser{
+		UserName: "inlined",
+		UserID:   "AIDAINLINED",
+		ARN:      "arn:aws:iam::123456789012:user/inlined",
+		Path:     "/",
+	}
+	userRaw, _ := json.Marshal(user)
+	require.NoError(t, state.Put(ctx, "iam", "user:inlined", userRaw))
+
+	// Inline policy: allow s3:GetObject.
+	doc := substrate.PolicyDocument{
+		Version: "2012-10-17",
+		Statement: []substrate.PolicyStatement{{
+			Effect:   "Allow",
+			Action:   substrate.StringOrSlice{"s3:GetObject"},
+			Resource: substrate.StringOrSlice{"*"},
+		}},
+	}
+	docRaw, _ := json.Marshal(doc)
+	require.NoError(t, state.Put(ctx, "iam", "user_inline:inlined:ReadPolicy", docRaw))
+	namesRaw, _ := json.Marshal([]string{"ReadPolicy"})
+	require.NoError(t, state.Put(ctx, "iam", "user_inline_names:inlined", namesRaw))
+
+	plugin := &substrate.IAMPlugin{}
+	require.NoError(t, plugin.Initialize(context.Background(), substrate.PluginConfig{State: state, Logger: logger}))
+
+	reqCtx := &substrate.RequestContext{
+		AccountID: "123456789012",
+		Principal: &substrate.Principal{ARN: "arn:aws:iam::123456789012:user/inlined", Type: "IAMUser"},
+		Metadata:  make(map[string]interface{}),
+	}
+
+	// Should allow s3:GetObject via inline policy.
+	err := substrate.IAMAuthorizeForTest(plugin, reqCtx, "s3:GetObject", "*")
+	assert.NoError(t, err)
+
+	// Should deny s3:PutObject (not in inline policy).
+	err = substrate.IAMAuthorizeForTest(plugin, reqCtx, "s3:PutObject", "*")
+	require.Error(t, err)
+}
+
+func TestIAMPlugin_Authorize_WithBoundary(t *testing.T) {
+	state := substrate.NewMemoryStateManager()
+	ctx := context.Background()
+	logger := substrate.NewDefaultLogger(0, false)
+
+	// Boundary policy: allow only s3:GetObject.
+	boundaryARN := "arn:aws:iam::123456789012:policy/ReadOnlyBoundary"
+	boundaryDoc := substrate.PolicyDocument{
+		Version: "2012-10-17",
+		Statement: []substrate.PolicyStatement{{
+			Effect:   "Allow",
+			Action:   substrate.StringOrSlice{"s3:GetObject"},
+			Resource: substrate.StringOrSlice{"*"},
+		}},
+	}
+	boundaryPolicy := substrate.IAMPolicy{
+		PolicyName:       "ReadOnlyBoundary",
+		PolicyID:         "ANPABOUND",
+		ARN:              boundaryARN,
+		Path:             "/",
+		DefaultVersionID: "v1",
+		IsAttachable:     true,
+		Document:         boundaryDoc,
+	}
+	bRaw, _ := json.Marshal(boundaryPolicy)
+	require.NoError(t, state.Put(ctx, "iam", "policy:"+boundaryARN, bRaw))
+
+	// User with AdministratorAccess + boundary set.
+	boundaryRef := &substrate.IAMAttachedPolicy{PolicyARN: boundaryARN, PolicyName: "ReadOnlyBoundary"}
+	user := substrate.IAMUser{
+		UserName:            "bounded",
+		UserID:              "AIDABOUND",
+		ARN:                 "arn:aws:iam::123456789012:user/bounded",
+		Path:                "/",
+		PermissionsBoundary: boundaryRef,
+	}
+	uRaw, _ := json.Marshal(user)
+	require.NoError(t, state.Put(ctx, "iam", "user:bounded", uRaw))
+
+	// Attach AdministratorAccess.
+	arnsRaw, _ := json.Marshal([]string{"arn:aws:iam::aws:policy/AdministratorAccess"})
+	require.NoError(t, state.Put(ctx, "iam", "user_policies:bounded", arnsRaw))
+
+	plugin := &substrate.IAMPlugin{}
+	require.NoError(t, plugin.Initialize(context.Background(), substrate.PluginConfig{State: state, Logger: logger}))
+
+	reqCtx := &substrate.RequestContext{
+		AccountID: "123456789012",
+		Principal: &substrate.Principal{ARN: "arn:aws:iam::123456789012:user/bounded", Type: "IAMUser"},
+		Metadata:  make(map[string]interface{}),
+	}
+
+	// GetObject allowed (boundary allows it).
+	err := substrate.IAMAuthorizeForTest(plugin, reqCtx, "s3:GetObject", "*")
+	assert.NoError(t, err)
+
+	// PutObject denied (boundary only allows GetObject).
+	err = substrate.IAMAuthorizeForTest(plugin, reqCtx, "s3:PutObject", "*")
+	require.Error(t, err)
+	var awsErr *substrate.AWSError
+	require.ErrorAs(t, err, &awsErr)
+	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Contains(t, awsErr.Message, "permission boundary")
 }

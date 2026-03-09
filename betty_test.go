@@ -226,7 +226,7 @@ func TestDeployStack_InvalidTemplate(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestDeployStack_LambdaNotImplemented(t *testing.T) {
+func TestDeployStack_LambdaServiceNotAvailable(t *testing.T) {
 	ctx := context.Background()
 	registry, store, state, tc, logger := newBettyTestDeps(t)
 	client := substrate.NewBettyClient(registry, store, state, tc, logger)
@@ -254,15 +254,14 @@ func TestDeployStack_LambdaNotImplemented(t *testing.T) {
 	for _, r := range result.Resources {
 		switch r.Type {
 		case "AWS::Lambda::Function":
-			assert.NotEmpty(t, r.Error, "Lambda should have a NotImplemented error")
-			assert.Contains(t, r.Error, "NotImplemented")
+			assert.NotEmpty(t, r.Error, "Lambda should have an error when no lambda plugin is registered")
 			hasLambdaError = true
 		case "AWS::S3::Bucket":
 			assert.Empty(t, r.Error, "S3 bucket should deploy successfully alongside Lambda")
 			hasS3Success = true
 		}
 	}
-	assert.True(t, hasLambdaError, "should have a Lambda error")
+	assert.True(t, hasLambdaError, "should have a Lambda deploy error")
 	assert.True(t, hasS3Success, "should have a successful S3 bucket")
 }
 

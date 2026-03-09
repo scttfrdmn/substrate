@@ -46,6 +46,9 @@ type DeployResult struct {
 
 	// Duration is the time taken to deploy all resources.
 	Duration time.Duration
+
+	// Outputs contains the resolved CloudFormation Outputs section values.
+	Outputs map[string]string
 }
 
 // BettyClient is a convenience wrapper for the full Betty.codes validation workflow.
@@ -88,13 +91,14 @@ func (b *BettyClient) Deploy(ctx context.Context, cfn string, intent Intent) (*D
 	deployer := &StackDeployer{
 		registry: b.registry,
 		store:    b.store,
+		state:    b.state,
 		tc:       b.tc,
 		logger:   b.logger,
 		costs:    b.costs,
 	}
 
 	streamID := fmt.Sprintf("deploy-%d", b.tc.Now().UnixNano())
-	result, err := deployer.Deploy(ctx, cfn, streamID)
+	result, err := deployer.Deploy(ctx, cfn, streamID, nil)
 	if err != nil {
 		return nil, err
 	}

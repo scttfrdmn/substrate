@@ -123,6 +123,15 @@ func (q *QuotaController) CheckQuota(reqCtx *RequestContext, req *AWSRequest) er
 	}
 }
 
+// UpdateConfig replaces the quota rules and discards all existing token buckets.
+// It is safe to call concurrently with CheckQuota.
+func (q *QuotaController) UpdateConfig(cfg QuotaConfig) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cfg = cfg
+	q.buckets = make(map[string]*tokenBucket)
+}
+
 // resolveKey returns the most-specific quota key for the given service and
 // operation. Operation-specific keys ("service/operation") take precedence
 // over service-level keys ("service"). An empty string is returned when no

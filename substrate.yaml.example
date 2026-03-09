@@ -9,13 +9,22 @@ server:
   read_timeout: "30s"
   write_timeout: "30s"
   shutdown_timeout: "10s"
+  # HTTP path for the liveness health endpoint (always returns 200).
+  health_path: "/health"
+  # HTTP path for the readiness endpoint (lists registered plugins).
+  ready_path: "/ready"
 
 event_store:
   # Set to false to disable the event log (not recommended for testing use cases).
   enabled: true
-  # Storage backend. "memory" is the only supported backend in v0.3.0-alpha.
-  # "sqlite" is planned for v0.4.0 to enable persistent replay across restarts.
+  # Storage backend: "memory" (default), "sqlite" (persistent), or "file" (NDJSON).
   backend: "memory"
+  # Path used by the sqlite and file backends (directory for file, prefix for sqlite).
+  # persist_path: "/var/lib/substrate"
+  # SQLite data source name (relative to persist_path when set). Default: substrate.db
+  # dsn: "substrate.db"
+  # Maximum NDJSON file size in MB before rotation (0 = no rotation, file backend only).
+  # max_file_size_mb: 100
 
 log:
   # Log level: debug | info | warn | error
@@ -44,6 +53,27 @@ consistency:
   affected_services:
     - "iam"
 
+# Credential registry for multi-account isolation and SigV4 signature verification.
+# When enabled, every incoming request must carry a valid AWS4-HMAC-SHA256 Authorization
+# header signed with a key registered here. Omitting this section disables both credential
+# resolution and signature verification (all requests are accepted, backward-compatible default).
+credentials:
+  # Set to true to enable SigV4 signature verification.
+  # enabled: true
+  # Static credentials. Production deployments can load these from Secrets Manager or env vars.
+  # entries:
+  #   - access_key_id: "AKIAEXAMPLE00000001"
+  #     secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  #     account_id: "111122223333"
+
+# Cross-service IAM authorization.
+# When enabled, every request whose caller principal has been resolved via the credential
+# registry is checked against that principal's attached managed policies, inline policies,
+# and permission boundary before the request reaches the plugin layer.
+auth:
+  # Set to true to enable cross-service IAM enforcement.
+  # enabled: true
+
 # Per-request cost estimation.
 # Built-in table: IAM/STS=$0, s3/PutObject=$0.000005, s3/GetObject=$0.0000004,
 # dynamodb/GetItem=$0.00000025, lambda/Invoke=$0.0000002. Add overrides below.
@@ -51,3 +81,54 @@ costs:
   enabled: true
   # overrides:
   #   "s3/PutObject": 0.000006
+
+# Prometheus metrics endpoint.
+# Exposes substrate_requests_total, substrate_cost_usd_total, and other
+# operational counters in Prometheus text-format v0.0.4.
+metrics:
+  enabled: false
+  # path: "/metrics"
+
+# Cost forecasting and anomaly detection.
+# Uses linear regression on historical daily costs to project future spend.
+forecast:
+  enabled: false
+  # window_days: 30
+  # horizon_days: 7
+  # anomaly_threshold_sigma: 2.0
+  # alert_thresholds:
+  #   s3: 10.00
+  #   lambda: 5.00
+
+# OpenTelemetry distributed tracing.
+# Emits spans for every AWS API request through the Substrate pipeline.
+tracing:
+  enabled: false
+  # exporter: "noop"   # choices: noop | stdout | otlp_http
+  # otlp_endpoint: "http://localhost:4318"
+  # service_name: "substrate"
+
+# Fault injection — inject errors or latency into the request pipeline.
+# Rules are evaluated in order; the first matching rule fires. Disabled by default.
+fault:
+  enabled: false
+  # rules:
+  #   - service: "s3"
+  #     operation: "PutObject"
+  #     fault_type: "error"
+  #     error_code: "InternalError"
+  #     http_status: 500
+  #     probability: 0.05   # fire on 5% of matching requests
+  #   - service: "dynamodb"
+  #     fault_type: "latency"
+  #     latency_ms: 200
+  #     probability: 0.10
+
+# Multi-region routing and resource isolation.
+# When allowed is non-empty, requests targeting regions not in the list are
+# rejected with 400 InvalidClientTokenId.
+region:
+  default: "us-east-1"
+  # allowed:
+  #   - "us-east-1"
+  #   - "us-west-2"

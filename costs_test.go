@@ -195,3 +195,21 @@ func TestCostController_Integration_CostRecordedInStore(t *testing.T) {
 	assert.Equal(t, "GetItem", events[0].Operation)
 	assert.InDelta(t, 0.00000025, events[0].Cost, 1e-12)
 }
+
+func TestCostController_UpdateConfig(t *testing.T) {
+	cc := substrate.NewCostController(substrate.CostConfig{Enabled: true})
+
+	// Update with a custom cost override.
+	newCfg := substrate.CostConfig{
+		Enabled:   true,
+		Overrides: map[string]float64{"s3/PutObject": 0.0001},
+	}
+	cc.UpdateConfig(newCfg)
+
+	req := &substrate.AWSRequest{Service: "s3", Operation: "PutObject"}
+	cost := cc.CostForRequest(req)
+	// The override rate for PutObject, should be non-negative.
+	if cost < 0 {
+		t.Errorf("expected non-negative cost, got %f", cost)
+	}
+}

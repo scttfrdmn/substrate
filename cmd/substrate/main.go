@@ -6,9 +6,11 @@
 //
 // Commands:
 //
-//	server   Start the HTTP server
-//	replay   Replay a recorded event stream
-//	debug    Inspect events in a recorded stream
+//	server        Start the HTTP server
+//	replay        Replay a recorded event stream
+//	debug         Inspect events in a recorded stream
+//	export        Export recorded events (NDJSON or CSV)
+//	validate-plan Validate a Terraform JSON plan
 package main
 
 import (
@@ -56,6 +58,8 @@ of CDK, CloudFormation, and Terraform infrastructure code.`,
 	root.AddCommand(newServerCmd())
 	root.AddCommand(newReplayCmd())
 	root.AddCommand(newDebugCmd())
+	root.AddCommand(newExportCmd())
+	root.AddCommand(newValidatePlanCmd())
 
 	return root
 }
@@ -107,17 +111,181 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(stsPlugin)
 
-			s3Plugin := &substrate.S3Plugin{}
-			if err := s3Plugin.Initialize(initCtx, substrate.PluginConfig{
+			lambdaPlugin := &substrate.LambdaPlugin{}
+			if err := lambdaPlugin.Initialize(initCtx, substrate.PluginConfig{
 				State:  state,
 				Logger: logger,
 				Options: map[string]any{
 					"time_controller": tc,
 				},
 			}); err != nil {
+				return fmt.Errorf("initialize lambda plugin: %w", err)
+			}
+			registry.Register(lambdaPlugin)
+
+			sqsPlugin := &substrate.SQSPlugin{}
+			if err := sqsPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize sqs plugin: %w", err)
+			}
+			registry.Register(sqsPlugin)
+
+			dynamodbPlugin := &substrate.DynamoDBPlugin{}
+			if err := dynamodbPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize dynamodb plugin: %w", err)
+			}
+			registry.Register(dynamodbPlugin)
+
+			ec2Plugin := &substrate.EC2Plugin{}
+			if err := ec2Plugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize ec2 plugin: %w", err)
+			}
+			registry.Register(ec2Plugin)
+
+			s3Plugin := &substrate.S3Plugin{}
+			if err := s3Plugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+					"registry":        registry,
+				},
+			}); err != nil {
 				return fmt.Errorf("initialize s3 plugin: %w", err)
 			}
 			registry.Register(s3Plugin)
+
+			elbPlugin := &substrate.ELBPlugin{}
+			if err := elbPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize elb plugin: %w", err)
+			}
+			registry.Register(elbPlugin)
+
+			r53Plugin := &substrate.Route53Plugin{}
+			if err := r53Plugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize route53 plugin: %w", err)
+			}
+			registry.Register(r53Plugin)
+
+			taggingPlugin := &substrate.TaggingPlugin{}
+			if err := taggingPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize tagging plugin: %w", err)
+			}
+			registry.Register(taggingPlugin)
+
+			snsPlugin := &substrate.SNSPlugin{}
+			if err := snsPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+					"registry":        registry,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize sns plugin: %w", err)
+			}
+			registry.Register(snsPlugin)
+
+			smPlugin := &substrate.SecretsManagerPlugin{}
+			if err := smPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize secretsmanager plugin: %w", err)
+			}
+			registry.Register(smPlugin)
+
+			ssmPlugin := &substrate.SSMPlugin{}
+			if err := ssmPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize ssm plugin: %w", err)
+			}
+			registry.Register(ssmPlugin)
+
+			kmsPlugin := &substrate.KMSPlugin{}
+			if err := kmsPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize kms plugin: %w", err)
+			}
+			registry.Register(kmsPlugin)
+
+			cwLogsPlugin := &substrate.CloudWatchLogsPlugin{}
+			if err := cwLogsPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize cloudwatchlogs plugin: %w", err)
+			}
+			registry.Register(cwLogsPlugin)
+
+			ebPlugin := &substrate.EventBridgePlugin{}
+			if err := ebPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize eventbridge plugin: %w", err)
+			}
+			registry.Register(ebPlugin)
+
+			cwPlugin := &substrate.CloudWatchPlugin{}
+			if err := cwPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+				Options: map[string]any{
+					"time_controller": tc,
+				},
+			}); err != nil {
+				return fmt.Errorf("initialize cloudwatch plugin: %w", err)
+			}
+			registry.Register(cwPlugin)
 
 			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
 
@@ -139,15 +307,63 @@ configured address will have their requests emulated and recorded.`,
 
 			costCtrl := substrate.NewCostController(cfg.Costs.ToCostConfig())
 
+			var faultCtrl *substrate.FaultController
+			if cfg.Fault.Enabled || len(cfg.Fault.Rules) > 0 {
+				faultCtrl = substrate.NewFaultController(cfg.Fault.ToFaultConfig(), time.Now().UnixNano())
+			}
+
+			authCtrl := substrate.NewAuthController(state, logger)
+
+			var metricsCollector *substrate.MetricsCollector
+			if cfg.Metrics.Enabled {
+				metricsCollector = substrate.NewMetricsCollector()
+			}
+
+			var tracer *substrate.Tracer
+			if cfg.Tracing.Enabled {
+				var tracerShutdown func(context.Context) error
+				tracer, tracerShutdown, err = substrate.NewTracer(initCtx, cfg.Tracing.ToTracingConfig())
+				if err != nil {
+					return fmt.Errorf("initialize tracer: %w", err)
+				}
+				defer func() { _ = tracerShutdown(context.Background()) }()
+			}
+
 			srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
 				substrate.ServerOptions{
 					Quota:       quotaCtrl,
 					Consistency: consistencyCtrl,
 					Costs:       costCtrl,
+					Auth:        authCtrl,
+					Metrics:     metricsCollector,
+					Tracer:      tracer,
+					Fault:       faultCtrl,
 				})
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+
+			// SIGHUP hot-reload: reload config and update controllers in place.
+			sighup := make(chan os.Signal, 1)
+			signal.Notify(sighup, syscall.SIGHUP)
+			go func() {
+				for range sighup {
+					newCfg, loadErr := substrate.LoadConfig(configPath)
+					if loadErr != nil {
+						logger.Warn("config reload failed", "err", loadErr)
+						continue
+					}
+					quotaCtrl.UpdateConfig(newCfg.Quotas.ToQuotaConfig())
+					if newCC, ccErr := newCfg.Consistency.ToConsistencyConfig(); ccErr == nil {
+						consistencyCtrl.UpdateConfig(newCC)
+					}
+					costCtrl.UpdateConfig(newCfg.Costs.ToCostConfig())
+					if faultCtrl != nil {
+						faultCtrl.UpdateConfig(newCfg.Fault.ToFaultConfig())
+					}
+					logger.Info("config reloaded")
+				}
+			}()
 
 			return srv.Start(ctx)
 		},
@@ -208,6 +424,156 @@ any determinism differences.`,
 	return cmd
 }
 
+func newExportCmd() *cobra.Command {
+	var configPath string
+	var format string
+	var output string
+	var streamID string
+	var service string
+	var start string
+	var end string
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export recorded events to NDJSON or CSV",
+		Long: `Export events from the Substrate event store to stdout or a file.
+Supports NDJSON (newline-delimited JSON) and CSV output formats.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg, err := substrate.LoadConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+
+			filter := substrate.EventFilter{
+				StreamID: streamID,
+				Service:  service,
+			}
+			if start != "" {
+				t, parseErr := time.Parse(time.RFC3339, start)
+				if parseErr != nil {
+					return fmt.Errorf("parse --start: %w", parseErr)
+				}
+				filter.StartTime = t
+			}
+			if end != "" {
+				t, parseErr := time.Parse(time.RFC3339, end)
+				if parseErr != nil {
+					return fmt.Errorf("parse --end: %w", parseErr)
+				}
+				filter.EndTime = t
+			}
+
+			var w *os.File
+			if output == "" || output == "-" {
+				w = os.Stdout
+			} else {
+				f, openErr := os.Create(output)
+				if openErr != nil {
+					return fmt.Errorf("open output file: %w", openErr)
+				}
+				defer f.Close() //nolint:errcheck
+				w = f
+			}
+
+			ctx := context.Background()
+			var n int64
+			switch format {
+			case "csv":
+				n, err = store.ExportCSV(ctx, filter, w)
+			default:
+				n, err = store.ExportNDJSON(ctx, filter, w)
+			}
+			if err != nil {
+				return fmt.Errorf("export: %w", err)
+			}
+			if output != "" && output != "-" {
+				fmt.Fprintf(os.Stderr, "exported %d events to %s\n", n, output)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to substrate.yaml config file")
+	cmd.Flags().StringVar(&format, "format", "ndjson", "output format: ndjson or csv")
+	cmd.Flags().StringVar(&output, "output", "-", "output file path; - writes to stdout")
+	cmd.Flags().StringVar(&streamID, "stream", "", "filter to a specific stream ID")
+	cmd.Flags().StringVar(&service, "service", "", "filter to a specific service")
+	cmd.Flags().StringVar(&start, "start", "", "RFC3339 start time (inclusive)")
+	cmd.Flags().StringVar(&end, "end", "", "RFC3339 end time (exclusive)")
+
+	return cmd
+}
+
+func newValidatePlanCmd() *cobra.Command {
+	var configPath string
+	var planPath string
+
+	cmd := &cobra.Command{
+		Use:   "validate-plan",
+		Short: "Validate a Terraform JSON plan",
+		Long: `Analyse a Terraform plan (terraform show -json) for estimated cost and
+policy concerns. No emulator state is modified.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if planPath == "" {
+				return fmt.Errorf("--plan is required")
+			}
+
+			f, err := os.Open(planPath)
+			if err != nil {
+				return fmt.Errorf("open plan file: %w", err)
+			}
+			defer f.Close() //nolint:errcheck
+
+			plan, err := substrate.ParseTerraformPlan(f)
+			if err != nil {
+				return fmt.Errorf("parse plan: %w", err)
+			}
+
+			var costs *substrate.CostController
+			cfg, cfgErr := substrate.LoadConfig(configPath)
+			if cfgErr == nil {
+				costs = substrate.NewCostController(cfg.Costs.ToCostConfig())
+			}
+
+			ctx := context.Background()
+			result, err := substrate.ValidateTerraformPlan(ctx, plan, costs)
+			if err != nil {
+				return fmt.Errorf("validate: %w", err)
+			}
+
+			creates := len(result.CreatedResources)
+			deletes := len(result.DeletedResources)
+			updates := result.ResourceCount - creates - deletes
+
+			fmt.Printf("Resource changes:  %d (%d create, %d update, %d delete)\n",
+				result.ResourceCount, creates, updates, deletes)
+			fmt.Printf("Estimated monthly: $%.2f\n", result.EstimatedMonthlyCostUSD)
+
+			if len(result.Warnings) > 0 {
+				fmt.Println("Warnings:")
+				for _, w := range result.Warnings {
+					fmt.Printf("  - %s\n", w)
+				}
+			}
+			if len(result.Errors) > 0 {
+				fmt.Println("Errors:")
+				for _, e := range result.Errors {
+					fmt.Printf("  - %s\n", e)
+				}
+				return fmt.Errorf("validation failed with %d error(s)", len(result.Errors))
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to substrate.yaml config file")
+	cmd.Flags().StringVar(&planPath, "plan", "", "path to terraform show -json output file")
+
+	return cmd
+}
 func newDebugCmd() *cobra.Command {
 	var configPath string
 

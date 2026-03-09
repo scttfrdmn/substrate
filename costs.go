@@ -2,7 +2,10 @@ package substrate
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +24,7 @@ type CostConfig struct {
 // stateless after initialisation: CostForRequest is a pure lookup with no
 // side effects, making it fully replay-safe.
 type CostController struct {
+	mu    sync.RWMutex
 	table map[string]float64
 }
 
@@ -45,6 +49,8 @@ func NewCostController(cfg CostConfig) *CostController {
 // back to a service-level key ("service"), and finally returns 0.0 when no
 // entry matches.
 func (c *CostController) CostForRequest(req *AWSRequest) float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	opKey := strings.ToLower(req.Service) + "/" + req.Operation
 	if cost, ok := c.table[opKey]; ok {
 		return cost
@@ -56,17 +62,70 @@ func (c *CostController) CostForRequest(req *AWSRequest) float64 {
 	return 0.0
 }
 
+// UpdateConfig rebuilds the pricing table from cfg. It is safe to call
+// concurrently with CostForRequest.
+func (c *CostController) UpdateConfig(cfg CostConfig) {
+	var table map[string]float64
+	if cfg.Enabled {
+		table = defaultCostTable()
+		for k, v := range cfg.Overrides {
+			table[k] = v
+		}
+	} else {
+		table = make(map[string]float64)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.table = table
+}
+
 // defaultCostTable returns the built-in per-request pricing table. IAM and
 // STS are free. S3, DynamoDB, and Lambda values are pre-populated so those
 // services get cost tracking as soon as their plugins land.
 func defaultCostTable() map[string]float64 {
 	return map[string]float64{
-		"iam":              0.0,
-		"sts":              0.0,
-		"s3/PutObject":     0.000005,
-		"s3/GetObject":     0.0000004,
-		"dynamodb/GetItem": 0.00000025,
-		"lambda/Invoke":    0.0000002,
+		"iam":                     0.0,
+		"sts":                     0.0,
+		"s3/PutObject":            0.000005,
+		"s3/GetObject":            0.0000004,
+		"dynamodb/GetItem":        0.00000025,
+		"dynamodb/PutItem":        0.00000125,
+		"dynamodb/UpdateItem":     0.00000125,
+		"dynamodb/DeleteItem":     0.00000125,
+		"dynamodb/BatchWriteItem": 0.00000125,
+		"dynamodb/Query":          0.00000025,
+		"dynamodb/Scan":           0.00000025,
+		"dynamodb/BatchGetItem":   0.00000025,
+		"lambda/Invoke":           0.0000002,
+		"sqs/SendMessage":         0.00000040,
+		"sqs/ReceiveMessage":      0.00000040,
+		"elasticloadbalancing/CreateLoadBalancer": 0.000008,
+		"elasticloadbalancing/RegisterTargets":    0.000001,
+		"route53/CreateHostedZone":                0.50,
+		"route53/ChangeResourceRecordSets":        0.000004,
+		// SNS pricing: $0.50 per 1M notifications published.
+		"sns/Publish": 0.0000005,
+		// Secrets Manager: $0.05 per secret per month (prorated per-API call at ~$0.00000166).
+		"secretsmanager/CreateSecret":   0.00000166,
+		"secretsmanager/GetSecretValue": 0.00000166,
+		"secretsmanager/PutSecretValue": 0.00000166,
+		// SSM Parameter Store: standard parameters are free; advanced are $0.05/10k API calls.
+		"ssm/GetParameter":        0.000000005,
+		"ssm/GetParameters":       0.000000005,
+		"ssm/GetParametersByPath": 0.000000005,
+		"ssm/PutParameter":        0.000000005,
+		// KMS: $0.03 per 10k API calls ≈ $0.000003 per call.
+		"kms/CreateKey":       0.000003,
+		"kms/Encrypt":         0.000003,
+		"kms/Decrypt":         0.000003,
+		"kms/GenerateDataKey": 0.000003,
+		"kms/ReEncrypt":       0.000003,
+		// CloudWatch Logs: ~$0.50/GB ingestion, approximate per-call estimate.
+		"logs/PutLogEvents": 0.0000005,
+		// EventBridge: $1.00 per million events.
+		"eventbridge/PutEvents": 0.000001,
+		// CloudWatch Alarms: $0.10 per alarm per month, charged on creation.
+		"monitoring/PutMetricAlarm": 0.10,
 	}
 }
 
@@ -126,4 +185,289 @@ func (e *EventStore) GetCostSummary(ctx context.Context, accountID string, start
 	}
 
 	return summary, nil
+}
+
+// CostForecast holds a projected cost estimate for a given account and service
+// over a future horizon, computed via linear regression on historical daily costs.
+type CostForecast struct {
+	// AccountID is the AWS account this forecast covers (empty = all accounts).
+	AccountID string
+
+	// Service is the AWS service name (empty = all services).
+	Service string
+
+	// WindowDays is the number of historical days used for the regression.
+	WindowDays int
+
+	// HorizonDays is the number of days projected forward.
+	HorizonDays int
+
+	// ProjectedCost is the estimated total cost over HorizonDays in USD.
+	ProjectedCost float64
+
+	// ConfidenceLow is the lower bound of the 95% confidence interval.
+	ConfidenceLow float64
+
+	// ConfidenceHigh is the upper bound of the 95% confidence interval.
+	ConfidenceHigh float64
+
+	// DailyCosts is the historical per-day cost series used for forecasting.
+	DailyCosts []DailyCost
+
+	// Anomalies lists services where the latest day cost is statistically unusual.
+	Anomalies []CostAnomaly
+
+	// ComputedAt is the time this forecast was generated.
+	ComputedAt time.Time
+}
+
+// DailyCost records the total estimated cost for a single UTC calendar day.
+type DailyCost struct {
+	// Date is the start of the UTC day (truncated to midnight).
+	Date time.Time
+
+	// Cost is the total estimated cost in USD for that day.
+	Cost float64
+}
+
+// CostAnomaly describes a service whose latest-day cost deviates significantly
+// from its rolling mean.
+type CostAnomaly struct {
+	// Service is the AWS service name.
+	Service string
+
+	// LatestDayCost is the cost recorded for the most recent day.
+	LatestDayCost float64
+
+	// MeanCost is the rolling mean cost per day.
+	MeanCost float64
+
+	// SigmaCount is the number of standard deviations above the mean.
+	SigmaCount float64
+}
+
+// GetCostForecast returns a projected cost estimate for the given accountID and
+// service over the next horizonDays days, based on windowDays of history.
+// An empty accountID or service matches all accounts/services respectively.
+// anomalyThresholdSigma is the number of standard deviations above which a
+// service cost is flagged as anomalous; use 2.0 for a typical 95% threshold.
+func (e *EventStore) GetCostForecast(
+	ctx context.Context,
+	accountID, service string,
+	windowDays, horizonDays int,
+	anomalyThresholdSigma float64,
+) (*CostForecast, error) {
+	if windowDays <= 0 {
+		windowDays = 30
+	}
+	if horizonDays <= 0 {
+		horizonDays = 7
+	}
+	if anomalyThresholdSigma <= 0 {
+		anomalyThresholdSigma = 2.0
+	}
+
+	end := time.Now().UTC().Truncate(24 * time.Hour)
+	start := end.AddDate(0, 0, -windowDays)
+
+	filter := EventFilter{
+		AccountID: accountID,
+		StartTime: start,
+		EndTime:   end,
+	}
+	if service != "" {
+		filter.Service = service
+	}
+
+	events, err := e.GetEvents(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("get events for forecast: %w", err)
+	}
+
+	daily := bucketByDay(events)
+	projected, low, high := forecastLinear(daily, horizonDays)
+	anomalies := detectAnomalies(events, anomalyThresholdSigma)
+
+	return &CostForecast{
+		AccountID:      accountID,
+		Service:        service,
+		WindowDays:     windowDays,
+		HorizonDays:    horizonDays,
+		ProjectedCost:  projected,
+		ConfidenceLow:  low,
+		ConfidenceHigh: high,
+		DailyCosts:     daily,
+		Anomalies:      anomalies,
+		ComputedAt:     time.Now().UTC(),
+	}, nil
+}
+
+// bucketByDay aggregates event costs into per-UTC-day totals.
+func bucketByDay(events []*Event) []DailyCost {
+	totals := make(map[time.Time]float64)
+	for _, ev := range events {
+		day := ev.Timestamp.UTC().Truncate(24 * time.Hour)
+		totals[day] += ev.Cost
+	}
+	result := make([]DailyCost, 0, len(totals))
+	for day, cost := range totals {
+		result = append(result, DailyCost{Date: day, Cost: cost})
+	}
+	// Sort ascending by date using insertion sort.
+	for i := 1; i < len(result); i++ {
+		for j := i; j > 0 && result[j].Date.Before(result[j-1].Date); j-- {
+			result[j], result[j-1] = result[j-1], result[j]
+		}
+	}
+	return result
+}
+
+// forecastLinear projects total cost over horizonDays using linear regression
+// on the daily series. When fewer than 3 data points are available, it falls
+// back to multiplying the mean daily cost by horizonDays.
+// Returns (projected, confidenceLow, confidenceHigh).
+func forecastLinear(daily []DailyCost, horizonDays int) (float64, float64, float64) {
+	n := len(daily)
+	if n == 0 {
+		return 0, 0, 0
+	}
+
+	ys := make([]float64, n)
+	for i, d := range daily {
+		ys[i] = d.Cost
+	}
+
+	if n < 3 {
+		// Insufficient data: use mean.
+		mean := meanFloat(ys)
+		projected := mean * float64(horizonDays)
+		return projected, projected, projected
+	}
+
+	xs := make([]float64, n)
+	for i := range xs {
+		xs[i] = float64(i)
+	}
+
+	slope, intercept := linearRegression(xs, ys)
+
+	// Project: sum predicted values for next horizonDays.
+	var projected float64
+	for h := 0; h < horizonDays; h++ {
+		x := float64(n + h)
+		v := slope*x + intercept
+		if v < 0 {
+			v = 0
+		}
+		projected += v
+	}
+
+	// Residual standard deviation.
+	var residSumSq float64
+	for i, y := range ys {
+		pred := slope*xs[i] + intercept
+		diff := y - pred
+		residSumSq += diff * diff
+	}
+	sigma := 0.0
+	if n > 2 {
+		sigma = math.Sqrt(residSumSq / float64(n-2))
+	}
+
+	// 95% CI: ±1.96σ scaled over horizonDays.
+	ci := 1.96 * sigma * math.Sqrt(float64(horizonDays))
+	return projected, projected - ci, projected + ci
+}
+
+// linearRegression computes the least-squares slope and intercept for
+// paired (xs[i], ys[i]) observations.
+func linearRegression(xs, ys []float64) (slope, intercept float64) {
+	n := float64(len(xs))
+	if n == 0 {
+		return 0, 0
+	}
+	var sumX, sumY, sumXY, sumXX float64
+	for i := range xs {
+		sumX += xs[i]
+		sumY += ys[i]
+		sumXY += xs[i] * ys[i]
+		sumXX += xs[i] * xs[i]
+	}
+	denom := n*sumXX - sumX*sumX
+	if denom == 0 {
+		return 0, sumY / n
+	}
+	slope = (n*sumXY - sumX*sumY) / denom
+	intercept = (sumY - slope*sumX) / n
+	return slope, intercept
+}
+
+// detectAnomalies flags services where the latest 24-hour cost exceeds
+// thresholdSigma standard deviations above the daily mean.
+func detectAnomalies(events []*Event, thresholdSigma float64) []CostAnomaly {
+	bySvc := make(map[string]map[time.Time]float64)
+	for _, ev := range events {
+		if _, ok := bySvc[ev.Service]; !ok {
+			bySvc[ev.Service] = make(map[time.Time]float64)
+		}
+		day := ev.Timestamp.UTC().Truncate(24 * time.Hour)
+		bySvc[ev.Service][day] += ev.Cost
+	}
+
+	var anomalies []CostAnomaly
+	for svc, days := range bySvc {
+		if len(days) < 2 {
+			continue
+		}
+		costs := make([]float64, 0, len(days))
+		var latestDay time.Time
+		var latestCost float64
+		for day, cost := range days {
+			costs = append(costs, cost)
+			if day.After(latestDay) {
+				latestDay = day
+				latestCost = cost
+			}
+		}
+		mean := meanFloat(costs)
+		sigma := stddevFloat(costs, mean)
+		if sigma == 0 {
+			continue
+		}
+		sigmaCount := (latestCost - mean) / sigma
+		if sigmaCount > thresholdSigma {
+			anomalies = append(anomalies, CostAnomaly{
+				Service:       svc,
+				LatestDayCost: latestCost,
+				MeanCost:      mean,
+				SigmaCount:    sigmaCount,
+			})
+		}
+	}
+	return anomalies
+}
+
+// meanFloat returns the arithmetic mean of vals. Returns 0 for empty slice.
+func meanFloat(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, v := range vals {
+		sum += v
+	}
+	return sum / float64(len(vals))
+}
+
+// stddevFloat returns the sample standard deviation of vals.
+func stddevFloat(vals []float64, mean float64) float64 {
+	if len(vals) < 2 {
+		return 0
+	}
+	var sumSq float64
+	for _, v := range vals {
+		diff := v - mean
+		sumSq += diff * diff
+	}
+	return math.Sqrt(sumSq / float64(len(vals)-1))
 }

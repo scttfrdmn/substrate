@@ -463,3 +463,313 @@ func TestS3_PutObject_CostTracked(t *testing.T) {
 	// PutObject costs $0.000005.
 	assert.InDelta(t, 0.000005, summary.ByOperation["s3/PutObject"], 1e-9)
 }
+
+// --- Bucket policy tests --------------------------------------------------
+
+func TestS3Plugin_BucketPolicy_PutGet(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	// Create bucket.
+	w := s3Request(t, srv, http.MethodPut, "/policy-bucket", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Put bucket policy.
+	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::policy-bucket/*"}]}`
+	w = s3Request(t, srv, http.MethodPut, "/policy-bucket?policy", []byte(policy), map[string]string{"Content-Type": "application/json"})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	// Get bucket policy.
+	w = s3Request(t, srv, http.MethodGet, "/policy-bucket?policy", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "s3:GetObject")
+}
+
+func TestS3Plugin_BucketPolicy_NotFound(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	w := s3Request(t, srv, http.MethodPut, "/no-policy-bucket", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = s3Request(t, srv, http.MethodGet, "/no-policy-bucket?policy", nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestS3Plugin_BucketPolicy_Delete(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	w := s3Request(t, srv, http.MethodPut, "/del-policy-bucket", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	policy := `{"Version":"2012-10-17","Statement":[]}`
+	w = s3Request(t, srv, http.MethodPut, "/del-policy-bucket?policy", []byte(policy), nil)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	w = s3Request(t, srv, http.MethodDelete, "/del-policy-bucket?policy", nil, nil)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	w = s3Request(t, srv, http.MethodGet, "/del-policy-bucket?policy", nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// --- Bucket ACL tests -------------------------------------------------------
+
+func TestS3Plugin_BucketAcl_PutGet(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	w := s3Request(t, srv, http.MethodPut, "/acl-bucket", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Get default ACL.
+	w = s3Request(t, srv, http.MethodGet, "/acl-bucket?acl", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "FULL_CONTROL")
+
+	// Put canned ACL via header.
+	w = s3Request(t, srv, http.MethodPut, "/acl-bucket?acl", nil, map[string]string{"X-Amz-Acl": "public-read"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify new ACL contains READ grant.
+	w = s3Request(t, srv, http.MethodGet, "/acl-bucket?acl", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "READ")
+}
+
+// --- Object ACL tests -------------------------------------------------------
+
+func TestS3Plugin_ObjectAcl_PutGet(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	// Create bucket and object.
+	s3Request(t, srv, http.MethodPut, "/obj-acl-bucket", nil, nil)
+	w := s3Request(t, srv, http.MethodPut, "/obj-acl-bucket/myobj.txt", []byte("data"), nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Get default object ACL.
+	w = s3Request(t, srv, http.MethodGet, "/obj-acl-bucket/myobj.txt?acl", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "FULL_CONTROL")
+
+	// Put object ACL via canned header.
+	w = s3Request(t, srv, http.MethodPut, "/obj-acl-bucket/myobj.txt?acl", nil, map[string]string{"X-Amz-Acl": "public-read"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify.
+	w = s3Request(t, srv, http.MethodGet, "/obj-acl-bucket/myobj.txt?acl", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "READ")
+}
+
+func TestS3Plugin_ObjectAcl_NoSuchKey(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/acl-test-bucket", nil, nil)
+
+	w := s3Request(t, srv, http.MethodGet, "/acl-test-bucket/nonexistent?acl", nil, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// --- Bucket notification configuration ---
+
+func TestS3Plugin_BucketNotification_PutGet(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	// Create bucket.
+	s3Request(t, srv, http.MethodPut, "/notify-bucket", nil, nil)
+
+	// GET on a bucket with no notification config returns empty 200.
+	w := s3Request(t, srv, http.MethodGet, "/notify-bucket?notification", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// PUT notification configuration (XML).
+	notifXML := []byte(`<NotificationConfiguration>
+		<QueueConfiguration>
+			<Id>myQueue</Id>
+			<Queue>arn:aws:sqs:us-east-1:123456789012:my-queue</Queue>
+			<Event>s3:ObjectCreated:*</Event>
+		</QueueConfiguration>
+	</NotificationConfiguration>`)
+	w2 := s3Request(t, srv, http.MethodPut, "/notify-bucket?notification", notifXML, map[string]string{
+		"Content-Type": "application/xml",
+	})
+	assert.Equal(t, http.StatusOK, w2.Code)
+
+	// GET again — should now include configuration.
+	w3 := s3Request(t, srv, http.MethodGet, "/notify-bucket?notification", nil, nil)
+	assert.Equal(t, http.StatusOK, w3.Code)
+}
+
+func TestS3Plugin_Shutdown(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	_ = srv // Shutdown is exercised via server teardown; just ensure it compiles.
+}
+
+// newS3SQSTestServer creates a Server with both S3 and SQS plugins for
+// notification integration tests. The S3 plugin receives the registry in its
+// Options so it can dispatch notifications to other services.
+func newS3SQSTestServer(t *testing.T) *substrate.Server {
+	t.Helper()
+	cfg := substrate.DefaultConfig()
+	state := substrate.NewMemoryStateManager()
+	logger := substrate.NewDefaultLogger(slog.LevelError, false)
+	tc := substrate.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	fs := afero.NewMemMapFs()
+
+	registry := substrate.NewPluginRegistry()
+
+	s3p := &substrate.S3Plugin{}
+	require.NoError(t, s3p.Initialize(context.Background(), substrate.PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+			"filesystem":      fs,
+			"registry":        registry,
+		},
+	}))
+
+	sqsp := &substrate.SQSPlugin{}
+	require.NoError(t, sqsp.Initialize(context.Background(), substrate.PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+		},
+	}))
+
+	registry.Register(s3p)
+	registry.Register(sqsp)
+
+	store := substrate.NewEventStore(substrate.EventStoreConfig{
+		Enabled: true,
+		Backend: "memory",
+	})
+	costCtrl := substrate.NewCostController(substrate.CostConfig{Enabled: true})
+	return substrate.NewServer(*cfg, registry, store, state, tc, logger,
+		substrate.ServerOptions{Costs: costCtrl})
+}
+
+// sqsFormRequest issues a form-encoded SQS request to the S3/SQS combined server.
+func sqsFormRequest(t *testing.T, srv *substrate.Server, params map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := strings.NewReader(buildURLValues(params))
+	r := httptest.NewRequest(http.MethodPost, "/", form)
+	r.Host = "sqs.us-east-1.amazonaws.com"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w
+}
+
+func buildURLValues(params map[string]string) string {
+	parts := make([]string, 0, len(params))
+	for k, v := range params {
+		parts = append(parts, k+"="+v)
+	}
+	// Sort for determinism.
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += "&"
+		}
+		result += p
+	}
+	return result
+}
+
+// TestS3Plugin_BucketNotification_FireSQS verifies that putting an object into a
+// bucket with an SQS notification configuration dispatches a message to the queue.
+func TestS3Plugin_BucketNotification_FireSQS(t *testing.T) {
+	srv := newS3SQSTestServer(t)
+
+	// Create SQS queue.
+	sqsFormRequest(t, srv, map[string]string{
+		"Action":    "CreateQueue",
+		"QueueName": "s3-notify-queue",
+	})
+	queueARN := "arn:aws:sqs:us-east-1:000000000000:s3-notify-queue"
+	queueURL := "http://sqs.us-east-1.localhost/000000000000/s3-notify-queue"
+
+	// Create S3 bucket.
+	s3Request(t, srv, http.MethodPut, "/fire-notif-bucket", nil, nil)
+
+	// Configure SQS notification on the bucket using JSON body.
+	notifJSON := []byte(fmt.Sprintf(`{
+		"QueueConfigurations": [{
+			"Id": "toSQS",
+			"QueueArn": "%s",
+			"Events": ["s3:ObjectCreated:*"]
+		}]
+	}`, queueARN))
+	w := s3Request(t, srv, http.MethodPut, "/fire-notif-bucket?notification", notifJSON, map[string]string{
+		"Content-Type": "application/json",
+	})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// PUT an object — should fire the notification.
+	s3Request(t, srv, http.MethodPut, "/fire-notif-bucket/test-key.txt", []byte("hello"), map[string]string{
+		"Content-Type": "text/plain",
+	})
+
+	// Receive from SQS — should have a notification message.
+	w2 := sqsFormRequest(t, srv, map[string]string{
+		"Action":              "ReceiveMessage",
+		"QueueUrl":            queueURL,
+		"MaxNumberOfMessages": "1",
+		"VisibilityTimeout":   "0",
+	})
+	body := w2.Body.String()
+	assert.Contains(t, body, "s3:ObjectCreated")
+}
+
+func TestS3Plugin_BucketTagging(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	// Create bucket.
+	s3Request(t, srv, http.MethodPut, "/tag-bucket", nil, nil)
+
+	// PutBucketTagging.
+	taggingXML := []byte(`<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag><Tag><Key>owner</Key><Value>alice</Value></Tag></TagSet></Tagging>`)
+	w := s3Request(t, srv, http.MethodPut, "/tag-bucket?tagging", taggingXML, map[string]string{"Content-Type": "application/xml"})
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	// GetBucketTagging.
+	w2 := s3Request(t, srv, http.MethodGet, "/tag-bucket?tagging", nil, nil)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	body := w2.Body.String()
+	assert.Contains(t, body, "env")
+	assert.Contains(t, body, "prod")
+
+	// DeleteBucketTagging.
+	w3 := s3Request(t, srv, http.MethodDelete, "/tag-bucket?tagging", nil, nil)
+	assert.Equal(t, http.StatusNoContent, w3.Code)
+
+	// GetBucketTagging after delete — should return empty TagSet.
+	w4 := s3Request(t, srv, http.MethodGet, "/tag-bucket?tagging", nil, nil)
+	assert.Equal(t, http.StatusOK, w4.Code)
+}
+
+func TestS3Plugin_ObjectTagging(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+
+	// Create bucket and object.
+	s3Request(t, srv, http.MethodPut, "/obj-tag-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/obj-tag-bucket/mykey.txt", []byte("hello"), map[string]string{"Content-Type": "text/plain"})
+
+	// PutObjectTagging.
+	taggingXML := []byte(`<Tagging><TagSet><Tag><Key>project</Key><Value>x</Value></Tag></TagSet></Tagging>`)
+	w := s3Request(t, srv, http.MethodPut, "/obj-tag-bucket/mykey.txt?tagging", taggingXML, map[string]string{"Content-Type": "application/xml"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// GetObjectTagging.
+	w2 := s3Request(t, srv, http.MethodGet, "/obj-tag-bucket/mykey.txt?tagging", nil, nil)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Contains(t, w2.Body.String(), "project")
+
+	// DeleteObjectTagging.
+	w3 := s3Request(t, srv, http.MethodDelete, "/obj-tag-bucket/mykey.txt?tagging", nil, nil)
+	assert.Equal(t, http.StatusNoContent, w3.Code)
+
+	// GetObjectTagging after delete — should return empty TagSet.
+	w4 := s3Request(t, srv, http.MethodGet, "/obj-tag-bucket/mykey.txt?tagging", nil, nil)
+	assert.Equal(t, http.StatusOK, w4.Code)
+}

@@ -59,6 +59,20 @@ func NewConsistencyController(cfg ConsistencyConfig, tc *TimeController) (*Consi
 	}, nil
 }
 
+// UpdateConfig replaces the consistency configuration. Pending write expiry
+// entries are preserved; they expire under the old delay. It is safe to call
+// concurrently with CheckRead and RecordWrite.
+func (c *ConsistencyController) UpdateConfig(cfg ConsistencyConfig) {
+	affected := make(map[string]bool, len(cfg.AffectedServices))
+	for _, svc := range cfg.AffectedServices {
+		affected[strings.ToLower(svc)] = true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg = cfg
+	c.affected = affected
+}
+
 // CheckRead returns an [*AWSError] with code InconsistentStateException (HTTP
 // 409) when the requested resource was recently mutated and the propagation
 // delay has not yet elapsed. It returns nil when simulation is disabled, the

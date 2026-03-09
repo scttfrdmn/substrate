@@ -3,6 +3,8 @@ package substrate
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -126,6 +128,7 @@ type SnapshotableStateManager interface {
 // By replacing the system clock, Substrate produces identical event timestamps
 // across replay runs.
 type TimeController struct {
+	mu      sync.RWMutex
 	current time.Time
 	scale   float64
 }
@@ -137,17 +140,23 @@ func NewTimeController(t time.Time) *TimeController {
 
 // Now returns the current controlled time.
 func (c *TimeController) Now() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.current
 }
 
 // SetTime sets the controller's current time to ts.
 func (c *TimeController) SetTime(ts time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.current = ts
 }
 
 // SetScale sets the time acceleration factor. A scale of 86400 advances one
 // real second for each simulated day.
 func (c *TimeController) SetScale(scale float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.scale = scale
 }
 
@@ -196,6 +205,7 @@ type Plugin interface {
 
 // PluginRegistry routes incoming AWS API requests to the appropriate [Plugin].
 type PluginRegistry struct {
+	mu      sync.RWMutex
 	plugins map[string]Plugin
 }
 
@@ -207,6 +217,8 @@ func NewPluginRegistry() *PluginRegistry {
 // Register adds p to the registry, keyed by [Plugin.Name].
 // Registering two plugins with the same name replaces the first.
 func (r *PluginRegistry) Register(p Plugin) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.plugins[p.Name()] = p
 }
 
@@ -214,7 +226,9 @@ func (r *PluginRegistry) Register(p Plugin) {
 // Returns an [*AWSError] with code "ServiceNotAvailable" if no matching
 // plugin is registered.
 func (r *PluginRegistry) RouteRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	r.mu.RLock()
 	p, ok := r.plugins[req.Service]
+	r.mu.RUnlock()
 	if !ok {
 		return nil, &AWSError{
 			Code:       "ServiceNotAvailable",
@@ -223,4 +237,16 @@ func (r *PluginRegistry) RouteRequest(ctx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 	return p.HandleRequest(ctx, req)
+}
+
+// Names returns the sorted list of service names registered in the registry.
+func (r *PluginRegistry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.plugins))
+	for name := range r.plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

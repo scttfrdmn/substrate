@@ -116,8 +116,19 @@ func TestMain(m *testing.M) {
 		_ = srv.Start(srvCtx)
 	}()
 
-	// Give the server a moment to bind.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for the server to become ready by polling the health endpoint.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + serverAddr + "/health") //nolint:noctx
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	code := m.Run()
 

@@ -119,6 +119,38 @@ func BenchmarkServer_HTTPThroughput(b *testing.B) {
 	}
 }
 
+// BenchmarkEventStore_FilterByService measures the performance of GetEvents with
+// a Service filter, exercising the in-memory service index.
+func BenchmarkEventStore_FilterByService(b *testing.B) {
+	const totalEvents = 10_000
+	services := []string{"s3", "iam", "dynamodb"}
+
+	store := substrate.NewEventStore(substrate.EventStoreConfig{
+		Enabled: true,
+		Backend: "memory",
+	})
+	ctx := context.Background()
+
+	for i := range totalEvents {
+		svc := services[i%len(services)]
+		_ = store.RecordEvent(ctx, &substrate.Event{
+			StreamID:  "bench-stream",
+			Service:   svc,
+			Operation: "Op",
+			Timestamp: time.Now(),
+		})
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for range b.N {
+		if _, err := store.GetEvents(ctx, substrate.EventFilter{Service: "s3"}); err != nil {
+			b.Fatalf("GetEvents: %v", err)
+		}
+	}
+}
+
 // BenchmarkS3PutObject_Latency measures the per-request latency for S3 PutObject
 // through the full server pipeline with a real S3Plugin backed by MemMapFs.
 func BenchmarkS3PutObject_Latency(b *testing.B) {

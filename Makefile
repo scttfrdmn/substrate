@@ -1,7 +1,7 @@
 .PHONY: build test lint coverage clean tidy vet bench e2e
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate.Version=$(VERSION)"
 
 build: ## Build the substrate binary
 	go build $(LDFLAGS) -o bin/substrate ./cmd/substrate

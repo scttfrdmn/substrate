@@ -1,6 +1,9 @@
 package substrate
 
-import "time"
+import (
+	"encoding/xml"
+	"time"
+)
 
 // S3Bucket holds metadata for an emulated S3 bucket.
 type S3Bucket struct {
@@ -42,6 +45,9 @@ type S3Object struct {
 	// UserMetadata holds key-value pairs set via X-Amz-Meta-* request headers.
 	// Keys are stored in lowercase without the x-amz-meta- prefix.
 	UserMetadata map[string]string `json:"user_metadata"`
+
+	// Tags holds optional user-defined key-value tags on the object.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // S3MultipartUpload holds state for an in-progress multipart upload.
@@ -76,4 +82,116 @@ type S3Part struct {
 
 	// LastModified is the time this part was uploaded.
 	LastModified time.Time `json:"last_modified"`
+}
+
+// S3BucketPolicy stores the raw JSON policy document for an S3 bucket.
+type S3BucketPolicy struct {
+	// Policy is the bucket policy as a raw JSON string.
+	Policy string `json:"Policy"`
+}
+
+// S3AccessControlList is the S3 access control list XML structure.
+type S3AccessControlList struct {
+	XMLName xml.Name  `xml:"AccessControlPolicy" json:"-"`
+	Owner   S3Owner   `xml:"Owner" json:"Owner"`
+	Grants  []S3Grant `xml:"AccessControlList>Grant" json:"Grants"`
+}
+
+// S3Owner represents the owner element in an S3 ACL.
+type S3Owner struct {
+	ID          string `xml:"ID" json:"ID"`
+	DisplayName string `xml:"DisplayName" json:"DisplayName"`
+}
+
+// S3Grant represents a single grant in an S3 ACL.
+type S3Grant struct {
+	Grantee    S3Grantee `xml:"Grantee" json:"Grantee"`
+	Permission string    `xml:"Permission" json:"Permission"`
+}
+
+// S3Grantee represents the grantee element in an S3 ACL grant.
+type S3Grantee struct {
+	Type        string `xml:"type,attr" json:"Type"`
+	ID          string `xml:"ID,omitempty" json:"ID,omitempty"`
+	URI         string `xml:"URI,omitempty" json:"URI,omitempty"`
+	DisplayName string `xml:"DisplayName,omitempty" json:"DisplayName,omitempty"`
+}
+
+// S3NotificationConfiguration holds event notification configurations for an S3 bucket.
+type S3NotificationConfiguration struct {
+	// LambdaFunctionConfigurations lists Lambda invocation notification configs.
+	LambdaFunctionConfigurations []S3LambdaFunctionConfiguration `json:"LambdaFunctionConfigurations,omitempty"`
+
+	// QueueConfigurations lists SQS queue notification configs.
+	QueueConfigurations []S3QueueConfiguration `json:"QueueConfigurations,omitempty"`
+
+	// TopicConfigurations lists SNS topic notification configs (stored but not dispatched).
+	TopicConfigurations []S3TopicConfiguration `json:"TopicConfigurations,omitempty"`
+}
+
+// S3LambdaFunctionConfiguration configures event notifications to a Lambda function.
+type S3LambdaFunctionConfiguration struct {
+	// ID is the optional unique identifier for this configuration.
+	ID string `json:"Id,omitempty"`
+
+	// LambdaFunctionArn is the ARN of the Lambda function to invoke.
+	LambdaFunctionArn string `json:"LambdaFunctionArn"`
+
+	// Events is the list of S3 event types that trigger this notification.
+	Events []string `json:"Events"`
+
+	// Filter holds optional object key name filter rules.
+	Filter *S3NotificationFilter `json:"Filter,omitempty"`
+}
+
+// S3QueueConfiguration configures event notifications to an SQS queue.
+type S3QueueConfiguration struct {
+	// ID is the optional unique identifier for this configuration.
+	ID string `json:"Id,omitempty"`
+
+	// QueueArn is the ARN of the SQS queue to send messages to.
+	QueueArn string `json:"QueueArn"`
+
+	// Events is the list of S3 event types that trigger this notification.
+	Events []string `json:"Events"`
+
+	// Filter holds optional object key name filter rules.
+	Filter *S3NotificationFilter `json:"Filter,omitempty"`
+}
+
+// S3TopicConfiguration configures event notifications to an SNS topic.
+// The topic is stored but notifications are not dispatched in this emulator.
+type S3TopicConfiguration struct {
+	// ID is the optional unique identifier for this configuration.
+	ID string `json:"Id,omitempty"`
+
+	// TopicArn is the ARN of the SNS topic.
+	TopicArn string `json:"TopicArn"`
+
+	// Events is the list of S3 event types that trigger this notification.
+	Events []string `json:"Events"`
+
+	// Filter holds optional object key name filter rules.
+	Filter *S3NotificationFilter `json:"Filter,omitempty"`
+}
+
+// S3NotificationFilter holds filter rules for S3 event notification configurations.
+type S3NotificationFilter struct {
+	// Key contains filter rules on the object key name.
+	Key S3KeyFilter `json:"Key"`
+}
+
+// S3KeyFilter holds filter rules based on object key name patterns.
+type S3KeyFilter struct {
+	// FilterRules is the list of filter rules applied to the key name.
+	FilterRules []S3FilterRule `json:"FilterRules"`
+}
+
+// S3FilterRule defines a single prefix or suffix filter for S3 notifications.
+type S3FilterRule struct {
+	// Name is either "prefix" or "suffix".
+	Name string `json:"Name"`
+
+	// Value is the prefix or suffix string to match against.
+	Value string `json:"Value"`
 }

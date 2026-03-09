@@ -96,6 +96,46 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListAccessKeys":
 		return p.listAccessKeys(ctx, req)
 
+	case "PutUserPolicy":
+		return p.putUserPolicy(ctx, req)
+	case "GetUserPolicy":
+		return p.getUserPolicy(ctx, req)
+	case "DeleteUserPolicy":
+		return p.deleteUserPolicy(ctx, req)
+	case "ListUserPolicies":
+		return p.listUserPolicies(ctx, req)
+
+	case "PutRolePolicy":
+		return p.putRolePolicy(ctx, req)
+	case "GetRolePolicy":
+		return p.getRolePolicy(ctx, req)
+	case "DeleteRolePolicy":
+		return p.deleteRolePolicy(ctx, req)
+	case "ListRolePolicies":
+		return p.listRolePolicies(ctx, req)
+
+	case "PutUserPermissionsBoundary":
+		return p.putUserPermissionsBoundary(ctx, req)
+	case "DeleteUserPermissionsBoundary":
+		return p.deleteUserPermissionsBoundary(ctx, req)
+	case "PutRolePermissionsBoundary":
+		return p.putRolePermissionsBoundary(ctx, req)
+	case "DeleteRolePermissionsBoundary":
+		return p.deleteRolePermissionsBoundary(ctx, req)
+
+	case "TagUser":
+		return p.tagUser(ctx, req)
+	case "UntagUser":
+		return p.untagUser(ctx, req)
+	case "ListUserTags":
+		return p.listUserTags(ctx, req)
+	case "TagRole":
+		return p.tagRole(ctx, req)
+	case "UntagRole":
+		return p.untagRole(ctx, req)
+	case "ListRoleTags":
+		return p.listRoleTags(ctx, req)
+
 	default:
 		return iamErrorResponse("InvalidAction",
 			fmt.Sprintf("Could not find operation %s", req.Operation),
@@ -1312,14 +1352,27 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		return fmt.Errorf("load policies for authorization: %w", err)
 	}
 
-	// Fast path: AdministratorAccess.
+	// Check for AdministratorAccess: substitute a synthetic allow-all document
+	// so that permission boundary evaluation still runs below.
+	hasAdminAccess := false
 	for _, arn := range arns {
 		if arn == "arn:aws:iam::aws:policy/AdministratorAccess" {
-			return nil
+			hasAdminAccess = true
+			break
 		}
 	}
 
 	var docs []PolicyDocument
+	if hasAdminAccess {
+		docs = []PolicyDocument{{
+			Version: "2012-10-17",
+			Statement: []PolicyStatement{{
+				Effect:   IAMEffectAllow,
+				Action:   StringOrSlice{"*"},
+				Resource: StringOrSlice{"*"},
+			}},
+		}}
+	}
 	for _, arn := range arns {
 		if mp, ok := GetManagedPolicy(arn); ok {
 			docs = append(docs, mp.Document)
@@ -1336,6 +1389,15 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		docs = append(docs, pol.Document)
 	}
 
+	// Also load inline policies for the entity.
+	inlineNames, _ := p.loadInlinePolicyNames(goCtx, entityType, entityName)
+	for _, name := range inlineNames {
+		doc, _ := p.loadInlinePolicyDoc(goCtx, entityType, entityName, name)
+		if doc != nil {
+			docs = append(docs, *doc)
+		}
+	}
+
 	result := Evaluate(docs, EvaluationRequest{
 		Principal: reqCtx.Principal.ARN,
 		Action:    action,
@@ -1350,7 +1412,823 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 			HTTPStatus: http.StatusForbidden,
 		}
 	}
+
+	// If a permission boundary is set it must also allow the action.
+	var entityRaw []byte
+	switch entityType {
+	case "user":
+		entityRaw, _ = p.state.Get(goCtx, iamNamespace, "user:"+entityName)
+	case "role":
+		entityRaw, _ = p.state.Get(goCtx, iamNamespace, "role:"+entityName)
+	}
+	if entityRaw != nil {
+		var entity struct {
+			PermissionsBoundary *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
+		}
+		if unmarshalErr := json.Unmarshal(entityRaw, &entity); unmarshalErr == nil && entity.PermissionsBoundary != nil {
+			boundaryDocs := p.loadBoundaryPolicyDocs(goCtx, entity.PermissionsBoundary.PolicyARN)
+			if len(boundaryDocs) > 0 {
+				boundaryResult := Evaluate(boundaryDocs, EvaluationRequest{
+					Principal: reqCtx.Principal.ARN,
+					Action:    action,
+					Resource:  resource,
+					Context:   make(map[string]string),
+				})
+				if boundaryResult.Decision != DecisionAllow {
+					return &AWSError{
+						Code:       "AccessDeniedException",
+						Message:    "User: " + reqCtx.Principal.ARN + " is not authorized to perform: " + action + " (blocked by permission boundary)",
+						HTTPStatus: http.StatusForbidden,
+					}
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+// --- Inline policies -------------------------------------------------------
+
+func (p *IAMPlugin) putUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.putInlinePolicy(ctx, req, "user")
+}
+
+func (p *IAMPlugin) getUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.getInlinePolicy(ctx, req, "user")
+}
+
+func (p *IAMPlugin) deleteUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.deleteInlinePolicy(ctx, req, "user")
+}
+
+func (p *IAMPlugin) listUserPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.listInlinePolicies(ctx, req, "user")
+}
+
+func (p *IAMPlugin) putRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.putInlinePolicy(ctx, req, "role")
+}
+
+func (p *IAMPlugin) getRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.getInlinePolicy(ctx, req, "role")
+}
+
+func (p *IAMPlugin) deleteRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.deleteInlinePolicy(ctx, req, "role")
+}
+
+func (p *IAMPlugin) listRolePolicies(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.listInlinePolicies(ctx, req, "role")
+}
+
+// putInlinePolicy stores an inline policy document for a user or role.
+func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
+	var params struct {
+		UserName       string `json:"UserName"`
+		RoleName       string `json:"RoleName"`
+		PolicyName     string `json:"PolicyName"`
+		PolicyDocument string `json:"PolicyDocument"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	entityName := params.UserName
+	actionSuffix := "User"
+	if entityType == "role" {
+		entityName = params.RoleName
+		actionSuffix = "Role"
+	}
+	if entityName == "" || params.PolicyName == "" || params.PolicyDocument == "" {
+		return iamErrorResponse("ValidationError",
+			"EntityName, PolicyName, and PolicyDocument are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"Policy", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	// Verify the entity exists.
+	var entityRaw []byte
+	var getErr error
+	switch entityType {
+	case "user":
+		entityRaw, getErr = p.state.Get(goCtx, iamNamespace, "user:"+entityName)
+	default:
+		entityRaw, getErr = p.state.Get(goCtx, iamNamespace, "role:"+entityName)
+	}
+	if getErr != nil {
+		return nil, fmt.Errorf("get %s: %w", entityType, getErr)
+	}
+	if entityRaw == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The %s with name %s cannot be found.", entityType, entityName),
+			http.StatusNotFound), nil
+	}
+
+	// Parse and validate the policy document.
+	var doc PolicyDocument
+	if err := json.Unmarshal([]byte(params.PolicyDocument), &doc); err != nil {
+		return iamErrorResponse("MalformedPolicyDocumentException", //nolint:nilerr
+			"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
+	}
+
+	docRaw, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal inline policy: %w", err)
+	}
+	stateKey := entityType + "_inline:" + entityName + ":" + params.PolicyName
+	if err := p.state.Put(goCtx, iamNamespace, stateKey, docRaw); err != nil {
+		return nil, fmt.Errorf("put inline policy: %w", err)
+	}
+
+	// Update the names list.
+	namesKey := entityType + "_inline_names:" + entityName
+	names, err := p.loadStringList(goCtx, namesKey)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	for _, n := range names {
+		if n == params.PolicyName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		names = append(names, params.PolicyName)
+		sort.Strings(names)
+		if err := p.saveStringList(goCtx, namesKey, names); err != nil {
+			return nil, err
+		}
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+// getInlinePolicy retrieves an inline policy document for a user or role.
+func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
+	var params struct {
+		UserName   string `json:"UserName"`
+		RoleName   string `json:"RoleName"`
+		PolicyName string `json:"PolicyName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	entityName := params.UserName
+	actionSuffix := "User"
+	if entityType == "role" {
+		entityName = params.RoleName
+		actionSuffix = "Role"
+	}
+	if entityName == "" || params.PolicyName == "" {
+		return iamErrorResponse("ValidationError",
+			"EntityName and PolicyName are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	if err := p.authorize(goCtx, ctx, "iam:Get"+actionSuffix+"Policy", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	raw, err := p.state.Get(goCtx, iamNamespace, entityType+"_inline:"+entityName+":"+params.PolicyName)
+	if err != nil {
+		return nil, fmt.Errorf("get inline policy: %w", err)
+	}
+	if raw == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The policy %s was not found.", params.PolicyName),
+			http.StatusNotFound), nil
+	}
+
+	entityKey := entityName
+	if entityType == "role" {
+		return iamJSONResponse(http.StatusOK, map[string]any{
+			"RoleName":       entityKey,
+			"PolicyName":     params.PolicyName,
+			"PolicyDocument": string(raw),
+		})
+	}
+	return iamJSONResponse(http.StatusOK, map[string]any{
+		"UserName":       entityKey,
+		"PolicyName":     params.PolicyName,
+		"PolicyDocument": string(raw),
+	})
+}
+
+// deleteInlinePolicy removes an inline policy from a user or role.
+func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
+	var params struct {
+		UserName   string `json:"UserName"`
+		RoleName   string `json:"RoleName"`
+		PolicyName string `json:"PolicyName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	entityName := params.UserName
+	actionSuffix := "User"
+	if entityType == "role" {
+		entityName = params.RoleName
+		actionSuffix = "Role"
+	}
+	if entityName == "" || params.PolicyName == "" {
+		return iamErrorResponse("ValidationError",
+			"EntityName and PolicyName are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"Policy", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	stateKey := entityType + "_inline:" + entityName + ":" + params.PolicyName
+	existing, err := p.state.Get(goCtx, iamNamespace, stateKey)
+	if err != nil {
+		return nil, fmt.Errorf("check inline policy: %w", err)
+	}
+	if existing == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The policy %s was not found.", params.PolicyName),
+			http.StatusNotFound), nil
+	}
+	if err := p.state.Delete(goCtx, iamNamespace, stateKey); err != nil {
+		return nil, fmt.Errorf("delete inline policy: %w", err)
+	}
+
+	// Remove from names list.
+	namesKey := entityType + "_inline_names:" + entityName
+	names, err := p.loadStringList(goCtx, namesKey)
+	if err != nil {
+		return nil, err
+	}
+	newNames := names[:0]
+	for _, n := range names {
+		if n != params.PolicyName {
+			newNames = append(newNames, n)
+		}
+	}
+	if err := p.saveStringList(goCtx, namesKey, newNames); err != nil {
+		return nil, err
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+// listInlinePolicies returns the names of all inline policies for a user or role.
+func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
+	var params struct {
+		UserName string `json:"UserName"`
+		RoleName string `json:"RoleName"`
+		Marker   string `json:"Marker"`
+		MaxItems int    `json:"MaxItems"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	entityName := params.UserName
+	actionSuffix := "User"
+	if entityType == "role" {
+		entityName = params.RoleName
+		actionSuffix = "Role"
+	}
+	if entityName == "" {
+		return iamErrorResponse("ValidationError", "EntityName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	if err := p.authorize(goCtx, ctx, "iam:List"+actionSuffix+"Policies", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	names, err := p.loadStringList(goCtx, entityType+"_inline_names:"+entityName)
+	if err != nil {
+		return nil, err
+	}
+
+	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems)
+
+	return iamJSONResponse(http.StatusOK, map[string]any{
+		"PolicyNames": page,
+		"IsTruncated": isTruncated,
+		"Marker":      nextMarker,
+	})
+}
+
+// --- Permission boundaries -------------------------------------------------
+
+func (p *IAMPlugin) putUserPermissionsBoundary(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.putPermissionsBoundary(ctx, req, "user")
+}
+
+func (p *IAMPlugin) deleteUserPermissionsBoundary(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.deletePermissionsBoundary(ctx, req, "user")
+}
+
+func (p *IAMPlugin) putRolePermissionsBoundary(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.putPermissionsBoundary(ctx, req, "role")
+}
+
+func (p *IAMPlugin) deleteRolePermissionsBoundary(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.deletePermissionsBoundary(ctx, req, "role")
+}
+
+// putPermissionsBoundary sets the permissions boundary on a user or role.
+func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
+	var params struct {
+		UserName            string `json:"UserName"`
+		RoleName            string `json:"RoleName"`
+		PermissionsBoundary string `json:"PermissionsBoundary"` // policy ARN
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	entityName := params.UserName
+	actionSuffix := "User"
+	if entityType == "role" {
+		entityName = params.RoleName
+		actionSuffix = "Role"
+	}
+	if entityName == "" || params.PermissionsBoundary == "" {
+		return iamErrorResponse("ValidationError",
+			"EntityName and PermissionsBoundary are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"PermissionsBoundary", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	boundary := &IAMAttachedPolicy{
+		PolicyARN:  params.PermissionsBoundary,
+		PolicyName: arnPolicyName(params.PermissionsBoundary),
+	}
+
+	stateKey := entityType + ":" + entityName
+	switch entityType {
+	case "user":
+		user, err := p.loadUser(goCtx, entityName)
+		if err != nil {
+			return nil, err
+		}
+		if user == nil {
+			return iamErrorResponse("NoSuchEntityException",
+				fmt.Sprintf("The user with name %s cannot be found.", entityName),
+				http.StatusNotFound), nil
+		}
+		user.PermissionsBoundary = boundary
+		raw, err := json.Marshal(user)
+		if err != nil {
+			return nil, fmt.Errorf("marshal user: %w", err)
+		}
+		if err := p.state.Put(goCtx, iamNamespace, stateKey, raw); err != nil {
+			return nil, fmt.Errorf("put user: %w", err)
+		}
+	default:
+		role, err := p.loadRole(goCtx, entityName)
+		if err != nil {
+			return nil, err
+		}
+		if role == nil {
+			return iamErrorResponse("NoSuchEntityException",
+				fmt.Sprintf("The role with name %s cannot be found.", entityName),
+				http.StatusNotFound), nil
+		}
+		role.PermissionsBoundary = boundary
+		raw, err := json.Marshal(role)
+		if err != nil {
+			return nil, fmt.Errorf("marshal role: %w", err)
+		}
+		if err := p.state.Put(goCtx, iamNamespace, stateKey, raw); err != nil {
+			return nil, fmt.Errorf("put role: %w", err)
+		}
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+// deletePermissionsBoundary clears the permissions boundary from a user or role.
+func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
+	var params struct {
+		UserName string `json:"UserName"`
+		RoleName string `json:"RoleName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	entityName := params.UserName
+	actionSuffix := "User"
+	if entityType == "role" {
+		entityName = params.RoleName
+		actionSuffix = "Role"
+	}
+	if entityName == "" {
+		return iamErrorResponse("ValidationError", "EntityName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"PermissionsBoundary", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	stateKey := entityType + ":" + entityName
+	switch entityType {
+	case "user":
+		user, err := p.loadUser(goCtx, entityName)
+		if err != nil {
+			return nil, err
+		}
+		if user == nil {
+			return iamErrorResponse("NoSuchEntityException",
+				fmt.Sprintf("The user with name %s cannot be found.", entityName),
+				http.StatusNotFound), nil
+		}
+		user.PermissionsBoundary = nil
+		raw, err := json.Marshal(user)
+		if err != nil {
+			return nil, fmt.Errorf("marshal user: %w", err)
+		}
+		if err := p.state.Put(goCtx, iamNamespace, stateKey, raw); err != nil {
+			return nil, fmt.Errorf("put user: %w", err)
+		}
+	default:
+		role, err := p.loadRole(goCtx, entityName)
+		if err != nil {
+			return nil, err
+		}
+		if role == nil {
+			return iamErrorResponse("NoSuchEntityException",
+				fmt.Sprintf("The role with name %s cannot be found.", entityName),
+				http.StatusNotFound), nil
+		}
+		role.PermissionsBoundary = nil
+		raw, err := json.Marshal(role)
+		if err != nil {
+			return nil, fmt.Errorf("marshal role: %w", err)
+		}
+		if err := p.state.Put(goCtx, iamNamespace, stateKey, raw); err != nil {
+			return nil, fmt.Errorf("put role: %w", err)
+		}
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+// --- Tagging operations ----------------------------------------------------
+
+func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		UserName string   `json:"UserName"`
+		Tags     []IAMTag `json:"Tags"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.UserName == "" {
+		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:TagUser", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	user, err := p.loadUser(goCtx, params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
+			http.StatusNotFound), nil
+	}
+
+	// Merge tags by key.
+	tagMap := make(map[string]string, len(user.Tags))
+	for _, t := range user.Tags {
+		tagMap[t.Key] = t.Value
+	}
+	for _, t := range params.Tags {
+		tagMap[t.Key] = t.Value
+	}
+	merged := make([]IAMTag, 0, len(tagMap))
+	for k, v := range tagMap {
+		merged = append(merged, IAMTag{Key: k, Value: v})
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
+	user.Tags = merged
+
+	raw, err := json.Marshal(user)
+	if err != nil {
+		return nil, fmt.Errorf("tagUser marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "user:"+params.UserName, raw); err != nil {
+		return nil, fmt.Errorf("tagUser put: %w", err)
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		UserName string   `json:"UserName"`
+		TagKeys  []string `json:"TagKeys"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.UserName == "" {
+		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:UntagUser", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	user, err := p.loadUser(goCtx, params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
+			http.StatusNotFound), nil
+	}
+
+	removeKeys := make(map[string]struct{}, len(params.TagKeys))
+	for _, k := range params.TagKeys {
+		removeKeys[k] = struct{}{}
+	}
+	filtered := user.Tags[:0]
+	for _, t := range user.Tags {
+		if _, remove := removeKeys[t.Key]; !remove {
+			filtered = append(filtered, t)
+		}
+	}
+	user.Tags = filtered
+
+	raw, err := json.Marshal(user)
+	if err != nil {
+		return nil, fmt.Errorf("untagUser marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "user:"+params.UserName, raw); err != nil {
+		return nil, fmt.Errorf("untagUser put: %w", err)
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		UserName string `json:"UserName"`
+		Marker   string `json:"Marker"`
+		MaxItems int    `json:"MaxItems"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.UserName == "" {
+		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:ListUserTags", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	user, err := p.loadUser(goCtx, params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
+			http.StatusNotFound), nil
+	}
+
+	tags := user.Tags
+	if tags == nil {
+		tags = []IAMTag{}
+	}
+
+	maxItems := params.MaxItems
+	if maxItems <= 0 {
+		maxItems = 100
+	}
+
+	// Simple pagination over sorted tags.
+	startIdx := 0
+	if params.Marker != "" {
+		for i, t := range tags {
+			if t.Key == params.Marker {
+				startIdx = i
+				break
+			}
+		}
+	}
+	end := startIdx + maxItems
+	isTruncated := false
+	var nextMarker string
+	if end < len(tags) {
+		isTruncated = true
+		nextMarker = tags[end].Key
+	} else {
+		end = len(tags)
+	}
+
+	result := map[string]any{
+		"Tags":        tags[startIdx:end],
+		"IsTruncated": isTruncated,
+	}
+	if nextMarker != "" {
+		result["Marker"] = nextMarker
+	}
+	return iamJSONResponse(http.StatusOK, result)
+}
+
+func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		RoleName string   `json:"RoleName"`
+		Tags     []IAMTag `json:"Tags"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.RoleName == "" {
+		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:TagRole", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	role, err := p.loadRole(goCtx, params.RoleName)
+	if err != nil {
+		return nil, err
+	}
+	if role == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
+			http.StatusNotFound), nil
+	}
+
+	// Merge tags by key.
+	tagMap := make(map[string]string, len(role.Tags))
+	for _, t := range role.Tags {
+		tagMap[t.Key] = t.Value
+	}
+	for _, t := range params.Tags {
+		tagMap[t.Key] = t.Value
+	}
+	merged := make([]IAMTag, 0, len(tagMap))
+	for k, v := range tagMap {
+		merged = append(merged, IAMTag{Key: k, Value: v})
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
+	role.Tags = merged
+
+	raw, err := json.Marshal(role)
+	if err != nil {
+		return nil, fmt.Errorf("tagRole marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "role:"+params.RoleName, raw); err != nil {
+		return nil, fmt.Errorf("tagRole put: %w", err)
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		RoleName string   `json:"RoleName"`
+		TagKeys  []string `json:"TagKeys"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.RoleName == "" {
+		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:UntagRole", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	role, err := p.loadRole(goCtx, params.RoleName)
+	if err != nil {
+		return nil, err
+	}
+	if role == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
+			http.StatusNotFound), nil
+	}
+
+	removeKeys := make(map[string]struct{}, len(params.TagKeys))
+	for _, k := range params.TagKeys {
+		removeKeys[k] = struct{}{}
+	}
+	filtered := role.Tags[:0]
+	for _, t := range role.Tags {
+		if _, remove := removeKeys[t.Key]; !remove {
+			filtered = append(filtered, t)
+		}
+	}
+	role.Tags = filtered
+
+	raw, err := json.Marshal(role)
+	if err != nil {
+		return nil, fmt.Errorf("untagRole marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "role:"+params.RoleName, raw); err != nil {
+		return nil, fmt.Errorf("untagRole put: %w", err)
+	}
+
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		RoleName string `json:"RoleName"`
+		Marker   string `json:"Marker"`
+		MaxItems int    `json:"MaxItems"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.RoleName == "" {
+		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:ListRoleTags", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	role, err := p.loadRole(goCtx, params.RoleName)
+	if err != nil {
+		return nil, err
+	}
+	if role == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
+			http.StatusNotFound), nil
+	}
+
+	tags := role.Tags
+	if tags == nil {
+		tags = []IAMTag{}
+	}
+
+	maxItems := params.MaxItems
+	if maxItems <= 0 {
+		maxItems = 100
+	}
+
+	startIdx := 0
+	if params.Marker != "" {
+		for i, t := range tags {
+			if t.Key == params.Marker {
+				startIdx = i
+				break
+			}
+		}
+	}
+	end := startIdx + maxItems
+	isTruncated := false
+	var nextMarker string
+	if end < len(tags) {
+		isTruncated = true
+		nextMarker = tags[end].Key
+	} else {
+		end = len(tags)
+	}
+
+	result := map[string]any{
+		"Tags":        tags[startIdx:end],
+		"IsTruncated": isTruncated,
+	}
+	if nextMarker != "" {
+		result["Marker"] = nextMarker
+	}
+	return iamJSONResponse(http.StatusOK, result)
 }
 
 // --- State helpers ---------------------------------------------------------
@@ -1387,6 +2265,46 @@ func (p *IAMPlugin) loadRole(goCtx context.Context, name string) (*IAMRole, erro
 
 func (p *IAMPlugin) loadPolicyList(goCtx context.Context, key string) ([]string, error) {
 	return p.loadStringList(goCtx, key)
+}
+
+// loadInlinePolicyNames returns the sorted list of inline policy names for the
+// given entity (entityType = "user" or "role").
+func (p *IAMPlugin) loadInlinePolicyNames(goCtx context.Context, entityType, entityName string) ([]string, error) {
+	return p.loadStringList(goCtx, entityType+"_inline_names:"+entityName)
+}
+
+// loadInlinePolicyDoc loads and parses an inline policy document. Returns nil
+// when the key is not found.
+func (p *IAMPlugin) loadInlinePolicyDoc(goCtx context.Context, entityType, entityName, policyName string) (*PolicyDocument, error) {
+	raw, err := p.state.Get(goCtx, iamNamespace, entityType+"_inline:"+entityName+":"+policyName)
+	if err != nil {
+		return nil, fmt.Errorf("load inline policy %s/%s/%s: %w", entityType, entityName, policyName, err)
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	var doc PolicyDocument
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("unmarshal inline policy %s/%s/%s: %w", entityType, entityName, policyName, err)
+	}
+	return &doc, nil
+}
+
+// loadBoundaryPolicyDocs loads the policy documents for a permissions-boundary
+// ARN. Returns nil when the policy cannot be found.
+func (p *IAMPlugin) loadBoundaryPolicyDocs(goCtx context.Context, arn string) []PolicyDocument {
+	if mp, ok := GetManagedPolicy(arn); ok {
+		return []PolicyDocument{mp.Document}
+	}
+	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	if err != nil || raw == nil {
+		return nil
+	}
+	var pol IAMPolicy
+	if err := json.Unmarshal(raw, &pol); err != nil {
+		return nil
+	}
+	return []PolicyDocument{pol.Document}
 }
 
 func (p *IAMPlugin) savePolicyList(goCtx context.Context, key string, arns []string) error {

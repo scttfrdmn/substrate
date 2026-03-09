@@ -16,26 +16,28 @@ const IAMEffectDeny = "Deny"
 
 // IAMUser represents an AWS IAM user entity.
 type IAMUser struct {
-	UserName         string     `json:"UserName"`
-	UserID           string     `json:"UserId"`
-	ARN              string     `json:"Arn"`
-	Path             string     `json:"Path"`
-	CreateDate       time.Time  `json:"CreateDate"`
-	PasswordLastUsed *time.Time `json:"PasswordLastUsed,omitempty"`
-	Tags             []IAMTag   `json:"Tags,omitempty"`
+	UserName            string             `json:"UserName"`
+	UserID              string             `json:"UserId"`
+	ARN                 string             `json:"Arn"`
+	Path                string             `json:"Path"`
+	CreateDate          time.Time          `json:"CreateDate"`
+	PasswordLastUsed    *time.Time         `json:"PasswordLastUsed,omitempty"`
+	Tags                []IAMTag           `json:"Tags,omitempty"`
+	PermissionsBoundary *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
 }
 
 // IAMRole represents an AWS IAM role entity.
 type IAMRole struct {
-	RoleName                 string         `json:"RoleName"`
-	RoleID                   string         `json:"RoleId"`
-	ARN                      string         `json:"Arn"`
-	Path                     string         `json:"Path"`
-	CreateDate               time.Time      `json:"CreateDate"`
-	Description              string         `json:"Description,omitempty"`
-	MaxSessionDuration       int            `json:"MaxSessionDuration,omitempty"`
-	AssumeRolePolicyDocument PolicyDocument `json:"AssumeRolePolicyDocument"`
-	Tags                     []IAMTag       `json:"Tags,omitempty"`
+	RoleName                 string             `json:"RoleName"`
+	RoleID                   string             `json:"RoleId"`
+	ARN                      string             `json:"Arn"`
+	Path                     string             `json:"Path"`
+	CreateDate               time.Time          `json:"CreateDate"`
+	Description              string             `json:"Description,omitempty"`
+	MaxSessionDuration       int                `json:"MaxSessionDuration,omitempty"`
+	AssumeRolePolicyDocument PolicyDocument     `json:"AssumeRolePolicyDocument"`
+	Tags                     []IAMTag           `json:"Tags,omitempty"`
+	PermissionsBoundary      *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
 }
 
 // IAMGroup represents an AWS IAM group entity.

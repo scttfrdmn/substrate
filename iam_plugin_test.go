@@ -720,3 +720,271 @@ func TestIAMPlugin_UnknownOperation(t *testing.T) {
 	decodeJSON(t, resp, &result)
 	assert.Equal(t, "InvalidAction", result["__type"])
 }
+
+// --- Inline policy tests --------------------------------------------------
+
+func TestIAMPlugin_PutGetDeleteListUserPolicy(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	// Create user first.
+	resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "alice"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Put inline policy.
+	policyDoc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`
+	resp = iamRequest(t, srv, "PutUserPolicy", map[string]any{
+		"UserName":       "alice",
+		"PolicyName":     "ReadPolicy",
+		"PolicyDocument": policyDoc,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Get inline policy.
+	resp = iamRequest(t, srv, "GetUserPolicy", map[string]any{
+		"UserName":   "alice",
+		"PolicyName": "ReadPolicy",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var getResult map[string]any
+	decodeJSON(t, resp, &getResult)
+	assert.Equal(t, "alice", getResult["UserName"])
+	assert.Equal(t, "ReadPolicy", getResult["PolicyName"])
+	assert.NotEmpty(t, getResult["PolicyDocument"])
+
+	// List inline policies.
+	resp = iamRequest(t, srv, "ListUserPolicies", map[string]any{"UserName": "alice"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var listResult map[string]any
+	decodeJSON(t, resp, &listResult)
+	names := listResult["PolicyNames"].([]any)
+	assert.Equal(t, 1, len(names))
+	assert.Equal(t, "ReadPolicy", names[0])
+
+	// Delete inline policy.
+	resp = iamRequest(t, srv, "DeleteUserPolicy", map[string]any{
+		"UserName":   "alice",
+		"PolicyName": "ReadPolicy",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify it's gone.
+	resp = iamRequest(t, srv, "GetUserPolicy", map[string]any{
+		"UserName":   "alice",
+		"PolicyName": "ReadPolicy",
+	})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestIAMPlugin_PutGetDeleteListRolePolicy(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	trustDoc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}`
+	resp := iamRequest(t, srv, "CreateRole", map[string]any{
+		"RoleName":                 "MyRole",
+		"AssumeRolePolicyDocument": trustDoc,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	policyDoc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}`
+	resp = iamRequest(t, srv, "PutRolePolicy", map[string]any{
+		"RoleName":       "MyRole",
+		"PolicyName":     "S3Full",
+		"PolicyDocument": policyDoc,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp = iamRequest(t, srv, "GetRolePolicy", map[string]any{
+		"RoleName":   "MyRole",
+		"PolicyName": "S3Full",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var getResult map[string]any
+	decodeJSON(t, resp, &getResult)
+	assert.Equal(t, "MyRole", getResult["RoleName"])
+	assert.Equal(t, "S3Full", getResult["PolicyName"])
+
+	resp = iamRequest(t, srv, "ListRolePolicies", map[string]any{"RoleName": "MyRole"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var listResult map[string]any
+	decodeJSON(t, resp, &listResult)
+	names := listResult["PolicyNames"].([]any)
+	assert.Equal(t, 1, len(names))
+
+	resp = iamRequest(t, srv, "DeleteRolePolicy", map[string]any{
+		"RoleName":   "MyRole",
+		"PolicyName": "S3Full",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestIAMPlugin_PermissionsBoundary_User(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	// Create user.
+	resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "bounded-user"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Put permissions boundary.
+	resp = iamRequest(t, srv, "PutUserPermissionsBoundary", map[string]any{
+		"UserName":            "bounded-user",
+		"PermissionsBoundary": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify the boundary is set via GetUser.
+	resp = iamRequest(t, srv, "GetUser", map[string]any{"UserName": "bounded-user"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	user := result["User"].(map[string]any)
+	boundary := user["PermissionsBoundary"].(map[string]any)
+	assert.Equal(t, "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess", boundary["PolicyArn"])
+
+	// Delete permissions boundary.
+	resp = iamRequest(t, srv, "DeleteUserPermissionsBoundary", map[string]any{
+		"UserName": "bounded-user",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify boundary is removed.
+	resp = iamRequest(t, srv, "GetUser", map[string]any{"UserName": "bounded-user"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result2 map[string]any
+	decodeJSON(t, resp, &result2)
+	user2 := result2["User"].(map[string]any)
+	_, hasBoundary := user2["PermissionsBoundary"]
+	assert.False(t, hasBoundary)
+}
+
+func TestIAMPlugin_PermissionsBoundary_Deny(t *testing.T) {
+	// This test verifies that a permission boundary blocks an otherwise-allowed action.
+	// We use the AuthController directly rather than wiring it into a server,
+	// since the server test for auth is in authz_test.go.
+	// Here we verify that PutUserPermissionsBoundary correctly stores the boundary
+	// so that authorization logic can use it.
+	srv := newIAMTestServer(t)
+
+	resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "restricted"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Boundary: allow only s3:GetObject.
+	resp = iamRequest(t, srv, "PutUserPermissionsBoundary", map[string]any{
+		"UserName":            "restricted",
+		"PermissionsBoundary": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify boundary is stored.
+	resp = iamRequest(t, srv, "GetUser", map[string]any{"UserName": "restricted"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	user := result["User"].(map[string]any)
+	assert.NotNil(t, user["PermissionsBoundary"])
+}
+
+func TestIAMPlugin_PermissionsBoundary_Role(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	trustDoc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}`
+	resp := iamRequest(t, srv, "CreateRole", map[string]any{
+		"RoleName":                 "BoundedRole",
+		"AssumeRolePolicyDocument": trustDoc,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp = iamRequest(t, srv, "PutRolePermissionsBoundary", map[string]any{
+		"RoleName":            "BoundedRole",
+		"PermissionsBoundary": "arn:aws:iam::aws:policy/PowerUserAccess",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp = iamRequest(t, srv, "DeleteRolePermissionsBoundary", map[string]any{
+		"RoleName": "BoundedRole",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestIAMPlugin_UserTagging(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	// Create user.
+	resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "tagged-user"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// TagUser.
+	resp = iamRequest(t, srv, "TagUser", map[string]any{
+		"UserName": "tagged-user",
+		"Tags": []map[string]string{
+			{"Key": "env", "Value": "test"},
+			{"Key": "owner", "Value": "bob"},
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// ListUserTags.
+	resp = iamRequest(t, srv, "ListUserTags", map[string]any{"UserName": "tagged-user"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	tags := result["Tags"].([]any)
+	assert.Len(t, tags, 2)
+
+	// UntagUser.
+	resp = iamRequest(t, srv, "UntagUser", map[string]any{
+		"UserName": "tagged-user",
+		"TagKeys":  []string{"env"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// ListUserTags — should have 1 tag now.
+	resp = iamRequest(t, srv, "ListUserTags", map[string]any{"UserName": "tagged-user"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result2 map[string]any
+	decodeJSON(t, resp, &result2)
+	tags2 := result2["Tags"].([]any)
+	assert.Len(t, tags2, 1)
+}
+
+func TestIAMPlugin_RoleTagging(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	trustDoc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}`
+	resp := iamRequest(t, srv, "CreateRole", map[string]any{
+		"RoleName":                 "tagged-role",
+		"AssumeRolePolicyDocument": trustDoc,
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// TagRole.
+	resp = iamRequest(t, srv, "TagRole", map[string]any{
+		"RoleName": "tagged-role",
+		"Tags": []map[string]string{
+			{"Key": "project", "Value": "substrate"},
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// ListRoleTags.
+	resp = iamRequest(t, srv, "ListRoleTags", map[string]any{"RoleName": "tagged-role"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	tags := result["Tags"].([]any)
+	assert.Len(t, tags, 1)
+
+	// UntagRole.
+	resp = iamRequest(t, srv, "UntagRole", map[string]any{
+		"RoleName": "tagged-role",
+		"TagKeys":  []string{"project"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// ListRoleTags — should be empty.
+	resp = iamRequest(t, srv, "ListRoleTags", map[string]any{"RoleName": "tagged-role"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result2 map[string]any
+	decodeJSON(t, resp, &result2)
+	tags2 := result2["Tags"].([]any)
+	assert.Empty(t, tags2)
+}

@@ -113,8 +113,10 @@ func extractService(target, host, urlPath string) string {
 	return "unknown"
 }
 
-// targetServiceAliases maps derived lowercase target namespace names to canonical
-// AWS service names when the stripping heuristic produces a non-standard result.
+// targetServiceAliases maps derived lowercase service names to canonical AWS
+// service names. It is consulted by both extractServiceFromTarget (for
+// X-Amz-Target namespace names) and extractServiceFromHost (for subdomain
+// names that do not match the emulator's canonical service name).
 var targetServiceAliases = map[string]string{
 	// "AmazonIdentityManagementService" → strip "Amazon" → "identitymanagementservice"
 	"identitymanagementservice": "iam",
@@ -122,6 +124,13 @@ var targetServiceAliases = map[string]string{
 	"awssecuritytokenservice": "sts",
 	// "AWSCognitoIdentityService" → no strip → "awscognitoidentityservice"
 	"awscognitoidentityservice": "cognito-identity",
+	// "ResourceGroupsTaggingAPI_20170126" → strip version → "resourcegroupstaggingapi"
+	"resourcegroupstaggingapi": "tagging",
+	// "TrentService" is the internal code-name for KMS.
+	"trentservice": "kms",
+	// "AmazonEventBridge" → strip "Amazon" → "eventbridge" (already correct), but
+	// the host "events.*" produces "events" which must alias to "eventbridge".
+	"events": "eventbridge",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
@@ -166,7 +175,11 @@ func extractServiceFromHost(host string) string {
 
 	// "<service>.<region>" or just "<service>".
 	parts := strings.SplitN(host, ".", 2)
-	return strings.ToLower(parts[0])
+	svc := strings.ToLower(parts[0])
+	if canonical, ok := targetServiceAliases[svc]; ok {
+		return canonical
+	}
+	return svc
 }
 
 // extractServiceFromPath returns the first path segment when the URL path

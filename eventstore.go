@@ -3,8 +3,12 @@ package substrate
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,12 +19,20 @@ import (
 // request is stored as an event, test sessions can be replayed byte-for-byte
 // with identical results.
 type EventStore struct {
-	mu         sync.RWMutex
-	events     []*Event
-	snapshots  map[string]*Snapshot
-	streams    map[string][]*Event // stream_id → events
-	config     EventStoreConfig
-	serializer Serializer
+	mu           sync.RWMutex
+	events       []*Event
+	snapshots    map[string]*Snapshot
+	streams      map[string][]*Event // stream_id → events
+	byService    map[string][]*Event // service → events (index)
+	byOperation  map[string][]*Event // operation → events (index)
+	config       EventStoreConfig
+	serializer   Serializer
+	stateRef     StateManager   // for async snapshots
+	snapshotCh   chan struct{}  // hint channel for async snapshots
+	stopCh       chan struct{}  // goroutine shutdown
+	fileBE       *fileBackend   // file NDJSON backend, non-nil when backend=="file"
+	sqliteBE     *sqliteBackend // SQLite backend, lazily initialised
+	sqliteInitMu sync.Mutex     // guards lazy sqliteBE init
 }
 
 // EventStoreConfig controls the behaviour of an [EventStore].
@@ -50,6 +62,24 @@ type EventStoreConfig struct {
 	// IncludeStateHashes enables before/after state hashing on each event,
 	// which [ReplayEngine] uses to validate determinism.
 	IncludeStateHashes bool
+
+	// MaxFileSizeMB is the maximum NDJSON file size in megabytes before rotation.
+	// Zero disables rotation. Only used by the "file" backend.
+	MaxFileSizeMB int
+
+	// DSN is the SQLite data source name. Defaults to "substrate.db".
+	// Only used by the "sqlite" backend.
+	DSN string
+}
+
+// EventStoreOption configures an [EventStore] at construction time.
+type EventStoreOption func(*EventStore)
+
+// WithStateManager attaches a [StateManager] to the EventStore, enabling
+// automatic background snapshotting when [EventStoreConfig.SnapshotInterval]
+// is set.
+func WithStateManager(sm StateManager) EventStoreOption {
+	return func(e *EventStore) { e.stateRef = sm }
 }
 
 // Event represents a single AWS request/response pair captured by [EventStore].
@@ -137,14 +167,71 @@ type Snapshot struct {
 	ToEvent   int64 `json:"to_event"`
 }
 
-// NewEventStore creates a new EventStore with the given configuration.
-func NewEventStore(config EventStoreConfig) *EventStore {
-	return &EventStore{
-		events:     make([]*Event, 0),
-		snapshots:  make(map[string]*Snapshot),
-		streams:    make(map[string][]*Event),
-		config:     config,
-		serializer: &JSONSerializer{},
+// NewEventStore creates a new EventStore with the given configuration and
+// optional [EventStoreOption] values.
+func NewEventStore(config EventStoreConfig, opts ...EventStoreOption) *EventStore {
+	e := &EventStore{
+		events:      make([]*Event, 0),
+		snapshots:   make(map[string]*Snapshot),
+		streams:     make(map[string][]*Event),
+		byService:   make(map[string][]*Event),
+		byOperation: make(map[string][]*Event),
+		config:      config,
+		serializer:  &JSONSerializer{},
+	}
+
+	for _, opt := range opts {
+		opt(e)
+	}
+
+	// Initialise file backend eagerly so Load can be called right away.
+	if config.Backend == "file" && config.PersistPath != "" {
+		e.fileBE = newFileBackend(config.PersistPath, config.MaxFileSizeMB, e.serializer)
+	}
+
+	// Start async snapshot goroutine when both interval and state are configured.
+	if config.SnapshotInterval > 0 && e.stateRef != nil {
+		e.snapshotCh = make(chan struct{}, 1)
+		e.stopCh = make(chan struct{})
+		go e.snapshotLoop()
+	}
+
+	return e
+}
+
+// Close shuts down background goroutines and releases resources held by the
+// EventStore. It should be called when the store is no longer needed.
+func (e *EventStore) Close() error {
+	if e.stopCh != nil {
+		close(e.stopCh)
+	}
+	e.sqliteInitMu.Lock()
+	sb := e.sqliteBE
+	e.sqliteInitMu.Unlock()
+	if sb != nil {
+		return sb.close()
+	}
+	return nil
+}
+
+// snapshotLoop runs in the background and creates a snapshot each time a hint
+// is received on snapshotCh.
+func (e *EventStore) snapshotLoop() {
+	for {
+		select {
+		case <-e.stopCh:
+			return
+		case <-e.snapshotCh:
+			e.mu.RLock()
+			var streamID string
+			if n := len(e.events); n > 0 {
+				streamID = e.events[n-1].StreamID
+			}
+			e.mu.RUnlock()
+			if streamID != "" {
+				_, _ = e.CreateSnapshot(context.Background(), streamID, e.stateRef)
+			}
+		}
 	}
 }
 
@@ -157,7 +244,6 @@ func (e *EventStore) RecordEvent(_ context.Context, event *Event) error {
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	event.Sequence = int64(len(e.events))
 
@@ -171,7 +257,25 @@ func (e *EventStore) RecordEvent(_ context.Context, event *Event) error {
 		e.streams[event.StreamID] = append(e.streams[event.StreamID], event)
 	}
 
-	// TODO(#3): trigger async snapshot when SnapshotInterval is reached.
+	// Populate service and operation indexes.
+	if event.Service != "" {
+		e.byService[event.Service] = append(e.byService[event.Service], event)
+	}
+	if event.Operation != "" {
+		e.byOperation[event.Operation] = append(e.byOperation[event.Operation], event)
+	}
+
+	// Send async snapshot hint when the interval is reached.
+	n := len(e.events)
+	e.mu.Unlock()
+
+	if e.config.SnapshotInterval > 0 && e.snapshotCh != nil &&
+		n%e.config.SnapshotInterval == 0 {
+		select {
+		case e.snapshotCh <- struct{}{}:
+		default:
+		}
+	}
 
 	return nil
 }
@@ -237,14 +341,103 @@ func (e *EventStore) GetEvents(_ context.Context, filter EventFilter) ([]*Event,
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	source := e.selectSource(filter)
 	var results []*Event
-	for _, event := range e.events {
+	for _, event := range source {
 		if matchesFilter(event, filter) {
 			results = append(results, event)
 		}
 	}
 
 	return results, nil
+}
+
+// ExportNDJSON writes all events matching filter to w as newline-delimited JSON
+// (one JSON object per line). It returns the number of events written and any
+// error from encoding or writing.
+func (e *EventStore) ExportNDJSON(ctx context.Context, filter EventFilter, w io.Writer) (int64, error) {
+	events, err := e.GetEvents(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("get events: %w", err)
+	}
+	enc := json.NewEncoder(w)
+	var n int64
+	for _, ev := range events {
+		if err := enc.Encode(ev); err != nil {
+			return n, fmt.Errorf("encode event %d: %w", ev.Sequence, err)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// ExportCSV writes events matching filter to w as RFC 4180 CSV. The first row
+// is the header: sequence,timestamp,account_id,region,service,operation,
+// duration_ms,cost,error,error_code,stream_id. It returns the number of data
+// rows written (excluding the header) and any error.
+func (e *EventStore) ExportCSV(ctx context.Context, filter EventFilter, w io.Writer) (int64, error) {
+	events, err := e.GetEvents(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("get events: %w", err)
+	}
+	cw := csv.NewWriter(w)
+	header := []string{
+		"sequence", "timestamp", "account_id", "region",
+		"service", "operation", "duration_ms", "cost",
+		"error", "error_code", "stream_id",
+	}
+	if err := cw.Write(header); err != nil {
+		return 0, fmt.Errorf("write CSV header: %w", err)
+	}
+	var n int64
+	for _, ev := range events {
+		durMs := strconv.FormatInt(ev.Duration.Milliseconds(), 10)
+		costStr := strconv.FormatFloat(ev.Cost, 'f', -1, 64)
+		row := []string{
+			strconv.FormatInt(ev.Sequence, 10),
+			ev.Timestamp.UTC().Format(time.RFC3339Nano),
+			ev.AccountID,
+			ev.Region,
+			ev.Service,
+			ev.Operation,
+			durMs,
+			costStr,
+			ev.Error,
+			ev.ErrorCode,
+			ev.StreamID,
+		}
+		if err := cw.Write(row); err != nil {
+			return n, fmt.Errorf("write CSV row %d: %w", ev.Sequence, err)
+		}
+		n++
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return n, fmt.Errorf("flush CSV: %w", err)
+	}
+	return n, nil
+}
+
+// selectSource returns the narrowest pre-indexed slice for filter. It must be
+// called with e.mu held for reading.
+func (e *EventStore) selectSource(filter EventFilter) []*Event {
+	// Use service index when only Service is constrained.
+	if filter.Service != "" && filter.StreamID == "" && filter.Operation == "" &&
+		filter.AccountID == "" && filter.Region == "" &&
+		filter.StartTime.IsZero() && filter.EndTime.IsZero() &&
+		filter.MinSequence == 0 && filter.MaxSequence == 0 &&
+		filter.HasError == nil {
+		return e.byService[filter.Service]
+	}
+	// Use operation index when only Operation is constrained.
+	if filter.Operation != "" && filter.StreamID == "" && filter.Service == "" &&
+		filter.AccountID == "" && filter.Region == "" &&
+		filter.StartTime.IsZero() && filter.EndTime.IsZero() &&
+		filter.MinSequence == 0 && filter.MaxSequence == 0 &&
+		filter.HasError == nil {
+		return e.byOperation[filter.Operation]
+	}
+	return e.events
 }
 
 // GetStream returns all events belonging to streamID, in sequence order.
@@ -394,32 +587,114 @@ func (i *ReplayIterator) Reset() {
 
 // Flush persists in-memory events to the configured backend.
 // It is a no-op for the "memory" backend.
-func (e *EventStore) Flush(_ context.Context) error {
-	if e.config.Backend == "memory" {
+func (e *EventStore) Flush(ctx context.Context) error {
+	switch e.config.Backend {
+	case "memory":
+		return nil
+	case "file":
+		if e.fileBE == nil {
+			return nil
+		}
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		return e.fileBE.flush(e.streams)
+	case "sqlite":
+		sb, err := e.initSQLiteBackend()
+		if err != nil {
+			return err
+		}
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		return sb.flush(ctx, e.events, e.snapshots)
+	default:
 		return nil
 	}
-
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	// TODO(#3): implement SQLite and file persistence.
-	_, err := json.Marshal(e.events)
-	if err != nil {
-		return fmt.Errorf("marshal events: %w", err)
-	}
-
-	return nil
 }
 
-// Load restores events from the configured backend.
+// Load restores events from the configured backend into memory.
 // It is a no-op for the "memory" backend.
-func (e *EventStore) Load(_ context.Context) error {
-	if e.config.Backend == "memory" {
+func (e *EventStore) Load(ctx context.Context) error {
+	switch e.config.Backend {
+	case "memory":
+		return nil
+	case "file":
+		if e.fileBE == nil {
+			return nil
+		}
+		events, err := e.fileBE.load()
+		if err != nil {
+			return err
+		}
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		for _, ev := range events {
+			e.events = append(e.events, ev)
+			if ev.StreamID != "" {
+				e.streams[ev.StreamID] = append(e.streams[ev.StreamID], ev)
+			}
+			if ev.Service != "" {
+				e.byService[ev.Service] = append(e.byService[ev.Service], ev)
+			}
+			if ev.Operation != "" {
+				e.byOperation[ev.Operation] = append(e.byOperation[ev.Operation], ev)
+			}
+		}
+		return nil
+	case "sqlite":
+		sb, err := e.initSQLiteBackend()
+		if err != nil {
+			return err
+		}
+		events, snapshots, err := sb.load(ctx)
+		if err != nil {
+			return err
+		}
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		for _, ev := range events {
+			e.events = append(e.events, ev)
+			if ev.StreamID != "" {
+				e.streams[ev.StreamID] = append(e.streams[ev.StreamID], ev)
+			}
+			if ev.Service != "" {
+				e.byService[ev.Service] = append(e.byService[ev.Service], ev)
+			}
+			if ev.Operation != "" {
+				e.byOperation[ev.Operation] = append(e.byOperation[ev.Operation], ev)
+			}
+		}
+		for id, snap := range snapshots {
+			e.snapshots[id] = snap
+		}
+		return nil
+	default:
 		return nil
 	}
+}
 
-	// TODO(#3): implement SQLite and file loading.
-	return nil
+// initSQLiteBackend lazily opens the SQLite database on first use.
+func (e *EventStore) initSQLiteBackend() (*sqliteBackend, error) {
+	e.sqliteInitMu.Lock()
+	defer e.sqliteInitMu.Unlock()
+
+	if e.sqliteBE != nil {
+		return e.sqliteBE, nil
+	}
+
+	dsn := e.config.DSN
+	if dsn == "" {
+		dsn = "substrate.db"
+	}
+	if e.config.PersistPath != "" {
+		dsn = filepath.Join(e.config.PersistPath, dsn)
+	}
+
+	sb, err := newSQLiteBackend(dsn, e.serializer)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	e.sqliteBE = sb
+	return sb, nil
 }
 
 // EventStoreStats summarises the contents and cost of an [EventStore].
@@ -514,9 +789,11 @@ func (s *JSONSerializer) Deserialize(data []byte) (*Event, error) {
 	return &event, nil
 }
 
-// generateEventID produces a unique event ID from service, operation, and time.
+// generateEventID produces a unique event ID from service, operation, sequence,
+// and time. The sequence number guarantees uniqueness within a run even when
+// multiple events are recorded within the same nanosecond.
 func generateEventID(event *Event) string {
-	return fmt.Sprintf("%s-%s-%d", event.Service, event.Operation, time.Now().UnixNano())
+	return fmt.Sprintf("%s-%s-%d-%d", event.Service, event.Operation, event.Sequence, time.Now().UnixNano())
 }
 
 // generateSnapshotID produces a unique snapshot ID.

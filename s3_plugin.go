@@ -28,10 +28,11 @@ const s3Namespace = "s3"
 // CompleteMultipartUpload, AbortMultipartUpload, and ListMultipartUploads.
 // Object bodies are stored in an afero.Fs; metadata is stored via StateManager.
 type S3Plugin struct {
-	state  StateManager
-	logger Logger
-	tc     *TimeController
-	fs     afero.Fs
+	state    StateManager
+	logger   Logger
+	tc       *TimeController
+	fs       afero.Fs
+	registry *PluginRegistry // nil = notifications disabled
 }
 
 // Name returns the service name "s3".
@@ -55,6 +56,8 @@ func (p *S3Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.fs = afero.NewMemMapFs()
 	}
+
+	p.registry, _ = cfg.Options["registry"].(*PluginRegistry)
 
 	return nil
 }
@@ -103,8 +106,37 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.completeMultipartUpload(ctx, req, bucket, key)
 	case "AbortMultipartUpload":
 		return p.abortMultipartUpload(ctx, req, bucket, key)
+	case "GetBucketPolicy":
+		return p.getBucketPolicy(ctx, req, bucket)
+	case "PutBucketPolicy":
+		return p.putBucketPolicy(ctx, req, bucket)
+	case "DeleteBucketPolicy":
+		return p.deleteBucketPolicy(ctx, req, bucket)
+	case "GetBucketAcl":
+		return p.getBucketACL(ctx, req, bucket)
+	case "PutBucketAcl":
+		return p.putBucketACL(ctx, req, bucket)
+	case "GetObjectAcl":
+		return p.getObjectACL(ctx, req, bucket, key)
+	case "PutObjectAcl":
+		return p.putObjectACL(ctx, req, bucket, key)
+	case "GetBucketNotificationConfiguration":
+		return p.getBucketNotificationConfiguration(ctx, req)
+	case "PutBucketNotificationConfiguration":
+		return p.putBucketNotificationConfiguration(ctx, req)
+	case "PutBucketTagging":
+		return p.putBucketTagging(ctx, req, bucket)
+	case "GetBucketTagging":
+		return p.getBucketTagging(ctx, req, bucket)
+	case "DeleteBucketTagging":
+		return p.deleteBucketTagging(ctx, req, bucket)
+	case "PutObjectTagging":
+		return p.putObjectTagging(ctx, req, bucket, key)
+	case "GetObjectTagging":
+		return p.getObjectTagging(ctx, req, bucket, key)
+	case "DeleteObjectTagging":
+		return p.deleteObjectTagging(ctx, req, bucket, key)
 	default:
-		// TODO(#22): event notifications via Lambda/SQS not yet implemented.
 		return nil, &AWSError{
 			Code:       "NotImplemented",
 			Message:    "S3 operation not yet implemented: " + op,
@@ -139,12 +171,42 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		// Bucket-level operations.
 		switch method {
 		case "PUT":
+			if req.Params["policy"] == "1" {
+				return bucket, "", "PutBucketPolicy"
+			}
+			if req.Params["acl"] == "1" {
+				return bucket, "", "PutBucketAcl"
+			}
+			if _, ok := req.Params["notification"]; ok {
+				return bucket, "", "PutBucketNotificationConfiguration"
+			}
+			if _, ok := req.Params["tagging"]; ok {
+				return bucket, "", "PutBucketTagging"
+			}
 			return bucket, "", "CreateBucket"
 		case "HEAD":
 			return bucket, "", "HeadBucket"
 		case "DELETE":
+			if req.Params["policy"] == "1" {
+				return bucket, "", "DeleteBucketPolicy"
+			}
+			if _, ok := req.Params["tagging"]; ok {
+				return bucket, "", "DeleteBucketTagging"
+			}
 			return bucket, "", "DeleteBucket"
 		case "GET":
+			if req.Params["policy"] == "1" {
+				return bucket, "", "GetBucketPolicy"
+			}
+			if req.Params["acl"] == "1" {
+				return bucket, "", "GetBucketAcl"
+			}
+			if _, ok := req.Params["notification"]; ok {
+				return bucket, "", "GetBucketNotificationConfiguration"
+			}
+			if _, ok := req.Params["tagging"]; ok {
+				return bucket, "", "GetBucketTagging"
+			}
 			if req.Params["uploads"] == "1" {
 				return bucket, "", "ListMultipartUploads"
 			}
@@ -157,6 +219,12 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		// Object-level operations.
 		switch method {
 		case "PUT":
+			if req.Params["acl"] == "1" {
+				return bucket, key, "PutObjectAcl"
+			}
+			if _, ok := req.Params["tagging"]; ok {
+				return bucket, key, "PutObjectTagging"
+			}
 			if req.Headers["X-Amz-Copy-Source"] != "" {
 				return bucket, key, "CopyObject"
 			}
@@ -165,12 +233,21 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			return bucket, key, "PutObject"
 		case "GET":
+			if req.Params["acl"] == "1" {
+				return bucket, key, "GetObjectAcl"
+			}
+			if _, ok := req.Params["tagging"]; ok {
+				return bucket, key, "GetObjectTagging"
+			}
 			return bucket, key, "GetObject"
 		case "HEAD":
 			return bucket, key, "HeadObject"
 		case "DELETE":
 			if req.Params["uploadId"] != "" {
 				return bucket, key, "AbortMultipartUpload"
+			}
+			if _, ok := req.Params["tagging"]; ok {
+				return bucket, key, "DeleteObjectTagging"
 			}
 			return bucket, key, "DeleteObject"
 		case "POST":
@@ -306,7 +383,7 @@ func (p *S3Plugin) deleteBucket(_ *RequestContext, _ *AWSRequest, bucket string)
 }
 
 // putObject handles PUT /<bucket>/<key>.
-func (p *S3Plugin) putObject(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
+func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
 	bucketData, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
@@ -354,6 +431,8 @@ func (p *S3Plugin) putObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	if err := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, data); err != nil {
 		return nil, fmt.Errorf("save object metadata: %w", err)
 	}
+
+	p.fireNotifications(reqCtx, bucket, key, "s3:ObjectCreated:Put", obj.Size, etag)
 
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
@@ -428,7 +507,7 @@ func (p *S3Plugin) headObject(_ *RequestContext, _ *AWSRequest, bucket, key stri
 
 // deleteObject handles DELETE /<bucket>/<key>.
 // S3 DELETE is idempotent: no error is returned when the key is absent.
-func (p *S3Plugin) deleteObject(_ *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+func (p *S3Plugin) deleteObject(reqCtx *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
 	bucketData, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
@@ -441,6 +520,8 @@ func (p *S3Plugin) deleteObject(_ *RequestContext, _ *AWSRequest, bucket, key st
 
 	_ = p.state.Delete(ctx, s3Namespace, "object:"+bucket+"/"+key)
 	_ = p.fs.Remove("/" + bucket + "/" + key)
+
+	p.fireNotifications(reqCtx, bucket, key, "s3:ObjectRemoved:Delete", 0, "")
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
@@ -1172,5 +1253,680 @@ func s3ErrorResponse(code, message string, status int, extras ...string) *AWSRes
 		StatusCode: status,
 		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
 		Body:       append([]byte(xml.Header), body...),
+	}
+}
+
+// --- Bucket policy operations ----------------------------------------------
+
+// getBucketPolicy handles GET /<bucket>?policy.
+func (p *S3Plugin) getBucketPolicy(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+	raw, err := p.state.Get(ctx, s3Namespace, "bucket_policy:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("get bucket policy: %w", err)
+	}
+	if raw == nil {
+		return s3ErrorResponse("NoSuchBucketPolicy",
+			"The bucket policy does not exist.", http.StatusNotFound), nil
+	}
+
+	var pol S3BucketPolicy
+	if err := json.Unmarshal(raw, &pol); err != nil {
+		return nil, fmt.Errorf("unmarshal bucket policy: %w", err)
+	}
+
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Body:       []byte(pol.Policy),
+	}, nil
+}
+
+// putBucketPolicy handles PUT /<bucket>?policy.
+func (p *S3Plugin) putBucketPolicy(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	// Verify bucket exists.
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket",
+			"The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	// Validate the policy document is JSON.
+	policyJSON := req.Body
+	if len(policyJSON) == 0 {
+		return s3ErrorResponse("MalformedPolicy",
+			"Request body must not be empty.", http.StatusBadRequest), nil
+	}
+	var rawCheck map[string]json.RawMessage
+	if err := json.Unmarshal(policyJSON, &rawCheck); err != nil {
+		return s3ErrorResponse("MalformedPolicy", //nolint:nilerr
+			"Bucket policy must be valid JSON.", http.StatusBadRequest), nil
+	}
+
+	pol := S3BucketPolicy{Policy: string(policyJSON)}
+	raw, err := json.Marshal(pol)
+	if err != nil {
+		return nil, fmt.Errorf("marshal bucket policy: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, "bucket_policy:"+bucket, raw); err != nil {
+		return nil, fmt.Errorf("put bucket policy: %w", err)
+	}
+
+	return &AWSResponse{
+		StatusCode: http.StatusNoContent,
+		Headers:    map[string]string{},
+	}, nil
+}
+
+// deleteBucketPolicy handles DELETE /<bucket>?policy.
+func (p *S3Plugin) deleteBucketPolicy(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+	if err := p.state.Delete(ctx, s3Namespace, "bucket_policy:"+bucket); err != nil {
+		return nil, fmt.Errorf("delete bucket policy: %w", err)
+	}
+	return &AWSResponse{
+		StatusCode: http.StatusNoContent,
+		Headers:    map[string]string{},
+	}, nil
+}
+
+// --- Bucket and object ACL operations -------------------------------------
+
+// getBucketACL handles GET /<bucket>?acl.
+func (p *S3Plugin) getBucketACL(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	// Verify bucket exists.
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket",
+			"The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	raw, err := p.state.Get(ctx, s3Namespace, "bucket_acl:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("get bucket acl: %w", err)
+	}
+
+	var acl S3AccessControlList
+	if raw != nil {
+		if err := json.Unmarshal(raw, &acl); err != nil {
+			return nil, fmt.Errorf("unmarshal bucket acl: %w", err)
+		}
+	} else {
+		// Return a default owner-full-control ACL.
+		acl = s3DefaultACL(bucket)
+	}
+
+	return s3XMLResponse(http.StatusOK, acl)
+}
+
+// putBucketACL handles PUT /<bucket>?acl.
+func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	// Verify bucket exists.
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket",
+			"The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	var acl S3AccessControlList
+	if len(req.Body) > 0 {
+		if err := xml.Unmarshal(req.Body, &acl); err != nil {
+			return s3ErrorResponse("MalformedACLError", //nolint:nilerr
+				"The XML you provided was not well-formed.", http.StatusBadRequest), nil
+		}
+	} else {
+		// Honour the x-amz-acl canned ACL header.
+		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
+	}
+
+	raw, err := json.Marshal(acl)
+	if err != nil {
+		return nil, fmt.Errorf("marshal bucket acl: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, "bucket_acl:"+bucket, raw); err != nil {
+		return nil, fmt.Errorf("put bucket acl: %w", err)
+	}
+
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{},
+	}, nil
+}
+
+// getObjectACL handles GET /<bucket>/<key>?acl.
+func (p *S3Plugin) getObjectACL(_ *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	// Verify object exists.
+	objKey := "object:" + bucket + "/" + key
+	existing, err := p.state.Get(ctx, s3Namespace, objKey)
+	if err != nil {
+		return nil, fmt.Errorf("check object: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchKey",
+			"The specified key does not exist.", http.StatusNotFound), nil
+	}
+
+	raw, err := p.state.Get(ctx, s3Namespace, "object_acl:"+bucket+"/"+key)
+	if err != nil {
+		return nil, fmt.Errorf("get object acl: %w", err)
+	}
+
+	var acl S3AccessControlList
+	if raw != nil {
+		if err := json.Unmarshal(raw, &acl); err != nil {
+			return nil, fmt.Errorf("unmarshal object acl: %w", err)
+		}
+	} else {
+		acl = s3DefaultACL(bucket)
+	}
+
+	return s3XMLResponse(http.StatusOK, acl)
+}
+
+// putObjectACL handles PUT /<bucket>/<key>?acl.
+func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	// Verify object exists.
+	objKey := "object:" + bucket + "/" + key
+	existing, err := p.state.Get(ctx, s3Namespace, objKey)
+	if err != nil {
+		return nil, fmt.Errorf("check object: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchKey",
+			"The specified key does not exist.", http.StatusNotFound), nil
+	}
+
+	var acl S3AccessControlList
+	if len(req.Body) > 0 {
+		if err := xml.Unmarshal(req.Body, &acl); err != nil {
+			return s3ErrorResponse("MalformedACLError", //nolint:nilerr
+				"The XML you provided was not well-formed.", http.StatusBadRequest), nil
+		}
+	} else {
+		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
+	}
+
+	raw, err := json.Marshal(acl)
+	if err != nil {
+		return nil, fmt.Errorf("marshal object acl: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, "object_acl:"+bucket+"/"+key, raw); err != nil {
+		return nil, fmt.Errorf("put object acl: %w", err)
+	}
+
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{},
+	}, nil
+}
+
+// s3DefaultACL returns an owner-full-control ACL for the given resource.
+func s3DefaultACL(resource string) S3AccessControlList {
+	return S3AccessControlList{
+		Owner: S3Owner{ID: resource + "-owner", DisplayName: resource},
+		Grants: []S3Grant{{
+			Grantee:    S3Grantee{Type: "CanonicalUser", ID: resource + "-owner"},
+			Permission: "FULL_CONTROL",
+		}},
+	}
+}
+
+// getBucketNotificationConfiguration handles GET /<bucket>?notification.
+func (p *S3Plugin) getBucketNotificationConfiguration(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	parts := strings.SplitN(strings.TrimPrefix(req.Path, "/"), "/", 2)
+	bucket := parts[0]
+
+	data, err := p.state.Get(context.Background(), s3Namespace, "notification:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("s3 getBucketNotificationConfiguration: %w", err)
+	}
+	if data == nil {
+		// Return empty configuration.
+		empty := S3NotificationConfiguration{}
+		body, marshalErr := xml.Marshal(empty)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("s3 getBucketNotificationConfiguration marshal: %w", marshalErr)
+		}
+		return &AWSResponse{
+			StatusCode: http.StatusOK,
+			Headers:    map[string]string{"Content-Type": "application/xml"},
+			Body:       body,
+		}, nil
+	}
+
+	var cfg S3NotificationConfiguration
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("s3 getBucketNotificationConfiguration unmarshal: %w", err)
+	}
+
+	body, marshalErr := xml.Marshal(cfg)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("s3 getBucketNotificationConfiguration xml marshal: %w", marshalErr)
+	}
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{"Content-Type": "application/xml"},
+		Body:       body,
+	}, nil
+}
+
+// putBucketNotificationConfiguration handles PUT /<bucket>?notification.
+func (p *S3Plugin) putBucketNotificationConfiguration(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	parts := strings.SplitN(strings.TrimPrefix(req.Path, "/"), "/", 2)
+	bucket := parts[0]
+
+	var cfg S3NotificationConfiguration
+	if err := xml.Unmarshal(req.Body, &cfg); err != nil {
+		// Try JSON fallback.
+		if jsonErr := json.Unmarshal(req.Body, &cfg); jsonErr != nil {
+			return nil, &AWSError{Code: "MalformedXML", Message: "invalid notification configuration", HTTPStatus: http.StatusBadRequest}
+		}
+	}
+
+	data, marshalErr := json.Marshal(cfg)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("s3 putBucketNotificationConfiguration marshal: %w", marshalErr)
+	}
+	if putErr := p.state.Put(context.Background(), s3Namespace, "notification:"+bucket, data); putErr != nil {
+		return nil, fmt.Errorf("s3 putBucketNotificationConfiguration state.Put: %w", putErr)
+	}
+
+	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{}, Body: nil}, nil
+}
+
+// fireNotifications dispatches S3 event notifications to configured Lambda
+// functions and SQS queues. It is a best-effort operation: errors are logged
+// but never returned to the caller.
+func (p *S3Plugin) fireNotifications(ctx *RequestContext, bucket, key, eventName string, size int64, eTag string) {
+	if p.registry == nil {
+		return
+	}
+
+	data, err := p.state.Get(context.Background(), s3Namespace, "notification:"+bucket)
+	if err != nil || data == nil {
+		return
+	}
+
+	var notifCfg S3NotificationConfiguration
+	if err := json.Unmarshal(data, &notifCfg); err != nil {
+		p.logger.Warn("s3 fireNotifications: unmarshal error", "err", err)
+		return
+	}
+
+	// Build S3 event payload.
+	payload := p.buildS3EventPayload(ctx, bucket, key, eventName, size, eTag)
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		p.logger.Warn("s3 fireNotifications: marshal payload error", "err", err)
+		return
+	}
+
+	// Dispatch to Lambda functions.
+	for _, lfCfg := range notifCfg.LambdaFunctionConfigurations {
+		if !s3EventMatches(eventName, lfCfg.Events) {
+			continue
+		}
+		if !s3KeyFilterMatches(key, lfCfg.Filter) {
+			continue
+		}
+		// Extract function name from ARN.
+		fnName := s3ARNLastComponent(lfCfg.LambdaFunctionArn)
+		invokeReq := &AWSRequest{
+			Service:   "lambda",
+			Operation: "POST",
+			Path:      "/2015-03-31/functions/" + fnName + "/invocations",
+			Body:      payloadBytes,
+			Headers:   map[string]string{},
+			Params:    map[string]string{},
+		}
+		_, invokeErr := p.registry.RouteRequest(ctx, invokeReq)
+		if invokeErr != nil {
+			p.logger.Warn("s3 fireNotifications: lambda invoke error", "function", fnName, "err", invokeErr)
+		}
+	}
+
+	// Dispatch to SQS queues.
+	for _, qCfg := range notifCfg.QueueConfigurations {
+		if !s3EventMatches(eventName, qCfg.Events) {
+			continue
+		}
+		if !s3KeyFilterMatches(key, qCfg.Filter) {
+			continue
+		}
+		queueURL := s3ARNToQueueURL(qCfg.QueueArn, ctx.Region, ctx.AccountID)
+		sendReq := &AWSRequest{
+			Service:   "sqs",
+			Operation: "SendMessage",
+			Body:      payloadBytes,
+			Headers:   map[string]string{},
+			Params: map[string]string{
+				"Action":      "SendMessage",
+				"QueueUrl":    queueURL,
+				"MessageBody": string(payloadBytes),
+			},
+		}
+		_, sendErr := p.registry.RouteRequest(ctx, sendReq)
+		if sendErr != nil {
+			p.logger.Warn("s3 fireNotifications: sqs send error", "queue", queueURL, "err", sendErr)
+		}
+	}
+
+	// Dispatch to SNS topics.
+	for _, tc2 := range notifCfg.TopicConfigurations {
+		if !s3EventMatches(eventName, tc2.Events) {
+			continue
+		}
+		if !s3KeyFilterMatches(key, tc2.Filter) {
+			continue
+		}
+		_, pubErr := p.registry.RouteRequest(ctx, &AWSRequest{
+			Service:   "sns",
+			Operation: "Publish",
+			Headers:   map[string]string{},
+			Params: map[string]string{
+				"Action":   "Publish",
+				"TopicArn": tc2.TopicArn,
+				"Message":  string(payloadBytes),
+				"Subject":  "Amazon S3 Notification",
+			},
+		})
+		if pubErr != nil {
+			p.logger.Warn("s3 fireNotifications: sns publish error", "topicArn", tc2.TopicArn, "err", pubErr)
+		}
+	}
+}
+
+// buildS3EventPayload constructs the S3 event notification payload for the
+// given bucket, key, event name, size, and ETag.
+func (p *S3Plugin) buildS3EventPayload(ctx *RequestContext, bucket, key, eventName string, size int64, eTag string) map[string]interface{} {
+	return map[string]interface{}{
+		"Records": []map[string]interface{}{
+			{
+				"eventVersion": "2.1",
+				"eventSource":  "aws:s3",
+				"awsRegion":    ctx.Region,
+				"eventTime":    p.tc.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+				"eventName":    eventName,
+				"s3": map[string]interface{}{
+					"s3SchemaVersion": "1.0",
+					"bucket": map[string]interface{}{
+						"name": bucket,
+						"arn":  "arn:aws:s3:::" + bucket,
+					},
+					"object": map[string]interface{}{
+						"key":  key,
+						"size": size,
+						"eTag": eTag,
+					},
+				},
+			},
+		},
+	}
+}
+
+// s3EventMatches reports whether eventName matches any of the given patterns.
+// Patterns may use a trailing ":*" wildcard, e.g. "s3:ObjectCreated:*".
+func s3EventMatches(eventName string, patterns []string) bool {
+	for _, p := range patterns {
+		if p == eventName {
+			return true
+		}
+		// Wildcard matching: "s3:ObjectCreated:*" matches "s3:ObjectCreated:Put"
+		if strings.HasSuffix(p, ":*") {
+			prefix := strings.TrimSuffix(p, "*")
+			if strings.HasPrefix(eventName, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// s3KeyFilterMatches reports whether key satisfies all prefix/suffix rules in
+// the given filter. A nil filter always matches.
+func s3KeyFilterMatches(key string, filter *S3NotificationFilter) bool {
+	if filter == nil {
+		return true
+	}
+	for _, rule := range filter.Key.FilterRules {
+		switch strings.ToLower(rule.Name) {
+		case "prefix":
+			if !strings.HasPrefix(key, rule.Value) {
+				return false
+			}
+		case "suffix":
+			if !strings.HasSuffix(key, rule.Value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// s3ARNLastComponent extracts the last colon-separated component of an ARN,
+// which for Lambda ARNs is the function name.
+func s3ARNLastComponent(arn string) string {
+	parts := strings.Split(arn, ":")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return arn
+}
+
+// s3ARNToQueueURL converts an SQS queue ARN to a local queue URL.
+// ARN format: arn:aws:sqs:{region}:{accountID}:{queueName}.
+func s3ARNToQueueURL(arn, region, accountID string) string {
+	parts := strings.Split(arn, ":")
+	if len(parts) >= 6 {
+		r := parts[3]
+		a := parts[4]
+		name := parts[5]
+		if r == "" {
+			r = region
+		}
+		if a == "" {
+			a = accountID
+		}
+		return "http://sqs." + r + ".localhost/" + a + "/" + name
+	}
+	return arn
+}
+
+// --- Tagging operations ----------------------------------------------------
+
+// s3Tag is the XML representation of a single S3 tag.
+type s3Tag struct {
+	XMLName xml.Name `xml:"Tag"`
+	Key     string   `xml:"Key"`
+	Value   string   `xml:"Value"`
+}
+
+// s3Tagging is the XML representation of an S3 tagging document.
+type s3Tagging struct {
+	XMLName xml.Name `xml:"Tagging"`
+	TagSet  struct {
+		Tags []s3Tag `xml:"Tag"`
+	} `xml:"TagSet"`
+}
+
+func (p *S3Plugin) putBucketTagging(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	var tagging s3Tagging
+	if err := xml.Unmarshal(req.Body, &tagging); err != nil {
+		return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	ctx := context.Background()
+	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil || data == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	var b S3Bucket
+	if err := json.Unmarshal(data, &b); err != nil {
+		return nil, fmt.Errorf("putBucketTagging unmarshal: %w", err)
+	}
+	b.Tags = make(map[string]string)
+	for _, tag := range tagging.TagSet.Tags {
+		b.Tags[tag.Key] = tag.Value
+	}
+	newData, err := json.Marshal(b)
+	if err != nil {
+		return nil, fmt.Errorf("putBucketTagging marshal: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, "bucket:"+bucket, newData); err != nil {
+		return nil, fmt.Errorf("putBucketTagging state.Put: %w", err)
+	}
+	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/xml"}, Body: nil}, nil
+}
+
+func (p *S3Plugin) getBucketTagging(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil || data == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	var b S3Bucket
+	if err := json.Unmarshal(data, &b); err != nil {
+		return nil, fmt.Errorf("getBucketTagging unmarshal: %w", err)
+	}
+	var result s3Tagging
+	for k, v := range b.Tags {
+		result.TagSet.Tags = append(result.TagSet.Tags, s3Tag{Key: k, Value: v})
+	}
+	return s3XMLResponse(http.StatusOK, result)
+}
+
+func (p *S3Plugin) deleteBucketTagging(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil || data == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	var b S3Bucket
+	if unmarshalErr := json.Unmarshal(data, &b); unmarshalErr != nil {
+		return nil, fmt.Errorf("deleteBucketTagging unmarshal: %w", unmarshalErr)
+	}
+	b.Tags = make(map[string]string)
+	newData, marshalErr := json.Marshal(b)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("deleteBucketTagging marshal: %w", marshalErr)
+	}
+	if putErr := p.state.Put(ctx, s3Namespace, "bucket:"+bucket, newData); putErr != nil {
+		return nil, fmt.Errorf("deleteBucketTagging state.Put: %w", putErr)
+	}
+	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/xml"}, Body: nil}, nil
+}
+
+func (p *S3Plugin) putObjectTagging(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	var tagging s3Tagging
+	if err := xml.Unmarshal(req.Body, &tagging); err != nil {
+		return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	ctx := context.Background()
+	stateKey := "object:" + bucket + "/" + key
+	data, err := p.state.Get(ctx, s3Namespace, stateKey)
+	if err != nil || data == nil {
+		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	var obj S3Object
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, fmt.Errorf("putObjectTagging unmarshal: %w", err)
+	}
+	obj.Tags = make(map[string]string)
+	for _, tag := range tagging.TagSet.Tags {
+		obj.Tags[tag.Key] = tag.Value
+	}
+	newData, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("putObjectTagging marshal: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, stateKey, newData); err != nil {
+		return nil, fmt.Errorf("putObjectTagging state.Put: %w", err)
+	}
+	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{"Content-Type": "application/xml"}, Body: nil}, nil
+}
+
+func (p *S3Plugin) getObjectTagging(_ *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	ctx := context.Background()
+	stateKey := "object:" + bucket + "/" + key
+	data, err := p.state.Get(ctx, s3Namespace, stateKey)
+	if err != nil || data == nil {
+		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	var obj S3Object
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, fmt.Errorf("getObjectTagging unmarshal: %w", err)
+	}
+	var result s3Tagging
+	for k, v := range obj.Tags {
+		result.TagSet.Tags = append(result.TagSet.Tags, s3Tag{Key: k, Value: v})
+	}
+	return s3XMLResponse(http.StatusOK, result)
+}
+
+func (p *S3Plugin) deleteObjectTagging(_ *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	ctx := context.Background()
+	stateKey := "object:" + bucket + "/" + key
+	data, err := p.state.Get(ctx, s3Namespace, stateKey)
+	if err != nil || data == nil {
+		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
+	}
+	var obj S3Object
+	if unmarshalErr := json.Unmarshal(data, &obj); unmarshalErr != nil {
+		return nil, fmt.Errorf("deleteObjectTagging unmarshal: %w", unmarshalErr)
+	}
+	obj.Tags = nil
+	newData, marshalErr := json.Marshal(obj)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("deleteObjectTagging marshal: %w", marshalErr)
+	}
+	if putErr := p.state.Put(ctx, s3Namespace, stateKey, newData); putErr != nil {
+		return nil, fmt.Errorf("deleteObjectTagging state.Put: %w", putErr)
+	}
+	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/xml"}, Body: nil}, nil
+}
+
+// s3CannedACL maps a canned ACL name (x-amz-acl header) to an S3AccessControlList.
+// Unsupported or empty canned ACL values fall back to the private (owner-only) ACL.
+func s3CannedACL(cannedACL, resource string) S3AccessControlList {
+	owner := S3Owner{ID: resource + "-owner", DisplayName: resource}
+	fullControlGrant := S3Grant{
+		Grantee:    S3Grantee{Type: "CanonicalUser", ID: resource + "-owner"},
+		Permission: "FULL_CONTROL",
+	}
+	publicReadGrant := S3Grant{
+		Grantee:    S3Grantee{Type: "Group", URI: "http://acs.amazonaws.com/groups/global/AllUsers"},
+		Permission: "READ",
+	}
+
+	switch cannedACL {
+	case "public-read":
+		return S3AccessControlList{Owner: owner, Grants: []S3Grant{fullControlGrant, publicReadGrant}}
+	case "public-read-write":
+		return S3AccessControlList{Owner: owner, Grants: []S3Grant{
+			fullControlGrant,
+			publicReadGrant,
+			{Grantee: S3Grantee{Type: "Group", URI: "http://acs.amazonaws.com/groups/global/AllUsers"}, Permission: "WRITE"},
+		}}
+	default:
+		// "private" and all other values → owner-only.
+		return S3AccessControlList{Owner: owner, Grants: []S3Grant{fullControlGrant}}
 	}
 }

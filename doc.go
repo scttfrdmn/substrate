@@ -44,4 +44,16 @@
 // ([StackDeployer]), recording, [ValidateRecording], and [DebugSession]
 // time-travel into a single high-level API for AI-generated infrastructure
 // validation.
+//
+// # Plugin Development
+//
+// Substrate's service layer is fully extensible. Any type that satisfies the
+// [Plugin] interface can be registered with a [PluginRegistry] and will
+// receive matching AWS API requests. See the package-level documentation in
+// doc_plugins.go for the full plugin developer guide, including state key
+// conventions, testing patterns, and cross-service dispatch examples.
+// See examples/custom_plugin/main.go for a minimal self-contained example.
 package substrate
+
+// Version is the Substrate release version, set at build time via ldflags.
+var Version = "dev"
