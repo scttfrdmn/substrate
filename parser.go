@@ -131,6 +131,8 @@ var targetServiceAliases = map[string]string{
 	// "AmazonEventBridge" → strip "Amazon" → "eventbridge" (already correct), but
 	// the host "events.*" produces "events" which must alias to "eventbridge".
 	"events": "eventbridge",
+	// "CertificateManager" is the ACM target namespace prefix.
+	"certificatemanager": "acm",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

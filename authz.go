@@ -263,6 +263,28 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			}
 		}
 		return "*"
+	case "apigateway":
+		// /restapis/{apiId}/...
+		parts := strings.SplitN(strings.TrimPrefix(req.Path, "/restapis/"), "/", 2)
+		if parts[0] != "" {
+			return "arn:aws:apigateway:" + region + "::/restapis/" + parts[0]
+		}
+		return "arn:aws:apigateway:" + region + "::/*"
+	case "apigatewayv2":
+		// /v2/apis/{apiId}/...
+		trimmed := strings.TrimPrefix(req.Path, "/v2/apis/")
+		if trimmed != req.Path {
+			parts := strings.SplitN(trimmed, "/", 2)
+			if parts[0] != "" {
+				return "arn:aws:apigateway:" + region + "::/apis/" + parts[0]
+			}
+		}
+		return "arn:aws:apigateway:" + region + "::/*"
+	case "acm":
+		if arn := req.Params["CertificateArn"]; arn != "" {
+			return arn
+		}
+		return "*"
 	default:
 		return "*"
 	}

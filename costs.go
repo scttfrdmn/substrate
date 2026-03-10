@@ -126,6 +126,12 @@ func defaultCostTable() map[string]float64 {
 		"eventbridge/PutEvents": 0.000001,
 		// CloudWatch Alarms: $0.10 per alarm per month, charged on creation.
 		"monitoring/PutMetricAlarm": 0.10,
+		// API Gateway REST APIs: ~$3.50/M API calls.
+		"apigateway/CreateDeployment": 0.0000035,
+		// API Gateway HTTP APIs: cheaper than REST.
+		"apigatewayv2/CreateApi": 0.000001,
+		// ACM: public certificates are free.
+		"acm/RequestCertificate": 0.0,
 	}
 }
 

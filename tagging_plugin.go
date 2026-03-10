@@ -246,6 +246,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "dynamodb", scan: p.scanDynamoDBTables},
 		{typePrefix: "ec2", scan: p.scanEC2Instances},
 		{typePrefix: "iam", scan: p.scanIAMEntities},
+		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
 	}
 
 	var all []resourceTagMapping
@@ -434,6 +435,32 @@ func (p *TaggingPlugin) scanIAMEntities(_ context.Context, _ *RequestContext) ([
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanAPIGatewayAPIs(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "api:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, apigatewayNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list apigateway apis: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, apigatewayNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var api RestAPIState
+		if err := json.Unmarshal(raw, &api); err != nil {
+			continue
+		}
+		arn := "arn:aws:apigateway:" + api.Region + "::/restapis/" + api.ID
+		out = append(out, resourceTagMapping{
+			ResourceARN: arn,
+			Tags:        mapToTaggingTags(api.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -590,6 +617,13 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		}
 		return "", "", fmt.Errorf("unsupported IAM resource type in ARN: %q", resource)
 
+	case "apigateway":
+		// arn:aws:apigateway:{region}::/restapis/{apiId}
+		apiID := strings.TrimPrefix(resource, "/restapis/")
+		region := parts[3]
+		acct := parts[4]
+		return apigatewayNamespace, "api:" + acct + "/" + region + "/" + apiID, nil
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -675,6 +709,15 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			return p.state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported IAM resource key: %s", key)
+
+	case apigatewayNamespace:
+		var api RestAPIState
+		if err := json.Unmarshal(raw, &api); err != nil {
+			return fmt.Errorf("unmarshal RestAPIState: %w", err)
+		}
+		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(api)
+		return p.state.Put(goCtx, ns, key, updated)
 
 	default:
 		return fmt.Errorf("unsupported namespace for tag merge: %s", ns)

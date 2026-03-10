@@ -125,6 +125,22 @@ var typePriority = map[string]int{
 	"AWS::Logs::LogStream":                        3,
 	"AWS::Events::Rule":                           4,
 	"AWS::CloudWatch::Alarm":                      4,
+	// v0.19.0 — API Gateway and ACM.
+	"AWS::CertificateManager::Certificate": 1,
+	"AWS::ApiGateway::RestApi":             2,
+	"AWS::ApiGateway::Authorizer":          3,
+	"AWS::ApiGateway::Resource":            3,
+	"AWS::ApiGateway::ApiKey":              3,
+	"AWS::ApiGateway::Method":              4,
+	"AWS::ApiGateway::Deployment":          4,
+	"AWS::ApiGateway::UsagePlan":           4,
+	"AWS::ApiGateway::Stage":               5,
+	"AWS::ApiGateway::UsagePlanKey":        5,
+	"AWS::ApiGatewayV2::Api":               2,
+	"AWS::ApiGatewayV2::Authorizer":        3,
+	"AWS::ApiGatewayV2::Integration":       3,
+	"AWS::ApiGatewayV2::Route":             3,
+	"AWS::ApiGatewayV2::Stage":             4,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -432,6 +448,37 @@ func (d *StackDeployer) deployResource(
 		return d.deployEventsRule(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::CloudWatch::Alarm":
 		return d.deployCloudWatchAlarm(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.19.0 — API Gateway and ACM.
+	case "AWS::CertificateManager::Certificate":
+		return d.deployACMCertificate(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::RestApi":
+		return d.deployAPIGatewayRestAPI(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::Authorizer":
+		return d.deployAPIGatewayAuthorizer(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::Resource":
+		return d.deployAPIGatewayResource(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::Method":
+		return d.deployAPIGatewayMethod(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::Deployment":
+		return d.deployAPIGatewayDeployment(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::Stage":
+		return d.deployAPIGatewayStage(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::ApiKey":
+		return d.deployAPIGatewayAPIKey(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::UsagePlan":
+		return d.deployAPIGatewayUsagePlan(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGateway::UsagePlanKey":
+		return d.deployAPIGatewayUsagePlanKey(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGatewayV2::Api":
+		return d.deployAPIGatewayV2Api(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGatewayV2::Route":
+		return d.deployAPIGatewayV2Route(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGatewayV2::Integration":
+		return d.deployAPIGatewayV2Integration(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGatewayV2::Stage":
+		return d.deployAPIGatewayV2Stage(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ApiGatewayV2::Authorizer":
+		return d.deployAPIGatewayV2Authorizer(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -2013,6 +2060,22 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 			return dr.PhysicalID
 		case "Value":
 			// AWS::SSM::Parameter GetAtt Value — physical ID is the parameter name.
+			return dr.PhysicalID
+		case "RootResourceId":
+			// AWS::ApiGateway::RestApi GetAtt RootResourceId — stored as extra in PhysicalID with prefix.
+			if strings.HasPrefix(dr.PhysicalID, "root:") {
+				return strings.TrimPrefix(dr.PhysicalID, "root:")
+			}
+			// Fallback: the metadata map stores it separately.
+			if v, ok := dr.Metadata["RootResourceId"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return dr.PhysicalID
+		case "InvokeURL":
+			// AWS::ApiGateway::Stage GetAtt InvokeURL.
+			if v, ok := dr.Metadata["InvokeURL"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
 			return dr.PhysicalID
 		default:
 			return dr.PhysicalID

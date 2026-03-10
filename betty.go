@@ -28,6 +28,10 @@ type DeployedResource struct {
 
 	// Error is non-empty if this resource failed to create.
 	Error string
+
+	// Metadata holds additional GetAtt-resolvable attributes for this resource,
+	// such as RootResourceId, InvokeURL, RepositoryUri, etc.
+	Metadata map[string]interface{}
 }
 
 // DeployResult is returned by DeployStack and BettyClient.Deploy.

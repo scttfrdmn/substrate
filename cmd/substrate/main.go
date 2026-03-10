@@ -287,6 +287,33 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(cwPlugin)
 
+			acmPlugin := &substrate.ACMPlugin{}
+			if err := acmPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize acm plugin: %w", err)
+			}
+			registry.Register(acmPlugin)
+
+			apigwPlugin := &substrate.APIGatewayPlugin{}
+			if err := apigwPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize apigateway plugin: %w", err)
+			}
+			registry.Register(apigwPlugin)
+
+			apigwv2Plugin := &substrate.APIGatewayV2Plugin{}
+			if err := apigwv2Plugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize apigatewayv2 plugin: %w", err)
+			}
+			registry.Register(apigwv2Plugin)
+
 			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
 
 			consistencyCtrl, err := substrate.NewConsistencyController(
