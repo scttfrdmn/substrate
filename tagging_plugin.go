@@ -247,6 +247,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "ec2", scan: p.scanEC2Instances},
 		{typePrefix: "iam", scan: p.scanIAMEntities},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
+		{typePrefix: "states", scan: p.scanStepFunctionsStateMachines},
 	}
 
 	var all []resourceTagMapping
@@ -461,6 +462,31 @@ func (p *TaggingPlugin) scanAPIGatewayAPIs(_ context.Context, reqCtx *RequestCon
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanStepFunctionsStateMachines(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "statemachine:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, statesNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list stepfunctions state machines: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, statesNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var sm StateMachineState
+		if err := json.Unmarshal(raw, &sm); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: sm.StateMachineArn,
+			Tags:        mapToTaggingTags(sm.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -624,6 +650,13 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		acct := parts[4]
 		return apigatewayNamespace, "api:" + acct + "/" + region + "/" + apiID, nil
 
+	case "states":
+		// arn:aws:states:{region}:{acct}:stateMachine:{name}
+		name := strings.TrimPrefix(resource, "stateMachine:")
+		region := parts[3]
+		acct := parts[4]
+		return statesNamespace, "statemachine:" + acct + "/" + region + "/" + name, nil
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -717,6 +750,15 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(api)
+		return p.state.Put(goCtx, ns, key, updated)
+
+	case statesNamespace:
+		var sm StateMachineState
+		if err := json.Unmarshal(raw, &sm); err != nil {
+			return fmt.Errorf("unmarshal StateMachineState: %w", err)
+		}
+		sm.Tags = mergeStringMap(sm.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(sm)
 		return p.state.Put(goCtx, ns, key, updated)
 
 	default:

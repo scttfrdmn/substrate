@@ -132,6 +132,8 @@ func defaultCostTable() map[string]float64 {
 		"apigatewayv2/CreateApi": 0.000001,
 		// ACM: public certificates are free.
 		"acm/RequestCertificate": 0.0,
+		// Step Functions: $0.025 per 1k state transitions (Standard Workflows).
+		"states/StartExecution": 0.000025,
 	}
 }
 

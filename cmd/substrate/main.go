@@ -314,6 +314,15 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(apigwv2Plugin)
 
+			sfnPlugin := &substrate.StepFunctionsPlugin{}
+			if err := sfnPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize stepfunctions plugin: %w", err)
+			}
+			registry.Register(sfnPlugin)
+
 			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
 
 			consistencyCtrl, err := substrate.NewConsistencyController(

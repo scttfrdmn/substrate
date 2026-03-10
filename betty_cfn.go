@@ -141,6 +141,9 @@ var typePriority = map[string]int{
 	"AWS::ApiGatewayV2::Integration":       3,
 	"AWS::ApiGatewayV2::Route":             3,
 	"AWS::ApiGatewayV2::Stage":             4,
+	// v0.20.0 — Step Functions.
+	"AWS::StepFunctions::Activity":     3,
+	"AWS::StepFunctions::StateMachine": 4,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -479,6 +482,11 @@ func (d *StackDeployer) deployResource(
 		return d.deployAPIGatewayV2Stage(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::ApiGatewayV2::Authorizer":
 		return d.deployAPIGatewayV2Authorizer(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.20.0 — Step Functions.
+	case "AWS::StepFunctions::StateMachine":
+		return d.deployStepFunctionsStateMachine(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::StepFunctions::Activity":
+		return d.deployStepFunctionsActivity(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -2074,6 +2082,12 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 		case "InvokeURL":
 			// AWS::ApiGateway::Stage GetAtt InvokeURL.
 			if v, ok := dr.Metadata["InvokeURL"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return dr.PhysicalID
+		case "Name":
+			// AWS::StepFunctions::StateMachine GetAtt Name.
+			if v, ok := dr.Metadata["Name"]; ok {
 				return fmt.Sprintf("%v", v)
 			}
 			return dr.PhysicalID

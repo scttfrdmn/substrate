@@ -285,6 +285,11 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return arn
 		}
 		return "*"
+	case "states":
+		if name := req.Params["name"]; name != "" {
+			return "arn:aws:states:" + region + ":" + acct + ":stateMachine:" + name
+		}
+		return "*"
 	default:
 		return "*"
 	}
