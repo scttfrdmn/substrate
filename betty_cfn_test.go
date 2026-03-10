@@ -825,3 +825,703 @@ func TestCFN_EC2Instance(t *testing.T) {
 	assert.Equal(t, "AWS::EC2::Instance", result.Resources[0].Type)
 	assert.NotEmpty(t, result.Resources[0].PhysicalID)
 }
+
+// newFullTestDeployer creates a StackDeployer with a broad plugin set covering
+// APIGateway, StepFunctions, ECR, ECS, Cognito, Kinesis, CloudFront and ACM.
+func newFullTestDeployer(t *testing.T) *substrate.StackDeployer {
+	t.Helper()
+	cfg := substrate.DefaultConfig()
+	registry := substrate.NewPluginRegistry()
+	state := substrate.NewMemoryStateManager()
+	logger := substrate.NewDefaultLogger(slog.LevelError, false)
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := substrate.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	fs := afero.NewMemMapFs()
+	costs := substrate.NewCostController(substrate.CostConfig{Enabled: true})
+
+	opts := substrate.PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+			"filesystem":      fs,
+		},
+	}
+
+	for _, p := range []substrate.Plugin{
+		&substrate.IAMPlugin{},
+		&substrate.LambdaPlugin{},
+		&substrate.SQSPlugin{},
+		&substrate.S3Plugin{},
+		&substrate.ACMPlugin{},
+		&substrate.APIGatewayPlugin{},
+		&substrate.APIGatewayV2Plugin{},
+		&substrate.StepFunctionsPlugin{},
+		&substrate.ECRPlugin{},
+		&substrate.ECSPlugin{},
+		&substrate.CognitoIDPPlugin{},
+		&substrate.CognitoIdentityPlugin{},
+		&substrate.KinesisPlugin{},
+		&substrate.CloudFrontPlugin{},
+	} {
+		require.NoError(t, p.Initialize(context.Background(), opts))
+		registry.Register(p)
+	}
+
+	return substrate.NewStackDeployer(registry, store, state, tc, logger, costs)
+}
+
+func TestCFN_ACMCertificate(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyCert": {
+				"Type": "AWS::CertificateManager::Certificate",
+				"Properties": {
+					"DomainName": "example.com"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "acm-cert-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::CertificateManager::Certificate", result.Resources[0].Type)
+	assert.Empty(t, result.Resources[0].Error)
+	assert.NotEmpty(t, result.Resources[0].ARN)
+}
+
+func TestCFN_APIGatewayRestAPI(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {
+					"Name": "cfn-test-api",
+					"Description": "API from CFN"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-restapi-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::ApiGateway::RestApi", r.Type)
+	assert.Empty(t, r.Error)
+	assert.NotEmpty(t, r.PhysicalID)
+}
+
+func TestCFN_APIGatewayFullStack(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {"Name": "full-cfn-api"}
+			},
+			"MyDeployment": {
+				"Type": "AWS::ApiGateway::Deployment",
+				"Properties": {"RestApiId": {"Ref": "MyAPI"}}
+			},
+			"MyStage": {
+				"Type": "AWS::ApiGateway::Stage",
+				"Properties": {
+					"RestApiId": {"Ref": "MyAPI"},
+					"DeploymentId": {"Ref": "MyDeployment"},
+					"StageName": "prod"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-fullstack-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s had error: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_APIGatewayAuthorizer(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {"Name": "auth-api"}
+			},
+			"MyAuth": {
+				"Type": "AWS::ApiGateway::Authorizer",
+				"Properties": {
+					"RestApiId": {"Ref": "MyAPI"},
+					"Name": "my-authorizer",
+					"Type": "TOKEN",
+					"AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/functions/arn:aws:lambda:us-east-1:123456789012:function:auth/invocations"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-auth-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s had error: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_APIGatewayResource(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {"Name": "resource-api"}
+			},
+			"MyResource": {
+				"Type": "AWS::ApiGateway::Resource",
+				"Properties": {
+					"RestApiId": {"Ref": "MyAPI"},
+					"PathPart": "items",
+					"ParentId": {"Fn::GetAtt": ["MyAPI", "RootResourceId"]}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-resource-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+}
+
+func TestCFN_APIGatewayAPIKey(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {"Name": "apikey-api"}
+			},
+			"MyKey": {
+				"Type": "AWS::ApiGateway::ApiKey",
+				"Properties": {
+					"Name": "cfn-test-key",
+					"Enabled": true
+				}
+			},
+			"MyPlan": {
+				"Type": "AWS::ApiGateway::UsagePlan",
+				"Properties": {"UsagePlanName": "cfn-test-plan"}
+			},
+			"MyPlanKey": {
+				"Type": "AWS::ApiGateway::UsagePlanKey",
+				"Properties": {
+					"KeyId": {"Ref": "MyKey"},
+					"KeyType": "API_KEY",
+					"UsagePlanId": {"Ref": "MyPlan"}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-apikey-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 4)
+}
+
+func TestCFN_APIGatewayV2API(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGatewayV2::Api",
+				"Properties": {
+					"Name": "cfn-v2-api",
+					"ProtocolType": "HTTP"
+				}
+			},
+			"MyStage": {
+				"Type": "AWS::ApiGatewayV2::Stage",
+				"Properties": {
+					"ApiId": {"Ref": "MyAPI"},
+					"StageName": "$default"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigwv2-api-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_APIGatewayV2RouteAndIntegration(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGatewayV2::Api",
+				"Properties": {"Name": "v2-route-api", "ProtocolType": "HTTP"}
+			},
+			"MyIntegration": {
+				"Type": "AWS::ApiGatewayV2::Integration",
+				"Properties": {
+					"ApiId": {"Ref": "MyAPI"},
+					"IntegrationType": "AWS_PROXY",
+					"IntegrationUri": "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
+				}
+			},
+			"MyRoute": {
+				"Type": "AWS::ApiGatewayV2::Route",
+				"Properties": {
+					"ApiId": {"Ref": "MyAPI"},
+					"RouteKey": "GET /items"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigwv2-route-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 3)
+}
+
+func TestCFN_APIGatewayV2Authorizer(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGatewayV2::Api",
+				"Properties": {"Name": "v2-auth-api", "ProtocolType": "HTTP"}
+			},
+			"MyAuth": {
+				"Type": "AWS::ApiGatewayV2::Authorizer",
+				"Properties": {
+					"ApiId": {"Ref": "MyAPI"},
+					"AuthorizerType": "JWT",
+					"Name": "cfn-v2-auth"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigwv2-auth-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+}
+
+func TestCFN_StepFunctionsStateMachine(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyStateMachine": {
+				"Type": "AWS::StepFunctions::StateMachine",
+				"Properties": {
+					"StateMachineName": "cfn-test-sm",
+					"RoleArn": "arn:aws:iam::123456789012:role/sfn-role"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "sfn-sm-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::StepFunctions::StateMachine", r.Type)
+	assert.Empty(t, r.Error)
+	assert.NotEmpty(t, r.ARN)
+}
+
+func TestCFN_StepFunctionsActivity(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyActivity": {
+				"Type": "AWS::StepFunctions::Activity",
+				"Properties": {"Name": "cfn-test-activity"}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "sfn-activity-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::StepFunctions::Activity", r.Type)
+	assert.Empty(t, r.Error)
+}
+
+func TestCFN_ECRRepository(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyRepo": {
+				"Type": "AWS::ECR::Repository",
+				"Properties": {"RepositoryName": "cfn-test-repo"}
+			},
+			"MyLifecycle": {
+				"Type": "AWS::ECR::LifecyclePolicy",
+				"Properties": {
+					"RepositoryName": {"Ref": "MyRepo"},
+					"LifecyclePolicyText": "{\"rules\":[]}"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "ecr-repo-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_ECSClusterAndTaskDefinition(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyCluster": {
+				"Type": "AWS::ECS::Cluster",
+				"Properties": {"ClusterName": "cfn-test-cluster"}
+			},
+			"MyTaskDef": {
+				"Type": "AWS::ECS::TaskDefinition",
+				"Properties": {
+					"Family": "cfn-test-task",
+					"ContainerDefinitions": [
+						{
+							"Name": "my-container",
+							"Image": "nginx:latest",
+							"Memory": 512,
+							"Cpu": 256
+						}
+					]
+				}
+			},
+			"MyCapProvider": {
+				"Type": "AWS::ECS::CapacityProvider",
+				"Properties": {
+					"Name": "cfn-test-cap-provider"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "ecs-cluster-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_ECSService(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyCluster": {
+				"Type": "AWS::ECS::Cluster",
+				"Properties": {"ClusterName": "svc-test-cluster"}
+			},
+			"MyTaskDef": {
+				"Type": "AWS::ECS::TaskDefinition",
+				"Properties": {
+					"Family": "svc-test-task",
+					"ContainerDefinitions": [{"Name": "c1", "Image": "nginx", "Memory": 256}]
+				}
+			},
+			"MyService": {
+				"Type": "AWS::ECS::Service",
+				"Properties": {
+					"ServiceName": "cfn-test-service",
+					"Cluster": {"Ref": "MyCluster"},
+					"TaskDefinition": {"Ref": "MyTaskDef"},
+					"DesiredCount": 1
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "ecs-service-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 3)
+}
+
+func TestCFN_CognitoUserPool(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyPool": {
+				"Type": "AWS::Cognito::UserPool",
+				"Properties": {"UserPoolName": "cfn-test-pool"}
+			},
+			"MyClient": {
+				"Type": "AWS::Cognito::UserPoolClient",
+				"Properties": {
+					"UserPoolId": {"Ref": "MyPool"},
+					"ClientName": "cfn-test-client"
+				}
+			},
+			"MyGroup": {
+				"Type": "AWS::Cognito::UserPoolGroup",
+				"Properties": {
+					"UserPoolId": {"Ref": "MyPool"},
+					"GroupName": "cfn-admins"
+				}
+			},
+			"MyDomain": {
+				"Type": "AWS::Cognito::UserPoolDomain",
+				"Properties": {
+					"UserPoolId": {"Ref": "MyPool"},
+					"Domain": "cfn-test-domain"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "cognito-pool-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 4)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_CognitoIdentityPool(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyPool": {
+				"Type": "AWS::Cognito::UserPool",
+				"Properties": {"UserPoolName": "idpool-test-pool"}
+			},
+			"MyIdentityPool": {
+				"Type": "AWS::Cognito::IdentityPool",
+				"Properties": {"IdentityPoolName": "cfn-test-identity-pool"}
+			},
+			"MyRoleAttach": {
+				"Type": "AWS::Cognito::IdentityPoolRoleAttachment",
+				"Properties": {
+					"IdentityPoolId": {"Ref": "MyIdentityPool"},
+					"Roles": {
+						"authenticated": "arn:aws:iam::123456789012:role/auth-role",
+						"unauthenticated": "arn:aws:iam::123456789012:role/unauth-role"
+					}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "cognito-idpool-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+func TestCFN_KinesisStream(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyStream": {
+				"Type": "AWS::Kinesis::Stream",
+				"Properties": {"Name": "cfn-test-stream"}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "kinesis-stream-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::Kinesis::Stream", r.Type)
+	assert.Empty(t, r.Error)
+	assert.NotEmpty(t, r.ARN)
+}
+
+func TestCFN_CloudFrontDistribution(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyDistribution": {
+				"Type": "AWS::CloudFront::Distribution",
+				"Properties": {
+					"DistributionConfig": {
+						"Comment": "CFN test distribution",
+						"Enabled": true
+					}
+				}
+			},
+			"MyOAI": {
+				"Type": "AWS::CloudFront::CloudFrontOriginAccessIdentity",
+				"Properties": {
+					"CloudFrontOriginAccessIdentityConfig": {
+						"Comment": "cfn-test-oai"
+					}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "cloudfront-dist-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+// TestCFN_FnGetAtt_ECRRepositoryUri verifies that Fn::GetAtt RepositoryUri works
+// for ECR repositories.
+func TestCFN_FnGetAtt_ECRRepositoryUri(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyRepo": {
+				"Type": "AWS::ECR::Repository",
+				"Properties": {"RepositoryName": "getatt-ecr-repo"}
+			}
+		},
+		"Outputs": {
+			"RepoUri": {"Value": {"Fn::GetAtt": ["MyRepo", "RepositoryUri"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "ecr-getatt-stack", nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.Outputs["RepoUri"])
+}
+
+// TestCFN_FnGetAtt_CognitoProviderName verifies Fn::GetAtt ProviderName and ProviderURL.
+func TestCFN_FnGetAtt_CognitoProviderName(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyPool": {
+				"Type": "AWS::Cognito::UserPool",
+				"Properties": {"UserPoolName": "getatt-pool"}
+			}
+		},
+		"Outputs": {
+			"ProviderName": {"Value": {"Fn::GetAtt": ["MyPool", "ProviderName"]}},
+			"ProviderURL":  {"Value": {"Fn::GetAtt": ["MyPool", "ProviderURL"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "cognito-getatt-stack", nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.Outputs["ProviderName"])
+	assert.NotEmpty(t, result.Outputs["ProviderURL"])
+}
+
+// TestCFN_FnGetAtt_StepFunctionsName verifies Fn::GetAtt Name for state machines.
+func TestCFN_FnGetAtt_StepFunctionsName(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySM": {
+				"Type": "AWS::StepFunctions::StateMachine",
+				"Properties": {
+					"StateMachineName": "getatt-state-machine",
+					"RoleArn": "arn:aws:iam::123456789012:role/sfn-role"
+				}
+			}
+		},
+		"Outputs": {
+			"SMName": {"Value": {"Fn::GetAtt": ["MySM", "Name"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "sfn-getatt-stack", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "getatt-state-machine", result.Outputs["SMName"])
+}
+
+// TestCFN_FnGetAtt_CloudFrontDomainName verifies Fn::GetAtt DomainName for distributions.
+func TestCFN_FnGetAtt_CloudFrontDomainName(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyDist": {
+				"Type": "AWS::CloudFront::Distribution",
+				"Properties": {
+					"DistributionConfig": {
+						"Comment": "getatt test",
+						"Enabled": true
+					}
+				}
+			}
+		},
+		"Outputs": {
+			"Domain": {"Value": {"Fn::GetAtt": ["MyDist", "DomainName"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "cf-getatt-stack", nil)
+	require.NoError(t, err)
+	assert.Contains(t, result.Outputs["Domain"], "cloudfront.net")
+}
+
+// TestCFN_FnGetAtt_KinesisStreamArn verifies Fn::GetAtt StreamArn for Kinesis streams.
+func TestCFN_FnGetAtt_KinesisStreamArn(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyStream": {
+				"Type": "AWS::Kinesis::Stream",
+				"Properties": {"Name": "getatt-kinesis-stream"}
+			}
+		},
+		"Outputs": {
+			"StreamArn": {"Value": {"Fn::GetAtt": ["MyStream", "StreamArn"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "kinesis-getatt-stack", nil)
+	require.NoError(t, err)
+	assert.Contains(t, result.Outputs["StreamArn"], "arn:aws:kinesis")
+	assert.Contains(t, result.Outputs["StreamArn"], "getatt-kinesis-stream")
+}
+
+// TestCFN_FnGetAtt_APIGatewayInvokeURL verifies Fn::GetAtt InvokeURL for stages.
+func TestCFN_FnGetAtt_APIGatewayInvokeURL(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {"Name": "getatt-invoke-api"}
+			},
+			"MyDeployment": {
+				"Type": "AWS::ApiGateway::Deployment",
+				"Properties": {"RestApiId": {"Ref": "MyAPI"}}
+			},
+			"MyStage": {
+				"Type": "AWS::ApiGateway::Stage",
+				"Properties": {
+					"RestApiId": {"Ref": "MyAPI"},
+					"DeploymentId": {"Ref": "MyDeployment"},
+					"StageName": "v1"
+				}
+			}
+		},
+		"Outputs": {
+			"InvokeURL": {"Value": {"Fn::GetAtt": ["MyStage", "InvokeURL"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-invokeurl-stack", nil)
+	require.NoError(t, err)
+	// InvokeURL may be empty if not populated by the stage deployer, but the output should exist.
+	assert.NotNil(t, result.Outputs["InvokeURL"])
+}

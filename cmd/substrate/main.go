@@ -359,6 +359,24 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(cognitoIdentityPlugin)
 
+			kinesisPlugin := &substrate.KinesisPlugin{}
+			if err := kinesisPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize kinesis plugin: %w", err)
+			}
+			registry.Register(kinesisPlugin)
+
+			cfPlugin := &substrate.CloudFrontPlugin{}
+			if err := cfPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize cloudfront plugin: %w", err)
+			}
+			registry.Register(cfPlugin)
+
 			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
 
 			consistencyCtrl, err := substrate.NewConsistencyController(

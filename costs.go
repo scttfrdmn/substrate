@@ -140,6 +140,9 @@ func defaultCostTable() map[string]float64 {
 		"ecr/PutImage": 0.000001,
 		// Cognito: ~$0.0055/MAU, approximated per auth call.
 		"cognito-idp/InitiateAuth": 0.000055,
+		// Kinesis: $0.014/1M records.
+		"kinesis/PutRecord":  0.000000014,
+		"kinesis/PutRecords": 0.000000014,
 	}
 }
 

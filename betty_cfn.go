@@ -158,6 +158,10 @@ var typePriority = map[string]int{
 	"AWS::Cognito::UserPoolGroup":              3,
 	"AWS::Cognito::UserPoolDomain":             4,
 	"AWS::Cognito::IdentityPoolRoleAttachment": 4,
+	// v0.23.0 — Kinesis and CloudFront.
+	"AWS::Kinesis::Stream":                            2,
+	"AWS::CloudFront::CloudFrontOriginAccessIdentity": 2,
+	"AWS::CloudFront::Distribution":                   3,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -527,6 +531,13 @@ func (d *StackDeployer) deployResource(
 		return d.deployCognitoIdentityPool(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Cognito::IdentityPoolRoleAttachment":
 		return d.deployCognitoIdentityPoolRoleAttachment(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.23.0 — Kinesis and CloudFront.
+	case "AWS::Kinesis::Stream":
+		return d.deployKinesisStream(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CloudFront::Distribution":
+		return d.deployCloudFrontDistribution(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CloudFront::CloudFrontOriginAccessIdentity":
+		return d.deployCloudFrontOAI(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -2147,6 +2158,18 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 			// AWS::Cognito::UserPool GetAtt ProviderURL.
 			if v, ok := dr.Metadata["ProviderURL"]; ok {
 				return fmt.Sprintf("%v", v)
+			}
+			return dr.PhysicalID
+		case "DomainName":
+			// AWS::CloudFront::Distribution GetAtt DomainName.
+			if v, ok := dr.Metadata["DomainName"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return dr.PhysicalID
+		case "StreamArn":
+			// AWS::Kinesis::Stream GetAtt StreamArn.
+			if dr.ARN != "" {
+				return dr.ARN
 			}
 			return dr.PhysicalID
 		default:

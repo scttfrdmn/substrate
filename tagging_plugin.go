@@ -251,6 +251,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "ecr", scan: p.scanECRRepositories},
 		{typePrefix: "ecs", scan: p.scanECSClusters},
 		{typePrefix: "cognito-idp", scan: p.scanCognitoUserPools},
+		{typePrefix: "kinesis", scan: p.scanKinesisStreams},
 	}
 
 	var all []resourceTagMapping
@@ -565,6 +566,31 @@ func (p *TaggingPlugin) scanCognitoUserPools(_ context.Context, reqCtx *RequestC
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanKinesisStreams(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "stream:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, kinesisNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list kinesis streams: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, kinesisNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var stream KinesisStream
+		if err := json.Unmarshal(raw, &stream); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: stream.StreamArn,
+			Tags:        mapToTaggingTags(stream.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -759,6 +785,13 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		acct := parts[4]
 		return cognitoIDPNamespace, "userpool:" + acct + "/" + region + "/" + poolID, nil
 
+	case "kinesis":
+		// arn:aws:kinesis:{region}:{acct}:stream/{name}
+		name := strings.TrimPrefix(resource, "stream/")
+		region := parts[3]
+		acct := parts[4]
+		return kinesisNamespace, "stream:" + acct + "/" + region + "/" + name, nil
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -888,6 +921,15 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		pool.Tags = mergeStringMap(pool.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(pool)
+		return p.state.Put(goCtx, ns, key, updated)
+
+	case kinesisNamespace:
+		var stream KinesisStream
+		if err := json.Unmarshal(raw, &stream); err != nil {
+			return fmt.Errorf("unmarshal KinesisStream: %w", err)
+		}
+		stream.Tags = mergeStringMap(stream.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(stream)
 		return p.state.Put(goCtx, ns, key, updated)
 
 	default:

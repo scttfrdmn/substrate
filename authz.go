@@ -310,6 +310,11 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return "arn:aws:cognito-identity:" + region + ":" + acct + ":identitypool/" + poolID
 		}
 		return "*"
+	case "kinesis":
+		if name := req.Params["StreamName"]; name != "" {
+			return "arn:aws:kinesis:" + region + ":" + acct + ":stream/" + name
+		}
+		return "*"
 	default:
 		return "*"
 	}

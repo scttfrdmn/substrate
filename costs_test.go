@@ -41,7 +41,7 @@ func TestCostController_KnownOperations(t *testing.T) {
 
 func TestCostController_Unknown_ReturnsZero(t *testing.T) {
 	ctrl := substrate.NewCostController(substrate.CostConfig{Enabled: true})
-	req := &substrate.AWSRequest{Service: "kinesis", Operation: "PutRecord"}
+	req := &substrate.AWSRequest{Service: "unknownservice", Operation: "UnknownOp"}
 	assert.Equal(t, 0.0, ctrl.CostForRequest(req))
 }
 

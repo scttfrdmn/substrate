@@ -871,3 +871,77 @@ func TestELB_DescribeLoadBalancerAttributes(t *testing.T) {
 		t.Fatalf("DescribeLoadBalancerAttributes: expected 200, got %d", resp.StatusCode)
 	}
 }
+
+func TestELB_ModifyLoadBalancerAttributes(t *testing.T) {
+	ts := newELBTestServer(t)
+	// Create a load balancer first.
+	lbResp := elbRequest(t, ts, map[string]string{
+		"Action": "CreateLoadBalancer",
+		"Name":   "test-lb-modify",
+		"Type":   "application",
+		"Scheme": "internet-facing",
+	})
+	defer lbResp.Body.Close() //nolint:errcheck
+	if lbResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateLoadBalancer: expected 200, got %d", lbResp.StatusCode)
+	}
+	var lbResult struct {
+		Result struct {
+			LoadBalancers []struct {
+				LoadBalancerArn string `xml:"LoadBalancerArn"`
+			} `xml:"LoadBalancers>member"`
+		} `xml:"CreateLoadBalancerResult"`
+	}
+	if err := xml.NewDecoder(lbResp.Body).Decode(&lbResult); err != nil {
+		t.Fatalf("decode load balancer: %v", err)
+	}
+	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
+
+	// Modify load balancer attributes.
+	modResp := elbRequest(t, ts, map[string]string{
+		"Action":                    "ModifyLoadBalancerAttributes",
+		"LoadBalancerArn":           lbARN,
+		"Attributes.member.1.Key":   "idle_timeout.timeout_seconds",
+		"Attributes.member.1.Value": "120",
+	})
+	defer modResp.Body.Close() //nolint:errcheck
+	if modResp.StatusCode != http.StatusOK {
+		t.Fatalf("ModifyLoadBalancerAttributes: expected 200, got %d", modResp.StatusCode)
+	}
+}
+
+func TestELB_ModifyTargetGroup(t *testing.T) {
+	ts := newELBTestServer(t)
+	// Create a target group first.
+	tgResp := elbRequest(t, ts, map[string]string{
+		"Action":   "CreateTargetGroup",
+		"Name":     "test-tg-modify",
+		"Protocol": "HTTP",
+		"Port":     "80",
+		"VpcId":    "vpc-12345678",
+	})
+	defer tgResp.Body.Close() //nolint:errcheck
+	var tgResult struct {
+		Result struct {
+			TargetGroups []struct {
+				TargetGroupArn string `xml:"TargetGroupArn"`
+			} `xml:"TargetGroups>member"`
+		} `xml:"CreateTargetGroupResult"`
+	}
+	if err := xml.NewDecoder(tgResp.Body).Decode(&tgResult); err != nil {
+		t.Fatalf("decode target group: %v", err)
+	}
+	tgARN := tgResult.Result.TargetGroups[0].TargetGroupArn
+
+	// Modify the target group.
+	modResp := elbRequest(t, ts, map[string]string{
+		"Action":              "ModifyTargetGroup",
+		"TargetGroupArn":      tgARN,
+		"HealthCheckPath":     "/health",
+		"HealthCheckProtocol": "HTTP",
+	})
+	defer modResp.Body.Close() //nolint:errcheck
+	if modResp.StatusCode != http.StatusOK {
+		t.Fatalf("ModifyTargetGroup: expected 200, got %d", modResp.StatusCode)
+	}
+}
