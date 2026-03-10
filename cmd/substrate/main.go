@@ -341,6 +341,24 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(ecsPlugin)
 
+			cognitoIDPPlugin := &substrate.CognitoIDPPlugin{}
+			if err := cognitoIDPPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize cognito-idp plugin: %w", err)
+			}
+			registry.Register(cognitoIDPPlugin)
+
+			cognitoIdentityPlugin := &substrate.CognitoIdentityPlugin{}
+			if err := cognitoIdentityPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize cognito-identity plugin: %w", err)
+			}
+			registry.Register(cognitoIdentityPlugin)
+
 			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
 
 			consistencyCtrl, err := substrate.NewConsistencyController(

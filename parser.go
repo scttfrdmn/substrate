@@ -124,6 +124,8 @@ var targetServiceAliases = map[string]string{
 	"awssecuritytokenservice": "sts",
 	// "AWSCognitoIdentityService" → no strip → "awscognitoidentityservice"
 	"awscognitoidentityservice": "cognito-identity",
+	// "AWSCognitoIdentityProviderService" → no strip → "awscognitoidentityproviderservice"
+	"awscognitoidentityproviderservice": "cognito-idp",
 	// "ResourceGroupsTaggingAPI_20170126" → strip version → "resourcegroupstaggingapi"
 	"resourcegroupstaggingapi": "tagging",
 	// "TrentService" is the internal code-name for KMS.

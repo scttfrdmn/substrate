@@ -250,6 +250,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "states", scan: p.scanStepFunctionsStateMachines},
 		{typePrefix: "ecr", scan: p.scanECRRepositories},
 		{typePrefix: "ecs", scan: p.scanECSClusters},
+		{typePrefix: "cognito-idp", scan: p.scanCognitoUserPools},
 	}
 
 	var all []resourceTagMapping
@@ -539,6 +540,31 @@ func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContex
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanCognitoUserPools(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "userpool:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, cognitoIDPNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list cognito user pools: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, cognitoIDPNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var pool CognitoUserPool
+		if err := json.Unmarshal(raw, &pool); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: pool.Arn,
+			Tags:        mapToTaggingTags(pool.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -726,6 +752,13 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		}
 		return "", "", fmt.Errorf("unsupported ECS resource type in ARN: %q", resource)
 
+	case "cognito-idp":
+		// arn:aws:cognito-idp:{region}:{acct}:userpool/{poolId}
+		poolID := strings.TrimPrefix(resource, "userpool/")
+		region := parts[3]
+		acct := parts[4]
+		return cognitoIDPNamespace, "userpool:" + acct + "/" + region + "/" + poolID, nil
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -846,6 +879,15 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		cluster.Tags = mergeECSTags(cluster.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(cluster)
+		return p.state.Put(goCtx, ns, key, updated)
+
+	case cognitoIDPNamespace:
+		var pool CognitoUserPool
+		if err := json.Unmarshal(raw, &pool); err != nil {
+			return fmt.Errorf("unmarshal CognitoUserPool: %w", err)
+		}
+		pool.Tags = mergeStringMap(pool.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(pool)
 		return p.state.Put(goCtx, ns, key, updated)
 
 	default:

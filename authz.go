@@ -300,6 +300,16 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return "arn:aws:ecs:" + region + ":" + acct + ":cluster/" + cluster
 		}
 		return "*"
+	case "cognito-idp":
+		if poolID := req.Params["UserPoolId"]; poolID != "" {
+			return "arn:aws:cognito-idp:" + region + ":" + acct + ":userpool/" + poolID
+		}
+		return "*"
+	case "cognito-identity":
+		if poolID := req.Params["IdentityPoolId"]; poolID != "" {
+			return "arn:aws:cognito-identity:" + region + ":" + acct + ":identitypool/" + poolID
+		}
+		return "*"
 	default:
 		return "*"
 	}

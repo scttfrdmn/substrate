@@ -138,6 +138,8 @@ func defaultCostTable() map[string]float64 {
 		"ecs/RunTask": 0.000025,
 		// ECR image storage stub.
 		"ecr/PutImage": 0.000001,
+		// Cognito: ~$0.0055/MAU, approximated per auth call.
+		"cognito-idp/InitiateAuth": 0.000055,
 	}
 }
 

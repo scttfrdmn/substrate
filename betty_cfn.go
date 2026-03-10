@@ -151,6 +151,13 @@ var typePriority = map[string]int{
 	"AWS::ECS::CapacityProvider": 3,
 	"AWS::ECS::TaskDefinition":   3,
 	"AWS::ECS::Service":          5,
+	// v0.22.0 — Cognito.
+	"AWS::Cognito::UserPool":                   2,
+	"AWS::Cognito::IdentityPool":               2,
+	"AWS::Cognito::UserPoolClient":             3,
+	"AWS::Cognito::UserPoolGroup":              3,
+	"AWS::Cognito::UserPoolDomain":             4,
+	"AWS::Cognito::IdentityPoolRoleAttachment": 4,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -507,6 +514,19 @@ func (d *StackDeployer) deployResource(
 		return d.deployECSService(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::ECS::CapacityProvider":
 		return d.deployECSCapacityProvider(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.22.0 — Cognito.
+	case "AWS::Cognito::UserPool":
+		return d.deployCognitoUserPool(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Cognito::UserPoolClient":
+		return d.deployCognitoUserPoolClient(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Cognito::UserPoolGroup":
+		return d.deployCognitoUserPoolGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Cognito::UserPoolDomain":
+		return d.deployCognitoUserPoolDomain(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Cognito::IdentityPool":
+		return d.deployCognitoIdentityPool(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Cognito::IdentityPoolRoleAttachment":
+		return d.deployCognitoIdentityPoolRoleAttachment(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -2117,6 +2137,18 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 				return fmt.Sprintf("%v", v)
 			}
 			return dr.ARN
+		case "ProviderName":
+			// AWS::Cognito::UserPool GetAtt ProviderName.
+			if v, ok := dr.Metadata["ProviderName"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return dr.PhysicalID
+		case "ProviderURL":
+			// AWS::Cognito::UserPool GetAtt ProviderURL.
+			if v, ok := dr.Metadata["ProviderURL"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return dr.PhysicalID
 		default:
 			return dr.PhysicalID
 		}
