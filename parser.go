@@ -133,6 +133,10 @@ var targetServiceAliases = map[string]string{
 	"events": "eventbridge",
 	// "CertificateManager" is the ACM target namespace prefix.
 	"certificatemanager": "acm",
+	// "AmazonEC2ContainerServiceV20141113" → strip "Amazon" → "ec2containerservicev20141113"
+	"ec2containerservicev20141113": "ecs",
+	// "AmazonEC2ContainerRegistry_V1_1_0" → strip "Amazon" → strip after "_" → "ec2containerregistry"
+	"ec2containerregistry": "ecr",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

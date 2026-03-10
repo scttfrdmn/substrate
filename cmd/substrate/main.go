@@ -323,6 +323,24 @@ configured address will have their requests emulated and recorded.`,
 			}
 			registry.Register(sfnPlugin)
 
+			ecrPlugin := &substrate.ECRPlugin{}
+			if err := ecrPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize ecr plugin: %w", err)
+			}
+			registry.Register(ecrPlugin)
+
+			ecsPlugin := &substrate.ECSPlugin{}
+			if err := ecsPlugin.Initialize(initCtx, substrate.PluginConfig{
+				State:  state,
+				Logger: logger,
+			}); err != nil {
+				return fmt.Errorf("initialize ecs plugin: %w", err)
+			}
+			registry.Register(ecsPlugin)
+
 			quotaCtrl := substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc)
 
 			consistencyCtrl, err := substrate.NewConsistencyController(

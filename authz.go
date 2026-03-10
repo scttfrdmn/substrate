@@ -290,6 +290,16 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return "arn:aws:states:" + region + ":" + acct + ":stateMachine:" + name
 		}
 		return "*"
+	case "ecr":
+		if name := req.Params["repositoryName"]; name != "" {
+			return "arn:aws:ecr:" + region + ":" + acct + ":repository/" + name
+		}
+		return "*"
+	case "ecs":
+		if cluster := req.Params["cluster"]; cluster != "" {
+			return "arn:aws:ecs:" + region + ":" + acct + ":cluster/" + cluster
+		}
+		return "*"
 	default:
 		return "*"
 	}

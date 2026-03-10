@@ -248,6 +248,8 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "iam", scan: p.scanIAMEntities},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
 		{typePrefix: "states", scan: p.scanStepFunctionsStateMachines},
+		{typePrefix: "ecr", scan: p.scanECRRepositories},
+		{typePrefix: "ecs", scan: p.scanECSClusters},
 	}
 
 	var all []resourceTagMapping
@@ -487,6 +489,56 @@ func (p *TaggingPlugin) scanStepFunctionsStateMachines(_ context.Context, reqCtx
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanECRRepositories(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "ecrrepo:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, ecrNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list ecr repositories: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ecrNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var repo ECRRepository
+		if err := json.Unmarshal(raw, &repo); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: repo.RepositoryArn,
+			Tags:        mapToTaggingTags(repo.Tags),
+		})
+	}
+	return out, nil
+}
+
+func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "cluster:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, ecsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list ecs clusters: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ecsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var cluster ECSCluster
+		if err := json.Unmarshal(raw, &cluster); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: cluster.ClusterArn,
+			Tags:        ecsTagsToTaggingTags(cluster.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -657,6 +709,23 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		acct := parts[4]
 		return statesNamespace, "statemachine:" + acct + "/" + region + "/" + name, nil
 
+	case "ecr":
+		// arn:aws:ecr:{region}:{acct}:repository/{name}
+		name := strings.TrimPrefix(resource, "repository/")
+		region := parts[3]
+		acct := parts[4]
+		return ecrNamespace, "ecrrepo:" + acct + "/" + region + "/" + name, nil
+
+	case "ecs":
+		// arn:aws:ecs:{region}:{acct}:cluster/{name}
+		if strings.HasPrefix(resource, "cluster/") {
+			name := strings.TrimPrefix(resource, "cluster/")
+			region := parts[3]
+			acct := parts[4]
+			return ecsNamespace, "cluster:" + acct + "/" + region + "/" + name, nil
+		}
+		return "", "", fmt.Errorf("unsupported ECS resource type in ARN: %q", resource)
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -761,6 +830,24 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		updated, _ := json.Marshal(sm)
 		return p.state.Put(goCtx, ns, key, updated)
 
+	case ecrNamespace:
+		var repo ECRRepository
+		if err := json.Unmarshal(raw, &repo); err != nil {
+			return fmt.Errorf("unmarshal ECRRepository: %w", err)
+		}
+		repo.Tags = mergeStringMap(repo.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(repo)
+		return p.state.Put(goCtx, ns, key, updated)
+
+	case ecsNamespace:
+		var cluster ECSCluster
+		if err := json.Unmarshal(raw, &cluster); err != nil {
+			return fmt.Errorf("unmarshal ECSCluster: %w", err)
+		}
+		cluster.Tags = mergeECSTags(cluster.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(cluster)
+		return p.state.Put(goCtx, ns, key, updated)
+
 	default:
 		return fmt.Errorf("unsupported namespace for tag merge: %s", ns)
 	}
@@ -856,6 +943,37 @@ func ec2TagsToTaggingTags(tags []EC2Tag) []taggingTag {
 	out := make([]taggingTag, len(tags))
 	for i, t := range tags {
 		out[i] = taggingTag(t)
+	}
+	return out
+}
+
+// ecsTagsToTaggingTags converts []ECSTag to []taggingTag.
+func ecsTagsToTaggingTags(tags []ECSTag) []taggingTag {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make([]taggingTag, len(tags))
+	for i, t := range tags {
+		out[i] = taggingTag{Key: t.Key, Value: t.Value} //nolint:staticcheck
+	}
+	return out
+}
+
+// mergeECSTags applies addTags and removeKeys to a []ECSTag slice.
+func mergeECSTags(existing []ECSTag, add map[string]string, removeKeys []string) []ECSTag {
+	m := make(map[string]string, len(existing))
+	for _, t := range existing {
+		m[t.Key] = t.Value
+	}
+	for k, v := range add {
+		m[k] = v
+	}
+	for _, k := range removeKeys {
+		delete(m, k)
+	}
+	out := make([]ECSTag, 0, len(m))
+	for k, v := range m {
+		out = append(out, ECSTag{Key: k, Value: v})
 	}
 	return out
 }

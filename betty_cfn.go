@@ -144,6 +144,13 @@ var typePriority = map[string]int{
 	// v0.20.0 — Step Functions.
 	"AWS::StepFunctions::Activity":     3,
 	"AWS::StepFunctions::StateMachine": 4,
+	// v0.21.0 — ECS and ECR.
+	"AWS::ECR::Repository":       2,
+	"AWS::ECR::LifecyclePolicy":  3,
+	"AWS::ECS::Cluster":          2,
+	"AWS::ECS::CapacityProvider": 3,
+	"AWS::ECS::TaskDefinition":   3,
+	"AWS::ECS::Service":          5,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -487,6 +494,19 @@ func (d *StackDeployer) deployResource(
 		return d.deployStepFunctionsStateMachine(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::StepFunctions::Activity":
 		return d.deployStepFunctionsActivity(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.21.0 — ECS and ECR.
+	case "AWS::ECR::Repository":
+		return d.deployECRRepository(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ECR::LifecyclePolicy":
+		return d.deployECRLifecyclePolicy(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ECS::Cluster":
+		return d.deployECSCluster(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ECS::TaskDefinition":
+		return d.deployECSTaskDefinition(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ECS::Service":
+		return d.deployECSService(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ECS::CapacityProvider":
+		return d.deployECSCapacityProvider(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -2091,6 +2111,12 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 				return fmt.Sprintf("%v", v)
 			}
 			return dr.PhysicalID
+		case "RepositoryUri":
+			// AWS::ECR::Repository GetAtt RepositoryUri.
+			if v, ok := dr.Metadata["RepositoryUri"]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return dr.ARN
 		default:
 			return dr.PhysicalID
 		}
