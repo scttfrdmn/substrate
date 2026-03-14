@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.24.0] - 2026-03-14
+
+### Added
+
+- `/_localstack/health` and `/_localstack/info` endpoints returning LocalStack-compatible service status JSON — enables Prism and other tools that poll for service readiness (#109).
+- `POST /v1/state/reset` HTTP endpoint for wiping all emulator state between tests (#108).
+- `StartTestServer(t *testing.T) *TestServer` Go helper for integration tests — starts an in-process server on a random port, registers all plugins, and registers `t.Cleanup` for automatic shutdown (#108).
+- `RegisterDefaultPlugins` exported function extracted from the server binary so testing helpers and custom embeddings can initialise the same plugin set (#108).
+- `substratelocal` CLI wrapper binary — injects `AWS_ENDPOINT_URL`, `LOCALSTACK_ENDPOINT`, and stub credentials into child process environment (#107).
+- Multi-arch Docker image (`linux/amd64` + `linux/arm64`) build support via `Dockerfile` and `.github/workflows/docker.yml`, published to `ghcr.io/scttfrdmn/substrate` on tag push (#106).
+- `docs/endpoint-configuration.md` — endpoint configuration reference for AWS CLI, Go SDK v2, boto3, Terraform, CDK, Prism, and Docker Compose (#110).
+
 ## [v0.23.0] - 2026-03-09
 
 ### Added
@@ -535,7 +547,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unused `ctx` parameters renamed to `_` across `eventstore.go` and `replay.go` to
   satisfy `revive` linter.
 
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.24.0...HEAD
+[v0.24.0]: https://github.com/scttfrdmn/substrate/compare/v0.23.0...v0.24.0
+[v0.23.0]: https://github.com/scttfrdmn/substrate/compare/v0.22.0...v0.23.0
+[v0.22.0]: https://github.com/scttfrdmn/substrate/compare/v0.21.0...v0.22.0
+[v0.21.0]: https://github.com/scttfrdmn/substrate/compare/v0.20.0...v0.21.0
+[v0.20.0]: https://github.com/scttfrdmn/substrate/compare/v0.19.0...v0.20.0
+[v0.19.0]: https://github.com/scttfrdmn/substrate/compare/v0.18.0...v0.19.0
+[v0.18.0]: https://github.com/scttfrdmn/substrate/compare/v0.17.0...v0.18.0
 [v0.18.0]: https://github.com/scttfrdmn/substrate/compare/v0.17.0...v0.18.0
 [v0.17.0]: https://github.com/scttfrdmn/substrate/compare/v0.16.0...v0.17.0
 [v0.16.0]: https://github.com/scttfrdmn/substrate/compare/v0.7.0...v0.16.0

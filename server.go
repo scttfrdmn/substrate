@@ -174,6 +174,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Get(healthPath, s.handleHealth)
 	r.Get(readyPath, s.handleReady)
 
+	r.Get("/_localstack/health", s.handleLocalStackHealth)
+	r.Get("/_localstack/info", s.handleLocalStackHealth)
+	r.Post("/v1/state/reset", s.handleStateReset)
+
 	if s.opts.Metrics != nil && s.config.Metrics.Enabled {
 		metricsPath := s.config.Metrics.Path
 		if metricsPath == "" {
@@ -184,6 +188,44 @@ func (s *Server) buildRouter() *chi.Mux {
 
 	r.HandleFunc("/*", s.handleAWSRequest)
 	return r
+}
+
+// handleLocalStackHealth returns a LocalStack-compatible health response listing
+// all registered plugins as available services. This allows tools that poll
+// /_localstack/health (e.g. Prism) to use Substrate as a drop-in replacement.
+func (s *Server) handleLocalStackHealth(w http.ResponseWriter, _ *http.Request) {
+	names := s.registry.Names()
+	services := make(map[string]string, len(names))
+	for _, name := range names {
+		services[name] = "available"
+	}
+	resp := struct {
+		Services map[string]string `json:"services"`
+		Version  string            `json:"version"`
+	}{Services: services, Version: Version}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.logger.Warn("failed to write localstack health response", "err", err)
+	}
+}
+
+// handleStateReset wipes all emulator state. Only available when the
+// [StateManager] implements [SnapshotableStateManager]. Returns 501 otherwise.
+// Primarily used by [TestServer.ResetState] between test cases.
+func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
+	sm, ok := s.state.(SnapshotableStateManager)
+	if !ok {
+		http.Error(w, `{"error":"state manager does not support reset"}`, http.StatusNotImplemented)
+		return
+	}
+	if err := sm.Reset(r.Context()); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 // handleMetrics writes a Prometheus text-format v0.0.4 metrics snapshot.

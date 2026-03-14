@@ -1,10 +1,20 @@
-.PHONY: build test lint coverage clean tidy vet bench e2e
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate.Version=$(VERSION)"
 
-build: ## Build the substrate binary
+build: build-substrate build-substratelocal ## Build all binaries
+
+build-substrate: ## Build the substrate binary
 	go build $(LDFLAGS) -o bin/substrate ./cmd/substrate
+
+build-substratelocal: ## Build the substratelocal wrapper binary
+	go build -o bin/substratelocal ./cmd/substratelocal
+
+docker-build: ## Build multi-arch Docker image (requires docker buildx)
+	docker buildx build --platform linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(VERSION) \
+		-t ghcr.io/scttfrdmn/substrate:$(VERSION) .
 
 test: ## Run tests with race detector
 	go test -race -count=1 ./...
