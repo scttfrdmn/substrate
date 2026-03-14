@@ -252,6 +252,8 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "ecs", scan: p.scanECSClusters},
 		{typePrefix: "cognito-idp", scan: p.scanCognitoUserPools},
 		{typePrefix: "kinesis", scan: p.scanKinesisStreams},
+		{typePrefix: "rds", scan: p.scanRDSInstances},
+		{typePrefix: "elasticache", scan: p.scanElastiCacheClusters},
 	}
 
 	var all []resourceTagMapping
@@ -591,6 +593,56 @@ func (p *TaggingPlugin) scanKinesisStreams(_ context.Context, reqCtx *RequestCon
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanRDSInstances(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "dbinstance:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, rdsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list rds instances: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, rdsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var inst RDSDBInstance
+		if err := json.Unmarshal(raw, &inst); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: inst.DBInstanceArn,
+			Tags:        mapToTaggingTags(inst.Tags),
+		})
+	}
+	return out, nil
+}
+
+func (p *TaggingPlugin) scanElastiCacheClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "cachecluster:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, elasticacheNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list elasticache clusters: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, elasticacheNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var cluster ElastiCacheCacheCluster
+		if err := json.Unmarshal(raw, &cluster); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: cluster.CacheClusterARN,
+			Tags:        mapToTaggingTags(cluster.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -792,6 +844,26 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		acct := parts[4]
 		return kinesisNamespace, "stream:" + acct + "/" + region + "/" + name, nil
 
+	case "rds":
+		// arn:aws:rds:{region}:{acct}:db:{id}
+		if strings.HasPrefix(resource, "db:") {
+			id := strings.TrimPrefix(resource, "db:")
+			region := parts[3]
+			acct := parts[4]
+			return rdsNamespace, "dbinstance:" + acct + "/" + region + "/" + id, nil
+		}
+		return "", "", fmt.Errorf("unsupported RDS resource type in ARN: %q", resource)
+
+	case "elasticache":
+		// arn:aws:elasticache:{region}:{acct}:cluster:{id}
+		if strings.HasPrefix(resource, "cluster:") {
+			id := strings.TrimPrefix(resource, "cluster:")
+			region := parts[3]
+			acct := parts[4]
+			return elasticacheNamespace, "cachecluster:" + acct + "/" + region + "/" + id, nil
+		}
+		return "", "", fmt.Errorf("unsupported ElastiCache resource type in ARN: %q", resource)
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -930,6 +1002,24 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		stream.Tags = mergeStringMap(stream.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(stream)
+		return p.state.Put(goCtx, ns, key, updated)
+
+	case rdsNamespace:
+		var inst RDSDBInstance
+		if err := json.Unmarshal(raw, &inst); err != nil {
+			return fmt.Errorf("unmarshal RDSDBInstance: %w", err)
+		}
+		inst.Tags = mergeStringMap(inst.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(inst)
+		return p.state.Put(goCtx, ns, key, updated)
+
+	case elasticacheNamespace:
+		var cluster ElastiCacheCacheCluster
+		if err := json.Unmarshal(raw, &cluster); err != nil {
+			return fmt.Errorf("unmarshal ElastiCacheCacheCluster: %w", err)
+		}
+		cluster.Tags = mergeStringMap(cluster.Tags, addTags, removeKeys)
+		updated, _ := json.Marshal(cluster)
 		return p.state.Put(goCtx, ns, key, updated)
 
 	default:

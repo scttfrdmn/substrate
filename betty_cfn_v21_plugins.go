@@ -247,4 +247,3 @@ func (d *StackDeployer) deployECSCapacityProvider(
 		PhysicalID: name,
 	}, 0, nil
 }
-

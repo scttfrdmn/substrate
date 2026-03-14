@@ -240,4 +240,3 @@ func (d *StackDeployer) deployCognitoIdentityPoolRoleAttachment(
 	}
 	return dr, cost, nil
 }
-

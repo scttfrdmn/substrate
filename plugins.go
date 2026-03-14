@@ -275,5 +275,25 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(cfPlugin)
 
+	rdsPlugin := &RDSPlugin{}
+	if err := rdsPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize rds plugin: %w", err)
+	}
+	registry.Register(rdsPlugin)
+
+	elasticachePlugin := &ElastiCachePlugin{}
+	if err := elasticachePlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize elasticache plugin: %w", err)
+	}
+	registry.Register(elasticachePlugin)
+
 	return nil
 }

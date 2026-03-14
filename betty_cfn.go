@@ -538,6 +538,21 @@ func (d *StackDeployer) deployResource(
 		return d.deployCloudFrontDistribution(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::CloudFront::CloudFrontOriginAccessIdentity":
 		return d.deployCloudFrontOAI(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.25.0 — RDS and ElastiCache.
+	case "AWS::RDS::DBSubnetGroup":
+		return d.deployRDSDBSubnetGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::RDS::DBParameterGroup":
+		return d.deployRDSDBParameterGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::RDS::DBInstance":
+		return d.deployRDSDBInstance(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ElastiCache::SubnetGroup":
+		return d.deployElastiCacheSubnetGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ElastiCache::ParameterGroup":
+		return d.deployElastiCacheParameterGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ElastiCache::CacheCluster":
+		return d.deployElastiCacheCacheCluster(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ElastiCache::ReplicationGroup":
+		return d.deployElastiCacheReplicationGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -2170,6 +2185,15 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 			// AWS::Kinesis::Stream GetAtt StreamArn.
 			if dr.ARN != "" {
 				return dr.ARN
+			}
+			return dr.PhysicalID
+		case "Endpoint.Address", "Endpoint.Port",
+			"ConfigurationEndpoint.Address", "ConfigurationEndpoint.Port",
+			"RedisEndPoint.Address", "RedisEndPoint.Port",
+			"PrimaryEndPoint.Address", "PrimaryEndPoint.Port":
+			// AWS::RDS::DBInstance and AWS::ElastiCache::* endpoint GetAtts.
+			if v, ok := dr.Metadata[attr]; ok {
+				return fmt.Sprintf("%v", v)
 			}
 			return dr.PhysicalID
 		default:

@@ -143,6 +143,13 @@ func defaultCostTable() map[string]float64 {
 		// Kinesis: $0.014/1M records.
 		"kinesis/PutRecord":  0.000000014,
 		"kinesis/PutRecords": 0.000000014,
+		// RDS: per-instance-hour prorated per API call.
+		"rds/CreateDBInstance": 0.0001,
+		"rds/CreateDBSnapshot": 0.00002,
+		"rds/ModifyDBInstance": 0.0001,
+		// ElastiCache: per-node-hour prorated per API call.
+		"elasticache/CreateCacheCluster":     0.0001,
+		"elasticache/CreateReplicationGroup": 0.0001,
 	}
 }
 

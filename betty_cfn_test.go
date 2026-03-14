@@ -863,6 +863,8 @@ func newFullTestDeployer(t *testing.T) *substrate.StackDeployer {
 		&substrate.CognitoIdentityPlugin{},
 		&substrate.KinesisPlugin{},
 		&substrate.CloudFrontPlugin{},
+		&substrate.RDSPlugin{},
+		&substrate.ElastiCachePlugin{},
 	} {
 		require.NoError(t, p.Initialize(context.Background(), opts))
 		registry.Register(p)
@@ -1524,4 +1526,153 @@ func TestCFN_FnGetAtt_APIGatewayInvokeURL(t *testing.T) {
 	require.NoError(t, err)
 	// InvokeURL may be empty if not populated by the stage deployer, but the output should exist.
 	assert.NotNil(t, result.Outputs["InvokeURL"])
+}
+
+// ----- v0.25.0 — RDS and ElastiCache CFN tests -----
+
+// TestCFN_RDSDBInstance verifies that an RDS DB instance can be deployed via CFN.
+func TestCFN_RDSDBInstance(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySG": {
+				"Type": "AWS::RDS::DBSubnetGroup",
+				"Properties": {
+					"DBSubnetGroupName": "cfn-rds-sg",
+					"DBSubnetGroupDescription": "CFN test subnet group"
+				}
+			},
+			"MyPG": {
+				"Type": "AWS::RDS::DBParameterGroup",
+				"Properties": {
+					"DBParameterGroupName": "cfn-rds-pg",
+					"Family": "mysql8.0",
+					"Description": "CFN test param group"
+				}
+			},
+			"MyDB": {
+				"Type": "AWS::RDS::DBInstance",
+				"Properties": {
+					"DBInstanceIdentifier": "cfn-rds-db",
+					"DBInstanceClass": "db.t3.micro",
+					"Engine": "mysql",
+					"MasterUsername": "admin",
+					"AllocatedStorage": "20",
+					"DBSubnetGroupName": {"Ref": "MySG"}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "rds-db-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+	// Find DB instance resource and verify ARN is set.
+	for _, r := range result.Resources {
+		if r.Type == "AWS::RDS::DBInstance" {
+			assert.NotEmpty(t, r.ARN)
+			assert.Contains(t, r.ARN, "arn:aws:rds")
+		}
+	}
+}
+
+// TestCFN_FnGetAtt_RDSEndpoint verifies Fn::GetAtt Endpoint.Address for RDS instances.
+func TestCFN_FnGetAtt_RDSEndpoint(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyDB": {
+				"Type": "AWS::RDS::DBInstance",
+				"Properties": {
+					"DBInstanceIdentifier": "getatt-rds-db",
+					"DBInstanceClass": "db.t3.micro",
+					"Engine": "postgres"
+				}
+			}
+		},
+		"Outputs": {
+			"DBEndpoint": {"Value": {"Fn::GetAtt": ["MyDB", "Endpoint.Address"]}}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "rds-getatt-stack", nil)
+	require.NoError(t, err)
+	assert.Contains(t, result.Outputs["DBEndpoint"], "getatt-rds-db")
+	assert.Contains(t, result.Outputs["DBEndpoint"], "rds.")
+}
+
+// TestCFN_ElastiCacheCacheCluster verifies ElastiCache cluster deployment via CFN.
+func TestCFN_ElastiCacheCacheCluster(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySubnetGroup": {
+				"Type": "AWS::ElastiCache::SubnetGroup",
+				"Properties": {
+					"CacheSubnetGroupName": "cfn-ec-sg",
+					"Description": "CFN test ElastiCache subnet group"
+				}
+			},
+			"MyParamGroup": {
+				"Type": "AWS::ElastiCache::ParameterGroup",
+				"Properties": {
+					"CacheParameterGroupName": "cfn-ec-pg",
+					"CacheParameterGroupFamily": "redis7",
+					"Description": "CFN test param group"
+				}
+			},
+			"MyCluster": {
+				"Type": "AWS::ElastiCache::CacheCluster",
+				"Properties": {
+					"ClusterId": "cfn-ec-cluster",
+					"Engine": "redis",
+					"CacheNodeType": "cache.t3.micro",
+					"NumCacheNodes": "1"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "elasticache-cluster-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+	// Verify cluster ARN is set.
+	for _, r := range result.Resources {
+		if r.Type == "AWS::ElastiCache::CacheCluster" {
+			assert.NotEmpty(t, r.ARN)
+			assert.Contains(t, r.ARN, "arn:aws:elasticache")
+		}
+	}
+}
+
+// TestCFN_ElastiCacheReplicationGroup verifies replication group deployment via CFN.
+func TestCFN_ElastiCacheReplicationGroup(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyRG": {
+				"Type": "AWS::ElastiCache::ReplicationGroup",
+				"Properties": {
+					"ReplicationGroupId": "cfn-ec-rg",
+					"ReplicationGroupDescription": "CFN test replication group",
+					"AutomaticFailoverEnabled": "true"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "elasticache-rg-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::ElastiCache::ReplicationGroup", r.Type)
+	assert.Empty(t, r.Error)
+	assert.NotEmpty(t, r.ARN)
+	assert.Contains(t, r.ARN, "arn:aws:elasticache")
 }

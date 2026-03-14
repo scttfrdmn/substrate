@@ -315,6 +315,16 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return "arn:aws:kinesis:" + region + ":" + acct + ":stream/" + name
 		}
 		return "*"
+	case "rds":
+		if id := req.Params["DBInstanceIdentifier"]; id != "" {
+			return "arn:aws:rds:" + region + ":" + acct + ":db:" + id
+		}
+		return "*"
+	case "elasticache":
+		if id := req.Params["CacheClusterId"]; id != "" {
+			return "arn:aws:elasticache:" + region + ":" + acct + ":cluster:" + id
+		}
+		return "*"
 	default:
 		return "*"
 	}

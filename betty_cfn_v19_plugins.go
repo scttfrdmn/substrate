@@ -631,4 +631,3 @@ func (d *StackDeployer) deployAPIGatewayV2Authorizer(
 	}
 	return dr, cost, nil
 }
-
