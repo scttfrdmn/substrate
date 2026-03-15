@@ -150,6 +150,17 @@ func defaultCostTable() map[string]float64 {
 		// ElastiCache: per-node-hour prorated per API call.
 		"elasticache/CreateCacheCluster":     0.0001,
 		"elasticache/CreateReplicationGroup": 0.0001,
+		// EFS: per-GB-month prorated per API call.
+		"elasticfilesystem/CreateFileSystem":  0.00003,
+		"elasticfilesystem/CreateAccessPoint": 0.00001,
+		"elasticfilesystem/CreateMountTarget": 0.00001,
+		// Glue: per-DPU-hour prorated per API call.
+		"glue/CreateDatabase": 0.00002,
+		"glue/CreateJob":      0.0001,
+		"glue/StartJobRun":    0.0001,
+		"glue/CreateCrawler":  0.0001,
+		// Budgets: $0.02 per budget per month, approximated per-API call.
+		"budgets/CreateBudget": 0.00001,
 	}
 }
 

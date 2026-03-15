@@ -1017,3 +1017,117 @@ func TestTagging_TagResources_CognitoUserPool(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &pool))
 	assert.Equal(t, "us-east-1", pool.Tags["Region"])
 }
+
+func putTestEFSFileSystem(t *testing.T, state substrate.StateManager, fsID string, tags []substrate.EFSTag) {
+	t.Helper()
+	fs := substrate.EFSFileSystem{
+		FileSystemID:   fsID,
+		FileSystemArn:  "arn:aws:elasticfilesystem:us-east-1:" + taggingTestAccountID + ":file-system/" + fsID,
+		OwnerID:        taggingTestAccountID,
+		LifeCycleState: "available",
+		Tags:           tags,
+		AccountID:      taggingTestAccountID,
+		Region:         "us-east-1",
+	}
+	raw, _ := json.Marshal(fs)
+	require.NoError(t, state.Put(context.Background(), "efs", "filesystem:"+taggingTestAccountID+"/us-east-1/"+fsID, raw))
+}
+
+func putTestGlueDatabase(t *testing.T, state substrate.StateManager, name string, tags map[string]string) {
+	t.Helper()
+	db := substrate.GlueDatabase{
+		Name:      name,
+		Arn:       "arn:aws:glue:us-east-1:" + taggingTestAccountID + ":database/" + name,
+		Tags:      tags,
+		AccountID: taggingTestAccountID,
+		Region:    "us-east-1",
+	}
+	raw, _ := json.Marshal(db)
+	require.NoError(t, state.Put(context.Background(), "glue", "database:"+taggingTestAccountID+"/us-east-1/"+name, raw))
+}
+
+func TestTagging_GetResources_EFSFileSystem(t *testing.T) {
+	ts, state := newTaggingTestServer(t)
+	putTestEFSFileSystem(t, state, "fs-abc12345", []substrate.EFSTag{{Key: "Name", Value: "my-fs"}})
+
+	resp := taggingRequest(t, ts, "GetResources", map[string]any{
+		"ResourceTypeFilters": []string{"elasticfilesystem:file-system"},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	list, _ := out["ResourceTagMappingList"].([]any)
+	require.Len(t, list, 1)
+	rm := list[0].(map[string]any)
+	assert.Contains(t, rm["ResourceARN"].(string), "fs-abc12345")
+}
+
+func TestTagging_TagResources_EFSFileSystem(t *testing.T) {
+	ts, state := newTaggingTestServer(t)
+	putTestEFSFileSystem(t, state, "fs-tagtag1", nil)
+
+	resp := taggingRequest(t, ts, "TagResources", map[string]any{
+		"ResourceARNList": []string{"arn:aws:elasticfilesystem:us-east-1:" + taggingTestAccountID + ":file-system/fs-tagtag1"},
+		"Tags":            map[string]string{"Env": "prod"},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	assert.Empty(t, out["FailedResourcesMap"])
+
+	raw, err := state.Get(context.Background(), "efs", "filesystem:"+taggingTestAccountID+"/us-east-1/fs-tagtag1")
+	require.NoError(t, err)
+	var fs substrate.EFSFileSystem
+	require.NoError(t, json.Unmarshal(raw, &fs))
+	var found bool
+	for _, tag := range fs.Tags {
+		if tag.Key == "Env" && tag.Value == "prod" {
+			found = true
+		}
+	}
+	assert.True(t, found, "expected Env=prod tag")
+}
+
+func TestTagging_GetResources_GlueDatabase(t *testing.T) {
+	ts, state := newTaggingTestServer(t)
+	putTestGlueDatabase(t, state, "tag-glue-db", map[string]string{"Project": "etl"})
+
+	resp := taggingRequest(t, ts, "GetResources", map[string]any{
+		"ResourceTypeFilters": []string{"glue:database"},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	list, _ := out["ResourceTagMappingList"].([]any)
+	require.Len(t, list, 1)
+	rm := list[0].(map[string]any)
+	assert.Contains(t, rm["ResourceARN"].(string), "tag-glue-db")
+}
+
+func TestTagging_TagResources_GlueDatabase(t *testing.T) {
+	ts, state := newTaggingTestServer(t)
+	putTestGlueDatabase(t, state, "tag-glue-db2", nil)
+
+	resp := taggingRequest(t, ts, "TagResources", map[string]any{
+		"ResourceARNList": []string{"arn:aws:glue:us-east-1:" + taggingTestAccountID + ":database/tag-glue-db2"},
+		"Tags":            map[string]string{"Cost": "etl"},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	assert.Empty(t, out["FailedResourcesMap"])
+
+	raw, err := state.Get(context.Background(), "glue", "database:"+taggingTestAccountID+"/us-east-1/tag-glue-db2")
+	require.NoError(t, err)
+	var db substrate.GlueDatabase
+	require.NoError(t, json.Unmarshal(raw, &db))
+	assert.Equal(t, "etl", db.Tags["Cost"])
+}

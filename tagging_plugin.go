@@ -254,6 +254,8 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "kinesis", scan: p.scanKinesisStreams},
 		{typePrefix: "rds", scan: p.scanRDSInstances},
 		{typePrefix: "elasticache", scan: p.scanElastiCacheClusters},
+		{typePrefix: "elasticfilesystem", scan: p.scanEFSFileSystems},
+		{typePrefix: "glue", scan: p.scanGlueDatabases},
 	}
 
 	var all []resourceTagMapping
@@ -643,6 +645,56 @@ func (p *TaggingPlugin) scanElastiCacheClusters(_ context.Context, reqCtx *Reque
 	return out, nil
 }
 
+func (p *TaggingPlugin) scanEFSFileSystems(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "filesystem:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, efsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list efs filesystems: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, efsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var fs EFSFileSystem
+		if err := json.Unmarshal(raw, &fs); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: fs.FileSystemArn,
+			Tags:        efsTagsToTaggingTags(fs.Tags),
+		})
+	}
+	return out, nil
+}
+
+func (p *TaggingPlugin) scanGlueDatabases(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := "database:" + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, glueNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list glue databases: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, glueNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var db GlueDatabase
+		if err := json.Unmarshal(raw, &db); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: db.Arn,
+			Tags:        mapToTaggingTags(db.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -864,6 +916,42 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		}
 		return "", "", fmt.Errorf("unsupported ElastiCache resource type in ARN: %q", resource)
 
+	case "elasticfilesystem":
+		// arn:aws:elasticfilesystem:{region}:{acct}:file-system/{id}
+		region := parts[3]
+		acct := parts[4]
+		if strings.HasPrefix(resource, "file-system/") {
+			id := strings.TrimPrefix(resource, "file-system/")
+			return efsNamespace, "filesystem:" + acct + "/" + region + "/" + id, nil
+		}
+		if strings.HasPrefix(resource, "access-point/") {
+			id := strings.TrimPrefix(resource, "access-point/")
+			return efsNamespace, "accesspoint:" + acct + "/" + region + "/" + id, nil
+		}
+		return "", "", fmt.Errorf("unsupported EFS resource type in ARN: %q", resource)
+
+	case "glue":
+		// arn:aws:glue:{region}:{acct}:{type}/{name}
+		region := parts[3]
+		acct := parts[4]
+		if strings.HasPrefix(resource, "database/") {
+			name := strings.TrimPrefix(resource, "database/")
+			return glueNamespace, "database:" + acct + "/" + region + "/" + name, nil
+		}
+		if strings.HasPrefix(resource, "job/") {
+			name := strings.TrimPrefix(resource, "job/")
+			return glueNamespace, "job:" + acct + "/" + region + "/" + name, nil
+		}
+		if strings.HasPrefix(resource, "crawler/") {
+			name := strings.TrimPrefix(resource, "crawler/")
+			return glueNamespace, "crawler:" + acct + "/" + region + "/" + name, nil
+		}
+		if strings.HasPrefix(resource, "connection/") {
+			name := strings.TrimPrefix(resource, "connection/")
+			return glueNamespace, "connection:" + acct + "/" + region + "/" + name, nil
+		}
+		return "", "", fmt.Errorf("unsupported Glue resource type in ARN: %q", resource)
+
 	default:
 		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
 	}
@@ -1022,6 +1110,66 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		updated, _ := json.Marshal(cluster)
 		return p.state.Put(goCtx, ns, key, updated)
 
+	case efsNamespace:
+		if strings.HasPrefix(key, "filesystem:") {
+			var fs EFSFileSystem
+			if err := json.Unmarshal(raw, &fs); err != nil {
+				return fmt.Errorf("unmarshal EFSFileSystem: %w", err)
+			}
+			fs.Tags = mergeEFSTags(fs.Tags, addTags, removeKeys)
+			updated, _ := json.Marshal(fs)
+			return p.state.Put(goCtx, ns, key, updated)
+		}
+		if strings.HasPrefix(key, "accesspoint:") {
+			var ap EFSAccessPoint
+			if err := json.Unmarshal(raw, &ap); err != nil {
+				return fmt.Errorf("unmarshal EFSAccessPoint: %w", err)
+			}
+			ap.Tags = mergeEFSTags(ap.Tags, addTags, removeKeys)
+			updated, _ := json.Marshal(ap)
+			return p.state.Put(goCtx, ns, key, updated)
+		}
+		return fmt.Errorf("unsupported EFS resource key: %s", key)
+
+	case glueNamespace:
+		if strings.HasPrefix(key, "database:") {
+			var db GlueDatabase
+			if err := json.Unmarshal(raw, &db); err != nil {
+				return fmt.Errorf("unmarshal GlueDatabase: %w", err)
+			}
+			db.Tags = mergeStringMap(db.Tags, addTags, removeKeys)
+			updated, _ := json.Marshal(db)
+			return p.state.Put(goCtx, ns, key, updated)
+		}
+		if strings.HasPrefix(key, "job:") {
+			var job GlueJob
+			if err := json.Unmarshal(raw, &job); err != nil {
+				return fmt.Errorf("unmarshal GlueJob: %w", err)
+			}
+			job.Tags = mergeStringMap(job.Tags, addTags, removeKeys)
+			updated, _ := json.Marshal(job)
+			return p.state.Put(goCtx, ns, key, updated)
+		}
+		if strings.HasPrefix(key, "crawler:") {
+			var crawler GlueCrawler
+			if err := json.Unmarshal(raw, &crawler); err != nil {
+				return fmt.Errorf("unmarshal GlueCrawler: %w", err)
+			}
+			crawler.Tags = mergeStringMap(crawler.Tags, addTags, removeKeys)
+			updated, _ := json.Marshal(crawler)
+			return p.state.Put(goCtx, ns, key, updated)
+		}
+		if strings.HasPrefix(key, "connection:") {
+			var conn GlueConnection
+			if err := json.Unmarshal(raw, &conn); err != nil {
+				return fmt.Errorf("unmarshal GlueConnection: %w", err)
+			}
+			conn.Tags = mergeStringMap(conn.Tags, addTags, removeKeys)
+			updated, _ := json.Marshal(conn)
+			return p.state.Put(goCtx, ns, key, updated)
+		}
+		return fmt.Errorf("unsupported Glue resource key: %s", key)
+
 	default:
 		return fmt.Errorf("unsupported namespace for tag merge: %s", ns)
 	}
@@ -1148,6 +1296,36 @@ func mergeECSTags(existing []ECSTag, add map[string]string, removeKeys []string)
 	out := make([]ECSTag, 0, len(m))
 	for k, v := range m {
 		out = append(out, ECSTag{Key: k, Value: v})
+	}
+	return out
+}
+
+func efsTagsToTaggingTags(tags []EFSTag) []taggingTag {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make([]taggingTag, len(tags))
+	for i, t := range tags {
+		out[i] = taggingTag(t)
+	}
+	return out
+}
+
+// mergeEFSTags applies addTags and removeKeys to a []EFSTag slice.
+func mergeEFSTags(existing []EFSTag, add map[string]string, removeKeys []string) []EFSTag {
+	m := make(map[string]string, len(existing))
+	for _, t := range existing {
+		m[t.Key] = t.Value
+	}
+	for k, v := range add {
+		m[k] = v
+	}
+	for _, k := range removeKeys {
+		delete(m, k)
+	}
+	out := make([]EFSTag, 0, len(m))
+	for k, v := range m {
+		out = append(out, EFSTag{Key: k, Value: v})
 	}
 	return out
 }

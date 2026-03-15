@@ -8,12 +8,15 @@ import (
 // RegisterDefaultPlugins initialises and registers all built-in service plugins
 // into registry. This function is called by both the server binary and
 // [StartTestServer] so the same plugin set is always available.
+// store is optional; pass nil when the EventStore is unavailable (e.g. in
+// test helpers that do not need cost-derived data in the Cost Explorer plugin).
 func RegisterDefaultPlugins(
 	ctx context.Context,
 	registry *PluginRegistry,
 	state StateManager,
 	tc *TimeController,
 	logger Logger,
+	store *EventStore,
 ) error {
 	iamPlugin := &IAMPlugin{}
 	if err := iamPlugin.Initialize(ctx, PluginConfig{State: state, Logger: logger}); err != nil {
@@ -294,6 +297,69 @@ func RegisterDefaultPlugins(
 		return fmt.Errorf("initialize elasticache plugin: %w", err)
 	}
 	registry.Register(elasticachePlugin)
+
+	efsPlugin := &EFSPlugin{}
+	if err := efsPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize efs plugin: %w", err)
+	}
+	registry.Register(efsPlugin)
+
+	gluePlugin := &GluePlugin{}
+	if err := gluePlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize glue plugin: %w", err)
+	}
+	registry.Register(gluePlugin)
+
+	cePlugin := &CEPlugin{}
+	ceOpts := map[string]any{}
+	if store != nil {
+		ceOpts["event_store"] = store
+	}
+	if err := cePlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: ceOpts,
+	}); err != nil {
+		return fmt.Errorf("initialize ce plugin: %w", err)
+	}
+	registry.Register(cePlugin)
+
+	budgetsPlugin := &BudgetsPlugin{}
+	if err := budgetsPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize budgets plugin: %w", err)
+	}
+	registry.Register(budgetsPlugin)
+
+	healthPlugin := &HealthPlugin{}
+	if err := healthPlugin.Initialize(ctx, PluginConfig{
+		State:  state,
+		Logger: logger,
+	}); err != nil {
+		return fmt.Errorf("initialize health plugin: %w", err)
+	}
+	registry.Register(healthPlugin)
+
+	orgsPlugin := &OrganizationsPlugin{}
+	if err := orgsPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize organizations plugin: %w", err)
+	}
+	registry.Register(orgsPlugin)
 
 	return nil
 }

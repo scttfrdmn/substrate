@@ -95,7 +95,7 @@ configured address will have their requests emulated and recorded.`,
 
 			initCtx := context.Background()
 
-			if err := substrate.RegisterDefaultPlugins(initCtx, registry, state, tc, logger); err != nil {
+			if err := substrate.RegisterDefaultPlugins(initCtx, registry, state, tc, logger, store); err != nil {
 				return err
 			}
 

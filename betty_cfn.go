@@ -162,6 +162,25 @@ var typePriority = map[string]int{
 	"AWS::Kinesis::Stream":                            2,
 	"AWS::CloudFront::CloudFrontOriginAccessIdentity": 2,
 	"AWS::CloudFront::Distribution":                   3,
+	// v0.25.0 — RDS and ElastiCache.
+	"AWS::RDS::DBSubnetGroup":            2,
+	"AWS::RDS::DBParameterGroup":         2,
+	"AWS::RDS::DBInstance":               3,
+	"AWS::ElastiCache::SubnetGroup":      2,
+	"AWS::ElastiCache::ParameterGroup":   2,
+	"AWS::ElastiCache::CacheCluster":     3,
+	"AWS::ElastiCache::ReplicationGroup": 3,
+	// v0.26.0 — EFS and Glue.
+	"AWS::EFS::FileSystem":  2,
+	"AWS::EFS::AccessPoint": 3,
+	"AWS::EFS::MountTarget": 4,
+	"AWS::Glue::Database":   2,
+	"AWS::Glue::Connection": 2,
+	"AWS::Glue::Table":      3,
+	"AWS::Glue::Crawler":    3,
+	"AWS::Glue::Job":        3,
+	// v0.27.0 — Budgets.
+	"AWS::Budgets::Budget": 3,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -553,6 +572,26 @@ func (d *StackDeployer) deployResource(
 		return d.deployElastiCacheCacheCluster(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::ElastiCache::ReplicationGroup":
 		return d.deployElastiCacheReplicationGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.26.0 — EFS and Glue.
+	case "AWS::EFS::FileSystem":
+		return d.deployEFSFileSystem(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::EFS::AccessPoint":
+		return d.deployEFSAccessPoint(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::EFS::MountTarget":
+		return d.deployEFSMountTarget(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Glue::Database":
+		return d.deployGlueDatabase(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Glue::Connection":
+		return d.deployGlueConnection(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Glue::Table":
+		return d.deployGlueTable(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Glue::Crawler":
+		return d.deployGlueCrawler(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Glue::Job":
+		return d.deployGlueJob(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.27.0 — Budgets.
+	case "AWS::Budgets::Budget":
+		return d.deployBudgetsBudget(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,

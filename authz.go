@@ -325,6 +325,18 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return "arn:aws:elasticache:" + region + ":" + acct + ":cluster:" + id
 		}
 		return "*"
+	case "elasticfilesystem":
+		// path-based REST: /2015-02-01/file-systems/{id}
+		pathParts := strings.SplitN(req.Path, "/", 5)
+		if len(pathParts) >= 4 && pathParts[3] != "" {
+			return "arn:aws:elasticfilesystem:" + region + ":" + acct + ":file-system/" + pathParts[3]
+		}
+		return "*"
+	case "glue":
+		if name := req.Params["Name"]; name != "" {
+			return "arn:aws:glue:" + region + ":" + acct + ":database/" + name
+		}
+		return "*"
 	default:
 		return "*"
 	}

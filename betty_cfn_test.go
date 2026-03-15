@@ -865,6 +865,9 @@ func newFullTestDeployer(t *testing.T) *substrate.StackDeployer {
 		&substrate.CloudFrontPlugin{},
 		&substrate.RDSPlugin{},
 		&substrate.ElastiCachePlugin{},
+		&substrate.EFSPlugin{},
+		&substrate.GluePlugin{},
+		&substrate.BudgetsPlugin{},
 	} {
 		require.NoError(t, p.Initialize(context.Background(), opts))
 		registry.Register(p)
@@ -1675,4 +1678,228 @@ func TestCFN_ElastiCacheReplicationGroup(t *testing.T) {
 	assert.Empty(t, r.Error)
 	assert.NotEmpty(t, r.ARN)
 	assert.Contains(t, r.ARN, "arn:aws:elasticache")
+}
+
+// TestCFN_EFSFileSystem verifies EFS file system deployment via CFN.
+func TestCFN_EFSFileSystem(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyFS": {
+				"Type": "AWS::EFS::FileSystem",
+				"Properties": {
+					"PerformanceMode": "generalPurpose",
+					"ThroughputMode": "bursting"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "efs-fs-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::EFS::FileSystem", r.Type)
+	assert.Empty(t, r.Error)
+	assert.NotEmpty(t, r.PhysicalID)
+	assert.Contains(t, r.PhysicalID, "fs-")
+	assert.NotEmpty(t, r.ARN)
+	assert.Contains(t, r.ARN, "arn:aws:elasticfilesystem")
+}
+
+// TestCFN_EFSAccessPoint verifies EFS access point deployment via CFN.
+func TestCFN_EFSAccessPoint(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyFS": {
+				"Type": "AWS::EFS::FileSystem",
+				"Properties": {}
+			},
+			"MyAP": {
+				"Type": "AWS::EFS::AccessPoint",
+				"Properties": {
+					"FileSystemId": {"Ref": "MyFS"}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "efs-ap-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+	for _, r := range result.Resources {
+		if r.Type == "AWS::EFS::AccessPoint" {
+			assert.Contains(t, r.PhysicalID, "fsap-")
+			assert.Contains(t, r.ARN, "arn:aws:elasticfilesystem")
+		}
+	}
+}
+
+// TestCFN_GlueDatabase verifies Glue database deployment via CFN.
+func TestCFN_GlueDatabase(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyDB": {
+				"Type": "AWS::Glue::Database",
+				"Properties": {
+					"DatabaseName": "cfn-glue-db",
+					"Description": "CFN test Glue database"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "glue-db-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::Glue::Database", r.Type)
+	assert.Empty(t, r.Error)
+	assert.Equal(t, "cfn-glue-db", r.PhysicalID)
+}
+
+// TestCFN_GlueJob verifies Glue job deployment via CFN.
+func TestCFN_GlueJob(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyDB": {
+				"Type": "AWS::Glue::Database",
+				"Properties": {
+					"DatabaseName": "cfn-glue-job-db"
+				}
+			},
+			"MyCrawler": {
+				"Type": "AWS::Glue::Crawler",
+				"Properties": {
+					"CrawlerName": "cfn-glue-crawler",
+					"Role": "arn:aws:iam::123456789012:role/GlueRole",
+					"DatabaseName": {"Ref": "MyDB"}
+				}
+			},
+			"MyJob": {
+				"Type": "AWS::Glue::Job",
+				"Properties": {
+					"JobName": "cfn-glue-job",
+					"Role": "arn:aws:iam::123456789012:role/GlueRole"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "glue-job-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+	for _, r := range result.Resources {
+		if r.Type == "AWS::Glue::Job" {
+			assert.Equal(t, "cfn-glue-job", r.PhysicalID)
+		}
+	}
+}
+
+// TestCFN_EFSMountTarget verifies EFS mount target deployment via CFN.
+func TestCFN_EFSMountTarget(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyFS": {
+				"Type": "AWS::EFS::FileSystem",
+				"Properties": {}
+			},
+			"MyMT": {
+				"Type": "AWS::EFS::MountTarget",
+				"Properties": {
+					"FileSystemId": {"Ref": "MyFS"},
+					"SubnetId": "subnet-abc123"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "efs-mt-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+	for _, r := range result.Resources {
+		if r.Type == "AWS::EFS::MountTarget" {
+			assert.Contains(t, r.PhysicalID, "fsmt-")
+		}
+	}
+}
+
+// TestCFN_GlueTableAndConnection verifies Glue table and connection deployment via CFN.
+func TestCFN_GlueTableAndConnection(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyDB": {
+				"Type": "AWS::Glue::Database",
+				"Properties": {
+					"DatabaseName": "cfn-glue-tc-db"
+				}
+			},
+			"MyTable": {
+				"Type": "AWS::Glue::Table",
+				"Properties": {
+					"DatabaseName": {"Ref": "MyDB"},
+					"TableName": "cfn-glue-table"
+				}
+			},
+			"MyConn": {
+				"Type": "AWS::Glue::Connection",
+				"Properties": {
+					"ConnectionName": "cfn-glue-conn",
+					"ConnectionType": "JDBC"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "glue-tc-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+	}
+}
+
+// TestCFN_BudgetsBudget verifies that a Budgets budget can be deployed via CFN.
+func TestCFN_BudgetsBudget(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyBudget": {
+				"Type": "AWS::Budgets::Budget",
+				"Properties": {
+					"Budget": {
+						"BudgetName": "cfn-monthly-budget",
+						"BudgetType": "COST",
+						"TimeUnit": "MONTHLY",
+						"BudgetLimit": {
+							"Amount": "500.00",
+							"Unit": "USD"
+						}
+					}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "budgets-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::Budgets::Budget", r.Type)
+	assert.Empty(t, r.Error)
+	assert.Equal(t, "cfn-monthly-budget", r.PhysicalID)
 }

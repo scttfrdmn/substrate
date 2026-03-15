@@ -139,6 +139,16 @@ var targetServiceAliases = map[string]string{
 	"ec2containerservicev20141113": "ecs",
 	// "AmazonEC2ContainerRegistry_V1_1_0" → strip "Amazon" → strip after "_" → "ec2containerregistry"
 	"ec2containerregistry": "ecr",
+	// "elasticfilesystem" is the subdomain name for Amazon EFS.
+	"elasticfilesystem": "efs",
+	// "AWSGlue" → strip "AWS" → "glue".
+	"awsglue": "glue",
+	// "AWSInsightsIndexService" → strip "AWS" → "insightsindexservice" → "ce".
+	"awsinsightsindexservice": "ce",
+	// "AmazonBudgetServiceGateway" → strip "Amazon" → "budgetservicegateway" → "budgets".
+	"budgetservicegateway": "budgets",
+	// "AmazonHealthService" → strip "Amazon" → "healthservice" → "health".
+	"healthservice": "health",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
