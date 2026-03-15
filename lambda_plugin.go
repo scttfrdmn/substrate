@@ -248,7 +248,7 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("lambda createFunction state.Put: %w", err)
 	}
 
-	// Auto-create the /aws/lambda/{name} log group to match real AWS behaviour.
+	// Auto-create the /aws/lambda/{name} log group to match real AWS behavior.
 	// We write directly to state (no registry call) to avoid a circular dependency
 	// on the CloudWatchLogsPlugin. See issue #73.
 	p.autoCreateLambdaLogGroup(ctx, body.FunctionName)

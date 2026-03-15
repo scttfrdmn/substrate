@@ -350,7 +350,7 @@ func (p *STSPlugin) now() time.Time {
 	return time.Now().UTC()
 }
 
-// stsXMLResponse serialises v to XML and wraps it in an AWSResponse.
+// stsXMLResponse serializes v to XML and wraps it in an AWSResponse.
 func stsXMLResponse(status int, v any) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

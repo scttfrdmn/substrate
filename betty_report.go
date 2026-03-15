@@ -90,7 +90,7 @@ type ValidationReport struct {
 	// PassFail is the overall validation outcome.
 	PassFail ValidationStatus `json:"pass_fail"`
 
-	// TotalEvents is the number of events analysed.
+	// TotalEvents is the number of events analyzed.
 	TotalEvents int `json:"total_events"`
 
 	// FailedEvents is the number of events that recorded an error.

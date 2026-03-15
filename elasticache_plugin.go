@@ -1049,7 +1049,7 @@ func elasticacheTagsFromParams(params map[string]string) map[string]string {
 	return tags
 }
 
-// elasticacheXMLResponse serialises v to XML and wraps it in an AWSResponse.
+// elasticacheXMLResponse serializes v to XML and wraps it in an AWSResponse.
 func elasticacheXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

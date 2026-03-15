@@ -1040,7 +1040,7 @@ func rdsTagsFromParams(params map[string]string) map[string]string {
 	return tags
 }
 
-// rdsXMLResponse serialises v to XML and wraps it in an AWSResponse.
+// rdsXMLResponse serializes v to XML and wraps it in an AWSResponse.
 func rdsXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

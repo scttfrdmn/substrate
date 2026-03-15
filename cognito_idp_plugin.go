@@ -1212,7 +1212,7 @@ func generateCognitoID() string {
 	return string(out)
 }
 
-// cognitoIDPJSONResponse serialises v as JSON and returns an AWSResponse with the
+// cognitoIDPJSONResponse serializes v as JSON and returns an AWSResponse with the
 // given HTTP status code and application/json content type.
 func cognitoIDPJSONResponse(status int, v any) (*AWSResponse, error) {
 	body, err := json.Marshal(v)

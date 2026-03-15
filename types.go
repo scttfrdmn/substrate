@@ -113,10 +113,10 @@ type StateManager interface {
 type SnapshotableStateManager interface {
 	StateManager
 
-	// Snapshot serialises the entire state into opaque bytes.
+	// Snapshot serializes the entire state into opaque bytes.
 	Snapshot(ctx context.Context) ([]byte, error)
 
-	// Restore deserialises previously snapshotted bytes back into the manager,
+	// Restore deserializes previously snapshotted bytes back into the manager,
 	// replacing all existing state.
 	Restore(ctx context.Context, data []byte) error
 

@@ -682,7 +682,7 @@ func (p *EFSPlugin) decrementMountTargetCount(goCtx context.Context, reqCtx *Req
 	_ = p.state.Put(goCtx, efsNamespace, key, updated)
 }
 
-// efsJSONResponse serialises v to JSON and returns an AWSResponse.
+// efsJSONResponse serializes v to JSON and returns an AWSResponse.
 func efsJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := json.Marshal(v)
 	if err != nil {

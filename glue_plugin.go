@@ -1094,7 +1094,7 @@ func (p *GluePlugin) loadGlueTags(goCtx context.Context, ns, key string) (map[st
 	return nil, nil
 }
 
-// glueJSONResponse serialises v to JSON and returns an AWSResponse.
+// glueJSONResponse serializes v to JSON and returns an AWSResponse.
 func glueJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := json.Marshal(v)
 	if err != nil {

@@ -325,7 +325,7 @@ func newValidatePlanCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validate-plan",
 		Short: "Validate a Terraform JSON plan",
-		Long: `Analyse a Terraform plan (terraform show -json) for estimated cost and
+		Long: `Analyze a Terraform plan (terraform show -json) for estimated cost and
 policy concerns. No emulator state is modified.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if planPath == "" {

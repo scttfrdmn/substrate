@@ -32,11 +32,11 @@ type EventStore struct {
 	snapshotCh   chan struct{}   // hint channel for async snapshots
 	stopCh       chan struct{}   // goroutine shutdown
 	fileBE       *fileBackend    // file NDJSON backend, non-nil when backend=="file"
-	sqliteBE     *sqliteBackend  // SQLite backend, lazily initialised
+	sqliteBE     *sqliteBackend  // SQLite backend, lazily initialized
 	sqliteInitMu sync.Mutex      // guards lazy sqliteBE init
 }
 
-// EventStoreConfig controls the behaviour of an [EventStore].
+// EventStoreConfig controls the behavior of an [EventStore].
 type EventStoreConfig struct {
 	// Enabled gates event recording. When false, RecordEvent is a no-op.
 	Enabled bool
@@ -172,7 +172,7 @@ type Snapshot struct {
 	// StreamID is the event stream this snapshot belongs to.
 	StreamID string `json:"stream_id"`
 
-	// State is the serialised emulator state at Sequence.
+	// State is the serialized emulator state at Sequence.
 	State []byte `json:"state"`
 
 	// StateHash is the SHA-256 hash of State, used for integrity verification.
@@ -200,7 +200,7 @@ func NewEventStore(config EventStoreConfig, opts ...EventStoreOption) *EventStor
 		opt(e)
 	}
 
-	// Initialise file backend eagerly so Load can be called right away.
+	// Initialize file backend eagerly so Load can be called right away.
 	if config.Backend == "file" && config.PersistPath != "" {
 		e.fileBE = newFileBackend(config.PersistPath, config.MaxFileSizeMB, e.serializer)
 	}
@@ -503,7 +503,7 @@ type EventFilter struct {
 	HasError *bool
 }
 
-// CreateSnapshot serialises state into a [Snapshot] and stores it.
+// CreateSnapshot serializes state into a [Snapshot] and stores it.
 func (e *EventStore) CreateSnapshot(ctx context.Context, streamID string, state StateManager) (*Snapshot, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -713,7 +713,7 @@ func (e *EventStore) initSQLiteBackend() (*sqliteBackend, error) {
 	return sb, nil
 }
 
-// EventStoreStats summarises the contents and cost of an [EventStore].
+// EventStoreStats summarizes the contents and cost of an [EventStore].
 type EventStoreStats struct {
 	// TotalEvents is the number of recorded events.
 	TotalEvents int64
@@ -886,7 +886,7 @@ func matchesFilter(event *Event, filter EventFilter) bool {
 	return true
 }
 
-// serializeState serialises the current state into bytes for snapshotting.
+// serializeState serializes the current state into bytes for snapshotting.
 // When state implements [SnapshotableStateManager] its Snapshot method is used;
 // otherwise a minimal placeholder is returned so the caller can proceed.
 func (e *EventStore) serializeState(ctx context.Context, state StateManager) ([]byte, error) {

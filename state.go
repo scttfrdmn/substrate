@@ -96,7 +96,7 @@ func (m *MemoryStateManager) List(_ context.Context, namespace, prefix string) (
 	return keys, nil
 }
 
-// Snapshot serialises the entire manager contents to JSON.
+// Snapshot serializes the entire manager contents to JSON.
 // Values are encoded as base64 by the standard JSON marshaller.
 func (m *MemoryStateManager) Snapshot(_ context.Context) ([]byte, error) {
 	m.mu.RLock()

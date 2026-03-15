@@ -318,7 +318,7 @@ func TestValidateRecording_WithCost(t *testing.T) {
 	report, err := substrate.ValidateRecording(ctx, store, result.StreamID, substrate.Intent{})
 	require.NoError(t, err)
 	assert.Greater(t, report.TotalEvents, 0)
-	// Cost breakdown maps should be initialised even if cost is zero.
+	// Cost breakdown maps should be initialized even if cost is zero.
 	assert.NotNil(t, report.Cost.ByService)
 	assert.NotNil(t, report.Cost.ByOperation)
 }

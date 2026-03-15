@@ -480,7 +480,7 @@ func (p *CloudFrontPlugin) loadDistribution(ctx *RequestContext, distID string) 
 	return dist, nil
 }
 
-// marshalDistributionXML serialises a distribution to a <Distribution> XML response.
+// marshalDistributionXML serializes a distribution to a <Distribution> XML response.
 func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution) (*AWSResponse, error) {
 	type xmlDist struct {
 		XMLName          xml.Name `xml:"Distribution"`
@@ -529,7 +529,7 @@ func extractDistIDFromARN(arn string) string {
 	return arn[idx+len(prefix):]
 }
 
-// cloudfrontXMLResponse serialises v to XML and returns an AWSResponse with
+// cloudfrontXMLResponse serializes v to XML and returns an AWSResponse with
 // Content-Type: application/xml and the given HTTP status code.
 func cloudfrontXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)

@@ -1216,7 +1216,7 @@ func generateUploadID() string {
 	return fmt.Sprintf("mpu-%d", time.Now().UnixNano())
 }
 
-// s3XMLResponse serialises v as XML and wraps it in an [AWSResponse] with the
+// s3XMLResponse serializes v as XML and wraps it in an [AWSResponse] with the
 // standard S3 content type. When v is nil only the XML declaration is emitted.
 func s3XMLResponse(status int, v any) (*AWSResponse, error) {
 	if v == nil {
@@ -1390,7 +1390,7 @@ func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket strin
 				"The XML you provided was not well-formed.", http.StatusBadRequest), nil
 		}
 	} else {
-		// Honour the x-amz-acl canned ACL header.
+		// Honor the x-amz-acl canned ACL header.
 		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
 	}
 

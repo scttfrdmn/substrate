@@ -15,7 +15,7 @@ type DebugSession struct {
 	ready    bool
 }
 
-// ensureLoaded initialises the replay engine with the stream on the first
+// ensureLoaded initializes the replay engine with the stream on the first
 // navigation call.
 func (d *DebugSession) ensureLoaded(ctx context.Context) error {
 	if d.ready {

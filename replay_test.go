@@ -288,7 +288,7 @@ func TestReplayEngine_ValidateState_HashMismatch(t *testing.T) {
 }
 
 func TestReplayEngine_RandWithSeed(t *testing.T) {
-	// After Replay() with RandomSeed set, r.rng is initialised;
+	// After Replay() with RandomSeed set, r.rng is initialized;
 	// RandFloat64/RandInt64 use the deterministic seeded path.
 	store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true, Backend: "memory"})
 	ctx := context.Background()

@@ -1326,7 +1326,7 @@ func (p *EC2Plugin) appendToList(scope, listName, id string) error {
 	return p.state.Put(context.Background(), ec2Namespace, key, newData)
 }
 
-// ec2XMLResponse serialises v to XML and returns an AWSResponse.
+// ec2XMLResponse serializes v to XML and returns an AWSResponse.
 func ec2XMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

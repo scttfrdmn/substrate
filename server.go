@@ -100,7 +100,7 @@ func NewServer(
 }
 
 // Start binds the listener and begins accepting requests. It blocks until ctx
-// is cancelled or an unrecoverable error occurs. A nil error is returned only
+// is canceled or an unrecoverable error occurs. A nil error is returned only
 // when shutdown is initiated via ctx cancellation or [Server.Stop].
 func (s *Server) Start(ctx context.Context) error {
 	readTimeout, err := time.ParseDuration(s.config.Server.ReadTimeout)
@@ -121,7 +121,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.logger.Info("substrate server starting", "address", s.config.Server.Address)
 
-	// Shutdown when context is cancelled.
+	// Shutdown when context is canceled.
 	go func() {
 		<-ctx.Done()
 		if stopErr := s.Stop(context.Background()); stopErr != nil {
@@ -137,7 +137,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Serve accepts connections on the provided listener. Unlike [Server.Start],
 // it does not create a new listener, eliminating the TOCTOU race between
-// port reservation and binding. It blocks until ctx is cancelled or an
+// port reservation and binding. It blocks until ctx is canceled or an
 // unrecoverable error occurs.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	readTimeout, err := time.ParseDuration(s.config.Server.ReadTimeout)
@@ -496,7 +496,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, resp)
 }
 
-// writeResponse serialises resp into the HTTP response writer.
+// writeResponse serializes resp into the HTTP response writer.
 func (s *Server) writeResponse(w http.ResponseWriter, resp *AWSResponse) {
 	for k, v := range resp.Headers {
 		w.Header().Set(k, v)
@@ -511,7 +511,7 @@ func (s *Server) writeResponse(w http.ResponseWriter, resp *AWSResponse) {
 
 // writeError converts err into an AWS-style error response. For JSON-protocol
 // services (identified by Content-Type application/x-amz-json-1.0 on the
-// incoming request), the error is serialised as JSON; otherwise XML is used.
+// incoming request), the error is serialized as JSON; otherwise XML is used.
 func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request) {
 	var awsErr *AWSError
 	if asAWSErr, ok := err.(*AWSError); ok {

@@ -360,7 +360,7 @@ func generateIdentityUUID() string {
 		hex.EncodeToString(b[10:16])
 }
 
-// cognitoIdentityJSONResponse serialises v as JSON and returns an AWSResponse with
+// cognitoIdentityJSONResponse serializes v as JSON and returns an AWSResponse with
 // the given HTTP status code and application/json content type.
 func cognitoIdentityJSONResponse(status int, v any) (*AWSResponse, error) {
 	body, err := json.Marshal(v)

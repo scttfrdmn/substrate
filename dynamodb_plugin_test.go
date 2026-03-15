@@ -274,7 +274,7 @@ func TestDynamoDB_ItemCRUD(t *testing.T) {
 		"Item": map[string]any{
 			"UserID":  av("user1"),
 			"OrderID": av("order1"),
-			"Status":  av("cancelled"),
+			"Status":  av("canceled"),
 		},
 		"ConditionExpression": "attribute_not_exists(UserID)",
 	})

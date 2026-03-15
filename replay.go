@@ -29,7 +29,7 @@ type ReplayEngine struct {
 	rng *rand.Rand
 }
 
-// ReplayConfig controls the behaviour of a [ReplayEngine].
+// ReplayConfig controls the behavior of a [ReplayEngine].
 type ReplayConfig struct {
 	// SpeedMultiplier scales event timing during replay.
 	// 1.0 replays at real time; 0 replays instantly.
@@ -72,7 +72,7 @@ type ActiveReplay struct {
 	// Breakpoints maps event positions to true; replay pauses at each.
 	Breakpoints map[int]bool
 
-	// StateSnapshots maps event positions to serialised state, used by
+	// StateSnapshots maps event positions to serialized state, used by
 	// [ReplayEngine.StepBackward] and [ReplayEngine.JumpToEvent].
 	StateSnapshots map[int][]byte
 
@@ -595,7 +595,7 @@ func (r *ReplayEngine) loadFromSnapshot(ctx context.Context, streamID string) er
 	return r.restoreState(ctx, snapshot.State)
 }
 
-// restoreState deserialises state bytes back into the state manager.
+// restoreState deserializes state bytes back into the state manager.
 // When the state manager implements [SnapshotableStateManager] its Restore
 // method is called; otherwise this is a no-op.
 func (r *ReplayEngine) restoreState(ctx context.Context, data []byte) error {

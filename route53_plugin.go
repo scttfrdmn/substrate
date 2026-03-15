@@ -533,7 +533,7 @@ func (p *Route53Plugin) loadList(scope, listName string) ([]string, error) {
 	return ids, nil
 }
 
-// r53XMLResponse serialises v to XML and returns an AWSResponse.
+// r53XMLResponse serializes v to XML and returns an AWSResponse.
 func r53XMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

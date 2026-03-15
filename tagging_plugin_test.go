@@ -908,9 +908,9 @@ func TestTagging_GetResources_APIGateway(t *testing.T) {
 func TestTagging_TagResources_APIGateway(t *testing.T) {
 	// APIGateway ARNs have an empty account-ID field (arn:aws:apigateway:{region}::/restapis/{id}).
 	// resolveARN resolves these using the empty account segment, so the state key must also
-	// use an empty account to match. This test verifies the current behaviour.
+	// use an empty account to match. This test verifies the current behavior.
 	ts, state := newTaggingTestServer(t)
-	// Store with empty account segment to match resolveARN behaviour for apigateway ARNs.
+	// Store with empty account segment to match resolveARN behavior for apigateway ARNs.
 	api := substrate.RestAPIState{
 		ID:        "def456",
 		Name:      "test-api-def456",

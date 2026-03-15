@@ -193,7 +193,7 @@ func (s *StringOrSlice) UnmarshalJSON(data []byte) error {
 }
 
 // MarshalJSON implements json.Marshaler for StringOrSlice.
-// Single-element slices are marshalled as a plain string for compactness.
+// Single-element slices are marshaled as a plain string for compactness.
 func (s StringOrSlice) MarshalJSON() ([]byte, error) {
 	if len(s) == 1 {
 		return json.Marshal(s[0])

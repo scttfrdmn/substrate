@@ -255,7 +255,7 @@ func (p *FirehosePlugin) deleteDeliveryStream(reqCtx *RequestContext, req *AWSRe
 	return firehoseJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-// firehoseJSONResponse serialises v to JSON and returns an AWSResponse.
+// firehoseJSONResponse serializes v to JSON and returns an AWSResponse.
 func firehoseJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := json.Marshal(v)
 	if err != nil {

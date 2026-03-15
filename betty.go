@@ -139,7 +139,7 @@ func (b *BettyClient) Validate(ctx context.Context, streamID string) (*Validatio
 	return ValidateRecording(ctx, b.store, streamID, b.intent)
 }
 
-// NewDebugSession returns a DebugSession initialised for time-travel inspection
+// NewDebugSession returns a DebugSession initialized for time-travel inspection
 // of the recorded stream identified by streamID.
 func (b *BettyClient) NewDebugSession(streamID string) *DebugSession {
 	engine := NewReplayEngine(b.store, b.state, b.tc, b.registry, ReplayConfig{}, b.logger)

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// RegisterDefaultPlugins initialises and registers all built-in service plugins
+// RegisterDefaultPlugins initializes and registers all built-in service plugins
 // into registry. This function is called by both the server binary and
 // [StartTestServer] so the same plugin set is always available.
 // store is optional; pass nil when the EventStore is unavailable (e.g. in

@@ -248,7 +248,7 @@ func (p *SESv2Plugin) sendEmail(_ *RequestContext, _ *AWSRequest) (*AWSResponse,
 	})
 }
 
-// sesv2JSONResponse serialises v to JSON and returns an AWSResponse.
+// sesv2JSONResponse serializes v to JSON and returns an AWSResponse.
 func sesv2JSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := json.Marshal(v)
 	if err != nil {

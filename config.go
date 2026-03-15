@@ -10,7 +10,7 @@ import (
 
 // Config holds the full Substrate server configuration.
 type Config struct {
-	// Server controls network binding and timeout behaviour.
+	// Server controls network binding and timeout behavior.
 	Server ServerConfig `mapstructure:"server"`
 
 	// EventStore controls event recording and storage.
@@ -56,7 +56,7 @@ type MetricsCfg struct {
 	Path string `mapstructure:"path"`
 }
 
-// ForecastCfg controls cost forecasting behaviour.
+// ForecastCfg controls cost forecasting behavior.
 type ForecastCfg struct {
 	// Enabled gates the cost forecasting subsystem. Default false.
 	Enabled bool `mapstructure:"enabled"`
@@ -179,7 +179,7 @@ type StateCfg struct {
 	Path string `mapstructure:"path"`
 }
 
-// LogCfg controls logging behaviour.
+// LogCfg controls logging behavior.
 type LogCfg struct {
 	// Level is the minimum log level: "debug", "info", "warn", or "error".
 	Level string `mapstructure:"level"`

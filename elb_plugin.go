@@ -1077,7 +1077,7 @@ func (p *ELBPlugin) removeFromList(scope, listName, id string) {
 	_ = p.state.Put(context.Background(), elbNamespace, key, newData)
 }
 
-// elbXMLResponse serialises v to XML and returns an AWSResponse.
+// elbXMLResponse serializes v to XML and returns an AWSResponse.
 func elbXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

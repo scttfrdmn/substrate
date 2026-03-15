@@ -144,7 +144,7 @@ func (c *ConsistencyController) RecordWrite(reqCtx *RequestContext, req *AWSRequ
 }
 
 // isMutating reports whether operation is a state-mutating AWS API call using
-// a prefix heuristic. Recognised prefixes: Create, Put, Attach, Delete,
+// a prefix heuristic. Recognized prefixes: Create, Put, Attach, Delete,
 // Update, Add, Remove, Set, Tag, Untag, Enable, Disable.
 func isMutating(operation string) bool {
 	mutatingPrefixes := []string{

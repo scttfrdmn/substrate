@@ -796,7 +796,7 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 // ----- ARN resolver --------------------------------------------------------
 
 // resolveARN parses an ARN and returns the (namespace, stateKey) for the resource.
-// Returns an error if the ARN format is unrecognised.
+// Returns an error if the ARN format is unrecognized.
 func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key string, err error) {
 	// ARN format: arn:aws:{service}:{region}:{account}:{resource}
 	parts := strings.SplitN(arn, ":", 6)

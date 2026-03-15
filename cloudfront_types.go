@@ -22,7 +22,7 @@ type CloudFrontDistribution struct {
 	// Origins holds the origin configuration, stored as raw JSON to avoid tight coupling.
 	Origins interface{} `json:"Origins,omitempty"`
 
-	// DefaultCacheBehavior holds the default cache behaviour, stored as raw JSON.
+	// DefaultCacheBehavior holds the default cache behavior, stored as raw JSON.
 	DefaultCacheBehavior interface{} `json:"DefaultCacheBehavior,omitempty"`
 
 	// Comment is an optional human-readable description of the distribution.

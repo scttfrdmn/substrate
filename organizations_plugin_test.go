@@ -94,7 +94,7 @@ func TestOrganizations_DescribeOrganization_AutoCreate(t *testing.T) {
 func TestOrganizations_ListAccounts(t *testing.T) {
 	ts := newOrganizationsTestServer(t)
 
-	// Initialise org first.
+	// Initialize org first.
 	initResp := orgsRequest(t, ts, "DescribeOrganization", map[string]interface{}{})
 	initResp.Body.Close() //nolint:errcheck
 
