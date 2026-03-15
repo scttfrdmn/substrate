@@ -51,6 +51,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          install-mode: goinstall
           args: --timeout=5m
 
   build:
@@ -77,6 +78,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Tidy e2e module
+        run: cd test/e2e && go mod tidy
 
       - name: Run E2E tests
         run: cd test/e2e && go test -v -race ./...
