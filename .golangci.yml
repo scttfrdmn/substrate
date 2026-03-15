@@ -13,31 +13,30 @@ linters:
     - godot           # doc comments must end with a period
     - nilerr          # return nil instead of errors.New("")
     - unconvert       # remove unnecessary type conversions
-
-linters-settings:
-  revive:
-    rules:
-      - name: exported
-        arguments:
-          - "checkPrivateReceivers"
-      - name: var-naming
-      - name: blank-imports
-      - name: context-as-argument
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: increment-decrement
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-  godot:
-    scope: declarations
-    period: true
-  misspell:
-    locale: US
+  settings:
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - "checkPrivateReceivers"
+        - name: var-naming
+        - name: blank-imports
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: increment-decrement
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+    godot:
+      scope: declarations
+      period: true
+    misspell:
+      locale: US
 
 formatters:
   enable:
@@ -47,7 +46,9 @@ formatters:
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
+
+exclusions:
+  rules:
     # Allow TODO comments that reference issue numbers.
     - text: "TODO\\(#\\d+\\)"
       linters: [godot]
