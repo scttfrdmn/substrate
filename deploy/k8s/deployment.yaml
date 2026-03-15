@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: substrate
+  labels:
+    app: substrate
+spec:
+  # SQLite requires a single writer — do not increase replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: substrate
+  template:
+    metadata:
+      labels:
+        app: substrate
+    spec:
+      containers:
+        - name: substrate
+          image: ghcr.io/scttfrdmn/substrate:latest
+          args: ["server", "--config", "/etc/substrate/config.yaml"]
+          ports:
+            - containerPort: 4566
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/substrate
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/substrate
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4566
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 4566
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: substrate-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: substrate-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: substrate
+  labels:
+    app: substrate
+spec:
+  # Change to LoadBalancer for external access.
+  type: ClusterIP
+  selector:
+    app: substrate
+  ports:
+    - name: http
+      port: 4566
+      targetPort: 4566
+      protocol: TCP

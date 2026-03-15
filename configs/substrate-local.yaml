@@ -1,0 +1,50 @@
+# configs/substrate-local.yaml — Substrate configuration for local Docker development.
+# Mounted read-only at /etc/substrate/config.yaml inside the container.
+# All values can be overridden with SUBSTRATE_<KEY> environment variables.
+#
+# To apply changes: docker compose restart substrate
+# Full option reference: see substrate.yaml.example
+
+server:
+  address: ":4566"
+  read_timeout: "30s"
+  write_timeout: "30s"
+  shutdown_timeout: "10s"
+
+event_store:
+  enabled: true
+  # SQLite provides durable persistence across container restarts.
+  # Data is stored in the Docker named volume mounted at /var/lib/substrate.
+  backend: "sqlite"
+  persist_path: "/var/lib/substrate"
+  dsn: "substrate.db"
+
+log:
+  # json is recommended for Docker — compatible with CloudWatch, Datadog, etc.
+  format: "json"
+  level: "info"
+
+costs:
+  enabled: true
+
+metrics:
+  # Prometheus metrics exposed at GET /metrics.
+  enabled: true
+
+quotas:
+  enabled: true
+
+consistency:
+  enabled: false
+  propagation_delay: "2s"
+  affected_services:
+    - "iam"
+
+tracing:
+  enabled: false
+
+fault:
+  enabled: false
+
+region:
+  default: "us-east-1"

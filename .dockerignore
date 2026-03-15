@@ -6,3 +6,5 @@ coverage.html
 test/
 docs/
 examples/
+deploy/
+configs/

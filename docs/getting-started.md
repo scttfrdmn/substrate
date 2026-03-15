@@ -11,6 +11,40 @@ test in about 15 minutes.
 
 ## Install
 
+### Docker Compose (recommended for local dev)
+
+The fastest way to run a persistent Substrate server that survives restarts:
+
+```bash
+# Clone the repo (includes the config file and compose manifest)
+git clone https://github.com/scttfrdmn/substrate
+cd substrate
+
+# Start Substrate in the background (pulls image from ghcr.io)
+docker compose up -d
+
+# Verify — healthy after ~15 s while SQLite initialises
+curl http://localhost:4566/health
+# {"status":"ok"}
+```
+
+Point any application at `http://localhost:4566`:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_DEFAULT_REGION=us-east-1
+```
+
+To change configuration, edit `configs/substrate-local.yaml` and run
+`docker compose restart substrate`. To stop and wipe all recorded data:
+`docker compose down -v`.
+
+See [`deploy/README.md`](../deploy/README.md) for ECS Fargate and Kubernetes
+deployment options. The `substratelocal` wrapper binary also provides a
+`localstack`-compatible endpoint for tools that hardcode that name.
+
 ### Binary
 
 ```bash

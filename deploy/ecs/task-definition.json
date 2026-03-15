@@ -1,0 +1,70 @@
+{
+  "family": "substrate",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "{{TASK_EXECUTION_ROLE_ARN}}",
+  "taskRoleArn": "{{TASK_ROLE_ARN}}",
+  "volumes": [
+    {
+      "name": "substrate-data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "{{EFS_FILE_SYSTEM_ID}}",
+        "rootDirectory": "/substrate",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "{{EFS_ACCESS_POINT_ID}}",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "substrate",
+      "image": "ghcr.io/scttfrdmn/substrate:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 4566,
+          "protocol": "tcp"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "substrate-data",
+          "containerPath": "/var/lib/substrate",
+          "readOnly": false
+        }
+      ],
+      "environment": [
+        { "name": "SUBSTRATE_EVENT_STORE_BACKEND",      "value": "sqlite" },
+        { "name": "SUBSTRATE_EVENT_STORE_PERSIST_PATH", "value": "/var/lib/substrate" },
+        { "name": "SUBSTRATE_LOG_FORMAT",               "value": "json" },
+        { "name": "SUBSTRATE_METRICS_ENABLED",          "value": "true" },
+        { "name": "SUBSTRATE_COSTS_ENABLED",            "value": "true" }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:4566/health || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "{{CLOUDWATCH_LOG_GROUP}}",
+          "awslogs-region":        "{{AWS_REGION}}",
+          "awslogs-stream-prefix": "substrate"
+        }
+      },
+      "readonlyRootFilesystem": false,
+      "user": "nobody"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+# docker-compose.yml — Substrate local development deployment.
+# Requires Docker Compose v2.
+#
+# Quick start:
+#   docker compose up -d
+#   curl http://localhost:4566/health
+#
+# To stop:      docker compose down
+# To wipe data: docker compose down -v
+services:
+  substrate:
+    image: ghcr.io/scttfrdmn/substrate:latest
+    # To build from source instead of pulling the published image:
+    #   build: .
+    #   image: substrate:dev
+    command: ["server", "--config", "/etc/substrate/config.yaml"]
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./configs/substrate-local.yaml:/etc/substrate/config.yaml:ro
+      - substrate-data:/var/lib/substrate
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4566/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+    # ── Optional environment overrides ─────────────────────────────────────
+    # Uncomment to enable OpenTelemetry tracing to a local collector:
+    # environment:
+    #   SUBSTRATE_TRACING_ENABLED: "true"
+    #   SUBSTRATE_TRACING_EXPORTER: otlp_http
+    #   SUBSTRATE_TRACING_OTLP_ENDPOINT: http://otel-collector:4318
+    #
+    # Uncomment to pin to a specific release instead of latest:
+    #   image: ghcr.io/scttfrdmn/substrate:v0.29.0
+
+volumes:
+  substrate-data:
+    driver: local

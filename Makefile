@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate.Version=$(VERSION)"
@@ -15,6 +15,15 @@ docker-build: ## Build multi-arch Docker image (requires docker buildx)
 	docker buildx build --platform linux/amd64,linux/arm64 \
 		--build-arg VERSION=$(VERSION) \
 		-t ghcr.io/scttfrdmn/substrate:$(VERSION) .
+
+compose-up: ## Start Substrate locally with Docker Compose
+	docker compose up -d
+
+compose-down: ## Stop and remove Docker Compose containers
+	docker compose down
+
+compose-logs: ## Tail Docker Compose logs
+	docker compose logs -f substrate
 
 test: ## Run tests with race detector
 	go test -race -count=1 ./...

@@ -89,9 +89,9 @@ configured address will have their requests emulated and recorded.`,
 			logger := substrate.NewDefaultLogger(logLevel, jsonLog)
 
 			registry := substrate.NewPluginRegistry()
-			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
-			state := substrate.NewMemoryStateManager()
 			tc := substrate.NewTimeController(time.Now())
+			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig(), substrate.WithTimeController(tc))
+			state := substrate.NewMemoryStateManager()
 
 			initCtx := context.Background()
 

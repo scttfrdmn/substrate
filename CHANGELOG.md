@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.29.0] - 2026-03-15
+
 ### Added
 
 - `docker-compose.yml` — turnkey local development deployment; SQLite state persisted in a named Docker volume (issue #187)
@@ -658,3 +660,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.16.0]: https://github.com/scttfrdmn/substrate/compare/v0.7.0...v0.16.0
 [v0.3.0-alpha]: https://github.com/scttfrdmn/substrate/releases/tag/v0.3.0-alpha
 [v0.28.0]: https://github.com/scttfrdmn/substrate/compare/v0.27.2...v0.28.0
+[v0.29.0]: https://github.com/scttfrdmn/substrate/compare/v0.28.0...v0.29.0
