@@ -18,16 +18,31 @@ import (
 type Route53Plugin struct {
 	state  StateManager
 	logger Logger
+	tc     *TimeController
 }
 
 // Name returns the service name "route53".
 func (p *Route53Plugin) Name() string { return "route53" }
 
-// Initialize sets up the Route53Plugin with the provided configuration.
+// Initialize sets up the Route53Plugin with the provided configuration and
+// optional TimeController from Options["time_controller"].
 func (p *Route53Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	p.state = cfg.State
 	p.logger = cfg.Logger
+	if tc, ok := cfg.Options["time_controller"]; ok {
+		if typed, ok := tc.(*TimeController); ok {
+			p.tc = typed
+		}
+	}
 	return nil
+}
+
+// now returns the current time from the TimeController if set, else time.Now().
+func (p *Route53Plugin) now() time.Time {
+	if p.tc != nil {
+		return p.tc.Now()
+	}
+	return time.Now()
 }
 
 // Shutdown is a no-op for Route53Plugin.
@@ -109,7 +124,7 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	changeInfo := Route53ChangeInfo{
 		ID:          generateChangeID(),
 		Status:      "INSYNC",
-		SubmittedAt: time.Now().UTC(),
+		SubmittedAt: p.now().UTC(),
 	}
 
 	type xmlZone struct {
@@ -271,7 +286,7 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 	changeInfo := Route53ChangeInfo{
 		ID:          generateChangeID(),
 		Status:      "INSYNC",
-		SubmittedAt: time.Now().UTC(),
+		SubmittedAt: p.now().UTC(),
 	}
 	type xmlChangeInfo struct {
 		ID          string `xml:"Id"`
@@ -371,7 +386,7 @@ func (p *Route53Plugin) changeResourceRecordSets(_ *RequestContext, req *AWSRequ
 	changeInfo := Route53ChangeInfo{
 		ID:          generateChangeID(),
 		Status:      "INSYNC",
-		SubmittedAt: time.Now().UTC(),
+		SubmittedAt: p.now().UTC(),
 		Comment:     xmlReq.ChangeBatch.Comment,
 	}
 	type xmlChangeInfo struct {

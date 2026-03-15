@@ -181,6 +181,9 @@ var typePriority = map[string]int{
 	"AWS::Glue::Job":        3,
 	// v0.27.0 — Budgets.
 	"AWS::Budgets::Budget": 3,
+	// v0.28.0 — SES v2 and Firehose.
+	"AWS::SES::EmailIdentity":              2,
+	"AWS::KinesisFirehose::DeliveryStream": 3,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -592,6 +595,11 @@ func (d *StackDeployer) deployResource(
 	// v0.27.0 — Budgets.
 	case "AWS::Budgets::Budget":
 		return d.deployBudgetsBudget(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.28.0 — SES v2 and Firehose.
+	case "AWS::SES::EmailIdentity":
+		return d.deploySESv2EmailIdentity(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::KinesisFirehose::DeliveryStream":
+		return d.deployFirehoseDeliveryStream(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,

@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -130,6 +131,41 @@ func (s *Server) Start(ctx context.Context) error {
 
 	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("listen and serve: %w", err)
+	}
+	return nil
+}
+
+// Serve accepts connections on the provided listener. Unlike [Server.Start],
+// it does not create a new listener, eliminating the TOCTOU race between
+// port reservation and binding. It blocks until ctx is cancelled or an
+// unrecoverable error occurs.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	readTimeout, err := time.ParseDuration(s.config.Server.ReadTimeout)
+	if err != nil {
+		return fmt.Errorf("parse read_timeout: %w", err)
+	}
+	writeTimeout, err := time.ParseDuration(s.config.Server.WriteTimeout)
+	if err != nil {
+		return fmt.Errorf("parse write_timeout: %w", err)
+	}
+
+	s.httpSrv = &http.Server{
+		Handler:      s.router,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+	}
+
+	s.logger.Info("substrate server starting", "address", ln.Addr().String())
+
+	go func() {
+		<-ctx.Done()
+		if stopErr := s.Stop(context.Background()); stopErr != nil {
+			s.logger.Error("graceful shutdown error", "err", stopErr)
+		}
+	}()
+
+	if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
 }

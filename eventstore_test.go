@@ -15,6 +15,32 @@ import (
 	"github.com/scttfrdmn/substrate"
 )
 
+func TestEventStore_WithTimeController(t *testing.T) {
+	// WithTimeController wires the controlled clock so that event timestamps
+	// reflect the simulated time rather than real wall-clock time.
+	fixedTime := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	tc := substrate.NewTimeController(fixedTime)
+
+	store := substrate.NewEventStore(
+		substrate.EventStoreConfig{Enabled: true, Backend: "memory"},
+		substrate.WithTimeController(tc),
+	)
+	require.NotNil(t, store)
+
+	ctx := context.Background()
+	reqCtx := &substrate.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
+	req := &substrate.AWSRequest{Service: "s3", Operation: "PutObject"}
+	resp := &substrate.AWSResponse{StatusCode: 200}
+
+	err := store.RecordRequest(ctx, reqCtx, req, resp, time.Millisecond, 0, nil)
+	require.NoError(t, err)
+
+	events, err := store.GetEvents(ctx, substrate.EventFilter{})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, fixedTime.Unix(), events[0].Timestamp.Unix())
+}
+
 func TestNewEventStore(t *testing.T) {
 	store := substrate.NewEventStore(substrate.EventStoreConfig{
 		Enabled: true,

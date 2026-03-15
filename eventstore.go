@@ -27,12 +27,13 @@ type EventStore struct {
 	byOperation  map[string][]*Event // operation → events (index)
 	config       EventStoreConfig
 	serializer   Serializer
-	stateRef     StateManager   // for async snapshots
-	snapshotCh   chan struct{}  // hint channel for async snapshots
-	stopCh       chan struct{}  // goroutine shutdown
-	fileBE       *fileBackend   // file NDJSON backend, non-nil when backend=="file"
-	sqliteBE     *sqliteBackend // SQLite backend, lazily initialised
-	sqliteInitMu sync.Mutex     // guards lazy sqliteBE init
+	stateRef     StateManager    // for async snapshots
+	tc           *TimeController // for controlled timestamps; nil means time.Now()
+	snapshotCh   chan struct{}   // hint channel for async snapshots
+	stopCh       chan struct{}   // goroutine shutdown
+	fileBE       *fileBackend    // file NDJSON backend, non-nil when backend=="file"
+	sqliteBE     *sqliteBackend  // SQLite backend, lazily initialised
+	sqliteInitMu sync.Mutex      // guards lazy sqliteBE init
 }
 
 // EventStoreConfig controls the behaviour of an [EventStore].
@@ -80,6 +81,21 @@ type EventStoreOption func(*EventStore)
 // is set.
 func WithStateManager(sm StateManager) EventStoreOption {
 	return func(e *EventStore) { e.stateRef = sm }
+}
+
+// WithTimeController attaches a [TimeController] to the EventStore so that
+// event timestamps use the controlled clock rather than time.Now().
+func WithTimeController(tc *TimeController) EventStoreOption {
+	return func(e *EventStore) { e.tc = tc }
+}
+
+// now returns the current time from the controlled clock, or time.Now() when
+// no TimeController is configured.
+func (e *EventStore) now() time.Time {
+	if e.tc != nil {
+		return e.tc.Now()
+	}
+	return time.Now()
 }
 
 // Event represents a single AWS request/response pair captured by [EventStore].
@@ -292,7 +308,7 @@ func (e *EventStore) RecordRequest(
 	err error,
 ) error {
 	event := &Event{
-		Timestamp: time.Now(),
+		Timestamp: e.now(),
 		StreamID:  streamIDFromContext(reqCtx),
 		AccountID: reqCtx.AccountID,
 		Region:    reqCtx.Region,

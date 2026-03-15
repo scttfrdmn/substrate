@@ -161,6 +161,11 @@ func defaultCostTable() map[string]float64 {
 		"glue/CreateCrawler":  0.0001,
 		// Budgets: $0.02 per budget per month, approximated per-API call.
 		"budgets/CreateBudget": 0.00001,
+		// SES v2: $0.10 per 1,000 emails sent.
+		"sesv2/SendEmail": 0.0000001,
+		// Firehose: $0.029 per GB ingested, approximated per record.
+		"firehose/PutRecord":      0.000000029,
+		"firehose/PutRecordBatch": 0.000000029,
 	}
 }
 
@@ -302,7 +307,7 @@ func (e *EventStore) GetCostForecast(
 		anomalyThresholdSigma = 2.0
 	}
 
-	end := time.Now().UTC().Truncate(24 * time.Hour)
+	end := e.now().UTC().Truncate(24 * time.Hour)
 	start := end.AddDate(0, 0, -windowDays)
 
 	filter := EventFilter{
@@ -333,7 +338,7 @@ func (e *EventStore) GetCostForecast(
 		ConfidenceHigh: high,
 		DailyCosts:     daily,
 		Anomalies:      anomalies,
-		ComputedAt:     time.Now().UTC(),
+		ComputedAt:     e.now().UTC(),
 	}, nil
 }
 

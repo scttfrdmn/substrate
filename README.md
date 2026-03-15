@@ -79,6 +79,12 @@ cd substrate
 make build          # produces ./bin/substrate
 ```
 
+Or run with Docker:
+
+```bash
+docker run -p 4566:4566 ghcr.io/scttfrdmn/substrate:latest
+```
+
 ### Start the server
 
 ```bash
@@ -87,6 +93,26 @@ substrate server
 ```
 
 Configuration via `substrate.yaml` or environment variables (see `substrate.yaml.example`).
+
+### Use in Go tests (recommended)
+
+The fastest way to test Go code against Substrate is `StartTestServer`, which
+spins up an in-process server on a random port and registers a `t.Cleanup` to
+shut it down automatically:
+
+```go
+func TestMyInfra(t *testing.T) {
+    ts := substrate.StartTestServer(t)
+    defer ts.Close()
+
+    cfg, _ := config.LoadDefaultConfig(context.Background(),
+        config.WithRegion("us-east-1"),
+        config.WithBaseEndpoint(ts.URL),
+        config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+    )
+    // Use cfg with any AWS SDK v2 client...
+}
+```
 
 ### Configure your AWS SDK
 
@@ -158,25 +184,55 @@ const client = new IAMClient({
 
 ### Supported services
 
-| Service | Operations | Status |
-|---------|-----------|--------|
-| IAM | CreateUser, GetUser, DeleteUser, ListUsers, CreateRole, GetRole, DeleteRole, ListRoles, CreateGroup, GetGroup, DeleteGroup, ListGroups, AttachUserPolicy, DetachUserPolicy, ListAttachedUserPolicies, AttachRolePolicy, DetachRolePolicy, ListAttachedRolePolicies, CreatePolicy, GetPolicy, DeletePolicy, ListPolicies, CreateAccessKey, DeleteAccessKey, ListAccessKeys (25 ops) | ✓ Implemented |
-| STS | GetCallerIdentity, AssumeRole, GetSessionToken | ✓ Implemented |
-| S3 | CreateBucket, HeadBucket, DeleteBucket, ListBuckets, PutObject, GetObject, HeadObject, DeleteObject, CopyObject, ListObjects, ListObjectsV2, CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload, ListMultipartUploads (16 ops) | ✓ Implemented |
-| Betty integration | BettyClient.Deploy (CFN), StartRecording, StopRecording, ValidateRecording, DebugSession | ✓ Implemented |
-| Lambda | — | Planned |
-| DynamoDB | — | Planned |
-| EC2 | — | Planned |
+| Service | Protocol | Key Operations | Betty CFN Types |
+|---------|----------|----------------|-----------------|
+| IAM | Query | CreateUser, CreateRole, CreatePolicy, AttachRolePolicy (25 ops) | AWS::IAM::Role, AWS::IAM::Policy |
+| STS | Query | GetCallerIdentity, AssumeRole, GetSessionToken | — |
+| S3 | REST/XML | CreateBucket, PutObject, GetObject, ListObjectsV2, multipart (16 ops) | AWS::S3::Bucket |
+| Lambda | REST/JSON | CreateFunction, InvokeFunction, UpdateFunctionCode (12 ops) | AWS::Lambda::Function |
+| SQS | Query | CreateQueue, SendMessage, ReceiveMessage, DeleteMessage (10 ops) | AWS::SQS::Queue |
+| DynamoDB | JSON | CreateTable, PutItem, GetItem, Query, Scan, UpdateItem (15 ops) | AWS::DynamoDB::Table |
+| EC2 | Query | RunInstances, DescribeInstances, CreateVpc, CreateSubnet (20 ops) | AWS::EC2::VPC, AWS::EC2::Instance |
+| ELB v2 | Query | CreateLoadBalancer, CreateTargetGroup, CreateListener (10 ops) | AWS::ElasticLoadBalancingV2::LoadBalancer |
+| Route 53 | REST/XML | CreateHostedZone, ChangeResourceRecordSets (6 ops) | AWS::Route53::HostedZone |
+| Resource Groups Tagging | JSON | GetResources, TagResources, UntagResources | — |
+| SNS | Query | CreateTopic, Publish, Subscribe, Unsubscribe (10 ops) | AWS::SNS::Topic |
+| Secrets Manager | JSON | CreateSecret, GetSecretValue, PutSecretValue (8 ops) | AWS::SecretsManager::Secret |
+| SSM Parameter Store | JSON | GetParameter, PutParameter, DeleteParameter (6 ops) | AWS::SSM::Parameter |
+| KMS | JSON | CreateKey, Encrypt, Decrypt, GenerateDataKey (8 ops) | AWS::KMS::Key |
+| CloudWatch Logs | JSON | CreateLogGroup, CreateLogStream, PutLogEvents (8 ops) | AWS::Logs::LogGroup |
+| EventBridge | JSON | PutEvents, CreateEventBus, PutRule (8 ops) | AWS::Events::Rule |
+| CloudWatch | Query | PutMetricAlarm, GetMetricStatistics, DescribeAlarms (6 ops) | AWS::CloudWatch::Alarm |
+| ACM | JSON | RequestCertificate, DescribeCertificate, DeleteCertificate (5 ops) | AWS::CertificateManager::Certificate |
+| API Gateway (REST) | REST/JSON | CreateRestApi, CreateResource, PutMethod, CreateDeployment (12 ops) | AWS::ApiGateway::RestApi |
+| API Gateway v2 (HTTP) | REST/JSON | CreateApi, CreateRoute, CreateIntegration, CreateStage (8 ops) | AWS::ApiGatewayV2::Api |
+| Step Functions | JSON | CreateStateMachine, StartExecution, DescribeExecution (6 ops) | AWS::StepFunctions::StateMachine |
+| ECR | JSON | CreateRepository, PutImage, GetAuthorizationToken (6 ops) | AWS::ECR::Repository |
+| ECS | JSON | CreateCluster, CreateService, RegisterTaskDefinition, RunTask (10 ops) | AWS::ECS::Cluster |
+| Cognito User Pools | JSON | CreateUserPool, AdminCreateUser, InitiateAuth (10 ops) | AWS::Cognito::UserPool |
+| Cognito Identity | JSON | CreateIdentityPool, GetCredentialsForIdentity (4 ops) | AWS::Cognito::IdentityPool |
+| Kinesis Data Streams | JSON | CreateStream, PutRecord, PutRecords, GetRecords (8 ops) | AWS::Kinesis::Stream |
+| CloudFront | REST/XML | CreateDistribution, GetDistribution, UpdateDistribution (6 ops) | AWS::CloudFront::Distribution |
+| RDS | Query | CreateDBInstance, CreateDBSnapshot, ModifyDBInstance (8 ops) | AWS::RDS::DBInstance |
+| ElastiCache | Query | CreateCacheCluster, CreateReplicationGroup (6 ops) | AWS::ElastiCache::CacheCluster |
+| EFS | REST/JSON | CreateFileSystem, CreateMountTarget, CreateAccessPoint (6 ops) | AWS::EFS::FileSystem |
+| Glue | JSON | CreateDatabase, CreateTable, CreateJob, StartJobRun (10 ops) | AWS::Glue::Database |
+| Cost Explorer | JSON | GetCostAndUsage, GetCostForecast | — |
+| Budgets | JSON | CreateBudget, DescribeBudget, UpdateBudget, DeleteBudget (6 ops) | AWS::Budgets::Budget |
+| Health | JSON | DescribeEvents, DescribeEventDetails (stub) | — |
+| Organizations | JSON | CreateOrganization, DescribeOrganization, CreateAccount (6 ops) | — |
+| SES v2 | REST/JSON | CreateEmailIdentity, SendEmail, GetEmailIdentity, ListEmailIdentities (5 ops) | AWS::SES::EmailIdentity |
+| Kinesis Data Firehose | JSON | CreateDeliveryStream, PutRecord, PutRecordBatch, ListDeliveryStreams (6 ops) | AWS::KinesisFirehose::DeliveryStream |
 
 ### Known limitations
 
-- **Managed policies**: 47 bundled AWS managed policies are available for attachment but permissions
-  are evaluated only within Substrate's IAM engine — not cross-service. No service other than IAM
-  and STS is enforced in this release.
-- **Persistence**: all state is in-memory; restarting the server resets it.
-- **Authentication**: Substrate accepts any AWS credentials without signature verification; use
-  `--no-sign-request` or static test credentials.
-- **Regions**: single-region only; all resources live in `us-east-1` by default.
+- **Cross-service IAM enforcement**: IAM policies are evaluated for IAM and STS operations.
+  Per-operation enforcement for other services is planned.
+- **Persistence**: In-memory by default; SQLite persistence available via `EventStoreConfig{Backend: "sqlite"}`.
+- **Authentication**: SigV4 verification is opt-in (disabled by default for ease of testing).
+  Enable via `ServerOptions.VerifySignatures = true`.
+- **Partial operation coverage**: Each service emulates the most common operations.
+  See [docs/services.md](docs/services.md) for the full operation list.
 
 ---
 
@@ -184,13 +240,26 @@ const client = new IAMClient({
 
 | Milestone | Status |
 |-----------|--------|
-| [v0.1.0 — Event sourcing foundation](https://github.com/scttfrdmn/substrate/milestone/1) | Complete |
-| [v0.2.0 — Core server and plugins](https://github.com/scttfrdmn/substrate/milestone/2) | Complete |
-| [v0.3.0 — IAM implementation](https://github.com/scttfrdmn/substrate/milestone/3) | Complete |
-| [v0.4.0 — Quotas, consistency, costs](https://github.com/scttfrdmn/substrate/milestone/4) | Complete |
-| [v0.5.0 — S3 plugin](https://github.com/scttfrdmn/substrate/milestone/5) | Complete |
-| [v0.6.0 — Betty integration](https://github.com/scttfrdmn/substrate/milestone/6) | Complete |
-| [v1.0.0 — Production release](https://github.com/scttfrdmn/substrate/milestone/7) | In Progress |
+| v0.1.0 — v0.9.0 | Complete |
+| v0.10.0 — Lambda, SQS, S3 notifications | Complete |
+| v0.11.0 — DynamoDB | Complete |
+| v0.13.0 — EC2/VPC, fault injection, multi-region | Complete |
+| v0.15.0 — ELB v2, Route 53 | Complete |
+| v0.17.0 — Observability (metrics, tracing) | Complete |
+| v0.18.0 — CloudWatch Logs, EventBridge, CloudWatch Alarms | Complete |
+| v0.19.0–v0.23.0 — ACM, API Gateway, Step Functions, ECS, ECR, Cognito, Kinesis, CloudFront | Complete |
+| v0.25.0–v0.26.0 — RDS, ElastiCache, EFS, Glue | Complete |
+| v0.27.0 — Cost Explorer, Budgets, Health, Organizations | Complete |
+| [v0.28.0](https://github.com/scttfrdmn/substrate/milestone/28) — SES v2, Firehose, Documentation | In Progress |
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history.
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md) — install, first test, 15-minute tutorial
+- [Service Reference](docs/services.md) — all 37 plugins with operation lists
+- [Testing Guide](docs/testing-guide.md) — `StartTestServer`, recording/replay, cost assertions
+- [Endpoint Configuration](docs/endpoint-configuration.md) — SDK and tool configuration
 
 ## Quick Start
 

@@ -149,6 +149,8 @@ var targetServiceAliases = map[string]string{
 	"budgetservicegateway": "budgets",
 	// "AmazonHealthService" → strip "Amazon" → "healthservice" → "health".
 	"healthservice": "health",
+	// "email" is the subdomain name for Amazon SES v2.
+	"email": "sesv2",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

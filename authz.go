@@ -415,12 +415,15 @@ func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *Requ
 		tags = fn.Tags
 
 	case "sqs":
-		qurl := req.Params["QueueUrl"]
+		qurl := strings.TrimRight(req.Params["QueueUrl"], "/")
 		if qurl == "" {
 			return
 		}
-		parts := strings.Split(strings.TrimRight(qurl, "/"), "/")
+		parts := strings.Split(qurl, "/")
 		name := parts[len(parts)-1]
+		if name == "" {
+			return
+		}
 		raw, err := a.state.Get(goCtx, sqsNamespace, "queue:"+name)
 		if err != nil || raw == nil {
 			return

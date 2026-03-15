@@ -19,7 +19,11 @@ func RegisterDefaultPlugins(
 	store *EventStore,
 ) error {
 	iamPlugin := &IAMPlugin{}
-	if err := iamPlugin.Initialize(ctx, PluginConfig{State: state, Logger: logger}); err != nil {
+	if err := iamPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
 		return fmt.Errorf("initialize iam plugin: %w", err)
 	}
 	registry.Register(iamPlugin)
@@ -99,8 +103,9 @@ func RegisterDefaultPlugins(
 
 	r53Plugin := &Route53Plugin{}
 	if err := r53Plugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
 	}); err != nil {
 		return fmt.Errorf("initialize route53 plugin: %w", err)
 	}
@@ -360,6 +365,24 @@ func RegisterDefaultPlugins(
 		return fmt.Errorf("initialize organizations plugin: %w", err)
 	}
 	registry.Register(orgsPlugin)
+
+	sesv2Plugin := &SESv2Plugin{}
+	if err := sesv2Plugin.Initialize(ctx, PluginConfig{
+		State:  state,
+		Logger: logger,
+	}); err != nil {
+		return fmt.Errorf("initialize sesv2 plugin: %w", err)
+	}
+	registry.Register(sesv2Plugin)
+
+	firehosePlugin := &FirehosePlugin{}
+	if err := firehosePlugin.Initialize(ctx, PluginConfig{
+		State:  state,
+		Logger: logger,
+	}); err != nil {
+		return fmt.Errorf("initialize firehose plugin: %w", err)
+	}
+	registry.Register(firehosePlugin)
 
 	return nil
 }

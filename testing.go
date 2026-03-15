@@ -29,7 +29,7 @@ func StartTestServer(t *testing.T) *TestServer {
 	t.Helper()
 
 	cfg := DefaultConfig()
-	cfg.Server.Address = "127.0.0.1:0" // will be replaced with actual port
+	cfg.Server.Address = "127.0.0.1:0"
 	cfg.EventStore.Enabled = false
 	cfg.Log.Level = "error"
 
@@ -38,23 +38,20 @@ func StartTestServer(t *testing.T) *TestServer {
 	registry := NewPluginRegistry()
 	logger := NewDefaultLogger(slog.LevelError, false)
 
-	store := NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	store := NewEventStore(cfg.EventStore.ToEventStoreConfig(), WithTimeController(tc))
 
 	ctx := context.Background()
 	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store); err != nil {
 		t.Fatalf("StartTestServer: register plugins: %v", err)
 	}
 
-	// Reserve a random port, then hand it to the server.
+	// Bind to a random port and keep the listener open to avoid the TOCTOU race
+	// between port reservation and server bind.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("StartTestServer: listen: %v", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatalf("StartTestServer: close listener: %v", err)
-	}
-	cfg.Server.Address = fmt.Sprintf("127.0.0.1:%d", port)
 
 	srv := NewServer(*cfg, registry, store, state, tc, logger)
 
@@ -62,7 +59,7 @@ func StartTestServer(t *testing.T) *TestServer {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = srv.Start(srvCtx)
+		_ = srv.Serve(srvCtx, ln)
 	}()
 
 	// Wait until the health endpoint responds.

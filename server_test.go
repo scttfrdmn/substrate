@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -290,6 +292,61 @@ func TestServer_CredentialRegistry_EnrichesContext(t *testing.T) {
 	// With the header present the key is found, principal set, but signature check runs.
 	// Response could be 200 or 403 depending on sig; just check the server doesn't 500.
 	assert.NotEqual(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestServer_Start_BindsAndServes(t *testing.T) {
+	// Server.Start must successfully bind and serve requests.
+	cfg := substrate.DefaultConfig()
+	cfg.Server.Address = "127.0.0.1:0"
+	registry := substrate.NewPluginRegistry()
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	state := substrate.NewMemoryStateManager()
+	tc := substrate.NewTimeController(time.Now())
+	logger := substrate.NewDefaultLogger(slog.LevelError, false)
+	srv := substrate.NewServer(*cfg, registry, store, state, tc, logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start(ctx) }()
+
+	// Wait briefly for the server to bind.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	err := <-errCh
+	assert.NoError(t, err)
+}
+
+func TestServer_Serve_UsesProvidedListener(t *testing.T) {
+	// Server.Serve keeps the caller's listener open, avoiding the TOCTOU race
+	// between port reservation and bind that affects Start.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	srv := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv.Serve(ctx, ln)
+	}()
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(5 * time.Second)
+	var resp *http.Response
+	for time.Now().Before(deadline) {
+		resp, err = http.Get(baseURL + "/health") //nolint:noctx
+		if err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	cancel()
+	<-done
 }
 
 func TestServer_CredentialRegistry_UnknownKey_Returns403(t *testing.T) {

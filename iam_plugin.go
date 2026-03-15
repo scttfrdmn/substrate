@@ -21,16 +21,30 @@ const iamNamespace = "iam"
 type IAMPlugin struct {
 	state  StateManager
 	logger Logger
+	tc     *TimeController
 }
 
 // Name returns the service name "iam".
 func (p *IAMPlugin) Name() string { return "iam" }
 
-// Initialize stores the provided state manager and logger.
+// Initialize stores the provided state manager, logger, and optional TimeController.
 func (p *IAMPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	p.state = cfg.State
 	p.logger = cfg.Logger
+	if tc, ok := cfg.Options["time_controller"]; ok {
+		if typed, ok := tc.(*TimeController); ok {
+			p.tc = typed
+		}
+	}
 	return nil
+}
+
+// now returns the current time from the TimeController if set, else time.Now().
+func (p *IAMPlugin) now() time.Time {
+	if p.tc != nil {
+		return p.tc.Now()
+	}
+	return time.Now()
 }
 
 // Shutdown is a no-op for IAMPlugin.
@@ -183,7 +197,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		UserID:     generateIAMID("AIDA"),
 		ARN:        iamUserARN(ctx.AccountID, params.Path, params.UserName),
 		Path:       params.Path,
-		CreateDate: time.Now().UTC(),
+		CreateDate: p.now().UTC(),
 		Tags:       params.Tags,
 	}
 
@@ -386,7 +400,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		Path:                     params.Path,
 		Description:              params.Description,
 		MaxSessionDuration:       params.MaxSessionDuration,
-		CreateDate:               time.Now().UTC(),
+		CreateDate:               p.now().UTC(),
 		AssumeRolePolicyDocument: trustPolicy,
 		Tags:                     params.Tags,
 	}
@@ -564,7 +578,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		GroupID:    generateIAMID("AGPA"),
 		ARN:        iamGroupARN(ctx.AccountID, params.Path, params.GroupName),
 		Path:       params.Path,
-		CreateDate: time.Now().UTC(),
+		CreateDate: p.now().UTC(),
 	}
 
 	raw, err := json.Marshal(group)
@@ -1001,7 +1015,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		}
 	}
 
-	now := time.Now().UTC()
+	now := p.now().UTC()
 	policy := &IAMPolicy{
 		PolicyName:       params.PolicyName,
 		PolicyID:         generateIAMID("ANPA"),
@@ -1187,7 +1201,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		SecretAccessKey: generateIAMID("SECRET") + generateIAMID("KEY"),
 		Status:          "Active",
 		UserName:        userName,
-		CreateDate:      time.Now().UTC(),
+		CreateDate:      p.now().UTC(),
 	}
 
 	raw, err := json.Marshal(accessKey)

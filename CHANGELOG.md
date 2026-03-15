@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `docker-compose.yml` — turnkey local development deployment; SQLite state persisted in a named Docker volume (issue #187)
+- `configs/substrate-local.yaml` — ready-to-use Substrate config mounted into the Compose container (issue #187)
+- `deploy/ecs/task-definition.json` — ECS Fargate task definition template with EFS volume and CloudWatch logging (issue #187)
+- `deploy/ecs/README.md` — step-by-step ECS Fargate + ALB deployment guide (issue #187)
+- `deploy/k8s/deployment.yaml` — Kubernetes Deployment + ClusterIP Service (issue #187)
+- `deploy/k8s/configmap.yaml` — Substrate config as a Kubernetes ConfigMap (issue #187)
+- `deploy/k8s/pvc.yaml` — PersistentVolumeClaim for SQLite data (issue #187)
+- `deploy/README.md` — comparison table and quickstarts for all three deployment options (issue #187)
+- `Makefile`: `compose-up`, `compose-down`, `compose-logs` targets (issue #187)
+- `docs/getting-started.md`: Docker Compose quickstart added as first Install option (issue #187)
+
+### Fixed
+
+- `cmd/substrate/main.go`: `TimeController` is now constructed before `EventStore` and passed via `WithTimeController`; the server clock and event-store clock are now the same instance (issue #187)
+
+## [v0.28.0] - 2026-03-15
+
+### Added
+
+- SES v2 plugin (issue #180): CreateEmailIdentity, ListEmailIdentities, GetEmailIdentity, SendEmail, DeleteEmailIdentity
+- Kinesis Data Firehose plugin (issue #181): CreateDeliveryStream, DescribeDeliveryStream, PutRecord, PutRecordBatch, ListDeliveryStreams, DeleteDeliveryStream
+- Betty CFN: AWS::SES::EmailIdentity, AWS::KinesisFirehose::DeliveryStream (issue #182)
+- Documentation overhaul: README service matrix updated to all 37 plugins (issue #175)
+- docs/getting-started.md: new first-user tutorial (issue #176)
+- docs/services.md: complete service reference for all 37 plugins (issue #177)
+- docs/testing-guide.md: Go testing patterns guide (issue #178)
+- `Server.Serve(ctx, net.Listener)` — accepts an already-bound listener, eliminating the port TOCTOU race in `StartTestServer` (issue #183)
+- `WithTimeController(tc)` EventStoreOption — event timestamps and cost-forecast windows now use the simulated clock rather than `time.Now()` (issue #185)
+
+### Fixed
+
+- `StartTestServer` now passes the open `net.Listener` directly to `srv.Serve`, eliminating the TOCTOU race between port reservation and bind (issue #183)
+- IAMPlugin and Route53Plugin now use `TimeController.Now()` for all business-visible timestamps (CreateDate, SubmittedAt) instead of `time.Now()` (issue #184)
+- `GetCostForecast` now uses `EventStore.now()` (respects the controlled clock) for the observation window and `ComputedAt` field (issue #185)
+- `authz.go` SQS ARN builder: guard against empty `name` segment after splitting a trailing-slash `QueueUrl`, preventing a spurious `""` queue name lookup (issue #186)
+
 ## [v0.27.2] - 2026-03-14
 
 ### Fixed
@@ -619,3 +657,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.17.0]: https://github.com/scttfrdmn/substrate/compare/v0.16.0...v0.17.0
 [v0.16.0]: https://github.com/scttfrdmn/substrate/compare/v0.7.0...v0.16.0
 [v0.3.0-alpha]: https://github.com/scttfrdmn/substrate/releases/tag/v0.3.0-alpha
+[v0.28.0]: https://github.com/scttfrdmn/substrate/compare/v0.27.2...v0.28.0
