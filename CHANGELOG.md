@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.27.1] - 2026-03-15
+
+### Fixed
+
+- **CI lint:** `golangci-lint` pre-built binary v1.64.8 (compiled with Go 1.24) rejected `go 1.26` in `go.mod`. Fixed by setting `install-mode: goinstall` in `.github/workflows/ci.yml` so golangci-lint is compiled from source with the installed Go 1.26.
+- **CI e2e:** `test/e2e/go.mod` was missing OTel and gRPC transitive dependencies introduced since v0.17.0; `go test` failed with `go: updates to go.mod needed`. Fixed by running `go mod tidy` and committing the result; added an explicit tidy step to the e2e CI job to prevent future drift.
+
 ## [v0.27.0] - 2026-03-14
 
 ### Added
@@ -589,7 +596,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unused `ctx` parameters renamed to `_` across `eventstore.go` and `replay.go` to
   satisfy `revive` linter.
 
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.27.1...HEAD
+[v0.27.1]: https://github.com/scttfrdmn/substrate/compare/v0.27.0...v0.27.1
 [v0.27.0]: https://github.com/scttfrdmn/substrate/compare/v0.26.0...v0.27.0
 [v0.26.0]: https://github.com/scttfrdmn/substrate/compare/v0.25.0...v0.26.0
 [v0.25.0]: https://github.com/scttfrdmn/substrate/compare/v0.24.0...v0.25.0
