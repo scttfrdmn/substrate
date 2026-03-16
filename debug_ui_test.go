@@ -32,7 +32,7 @@ func newDebugServer(t *testing.T) (*substrate.Server, *substrate.EventStore) {
 	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig(), substrate.WithTimeController(tc))
 
 	ctx := context.Background()
-	if err := substrate.RegisterDefaultPlugins(ctx, registry, state, tc, logger, store); err != nil {
+	if err := substrate.RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, nil); err != nil {
 		t.Fatalf("register plugins: %v", err)
 	}
 

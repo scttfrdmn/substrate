@@ -41,7 +41,7 @@ func StartTestServer(t *testing.T) *TestServer {
 	store := NewEventStore(cfg.EventStore.ToEventStoreConfig(), WithTimeController(tc))
 
 	ctx := context.Background()
-	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store); err != nil {
+	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, nil); err != nil {
 		t.Fatalf("StartTestServer: register plugins: %v", err)
 	}
 

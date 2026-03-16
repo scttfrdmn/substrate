@@ -71,3 +71,113 @@ func MeanFloatForTest(vals []float64) float64 { return meanFloat(vals) }
 
 // StddevFloatForTest wraps the unexported stddevFloat for direct unit testing.
 func StddevFloatForTest(vals []float64, mean float64) float64 { return stddevFloat(vals, mean) }
+
+// RuntimeToImage wraps runtimeToImage for external tests.
+func RuntimeToImage(runtime string) string { return runtimeToImage(runtime) }
+
+// FindFreePort wraps findFreePort for external tests.
+func FindFreePort() (int, error) { return findFreePort() }
+
+// NewLambdaExecutorForTest creates a LambdaExecutor with a forced Docker
+// availability value, allowing tests to run without a Docker daemon.
+func NewLambdaExecutorForTest(cfg LambdaExecCfg, logger Logger, dockerAvail bool) *LambdaExecutor {
+	e := NewLambdaExecutor(cfg, logger)
+	// Override the availability probe result.
+	e.availOnce.Do(func() { e.available = dockerAvail })
+	return e
+}
+
+// NewLambdaPluginForTest constructs a bare LambdaPlugin wired to the given
+// state manager. It is used to test replay-cache helpers without a full server.
+func NewLambdaPluginForTest(state StateManager, tc *TimeController) *LambdaPlugin {
+	return &LambdaPlugin{
+		state:   state,
+		logger:  NewDefaultLogger(-4, false),
+		tc:      tc,
+		esmStop: make(map[string]chan struct{}),
+	}
+}
+
+// SaveReplayForTest exposes saveReplay for external tests.
+func (p *LambdaPlugin) SaveReplayForTest(functionARN string, payload, response []byte) {
+	p.saveReplay(functionARN, payload, response)
+}
+
+// LoadReplayForTest exposes loadReplay for external tests.
+func (p *LambdaPlugin) LoadReplayForTest(functionARN string, payload []byte) ([]byte, bool) {
+	return p.loadReplay(functionARN, payload)
+}
+
+// BuildV1ProxyEventForTest wraps buildV1ProxyEvent for external tests.
+func BuildV1ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+	return buildV1ProxyEvent(req, apiID, stage, resourcePath)
+}
+
+// BuildV2ProxyEventForTest wraps buildV2ProxyEvent for external tests.
+func BuildV2ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+	return buildV2ProxyEvent(req, apiID, stage, resourcePath)
+}
+
+// ParseProxyResponseForTest wraps parseProxyResponse for external tests.
+func ParseProxyResponseForTest(body []byte) (*AWSResponse, error) {
+	return parseProxyResponse(body)
+}
+
+// ExtractLambdaARNFromURIForTest wraps extractLambdaARNFromURI for external tests.
+func ExtractLambdaARNFromURIForTest(uri string) string {
+	return extractLambdaARNFromURI(uri)
+}
+
+// NewRDSExecutorForTest wraps NewRDSExecutor for external tests.
+func NewRDSExecutorForTest(logger Logger) *RDSExecutor {
+	return NewRDSExecutor(logger)
+}
+
+// InjectRDSHandleForTest inserts a fake RDSContainerHandle into the executor's
+// active map to exercise code paths that iterate over active containers.
+func InjectRDSHandleForTest(e *RDSExecutor, instanceID, containerID string) {
+	e.mu.Lock()
+	e.active[instanceID] = &RDSContainerHandle{ContainerID: containerID, HostPort: 5432}
+	e.mu.Unlock()
+}
+
+// RDSStopContainerForTest calls StopContainer for external tests.
+func RDSStopContainerForTest(e *RDSExecutor, ctx context.Context, containerID string) error {
+	return e.StopContainer(ctx, containerID)
+}
+
+// EvictStaleForTest exposes LambdaExecutor.evictStale for external tests.
+func (e *LambdaExecutor) EvictStaleForTest() { e.evictStale() }
+
+// InjectPoolEntryForTest inserts a fake containerHandle into the executor's
+// warm pool to exercise code paths that iterate over the pool (e.g., StopAll).
+func InjectPoolEntryForTest(e *LambdaExecutor, arn, containerID string) {
+	e.mu.Lock()
+	e.pool[arn] = &containerHandle{containerID: containerID}
+	e.mu.Unlock()
+}
+
+// IsDockerAvailableForTest exposes LambdaExecutor.isDockerAvailable for tests.
+func (e *LambdaExecutor) IsDockerAvailableForTest() bool { return e.isDockerAvailable() }
+
+// ShutdownLambdaPluginForTest calls LambdaPlugin.Shutdown for coverage.
+func ShutdownLambdaPluginForTest(p *LambdaPlugin, ctx context.Context) error {
+	return p.Shutdown(ctx)
+}
+
+// LambdaPluginSetExecutorForTest injects a LambdaExecutor into the plugin for
+// tests that need to exercise Docker execution or replay paths.
+func LambdaPluginSetExecutorForTest(p *LambdaPlugin, exec *LambdaExecutor) {
+	p.executor = exec
+}
+
+// LambdaPluginCreateFunctionForTest writes a minimal LambdaFunction to state
+// so that invoke can load it without a real HTTP CreateFunction request.
+func LambdaPluginCreateFunctionForTest(p *LambdaPlugin, fn LambdaFunction) {
+	_, _ = p.saveFunctionAndRespond(fn, 200)
+}
+
+// InvokeLambdaForTest calls the unexported invoke method directly.
+func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
+	return p.invoke(ctx, req, name)
+}

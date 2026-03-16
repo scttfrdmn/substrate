@@ -45,6 +45,12 @@ type Config struct {
 
 	// Region controls multi-region routing and resource isolation.
 	Region RegionCfg `mapstructure:"region"`
+
+	// Lambda controls Lambda Docker execution behavior.
+	Lambda LambdaCfg `mapstructure:"lambda"`
+
+	// RDS controls RDS backend behavior.
+	RDS RDSCfg `mapstructure:"rds"`
 }
 
 // MetricsCfg controls Prometheus metrics exposure.
@@ -340,6 +346,29 @@ type RegionCfg struct {
 	Allowed []string `mapstructure:"allowed"`
 }
 
+// LambdaCfg controls Lambda Docker execution behavior.
+type LambdaCfg struct {
+	// DockerEnabled gates the Docker-based Lambda execution engine. Default false.
+	// When false (or when Docker is unavailable), a stub response is returned.
+	DockerEnabled bool `mapstructure:"docker_enabled"`
+
+	// ReplayMode selects how Lambda invocations are served: "live" executes the
+	// function container; "recorded" returns a cached result when available.
+	// Default "live".
+	ReplayMode string `mapstructure:"replay_mode"`
+
+	// WarmPoolTTL is the duration string (e.g. "5m") after which an idle Lambda
+	// container is stopped and removed. Default "5m".
+	WarmPoolTTL string `mapstructure:"warm_pool_ttl"`
+}
+
+// RDSCfg controls RDS backend behavior.
+type RDSCfg struct {
+	// Engine selects the RDS backend: "stub" returns synthetic endpoints;
+	// "container" starts a real Postgres Docker container. Default "stub".
+	Engine string `mapstructure:"engine"`
+}
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -401,6 +430,14 @@ func DefaultConfig() *Config {
 		Region: RegionCfg{
 			Default: "us-east-1",
 		},
+		Lambda: LambdaCfg{
+			DockerEnabled: false,
+			ReplayMode:    "live",
+			WarmPoolTTL:   "5m",
+		},
+		RDS: RDSCfg{
+			Engine: "stub",
+		},
 	}
 }
 
@@ -448,6 +485,10 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("tracing.service_name", defaults.Tracing.ServiceName)
 	v.SetDefault("fault.enabled", defaults.Fault.Enabled)
 	v.SetDefault("region.default", defaults.Region.Default)
+	v.SetDefault("lambda.docker_enabled", defaults.Lambda.DockerEnabled)
+	v.SetDefault("lambda.replay_mode", defaults.Lambda.ReplayMode)
+	v.SetDefault("lambda.warm_pool_ttl", defaults.Lambda.WarmPoolTTL)
+	v.SetDefault("rds.engine", defaults.RDS.Engine)
 
 	// Environment variable overrides.
 	v.SetEnvPrefix("SUBSTRATE")
@@ -531,6 +572,22 @@ func Validate(cfg *Config) error {
 
 	if cfg.Tracing.Enabled && cfg.Tracing.Exporter == "otlp_http" && cfg.Tracing.OTLPEndpoint == "" {
 		return fmt.Errorf("tracing.otlp_endpoint must be set when tracing.exporter is otlp_http")
+	}
+
+	validReplayModes := map[string]bool{"live": true, "recorded": true}
+	if !validReplayModes[cfg.Lambda.ReplayMode] {
+		return fmt.Errorf("lambda.replay_mode %q is not valid; choose live or recorded", cfg.Lambda.ReplayMode)
+	}
+
+	if cfg.Lambda.WarmPoolTTL != "" {
+		if _, err := time.ParseDuration(cfg.Lambda.WarmPoolTTL); err != nil {
+			return fmt.Errorf("lambda.warm_pool_ttl %q is not a valid duration: %w", cfg.Lambda.WarmPoolTTL, err)
+		}
+	}
+
+	validRDSEngines := map[string]bool{"stub": true, "container": true}
+	if !validRDSEngines[cfg.RDS.Engine] {
+		return fmt.Errorf("rds.engine %q is not valid; choose stub or container", cfg.RDS.Engine)
 	}
 
 	for i, rule := range cfg.Fault.Rules {

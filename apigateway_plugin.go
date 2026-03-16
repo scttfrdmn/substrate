@@ -3,6 +3,7 @@ package substrate
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1321,6 +1322,374 @@ func apigwJSONResponse(status int, v any) (*AWSResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("apigwJSONResponse marshal: %w", err)
 	}
+	return &AWSResponse{
+		StatusCode: status,
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Body:       body,
+	}, nil
+}
+
+// --- API Gateway Proxy Plugin ------------------------------------------------
+
+// APIGatewayProxyPlugin handles runtime (stage) invocations for API Gateway
+// v1 and v2 APIs. Requests arrive at {apiId}.execute-api.{region}.amazonaws.com
+// and are dispatched to the configured Lambda AWS_PROXY integration.
+type APIGatewayProxyPlugin struct {
+	state    StateManager
+	logger   Logger
+	registry *PluginRegistry
+}
+
+// Name returns the service name "execute-api".
+func (p *APIGatewayProxyPlugin) Name() string { return "execute-api" }
+
+// Initialize sets up the APIGatewayProxyPlugin.
+func (p *APIGatewayProxyPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
+	p.state = cfg.State
+	p.logger = cfg.Logger
+	if reg, ok := cfg.Options["registry"].(*PluginRegistry); ok {
+		p.registry = reg
+	}
+	return nil
+}
+
+// Shutdown is a no-op for APIGatewayProxyPlugin.
+func (p *APIGatewayProxyPlugin) Shutdown(_ context.Context) error { return nil }
+
+// HandleRequest routes an API Gateway runtime request to a Lambda function
+// via the registered AWS_PROXY integration.
+func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	if p.registry == nil {
+		return proxyError(http.StatusInternalServerError, "proxy plugin not wired to registry")
+	}
+
+	// Extract API ID from the Host header: {apiId}.execute-api.{region}.amazonaws.com
+	host := req.Headers["Host"]
+	if host == "" {
+		return proxyError(http.StatusBadRequest, "missing Host header")
+	}
+	// Strip port.
+	if colon := strings.LastIndexByte(host, ':'); colon > 0 {
+		host = host[:colon]
+	}
+	dotIdx := strings.Index(host, ".execute-api.")
+	if dotIdx < 0 {
+		return proxyError(http.StatusBadRequest, "unexpected host: "+host)
+	}
+	apiID := host[:dotIdx]
+
+	// Parse path: /{stage}/{resourcePath...}
+	rawPath := req.Path
+	rawPath = strings.TrimPrefix(rawPath, "/")
+	slashIdx := strings.Index(rawPath, "/")
+	var stageName, resourcePath string
+	if slashIdx < 0 {
+		stageName = rawPath
+		resourcePath = "/"
+	} else {
+		stageName = rawPath[:slashIdx]
+		resourcePath = rawPath[slashIdx:]
+	}
+
+	// Try v2 API first.
+	lambdaARN, isV2, err := p.resolveLambdaARN(reqCtx, apiID, req.Operation, resourcePath)
+	if err != nil {
+		return proxyError(http.StatusBadGateway, "no Lambda integration found: "+err.Error())
+	}
+
+	// Extract function name from ARN.
+	arnParts := strings.Split(lambdaARN, ":")
+	fnName := arnParts[len(arnParts)-1]
+
+	var eventJSON []byte
+	if isV2 {
+		eventJSON, err = buildV2ProxyEvent(req, apiID, stageName, resourcePath)
+	} else {
+		eventJSON, err = buildV1ProxyEvent(req, apiID, stageName, resourcePath)
+	}
+	if err != nil {
+		return proxyError(http.StatusInternalServerError, "build proxy event: "+err.Error())
+	}
+
+	// Invoke Lambda via registry.
+	invokeReq := &AWSRequest{
+		Service:   "lambda",
+		Operation: "POST",
+		Path:      "/2015-03-31/functions/" + fnName + "/invocations",
+		Headers:   map[string]string{"Content-Type": "application/json"},
+		Body:      eventJSON,
+	}
+	invokeCtx := &RequestContext{
+		RequestID: generateRequestID(),
+		AccountID: reqCtx.AccountID,
+		Region:    reqCtx.Region,
+		Timestamp: reqCtx.Timestamp,
+		Metadata:  make(map[string]interface{}),
+	}
+	invokeResp, invokeErr := p.registry.RouteRequest(invokeCtx, invokeReq)
+	if invokeErr != nil {
+		return proxyError(http.StatusBadGateway, "lambda invoke: "+invokeErr.Error())
+	}
+	if invokeResp == nil {
+		return proxyError(http.StatusBadGateway, "nil lambda response")
+	}
+
+	// Parse Lambda proxy response.
+	return parseProxyResponse(invokeResp.Body)
+}
+
+// resolveLambdaARN looks up the Lambda ARN for the given API, HTTP method, and
+// resource path. It checks v2 APIs first, then v1.
+func (p *APIGatewayProxyPlugin) resolveLambdaARN(reqCtx *RequestContext, apiID, httpMethod, resourcePath string) (arn string, isV2 bool, err error) {
+	goCtx := context.Background()
+	acct := reqCtx.AccountID
+	region := reqCtx.Region
+
+	// --- Try v2 ---
+	apiData, _ := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2APIKey(acct, region, apiID))
+	if apiData != nil {
+		// Find a matching route (exact or $default).
+		routeIDs, _ := p.loadStringList(goCtx, apigatewayv2Namespace, apigwv2RouteIDsKey(acct, region, apiID))
+		var defaultIntID, matchIntID string
+		for _, rid := range routeIDs {
+			routeData, _ := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2RouteKey(acct, region, apiID, rid))
+			if routeData == nil {
+				continue
+			}
+			var route V2RouteState
+			if json.Unmarshal(routeData, &route) != nil {
+				continue
+			}
+			// Extract integration ID from target "integrations/{id}".
+			target := strings.TrimPrefix(route.Target, "integrations/")
+			if route.RouteKey == "$default" {
+				defaultIntID = target
+			} else {
+				// RouteKey format: "METHOD /path" or just "/path"
+				rk := route.RouteKey
+				method, path, _ := strings.Cut(rk, " ")
+				if (method == httpMethod || method == "ANY") && path == resourcePath {
+					matchIntID = target
+					break
+				}
+			}
+		}
+		intID := matchIntID
+		if intID == "" {
+			intID = defaultIntID
+		}
+		if intID != "" {
+			intData, _ := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2IntegrationKey(acct, region, apiID, intID))
+			if intData != nil {
+				var integration V2IntegrationState
+				if json.Unmarshal(intData, &integration) == nil && integration.IntegrationType == "AWS_PROXY" {
+					lambdaARN := extractLambdaARNFromURI(integration.IntegrationURI)
+					if lambdaARN != "" {
+						return lambdaARN, true, nil
+					}
+				}
+			}
+		}
+	}
+
+	// --- Try v1 ---
+	v1APIData, _ := p.state.Get(goCtx, apigatewayNamespace, apigwAPIKey(acct, region, apiID))
+	if v1APIData == nil {
+		return "", false, fmt.Errorf("API %s not found", apiID)
+	}
+	// Enumerate resources to find a matching path.
+	resIDs, _ := p.loadStringList(goCtx, apigatewayNamespace, apigwResourceIDsKey(acct, region, apiID))
+	for _, rid := range resIDs {
+		resData, _ := p.state.Get(goCtx, apigatewayNamespace, apigwResourceKey(acct, region, apiID, rid))
+		if resData == nil {
+			continue
+		}
+		var res ResourceState
+		if json.Unmarshal(resData, &res) != nil {
+			continue
+		}
+		if res.Path != resourcePath {
+			continue
+		}
+		// Check integration for this resource and method.
+		intData, _ := p.state.Get(goCtx, apigatewayNamespace, apigwIntegrationKey(acct, region, apiID, rid, httpMethod))
+		if intData == nil {
+			// Try ANY.
+			intData, _ = p.state.Get(goCtx, apigatewayNamespace, apigwIntegrationKey(acct, region, apiID, rid, "ANY"))
+		}
+		if intData == nil {
+			continue
+		}
+		var integration IntegrationState
+		if json.Unmarshal(intData, &integration) != nil {
+			continue
+		}
+		if integration.Type != "AWS_PROXY" {
+			continue
+		}
+		lambdaARN := extractLambdaARNFromURI(integration.URI)
+		if lambdaARN != "" {
+			return lambdaARN, false, nil
+		}
+	}
+
+	return "", false, fmt.Errorf("no AWS_PROXY integration for %s %s", httpMethod, resourcePath)
+}
+
+// loadStringList loads a JSON-encoded string slice from state.
+func (p *APIGatewayProxyPlugin) loadStringList(ctx context.Context, ns, key string) ([]string, error) {
+	data, err := p.state.Get(ctx, ns, key)
+	if err != nil || data == nil {
+		return nil, err
+	}
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// extractLambdaARNFromURI parses the Lambda ARN from an integration URI of the
+// form: arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{lambdaArn}/invocations
+// or the Lambda ARN directly.
+func extractLambdaARNFromURI(uri string) string {
+	const marker = "functions/"
+	idx := strings.Index(uri, marker)
+	if idx < 0 {
+		// Check if the URI is already a Lambda ARN.
+		if strings.HasPrefix(uri, "arn:aws:lambda:") {
+			return uri
+		}
+		return ""
+	}
+	rest := uri[idx+len(marker):]
+	if end := strings.Index(rest, "/"); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest
+}
+
+// buildV1ProxyEvent constructs a v1 (REST API) proxy event JSON payload.
+func buildV1ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+	qs := make(map[string]string)
+	for k, v := range req.Params {
+		qs[k] = v
+	}
+	event := map[string]interface{}{
+		"version":    "1.0",
+		"httpMethod": req.Operation,
+		"path":       "/" + stage + resourcePath,
+		"resource":   resourcePath,
+		"headers":    req.Headers,
+		"queryStringParameters": func() interface{} {
+			if len(qs) == 0 {
+				return nil
+			}
+			return qs
+		}(),
+		"pathParameters":  nil,
+		"stageVariables":  map[string]string{},
+		"isBase64Encoded": false,
+		"body": func() interface{} {
+			if len(req.Body) == 0 {
+				return nil
+			}
+			return string(req.Body)
+		}(),
+		"requestContext": map[string]interface{}{
+			"stage":        stage,
+			"requestId":    generateRequestID(),
+			"httpMethod":   req.Operation,
+			"resourcePath": resourcePath,
+			"apiId":        apiID,
+		},
+	}
+	return json.Marshal(event)
+}
+
+// buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload.
+func buildV2ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+	rawQS := ""
+	sep := ""
+	for k, v := range req.Params {
+		rawQS += sep + k + "=" + v
+		sep = "&"
+	}
+	event := map[string]interface{}{
+		"version":         "2.0",
+		"routeKey":        req.Operation + " " + resourcePath,
+		"rawPath":         "/" + stage + resourcePath,
+		"rawQueryString":  rawQS,
+		"headers":         req.Headers,
+		"isBase64Encoded": false,
+		"body": func() interface{} {
+			if len(req.Body) == 0 {
+				return nil
+			}
+			return string(req.Body)
+		}(),
+		"requestContext": map[string]interface{}{
+			"routeKey":  req.Operation + " " + resourcePath,
+			"stage":     stage,
+			"requestId": generateRequestID(),
+			"apiId":     apiID,
+			"http": map[string]interface{}{
+				"method": req.Operation,
+				"path":   "/" + stage + resourcePath,
+			},
+		},
+	}
+	return json.Marshal(event)
+}
+
+// proxyResponseShape is the expected shape of a Lambda proxy response.
+type proxyResponseShape struct {
+	StatusCode      int               `json:"statusCode"`
+	Headers         map[string]string `json:"headers"`
+	Body            string            `json:"body"`
+	IsBase64Encoded bool              `json:"isBase64Encoded"`
+}
+
+// parseProxyResponse decodes a Lambda proxy response body into an AWSResponse.
+func parseProxyResponse(body []byte) (*AWSResponse, error) {
+	var pr proxyResponseShape
+	if err := json.Unmarshal(body, &pr); err != nil {
+		// If we can't parse, pass the raw body through with 200.
+		return &AWSResponse{ //nolint:nilerr
+			StatusCode: http.StatusOK,
+			Headers:    map[string]string{"Content-Type": "application/json"},
+			Body:       body,
+		}, nil
+	}
+	status := pr.StatusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	headers := pr.Headers
+	if headers == nil {
+		headers = map[string]string{"Content-Type": "application/json"}
+	}
+	var responseBody []byte
+	if pr.IsBase64Encoded {
+		decoded, decErr := base64.StdEncoding.DecodeString(pr.Body)
+		if decErr == nil {
+			responseBody = decoded
+		} else {
+			responseBody = []byte(pr.Body)
+		}
+	} else {
+		responseBody = []byte(pr.Body)
+	}
+	return &AWSResponse{
+		StatusCode: status,
+		Headers:    headers,
+		Body:       responseBody,
+	}, nil
+}
+
+// proxyError returns a simple JSON error AWSResponse.
+func proxyError(status int, msg string) (*AWSResponse, error) {
+	body, _ := json.Marshal(map[string]string{"message": msg})
 	return &AWSResponse{
 		StatusCode: status,
 		Headers:    map[string]string{"Content-Type": "application/json"},

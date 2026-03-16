@@ -60,6 +60,13 @@ type LambdaFunction struct {
 
 	// CreateDate is the date the function was created.
 	CreateDate time.Time `json:"CreateDate"`
+
+	// ImageURI is the URI of a container image in ECR when PackageType is "Image".
+	ImageURI string `json:"ImageUri,omitempty"`
+
+	// ZipStored indicates whether the deployment ZIP bytes are held in state.
+	// False when the function was created via S3 reference (not directly uploaded).
+	ZipStored bool `json:"ZipStored,omitempty"`
 }
 
 // LambdaPermissionStatement is a single statement in a Lambda resource policy.

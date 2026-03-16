@@ -287,7 +287,7 @@ func (s *Server) stateAtSequence(ctx context.Context, upToSeq int64) ([]byte, er
 	freshState := NewMemoryStateManager()
 	freshRegistry := NewPluginRegistry()
 	freshTC := NewTimeController(time.Time{})
-	if err := RegisterDefaultPlugins(ctx, freshRegistry, freshState, freshTC, s.logger, nil); err != nil {
+	if err := RegisterDefaultPlugins(ctx, freshRegistry, freshState, freshTC, s.logger, nil, nil); err != nil {
 		return nil, fmt.Errorf("stateAtSequence register plugins: %w", err)
 	}
 

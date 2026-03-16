@@ -880,6 +880,7 @@ func newFullTestDeployer(t *testing.T) *substrate.StackDeployer {
 		&substrate.BudgetsPlugin{},
 		&substrate.MSKPlugin{},
 		&substrate.SESv2Plugin{},
+		&substrate.FirehosePlugin{},
 	} {
 		require.NoError(t, p.Initialize(context.Background(), opts))
 		registry.Register(p)
@@ -1985,4 +1986,87 @@ func TestCFN_MSKCluster(t *testing.T) {
 	assert.Empty(t, r.Error, "MSK cluster resource error: %s", r.Error)
 	assert.Contains(t, r.PhysicalID, "cfn-kafka-cluster")
 	assert.Contains(t, r.ARN, "kafka")
+}
+
+// TestCFN_SESv2EmailIdentity verifies the AWS::SES::EmailIdentity CFN resource.
+func TestCFN_SESv2EmailIdentity(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyEmailIdentity": {
+				"Type": "AWS::SES::EmailIdentity",
+				"Properties": {
+					"EmailIdentity": "test@example.com"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "sesv2-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::SES::EmailIdentity", r.Type)
+	assert.Empty(t, r.Error, "SESv2 identity resource error: %s", r.Error)
+}
+
+// TestCFN_FirehoseDeliveryStream verifies the AWS::KinesisFirehose::DeliveryStream CFN resource.
+func TestCFN_FirehoseDeliveryStream(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyStream": {
+				"Type": "AWS::KinesisFirehose::DeliveryStream",
+				"Properties": {
+					"DeliveryStreamName": "cfn-test-stream"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "firehose-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::KinesisFirehose::DeliveryStream", r.Type)
+	assert.Empty(t, r.Error, "Firehose delivery stream resource error: %s", r.Error)
+}
+
+// TestCFN_APIGatewayMethod verifies the AWS::ApiGateway::Method CFN resource.
+func TestCFN_APIGatewayMethod(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAPI": {
+				"Type": "AWS::ApiGateway::RestApi",
+				"Properties": {"Name": "method-test-api"}
+			},
+			"MyResource": {
+				"Type": "AWS::ApiGateway::Resource",
+				"Properties": {
+					"RestApiId": {"Ref": "MyAPI"},
+					"ParentId": {"Fn::GetAtt": ["MyAPI", "RootResourceId"]},
+					"PathPart": "items"
+				},
+				"DependsOn": "MyAPI"
+			},
+			"MyMethod": {
+				"Type": "AWS::ApiGateway::Method",
+				"Properties": {
+					"RestApiId": {"Ref": "MyAPI"},
+					"ResourceId": {"Ref": "MyResource"},
+					"HttpMethod": "GET",
+					"AuthorizationType": "NONE"
+				},
+				"DependsOn": "MyResource"
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "apigw-method-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 3)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s had error: %s", r.LogicalID, r.Error)
+	}
 }

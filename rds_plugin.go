@@ -13,10 +13,13 @@ import (
 
 // RDSPlugin emulates the Amazon RDS API using the AWS Query protocol.
 // It supports DB instances, snapshots, subnet groups, and parameter groups.
+// When an RDSExecutor is configured (rds.engine=container) real Postgres
+// containers are started for each CreateDBInstance call.
 type RDSPlugin struct {
-	state  StateManager
-	logger Logger
-	tc     *TimeController
+	state    StateManager
+	logger   Logger
+	tc       *TimeController
+	executor *RDSExecutor // nil when engine is "stub"
 }
 
 // Name returns the service name "rds".
@@ -31,11 +34,19 @@ func (p *RDSPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
+	if exec, ok := cfg.Options["rds_executor"].(*RDSExecutor); ok {
+		p.executor = exec
+	}
 	return nil
 }
 
-// Shutdown is a no-op for RDSPlugin.
-func (p *RDSPlugin) Shutdown(_ context.Context) error { return nil }
+// Shutdown stops all active RDS containers if the executor is configured.
+func (p *RDSPlugin) Shutdown(ctx context.Context) error {
+	if p.executor != nil {
+		return p.executor.StopAll(ctx)
+	}
+	return nil
+}
 
 // HandleRequest dispatches an RDS query-protocol request to the appropriate handler.
 func (p *RDSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -140,6 +151,30 @@ func (p *RDSPlugin) createDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	if s := req.Params["AllocatedStorage"]; s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
 			inst.AllocatedStorage = n
+		}
+	}
+
+	// When the container executor is configured, launch a real Postgres container.
+	if p.executor != nil {
+		masterUser := inst.MasterUsername
+		if masterUser == "" {
+			masterUser = "postgres"
+		}
+		masterPwd := req.Params["MasterUserPassword"]
+		if masterPwd == "" {
+			masterPwd = "substrate"
+		}
+		handle, startErr := p.executor.StartPostgres(context.Background(), id, masterUser, masterPwd)
+		if startErr != nil {
+			// Graceful degradation: log warning and keep synthetic endpoint.
+			p.logger.Warn("rds createDBInstance: container start failed, using synthetic endpoint",
+				"instance", id, "err", startErr)
+		} else {
+			inst.Endpoint = RDSEndpoint{Address: "localhost", Port: handle.HostPort}
+			// Persist the container handle for deletion.
+			handleData, _ := json.Marshal(handle)
+			scope := reqCtx.AccountID + "/" + reqCtx.Region
+			_ = p.state.Put(context.Background(), rdsNamespace, "dbinstance_container:"+scope+"/"+id, handleData)
 		}
 	}
 
@@ -318,6 +353,21 @@ func (p *RDSPlugin) deleteDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("rds deleteDBInstance delete: %w", err)
 	}
 	p.removeFromIndex(scope, "dbinstance_ids", id)
+
+	// Stop the container if the executor is configured.
+	if p.executor != nil {
+		containerKey := "dbinstance_container:" + scope + "/" + id
+		handleData, _ := p.state.Get(context.Background(), rdsNamespace, containerKey)
+		if handleData != nil {
+			var h RDSContainerHandle
+			if json.Unmarshal(handleData, &h) == nil {
+				if err := p.executor.StopContainer(context.Background(), h.ContainerID); err != nil {
+					p.logger.Warn("rds deleteDBInstance: stop container", "instance", id, "err", err)
+				}
+			}
+			_ = p.state.Delete(context.Background(), rdsNamespace, containerKey)
+		}
+	}
 
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`

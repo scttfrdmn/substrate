@@ -327,3 +327,39 @@ func TestLambdaPlugin_UntagResource(t *testing.T) {
 	assert.NotContains(t, tags, "a")
 	assert.Contains(t, tags, "b")
 }
+
+// TestLambdaPlugin_UpdateFunctionCode_S3 verifies the S3-sourced code path
+// (logs a warning, sets ZipStored=false, but succeeds).
+func TestLambdaPlugin_UpdateFunctionCode_S3(t *testing.T) {
+	srv := newLambdaTestServer(t)
+
+	lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "s3-update-fn",
+		"Runtime":      "python3.12",
+		"Role":         "arn:aws:iam::123456789012:role/r",
+		"Handler":      "index.handler",
+	})
+
+	resp := lambdaRequest(t, srv, http.MethodPut, "/2015-03-31/functions/s3-update-fn/code", map[string]any{
+		"S3Bucket": "my-bucket",
+		"S3Key":    "functions/my-fn.zip",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestLambdaPlugin_UpdateFunctionCode_Image verifies the Image-URI code path.
+func TestLambdaPlugin_UpdateFunctionCode_Image(t *testing.T) {
+	srv := newLambdaTestServer(t)
+
+	lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "image-update-fn",
+		"Runtime":      "python3.12",
+		"Role":         "arn:aws:iam::123456789012:role/r",
+		"Handler":      "index.handler",
+	})
+
+	resp := lambdaRequest(t, srv, http.MethodPut, "/2015-03-31/functions/image-update-fn/code", map[string]any{
+		"ImageUri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/my-fn:latest",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}

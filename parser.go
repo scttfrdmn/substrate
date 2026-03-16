@@ -51,6 +51,11 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	if host == "" {
 		host = r.Header.Get("Host")
 	}
+	// Ensure the Host is always present in the headers map so that plugins
+	// such as APIGatewayProxyPlugin can read it without special-casing r.Host.
+	if _, ok := headers["Host"]; !ok && host != "" {
+		headers["Host"] = host
+	}
 
 	target := r.Header.Get("X-Amz-Target")
 	authHeader := r.Header.Get("Authorization")
@@ -200,6 +205,11 @@ func extractServiceFromHost(host string) string {
 		return "appsync"
 	}
 
+	// API Gateway runtime endpoint: {apiId}.execute-api.{region}
+	if strings.Contains(host, ".execute-api.") {
+		return "execute-api"
+	}
+
 	// "<service>.<region>" or just "<service>".
 	parts := strings.SplitN(host, ".", 2)
 	svc := strings.ToLower(parts[0])
@@ -284,6 +294,11 @@ func extractRegionFromHost(host string) string {
 			}
 			return "" // s3 at the end → global, no region
 		}
+	}
+
+	// execute-api runtime: "{apiId}.execute-api.{region}".
+	if len(parts) >= 3 && parts[1] == "execute-api" {
+		return parts[2]
 	}
 
 	// Non-S3: "<service>.<region>" or just "<service>".

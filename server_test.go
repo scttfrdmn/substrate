@@ -231,6 +231,25 @@ func TestServer_ReadyEndpoint(t *testing.T) {
 	assert.Contains(t, plugins, "s3")
 }
 
+func TestServer_MetricsEndpoint(t *testing.T) {
+	cfg := substrate.DefaultConfig()
+	cfg.Metrics.Enabled = true
+	registry := substrate.NewPluginRegistry()
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	state := substrate.NewMemoryStateManager()
+	tc := substrate.NewTimeController(time.Now())
+	logger := substrate.NewDefaultLogger(slog.LevelInfo, false)
+	metrics := substrate.NewMetricsCollector()
+	srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
+		substrate.ServerOptions{Metrics: metrics})
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/plain")
+}
+
 func TestServer_CustomHealthPath(t *testing.T) {
 	cfg := substrate.DefaultConfig()
 	cfg.Server.HealthPath = "/_ping"

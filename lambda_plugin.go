@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,11 +18,17 @@ import (
 // It handles CreateFunction, GetFunction, DeleteFunction, ListFunctions,
 // UpdateFunctionCode, UpdateFunctionConfiguration, Invoke, InvokeAsync,
 // AddPermission, RemovePermission, GetPolicy, PutFunctionEventInvokeConfig,
-// TagResource, UntagResource, and ListTags.
+// TagResource, UntagResource, ListTags, and event source mappings.
+// When a LambdaExecutor is configured (Docker enabled) real function code is
+// executed; otherwise stub responses are returned.
 type LambdaPlugin struct {
-	state  StateManager
-	logger Logger
-	tc     *TimeController
+	state    StateManager
+	logger   Logger
+	tc       *TimeController
+	executor *LambdaExecutor // nil when Docker is disabled
+	registry *PluginRegistry // for SQS ESM poller
+	esmMu    sync.Mutex
+	esmStop  map[string]chan struct{} // UUID → stop channel
 }
 
 // Name returns the service name "lambda".
@@ -35,11 +43,30 @@ func (p *LambdaPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
+	if exec, ok := cfg.Options["lambda_exec"].(*LambdaExecutor); ok {
+		p.executor = exec
+	}
+	if reg, ok := cfg.Options["registry"].(*PluginRegistry); ok {
+		p.registry = reg
+	}
+	p.esmStop = make(map[string]chan struct{})
 	return nil
 }
 
-// Shutdown is a no-op for LambdaPlugin.
-func (p *LambdaPlugin) Shutdown(_ context.Context) error { return nil }
+// Shutdown stops all ESM pollers and the Docker executor (if active).
+func (p *LambdaPlugin) Shutdown(_ context.Context) error {
+	p.esmMu.Lock()
+	for _, ch := range p.esmStop {
+		close(ch)
+	}
+	p.esmStop = make(map[string]chan struct{})
+	p.esmMu.Unlock()
+
+	if p.executor != nil {
+		p.executor.StopAll()
+	}
+	return nil
+}
 
 // HandleRequest dispatches a Lambda REST API request to the appropriate handler.
 func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -58,7 +85,7 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 	case "ListFunctions":
 		return p.listFunctions(ctx, req)
 	case "Invoke":
-		return p.invoke(ctx, name)
+		return p.invoke(ctx, req, name)
 	case "InvokeAsync":
 		return p.invokeAsync(name)
 	case "AddPermission":
@@ -215,7 +242,13 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		PackageType   string            `json:"PackageType"`
 		Architectures []string          `json:"Architectures"`
 		Tags          map[string]string `json:"Tags"`
-		Environment   struct {
+		ImageURI      string            `json:"ImageUri"`
+		Code          struct {
+			ZipFile  string `json:"ZipFile"`
+			S3Bucket string `json:"S3Bucket"`
+			S3Key    string `json:"S3Key"`
+		} `json:"Code"`
+		Environment struct {
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
 	}
@@ -270,8 +303,19 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		PackageType:   pkgType,
 		Architectures: archs,
 		Tags:          body.Tags,
+		ImageURI:      body.ImageURI,
 		LastModified:  now,
 		CreateDate:    now,
+	}
+
+	// Store ZIP bytes when provided directly.
+	if body.Code.ZipFile != "" {
+		decoded, decErr := base64.StdEncoding.DecodeString(body.Code.ZipFile)
+		if decErr == nil && len(decoded) > 0 {
+			fn.CodeSize = int64(len(decoded))
+			fn.ZipStored = true
+			_ = p.state.Put(context.Background(), lambdaNamespace, "function_zip:"+body.FunctionName, decoded)
+		}
 	}
 
 	data, err := json.Marshal(fn)
@@ -330,11 +374,24 @@ func (p *LambdaPlugin) updateFunctionCode(_ *RequestContext, req *AWSRequest, na
 	fn.CodeSha256 = generateLambdaRevisionID()
 	fn.RevisionID = generateLambdaRevisionID()
 	fn.LastModified = p.tc.Now()
+
 	if body.ZipFile != "" {
 		decoded, decErr := base64.StdEncoding.DecodeString(body.ZipFile)
-		if decErr == nil {
+		if decErr == nil && len(decoded) > 0 {
 			fn.CodeSize = int64(len(decoded))
+			fn.ZipStored = true
+			_ = p.state.Put(context.Background(), lambdaNamespace, "function_zip:"+name, decoded)
 		}
+	} else if body.S3Bucket != "" {
+		// S3-sourced ZIP — we don't have the bytes; log and continue.
+		p.logger.Warn("lambda updateFunctionCode: S3 source not fetched; Docker execution unavailable for this function",
+			"bucket", body.S3Bucket, "key", body.S3Key)
+		fn.ZipStored = false
+	}
+
+	if body.ImageURI != "" {
+		fn.ImageURI = body.ImageURI
+		fn.PackageType = "Image"
 	}
 
 	return p.saveFunctionAndRespond(fn, http.StatusOK)
@@ -459,15 +516,61 @@ func (p *LambdaPlugin) listFunctions(_ *RequestContext, req *AWSRequest) (*AWSRe
 	return lambdaJSONResponse(http.StatusOK, response{Functions: functions, NextMarker: nextMarker})
 }
 
-func (p *LambdaPlugin) invoke(_ *RequestContext, name string) (*AWSResponse, error) {
-	_, err := p.loadFunction(name)
+func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
+	fn, err := p.loadFunction(name)
 	if err != nil {
 		return nil, err
 	}
 
-	// Return a stub successful response.
-	stubPayload := `{"statusCode":200,"body":"null"}`
-	encoded := base64.StdEncoding.EncodeToString([]byte(stubPayload))
+	payload := req.Body
+
+	// Stub path: no executor or Docker unavailable.
+	if p.executor == nil || !p.executor.isDockerAvailable() {
+		stubPayload := `{"statusCode":200,"body":"null"}`
+		encoded := base64.StdEncoding.EncodeToString([]byte(stubPayload))
+		return &AWSResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string]string{
+				"Content-Type":           "application/json",
+				"X-Amz-Function-Error":   "",
+				"X-Amz-Executed-Version": "$LATEST",
+				"X-Amz-Log-Result":       encoded,
+			},
+			Body: []byte(stubPayload),
+		}, nil
+	}
+
+	// Recorded replay: return cached result when available.
+	if p.executor.cfg.ReplayMode == "recorded" {
+		if cached, ok := p.loadReplay(fn.FunctionArn, payload); ok {
+			encoded := base64.StdEncoding.EncodeToString(cached)
+			return &AWSResponse{
+				StatusCode: http.StatusOK,
+				Headers: map[string]string{
+					"Content-Type":           "application/json",
+					"X-Amz-Executed-Version": "$LATEST",
+					"X-Amz-Log-Result":       encoded,
+				},
+				Body: cached,
+			}, nil
+		}
+	}
+
+	// Load stored ZIP bytes (nil for Image-type functions).
+	var zipBytes []byte
+	if fn.ZipStored {
+		zipBytes, _ = p.state.Get(context.Background(), lambdaNamespace, "function_zip:"+name)
+	}
+
+	result, execErr := p.executor.Execute(context.Background(), fn, zipBytes, payload)
+	if execErr != nil {
+		return nil, fmt.Errorf("lambda invoke execute: %w", execErr)
+	}
+
+	// Cache result for future "recorded" replays.
+	p.saveReplay(fn.FunctionArn, payload, result)
+
+	encoded := base64.StdEncoding.EncodeToString(result)
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
 		Headers: map[string]string{
@@ -476,7 +579,7 @@ func (p *LambdaPlugin) invoke(_ *RequestContext, name string) (*AWSResponse, err
 			"X-Amz-Executed-Version": "$LATEST",
 			"X-Amz-Log-Result":       encoded,
 		},
-		Body: []byte(stubPayload),
+		Body: result,
 	}, nil
 }
 
@@ -863,6 +966,10 @@ type ESMConfig struct {
 
 	// StartingPosition is the position from which to start reading: TRIM_HORIZON or LATEST.
 	StartingPosition string `json:"StartingPosition"`
+
+	// MaximumBatchingWindowInSeconds is the maximum time to gather records before
+	// invoking the function. Zero means no batching window.
+	MaximumBatchingWindowInSeconds int `json:"MaximumBatchingWindowInSeconds,omitempty"`
 }
 
 func (p *LambdaPlugin) esmKey(uuid string) string {
@@ -979,6 +1086,15 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("lambda createEventSourceMapping saveESMIDs: %w", err)
 	}
 
+	// Start SQS poller when ESM is for an SQS source and registry is available.
+	if esm.State == "Enabled" && p.registry != nil && strings.Contains(input.EventSourceArn, ":sqs:") {
+		stopCh := make(chan struct{})
+		p.esmMu.Lock()
+		p.esmStop[uuid] = stopCh
+		p.esmMu.Unlock()
+		go p.sqsPollerLoop(*esm, stopCh)
+	}
+
 	return lambdaJSONResponse(http.StatusCreated, esm)
 }
 
@@ -1077,6 +1193,8 @@ func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSReque
 		}
 	}
 
+	prevState := esm.State
+
 	var input struct {
 		BatchSize int   `json:"BatchSize"`
 		Enabled   *bool `json:"Enabled"`
@@ -1098,6 +1216,27 @@ func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSReque
 	if err := p.saveESM(context.Background(), esm); err != nil {
 		return nil, fmt.Errorf("lambda updateEventSourceMapping saveESM: %w", err)
 	}
+
+	// Manage SQS poller lifecycle based on state transition.
+	if p.registry != nil && strings.Contains(esm.EventSourceARN, ":sqs:") {
+		if prevState != "Enabled" && esm.State == "Enabled" {
+			// Start poller.
+			stopCh := make(chan struct{})
+			p.esmMu.Lock()
+			p.esmStop[uuid] = stopCh
+			p.esmMu.Unlock()
+			go p.sqsPollerLoop(*esm, stopCh)
+		} else if prevState == "Enabled" && esm.State != "Enabled" {
+			// Stop poller.
+			p.esmMu.Lock()
+			if ch, ok := p.esmStop[uuid]; ok {
+				close(ch)
+				delete(p.esmStop, uuid)
+			}
+			p.esmMu.Unlock()
+		}
+	}
+
 	return lambdaJSONResponse(http.StatusOK, esm)
 }
 
@@ -1118,6 +1257,14 @@ func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) 
 		return nil, fmt.Errorf("lambda deleteEventSourceMapping: %w", delErr)
 	}
 
+	// Stop SQS poller if running.
+	p.esmMu.Lock()
+	if ch, ok := p.esmStop[uuid]; ok {
+		close(ch)
+		delete(p.esmStop, uuid)
+	}
+	p.esmMu.Unlock()
+
 	// Remove from function's ESM list.
 	ids, err := p.loadESMIDs(context.Background(), esm.FunctionARN)
 	if err != nil {
@@ -1132,4 +1279,151 @@ func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) 
 	_ = p.saveESMIDs(context.Background(), esm.FunctionARN, filtered)
 
 	return lambdaJSONResponse(http.StatusOK, esm)
+}
+
+// --- SQS ESM poller --------------------------------------------------------
+
+// sqsPollerLoop polls an SQS queue and invokes the Lambda function with each
+// batch of messages. It runs until stopCh is closed.
+func (p *LambdaPlugin) sqsPollerLoop(esm ESMConfig, stopCh <-chan struct{}) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			p.pollAndInvoke(esm)
+		}
+	}
+}
+
+// pollAndInvoke fetches messages from SQS, invokes Lambda, and deletes
+// successfully processed messages.
+func (p *LambdaPlugin) pollAndInvoke(esm ESMConfig) {
+	// Derive queue URL from ARN: arn:aws:sqs:{region}:{acct}:{name}
+	arnParts := strings.Split(esm.EventSourceARN, ":")
+	if len(arnParts) < 6 {
+		return
+	}
+	region, acct, queueName := arnParts[3], arnParts[4], arnParts[5]
+	queueURL := "http://sqs." + region + ".localhost/" + acct + "/" + queueName
+
+	batchSize := esm.BatchSize
+	if batchSize <= 0 {
+		batchSize = 10
+	}
+
+	// ReceiveMessage.
+	receiveReq := &AWSRequest{
+		Service:   "sqs",
+		Operation: "ReceiveMessage",
+		Params: map[string]string{
+			"Action":              "ReceiveMessage",
+			"QueueUrl":            queueURL,
+			"MaxNumberOfMessages": fmt.Sprintf("%d", batchSize),
+			"WaitTimeSeconds":     "0",
+		},
+		Headers: map[string]string{},
+		Path:    "/",
+		Body:    nil,
+	}
+	rxCtx := &RequestContext{
+		RequestID: generateRequestID(),
+		AccountID: acct,
+		Region:    region,
+		Timestamp: time.Now(),
+		Metadata:  make(map[string]interface{}),
+	}
+	rxResp, err := p.registry.RouteRequest(rxCtx, receiveReq)
+	if err != nil || rxResp == nil {
+		return
+	}
+
+	// Parse ReceiveMessageResponse XML.
+	type sqsMessage struct {
+		MessageID     string `xml:"MessageId"`
+		ReceiptHandle string `xml:"ReceiptHandle"`
+		Body          string `xml:"Body"`
+	}
+	type rxResult struct {
+		Messages []sqsMessage `xml:"ReceiveMessageResult>Message"`
+	}
+	var parsed rxResult
+	if xmlErr := xml.Unmarshal(rxResp.Body, &parsed); xmlErr != nil || len(parsed.Messages) == 0 {
+		return
+	}
+
+	// Build Lambda event JSON.
+	type sqsRecord struct {
+		MessageID      string            `json:"messageId"`
+		ReceiptHandle  string            `json:"receiptHandle"`
+		Body           string            `json:"body"`
+		Attributes     map[string]string `json:"attributes"`
+		EventSource    string            `json:"eventSource"`
+		EventSourceARN string            `json:"eventSourceARN"`
+		AWSRegion      string            `json:"awsRegion"`
+	}
+	records := make([]sqsRecord, len(parsed.Messages))
+	for i, m := range parsed.Messages {
+		records[i] = sqsRecord{
+			MessageID:      m.MessageID,
+			ReceiptHandle:  m.ReceiptHandle,
+			Body:           m.Body,
+			Attributes:     map[string]string{},
+			EventSource:    "aws:sqs",
+			EventSourceARN: esm.EventSourceARN,
+			AWSRegion:      region,
+		}
+	}
+	eventJSON, marshalErr := json.Marshal(map[string]interface{}{"Records": records})
+	if marshalErr != nil {
+		return
+	}
+
+	// Derive Lambda function name from ARN.
+	fnParts := strings.Split(esm.FunctionARN, ":")
+	fnName := fnParts[len(fnParts)-1]
+
+	// Invoke Lambda.
+	invokeReq := &AWSRequest{
+		Service:   "lambda",
+		Operation: "POST",
+		Path:      "/2015-03-31/functions/" + fnName + "/invocations",
+		Headers:   map[string]string{"Content-Type": "application/json"},
+		Body:      eventJSON,
+	}
+	invokeCtx := &RequestContext{
+		RequestID: generateRequestID(),
+		AccountID: acct,
+		Region:    region,
+		Timestamp: time.Now(),
+		Metadata:  make(map[string]interface{}),
+	}
+	invokeResp, invokeErr := p.registry.RouteRequest(invokeCtx, invokeReq)
+	if invokeErr != nil {
+		p.logger.Warn("lambda ESM: invoke failed", "function", fnName, "err", invokeErr)
+		return
+	}
+	if invokeResp != nil && invokeResp.StatusCode >= 300 {
+		p.logger.Warn("lambda ESM: invoke non-2xx", "function", fnName, "status", invokeResp.StatusCode)
+		return
+	}
+
+	// Delete successfully processed messages.
+	for _, m := range parsed.Messages {
+		deleteReq := &AWSRequest{
+			Service:   "sqs",
+			Operation: "DeleteMessage",
+			Params: map[string]string{
+				"Action":        "DeleteMessage",
+				"QueueUrl":      queueURL,
+				"ReceiptHandle": m.ReceiptHandle,
+			},
+			Headers: map[string]string{},
+			Path:    "/",
+			Body:    nil,
+		}
+		_, _ = p.registry.RouteRequest(rxCtx, deleteReq)
+	}
 }

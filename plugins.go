@@ -3,6 +3,7 @@ package substrate
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // RegisterDefaultPlugins initializes and registers all built-in service plugins
@@ -10,6 +11,8 @@ import (
 // [StartTestServer] so the same plugin set is always available.
 // store is optional; pass nil when the EventStore is unavailable (e.g. in
 // test helpers that do not need cost-derived data in the Cost Explorer plugin).
+// cfg is optional; pass nil to disable all Docker-backed features (Lambda
+// Docker execution, RDS container engine).
 func RegisterDefaultPlugins(
 	ctx context.Context,
 	registry *PluginRegistry,
@@ -17,7 +20,24 @@ func RegisterDefaultPlugins(
 	tc *TimeController,
 	logger Logger,
 	store *EventStore,
+	cfg *Config,
 ) error {
+	// Resolve optional Docker-backed executors from cfg.
+	var lambdaExec *LambdaExecutor
+	var rdsExec *RDSExecutor
+	if cfg != nil && cfg.Lambda.DockerEnabled {
+		ttl, err := time.ParseDuration(cfg.Lambda.WarmPoolTTL)
+		if err != nil {
+			ttl = 5 * time.Minute
+		}
+		lambdaExec = NewLambdaExecutor(LambdaExecCfg{
+			ReplayMode:  cfg.Lambda.ReplayMode,
+			WarmPoolTTL: ttl,
+		}, logger)
+	}
+	if cfg != nil && cfg.RDS.Engine == "container" {
+		rdsExec = NewRDSExecutor(logger)
+	}
 	iamPlugin := &IAMPlugin{}
 	if err := iamPlugin.Initialize(ctx, PluginConfig{
 		State:   state,
@@ -39,10 +59,17 @@ func RegisterDefaultPlugins(
 	registry.Register(stsPlugin)
 
 	lambdaPlugin := &LambdaPlugin{}
+	lambdaOpts := map[string]any{
+		"time_controller": tc,
+		"registry":        registry,
+	}
+	if lambdaExec != nil {
+		lambdaOpts["lambda_exec"] = lambdaExec
+	}
 	if err := lambdaPlugin.Initialize(ctx, PluginConfig{
 		State:   state,
 		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
+		Options: lambdaOpts,
 	}); err != nil {
 		return fmt.Errorf("initialize lambda plugin: %w", err)
 	}
@@ -220,6 +247,18 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(apigwv2Plugin)
 
+	proxyPlugin := &APIGatewayProxyPlugin{}
+	if err := proxyPlugin.Initialize(ctx, PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"registry": registry,
+		},
+	}); err != nil {
+		return fmt.Errorf("initialize apigateway-proxy plugin: %w", err)
+	}
+	registry.Register(proxyPlugin)
+
 	sfnPlugin := &StepFunctionsPlugin{}
 	if err := sfnPlugin.Initialize(ctx, PluginConfig{
 		State:  state,
@@ -284,10 +323,14 @@ func RegisterDefaultPlugins(
 	registry.Register(cfPlugin)
 
 	rdsPlugin := &RDSPlugin{}
+	rdsOpts := map[string]any{"time_controller": tc}
+	if rdsExec != nil {
+		rdsOpts["rds_executor"] = rdsExec
+	}
 	if err := rdsPlugin.Initialize(ctx, PluginConfig{
 		State:   state,
 		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
+		Options: rdsOpts,
 	}); err != nil {
 		return fmt.Errorf("initialize rds plugin: %w", err)
 	}
