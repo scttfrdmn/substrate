@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5" //nolint:gosec // SQS MD5OfBody is defined by the protocol; not used for security.
 	"crypto/rand"
+	"crypto/sha256" //nolint:gosec // SHA-256 used for content-based deduplication; not for security.
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -614,6 +615,97 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 	delay, _ := strconv.Atoi(delayStr)
 
+	// FIFO queue enforcement.
+	if q.FifoQueue {
+		if req.Params["MessageGroupId"] == "" {
+			return nil, &AWSError{
+				Code:       "MissingParameter",
+				Message:    "The request must contain the parameter MessageGroupId.",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		dedupID := req.Params["MessageDeduplicationId"]
+		if dedupID == "" {
+			if getAttrOrDefault(q.Attributes, "ContentBasedDeduplication", "false") == "true" {
+				// SHA-256 of body as hex string.
+				dedupID = sqsContentHash(body)
+			} else {
+				return nil, &AWSError{
+					Code:       "InvalidParameterValue",
+					Message:    "The queue requires MessageDeduplicationId or ContentBasedDeduplication.",
+					HTTPStatus: http.StatusBadRequest,
+				}
+			}
+		}
+		// Check deduplication window.
+		urlKey := sqsURLKey(queueURL)
+		if existing, dupMsgID := p.checkFIFODedup(context.Background(), urlKey, dedupID, p.tc.Now()); existing {
+			// Return success with original message ID (idempotent).
+			md5Body := computeMD5(body)
+			type result struct {
+				MD5OfMessageBody string `xml:"MD5OfMessageBody"`
+				MessageID        string `xml:"MessageId"`
+			}
+			type response struct {
+				XMLName           xml.Name         `xml:"SendMessageResponse"`
+				Xmlns             string           `xml:"xmlns,attr"`
+				SendMessageResult result           `xml:"SendMessageResult"`
+				ResponseMetadata  responseMetadata `xml:"ResponseMetadata"`
+			}
+			return sqsXMLResponse(http.StatusOK, response{
+				Xmlns:             "http://queue.amazonaws.com/doc/2012-11-05/",
+				SendMessageResult: result{MD5OfMessageBody: md5Body, MessageID: dupMsgID},
+				ResponseMetadata:  responseMetadata{RequestID: ctx.RequestID},
+			})
+		}
+		// Record this deduplication ID.
+		msgID := generateSQSMessageID()
+		p.recordFIFODedup(context.Background(), urlKey, dedupID, msgID, p.tc.Now())
+
+		md5Body := computeMD5(body)
+		now := p.tc.Now()
+		msg := &SQSMessage{
+			MessageID:     msgID,
+			ReceiptHandle: generateSQSReceiptHandle(),
+			Body:          body,
+			MD5OfBody:     md5Body,
+			Attributes: map[string]string{
+				"SenderId":      ctx.AccountID,
+				"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
+			},
+			SentTimestamp: now.UnixMilli(),
+			DelayUntil:    now.Add(time.Duration(delay) * time.Second),
+			VisibleAfter:  time.Time{},
+			ReceiveCount:  0,
+		}
+		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
+			return nil, fmt.Errorf("sqs sendMessage saveMsg: %w", saveErr)
+		}
+		ids, loadErr := p.loadMsgIDs(context.Background(), urlKey)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		ids = append(ids, msgID)
+		if saveErr := p.saveMsgIDs(context.Background(), urlKey, ids); saveErr != nil {
+			return nil, fmt.Errorf("sqs sendMessage saveMsgIDs: %w", saveErr)
+		}
+		type result struct {
+			MD5OfMessageBody string `xml:"MD5OfMessageBody"`
+			MessageID        string `xml:"MessageId"`
+		}
+		type response struct {
+			XMLName           xml.Name         `xml:"SendMessageResponse"`
+			Xmlns             string           `xml:"xmlns,attr"`
+			SendMessageResult result           `xml:"SendMessageResult"`
+			ResponseMetadata  responseMetadata `xml:"ResponseMetadata"`
+		}
+		return sqsXMLResponse(http.StatusOK, response{
+			Xmlns:             "http://queue.amazonaws.com/doc/2012-11-05/",
+			SendMessageResult: result{MD5OfMessageBody: md5Body, MessageID: msgID},
+			ResponseMetadata:  responseMetadata{RequestID: ctx.RequestID},
+		})
+	}
+
 	msgID := generateSQSMessageID()
 	md5Body := computeMD5(body)
 	now := p.tc.Now()
@@ -1106,5 +1198,76 @@ func generateSQSReceiptHandle() string {
 // computeMD5 computes the hex MD5 of s.
 func computeMD5(s string) string {
 	h := md5.Sum([]byte(s)) //nolint:gosec // MD5 for SQS protocol; not used for security.
+	return fmt.Sprintf("%x", h)
+}
+
+// --- FIFO deduplication helpers ----------------------------------------------
+
+// sqsFIFODedupKey returns the state key for FIFO deduplication tracking.
+func sqsFIFODedupKey(urlKey string) string {
+	return "fifo_dedup:" + urlKey
+}
+
+// sqsFIFODedupEntry holds a single deduplication entry.
+type sqsFIFODedupEntry struct {
+	// MessageID is the ID of the original message.
+	MessageID string `json:"MessageID"`
+	// ExpiresNano is the Unix nanosecond timestamp after which this entry is
+	// considered expired (deduplication window = 5 minutes).
+	ExpiresNano int64 `json:"ExpiresNano"`
+}
+
+// checkFIFODedup returns (true, originalMsgID) if dedupID is within the 5-minute
+// deduplication window, (false, "") otherwise.
+func (p *SQSPlugin) checkFIFODedup(ctx context.Context, urlKey, dedupID string, now time.Time) (bool, string) {
+	data, err := p.state.Get(ctx, sqsNamespace, sqsFIFODedupKey(urlKey))
+	if err != nil || data == nil {
+		return false, ""
+	}
+	var window map[string]sqsFIFODedupEntry
+	if err := json.Unmarshal(data, &window); err != nil {
+		return false, ""
+	}
+	entry, ok := window[dedupID]
+	if !ok {
+		return false, ""
+	}
+	if now.UnixNano() > entry.ExpiresNano {
+		return false, ""
+	}
+	return true, entry.MessageID
+}
+
+// recordFIFODedup adds dedupID → msgID to the deduplication window and prunes
+// expired entries.
+func (p *SQSPlugin) recordFIFODedup(ctx context.Context, urlKey, dedupID, msgID string, now time.Time) {
+	data, _ := p.state.Get(ctx, sqsNamespace, sqsFIFODedupKey(urlKey))
+	var window map[string]sqsFIFODedupEntry
+	if data != nil {
+		_ = json.Unmarshal(data, &window)
+	}
+	if window == nil {
+		window = make(map[string]sqsFIFODedupEntry)
+	}
+	// Prune expired entries.
+	nowNano := now.UnixNano()
+	for k, e := range window {
+		if nowNano > e.ExpiresNano {
+			delete(window, k)
+		}
+	}
+	window[dedupID] = sqsFIFODedupEntry{
+		MessageID:   msgID,
+		ExpiresNano: now.Add(5 * time.Minute).UnixNano(),
+	}
+	if b, err := json.Marshal(window); err == nil {
+		_ = p.state.Put(ctx, sqsNamespace, sqsFIFODedupKey(urlKey), b)
+	}
+}
+
+// sqsContentHash returns the hex SHA-256 digest of body for content-based
+// deduplication. Uses SHA-256 per the AWS SQS specification.
+func sqsContentHash(body string) string {
+	h := sha256.Sum256([]byte(body)) //nolint:gosec
 	return fmt.Sprintf("%x", h)
 }

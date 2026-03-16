@@ -384,5 +384,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(firehosePlugin)
 
+	sqPlugin := &ServiceQuotasPlugin{}
+	if err := sqPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize servicequotas plugin: %w", err)
+	}
+	registry.Register(sqPlugin)
+
 	return nil
 }

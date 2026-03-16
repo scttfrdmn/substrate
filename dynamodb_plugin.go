@@ -2,6 +2,7 @@ package substrate
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -77,7 +78,7 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 		return p.updateTimeToLive(ctx, req)
 	case "DescribeTimeToLive":
 		return p.describeTimeToLive(ctx, req)
-	// Streams stubs.
+	// Streams.
 	case "ListStreams":
 		return p.listStreams(ctx, req)
 	case "DescribeStream":
@@ -86,6 +87,11 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 		return p.getShardIterator(ctx, req)
 	case "GetRecords":
 		return p.getRecords(ctx, req)
+	// PartiQL.
+	case "ExecuteStatement":
+		return p.executeStatement(ctx, req)
+	case "BatchExecuteStatement":
+		return p.batchExecuteStatement(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "UnknownOperationException",
@@ -590,6 +596,13 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		}
 	}
 
+	// Append stream record if streams enabled.
+	eventName := "MODIFY"
+	if oldItem == nil {
+		eventName = "INSERT"
+	}
+	p.appendStreamRecord(context.Background(), ctx.AccountID, input.TableName, eventName, oldItem, input.Item)
+
 	result := map[string]interface{}{}
 	if input.ReturnValues == "ALL_OLD" && oldItem != nil {
 		result["Attributes"] = oldItem
@@ -697,6 +710,8 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		if err := p.saveItemKeys(context.Background(), ctx.AccountID, input.TableName, newKeys); err != nil {
 			return nil, fmt.Errorf("dynamodb deleteItem saveItemKeys: %w", err)
 		}
+		// Append stream record.
+		p.appendStreamRecord(context.Background(), ctx.AccountID, input.TableName, "REMOVE", oldItem, nil)
 	}
 
 	result := map[string]interface{}{}
@@ -782,6 +797,13 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 			return nil, fmt.Errorf("dynamodb updateItem saveItemKeys: %w", err)
 		}
 	}
+
+	// Append stream record.
+	updateEventName := "MODIFY"
+	if isNew {
+		updateEventName = "INSERT"
+	}
+	p.appendStreamRecord(context.Background(), ctx.AccountID, input.TableName, updateEventName, oldItem, item)
 
 	result := map[string]interface{}{}
 	switch input.ReturnValues {
@@ -1242,7 +1264,98 @@ func (p *DynamoDBPlugin) describeTimeToLive(ctx *RequestContext, req *AWSRequest
 	})
 }
 
-// --- Streams stubs -----------------------------------------------------------
+// --- Streams -----------------------------------------------------------------
+
+// dynamodbMaxStreamRecords is the maximum records kept in a stream ring buffer.
+const dynamodbMaxStreamRecords = 1000
+
+// DynamoDBStreamRecord is a single change-data-capture record appended to a
+// table's stream ring buffer by putItem, updateItem, and deleteItem.
+type DynamoDBStreamRecord struct {
+	// EventID is a unique identifier for this stream event.
+	EventID string `json:"eventID"`
+
+	// EventName is INSERT, MODIFY, or REMOVE.
+	EventName string `json:"eventName"`
+
+	// TableName is the table that generated this record.
+	TableName string `json:"tableName"`
+
+	// Sequence is a monotonically increasing counter within the ring buffer.
+	Sequence int64 `json:"sequence"`
+
+	// OldImage is the item before the change (nil for INSERT).
+	OldImage map[string]*AttributeValue `json:"oldImage,omitempty"`
+
+	// NewImage is the item after the change (nil for REMOVE).
+	NewImage map[string]*AttributeValue `json:"newImage,omitempty"`
+
+	// ApproxTimestamp is the Unix millisecond timestamp of the event.
+	ApproxTimestamp int64 `json:"approximateCreationDateTime"`
+}
+
+// DynamoDBStreamCursor is the parsed body of a base64-encoded shard iterator.
+type DynamoDBStreamCursor struct {
+	// TableName identifies which table's ring buffer to read.
+	TableName string `json:"tableName"`
+
+	// AccountID is the owning account.
+	AccountID string `json:"accountId"`
+
+	// Sequence is the position in the ring buffer (next to read).
+	Sequence int64 `json:"sequence"`
+
+	// IterType is the iterator type (TRIM_HORIZON, LATEST, AT_SEQUENCE_NUMBER, AFTER_SEQUENCE_NUMBER).
+	IterType string `json:"iteratorType"`
+}
+
+func (p *DynamoDBPlugin) streamRecordsKey(accountID, tableName string) string {
+	return "stream_records:" + accountID + "/" + tableName
+}
+
+// appendStreamRecord adds a CDC record to a table's stream ring buffer if
+// streams are enabled for that table. Errors are logged and suppressed so
+// that main item operations never fail due to stream problems.
+func (p *DynamoDBPlugin) appendStreamRecord(
+	ctx context.Context,
+	accountID, tableName, eventName string,
+	oldImage, newImage map[string]*AttributeValue,
+) {
+	tbl, err := p.loadTable(ctx, accountID, tableName)
+	if err != nil || tbl == nil || tbl.LatestStreamARN == "" {
+		return // streams not enabled
+	}
+
+	rk := p.streamRecordsKey(accountID, tableName)
+	data, _ := p.state.Get(ctx, dynamodbNamespace, rk)
+	var records []DynamoDBStreamRecord
+	if data != nil {
+		_ = json.Unmarshal(data, &records)
+	}
+
+	var seq int64
+	if len(records) > 0 {
+		seq = records[len(records)-1].Sequence + 1
+	}
+
+	records = append(records, DynamoDBStreamRecord{
+		EventID:         fmt.Sprintf("%s-%d", tableName, seq),
+		EventName:       eventName,
+		TableName:       tableName,
+		Sequence:        seq,
+		OldImage:        oldImage,
+		NewImage:        newImage,
+		ApproxTimestamp: time.Now().UnixMilli(),
+	})
+
+	if len(records) > dynamodbMaxStreamRecords {
+		records = records[len(records)-dynamodbMaxStreamRecords:]
+	}
+
+	if b, marshalErr := json.Marshal(records); marshalErr == nil {
+		_ = p.state.Put(ctx, dynamodbNamespace, rk, b)
+	}
+}
 
 func (p *DynamoDBPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
@@ -1292,7 +1405,7 @@ func (p *DynamoDBPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWS
 	})
 }
 
-func (p *DynamoDBPlugin) describeStream(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *DynamoDBPlugin) describeStream(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StreamArn string `json:"StreamArn"`
 	}
@@ -1300,34 +1413,191 @@ func (p *DynamoDBPlugin) describeStream(_ *RequestContext, req *AWSRequest) (*AW
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
+	// Find the table for this stream ARN.
+	tableName := dynamodbTableNameFromStreamARN(input.StreamArn)
+
+	shardID := "shardId-00000000000000000000-00000001"
+	shard := map[string]interface{}{
+		"ShardId": shardID,
+		"SequenceNumberRange": map[string]interface{}{
+			"StartingSequenceNumber": "0",
+		},
+	}
+
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
 		"StreamDescription": map[string]interface{}{
 			"StreamArn":    input.StreamArn,
 			"StreamStatus": "ENABLED",
-			"Shards":       []interface{}{},
+			"TableName":    tableName,
+			"Shards":       []interface{}{shard},
 		},
 	})
 }
 
-func (p *DynamoDBPlugin) getShardIterator(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *DynamoDBPlugin) getShardIterator(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StreamArn         string `json:"StreamArn"`
 		ShardID           string `json:"ShardId"`
 		ShardIteratorType string `json:"ShardIteratorType"`
+		SequenceNumber    string `json:"SequenceNumber"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
+	tableName := dynamodbTableNameFromStreamARN(input.StreamArn)
+
+	var startSeq int64
+	switch input.ShardIteratorType {
+	case "LATEST":
+		// Start after the last record.
+		rk := p.streamRecordsKey(ctx.AccountID, tableName)
+		data, _ := p.state.Get(context.Background(), dynamodbNamespace, rk)
+		var records []DynamoDBStreamRecord
+		if data != nil {
+			_ = json.Unmarshal(data, &records)
+		}
+		if len(records) > 0 {
+			startSeq = records[len(records)-1].Sequence + 1
+		}
+	case "AT_SEQUENCE_NUMBER":
+		n, _ := strconv.ParseInt(input.SequenceNumber, 10, 64)
+		startSeq = n
+	case "AFTER_SEQUENCE_NUMBER":
+		n, _ := strconv.ParseInt(input.SequenceNumber, 10, 64)
+		startSeq = n + 1
+	default: // TRIM_HORIZON
+		startSeq = 0
+	}
+
+	cursor := DynamoDBStreamCursor{
+		TableName: tableName,
+		AccountID: ctx.AccountID,
+		Sequence:  startSeq,
+		IterType:  input.ShardIteratorType,
+	}
+	b, err := json.Marshal(cursor)
+	if err != nil {
+		return nil, fmt.Errorf("marshal stream cursor: %w", err)
+	}
+	iterToken := base64.StdEncoding.EncodeToString(b)
+
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-		"ShardIterator": "stub-shard-iterator-" + input.StreamArn,
+		"ShardIterator": iterToken,
 	})
 }
 
-func (p *DynamoDBPlugin) getRecords(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+func (p *DynamoDBPlugin) getRecords(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		ShardIterator string `json:"ShardIterator"`
+		Limit         int    `json:"Limit"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &input)
+	}
+
+	if input.ShardIterator == "" {
+		return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
+			"Records": []interface{}{},
+		})
+	}
+
+	b, err := base64.StdEncoding.DecodeString(input.ShardIterator)
+	if err != nil {
+		// Handle legacy stub iterators gracefully.
+		return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
+			"Records": []interface{}{},
+		})
+	}
+
+	var cursor DynamoDBStreamCursor
+	if err := json.Unmarshal(b, &cursor); err != nil {
+		return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
+			"Records": []interface{}{},
+		})
+	}
+
+	rk := p.streamRecordsKey(cursor.AccountID, cursor.TableName)
+	data, _ := p.state.Get(context.Background(), dynamodbNamespace, rk)
+	var allRecords []DynamoDBStreamRecord
+	if data != nil {
+		_ = json.Unmarshal(data, &allRecords)
+	}
+
+	// Filter records from cursor.Sequence onwards.
+	var matchedRecords []DynamoDBStreamRecord
+	for _, r := range allRecords {
+		if r.Sequence >= cursor.Sequence {
+			matchedRecords = append(matchedRecords, r)
+		}
+	}
+
+	limit := 1000
+	if input.Limit > 0 && input.Limit < limit {
+		limit = input.Limit
+	}
+	if len(matchedRecords) > limit {
+		matchedRecords = matchedRecords[:limit]
+	}
+
+	// Advance cursor.
+	var nextSeq int64
+	if len(matchedRecords) > 0 {
+		nextSeq = matchedRecords[len(matchedRecords)-1].Sequence + 1
+	} else {
+		nextSeq = cursor.Sequence
+	}
+	cursor.Sequence = nextSeq
+	nextCursorBytes, _ := json.Marshal(cursor)
+	nextIterator := base64.StdEncoding.EncodeToString(nextCursorBytes)
+
+	// Convert to DynamoDB Streams wire format.
+	wireRecords := make([]map[string]interface{}, 0, len(matchedRecords))
+	for _, r := range matchedRecords {
+		rec := map[string]interface{}{
+			"eventID":                     r.EventID,
+			"eventName":                   r.EventName,
+			"eventSource":                 "aws:dynamodb",
+			"eventVersion":                "1.1",
+			"approximateCreationDateTime": float64(r.ApproxTimestamp) / 1000.0,
+			"dynamodb": map[string]interface{}{
+				"TableName":      r.TableName,
+				"SequenceNumber": strconv.FormatInt(r.Sequence, 10),
+				"SizeBytes":      64,
+				"StreamViewType": "NEW_AND_OLD_IMAGES",
+			},
+		}
+		dynamoRecord := rec["dynamodb"].(map[string]interface{})
+		if r.NewImage != nil {
+			dynamoRecord["NewImage"] = r.NewImage
+		}
+		if r.OldImage != nil {
+			dynamoRecord["OldImage"] = r.OldImage
+		}
+		wireRecords = append(wireRecords, rec)
+	}
+
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-		"Records": []interface{}{},
+		"Records":           wireRecords,
+		"NextShardIterator": nextIterator,
 	})
+}
+
+// dynamodbTableNameFromStreamARN extracts the table name from a DynamoDB stream ARN.
+// ARN format: arn:aws:dynamodb:{region}:{account}:table/{name}/stream/{label}.
+func dynamodbTableNameFromStreamARN(arn string) string {
+	// Find "table/" prefix.
+	const tablePrefix = "table/"
+	idx := strings.Index(arn, tablePrefix)
+	if idx < 0 {
+		return arn
+	}
+	rest := arn[idx+len(tablePrefix):]
+	// Find the next "/" to get just the table name.
+	if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
+		return rest[:slashIdx]
+	}
+	return rest
 }
 
 // --- Expression helpers ------------------------------------------------------
@@ -2590,4 +2860,351 @@ func dynamodbJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.0"},
 		Body:       body,
 	}, nil
+}
+
+// --- PartiQL -----------------------------------------------------------------
+
+// ExecuteStatementOutput is the JSON response for ExecuteStatement.
+type ExecuteStatementOutput struct {
+	// Items contains the result items for SELECT statements.
+	Items []map[string]*AttributeValue `json:"Items"`
+
+	// NextToken is the pagination token for large result sets.
+	NextToken string `json:"NextToken,omitempty"`
+}
+
+// executeStatement handles ExecuteStatement (single PartiQL statement).
+func (p *DynamoDBPlugin) executeStatement(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		Statement  string            `json:"Statement"`
+		Parameters []*AttributeValue `json:"Parameters"`
+		NextToken  string            `json:"NextToken"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+
+	items, err := p.executePartiQLStatement(ctx, input.Statement, input.Parameters)
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		items = []map[string]*AttributeValue{}
+	}
+	return dynamodbJSONResponse(http.StatusOK, ExecuteStatementOutput{Items: items})
+}
+
+// batchExecuteStatement handles BatchExecuteStatement (multiple PartiQL statements).
+func (p *DynamoDBPlugin) batchExecuteStatement(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		Statements []struct {
+			Statement  string            `json:"Statement"`
+			Parameters []*AttributeValue `json:"Parameters"`
+		} `json:"Statements"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+
+	type batchResponse struct {
+		TableName string                     `json:"TableName,omitempty"`
+		Item      map[string]*AttributeValue `json:"Item,omitempty"`
+		Error     *map[string]interface{}    `json:"Error,omitempty"`
+	}
+
+	responses := make([]batchResponse, 0, len(input.Statements))
+	for _, stmt := range input.Statements {
+		items, err := p.executePartiQLStatement(ctx, stmt.Statement, stmt.Parameters)
+		if err != nil {
+			awsErr, ok := err.(*AWSError)
+			if ok {
+				errMap := map[string]interface{}{"Code": awsErr.Code, "Message": awsErr.Message}
+				responses = append(responses, batchResponse{Error: &errMap})
+			} else {
+				errMap := map[string]interface{}{"Code": "InternalServerError", "Message": err.Error()}
+				responses = append(responses, batchResponse{Error: &errMap})
+			}
+			continue
+		}
+		if len(items) > 0 {
+			responses = append(responses, batchResponse{Item: items[0]})
+		} else {
+			responses = append(responses, batchResponse{})
+		}
+	}
+
+	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
+		"Responses": responses,
+	})
+}
+
+// executePartiQLStatement executes a single PartiQL statement and returns the
+// result items. Supports SELECT, INSERT, UPDATE, and DELETE.
+func (p *DynamoDBPlugin) executePartiQLStatement(
+	ctx *RequestContext,
+	stmt string,
+	params []*AttributeValue,
+) ([]map[string]*AttributeValue, error) {
+	verb, tableName, whereClause, setClause := tokenizePartiQL(stmt)
+	if tableName == "" {
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    "Unable to parse statement: " + stmt,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, tableName)
+	if err != nil {
+		return nil, err
+	}
+	if tbl == nil {
+		return nil, &AWSError{
+			Code:       "ResourceNotFoundException",
+			Message:    "Table not found: " + tableName,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	switch strings.ToUpper(verb) {
+	case "SELECT":
+		return p.partiQLSelect(ctx, tbl, whereClause, params)
+	case "INSERT":
+		return p.partiQLInsert(ctx, tbl, setClause, params)
+	case "UPDATE":
+		return p.partiQLUpdate(ctx, tbl, whereClause, setClause, params)
+	case "DELETE":
+		return p.partiQLDelete(ctx, tbl, whereClause, params)
+	default:
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    "Unsupported PartiQL verb: " + verb,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+}
+
+// tokenizePartiQL extracts the verb, table name, WHERE clause, and SET clause
+// from a simple PartiQL statement. Only basic patterns are supported.
+func tokenizePartiQL(stmt string) (verb, tableName, whereClause, setClause string) {
+	stmt = strings.TrimSpace(stmt)
+	upper := strings.ToUpper(stmt)
+
+	if strings.HasPrefix(upper, "SELECT") {
+		// SELECT * FROM "table" [WHERE ...]
+		fromIdx := strings.Index(upper, " FROM ")
+		if fromIdx < 0 {
+			return "SELECT", "", "", ""
+		}
+		rest := strings.TrimSpace(stmt[fromIdx+6:])
+		tableName = extractPartiQLTableName(rest)
+		whereClause = extractPartiQLClause(rest, "WHERE")
+		return "SELECT", tableName, whereClause, ""
+	}
+
+	if strings.HasPrefix(upper, "INSERT") {
+		// INSERT INTO "table" VALUE {...}
+		intoIdx := strings.Index(upper, " INTO ")
+		if intoIdx < 0 {
+			return "INSERT", "", "", ""
+		}
+		rest := strings.TrimSpace(stmt[intoIdx+6:])
+		tableName = extractPartiQLTableName(rest)
+		valueClause := extractPartiQLClause(rest, "VALUE")
+		return "INSERT", tableName, "", valueClause
+	}
+
+	if strings.HasPrefix(upper, "UPDATE") {
+		// UPDATE "table" SET ... WHERE ...
+		rest := strings.TrimSpace(stmt[6:])
+		tableName = extractPartiQLTableName(rest)
+		setClause = extractPartiQLClause(rest, "SET")
+		whereClause = extractPartiQLClause(rest, "WHERE")
+		return "UPDATE", tableName, whereClause, setClause
+	}
+
+	if strings.HasPrefix(upper, "DELETE") {
+		// DELETE FROM "table" WHERE ...
+		fromIdx := strings.Index(upper, " FROM ")
+		if fromIdx < 0 {
+			return "DELETE", "", "", ""
+		}
+		rest := strings.TrimSpace(stmt[fromIdx+6:])
+		tableName = extractPartiQLTableName(rest)
+		whereClause = extractPartiQLClause(rest, "WHERE")
+		return "DELETE", tableName, whereClause, ""
+	}
+
+	return "", "", "", ""
+}
+
+// extractPartiQLTableName returns the table name from the leading part of a
+// PartiQL statement fragment. Table names may be quoted or unquoted.
+func extractPartiQLTableName(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return ""
+	}
+	if s[0] == '"' {
+		end := strings.Index(s[1:], `"`)
+		if end < 0 {
+			return s[1:]
+		}
+		return s[1 : end+1]
+	}
+	// Unquoted: read until space.
+	if idx := strings.IndexAny(s, " \t"); idx >= 0 {
+		return s[:idx]
+	}
+	return s
+}
+
+// extractPartiQLClause returns the text following keyword in a statement.
+func extractPartiQLClause(stmt, keyword string) string {
+	upper := strings.ToUpper(stmt)
+	prefix := " " + keyword + " "
+	idx := strings.Index(upper, prefix)
+	if idx < 0 {
+		prefix = keyword + " "
+		if strings.HasPrefix(upper, prefix) {
+			idx = -len(keyword)
+		} else {
+			return ""
+		}
+	}
+	return strings.TrimSpace(stmt[idx+len(prefix):])
+}
+
+func (p *DynamoDBPlugin) partiQLSelect(
+	ctx *RequestContext,
+	tbl *DynamoDBTable,
+	whereClause string,
+	_ []*AttributeValue,
+) ([]map[string]*AttributeValue, error) {
+	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []map[string]*AttributeValue
+	for _, k := range keys {
+		item, err := p.loadItem(context.Background(), ctx.AccountID, tbl.TableName, k)
+		if err != nil || item == nil {
+			continue
+		}
+		if whereClause != "" {
+			ok, _ := evalDynamoCondition(whereClause, nil, nil, item)
+			if !ok {
+				continue
+			}
+		}
+		results = append(results, item)
+	}
+	return results, nil
+}
+
+func (p *DynamoDBPlugin) partiQLInsert(
+	ctx *RequestContext,
+	tbl *DynamoDBTable,
+	valueClause string,
+	_ []*AttributeValue,
+) ([]map[string]*AttributeValue, error) {
+	// valueClause should be a JSON object like {"pk": {"S": "val"}, ...}
+	var item map[string]*AttributeValue
+	if err := json.Unmarshal([]byte(valueClause), &item); err != nil {
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    "Failed to parse VALUE clause as item: " + err.Error(),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	_, pkVal, _, skVal, err := extractPrimaryKey(item, tbl.KeySchema)
+	if err != nil {
+		return nil, err
+	}
+	ik := dynamodbItemKey(pkVal, skVal)
+
+	if err := p.saveItem(context.Background(), ctx.AccountID, tbl.TableName, ik, item); err != nil {
+		return nil, fmt.Errorf("partiQL insert saveItem: %w", err)
+	}
+	keys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	keys = append(keys, ik)
+	_ = p.saveItemKeys(context.Background(), ctx.AccountID, tbl.TableName, keys)
+	p.appendStreamRecord(context.Background(), ctx.AccountID, tbl.TableName, "INSERT", nil, item)
+	return nil, nil
+}
+
+func (p *DynamoDBPlugin) partiQLUpdate(
+	ctx *RequestContext,
+	tbl *DynamoDBTable,
+	whereClause, setClause string,
+	_ []*AttributeValue,
+) ([]map[string]*AttributeValue, error) {
+	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, k := range keys {
+		item, err := p.loadItem(context.Background(), ctx.AccountID, tbl.TableName, k)
+		if err != nil || item == nil {
+			continue
+		}
+		if whereClause != "" {
+			ok, _ := evalDynamoCondition(whereClause, nil, nil, item)
+			if !ok {
+				continue
+			}
+		}
+		oldItem := copyItem(item)
+		if setClause != "" {
+			// Convert SET clause to UpdateExpression format.
+			updateExpr := "SET " + setClause
+			if applyErr := applyUpdateExpression(item, updateExpr, nil, nil); applyErr != nil {
+				return nil, &AWSError{
+					Code:       "ValidationException",
+					Message:    "Failed to apply SET clause: " + applyErr.Error(),
+					HTTPStatus: http.StatusBadRequest,
+				}
+			}
+		}
+		if saveErr := p.saveItem(context.Background(), ctx.AccountID, tbl.TableName, k, item); saveErr != nil {
+			return nil, fmt.Errorf("partiQL update saveItem: %w", saveErr)
+		}
+		p.appendStreamRecord(context.Background(), ctx.AccountID, tbl.TableName, "MODIFY", oldItem, item)
+	}
+	return nil, nil
+}
+
+func (p *DynamoDBPlugin) partiQLDelete(
+	ctx *RequestContext,
+	tbl *DynamoDBTable,
+	whereClause string,
+	_ []*AttributeValue,
+) ([]map[string]*AttributeValue, error) {
+	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	if err != nil {
+		return nil, err
+	}
+
+	remaining := keys[:0]
+	for _, k := range keys {
+		item, err := p.loadItem(context.Background(), ctx.AccountID, tbl.TableName, k)
+		if err != nil || item == nil {
+			remaining = append(remaining, k)
+			continue
+		}
+		if whereClause != "" {
+			ok, _ := evalDynamoCondition(whereClause, nil, nil, item)
+			if !ok {
+				remaining = append(remaining, k)
+				continue
+			}
+		}
+		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, tbl.TableName, k)
+		p.appendStreamRecord(context.Background(), ctx.AccountID, tbl.TableName, "REMOVE", item, nil)
+	}
+	_ = p.saveItemKeys(context.Background(), ctx.AccountID, tbl.TableName, remaining)
+	return nil, nil
 }

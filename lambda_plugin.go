@@ -75,6 +75,16 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 		return p.untagResource(ctx, req, name)
 	case "ListTags":
 		return p.listTags(ctx, name)
+	case "CreateEventSourceMapping":
+		return p.createEventSourceMapping(ctx, req)
+	case "ListEventSourceMappings":
+		return p.listEventSourceMappings(ctx, req)
+	case "GetEventSourceMapping":
+		return p.getEventSourceMapping(ctx, name)
+	case "UpdateEventSourceMapping":
+		return p.updateEventSourceMapping(ctx, req, name)
+	case "DeleteEventSourceMapping":
+		return p.deleteEventSourceMapping(ctx, name)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -161,6 +171,30 @@ func parseLambdaOperation(method, path string) (op, name, subResource string) {
 			return "ListTags", arn, ""
 		case "DELETE":
 			return "UntagResource", arn, ""
+		}
+	}
+
+	// /event-source-mappings[/{uuid}]
+	if strings.HasPrefix(p, "/event-source-mappings") {
+		rest := strings.TrimPrefix(p, "/event-source-mappings")
+		rest = strings.TrimPrefix(rest, "/")
+		if rest == "" {
+			switch method {
+			case "POST":
+				return "CreateEventSourceMapping", "", ""
+			case "GET":
+				return "ListEventSourceMappings", "", ""
+			}
+		} else {
+			uuid := rest
+			switch method {
+			case "GET":
+				return "GetEventSourceMapping", uuid, ""
+			case "PUT":
+				return "UpdateEventSourceMapping", uuid, ""
+			case "DELETE":
+				return "DeleteEventSourceMapping", uuid, ""
+			}
 		}
 	}
 
@@ -806,4 +840,296 @@ func parseInt(s string) (int, error) {
 	var n int
 	_, err := fmt.Sscanf(s, "%d", &n)
 	return n, err
+}
+
+// --- Event Source Mapping (ESM) -----------------------------------------------
+
+// ESMConfig represents an event source mapping configuration.
+type ESMConfig struct {
+	// UUID is the unique identifier for this event source mapping.
+	UUID string `json:"UUID"`
+
+	// FunctionARN is the Lambda function that will receive events.
+	FunctionARN string `json:"FunctionARN"`
+
+	// EventSourceARN is the ARN of the event source (DynamoDB stream or Kinesis stream).
+	EventSourceARN string `json:"EventSourceARN"`
+
+	// BatchSize is the maximum number of records in each batch.
+	BatchSize int `json:"BatchSize"`
+
+	// State is the current state: Enabled or Disabled.
+	State string `json:"State"`
+
+	// StartingPosition is the position from which to start reading: TRIM_HORIZON or LATEST.
+	StartingPosition string `json:"StartingPosition"`
+}
+
+func (p *LambdaPlugin) esmKey(uuid string) string {
+	return "esm:" + uuid
+}
+
+func (p *LambdaPlugin) esmIDsKey(functionARN string) string {
+	return "esm_ids:" + functionARN
+}
+
+func (p *LambdaPlugin) loadESM(ctx context.Context, uuid string) (*ESMConfig, error) {
+	data, err := p.state.Get(ctx, lambdaNamespace, p.esmKey(uuid))
+	if err != nil {
+		return nil, fmt.Errorf("lambda loadESM: %w", err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var esm ESMConfig
+	if err := json.Unmarshal(data, &esm); err != nil {
+		return nil, fmt.Errorf("lambda loadESM unmarshal: %w", err)
+	}
+	return &esm, nil
+}
+
+func (p *LambdaPlugin) saveESM(ctx context.Context, esm *ESMConfig) error {
+	data, err := json.Marshal(esm)
+	if err != nil {
+		return fmt.Errorf("lambda saveESM marshal: %w", err)
+	}
+	return p.state.Put(ctx, lambdaNamespace, p.esmKey(esm.UUID), data)
+}
+
+func (p *LambdaPlugin) loadESMIDs(ctx context.Context, functionARN string) ([]string, error) {
+	data, err := p.state.Get(ctx, lambdaNamespace, p.esmIDsKey(functionARN))
+	if err != nil {
+		return nil, fmt.Errorf("lambda loadESMIDs: %w", err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return nil, fmt.Errorf("lambda loadESMIDs unmarshal: %w", err)
+	}
+	return ids, nil
+}
+
+func (p *LambdaPlugin) saveESMIDs(ctx context.Context, functionARN string, ids []string) error {
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("lambda saveESMIDs marshal: %w", err)
+	}
+	return p.state.Put(ctx, lambdaNamespace, p.esmIDsKey(functionARN), data)
+}
+
+func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		FunctionName     string `json:"FunctionName"`
+		EventSourceArn   string `json:"EventSourceArn"`
+		BatchSize        int    `json:"BatchSize"`
+		StartingPosition string `json:"StartingPosition"`
+		Enabled          *bool  `json:"Enabled"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+	}
+	if input.FunctionName == "" || input.EventSourceArn == "" {
+		return nil, &AWSError{Code: "ValidationException", Message: "FunctionName and EventSourceArn are required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	batchSize := input.BatchSize
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+
+	state := "Enabled"
+	if input.Enabled != nil && !*input.Enabled {
+		state = "Disabled"
+	}
+
+	startingPosition := input.StartingPosition
+	if startingPosition == "" {
+		startingPosition = "TRIM_HORIZON"
+	}
+
+	// Resolve function ARN.
+	functionARN := input.FunctionName
+	if !strings.HasPrefix(functionARN, "arn:") {
+		functionARN = "arn:aws:lambda:" + ctx.Region + ":" + ctx.AccountID + ":function:" + input.FunctionName
+	}
+
+	uuid := generateLambdaRevisionID()
+	esm := &ESMConfig{
+		UUID:             uuid,
+		FunctionARN:      functionARN,
+		EventSourceARN:   input.EventSourceArn,
+		BatchSize:        batchSize,
+		State:            state,
+		StartingPosition: startingPosition,
+	}
+
+	bgCtx := context.Background()
+	if err := p.saveESM(bgCtx, esm); err != nil {
+		return nil, fmt.Errorf("lambda createEventSourceMapping saveESM: %w", err)
+	}
+
+	ids, err := p.loadESMIDs(bgCtx, functionARN)
+	if err != nil {
+		return nil, err
+	}
+	ids = append(ids, uuid)
+	if err := p.saveESMIDs(bgCtx, functionARN, ids); err != nil {
+		return nil, fmt.Errorf("lambda createEventSourceMapping saveESMIDs: %w", err)
+	}
+
+	return lambdaJSONResponse(http.StatusCreated, esm)
+}
+
+func (p *LambdaPlugin) listEventSourceMappings(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	functionName := req.Params["FunctionName"]
+	eventSourceArn := req.Params["EventSourceArn"]
+
+	bgCtx := context.Background()
+
+	var functionARN string
+	if functionName != "" {
+		if strings.HasPrefix(functionName, "arn:") {
+			functionARN = functionName
+		} else {
+			functionARN = "arn:aws:lambda:" + ctx.Region + ":" + ctx.AccountID + ":function:" + functionName
+		}
+	}
+
+	var esms []ESMConfig
+
+	if functionARN != "" {
+		ids, err := p.loadESMIDs(bgCtx, functionARN)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			esm, err := p.loadESM(bgCtx, id)
+			if err != nil || esm == nil {
+				continue
+			}
+			if eventSourceArn != "" && esm.EventSourceARN != eventSourceArn {
+				continue
+			}
+			esms = append(esms, *esm)
+		}
+	} else {
+		// Scan all ESMs — list by scanning state keys.
+		keys, err := p.state.List(bgCtx, lambdaNamespace, "esm:")
+		if err != nil {
+			return nil, fmt.Errorf("lambda listEventSourceMappings: %w", err)
+		}
+		for _, k := range keys {
+			// Skip index keys.
+			if strings.HasPrefix(k, "esm_ids:") {
+				continue
+			}
+			data, getErr := p.state.Get(bgCtx, lambdaNamespace, k)
+			if getErr != nil || data == nil {
+				continue
+			}
+			var esm ESMConfig
+			if unmarshalErr := json.Unmarshal(data, &esm); unmarshalErr != nil {
+				continue
+			}
+			if eventSourceArn != "" && esm.EventSourceARN != eventSourceArn {
+				continue
+			}
+			esms = append(esms, esm)
+		}
+	}
+
+	if esms == nil {
+		esms = []ESMConfig{}
+	}
+
+	return lambdaJSONResponse(http.StatusOK, map[string]interface{}{
+		"EventSourceMappings": esms,
+	})
+}
+
+func (p *LambdaPlugin) getEventSourceMapping(_ *RequestContext, uuid string) (*AWSResponse, error) {
+	esm, err := p.loadESM(context.Background(), uuid)
+	if err != nil {
+		return nil, err
+	}
+	if esm == nil {
+		return nil, &AWSError{
+			Code:       "ResourceNotFoundException",
+			Message:    "The event source mapping " + uuid + " was not found.",
+			HTTPStatus: http.StatusNotFound,
+		}
+	}
+	return lambdaJSONResponse(http.StatusOK, esm)
+}
+
+func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSRequest, uuid string) (*AWSResponse, error) {
+	esm, err := p.loadESM(context.Background(), uuid)
+	if err != nil {
+		return nil, err
+	}
+	if esm == nil {
+		return nil, &AWSError{
+			Code:       "ResourceNotFoundException",
+			Message:    "The event source mapping " + uuid + " was not found.",
+			HTTPStatus: http.StatusNotFound,
+		}
+	}
+
+	var input struct {
+		BatchSize int   `json:"BatchSize"`
+		Enabled   *bool `json:"Enabled"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &input)
+	}
+	if input.BatchSize > 0 {
+		esm.BatchSize = input.BatchSize
+	}
+	if input.Enabled != nil {
+		if *input.Enabled {
+			esm.State = "Enabled"
+		} else {
+			esm.State = "Disabled"
+		}
+	}
+
+	if err := p.saveESM(context.Background(), esm); err != nil {
+		return nil, fmt.Errorf("lambda updateEventSourceMapping saveESM: %w", err)
+	}
+	return lambdaJSONResponse(http.StatusOK, esm)
+}
+
+func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) (*AWSResponse, error) {
+	esm, err := p.loadESM(context.Background(), uuid)
+	if err != nil {
+		return nil, err
+	}
+	if esm == nil {
+		return nil, &AWSError{
+			Code:       "ResourceNotFoundException",
+			Message:    "The event source mapping " + uuid + " was not found.",
+			HTTPStatus: http.StatusNotFound,
+		}
+	}
+
+	if delErr := p.state.Delete(context.Background(), lambdaNamespace, p.esmKey(uuid)); delErr != nil {
+		return nil, fmt.Errorf("lambda deleteEventSourceMapping: %w", delErr)
+	}
+
+	// Remove from function's ESM list.
+	ids, err := p.loadESMIDs(context.Background(), esm.FunctionARN)
+	if err != nil {
+		return nil, err
+	}
+	filtered := ids[:0]
+	for _, id := range ids {
+		if id != uuid {
+			filtered = append(filtered, id)
+		}
+	}
+	_ = p.saveESMIDs(context.Background(), esm.FunctionARN, filtered)
+
+	return lambdaJSONResponse(http.StatusOK, esm)
 }

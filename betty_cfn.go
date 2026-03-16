@@ -184,6 +184,8 @@ var typePriority = map[string]int{
 	// v0.28.0 — SES v2 and Firehose.
 	"AWS::SES::EmailIdentity":              2,
 	"AWS::KinesisFirehose::DeliveryStream": 3,
+	// v0.30.0 — Lambda ESM.
+	"AWS::Lambda::EventSourceMapping": 5,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -600,6 +602,9 @@ func (d *StackDeployer) deployResource(
 		return d.deploySESv2EmailIdentity(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::KinesisFirehose::DeliveryStream":
 		return d.deployFirehoseDeliveryStream(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.30.0 — Lambda ESM.
+	case "AWS::Lambda::EventSourceMapping":
+		return d.deployLambdaEventSourceMapping(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,
@@ -641,6 +646,21 @@ func (d *StackDeployer) deployS3Bucket(
 		dr.Error = routeErr.Error()
 	}
 	_ = resp
+
+	// Apply VersioningConfiguration if present.
+	if vc, ok := props["VersioningConfiguration"].(map[string]interface{}); ok {
+		if status, _ := vc["Status"].(string); status == "Enabled" {
+			vReq := &AWSRequest{
+				Service:   "s3",
+				Operation: "PUT",
+				Path:      "/" + bucketName,
+				Params:    map[string]string{"versioning": "1"},
+				Headers:   map[string]string{"Content-Type": "application/xml"},
+				Body:      []byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`),
+			}
+			_, _, _ = d.dispatch(ctx, vReq, streamID)
+		}
+	}
 
 	return dr, cost, nil
 }
@@ -2376,4 +2396,57 @@ func marshalToJSON(v interface{}) string {
 		return ""
 	}
 	return string(b)
+}
+
+// deployLambdaEventSourceMapping creates a Lambda event source mapping for the
+// given CFN resource (AWS::Lambda::EventSourceMapping).
+func (d *StackDeployer) deployLambdaEventSourceMapping(
+	ctx context.Context,
+	logicalID string,
+	props map[string]interface{},
+	streamID string,
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	functionName := resolveStringProp(props, "FunctionName", "", cctx)
+	eventSourceArn := resolveStringProp(props, "EventSourceArn", "", cctx)
+	startingPosition := resolveStringProp(props, "StartingPosition", "TRIM_HORIZON", cctx)
+
+	bodyMap := map[string]interface{}{
+		"FunctionName":     functionName,
+		"EventSourceArn":   eventSourceArn,
+		"StartingPosition": startingPosition,
+	}
+	if batchSize, ok := props["BatchSize"]; ok {
+		bodyMap["BatchSize"] = batchSize
+	}
+	bodyBytes, err := json.Marshal(bodyMap)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("marshal esm body: %w", err)
+	}
+
+	req := &AWSRequest{
+		Service:   "lambda",
+		Operation: "POST",
+		Path:      "/2015-03-31/event-source-mappings/",
+		Headers:   map[string]string{"Content-Type": "application/json"},
+		Params:    map[string]string{},
+		Body:      bodyBytes,
+	}
+
+	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+
+	dr := DeployedResource{
+		LogicalID: logicalID,
+		Type:      "AWS::Lambda::EventSourceMapping",
+	}
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+	} else if resp != nil {
+		var result ESMConfig
+		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
+			dr.PhysicalID = result.UUID
+		}
+	}
+
+	return dr, cost, nil
 }

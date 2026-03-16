@@ -48,6 +48,70 @@ type S3Object struct {
 
 	// Tags holds optional user-defined key-value tags on the object.
 	Tags map[string]string `json:"tags,omitempty"`
+
+	// VersionID is the version identifier when bucket versioning is enabled.
+	// Empty for unversioned objects.
+	VersionID string `json:"version_id,omitempty"`
+
+	// IsDeleteMarker indicates this is a versioning delete marker rather than
+	// an actual object.
+	IsDeleteMarker bool `json:"is_delete_marker,omitempty"`
+}
+
+// S3VersioningConfiguration holds the versioning state for a bucket.
+type S3VersioningConfiguration struct {
+	// Status is "Enabled", "Suspended", or "" (never enabled).
+	Status string `xml:"Status" json:"Status"`
+}
+
+// S3ObjectVersion holds the metadata for one version of an object in a
+// ListObjectVersions response.
+type S3ObjectVersion struct {
+	// Key is the object key.
+	Key string `xml:"Key"`
+
+	// VersionID is the version identifier.
+	VersionID string `xml:"VersionId"`
+
+	// IsLatest is true when this is the current version.
+	IsLatest bool `xml:"IsLatest"`
+
+	// LastModified is the ISO-8601 timestamp of the version.
+	LastModified string `xml:"LastModified"`
+
+	// ETag is the entity tag.
+	ETag string `xml:"ETag"`
+
+	// Size is the byte length of the object body.
+	Size int64 `xml:"Size"`
+}
+
+// S3DeleteMarker holds metadata for one delete marker in a ListObjectVersions
+// response.
+type S3DeleteMarker struct {
+	// Key is the object key.
+	Key string `xml:"Key"`
+
+	// VersionID is the version identifier of the delete marker.
+	VersionID string `xml:"VersionId"`
+
+	// IsLatest is true when this delete marker is the current version.
+	IsLatest bool `xml:"IsLatest"`
+
+	// LastModified is the ISO-8601 timestamp of the delete marker.
+	LastModified string `xml:"LastModified"`
+}
+
+// ListObjectVersionsResult is the XML response body for ListObjectVersions.
+type ListObjectVersionsResult struct {
+	XMLName       xml.Name          `xml:"ListVersionsResult"`
+	Xmlns         string            `xml:"xmlns,attr"`
+	Name          string            `xml:"Name"`
+	Prefix        string            `xml:"Prefix"`
+	MaxKeys       int               `xml:"MaxKeys"`
+	IsTruncated   bool              `xml:"IsTruncated"`
+	Versions      []S3ObjectVersion `xml:"Version"`
+	DeleteMarkers []S3DeleteMarker  `xml:"DeleteMarker"`
 }
 
 // S3MultipartUpload holds state for an in-progress multipart upload.

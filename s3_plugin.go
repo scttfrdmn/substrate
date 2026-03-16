@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/afero"
@@ -28,11 +29,12 @@ const s3Namespace = "s3"
 // CompleteMultipartUpload, AbortMultipartUpload, and ListMultipartUploads.
 // Object bodies are stored in an afero.Fs; metadata is stored via StateManager.
 type S3Plugin struct {
-	state    StateManager
-	logger   Logger
-	tc       *TimeController
-	fs       afero.Fs
-	registry *PluginRegistry // nil = notifications disabled
+	state      StateManager
+	logger     Logger
+	tc         *TimeController
+	fs         afero.Fs
+	registry   *PluginRegistry // nil = notifications disabled
+	versionSeq int64           // monotonic counter for unique version IDs
 }
 
 // Name returns the service name "s3".
@@ -136,6 +138,18 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getObjectTagging(ctx, req, bucket, key)
 	case "DeleteObjectTagging":
 		return p.deleteObjectTagging(ctx, req, bucket, key)
+	case "PutBucketVersioning":
+		return p.putBucketVersioning(ctx, req, bucket)
+	case "GetBucketVersioning":
+		return p.getBucketVersioning(ctx, req, bucket)
+	case "ListObjectVersions":
+		return p.listObjectVersions(ctx, req, bucket)
+	case "PutBucketLifecycleConfiguration":
+		return p.putBucketLifecycleConfiguration(ctx, req, bucket)
+	case "GetBucketLifecycleConfiguration":
+		return p.getBucketLifecycleConfiguration(ctx, req, bucket)
+	case "DeleteBucketLifecycle":
+		return p.deleteBucketLifecycle(ctx, req, bucket)
 	default:
 		return nil, &AWSError{
 			Code:       "NotImplemented",
@@ -183,6 +197,12 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["tagging"]; ok {
 				return bucket, "", "PutBucketTagging"
 			}
+			if _, ok := req.Params["versioning"]; ok {
+				return bucket, "", "PutBucketVersioning"
+			}
+			if _, ok := req.Params["lifecycle"]; ok {
+				return bucket, "", "PutBucketLifecycleConfiguration"
+			}
 			return bucket, "", "CreateBucket"
 		case "HEAD":
 			return bucket, "", "HeadBucket"
@@ -192,6 +212,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["tagging"]; ok {
 				return bucket, "", "DeleteBucketTagging"
+			}
+			if _, ok := req.Params["lifecycle"]; ok {
+				return bucket, "", "DeleteBucketLifecycle"
 			}
 			return bucket, "", "DeleteBucket"
 		case "GET":
@@ -209,6 +232,15 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if req.Params["uploads"] == "1" {
 				return bucket, "", "ListMultipartUploads"
+			}
+			if _, ok := req.Params["versioning"]; ok {
+				return bucket, "", "GetBucketVersioning"
+			}
+			if _, ok := req.Params["versions"]; ok {
+				return bucket, "", "ListObjectVersions"
+			}
+			if _, ok := req.Params["lifecycle"]; ok {
+				return bucket, "", "GetBucketLifecycleConfiguration"
 			}
 			if req.Params["list-type"] == "2" {
 				return bucket, "", "ListObjectsV2"
@@ -423,6 +455,36 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		UserMetadata: userMeta,
 	}
 
+	respHeaders := map[string]string{"ETag": etag}
+
+	// If versioning is enabled, generate a version ID and store the versioned copy.
+	versioningStatus := p.getBucketVersioningStatus(ctx, bucket)
+	if versioningStatus == "Enabled" {
+		versionID := fmt.Sprintf("v%d-%d", p.tc.Now().UnixNano(), atomic.AddInt64(&p.versionSeq, 1))
+		obj.VersionID = versionID
+		// Write body to version-specific filesystem path.
+		vfPath := "/" + bucket + "/.versions/" + key + "/" + versionID
+		if mkErr := p.fs.MkdirAll(filepath.Dir(vfPath), 0o755); mkErr != nil {
+			return nil, fmt.Errorf("mkdir versioned path: %w", mkErr)
+		}
+		if wErr := afero.WriteFile(p.fs, vfPath, body, 0o644); wErr != nil {
+			return nil, fmt.Errorf("write versioned body: %w", wErr)
+		}
+		versionedKey := "object_version:" + bucket + "/" + key + "/" + versionID
+		versionedData, marshalErr := json.Marshal(obj)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal versioned object: %w", marshalErr)
+		}
+		if putErr := p.state.Put(ctx, s3Namespace, versionedKey, versionedData); putErr != nil {
+			return nil, fmt.Errorf("save versioned object: %w", putErr)
+		}
+		// Prepend version ID to the version list.
+		vids := p.loadVersionIDs(ctx, bucket, key)
+		vids = append([]string{versionID}, vids...)
+		p.saveVersionIDs(ctx, bucket, key, vids)
+		respHeaders["x-amz-version-id"] = versionID
+	}
+
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return nil, fmt.Errorf("marshal object metadata: %w", err)
@@ -436,15 +498,28 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
-		Headers:    map[string]string{"ETag": etag},
+		Headers:    respHeaders,
 	}, nil
 }
 
 // getObject handles GET /<bucket>/<key>.
-func (p *S3Plugin) getObject(_ *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
-	data, err := p.state.Get(ctx, s3Namespace, "object:"+bucket+"/"+key)
+	// If versionId query param is present, load from versioned storage.
+	versionID := req.Params["versionId"]
+
+	var stateKey string
+	var fsPath string
+	if versionID != "" {
+		stateKey = "object_version:" + bucket + "/" + key + "/" + versionID
+		fsPath = "/" + bucket + "/.versions/" + key + "/" + versionID
+	} else {
+		stateKey = "object:" + bucket + "/" + key
+		fsPath = "/" + bucket + "/" + key
+	}
+
+	data, err := p.state.Get(ctx, s3Namespace, stateKey)
 	if err != nil {
 		return nil, fmt.Errorf("get object metadata: %w", err)
 	}
@@ -457,9 +532,18 @@ func (p *S3Plugin) getObject(_ *RequestContext, _ *AWSRequest, bucket, key strin
 		return nil, fmt.Errorf("unmarshal object metadata: %w", err)
 	}
 
-	body, readErr := afero.ReadFile(p.fs, "/"+bucket+"/"+key)
+	if obj.IsDeleteMarker {
+		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+	}
+
+	// Try versioned fs path first, then fallback to main path.
+	body, readErr := afero.ReadFile(p.fs, fsPath)
 	if readErr != nil {
-		return nil, fmt.Errorf("read object body: %w", readErr)
+		// Fall back to main path for objects written before versioning was enabled.
+		body, readErr = afero.ReadFile(p.fs, "/"+bucket+"/"+key)
+		if readErr != nil {
+			return nil, fmt.Errorf("read object body: %w", readErr)
+		}
 	}
 
 	headers := map[string]string{
@@ -467,6 +551,9 @@ func (p *S3Plugin) getObject(_ *RequestContext, _ *AWSRequest, bucket, key strin
 		"ETag":           obj.ETag,
 		"Last-Modified":  obj.LastModified.UTC().Format(http.TimeFormat),
 		"Content-Length": strconv.FormatInt(obj.Size, 10),
+	}
+	if obj.VersionID != "" {
+		headers["x-amz-version-id"] = obj.VersionID
 	}
 	for k, v := range obj.UserMetadata {
 		headers["X-Amz-Meta-"+k] = v
@@ -507,7 +594,7 @@ func (p *S3Plugin) headObject(_ *RequestContext, _ *AWSRequest, bucket, key stri
 
 // deleteObject handles DELETE /<bucket>/<key>.
 // S3 DELETE is idempotent: no error is returned when the key is absent.
-func (p *S3Plugin) deleteObject(reqCtx *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
 	bucketData, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
@@ -516,6 +603,64 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, _ *AWSRequest, bucket, k
 	}
 	if bucketData == nil {
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	versioningStatus := p.getBucketVersioningStatus(ctx, bucket)
+	versionID := req.Params["versionId"]
+
+	if versionID != "" {
+		// Permanently remove a specific version.
+		versionedKey := "object_version:" + bucket + "/" + key + "/" + versionID
+		_ = p.state.Delete(ctx, s3Namespace, versionedKey)
+		_ = p.fs.Remove("/" + bucket + "/.versions/" + key + "/" + versionID)
+		// Remove from version list.
+		vids := p.loadVersionIDs(ctx, bucket, key)
+		filtered := vids[:0]
+		for _, vid := range vids {
+			if vid != versionID {
+				filtered = append(filtered, vid)
+			}
+		}
+		p.saveVersionIDs(ctx, bucket, key, filtered)
+		return &AWSResponse{
+			StatusCode: http.StatusNoContent,
+			Headers:    map[string]string{"x-amz-version-id": versionID},
+		}, nil
+	}
+
+	if versioningStatus == "Enabled" {
+		// Insert a delete marker.
+		markerVersionID := fmt.Sprintf("dm%d-%d", p.tc.Now().UnixNano(), atomic.AddInt64(&p.versionSeq, 1))
+		marker := S3Object{
+			Bucket:         bucket,
+			Key:            key,
+			LastModified:   p.tc.Now(),
+			VersionID:      markerVersionID,
+			IsDeleteMarker: true,
+		}
+		markerData, marshalErr := json.Marshal(marker)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal delete marker: %w", marshalErr)
+		}
+		versionedKey := "object_version:" + bucket + "/" + key + "/" + markerVersionID
+		if putErr := p.state.Put(ctx, s3Namespace, versionedKey, markerData); putErr != nil {
+			return nil, fmt.Errorf("save delete marker: %w", putErr)
+		}
+		// Update the current object to the delete marker.
+		if putErr := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, markerData); putErr != nil {
+			return nil, fmt.Errorf("update current to delete marker: %w", putErr)
+		}
+		vids := p.loadVersionIDs(ctx, bucket, key)
+		vids = append([]string{markerVersionID}, vids...)
+		p.saveVersionIDs(ctx, bucket, key, vids)
+		p.fireNotifications(reqCtx, bucket, key, "s3:ObjectRemoved:DeleteMarkerCreated", 0, "")
+		return &AWSResponse{
+			StatusCode: http.StatusNoContent,
+			Headers: map[string]string{
+				"x-amz-version-id":    markerVersionID,
+				"x-amz-delete-marker": "true",
+			},
+		}, nil
 	}
 
 	_ = p.state.Delete(ctx, s3Namespace, "object:"+bucket+"/"+key)
@@ -1929,4 +2074,255 @@ func s3CannedACL(cannedACL, resource string) S3AccessControlList {
 		// "private" and all other values → owner-only.
 		return S3AccessControlList{Owner: owner, Grants: []S3Grant{fullControlGrant}}
 	}
+}
+
+// --- Versioning helpers ------------------------------------------------------
+
+// getBucketVersioningStatus returns "Enabled", "Suspended", or "" for the bucket.
+func (p *S3Plugin) getBucketVersioningStatus(ctx context.Context, bucket string) string {
+	data, err := p.state.Get(ctx, s3Namespace, "bucket_versioning:"+bucket)
+	if err != nil || data == nil {
+		return ""
+	}
+	return string(data)
+}
+
+// loadVersionIDs returns the newest-first list of version IDs for bucket/key.
+func (p *S3Plugin) loadVersionIDs(ctx context.Context, bucket, key string) []string {
+	data, err := p.state.Get(ctx, s3Namespace, "object_versions:"+bucket+"/"+key)
+	if err != nil || data == nil {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return nil
+	}
+	return ids
+}
+
+// saveVersionIDs persists the version ID list for bucket/key.
+func (p *S3Plugin) saveVersionIDs(ctx context.Context, bucket, key string, ids []string) {
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return
+	}
+	_ = p.state.Put(ctx, s3Namespace, "object_versions:"+bucket+"/"+key, data)
+}
+
+// --- Versioning operations ---------------------------------------------------
+
+// putBucketVersioning handles PUT /<bucket>?versioning.
+func (p *S3Plugin) putBucketVersioning(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	var cfg S3VersioningConfiguration
+	if len(req.Body) > 0 {
+		if parseErr := xml.Unmarshal(req.Body, &cfg); parseErr != nil {
+			return nil, fmt.Errorf("parse versioning config: %w", parseErr)
+		}
+	}
+
+	if cfg.Status == "" {
+		cfg.Status = "Enabled"
+	}
+	if cfg.Status != "Enabled" && cfg.Status != "Suspended" {
+		return s3ErrorResponse("IllegalVersioningConfigurationException",
+			"The versioning configuration specified is not valid.", http.StatusBadRequest), nil
+	}
+
+	if err := p.state.Put(ctx, s3Namespace, "bucket_versioning:"+bucket, []byte(cfg.Status)); err != nil {
+		return nil, fmt.Errorf("save versioning config: %w", err)
+	}
+
+	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{}}, nil
+}
+
+// getBucketVersioning handles GET /<bucket>?versioning.
+func (p *S3Plugin) getBucketVersioning(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	status := p.getBucketVersioningStatus(ctx, bucket)
+
+	type versioningResp struct {
+		XMLName xml.Name `xml:"VersioningConfiguration"`
+		Xmlns   string   `xml:"xmlns,attr"`
+		Status  string   `xml:"Status,omitempty"`
+	}
+
+	return s3XMLResponse(http.StatusOK, versioningResp{
+		Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
+		Status: status,
+	})
+}
+
+// listObjectVersions handles GET /<bucket>?versions.
+func (p *S3Plugin) listObjectVersions(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	prefix := req.Params["prefix"]
+
+	// Enumerate all object keys in the bucket.
+	objKeys, err := p.state.List(ctx, s3Namespace, "object:"+bucket+"/")
+	if err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
+	}
+
+	result := ListObjectVersionsResult{
+		Xmlns:   "http://s3.amazonaws.com/doc/2006-03-01/",
+		Name:    bucket,
+		MaxKeys: 1000,
+	}
+
+	seen := make(map[string]bool)
+	for _, stateKey := range objKeys {
+		// stateKey looks like "object:{bucket}/{key}" — extract the key part.
+		key := strings.TrimPrefix(stateKey, "object:"+bucket+"/")
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		vids := p.loadVersionIDs(ctx, bucket, key)
+		if len(vids) == 0 {
+			// Object without versioning — return as a single version.
+			objData, getErr := p.state.Get(ctx, s3Namespace, "object:"+bucket+"/"+key)
+			if getErr != nil || objData == nil {
+				continue
+			}
+			var obj S3Object
+			if unmarshalErr := json.Unmarshal(objData, &obj); unmarshalErr != nil {
+				continue
+			}
+			result.Versions = append(result.Versions, S3ObjectVersion{
+				Key:          key,
+				VersionID:    "null",
+				IsLatest:     true,
+				LastModified: obj.LastModified.UTC().Format(time.RFC3339Nano),
+				ETag:         obj.ETag,
+				Size:         obj.Size,
+			})
+			continue
+		}
+
+		for i, vid := range vids {
+			versionedData, getErr := p.state.Get(ctx, s3Namespace, "object_version:"+bucket+"/"+key+"/"+vid)
+			if getErr != nil || versionedData == nil {
+				continue
+			}
+			var obj S3Object
+			if unmarshalErr := json.Unmarshal(versionedData, &obj); unmarshalErr != nil {
+				continue
+			}
+			isLatest := i == 0
+			if obj.IsDeleteMarker {
+				result.DeleteMarkers = append(result.DeleteMarkers, S3DeleteMarker{
+					Key:          key,
+					VersionID:    vid,
+					IsLatest:     isLatest,
+					LastModified: obj.LastModified.UTC().Format(time.RFC3339Nano),
+				})
+			} else {
+				result.Versions = append(result.Versions, S3ObjectVersion{
+					Key:          key,
+					VersionID:    vid,
+					IsLatest:     isLatest,
+					LastModified: obj.LastModified.UTC().Format(time.RFC3339Nano),
+					ETag:         obj.ETag,
+					Size:         obj.Size,
+				})
+			}
+		}
+	}
+
+	return s3XMLResponse(http.StatusOK, result)
+}
+
+// --- Lifecycle operations ----------------------------------------------------
+
+// putBucketLifecycleConfiguration handles PUT /<bucket>?lifecycle.
+// The configuration is stored as-is (config round-trip; no expiration logic).
+func (p *S3Plugin) putBucketLifecycleConfiguration(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	body := req.Body
+	if len(body) == 0 {
+		body = []byte("<LifecycleConfiguration/>")
+	}
+	if err := p.state.Put(ctx, s3Namespace, "bucket_lifecycle:"+bucket, body); err != nil {
+		return nil, fmt.Errorf("save lifecycle config: %w", err)
+	}
+
+	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{}}, nil
+}
+
+// getBucketLifecycleConfiguration handles GET /<bucket>?lifecycle.
+func (p *S3Plugin) getBucketLifecycleConfiguration(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	data, err := p.state.Get(ctx, s3Namespace, "bucket_lifecycle:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("get lifecycle config: %w", err)
+	}
+	if data == nil {
+		return s3ErrorResponse("NoSuchLifecycleConfiguration",
+			"The lifecycle configuration does not exist.", http.StatusNotFound), nil
+	}
+
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{"Content-Type": "application/xml"},
+		Body:       data,
+	}, nil
+}
+
+// deleteBucketLifecycle handles DELETE /<bucket>?lifecycle.
+func (p *S3Plugin) deleteBucketLifecycle(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	existing, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if existing == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	_ = p.state.Delete(ctx, s3Namespace, "bucket_lifecycle:"+bucket)
+
+	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
