@@ -365,3 +365,89 @@ func TestServer_CredentialRegistry_UnknownKey_Returns403(t *testing.T) {
 	srv.ServeHTTP(w, r)
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
+
+func TestServer_EmailsEndpoint(t *testing.T) {
+	cfg := substrate.DefaultConfig()
+	registry := substrate.NewPluginRegistry()
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	state := substrate.NewMemoryStateManager()
+	tc := substrate.NewTimeController(time.Now())
+	logger := substrate.NewDefaultLogger(slog.LevelError, false)
+
+	// Register the SESv2 plugin so emails can be sent.
+	sesv2 := &substrate.SESv2Plugin{}
+	require.NoError(t, sesv2.Initialize(context.Background(), substrate.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(sesv2)
+
+	srv := substrate.NewServer(*cfg, registry, store, state, tc, logger)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Send a couple of emails via POST.
+	sendEmail := func(to, subject string) {
+		body, _ := json.Marshal(map[string]any{
+			"FromEmailAddress": "from@example.com",
+			"Destination": map[string]any{
+				"ToAddresses": []string{to},
+			},
+			"Content": map[string]any{
+				"Simple": map[string]any{
+					"Subject": map[string]string{"Data": subject},
+					"Body":    map[string]any{"Text": map[string]string{"Data": "body"}},
+				},
+			},
+		})
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v2/email/outbound-emails", strings.NewReader(string(body)))
+		req.Host = "email.us-east-1.amazonaws.com"
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	sendEmail("alice@example.com", "Hello Alice")
+	sendEmail("bob@example.com", "Hello Bob")
+
+	// GET /v1/emails — all.
+	resp, err := http.Get(ts.URL + "/v1/emails")
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result struct {
+		Emails []substrate.SESv2CapturedEmail `json:"Emails"`
+		Count  int                            `json:"Count"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, 2, result.Count)
+
+	// GET /v1/emails?to=alice.
+	resp2, err := http.Get(ts.URL + "/v1/emails?to=alice")
+	require.NoError(t, err)
+	defer resp2.Body.Close() //nolint:errcheck
+	var result2 struct {
+		Emails []substrate.SESv2CapturedEmail `json:"Emails"`
+		Count  int                            `json:"Count"`
+	}
+	require.NoError(t, json.NewDecoder(resp2.Body).Decode(&result2))
+	assert.Equal(t, 1, result2.Count)
+	if len(result2.Emails) > 0 {
+		assert.Contains(t, result2.Emails[0].To[0], "alice")
+	}
+
+	// GET /v1/emails?subject=Bob.
+	resp3, err := http.Get(ts.URL + "/v1/emails?subject=Bob")
+	require.NoError(t, err)
+	defer resp3.Body.Close() //nolint:errcheck
+	var result3 struct {
+		Emails []substrate.SESv2CapturedEmail `json:"Emails"`
+		Count  int                            `json:"Count"`
+	}
+	require.NoError(t, json.NewDecoder(resp3.Body).Decode(&result3))
+	assert.Equal(t, 1, result3.Count)
+}

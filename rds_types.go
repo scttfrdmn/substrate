@@ -114,6 +114,40 @@ type RDSDBParameterGroup struct {
 	Region string `json:"Region"`
 }
 
+// RDSDBCluster represents an Amazon Aurora DB cluster.
+type RDSDBCluster struct {
+	// DBClusterIdentifier is the unique identifier for the DB cluster.
+	DBClusterIdentifier string `json:"DBClusterIdentifier"`
+	// Engine is the database engine (e.g. "aurora-mysql", "aurora-postgresql").
+	Engine string `json:"Engine"`
+	// EngineVersion is the version of the database engine.
+	EngineVersion string `json:"EngineVersion"`
+	// Status is the current status of the DB cluster.
+	Status string `json:"Status"`
+	// Endpoint is the writer endpoint for the cluster.
+	Endpoint string `json:"Endpoint"`
+	// ReaderEndpoint is the reader endpoint for the cluster.
+	ReaderEndpoint string `json:"ReaderEndpoint"`
+	// Port is the port on which the cluster accepts connections.
+	Port int `json:"Port"`
+	// MasterUsername is the master user name for the DB cluster.
+	MasterUsername string `json:"MasterUsername"`
+	// DBSubnetGroupName is the subnet group associated with the cluster.
+	DBSubnetGroupName string `json:"DBSubnetGroupName"`
+	// MultiAZ indicates whether the cluster spans multiple Availability Zones.
+	MultiAZ bool `json:"MultiAZ"`
+	// DBClusterArn is the Amazon Resource Name for the DB cluster.
+	DBClusterArn string `json:"DBClusterArn"`
+	// Tags holds resource tags as key-value pairs.
+	Tags map[string]string `json:"Tags"`
+	// AccountID is the AWS account that owns the cluster.
+	AccountID string `json:"AccountID"`
+	// Region is the AWS region where the cluster resides.
+	Region string `json:"Region"`
+	// CreatedAt is the time the cluster was created.
+	CreatedAt time.Time `json:"CreatedAt"`
+}
+
 // rdsDefaultPort returns the default port for the given database engine.
 func rdsDefaultPort(engine string) int {
 	switch engine {

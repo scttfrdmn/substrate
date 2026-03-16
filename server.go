@@ -213,6 +213,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Get("/_localstack/health", s.handleLocalStackHealth)
 	r.Get("/_localstack/info", s.handleLocalStackHealth)
 	r.Post("/v1/state/reset", s.handleStateReset)
+	r.Get("/v1/emails", s.handleEmails)
 
 	if s.opts.Metrics != nil && s.config.Metrics.Enabled {
 		metricsPath := s.config.Metrics.Path
@@ -262,6 +263,64 @@ func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleEmails returns all captured SESv2 outbound emails as JSON. It is
+// intended for test assertions and accepts optional ?to= and ?subject= query
+// parameters for substring filtering.
+func (s *Server) handleEmails(w http.ResponseWriter, r *http.Request) {
+	filterTo := r.URL.Query().Get("to")
+	filterSubject := r.URL.Query().Get("subject")
+
+	keys, err := s.state.List(r.Context(), sesv2Namespace, "captured_email:")
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	var emails []SESv2CapturedEmail
+	for _, k := range keys {
+		data, getErr := s.state.Get(r.Context(), sesv2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var email SESv2CapturedEmail
+		if json.Unmarshal(data, &email) != nil {
+			continue
+		}
+		// Apply to filter.
+		if filterTo != "" {
+			matched := false
+			for _, addr := range email.To {
+				if strings.Contains(addr, filterTo) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		// Apply subject filter.
+		if filterSubject != "" && !strings.Contains(email.Subject, filterSubject) {
+			continue
+		}
+		emails = append(emails, email)
+	}
+	if emails == nil {
+		emails = []SESv2CapturedEmail{}
+	}
+
+	result := map[string]interface{}{
+		"Emails": emails,
+		"Count":  len(emails),
+	}
+	body, _ := json.Marshal(result)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(body); err != nil {
+		s.logger.Warn("failed to write emails response", "err", err)
+	}
 }
 
 // handleMetrics writes a Prometheus text-format v0.0.4 metrics snapshot.

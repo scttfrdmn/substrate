@@ -169,6 +169,12 @@ func defaultCostTable() map[string]float64 {
 		// AppSync: $4.00 per million query/mutation operations.
 		"appsync/ExecuteGraphQL":   0.000004,
 		"appsync/CreateGraphqlApi": 0.000004,
+		// RDS Aurora: per-cluster-hour prorated per API call.
+		"rds/CreateDBCluster":                 0.0001,
+		"rds/RestoreDBInstanceFromDBSnapshot": 0.0001,
+		// MSK: per-broker-hour prorated per API call.
+		"msk/CreateCluster":       0.0002,
+		"msk/GetBootstrapBrokers": 0.000001,
 	}
 }
 

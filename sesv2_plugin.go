@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type SESv2Plugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	msgSeq atomic.Int64
 }
 
 // Name returns the service name "sesv2".
@@ -241,8 +243,63 @@ func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest,
 	return sesv2JSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-func (p *SESv2Plugin) sendEmail(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	messageID := fmt.Sprintf("msg-%d", p.tc.Now().UnixNano())
+func (p *SESv2Plugin) sendEmail(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	seq := p.msgSeq.Add(1)
+	messageID := fmt.Sprintf("msg-%d-%d", p.tc.Now().UnixNano(), seq)
+
+	var input struct {
+		FromEmailAddress string `json:"FromEmailAddress"`
+		Destination      struct {
+			ToAddresses []string `json:"ToAddresses"`
+		} `json:"Destination"`
+		Content struct {
+			Simple struct {
+				Subject struct {
+					Data string `json:"Data"`
+				} `json:"Subject"`
+				Body struct {
+					Text struct {
+						Data string `json:"Data"`
+					} `json:"Text"`
+					HTML struct {
+						Data string `json:"Data"`
+					} `json:"Html"`
+				} `json:"Body"`
+			} `json:"Simple"`
+		} `json:"Content"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &input)
+	}
+
+	body := input.Content.Simple.Body.Text.Data
+	if body == "" {
+		body = input.Content.Simple.Body.HTML.Data
+	}
+
+	email := SESv2CapturedEmail{
+		MessageID: messageID,
+		To:        input.Destination.ToAddresses,
+		From:      input.FromEmailAddress,
+		Subject:   input.Content.Simple.Subject.Data,
+		Body:      body,
+		SentAt:    p.tc.Now(),
+		AccountID: reqCtx.AccountID,
+		Region:    reqCtx.Region,
+	}
+
+	goCtx := context.Background()
+	data, err := json.Marshal(email)
+	if err == nil {
+		stateKey := "captured_email:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + messageID
+		if putErr := p.state.Put(goCtx, sesv2Namespace, stateKey, data); putErr != nil {
+			p.logger.Warn("sesv2 sendEmail: failed to capture email", "err", putErr)
+		} else {
+			updateStringIndex(goCtx, p.state, sesv2Namespace,
+				"captured_email_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, messageID)
+		}
+	}
+
 	return sesv2JSONResponse(http.StatusOK, map[string]string{
 		"MessageId": messageID,
 	})

@@ -826,3 +826,156 @@ func TestRDSPlugin_MissingParams(t *testing.T) {
 		}
 	}
 }
+
+func TestRDSPlugin_CreateDescribeDeleteDBCluster(t *testing.T) {
+	ts := newRDSTestServer(t)
+
+	// CreateDBCluster
+	resp := rdsRequest(t, ts, map[string]string{
+		"Action":              "CreateDBCluster",
+		"DBClusterIdentifier": "mycluster",
+		"Engine":              "aurora-mysql",
+		"MasterUsername":      "admin",
+	})
+	body := rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateDBCluster status %d, body: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "mycluster") {
+		t.Error("CreateDBCluster response missing cluster ID")
+	}
+	if !strings.Contains(body, "available") {
+		t.Error("CreateDBCluster response missing available status")
+	}
+
+	// DescribeDBClusters — all
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action": "DescribeDBClusters",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeDBClusters status %d, body: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "mycluster") {
+		t.Error("DescribeDBClusters response missing cluster")
+	}
+
+	// DescribeDBClusters — by ID
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":              "DescribeDBClusters",
+		"DBClusterIdentifier": "mycluster",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeDBClusters by ID status %d, body: %s", resp.StatusCode, body)
+	}
+
+	// DescribeDBClusters — not found
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":              "DescribeDBClusters",
+		"DBClusterIdentifier": "nonexistent",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("DescribeDBClusters not found want 404, got %d; body: %s", resp.StatusCode, body)
+	}
+
+	// CreateDBCluster — duplicate
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":              "CreateDBCluster",
+		"DBClusterIdentifier": "mycluster",
+		"Engine":              "aurora-mysql",
+		"MasterUsername":      "admin",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("CreateDBCluster duplicate should fail")
+	}
+	if !strings.Contains(body, "DBClusterAlreadyExistsFault") {
+		t.Errorf("want DBClusterAlreadyExistsFault, body: %s", body)
+	}
+
+	// DeleteDBCluster
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":              "DeleteDBCluster",
+		"DBClusterIdentifier": "mycluster",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteDBCluster status %d, body: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "deleting") {
+		t.Error("DeleteDBCluster response missing deleting status")
+	}
+
+	// DeleteDBCluster — not found after delete
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":              "DeleteDBCluster",
+		"DBClusterIdentifier": "mycluster",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("DeleteDBCluster not found want 404, got %d; body: %s", resp.StatusCode, body)
+	}
+}
+
+func TestRDSPlugin_RestoreDBInstanceFromSnapshot(t *testing.T) {
+	ts := newRDSTestServer(t)
+
+	// Create a DB instance.
+	resp := rdsRequest(t, ts, map[string]string{
+		"Action":               "CreateDBInstance",
+		"DBInstanceIdentifier": "srcdb",
+		"DBInstanceClass":      "db.t3.micro",
+		"Engine":               "mysql",
+		"MasterUsername":       "admin",
+		"AllocatedStorage":     "20",
+	})
+	rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateDBInstance status %d", resp.StatusCode)
+	}
+
+	// Create a snapshot.
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":               "CreateDBSnapshot",
+		"DBSnapshotIdentifier": "snap1",
+		"DBInstanceIdentifier": "srcdb",
+	})
+	rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateDBSnapshot status %d", resp.StatusCode)
+	}
+
+	// Restore from snapshot.
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":               "RestoreDBInstanceFromDBSnapshot",
+		"DBSnapshotIdentifier": "snap1",
+		"DBInstanceIdentifier": "restoreddb",
+		"DBInstanceClass":      "db.t3.micro",
+	})
+	body := rdsBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("RestoreDBInstanceFromDBSnapshot status %d, body: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "restoreddb") {
+		t.Error("Restore response missing new instance ID")
+	}
+	if !strings.Contains(body, "available") {
+		t.Error("Restore response missing available status")
+	}
+
+	// Restore from non-existent snapshot.
+	resp = rdsRequest(t, ts, map[string]string{
+		"Action":               "RestoreDBInstanceFromDBSnapshot",
+		"DBSnapshotIdentifier": "nosuchsnap",
+		"DBInstanceIdentifier": "another",
+	})
+	body = rdsBody(t, resp)
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("Restore from missing snapshot should fail")
+	}
+	if !strings.Contains(body, "DBSnapshotNotFound") {
+		t.Errorf("want DBSnapshotNotFound, body: %s", body)
+	}
+}

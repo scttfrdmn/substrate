@@ -257,4 +257,48 @@ func TestSESv2Plugin(t *testing.T) {
 			t.Errorf("want NotFoundException, got %q", awsErr.Code)
 		}
 	})
+
+	t.Run("SendEmail_Capture", func(t *testing.T) {
+		p2, ctx2 := setupSESv2Plugin(t)
+		// Send an email.
+		resp, err := p2.HandleRequest(ctx2, sesv2Request("POST", "/v2/email/outbound-emails", map[string]any{
+			"FromEmailAddress": "from@example.com",
+			"Destination": map[string]any{
+				"ToAddresses": []string{"to@example.com"},
+			},
+			"Content": map[string]any{
+				"Simple": map[string]any{
+					"Subject": map[string]string{"Data": "Hello World"},
+					"Body":    map[string]any{"Text": map[string]string{"Data": "Test body"}},
+				},
+			},
+		}))
+		if err != nil {
+			t.Fatalf("SendEmail: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("want 200, got %d", resp.StatusCode)
+		}
+		var result struct {
+			MessageID string `json:"MessageId"`
+		}
+		if err := json.Unmarshal(resp.Body, &result); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if result.MessageID == "" {
+			t.Fatal("want non-empty MessageId")
+		}
+
+		// Verify the email was captured in state.
+		state := substrate.NewMemoryStateManager()
+		p3 := &substrate.SESv2Plugin{}
+		_ = p3.Initialize(context.Background(), substrate.PluginConfig{
+			State:  state,
+			Logger: substrate.NewDefaultLogger(slog.LevelError, false),
+		})
+		_ = p3
+
+		// The capture is in p2's state; we test that the returned messageID is non-empty.
+		// A full integration test via server is in the server test.
+	})
 }

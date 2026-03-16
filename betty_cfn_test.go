@@ -878,6 +878,8 @@ func newFullTestDeployer(t *testing.T) *substrate.StackDeployer {
 		&substrate.EFSPlugin{},
 		&substrate.GluePlugin{},
 		&substrate.BudgetsPlugin{},
+		&substrate.MSKPlugin{},
+		&substrate.SESv2Plugin{},
 	} {
 		require.NoError(t, p.Initialize(context.Background(), opts))
 		registry.Register(p)
@@ -1912,4 +1914,75 @@ func TestCFN_BudgetsBudget(t *testing.T) {
 	assert.Equal(t, "AWS::Budgets::Budget", r.Type)
 	assert.Empty(t, r.Error)
 	assert.Equal(t, "cfn-monthly-budget", r.PhysicalID)
+}
+
+// TestCFN_RDSDBCluster verifies that an Aurora DB cluster can be deployed via CFN.
+func TestCFN_RDSDBCluster(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySubnetGroup": {
+				"Type": "AWS::RDS::DBSubnetGroup",
+				"Properties": {
+					"DBSubnetGroupName": "cfn-cluster-subnet-group",
+					"DBSubnetGroupDescription": "test subnet group"
+				}
+			},
+			"MyCluster": {
+				"Type": "AWS::RDS::DBCluster",
+				"Properties": {
+					"DBClusterIdentifier": "cfn-aurora-cluster",
+					"Engine": "aurora-mysql",
+					"MasterUsername": "admin",
+					"DBSubnetGroupName": "cfn-cluster-subnet-group"
+				},
+				"DependsOn": "MySubnetGroup"
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "rds-cluster-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 2)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s has error: %s", r.LogicalID, r.Error)
+	}
+	var clusterResource substrate.DeployedResource
+	for _, r := range result.Resources {
+		if r.Type == "AWS::RDS::DBCluster" {
+			clusterResource = r
+		}
+	}
+	assert.Equal(t, "cfn-aurora-cluster", clusterResource.PhysicalID)
+	assert.Contains(t, clusterResource.ARN, "cluster:cfn-aurora-cluster")
+}
+
+// TestCFN_MSKCluster verifies that an MSK cluster can be deployed via CFN.
+func TestCFN_MSKCluster(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyMSK": {
+				"Type": "AWS::MSK::Cluster",
+				"Properties": {
+					"ClusterName": "cfn-kafka-cluster",
+					"KafkaVersion": "3.5.1",
+					"NumberOfBrokerNodes": 3,
+					"BrokerNodeGroupInfo": {
+						"InstanceType": "kafka.m5.large",
+						"ClientSubnets": []
+					}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "msk-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::MSK::Cluster", r.Type)
+	assert.Empty(t, r.Error, "MSK cluster resource error: %s", r.Error)
+	assert.Contains(t, r.PhysicalID, "cfn-kafka-cluster")
+	assert.Contains(t, r.ARN, "kafka")
 }

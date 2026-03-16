@@ -404,5 +404,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(appSyncPlugin)
 
+	mskPlugin := &MSKPlugin{}
+	if err := mskPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize msk plugin: %w", err)
+	}
+	registry.Register(mskPlugin)
+
 	return nil
 }

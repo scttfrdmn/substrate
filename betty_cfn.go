@@ -168,6 +168,7 @@ var typePriority = map[string]int{
 	// v0.25.0 — RDS and ElastiCache.
 	"AWS::RDS::DBSubnetGroup":            2,
 	"AWS::RDS::DBParameterGroup":         2,
+	"AWS::RDS::DBCluster":                3,
 	"AWS::RDS::DBInstance":               3,
 	"AWS::ElastiCache::SubnetGroup":      2,
 	"AWS::ElastiCache::ParameterGroup":   2,
@@ -194,6 +195,8 @@ var typePriority = map[string]int{
 	"AWS::AppSync::DataSource":            3,
 	"AWS::AppSync::Resolver":              4,
 	"AWS::AppSync::FunctionConfiguration": 4,
+	// v0.34.0 — RDS Aurora cluster and MSK.
+	"AWS::MSK::Cluster": 3,
 	// v0.32.0 — extended CFN stubs.
 	"AWS::OpenSearchService::Domain":     2,
 	"AWS::WAFv2::WebACL":                 2,
@@ -587,6 +590,8 @@ func (d *StackDeployer) deployResource(
 		return d.deployRDSDBSubnetGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::RDS::DBParameterGroup":
 		return d.deployRDSDBParameterGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::RDS::DBCluster":
+		return d.deployRDSDBCluster(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::RDS::DBInstance":
 		return d.deployRDSDBInstance(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::ElastiCache::SubnetGroup":
@@ -634,6 +639,9 @@ func (d *StackDeployer) deployResource(
 		return d.deployAppSyncResolver(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::AppSync::FunctionConfiguration":
 		return d.deployAppSyncFunction(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.34.0 — RDS Aurora cluster and MSK.
+	case "AWS::MSK::Cluster":
+		return d.deployMSKCluster(ctx, logicalID, res.Properties, streamID, cctx)
 	// v0.32.0 — extended CFN stubs.
 	case "AWS::OpenSearchService::Domain":
 		return d.deployOpenSearchDomain(ctx, logicalID, res.Properties, streamID, cctx)

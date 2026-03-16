@@ -80,6 +80,16 @@ func (p *RDSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeDBParameterGroups(ctx, req)
 	case "DeleteDBParameterGroup":
 		return p.deleteDBParameterGroup(ctx, req)
+	// DB Cluster operations.
+	case "CreateDBCluster":
+		return p.createDBCluster(ctx, req)
+	case "DescribeDBClusters":
+		return p.describeDBClusters(ctx, req)
+	case "DeleteDBCluster":
+		return p.deleteDBCluster(ctx, req)
+	// Restore operations.
+	case "RestoreDBInstanceFromDBSnapshot":
+		return p.restoreDBInstanceFromSnapshot(ctx, req)
 	// Tagging operations.
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
@@ -380,6 +390,314 @@ func (p *RDSPlugin) setDBInstanceStatus(reqCtx *RequestContext, req *AWSRequest,
 		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
 		Body:       append([]byte(xml.Header), body...),
 	}, nil
+}
+
+// --- DB Cluster operations ---
+
+func (p *RDSPlugin) createDBCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	id := req.Params["DBClusterIdentifier"]
+	if id == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DBClusterIdentifier is required", HTTPStatus: http.StatusBadRequest}
+	}
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	stateKey := "dbcluster:" + scope + "/" + id
+
+	existing, err := p.state.Get(context.Background(), rdsNamespace, stateKey)
+	if err != nil {
+		return nil, fmt.Errorf("rds createDBCluster get: %w", err)
+	}
+	if existing != nil {
+		return nil, &AWSError{Code: "DBClusterAlreadyExistsFault", Message: "DB Cluster already exists: " + id, HTTPStatus: http.StatusBadRequest}
+	}
+
+	engine := req.Params["Engine"]
+	if engine == "" {
+		engine = "aurora-mysql"
+	}
+	port := rdsDefaultPort(engine)
+
+	cluster := RDSDBCluster{
+		DBClusterIdentifier: id,
+		Engine:              engine,
+		EngineVersion:       req.Params["EngineVersion"],
+		Status:              "available",
+		Endpoint:            id + ".cluster-xxx." + reqCtx.Region + ".rds.amazonaws.com",
+		ReaderEndpoint:      id + ".cluster-ro-xxx." + reqCtx.Region + ".rds.amazonaws.com",
+		Port:                port,
+		MasterUsername:      req.Params["MasterUsername"],
+		DBSubnetGroupName:   req.Params["DBSubnetGroupName"],
+		MultiAZ:             req.Params["MultiAZ"] == "true",
+		DBClusterArn:        rdsDBClusterARN(reqCtx.Region, reqCtx.AccountID, id),
+		Tags:                rdsTagsFromParams(req.Params),
+		AccountID:           reqCtx.AccountID,
+		Region:              reqCtx.Region,
+		CreatedAt:           p.tc.Now(),
+	}
+
+	data, err := json.Marshal(cluster)
+	if err != nil {
+		return nil, fmt.Errorf("rds createDBCluster marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), rdsNamespace, stateKey, data); err != nil {
+		return nil, fmt.Errorf("rds createDBCluster put: %w", err)
+	}
+	if err := p.appendToIndex(scope, "dbcluster_ids", id); err != nil {
+		return nil, err
+	}
+
+	type xmlClusterItem struct {
+		DBClusterIdentifier string `xml:"DBClusterIdentifier"`
+		Engine              string `xml:"Engine"`
+		EngineVersion       string `xml:"EngineVersion"`
+		Status              string `xml:"Status"`
+		Endpoint            string `xml:"Endpoint"`
+		ReaderEndpoint      string `xml:"ReaderEndpoint"`
+		Port                int    `xml:"Port"`
+		MasterUsername      string `xml:"MasterUsername"`
+		DBSubnetGroup       string `xml:"DBSubnetGroup>DBSubnetGroupName,omitempty"`
+		MultiAZ             bool   `xml:"MultiAZ"`
+		DBClusterArn        string `xml:"DBClusterArn"`
+	}
+	type result struct {
+		DBCluster xmlClusterItem `xml:"DBCluster"`
+	}
+	type response struct {
+		XMLName xml.Name `xml:"CreateDBClusterResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Result  result   `xml:"CreateDBClusterResult"`
+	}
+	return rdsXMLResponse(http.StatusOK, response{
+		XMLNS: rdsXMLNS,
+		Result: result{DBCluster: xmlClusterItem{
+			DBClusterIdentifier: cluster.DBClusterIdentifier,
+			Engine:              cluster.Engine,
+			EngineVersion:       cluster.EngineVersion,
+			Status:              cluster.Status,
+			Endpoint:            cluster.Endpoint,
+			ReaderEndpoint:      cluster.ReaderEndpoint,
+			Port:                cluster.Port,
+			MasterUsername:      cluster.MasterUsername,
+			DBSubnetGroup:       cluster.DBSubnetGroupName,
+			MultiAZ:             cluster.MultiAZ,
+			DBClusterArn:        cluster.DBClusterArn,
+		}},
+	})
+}
+
+func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	filterID := req.Params["DBClusterIdentifier"]
+
+	keys, err := p.state.List(context.Background(), rdsNamespace, "dbcluster:"+scope+"/")
+	if err != nil {
+		return nil, fmt.Errorf("rds describeDBClusters list: %w", err)
+	}
+
+	type xmlClusterItem struct {
+		DBClusterIdentifier string `xml:"DBClusterIdentifier"`
+		Engine              string `xml:"Engine"`
+		EngineVersion       string `xml:"EngineVersion"`
+		Status              string `xml:"Status"`
+		Endpoint            string `xml:"Endpoint"`
+		ReaderEndpoint      string `xml:"ReaderEndpoint"`
+		Port                int    `xml:"Port"`
+		MasterUsername      string `xml:"MasterUsername"`
+		DBSubnetGroup       string `xml:"DBSubnetGroup>DBSubnetGroupName,omitempty"`
+		MultiAZ             bool   `xml:"MultiAZ"`
+		DBClusterArn        string `xml:"DBClusterArn"`
+	}
+
+	var items []xmlClusterItem
+	for _, k := range keys {
+		data, getErr := p.state.Get(context.Background(), rdsNamespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var c RDSDBCluster
+		if json.Unmarshal(data, &c) != nil {
+			continue
+		}
+		if filterID != "" && c.DBClusterIdentifier != filterID {
+			continue
+		}
+		items = append(items, xmlClusterItem{
+			DBClusterIdentifier: c.DBClusterIdentifier,
+			Engine:              c.Engine,
+			EngineVersion:       c.EngineVersion,
+			Status:              c.Status,
+			Endpoint:            c.Endpoint,
+			ReaderEndpoint:      c.ReaderEndpoint,
+			Port:                c.Port,
+			MasterUsername:      c.MasterUsername,
+			DBSubnetGroup:       c.DBSubnetGroupName,
+			MultiAZ:             c.MultiAZ,
+			DBClusterArn:        c.DBClusterArn,
+		})
+	}
+
+	if filterID != "" && len(items) == 0 {
+		return nil, &AWSError{
+			Code:       "DBClusterNotFoundFault",
+			Message:    "DBCluster " + filterID + " not found.",
+			HTTPStatus: http.StatusNotFound,
+		}
+	}
+
+	// Pagination.
+	maxRecords := 100
+	if s := req.Params["MaxRecords"]; s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			maxRecords = n
+		}
+	}
+	marker := req.Params["Marker"]
+	offset := 0
+	if marker != "" {
+		if n, err := strconv.Atoi(marker); err == nil {
+			offset = n
+		}
+	}
+	if offset > len(items) {
+		offset = len(items)
+	}
+	page := items[offset:]
+	var nextMarker string
+	if len(page) > maxRecords {
+		page = page[:maxRecords]
+		nextMarker = strconv.Itoa(offset + maxRecords)
+	}
+
+	type result struct {
+		DBClusters []xmlClusterItem `xml:"DBClusters>DBCluster"`
+		Marker     string           `xml:"Marker,omitempty"`
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DescribeDBClustersResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Result  result   `xml:"DescribeDBClustersResult"`
+	}
+	return rdsXMLResponse(http.StatusOK, response{
+		XMLNS: rdsXMLNS,
+		Result: result{
+			DBClusters: page,
+			Marker:     nextMarker,
+		},
+	})
+}
+
+func (p *RDSPlugin) deleteDBCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	id := req.Params["DBClusterIdentifier"]
+	if id == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DBClusterIdentifier is required", HTTPStatus: http.StatusBadRequest}
+	}
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	stateKey := "dbcluster:" + scope + "/" + id
+
+	data, err := p.state.Get(context.Background(), rdsNamespace, stateKey)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "DBClusterNotFoundFault", Message: "DBCluster " + id + " not found.", HTTPStatus: http.StatusNotFound}
+	}
+	var cluster RDSDBCluster
+	if json.Unmarshal(data, &cluster) != nil {
+		cluster.DBClusterIdentifier = id
+	}
+	cluster.Status = "deleting"
+
+	if err := p.state.Delete(context.Background(), rdsNamespace, stateKey); err != nil {
+		return nil, fmt.Errorf("rds deleteDBCluster delete: %w", err)
+	}
+	p.removeFromIndex(scope, "dbcluster_ids", id)
+
+	type xmlClusterItem struct {
+		DBClusterIdentifier string `xml:"DBClusterIdentifier"`
+		Status              string `xml:"Status"`
+		DBClusterArn        string `xml:"DBClusterArn"`
+	}
+	type result struct {
+		DBCluster xmlClusterItem `xml:"DBCluster"`
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DeleteDBClusterResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Result  result   `xml:"DeleteDBClusterResult"`
+	}
+	return rdsXMLResponse(http.StatusOK, response{
+		XMLNS: rdsXMLNS,
+		Result: result{DBCluster: xmlClusterItem{
+			DBClusterIdentifier: cluster.DBClusterIdentifier,
+			Status:              cluster.Status,
+			DBClusterArn:        cluster.DBClusterArn,
+		}},
+	})
+}
+
+// --- Restore operations ---
+
+func (p *RDSPlugin) restoreDBInstanceFromSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	snapshotID := req.Params["DBSnapshotIdentifier"]
+	newInstanceID := req.Params["DBInstanceIdentifier"]
+	if snapshotID == "" || newInstanceID == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DBSnapshotIdentifier and DBInstanceIdentifier are required", HTTPStatus: http.StatusBadRequest}
+	}
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+
+	snapData, err := p.state.Get(context.Background(), rdsNamespace, "dbsnapshot:"+scope+"/"+snapshotID)
+	if err != nil || snapData == nil {
+		return nil, &AWSError{Code: "DBSnapshotNotFound", Message: "DBSnapshot " + snapshotID + " not found.", HTTPStatus: http.StatusNotFound}
+	}
+	var snap RDSDBSnapshot
+	if json.Unmarshal(snapData, &snap) != nil {
+		snap.Engine = "mysql"
+	}
+
+	engine := snap.Engine
+	if engine == "" {
+		engine = "mysql"
+	}
+	port := rdsDefaultPort(engine)
+
+	inst := RDSDBInstance{
+		DBInstanceIdentifier: newInstanceID,
+		DBInstanceClass:      req.Params["DBInstanceClass"],
+		Engine:               engine,
+		DBInstanceStatus:     "available",
+		AllocatedStorage:     snap.AllocatedStorage,
+		DBInstanceArn:        rdsDBInstanceARN(reqCtx.Region, reqCtx.AccountID, newInstanceID),
+		Endpoint: RDSEndpoint{
+			Address: newInstanceID + ".rds." + reqCtx.Region + ".amazonaws.com",
+			Port:    port,
+		},
+		DBSubnetGroupName: req.Params["DBSubnetGroupName"],
+		Tags:              rdsTagsFromParams(req.Params),
+		AccountID:         reqCtx.AccountID,
+		Region:            reqCtx.Region,
+		CreatedAt:         p.tc.Now(),
+	}
+
+	data, err := json.Marshal(inst)
+	if err != nil {
+		return nil, fmt.Errorf("rds restoreDBInstanceFromSnapshot marshal: %w", err)
+	}
+	stateKey := "dbinstance:" + scope + "/" + newInstanceID
+	if err := p.state.Put(context.Background(), rdsNamespace, stateKey, data); err != nil {
+		return nil, fmt.Errorf("rds restoreDBInstanceFromSnapshot put: %w", err)
+	}
+	if err := p.appendToIndex(scope, "dbinstance_ids", newInstanceID); err != nil {
+		return nil, err
+	}
+
+	type result struct {
+		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
+	}
+	type response struct {
+		XMLName xml.Name `xml:"RestoreDBInstanceFromDBSnapshotResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Result  result   `xml:"RestoreDBInstanceFromDBSnapshotResult"`
+	}
+	return rdsXMLResponse(http.StatusOK, response{
+		XMLNS:  rdsXMLNS,
+		Result: result{DBInstance: dbInstanceToXML(inst)},
+	})
 }
 
 // --- DB Snapshot operations ---
@@ -984,6 +1302,10 @@ func (p *RDSPlugin) removeFromIndex(scope, indexName, id string) {
 
 func rdsDBInstanceARN(region, acct, id string) string {
 	return "arn:aws:rds:" + region + ":" + acct + ":db:" + id
+}
+
+func rdsDBClusterARN(region, acct, id string) string {
+	return "arn:aws:rds:" + region + ":" + acct + ":cluster:" + id
 }
 
 func rdsSnapshotARN(region, acct, id string) string {

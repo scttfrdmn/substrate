@@ -151,6 +151,8 @@ var targetServiceAliases = map[string]string{
 	"healthservice": "health",
 	// "email" is the subdomain name for Amazon SES v2.
 	"email": "sesv2",
+	// "Kafka_20181101" → strip version → "Kafka" → lowercase → "kafka" → "msk".
+	"kafka": "msk",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
