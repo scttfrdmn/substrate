@@ -88,6 +88,9 @@ type cfnContext struct {
 // cfnNamespace is the state namespace for CloudFormation stack state.
 const cfnNamespace = "cfn"
 
+// cfnStubNamespace is the state namespace for generic CFN stub resource props.
+const cfnStubNamespace = "cfn_stub"
+
 // typePriority determines deployment order for CloudFormation resources.
 // Lower numbers deploy first.
 var typePriority = map[string]int{
@@ -191,6 +194,18 @@ var typePriority = map[string]int{
 	"AWS::AppSync::DataSource":            3,
 	"AWS::AppSync::Resolver":              4,
 	"AWS::AppSync::FunctionConfiguration": 4,
+	// v0.32.0 — extended CFN stubs.
+	"AWS::OpenSearchService::Domain":     2,
+	"AWS::WAFv2::WebACL":                 2,
+	"AWS::Backup::BackupPlan":            2,
+	"AWS::CodeBuild::Project":            2,
+	"AWS::CodePipeline::Pipeline":        3,
+	"AWS::CodeDeploy::DeploymentGroup":   3,
+	"AWS::CloudTrail::Trail":             2,
+	"AWS::Config::ConfigRule":            3,
+	"AWS::Config::ConfigurationRecorder": 2,
+	"AWS::Transfer::Server":              2,
+	"AWS::Athena::WorkGroup":             2,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -619,15 +634,35 @@ func (d *StackDeployer) deployResource(
 		return d.deployAppSyncResolver(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::AppSync::FunctionConfiguration":
 		return d.deployAppSyncFunction(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.32.0 — extended CFN stubs.
+	case "AWS::OpenSearchService::Domain":
+		return d.deployOpenSearchDomain(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::WAFv2::WebACL":
+		return d.deployWAFv2WebACL(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Backup::BackupPlan":
+		return d.deployBackupBackupPlan(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CodeBuild::Project":
+		return d.deployCodeBuildProject(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CodePipeline::Pipeline":
+		return d.deployCodePipelinePipeline(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CodeDeploy::DeploymentGroup":
+		return d.deployCodeDeployDeploymentGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CloudTrail::Trail":
+		return d.deployCloudTrailTrail(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Config::ConfigRule":
+		return d.deployConfigConfigRule(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Config::ConfigurationRecorder":
+		return d.deployConfigConfigurationRecorder(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Transfer::Server":
+		return d.deployTransferServer(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Athena::WorkGroup":
+		return d.deployAthenaWorkGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
-		d.logger.Warn("unknown CloudFormation resource type; skipping",
+		d.logger.Warn("unknown CloudFormation resource type; using generic stub",
 			"logical_id", logicalID,
 			"type", res.Type,
 		)
-		return DeployedResource{
-			LogicalID: logicalID,
-			Type:      res.Type,
-		}, 0, nil
+		return d.deployGenericStub(ctx, logicalID, res.Type, res.Properties, cctx)
 	}
 }
 
@@ -2378,6 +2413,42 @@ func resolveStringProp(props map[string]interface{}, key, fallback string, cctx 
 		return fallback
 	}
 	return result
+}
+
+// deployGenericStub handles unknown CloudFormation resource types by generating a
+// synthetic ARN and persisting the resource properties in cfnStubNamespace.
+func (d *StackDeployer) deployGenericStub(
+	ctx context.Context,
+	logicalID string,
+	resType string,
+	props map[string]interface{},
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	// Build a deterministic ARN from the resource type and logical ID.
+	// Format: arn:aws:{service}:{region}:{acct}:{typeSlug}/{logicalID}
+	parts := strings.SplitN(resType, "::", 3) // ["AWS", "Service", "ResourceType"]
+	service := ""
+	rtype := logicalID
+	if len(parts) == 3 {
+		service = strings.ToLower(parts[1])
+		rtype = strings.ToLower(parts[2])
+	}
+	arn := fmt.Sprintf("arn:aws:%s:%s:%s:%s/%s", service, cctx.region, cctx.accountID, rtype, logicalID)
+
+	if d.state != nil && props != nil {
+		data, err := json.Marshal(props)
+		if err == nil {
+			key := fmt.Sprintf("%s/%s/%s", cctx.accountID, cctx.region, logicalID)
+			_ = d.state.Put(ctx, cfnStubNamespace, key, data)
+		}
+	}
+
+	return DeployedResource{
+		LogicalID:  logicalID,
+		Type:       resType,
+		PhysicalID: logicalID,
+		ARN:        arn,
+	}, 0, nil
 }
 
 // parseCFNTemplate attempts JSON then YAML unmarshalling of a CloudFormation template.
