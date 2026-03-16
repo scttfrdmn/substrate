@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Substrate Debug UI</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace; font-size: 13px; background: #0d1117; color: #c9d1d9; display: flex; height: 100vh; overflow: hidden; }
+  #sidebar { width: 200px; min-width: 160px; background: #161b22; border-right: 1px solid #30363d; padding: 12px; overflow-y: auto; flex-shrink: 0; }
+  #sidebar h3 { color: #58a6ff; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+  #sidebar label { display: flex; align-items: center; gap: 6px; padding: 3px 0; cursor: pointer; color: #8b949e; font-size: 12px; }
+  #sidebar label:hover { color: #c9d1d9; }
+  #sidebar input[type=checkbox] { accent-color: #58a6ff; }
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #tabs { display: flex; background: #161b22; border-bottom: 1px solid #30363d; }
+  .tab { padding: 10px 18px; cursor: pointer; color: #8b949e; border-bottom: 2px solid transparent; font-size: 13px; user-select: none; }
+  .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+  .tab:hover { color: #c9d1d9; }
+  #content { flex: 1; overflow: auto; padding: 16px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { background: #161b22; padding: 7px 10px; text-align: left; color: #8b949e; font-weight: 600; border-bottom: 1px solid #30363d; position: sticky; top: 0; }
+  td { padding: 6px 10px; border-bottom: 1px solid #21262d; }
+  tr:hover td { background: #1c2128; cursor: pointer; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-ok { background: #0d4429; color: #3fb950; }
+  .badge-err { background: #4d1414; color: #f85149; }
+  .badge-svc { background: #132030; color: #58a6ff; }
+  pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; font-size: 12px; overflow: auto; white-space: pre-wrap; word-break: break-all; max-height: 70vh; }
+  .controls { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  input[type=number], input[type=text] { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 5px 10px; border-radius: 6px; font-size: 12px; width: 130px; }
+  button { background: #238636; color: #fff; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #2ea043; }
+  button.secondary { background: #21262d; }
+  button.secondary:hover { background: #30363d; }
+  .cost-bar-wrap { margin-bottom: 6px; }
+  .cost-label { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 12px; }
+  .cost-bar-bg { background: #21262d; border-radius: 4px; height: 10px; }
+  .cost-bar { background: #58a6ff; height: 10px; border-radius: 4px; }
+  textarea { width: 100%; min-height: 400px; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 12px; font-family: monospace; font-size: 12px; border-radius: 6px; }
+  .stat { display: inline-block; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 14px; margin-right: 10px; margin-bottom: 10px; }
+  .stat .val { font-size: 20px; font-weight: 700; color: #58a6ff; }
+  .stat .lbl { font-size: 11px; color: #8b949e; }
+  .diff-section { margin-bottom: 20px; }
+  .diff-section h4 { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .diff-added { border-left: 3px solid #3fb950; padding-left: 10px; }
+  .diff-removed { border-left: 3px solid #f85149; padding-left: 10px; }
+  .diff-changed { border-left: 3px solid #d29922; padding-left: 10px; }
+  #loadingMsg { color: #58a6ff; font-size: 13px; padding: 20px 0; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h3>Services</h3>
+  <div id="serviceFilters"><em style="color:#555;font-size:11px">Loading…</em></div>
+</div>
+<div id="main">
+  <div id="tabs">
+    <div class="tab active" data-panel="events">Events</div>
+    <div class="tab" data-panel="state">State</div>
+    <div class="tab" data-panel="diff">Diff</div>
+    <div class="tab" data-panel="costs">Costs</div>
+    <div class="tab" data-panel="export">Export</div>
+  </div>
+  <div id="content">
+    <!-- Events panel -->
+    <div class="panel active" id="panel-events">
+      <div class="controls">
+        <button onclick="loadEvents()">Refresh</button>
+        <span id="eventCount" style="color:#8b949e;font-size:12px"></span>
+      </div>
+      <div id="loadingMsg" style="display:none">Loading events…</div>
+      <table id="eventTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Timestamp</th>
+            <th>Service</th>
+            <th>Operation</th>
+            <th>Status</th>
+            <th>Cost ($)</th>
+            <th>ms</th>
+            <th>Stream</th>
+          </tr>
+        </thead>
+        <tbody id="eventBody"></tbody>
+      </table>
+    </div>
+
+    <!-- State panel -->
+    <div class="panel" id="panel-state">
+      <div class="controls">
+        <span style="color:#8b949e">State at sequence:</span>
+        <input type="number" id="stateSeq" min="0" value="0" placeholder="seq">
+        <button onclick="loadState()">Load</button>
+      </div>
+      <pre id="stateJson">Click an event row to load state at that point.</pre>
+    </div>
+
+    <!-- Diff panel -->
+    <div class="panel" id="panel-diff">
+      <div class="controls">
+        <span style="color:#8b949e">From seq:</span>
+        <input type="number" id="diffFrom" min="0" value="0" placeholder="from">
+        <span style="color:#8b949e">To seq:</span>
+        <input type="number" id="diffTo" min="0" value="1" placeholder="to">
+        <button onclick="loadDiff()">Diff</button>
+      </div>
+      <div id="diffResult"></div>
+    </div>
+
+    <!-- Costs panel -->
+    <div class="panel" id="panel-costs">
+      <div class="controls">
+        <input type="text" id="costAccount" placeholder="Account ID (blank=all)">
+        <button onclick="loadCosts()">Load</button>
+      </div>
+      <div id="costsResult"></div>
+    </div>
+
+    <!-- Export panel -->
+    <div class="panel" id="panel-export">
+      <div class="controls">
+        <input type="text" id="exportStream" placeholder="Stream ID" style="width:200px">
+        <input type="text" id="exportPackage" placeholder="Package name" value="substrate_test" style="width:150px">
+        <input type="text" id="exportTest" placeholder="Test name" value="TestGeneratedReplay" style="width:180px">
+        <button onclick="loadExport()">Export</button>
+        <button class="secondary" onclick="copyExport()">Copy</button>
+      </div>
+      <textarea id="exportOutput" readonly placeholder="Generated Go test file will appear here…"></textarea>
+    </div>
+  </div>
+</div>
+
+<script>
+  var activeService = '';
+  var allServices = [];
+
+  // Tab switching.
+  document.querySelectorAll('.tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('active'); });
+      tab.classList.add('active');
+      document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+    });
+  });
+
+  function switchToPanel(name) {
+    document.querySelectorAll('.tab').forEach(function(t) {
+      t.classList.toggle('active', t.dataset.panel === name);
+    });
+    document.querySelectorAll('.panel').forEach(function(p) {
+      p.classList.toggle('active', p.id === 'panel-' + name);
+    });
+  }
+
+  function loadEvents() {
+    document.getElementById('loadingMsg').style.display = 'block';
+    document.getElementById('eventBody').innerHTML = '';
+    var url = '/v1/debug/events?limit=500';
+    if (activeService) url += '&service=' + encodeURIComponent(activeService);
+    fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+      document.getElementById('loadingMsg').style.display = 'none';
+      var events = data.events || [];
+      document.getElementById('eventCount').textContent = events.length + ' events';
+      // Rebuild service filter sidebar.
+      var svcs = {};
+      events.forEach(function(ev) { if (ev.service) svcs[ev.service] = true; });
+      allServices = Object.keys(svcs).sort();
+      renderServiceFilters();
+      // Populate table.
+      var tbody = document.getElementById('eventBody');
+      tbody.innerHTML = '';
+      events.forEach(function(ev) {
+        var tr = document.createElement('tr');
+        var ts = ev.timestamp ? ev.timestamp.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '';
+        var statusBadge = ev.error
+          ? '<span class="badge badge-err">ERR</span>'
+          : '<span class="badge badge-ok">OK</span>';
+        var svcBadge = '<span class="badge badge-svc">' + esc(ev.service) + '</span>';
+        var cost = ev.cost ? ev.cost.toFixed(8) : '—';
+        tr.innerHTML = '<td>' + ev.seq + '</td><td>' + esc(ts) + '</td><td>' + svcBadge + '</td>' +
+          '<td>' + esc(ev.operation) + '</td><td>' + statusBadge + '</td>' +
+          '<td>' + cost + '</td><td>' + (ev.duration_ms || 0) + '</td>' +
+          '<td>' + esc(ev.stream_id || '') + '</td>';
+        tr.title = ev.error || '';
+        tr.addEventListener('click', function() {
+          document.getElementById('stateSeq').value = ev.seq;
+          switchToPanel('state');
+          loadStateAt(ev.seq);
+        });
+        tbody.appendChild(tr);
+      });
+    }).catch(function(err) {
+      document.getElementById('loadingMsg').style.display = 'none';
+      document.getElementById('loadingMsg').textContent = 'Error: ' + err;
+    });
+  }
+
+  function renderServiceFilters() {
+    var container = document.getElementById('serviceFilters');
+    container.innerHTML = '';
+    // All option.
+    var allLabel = document.createElement('label');
+    var allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.checked = activeService === '';
+    allCb.addEventListener('change', function() {
+      activeService = '';
+      loadEvents();
+    });
+    allLabel.appendChild(allCb);
+    allLabel.appendChild(document.createTextNode('all'));
+    container.appendChild(allLabel);
+
+    allServices.forEach(function(svc) {
+      var label = document.createElement('label');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = activeService === svc;
+      cb.addEventListener('change', function() {
+        activeService = cb.checked ? svc : '';
+        loadEvents();
+      });
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(svc));
+      container.appendChild(label);
+    });
+  }
+
+  function loadState() {
+    var seq = parseInt(document.getElementById('stateSeq').value, 10);
+    loadStateAt(seq);
+  }
+
+  function loadStateAt(seq) {
+    document.getElementById('stateJson').textContent = 'Loading…';
+    fetch('/v1/debug/events/' + seq + '/state')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        document.getElementById('stateJson').textContent = JSON.stringify(data, null, 2);
+      })
+      .catch(function(err) {
+        document.getElementById('stateJson').textContent = 'Error: ' + err;
+      });
+  }
+
+  function loadDiff() {
+    var from = document.getElementById('diffFrom').value;
+    var to = document.getElementById('diffTo').value;
+    fetch('/v1/debug/state/diff?from=' + from + '&to=' + to)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var html = '';
+        html += renderDiffSection('Added', data.added || {}, 'diff-added');
+        html += renderDiffSection('Removed', data.removed || {}, 'diff-removed');
+        html += renderChangedSection('Changed', data.changed || {});
+        document.getElementById('diffResult').innerHTML = html || '<em style="color:#555">No differences.</em>';
+      })
+      .catch(function(err) {
+        document.getElementById('diffResult').innerHTML = '<span style="color:#f85149">Error: ' + esc(String(err)) + '</span>';
+      });
+  }
+
+  function renderDiffSection(title, obj, cls) {
+    var keys = Object.keys(obj);
+    if (!keys.length) return '';
+    var html = '<div class="diff-section"><h4>' + title + ' (' + keys.length + ')</h4><div class="' + cls + '">';
+    keys.forEach(function(k) {
+      html += '<div style="margin-bottom:6px"><strong>' + esc(k) + '</strong><pre style="margin-top:4px">' + esc(JSON.stringify(obj[k], null, 2)) + '</pre></div>';
+    });
+    return html + '</div></div>';
+  }
+
+  function renderChangedSection(title, obj) {
+    var keys = Object.keys(obj);
+    if (!keys.length) return '';
+    var html = '<div class="diff-section"><h4>' + title + ' (' + keys.length + ')</h4><div class="diff-changed">';
+    keys.forEach(function(k) {
+      var before = obj[k].before;
+      var after = obj[k].after;
+      html += '<div style="margin-bottom:12px"><strong>' + esc(k) + '</strong>' +
+        '<pre style="margin-top:4px;border-left:2px solid #f85149;padding-left:8px">- ' + esc(JSON.stringify(before, null, 2)) + '</pre>' +
+        '<pre style="margin-top:4px;border-left:2px solid #3fb950;padding-left:8px">+ ' + esc(JSON.stringify(after, null, 2)) + '</pre></div>';
+    });
+    return html + '</div></div>';
+  }
+
+  function loadCosts() {
+    var account = document.getElementById('costAccount').value;
+    var url = '/v1/debug/costs';
+    if (account) url += '?account=' + encodeURIComponent(account);
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var html = '';
+        html += '<div style="margin-bottom:16px">';
+        html += '<div class="stat"><div class="val">$' + (data.TotalCost || 0).toFixed(8) + '</div><div class="lbl">Total Cost</div></div>';
+        html += '<div class="stat"><div class="val">' + (data.RequestCount || 0) + '</div><div class="lbl">Requests</div></div>';
+        html += '</div>';
+        var byService = data.ByService || {};
+        var svcs = Object.keys(byService).sort(function(a, b) { return byService[b] - byService[a]; });
+        if (svcs.length) {
+          var max = byService[svcs[0]] || 1;
+          html += '<h4 style="color:#8b949e;font-size:11px;text-transform:uppercase;margin-bottom:10px">Cost by Service</h4>';
+          svcs.forEach(function(svc) {
+            var pct = Math.round((byService[svc] / max) * 100);
+            html += '<div class="cost-bar-wrap">' +
+              '<div class="cost-label"><span>' + esc(svc) + '</span><span>$' + byService[svc].toFixed(8) + '</span></div>' +
+              '<div class="cost-bar-bg"><div class="cost-bar" style="width:' + pct + '%"></div></div></div>';
+          });
+        }
+        document.getElementById('costsResult').innerHTML = html;
+      })
+      .catch(function(err) {
+        document.getElementById('costsResult').innerHTML = '<span style="color:#f85149">Error: ' + esc(String(err)) + '</span>';
+      });
+  }
+
+  function loadExport() {
+    var stream = document.getElementById('exportStream').value;
+    var pkg = document.getElementById('exportPackage').value || 'substrate_test';
+    var test = document.getElementById('exportTest').value || 'TestGeneratedReplay';
+    if (!stream) { alert('Stream ID is required'); return; }
+    document.getElementById('exportOutput').value = 'Generating…';
+    fetch('/v1/debug/export?stream=' + encodeURIComponent(stream) +
+          '&package=' + encodeURIComponent(pkg) + '&test=' + encodeURIComponent(test))
+      .then(function(r) { return r.text(); })
+      .then(function(src) {
+        document.getElementById('exportOutput').value = src;
+      })
+      .catch(function(err) {
+        document.getElementById('exportOutput').value = 'Error: ' + err;
+      });
+  }
+
+  function copyExport() {
+    var ta = document.getElementById('exportOutput');
+    ta.select();
+    document.execCommand('copy');
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // Initial load.
+  loadEvents();
+</script>
+</body>
+</html>

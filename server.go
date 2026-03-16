@@ -215,6 +215,13 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/state/reset", s.handleStateReset)
 	r.Get("/v1/emails", s.handleEmails)
 
+	r.Get("/ui", s.handleDebugUI)
+	r.Get("/v1/debug/events", s.handleDebugEvents)
+	r.Get("/v1/debug/events/{seq}/state", s.handleDebugStateAt)
+	r.Get("/v1/debug/state/diff", s.handleDebugStateDiff)
+	r.Get("/v1/debug/costs", s.handleDebugCosts)
+	r.Get("/v1/debug/export", s.handleDebugExport)
+
 	if s.opts.Metrics != nil && s.config.Metrics.Enabled {
 		metricsPath := s.config.Metrics.Path
 		if metricsPath == "" {
