@@ -166,6 +166,9 @@ func defaultCostTable() map[string]float64 {
 		// Firehose: $0.029 per GB ingested, approximated per record.
 		"firehose/PutRecord":      0.000000029,
 		"firehose/PutRecordBatch": 0.000000029,
+		// AppSync: $4.00 per million query/mutation operations.
+		"appsync/ExecuteGraphQL":   0.000004,
+		"appsync/CreateGraphqlApi": 0.000004,
 	}
 }
 

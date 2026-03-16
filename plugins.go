@@ -394,5 +394,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(sqPlugin)
 
+	appSyncPlugin := &AppSyncPlugin{}
+	if err := appSyncPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize appsync plugin: %w", err)
+	}
+	registry.Register(appSyncPlugin)
+
 	return nil
 }

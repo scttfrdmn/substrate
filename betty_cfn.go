@@ -186,6 +186,11 @@ var typePriority = map[string]int{
 	"AWS::KinesisFirehose::DeliveryStream": 3,
 	// v0.30.0 — Lambda ESM.
 	"AWS::Lambda::EventSourceMapping": 5,
+	// v0.31.0 — AppSync.
+	"AWS::AppSync::GraphQLApi":            2,
+	"AWS::AppSync::DataSource":            3,
+	"AWS::AppSync::Resolver":              4,
+	"AWS::AppSync::FunctionConfiguration": 4,
 }
 
 // StackDeployer parses and deploys a CloudFormation template using in-process
@@ -605,6 +610,15 @@ func (d *StackDeployer) deployResource(
 	// v0.30.0 — Lambda ESM.
 	case "AWS::Lambda::EventSourceMapping":
 		return d.deployLambdaEventSourceMapping(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.31.0 — AppSync.
+	case "AWS::AppSync::GraphQLApi":
+		return d.deployAppSyncGraphQLApi(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::AppSync::DataSource":
+		return d.deployAppSyncDataSource(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::AppSync::Resolver":
+		return d.deployAppSyncResolver(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::AppSync::FunctionConfiguration":
+		return d.deployAppSyncFunction(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; skipping",
 			"logical_id", logicalID,

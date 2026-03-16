@@ -65,6 +65,16 @@ func newTestDeployer(t *testing.T) *substrate.StackDeployer {
 	}))
 	registry.Register(s3Plugin)
 
+	appSyncPlugin := &substrate.AppSyncPlugin{}
+	require.NoError(t, appSyncPlugin.Initialize(context.Background(), substrate.PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+		},
+	}))
+	registry.Register(appSyncPlugin)
+
 	return substrate.NewStackDeployer(registry, store, state, tc, logger, costs)
 }
 

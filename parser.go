@@ -193,6 +193,11 @@ func extractServiceFromHost(host string) string {
 	}
 	host = strings.TrimSuffix(host, ".amazonaws.com")
 
+	// AppSync execution endpoint: {apiId}.appsync-api.{region}
+	if strings.Contains(host, ".appsync-api.") {
+		return "appsync"
+	}
+
 	// "<service>.<region>" or just "<service>".
 	parts := strings.SplitN(host, ".", 2)
 	svc := strings.ToLower(parts[0])
