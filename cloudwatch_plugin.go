@@ -60,6 +60,10 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.disableAlarmActions(ctx, req)
 	case "GetMetricData":
 		return p.getMetricData(ctx, req)
+	case "PutMetricData":
+		return p.putMetricData(ctx, req)
+	case "ListMetrics":
+		return p.listMetrics(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -533,4 +537,108 @@ func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (
 			RequestID string `xml:"RequestId"`
 		}{RequestID: ctx.RequestID},
 	})
+}
+
+// --- PutMetricData -----------------------------------------------------------
+
+// cwMetricNamesKey returns the state key for the metric name index.
+func cwMetricNamesKey(accountID, region, namespace string) string {
+	return "metric_names:" + accountID + "/" + region + "/" + namespace
+}
+
+// putMetricData handles the PutMetricData operation. Substrate records the
+// metric name and namespace so that ListMetrics can return them; actual
+// data-point values are discarded (GetMetricData returns empty results).
+// Closes #221.
+func (p *CloudWatchPlugin) putMetricData(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	namespace := req.Params["Namespace"]
+
+	for i := 1; ; i++ {
+		prefix := "MetricData.member." + strconv.Itoa(i) + "."
+		name := req.Params[prefix+"MetricName"]
+		if name == "" {
+			break
+		}
+		idxKey := cwMetricNamesKey(ctx.AccountID, ctx.Region, namespace)
+		updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
+	}
+
+	type putMetricDataResponse struct {
+		XMLName  xml.Name `xml:"PutMetricDataResponse"`
+		XMLNS    string   `xml:"xmlns,attr"`
+		Metadata struct {
+			RequestID string `xml:"RequestId"`
+		} `xml:"ResponseMetadata"`
+	}
+	return cwXMLResponse(http.StatusOK, putMetricDataResponse{
+		XMLNS: cloudwatchXMLNS,
+		Metadata: struct {
+			RequestID string `xml:"RequestId"`
+		}{RequestID: ctx.RequestID},
+	})
+}
+
+// --- ListMetrics -------------------------------------------------------------
+
+// listMetrics handles the ListMetrics operation. It returns the metric names
+// that were previously published via PutMetricData for the given namespace.
+// Closes #221.
+func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	namespace := req.Params["Namespace"]
+	filterName := req.Params["MetricName"]
+
+	type cwMetricEntry struct {
+		MetricName string   `xml:"MetricName"`
+		Namespace  string   `xml:"Namespace"`
+		Dimensions struct{} `xml:"Dimensions"`
+	}
+	var metrics []cwMetricEntry
+
+	var namespaces []string
+	if namespace != "" {
+		namespaces = []string{namespace}
+	} else {
+		prefix := "metric_names:" + ctx.AccountID + "/" + ctx.Region + "/"
+		all, err := p.state.List(goCtx, monitoringNamespace, prefix)
+		if err == nil {
+			for _, k := range all {
+				ns := strings.TrimPrefix(k, prefix)
+				if ns != "" {
+					namespaces = append(namespaces, ns)
+				}
+			}
+		}
+	}
+
+	for _, ns := range namespaces {
+		idxKey := cwMetricNamesKey(ctx.AccountID, ctx.Region, ns)
+		names, err := loadStringIndex(goCtx, p.state, monitoringNamespace, idxKey)
+		if err != nil {
+			continue
+		}
+		for _, name := range names {
+			if filterName != "" && name != filterName {
+				continue
+			}
+			metrics = append(metrics, cwMetricEntry{MetricName: name, Namespace: ns})
+		}
+	}
+
+	type listMetricsResponse struct {
+		XMLName  xml.Name `xml:"ListMetricsResponse"`
+		XMLNS    string   `xml:"xmlns,attr"`
+		Result   struct {
+			Metrics   []cwMetricEntry `xml:"Metrics>member"`
+			NextToken string          `xml:"NextToken,omitempty"`
+		} `xml:"ListMetricsResult"`
+		Metadata struct {
+			RequestID string `xml:"RequestId"`
+		} `xml:"ResponseMetadata"`
+	}
+	resp := listMetricsResponse{XMLNS: cloudwatchXMLNS}
+	resp.Result.Metrics = metrics
+	resp.Metadata.RequestID = ctx.RequestID
+	return cwXMLResponse(http.StatusOK, resp)
 }

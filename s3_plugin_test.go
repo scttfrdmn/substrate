@@ -1025,3 +1025,62 @@ func TestS3_MultipartUpload_UserMetadata(t *testing.T) {
 	require.Equal(t, http.StatusOK, gw.Code)
 	assert.Equal(t, "alice", gw.Header().Get("X-Amz-Meta-Author"))
 }
+
+// --- Regression tests for issues #221–#224 -----------------------------------
+
+// TestS3_PutObject_NoSuchBucket verifies that PUT to a non-existent bucket
+// returns NoSuchBucket (HTTP 404). Regression test for #223.
+func TestS3_PutObject_NoSuchBucket(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	w := s3Request(t, srv, http.MethodPut, "/nonexistent-bucket/test-key", []byte("data"), nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "NoSuchBucket")
+}
+
+// TestS3_ListObjectsV2_CorrectSize verifies that ListObjectsV2 returns the
+// accurate byte count for a stored object. Regression test for #224.
+func TestS3_ListObjectsV2_CorrectSize(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/sz-bucket", nil, nil)
+	body := bytes.Repeat([]byte("a"), 10240)
+	s3Request(t, srv, http.MethodPut, "/sz-bucket/test-key", body, nil)
+
+	w := s3Request(t, srv, http.MethodGet, "/sz-bucket?list-type=2", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var result struct {
+		Contents []struct {
+			Key  string `xml:"Key"`
+			Size int64  `xml:"Size"`
+		} `xml:"Contents"`
+	}
+	require.NoError(t, xml.NewDecoder(w.Body).Decode(&result))
+	require.Len(t, result.Contents, 1)
+	assert.Equal(t, int64(len(body)), result.Contents[0].Size)
+}
+
+// TestS3_HeadObject_ContentEncoding verifies that Content-Encoding set during
+// PutObject is returned by HeadObject. Regression test for #222.
+func TestS3_HeadObject_ContentEncoding(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/enc-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/enc-bucket/obj.bin", []byte("data"),
+		map[string]string{"Content-Encoding": "gzip"})
+
+	w := s3Request(t, srv, http.MethodHead, "/enc-bucket/obj.bin", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
+}
+
+// TestS3_GetObject_ContentEncoding verifies that Content-Encoding set during
+// PutObject is returned by GetObject. Regression test for #222.
+func TestS3_GetObject_ContentEncoding(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/enc-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/enc-bucket/obj.bin", []byte("data"),
+		map[string]string{"Content-Encoding": "gzip"})
+
+	w := s3Request(t, srv, http.MethodGet, "/enc-bucket/obj.bin", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
+}

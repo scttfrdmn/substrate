@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.37.1] - 2026-03-18
+
+### Added
+
+- **CloudWatch `PutMetricData` and `ListMetrics`** (`cloudwatch_plugin.go`): `PutMetricData`
+  now records metric names by namespace so that `ListMetrics` can return them. Actual
+  data-point values continue to be discarded (no time-series storage); `GetMetricData` still
+  returns an empty result set. `ListMetrics` supports `Namespace` and `MetricName` filter
+  parameters. Three unit tests added. Closes #221.
+
+### Fixed
+
+- **S3 `HeadObject` / `GetObject` omit `Content-Encoding` header** (`s3_plugin.go`,
+  `s3_types.go`): `S3Object` was missing a `ContentEncoding` field; the header set on
+  `PutObject` was silently discarded and never returned by subsequent reads. Added
+  `ContentEncoding string` to `S3Object`, capture it in `putObject`, and emit
+  `Content-Encoding` in both `headObject` and `getObject` when non-empty. Fixes #222.
+- **S3 `PutObject` to non-existent bucket returns `NoSuchBucket`** (`s3_plugin.go`):
+  the bucket-existence check was already in place; regression tests added to confirm the
+  behaviour and prevent future regressions. Fixes #223.
+- **S3 `ListObjectsV2` object size is correct** (`s3_plugin.go`): `Size` is stored as
+  `int64(len(body))` at `PutObject` time and round-trips correctly through JSON state
+  storage; regression test added. Fixes #224.
+
 ## [v0.37.0] - 2026-03-18
 
 ### Added
@@ -976,3 +1000,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.20]: https://github.com/scttfrdmn/substrate/compare/v0.36.19...v0.36.20
 [v0.36.21]: https://github.com/scttfrdmn/substrate/compare/v0.36.20...v0.36.21
 [v0.37.0]: https://github.com/scttfrdmn/substrate/compare/v0.36.21...v0.37.0
+[v0.37.1]: https://github.com/scttfrdmn/substrate/compare/v0.37.0...v0.37.1

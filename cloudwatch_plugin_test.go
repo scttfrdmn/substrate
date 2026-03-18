@@ -287,3 +287,72 @@ func TestCW_GetMetricData_SmithyRPCV2CBOR(t *testing.T) {
 	require.Len(t, body, 1)
 	assert.Equal(t, byte(0xa0), body[0])
 }
+
+// TestCW_PutMetricData_ListMetrics verifies that metrics published via
+// PutMetricData are returned by ListMetrics. Regression test for #221.
+func TestCW_PutMetricData_ListMetrics(t *testing.T) {
+	srv := newCWAlarmTestServer(t)
+
+	// Publish two metrics in the same namespace.
+	resp := cwRequest(t, srv, map[string]string{
+		"Action":                             "PutMetricData",
+		"Namespace":                          "CargoShip/IntegrationTest",
+		"MetricData.member.1.MetricName":     "RequestCount",
+		"MetricData.member.1.Value":          "42",
+		"MetricData.member.1.Unit":           "Count",
+		"MetricData.member.2.MetricName":     "ErrorRate",
+		"MetricData.member.2.Value":          "0.1",
+		"MetricData.member.2.Unit":           "Percent",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close() //nolint:errcheck
+
+	// ListMetrics with namespace filter should return both.
+	resp2 := cwRequest(t, srv, map[string]string{
+		"Action":    "ListMetrics",
+		"Namespace": "CargoShip/IntegrationTest",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body := cwReadBody(t, resp2)
+	assert.Contains(t, body, "RequestCount")
+	assert.Contains(t, body, "ErrorRate")
+	assert.Contains(t, body, "CargoShip/IntegrationTest")
+}
+
+// TestCW_ListMetrics_FilterByName verifies that ListMetrics MetricName filter
+// returns only the matching metric. Regression test for #221.
+func TestCW_ListMetrics_FilterByName(t *testing.T) {
+	srv := newCWAlarmTestServer(t)
+
+	cwRequest(t, srv, map[string]string{
+		"Action":                         "PutMetricData",
+		"Namespace":                      "MyNS",
+		"MetricData.member.1.MetricName": "Alpha",
+		"MetricData.member.1.Value":      "1",
+		"MetricData.member.2.MetricName": "Beta",
+		"MetricData.member.2.Value":      "2",
+	}).Body.Close() //nolint:errcheck
+
+	resp := cwRequest(t, srv, map[string]string{
+		"Action":     "ListMetrics",
+		"Namespace":  "MyNS",
+		"MetricName": "Alpha",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := cwReadBody(t, resp)
+	assert.Contains(t, body, "Alpha")
+	assert.NotContains(t, body, "Beta")
+}
+
+// TestCW_ListMetrics_Empty verifies that ListMetrics returns an empty result
+// when no metrics have been published. Regression test for #221.
+func TestCW_ListMetrics_Empty(t *testing.T) {
+	srv := newCWAlarmTestServer(t)
+
+	resp := cwRequest(t, srv, map[string]string{
+		"Action":    "ListMetrics",
+		"Namespace": "NoSuchNamespace",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close() //nolint:errcheck
+}

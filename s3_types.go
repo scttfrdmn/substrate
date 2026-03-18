@@ -36,6 +36,10 @@ type S3Object struct {
 	// ContentType is the MIME type of the object body.
 	ContentType string `json:"content_type"`
 
+	// ContentEncoding is the encoding of the object body (e.g. "gzip"),
+	// set via the Content-Encoding header on PutObject.
+	ContentEncoding string `json:"content_encoding,omitempty"`
+
 	// Size is the byte length of the object body.
 	Size int64 `json:"size"`
 

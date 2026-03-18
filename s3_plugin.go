@@ -463,13 +463,14 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	}
 
 	obj := S3Object{
-		Bucket:       bucket,
-		Key:          key,
-		ETag:         etag,
-		ContentType:  contentType,
-		Size:         int64(len(body)),
-		LastModified: p.tc.Now(),
-		UserMetadata: userMeta,
+		Bucket:          bucket,
+		Key:             key,
+		ETag:            etag,
+		ContentType:     contentType,
+		ContentEncoding: req.Headers["Content-Encoding"],
+		Size:            int64(len(body)),
+		LastModified:    p.tc.Now(),
+		UserMetadata:    userMeta,
 	}
 
 	respHeaders := map[string]string{"ETag": etag}
@@ -578,6 +579,9 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 		"Last-Modified":  obj.LastModified.UTC().Format(http.TimeFormat),
 		"Content-Length": strconv.FormatInt(obj.Size, 10),
 	}
+	if obj.ContentEncoding != "" {
+		headers["Content-Encoding"] = obj.ContentEncoding
+	}
 	if obj.VersionID != "" {
 		headers["x-amz-version-id"] = obj.VersionID
 	}
@@ -610,6 +614,9 @@ func (p *S3Plugin) headObject(_ *RequestContext, _ *AWSRequest, bucket, key stri
 		"ETag":           obj.ETag,
 		"Last-Modified":  obj.LastModified.UTC().Format(http.TimeFormat),
 		"Content-Length": strconv.FormatInt(obj.Size, 10),
+	}
+	if obj.ContentEncoding != "" {
+		headers["Content-Encoding"] = obj.ContentEncoding
 	}
 	for k, v := range obj.UserMetadata {
 		headers["X-Amz-Meta-"+k] = v
