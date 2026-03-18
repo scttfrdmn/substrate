@@ -1157,3 +1157,81 @@ func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
 		t.Errorf("expected 0 images after DeregisterImage, got %d", len(descResult2.Images))
 	}
 }
+
+func TestEC2_RunInstances_TagSpecifications(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Launch with TagSpecifications for ResourceType=instance.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-1",
+		"InstanceType": "t3.micro",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+		"TagSpecification.1.ResourceType": "instance",
+		"TagSpecification.1.Tag.1.Key":    "Name",
+		"TagSpecification.1.Tag.1.Value":  "my-instance",
+		"TagSpecification.1.Tag.2.Key":    "canopy:managed",
+		"TagSpecification.1.Tag.2.Value":  "true",
+	})
+	if runResp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: expected 200, got %d", runResp.StatusCode)
+	}
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+			Tags       []struct {
+				Key   string `xml:"key"`
+				Value string `xml:"value"`
+			} `xml:"tagSet>item"`
+		} `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	if len(runResult.Instances) == 0 {
+		t.Fatal("no instance returned")
+	}
+	instanceID := runResult.Instances[0].InstanceID
+
+	// DescribeInstances should return the launch tags.
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeInstances", "InstanceId.1": instanceID,
+	})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeInstances: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		Reservations []struct {
+			Instances []struct {
+				Tags []struct {
+					Key   string `xml:"key"`
+					Value string `xml:"value"`
+				} `xml:"tagSet>item"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeInstances: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.Reservations) == 0 || len(descResult.Reservations[0].Instances) == 0 {
+		t.Fatal("no instance in describe response")
+	}
+	tags := descResult.Reservations[0].Instances[0].Tags
+	if len(tags) != 2 {
+		t.Fatalf("expected 2 tags from launch, got %d: %v", len(tags), tags)
+	}
+	tagMap := make(map[string]string, len(tags))
+	for _, tg := range tags {
+		tagMap[tg.Key] = tg.Value
+	}
+	if tagMap["Name"] != "my-instance" {
+		t.Errorf("Name tag = %q; want %q", tagMap["Name"], "my-instance")
+	}
+	if tagMap["canopy:managed"] != "true" {
+		t.Errorf("canopy:managed tag = %q; want %q", tagMap["canopy:managed"], "true")
+	}
+}

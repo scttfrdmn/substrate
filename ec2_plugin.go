@@ -198,6 +198,28 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
+	// Extract tags for instances from TagSpecification.N (ResourceType=instance).
+	var launchTags []EC2Tag
+	for n := 1; ; n++ {
+		rt := req.Params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
+		if rt == "" {
+			break
+		}
+		if rt != "instance" {
+			continue
+		}
+		for m := 1; ; m++ {
+			key := req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
+			if key == "" {
+				break
+			}
+			launchTags = append(launchTags, EC2Tag{
+				Key:   key,
+				Value: req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)],
+			})
+		}
+	}
+
 	reservationID := generateReservationID()
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	var instances []EC2Instance
@@ -216,6 +238,7 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			AccountID:        reqCtx.AccountID,
 			Region:           reqCtx.Region,
 			KeyName:          keyName,
+			Tags:             launchTags,
 		}
 
 		// Look up VPCID from subnet.
