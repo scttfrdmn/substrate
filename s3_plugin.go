@@ -178,8 +178,13 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		bucket = path[:slashIdx]
 		key = path[slashIdx+1:]
 	}
-	// Trim trailing slash produced by virtual-hosted bucket-root requests.
-	key = strings.TrimSuffix(key, "/")
+	// A key that is exactly "/" arises from double-slash URLs like "/bucket//"
+	// and should be treated as a bucket-level operation with no key.
+	// Any other trailing slash is a legitimate directory-marker suffix and must
+	// be preserved (e.g. "newdir/" is a valid S3 directory-marker key).
+	if key == "/" {
+		key = ""
+	}
 
 	method := req.Operation // still the HTTP verb at this point
 
@@ -436,12 +441,18 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	hash := md5.Sum(body) //nolint:gosec
 	etag := fmt.Sprintf(`"%x"`, hash)
 
-	filePath := "/" + bucket + "/" + key
-	if mkdirErr := p.fs.MkdirAll(filepath.Dir(filePath), 0o755); mkdirErr != nil {
-		return nil, fmt.Errorf("mkdir: %w", mkdirErr)
-	}
-	if writeErr := afero.WriteFile(p.fs, filePath, body, 0o644); writeErr != nil {
-		return nil, fmt.Errorf("write object body: %w", writeErr)
+	// Directory-marker objects (key ends with "/") must not be written to the
+	// afero filesystem: filepath.Clean inside MemMapFs would strip the trailing
+	// slash, corrupting the path and conflicting with real sub-key directories.
+	// State metadata is sufficient for directory markers (body is always empty).
+	if !strings.HasSuffix(key, "/") {
+		filePath := "/" + bucket + "/" + key
+		if mkdirErr := p.fs.MkdirAll(filepath.Dir(filePath), 0o755); mkdirErr != nil {
+			return nil, fmt.Errorf("mkdir: %w", mkdirErr)
+		}
+		if writeErr := afero.WriteFile(p.fs, filePath, body, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("write object body: %w", writeErr)
+		}
 	}
 
 	userMeta := extractUserMetadata(req.Headers)
@@ -469,12 +480,15 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		versionID := fmt.Sprintf("v%d-%d", p.tc.Now().UnixNano(), atomic.AddInt64(&p.versionSeq, 1))
 		obj.VersionID = versionID
 		// Write body to version-specific filesystem path.
-		vfPath := "/" + bucket + "/.versions/" + key + "/" + versionID
-		if mkErr := p.fs.MkdirAll(filepath.Dir(vfPath), 0o755); mkErr != nil {
-			return nil, fmt.Errorf("mkdir versioned path: %w", mkErr)
-		}
-		if wErr := afero.WriteFile(p.fs, vfPath, body, 0o644); wErr != nil {
-			return nil, fmt.Errorf("write versioned body: %w", wErr)
+		// Skip filesystem for directory-marker keys (same reason as above).
+		if !strings.HasSuffix(key, "/") {
+			vfPath := "/" + bucket + "/.versions/" + key + "/" + versionID
+			if mkErr := p.fs.MkdirAll(filepath.Dir(vfPath), 0o755); mkErr != nil {
+				return nil, fmt.Errorf("mkdir versioned path: %w", mkErr)
+			}
+			if wErr := afero.WriteFile(p.fs, vfPath, body, 0o644); wErr != nil {
+				return nil, fmt.Errorf("write versioned body: %w", wErr)
+			}
 		}
 		versionedKey := "object_version:" + bucket + "/" + key + "/" + versionID
 		versionedData, marshalErr := json.Marshal(obj)
@@ -542,13 +556,19 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
 	}
 
-	// Try versioned fs path first, then fallback to main path.
-	body, readErr := afero.ReadFile(p.fs, fsPath)
-	if readErr != nil {
-		// Fall back to main path for objects written before versioning was enabled.
-		body, readErr = afero.ReadFile(p.fs, "/"+bucket+"/"+key)
+	// Directory-marker objects (key ends with "/") are never written to the
+	// afero filesystem; their body is always empty.
+	var body []byte
+	if !strings.HasSuffix(key, "/") {
+		// Try versioned fs path first, then fallback to main path.
+		var readErr error
+		body, readErr = afero.ReadFile(p.fs, fsPath)
 		if readErr != nil {
-			return nil, fmt.Errorf("read object body: %w", readErr)
+			// Fall back to main path for objects written before versioning was enabled.
+			body, readErr = afero.ReadFile(p.fs, "/"+bucket+"/"+key)
+			if readErr != nil {
+				return nil, fmt.Errorf("read object body: %w", readErr)
+			}
 		}
 	}
 

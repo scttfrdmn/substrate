@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.16] - 2026-03-18
+
+### Fixed
+
+- **S3 `PutObject` now preserves trailing-slash keys (directory markers)** (`s3_plugin.go`): `parseS3Operation` was unconditionally stripping the trailing `/` from all object keys. Keys like `"newdir/"` became `"newdir"`, breaking the common S3 directory-marker pattern. The fix narrows the trim to the degenerate `"/"` case (from `"/bucket//"` style URLs) and leaves all other keys intact. Additionally, `putObject` and `getObject` now bypass the afero filesystem entirely for directory-marker keys (key ends with `/`) because `filepath.Clean` inside `MemMapFs` would corrupt the path — state metadata is sufficient for zero-body markers. Fixes #212.
+
+### Added
+
+- **Regression tests for S3 directory markers** (`s3_plugin_test.go`): `TestS3_DirectoryMarker_KeyPreserved` verifies that `PutObject` / `HeadObject` / `GetObject` / `ListObjectsV2` all preserve the trailing slash in the stored key. `TestS3_DirectoryMarker_AppearsAsPrefix` verifies that a directory-marker object is correctly grouped into `CommonPrefixes` (not `Contents`) when `ListObjectsV2` is called with `delimiter="/"`.
+
 ## [v0.36.15] - 2026-03-18
 
 ### Fixed
@@ -878,3 +888,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.13]: https://github.com/scttfrdmn/substrate/compare/v0.36.12...v0.36.13
 [v0.36.14]: https://github.com/scttfrdmn/substrate/compare/v0.36.13...v0.36.14
 [v0.36.15]: https://github.com/scttfrdmn/substrate/compare/v0.36.14...v0.36.15
+[v0.36.16]: https://github.com/scttfrdmn/substrate/compare/v0.36.15...v0.36.16

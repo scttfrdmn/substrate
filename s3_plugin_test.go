@@ -886,3 +886,73 @@ func TestS3_PresignedURL_ServiceIdentification(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "presigned GET should return 200")
 	assert.Equal(t, "hello", w.Body.String())
 }
+
+// TestS3_DirectoryMarker_KeyPreserved verifies that PutObject with a trailing-
+// slash key (directory marker) preserves the key as-is in the stored metadata
+// and returns it unmodified in HeadObject and ListObjectsV2.
+// Regression test for #212.
+func TestS3_DirectoryMarker_KeyPreserved(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/dirtest", nil, nil)
+	// PutObject: key with trailing slash (directory marker, empty body).
+	w := s3Request(t, srv, http.MethodPut, "/dirtest/newdir/", []byte{}, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "PutObject directory marker")
+
+	// HeadObject: should find the object under the trailing-slash key.
+	w = s3Request(t, srv, http.MethodHead, "/dirtest/newdir/", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "HeadObject directory marker")
+
+	// GetObject: should return empty body.
+	w = s3Request(t, srv, http.MethodGet, "/dirtest/newdir/", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "GetObject directory marker")
+	assert.Empty(t, w.Body.Bytes(), "directory marker body must be empty")
+
+	// ListObjectsV2 without delimiter: key must appear as "newdir/".
+	w = s3Request(t, srv, http.MethodGet, "/dirtest?list-type=2", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var list struct {
+		Contents []struct {
+			Key string `xml:"Key"`
+		} `xml:"Contents"`
+	}
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &list))
+	require.Len(t, list.Contents, 1)
+	assert.Equal(t, "newdir/", list.Contents[0].Key, "trailing slash must be preserved in listing")
+}
+
+// TestS3_DirectoryMarker_AppearsAsPrefix verifies that a directory-marker
+// object appears in CommonPrefixes (not Contents) when ListObjectsV2 is called
+// with delimiter="/". Regression test for #212.
+func TestS3_DirectoryMarker_AppearsAsPrefix(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/prefixtest", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/prefixtest/newdir/", []byte{}, nil)
+	s3Request(t, srv, http.MethodPut, "/prefixtest/file.txt", []byte("x"), nil)
+
+	// List with delimiter "/": "newdir/" should appear as a CommonPrefix,
+	// NOT as a Contents entry.
+	w := s3Request(t, srv, http.MethodGet, "/prefixtest?list-type=2&delimiter=%2F", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var result struct {
+		Contents []struct {
+			Key string `xml:"Key"`
+		} `xml:"Contents"`
+		CommonPrefixes []struct {
+			Prefix string `xml:"Prefix"`
+		} `xml:"CommonPrefixes"`
+	}
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
+
+	// "file.txt" must be in Contents.
+	require.Len(t, result.Contents, 1)
+	assert.Equal(t, "file.txt", result.Contents[0].Key)
+
+	// "newdir/" must be in CommonPrefixes.
+	require.Len(t, result.CommonPrefixes, 1)
+	assert.Equal(t, "newdir/", result.CommonPrefixes[0].Prefix)
+}
