@@ -44,3 +44,30 @@ type CEGroup struct {
 	// Metrics maps metric names to their values for this group.
 	Metrics map[string]CEMetric `json:"Metrics"`
 }
+
+// CEGroupDefinition describes a single GroupBy clause in a GetCostAndUsage request.
+type CEGroupDefinition struct {
+	// Type is the grouping type: "DIMENSION" or "TAG".
+	Type string `json:"Type"`
+
+	// Key is the dimension name (e.g. "SERVICE") or tag key (e.g. "Name").
+	Key *string `json:"Key,omitempty"`
+}
+
+// CEFilter is the top-level filter expression in a GetCostAndUsage request.
+// Only the Dimensions sub-filter is modelled; nested And/Or/Not are not needed
+// for the use cases Substrate currently supports.
+type CEFilter struct {
+	// Dimensions filters by a named AWS dimension.
+	Dimensions *CEFilterDimensions `json:"Dimensions,omitempty"`
+}
+
+// CEFilterDimensions narrows results to resources whose named dimension matches
+// one of the supplied values (e.g. Key="SERVICE", Values=["Amazon EC2 - Compute"]).
+type CEFilterDimensions struct {
+	// Key is the dimension name (e.g. "SERVICE").
+	Key string `json:"Key"`
+
+	// Values is the set of allowed values for the dimension.
+	Values []string `json:"Values"`
+}

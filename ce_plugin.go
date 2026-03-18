@@ -88,11 +88,16 @@ func (p *CEPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 }
 
+// ec2ServiceKey is the AWS Cost Explorer service name for EC2 compute.
+const ec2ServiceKey = "Amazon Elastic Compute Cloud - Compute"
+
 func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		TimePeriod  CEDateInterval `json:"TimePeriod"`
-		Granularity string         `json:"Granularity"`
-		Metrics     []string       `json:"Metrics"`
+		TimePeriod  CEDateInterval      `json:"TimePeriod"`
+		Granularity string              `json:"Granularity"`
+		Metrics     []string            `json:"Metrics"`
+		GroupBy     []CEGroupDefinition `json:"GroupBy"`
+		Filter      *CEFilter           `json:"Filter"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -100,62 +105,94 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 
+	// Use the caller-requested metric names; default to UnblendedCost.
+	metricNames := input.Metrics
+	if len(metricNames) == 0 {
+		metricNames = []string{"UnblendedCost"}
+	}
+	buildMetrics := func(cost float64) map[string]CEMetric {
+		m := make(map[string]CEMetric, len(metricNames))
+		for _, name := range metricNames {
+			m[name] = CEMetric{Amount: fmt.Sprintf("%.6f", cost), Unit: "USD"}
+		}
+		return m
+	}
+
 	var results []CECostResultByTime
 
 	start, end, parseErr := parseCEDateRange(input.TimePeriod)
 	if parseErr == nil {
-		// API-call costs from the event store.
-		bySvc := make(map[string]float64)
-		var totalCost float64
-		if p.store != nil {
-			summary, err := p.store.GetCostSummary(context.Background(), reqCtx.AccountID, start, end)
-			if err != nil {
-				p.logger.Error("ce: GetCostSummary failed", "error", err)
-			} else if summary != nil {
-				for svc, cost := range summary.ByService {
-					bySvc[svc] += cost
+		// Detect GroupBy TAG — group EC2 instance costs by a tag value.
+		if len(input.GroupBy) > 0 && input.GroupBy[0].Type == "TAG" {
+			tagKey := ""
+			if input.GroupBy[0].Key != nil {
+				tagKey = *input.GroupBy[0].Key
+			}
+			// Only include EC2 when no service filter is present, or when the
+			// filter explicitly includes the EC2 service key.
+			includeEC2 := true
+			if input.Filter != nil && input.Filter.Dimensions != nil &&
+				strings.EqualFold(input.Filter.Dimensions.Key, "SERVICE") {
+				includeEC2 = false
+				for _, v := range input.Filter.Dimensions.Values {
+					if v == ec2ServiceKey {
+						includeEC2 = true
+						break
+					}
 				}
-				totalCost += summary.TotalCost
 			}
-		}
 
-		// EC2 compute usage cost derived from instance run-time in state.
-		const ec2ServiceKey = "Amazon Elastic Compute Cloud - Compute"
-		if ec2Cost := p.computeEC2UsageCost(reqCtx.AccountID, start, end); ec2Cost > 0 {
-			bySvc[ec2ServiceKey] += ec2Cost
-			totalCost += ec2Cost
-		}
-
-		// Use the caller-requested metric names; default to UnblendedCost.
-		metricNames := input.Metrics
-		if len(metricNames) == 0 {
-			metricNames = []string{"UnblendedCost"}
-		}
-
-		buildMetrics := func(cost float64) map[string]CEMetric {
-			m := make(map[string]CEMetric, len(metricNames))
-			for _, name := range metricNames {
-				m[name] = CEMetric{Amount: fmt.Sprintf("%.6f", cost), Unit: "USD"}
+			byTag := make(map[string]float64)
+			if includeEC2 {
+				byTag = p.computeEC2UsageCostByTag(reqCtx.AccountID, start, end, tagKey)
 			}
-			return m
-		}
 
-		groups := make([]CEGroup, 0, len(bySvc))
-		for svc, cost := range bySvc {
-			groups = append(groups, CEGroup{
-				Keys:    []string{svc},
-				Metrics: buildMetrics(cost),
-			})
-		}
-		sort.Slice(groups, func(i, j int) bool { return groups[i].Keys[0] < groups[j].Keys[0] })
+			var totalCost float64
+			groups := make([]CEGroup, 0, len(byTag))
+			for k, cost := range byTag {
+				groups = append(groups, CEGroup{Keys: []string{k}, Metrics: buildMetrics(cost)})
+				totalCost += cost
+			}
+			sort.Slice(groups, func(i, j int) bool { return groups[i].Keys[0] < groups[j].Keys[0] })
 
-		results = []CECostResultByTime{
-			{
+			results = []CECostResultByTime{{
 				TimePeriod: input.TimePeriod,
 				Total:      buildMetrics(totalCost),
 				Groups:     groups,
 				Estimated:  false,
-			},
+			}}
+		} else {
+			// Default: group by SERVICE (existing behaviour).
+			bySvc := make(map[string]float64)
+			var totalCost float64
+			if p.store != nil {
+				summary, err := p.store.GetCostSummary(context.Background(), reqCtx.AccountID, start, end)
+				if err != nil {
+					p.logger.Error("ce: GetCostSummary failed", "error", err)
+				} else if summary != nil {
+					for svc, cost := range summary.ByService {
+						bySvc[svc] += cost
+					}
+					totalCost += summary.TotalCost
+				}
+			}
+			if ec2Cost := p.computeEC2UsageCost(reqCtx.AccountID, start, end); ec2Cost > 0 {
+				bySvc[ec2ServiceKey] += ec2Cost
+				totalCost += ec2Cost
+			}
+
+			groups := make([]CEGroup, 0, len(bySvc))
+			for svc, cost := range bySvc {
+				groups = append(groups, CEGroup{Keys: []string{svc}, Metrics: buildMetrics(cost)})
+			}
+			sort.Slice(groups, func(i, j int) bool { return groups[i].Keys[0] < groups[j].Keys[0] })
+
+			results = []CECostResultByTime{{
+				TimePeriod: input.TimePeriod,
+				Total:      buildMetrics(totalCost),
+				Groups:     groups,
+				Estimated:  false,
+			}}
 		}
 	}
 
@@ -258,33 +295,70 @@ func (p *CEPlugin) getDimensionValues(reqCtx *RequestContext, req *AWSRequest) (
 	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
 }
 
-// computeEC2UsageCost returns the estimated USD cost of all EC2 instances in
-// the given account that were running during [queryStart, queryEnd).  It reads
-// instance records directly from state so costs accrue even when no API calls
-// are recorded in the event store.  The upper bound of each instance's run time
-// is capped at now (from the TimeController if set, otherwise wall-clock time)
-// so that in-flight instances don't accrue cost beyond the simulated present.
-func (p *CEPlugin) computeEC2UsageCost(accountID string, queryStart, queryEnd time.Time) float64 {
-	if p.state == nil {
+// ec2InstanceCostInWindow returns the USD cost for a single EC2 instance
+// for the time it was running within [queryStart, queryEnd).
+// queryEnd must already be clamped to the simulated present.
+func ec2InstanceCostInWindow(inst EC2Instance, queryStart, queryEnd time.Time) float64 {
+	launchTime, err := time.Parse(time.RFC3339, inst.LaunchTime)
+	if err != nil {
 		return 0
 	}
+	// Stopped instances don't accrue compute cost.
+	if inst.State.Code == 80 {
+		return 0
+	}
+	runEnd := queryEnd
+	if inst.TerminatedTime != "" {
+		if t, err := time.Parse(time.RFC3339, inst.TerminatedTime); err == nil && t.Before(runEnd) {
+			runEnd = t
+		}
+	}
+	start := launchTime
+	if queryStart.After(start) {
+		start = queryStart
+	}
+	end := runEnd
+	if queryEnd.Before(end) {
+		end = queryEnd
+	}
+	if !start.Before(end) {
+		return 0
+	}
+	hours := end.Sub(start).Hours()
+	rate, ok := ec2HourlyRates[inst.InstanceType]
+	if !ok {
+		rate = ec2DefaultHourlyRate
+	}
+	return hours * rate
+}
+
+// clampedQueryEnd returns queryEnd capped at tc.Now() (or wall time) so
+// in-flight instances don't accrue cost beyond the simulated present.
+func (p *CEPlugin) clampedQueryEnd(queryEnd time.Time) time.Time {
 	now := time.Now()
 	if p.tc != nil {
 		now = p.tc.Now()
 	}
-	// Clamp query end to now so we don't project future cost.
 	if queryEnd.After(now) {
-		queryEnd = now
+		return now
 	}
+	return queryEnd
+}
+
+// computeEC2UsageCost returns the estimated USD cost of all EC2 instances in
+// the given account that were running during [queryStart, queryEnd).
+func (p *CEPlugin) computeEC2UsageCost(accountID string, queryStart, queryEnd time.Time) float64 {
+	if p.state == nil {
+		return 0
+	}
+	queryEnd = p.clampedQueryEnd(queryEnd)
 	if !queryStart.Before(queryEnd) {
 		return 0
 	}
-
 	keys, err := p.state.List(context.Background(), ec2Namespace, "instance:"+accountID+"/")
 	if err != nil || len(keys) == 0 {
 		return 0
 	}
-
 	var total float64
 	for _, key := range keys {
 		data, err := p.state.Get(context.Background(), ec2Namespace, key)
@@ -295,40 +369,50 @@ func (p *CEPlugin) computeEC2UsageCost(accountID string, queryStart, queryEnd ti
 		if json.Unmarshal(data, &inst) != nil {
 			continue
 		}
-		launchTime, err := time.Parse(time.RFC3339, inst.LaunchTime)
-		if err != nil {
-			continue
-		}
-		// Determine when this instance stopped accruing cost.
-		runEnd := queryEnd
-		if inst.TerminatedTime != "" {
-			if t, err := time.Parse(time.RFC3339, inst.TerminatedTime); err == nil && t.Before(runEnd) {
-				runEnd = t
-			}
-		} else if inst.State.Code == 80 { // stopped
-			// Stopped instances don't accrue compute cost.
-			continue
-		}
-		// Compute overlap of [launchTime, runEnd) with [queryStart, queryEnd).
-		start := launchTime
-		if queryStart.After(start) {
-			start = queryStart
-		}
-		end := runEnd
-		if queryEnd.Before(end) {
-			end = queryEnd
-		}
-		if !start.Before(end) {
-			continue
-		}
-		hours := end.Sub(start).Hours()
-		rate, ok := ec2HourlyRates[inst.InstanceType]
-		if !ok {
-			rate = ec2DefaultHourlyRate
-		}
-		total += hours * rate
+		total += ec2InstanceCostInWindow(inst, queryStart, queryEnd)
 	}
 	return total
+}
+
+// computeEC2UsageCostByTag returns per-tag-value EC2 costs grouped by tagKey.
+// Map keys use AWS CE tag format: "TagKey$TagValue".  Instances without the
+// tag are grouped under "TagKey$" (empty value), matching real AWS behaviour.
+func (p *CEPlugin) computeEC2UsageCostByTag(accountID string, queryStart, queryEnd time.Time, tagKey string) map[string]float64 {
+	result := make(map[string]float64)
+	if p.state == nil {
+		return result
+	}
+	queryEnd = p.clampedQueryEnd(queryEnd)
+	if !queryStart.Before(queryEnd) {
+		return result
+	}
+	keys, err := p.state.List(context.Background(), ec2Namespace, "instance:"+accountID+"/")
+	if err != nil || len(keys) == 0 {
+		return result
+	}
+	for _, key := range keys {
+		data, err := p.state.Get(context.Background(), ec2Namespace, key)
+		if err != nil || data == nil {
+			continue
+		}
+		var inst EC2Instance
+		if json.Unmarshal(data, &inst) != nil {
+			continue
+		}
+		cost := ec2InstanceCostInWindow(inst, queryStart, queryEnd)
+		if cost == 0 {
+			continue
+		}
+		tagValue := ""
+		for _, t := range inst.Tags {
+			if t.Key == tagKey {
+				tagValue = t.Value
+				break
+			}
+		}
+		result[tagKey+"$"+tagValue] += cost
+	}
+	return result
 }
 
 // parseCEDateRange parses a CEDateInterval into time.Time values.

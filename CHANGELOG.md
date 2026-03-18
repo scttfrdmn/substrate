@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.13] - 2026-03-18
+
+### Added
+
+- **`GetCostAndUsage` GroupBy TAG support** (`ce_plugin.go`, `ce_types.go`): `GroupBy [{Type: "TAG", Key: "Name"}]` now returns one group per unique tag value using the AWS CE `"TagKey$TagValue"` key format. An optional `Filter.Dimensions` service filter (e.g. `Key=SERVICE, Values=["Amazon Elastic Compute Cloud - Compute"]`) restricts results to the matching service. Instances without the requested tag are grouped under `"TagKey$"`, matching real AWS behaviour. Fixes #209.
+
+### Changed
+
+- Extracted `ec2InstanceCostInWindow` package-level helper and `clampedQueryEnd` method to eliminate duplicate logic between `computeEC2UsageCost` and the new `computeEC2UsageCostByTag`.
+
 ## [v0.36.12] - 2026-03-18
 
 ### Fixed
@@ -849,3 +859,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.10]: https://github.com/scttfrdmn/substrate/compare/v0.36.9...v0.36.10
 [v0.36.11]: https://github.com/scttfrdmn/substrate/compare/v0.36.10...v0.36.11
 [v0.36.12]: https://github.com/scttfrdmn/substrate/compare/v0.36.11...v0.36.12
+[v0.36.13]: https://github.com/scttfrdmn/substrate/compare/v0.36.12...v0.36.13

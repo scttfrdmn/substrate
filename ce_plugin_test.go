@@ -469,3 +469,143 @@ func TestCE_EC2UsageCost_TerminatedInstance(t *testing.T) {
 	}
 	t.Errorf("EC2 group %q not found in groups: %+v", ec2Key, out.ResultsByTime[0].Groups)
 }
+
+// TestCE_GetCostAndUsage_GroupByTag verifies that GroupBy TAG with a service
+// dimension filter returns per-tag-value groups using the "TagKey$TagValue"
+// AWS CE format.  Regression test for #209.
+func TestCE_GetCostAndUsage_GroupByTag(t *testing.T) {
+	baseline := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ts, tc := newCEWithEC2TestServer(t)
+	tc.SetTime(baseline)
+
+	// Launch an m7i.large with Name=cost-tag-test.
+	runResp := ec2QueryRequest(t, ts, map[string]string{
+		"Action":                         "RunInstances",
+		"ImageId":                        "ami-12345678",
+		"InstanceType":                   "m7i.large",
+		"MinCount":                       "1",
+		"MaxCount":                       "1",
+		"TagSpecification.1.ResourceType": "instance",
+		"TagSpecification.1.Tag.1.Key":   "Name",
+		"TagSpecification.1.Tag.1.Value": "cost-tag-test",
+	})
+	_ = runResp.Body.Close()
+	if runResp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: %d", runResp.StatusCode)
+	}
+
+	// Advance 27 hours — m7i.large $0.192/hr × 27h ≈ $5.18.
+	tc.SetTime(baseline.Add(27 * time.Hour))
+
+	tagKey := "Name"
+	nameKey := "aws:TagKey"
+	_ = nameKey
+	resp := ceRequest(t, ts, "GetCostAndUsage", map[string]interface{}{
+		"TimePeriod":  map[string]string{"Start": "2026-03-01", "End": "2026-04-01"},
+		"Granularity": "MONTHLY",
+		"Metrics":     []string{"BlendedCost"},
+		"Filter": map[string]interface{}{
+			"Dimensions": map[string]interface{}{
+				"Key":    "SERVICE",
+				"Values": []string{"Amazon Elastic Compute Cloud - Compute"},
+			},
+		},
+		"GroupBy": []map[string]string{
+			{"Type": "TAG", "Key": tagKey},
+		},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GetCostAndUsage: %d", resp.StatusCode)
+	}
+
+	var out struct {
+		ResultsByTime []struct {
+			Groups []struct {
+				Keys    []string                     `json:"Keys"`
+				Metrics map[string]map[string]string `json:"Metrics"`
+			} `json:"Groups"`
+		} `json:"ResultsByTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.ResultsByTime) == 0 {
+		t.Fatal("no ResultsByTime")
+	}
+
+	// Expect a group with key "Name$cost-tag-test".
+	wantKey := "Name$cost-tag-test"
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) > 0 && g.Keys[0] == wantKey {
+			amount := g.Metrics["BlendedCost"]["Amount"]
+			if amount == "" || amount == "0.000000" {
+				t.Errorf("group %q has zero/empty BlendedCost.Amount", wantKey)
+			}
+			var cost float64
+			if err := json.Unmarshal([]byte(amount), &cost); err == nil {
+				// 27h × $0.192/hr = $5.184
+				if cost < 5.0 || cost > 5.5 {
+					t.Errorf("expected ~5.18 USD for 27h m7i.large, got %.4f", cost)
+				}
+			}
+			return
+		}
+	}
+	t.Errorf("group %q not found; got: %+v", wantKey, out.ResultsByTime[0].Groups)
+}
+
+// TestCE_GetCostAndUsage_GroupByTag_NoServiceFilter verifies that an untagged
+// instance is grouped under "TagKey$" when GroupBy TAG has no service filter.
+func TestCE_GetCostAndUsage_GroupByTag_NoServiceFilter(t *testing.T) {
+	baseline := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ts, tc := newCEWithEC2TestServer(t)
+	tc.SetTime(baseline)
+
+	// Launch instance with no Name tag.
+	runResp := ec2QueryRequest(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-12345678",
+		"InstanceType": "t3.micro",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+	})
+	_ = runResp.Body.Close()
+
+	tc.SetTime(baseline.Add(2 * time.Hour))
+
+	resp := ceRequest(t, ts, "GetCostAndUsage", map[string]interface{}{
+		"TimePeriod":  map[string]string{"Start": "2026-03-01", "End": "2026-04-01"},
+		"Granularity": "MONTHLY",
+		"Metrics":     []string{"BlendedCost"},
+		"GroupBy": []map[string]string{
+			{"Type": "TAG", "Key": "Name"},
+		},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GetCostAndUsage: %d", resp.StatusCode)
+	}
+
+	var out struct {
+		ResultsByTime []struct {
+			Groups []struct {
+				Keys []string `json:"Keys"`
+			} `json:"Groups"`
+		} `json:"ResultsByTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.ResultsByTime) == 0 {
+		t.Fatal("no ResultsByTime")
+	}
+
+	// Untagged instance should appear under "Name$".
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) > 0 && g.Keys[0] == "Name$" {
+			return
+		}
+	}
+	t.Errorf("expected group %q for untagged instance; got: %+v", "Name$", out.ResultsByTime[0].Groups)
+}
