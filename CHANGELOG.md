@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.14] - 2026-03-18
+
+### Fixed
+
+- **`GetCostAndUsage` GroupBy TAG type check is now case-insensitive** (`ce_plugin.go`): the `Type` field comparison now uses `strings.EqualFold` so that callers sending `"tag"` or `"Tag"` are handled identically to `"TAG"`, matching the robustness of other case-insensitive checks in the codebase. Fixes #210.
+
+### Added
+
+- **Regression tests for GroupBy TAG** (`ce_plugin_test.go`): `TestCE_GetCostAndUsage_CreateTagsAfterLaunch` verifies that tags applied via `CreateTags` after `RunInstances` (the common consumer pattern) are visible in GroupBy TAG cost queries. `TestCE_GetCostAndUsage_GroupByTag_NoEventStoreLeakage` verifies that EventStore service records (`"ec2"`, `"iam"`, `"ce"`, etc.) do not appear in TAG-grouped responses — only `"TagKey$TagValue"` entries are returned.
+
 ## [v0.36.13] - 2026-03-18
 
 ### Added
@@ -860,3 +870,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.11]: https://github.com/scttfrdmn/substrate/compare/v0.36.10...v0.36.11
 [v0.36.12]: https://github.com/scttfrdmn/substrate/compare/v0.36.11...v0.36.12
 [v0.36.13]: https://github.com/scttfrdmn/substrate/compare/v0.36.12...v0.36.13
+[v0.36.14]: https://github.com/scttfrdmn/substrate/compare/v0.36.13...v0.36.14

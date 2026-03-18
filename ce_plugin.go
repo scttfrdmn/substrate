@@ -123,7 +123,7 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 	start, end, parseErr := parseCEDateRange(input.TimePeriod)
 	if parseErr == nil {
 		// Detect GroupBy TAG — group EC2 instance costs by a tag value.
-		if len(input.GroupBy) > 0 && input.GroupBy[0].Type == "TAG" {
+		if len(input.GroupBy) > 0 && strings.EqualFold(input.GroupBy[0].Type, "TAG") {
 			tagKey := ""
 			if input.GroupBy[0].Key != nil {
 				tagKey = *input.GroupBy[0].Key

@@ -609,3 +609,187 @@ func TestCE_GetCostAndUsage_GroupByTag_NoServiceFilter(t *testing.T) {
 	}
 	t.Errorf("expected group %q for untagged instance; got: %+v", "Name$", out.ResultsByTime[0].Groups)
 }
+
+// TestCE_GetCostAndUsage_GroupByTag_NoEventStoreLeakage verifies that when
+// GroupBy TAG is requested, EventStore service records (like "ec2", "iam") do
+// NOT appear in the response Groups — only TagKey$TagValue entries should.
+// Regression test for #210.
+func TestCE_GetCostAndUsage_GroupByTag_NoEventStoreLeakage(t *testing.T) {
+	baseline := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ts, tc := newCEWithEC2TestServer(t)
+	tc.SetTime(baseline)
+
+	// Generate EventStore records for several services by making API calls.
+	ec2QueryRequest(t, ts, map[string]string{
+		"Action":                          "RunInstances",
+		"ImageId":                         "ami-12345678",
+		"InstanceType":                    "t3.micro",
+		"MinCount":                        "1",
+		"MaxCount":                        "1",
+		"TagSpecification.1.ResourceType": "instance",
+		"TagSpecification.1.Tag.1.Key":    "Env",
+		"TagSpecification.1.Tag.1.Value":  "prod",
+	}).Body.Close() //nolint:errcheck
+
+	tc.SetTime(baseline.Add(10 * time.Hour))
+
+	// Call CE once to generate a "ce" EventStore record.
+	ceRequest(t, ts, "GetCostAndUsage", map[string]interface{}{
+		"TimePeriod":  map[string]string{"Start": "2026-02-01", "End": "2026-03-01"},
+		"Granularity": "MONTHLY",
+		"Metrics":     []string{"UnblendedCost"},
+	}).Body.Close() //nolint:errcheck
+
+	// Now call CE with GroupBy TAG — response must NOT contain service names.
+	resp := ceRequest(t, ts, "GetCostAndUsage", map[string]interface{}{
+		"TimePeriod":  map[string]string{"Start": "2026-03-01", "End": "2026-04-01"},
+		"Granularity": "MONTHLY",
+		"Metrics":     []string{"BlendedCost"},
+		"GroupBy": []map[string]string{
+			{"Type": "TAG", "Key": "Env"},
+		},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GetCostAndUsage: %d", resp.StatusCode)
+	}
+
+	var out struct {
+		ResultsByTime []struct {
+			Groups []struct {
+				Keys []string `json:"Keys"`
+			} `json:"Groups"`
+		} `json:"ResultsByTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.ResultsByTime) == 0 {
+		t.Fatal("no ResultsByTime")
+	}
+
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) == 0 {
+			continue
+		}
+		key := g.Keys[0]
+		if !strings.Contains(key, "$") {
+			t.Errorf("GroupBy TAG response contains non-tag key %q — EventStore service data must not leak into TAG responses", key)
+		}
+	}
+
+	// Expect "Env$prod" group (instance has Env=prod).
+	found := false
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) > 0 && g.Keys[0] == "Env$prod" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected group %q not found; got: %+v", "Env$prod", out.ResultsByTime[0].Groups)
+	}
+}
+
+// TestCE_GetCostAndUsage_CreateTagsAfterLaunch verifies that tags applied via
+// CreateTags after RunInstances are visible in GroupBy TAG cost queries.
+// Regression test for #210.
+func TestCE_GetCostAndUsage_CreateTagsAfterLaunch(t *testing.T) {
+	baseline := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ts, tc := newCEWithEC2TestServer(t)
+	tc.SetTime(baseline)
+
+	// Launch an m7i.large with NO tags.
+	runResp := ec2QueryRequest(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-12345678",
+		"InstanceType": "m7i.large",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+	})
+	defer runResp.Body.Close() //nolint:errcheck
+	if runResp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: %d", runResp.StatusCode)
+	}
+
+	// Parse the instance ID from DescribeInstances.
+	descResp := ec2QueryRequest(t, ts, map[string]string{"Action": "DescribeInstances"})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		Reservations []struct {
+			Instances []struct {
+				InstanceID string `xml:"instanceId"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("describe instances: %v", err)
+	}
+	if len(descResult.Reservations) == 0 || len(descResult.Reservations[0].Instances) == 0 {
+		t.Fatal("no instances found")
+	}
+	instID := descResult.Reservations[0].Instances[0].InstanceID
+
+	// Apply Name tag via CreateTags (AFTER launch, the consumer pattern).
+	tagResp := ec2QueryRequest(t, ts, map[string]string{
+		"Action":       "CreateTags",
+		"ResourceId.1": instID,
+		"Tag.1.Key":    "Name",
+		"Tag.1.Value":  "post-launch-tagged",
+	})
+	_ = tagResp.Body.Close()
+	if tagResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateTags: %d", tagResp.StatusCode)
+	}
+
+	// Advance 27 hours — m7i.large $0.192/hr × 27h ≈ $5.18.
+	tc.SetTime(baseline.Add(27 * time.Hour))
+
+	// Query CE with GroupBy TAG Key=Name.
+	resp := ceRequest(t, ts, "GetCostAndUsage", map[string]interface{}{
+		"TimePeriod":  map[string]string{"Start": "2026-03-01", "End": "2026-04-01"},
+		"Granularity": "MONTHLY",
+		"Metrics":     []string{"BlendedCost"},
+		"GroupBy": []map[string]string{
+			{"Type": "TAG", "Key": "Name"},
+		},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GetCostAndUsage: %d", resp.StatusCode)
+	}
+
+	var out struct {
+		ResultsByTime []struct {
+			Groups []struct {
+				Keys    []string                     `json:"Keys"`
+				Metrics map[string]map[string]string `json:"Metrics"`
+			} `json:"Groups"`
+		} `json:"ResultsByTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.ResultsByTime) == 0 {
+		t.Fatal("no ResultsByTime")
+	}
+
+	// Must find "Name$post-launch-tagged" group with non-zero cost.
+	wantKey := "Name$post-launch-tagged"
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) > 0 && g.Keys[0] == wantKey {
+			amount := g.Metrics["BlendedCost"]["Amount"]
+			if amount == "" || amount == "0.000000" {
+				t.Errorf("group %q has zero/empty BlendedCost.Amount", wantKey)
+			}
+			return
+		}
+	}
+	// Must NOT contain any service names — only tag-format keys.
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) > 0 && !strings.Contains(g.Keys[0], "$") {
+			t.Errorf("GroupBy TAG returned non-tag key %q (service branch must not run)", g.Keys[0])
+		}
+	}
+	t.Errorf("group %q not found; got: %+v", wantKey, out.ResultsByTime[0].Groups)
+}
