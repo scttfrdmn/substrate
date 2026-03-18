@@ -249,10 +249,10 @@ func TestEC2_SecurityGroup_AuthorizeRevoke(t *testing.T) {
 	vpcResp.Body.Close() //nolint:errcheck
 
 	sgResp := ec2Request(t, ts, map[string]string{
-		"Action":      "CreateSecurityGroup",
-		"GroupName":   "test-sg",
-		"Description": "test security group",
-		"VpcId":       vpcResult.Vpc.VpcID,
+		"Action":           "CreateSecurityGroup",
+		"GroupName":        "test-sg",
+		"GroupDescription": "test security group",
+		"VpcId":            vpcResult.Vpc.VpcID,
 	})
 	if sgResp.StatusCode != http.StatusOK {
 		t.Fatalf("CreateSecurityGroup: expected 200, got %d", sgResp.StatusCode)
@@ -550,10 +550,10 @@ func TestEC2_SecurityGroup_DescribeDelete(t *testing.T) {
 
 	// CreateSecurityGroup.
 	sgResp := ec2Request(t, ts, map[string]string{
-		"Action":      "CreateSecurityGroup",
-		"GroupName":   "test-sg",
-		"Description": "test sg",
-		"VpcId":       vpcID,
+		"Action":           "CreateSecurityGroup",
+		"GroupName":        "test-sg",
+		"GroupDescription": "test sg",
+		"VpcId":            vpcID,
 	})
 	var sgResult struct {
 		GroupID string `xml:"groupId"`
@@ -579,6 +579,61 @@ func TestEC2_SecurityGroup_DescribeDelete(t *testing.T) {
 	delResp.Body.Close() //nolint:errcheck
 }
 
+// TestEC2_SecurityGroup_GroupDescription verifies that CreateSecurityGroup reads
+// the description from the GroupDescription parameter (not Description), matching
+// the AWS EC2 query protocol wire format. Regression test for #219.
+func TestEC2_SecurityGroup_GroupDescription(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.5.0.0/16"})
+	var vpcResult struct {
+		VPC struct{ VPCID string `xml:"vpcId"` } `xml:"vpc"`
+	}
+	if err := xml.NewDecoder(vpcResp.Body).Decode(&vpcResult); err != nil {
+		t.Fatalf("decode CreateVpc: %v", err)
+	}
+	vpcResp.Body.Close() //nolint:errcheck
+
+	sgResp := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateSecurityGroup",
+		"GroupName":        "desc-test-sg",
+		"GroupDescription": "my group description",
+		"VpcId":            vpcResult.VPC.VPCID,
+	})
+	if sgResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateSecurityGroup: expected 200, got %d", sgResp.StatusCode)
+	}
+	var sgResult struct{ GroupID string `xml:"groupId"` }
+	if err := xml.NewDecoder(sgResp.Body).Decode(&sgResult); err != nil {
+		t.Fatalf("decode CreateSecurityGroup: %v", err)
+	}
+	sgResp.Body.Close() //nolint:errcheck
+
+	dResp := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeSecurityGroups",
+		"GroupId.1": sgResult.GroupID,
+	})
+	if dResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeSecurityGroups: expected 200, got %d", dResp.StatusCode)
+	}
+	var dResult struct {
+		Groups []struct {
+			Description string `xml:"groupDescription"`
+		} `xml:"securityGroupInfo>item"`
+	}
+	if err := xml.NewDecoder(dResp.Body).Decode(&dResult); err != nil {
+		t.Fatalf("decode DescribeSecurityGroups: %v", err)
+	}
+	dResp.Body.Close() //nolint:errcheck
+	if len(dResult.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(dResult.Groups))
+	}
+	if dResult.Groups[0].Description != "my group description" {
+		t.Errorf("groupDescription = %q; want %q", dResult.Groups[0].Description, "my group description")
+	}
+}
+
 func TestEC2_SecurityGroup_EgressRules(t *testing.T) {
 	ts := newEC2TestServer(t)
 
@@ -595,7 +650,7 @@ func TestEC2_SecurityGroup_EgressRules(t *testing.T) {
 
 	sgResp := ec2Request(t, ts, map[string]string{
 		"Action": "CreateSecurityGroup", "GroupName": "egress-sg",
-		"Description": "egress test", "VpcId": vpcResult.VPC.VPCID,
+		"GroupDescription": "egress test", "VpcId": vpcResult.VPC.VPCID,
 	})
 	var sgResult struct {
 		GroupID string `xml:"groupId"`
@@ -1432,10 +1487,10 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 	makeSG := func(name, vpcID string) string {
 		t.Helper()
 		r := ec2Request(t, ts, map[string]string{
-			"Action":      "CreateSecurityGroup",
-			"GroupName":   name,
-			"Description": name,
-			"VpcId":       vpcID,
+			"Action":           "CreateSecurityGroup",
+			"GroupName":        name,
+			"GroupDescription": name,
+			"VpcId":            vpcID,
 		})
 		defer r.Body.Close() //nolint:errcheck
 		var res struct {

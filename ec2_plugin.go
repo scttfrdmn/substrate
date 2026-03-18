@@ -777,7 +777,7 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 
 func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	groupName := req.Params["GroupName"]
-	description := req.Params["Description"]
+	description := req.Params["GroupDescription"]
 	vpcID := req.Params["VpcId"]
 	sgID := generateSGID()
 	sg := EC2SecurityGroup{

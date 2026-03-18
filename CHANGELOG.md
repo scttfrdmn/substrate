@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.21] - 2026-03-18
+
+### Fixed
+
+- **EC2 `CreateSecurityGroup` now reads description from `GroupDescription` parameter** (`ec2_plugin.go`): the handler was reading `req.Params["Description"]` but the AWS EC2 query protocol wire format sends `GroupDescription`. Security groups created via any AWS SDK always had an empty description. The fix changes the key to `"GroupDescription"`. Existing tests that passed the wrong parameter name were also corrected. Fixes #219.
+
+### Added
+
+- **Regression test for `CreateSecurityGroup` description** (`ec2_plugin_test.go`): `TestEC2_SecurityGroup_GroupDescription` creates a group with `GroupDescription=my group description` and asserts that `DescribeSecurityGroups` returns the same value in `groupDescription`.
+
 ## [v0.36.20] - 2026-03-18
 
 ### Fixed
