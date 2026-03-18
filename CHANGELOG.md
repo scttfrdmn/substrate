@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.38.0] - 2026-03-18
+
+### Added
+
+- **RDS Aurora clusters** (`rds_plugin.go`, `rds_types.go`): `CreateDBCluster`,
+  `DescribeDBClusters`, `DeleteDBCluster` — cluster ARNs, endpoints, and status.
+  Closes #133.
+- **MSK plugin** (`msk_plugin.go`, `msk_types.go`): Kafka cluster lifecycle —
+  `CreateCluster`, `DescribeCluster`, `ListClusters`, `DeleteCluster`. Cluster ARN
+  format: `arn:aws:kafka:{region}:{acct}:cluster/{name}/{uuid}`. Closes #138.
+- **Email capture endpoint** (`debug_ui.go`): `GET /v1/emails` returns all SES messages
+  captured in the emulator as JSON, enabling test assertions without a real mail server.
+  Closes #140.
+- **`RestoreDBInstanceFromDBSnapshot`** (`rds_plugin.go`): Restores an RDS DB instance
+  from a DB snapshot, creating a new instance with the snapshot's engine/storage settings.
+  Closes #188.
+- **Betty CFN resources for ElastiCache and MSK** (`betty_cfn_*.go`): CloudFormation
+  resource types `AWS::ElastiCache::ReplicationGroup` and `AWS::MSK::Cluster` now
+  deployable via Betty. Closes #189.
+
 ## [v0.37.1] - 2026-03-18
 
 ### Added
@@ -1001,3 +1021,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.21]: https://github.com/scttfrdmn/substrate/compare/v0.36.20...v0.36.21
 [v0.37.0]: https://github.com/scttfrdmn/substrate/compare/v0.36.21...v0.37.0
 [v0.37.1]: https://github.com/scttfrdmn/substrate/compare/v0.37.0...v0.37.1
+[v0.38.0]: https://github.com/scttfrdmn/substrate/compare/v0.37.1...v0.38.0
