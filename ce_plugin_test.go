@@ -54,8 +54,8 @@ func newCEWithEC2TestServer(t *testing.T) (*httptest.Server, *substrate.TimeCont
 
 	ec2p := &substrate.EC2Plugin{}
 	if err := ec2p.Initialize(t.Context(), substrate.PluginConfig{ //nolint:contextcheck
-		State:  state,
-		Logger: logger,
+		State:   state,
+		Logger:  logger,
 		Options: map[string]any{"time_controller": tc},
 	}); err != nil {
 		t.Fatalf("initialize ec2 plugin: %v", err)
@@ -239,7 +239,7 @@ func TestCE_GetCostAndUsage_BlendedCostMetric(t *testing.T) {
 
 	var out struct {
 		ResultsByTime []struct {
-			Total  map[string]map[string]string   `json:"Total"`
+			Total  map[string]map[string]string `json:"Total"`
 			Groups []struct {
 				Keys    []string                     `json:"Keys"`
 				Metrics map[string]map[string]string `json:"Metrics"`
@@ -391,7 +391,7 @@ func TestCE_EC2UsageCost_TerminatedInstance(t *testing.T) {
 	}
 	// Re-read: the body was already drained by the status check above, so re-run.
 	runResp2 := ec2QueryRequest(t, ts, map[string]string{
-		"Action":       "DescribeInstances",
+		"Action": "DescribeInstances",
 	})
 	defer runResp2.Body.Close() //nolint:errcheck
 	var descResult struct {
@@ -413,7 +413,7 @@ func TestCE_EC2UsageCost_TerminatedInstance(t *testing.T) {
 	// Advance 10 hours, then terminate.
 	tc.SetTime(baseline.Add(10 * time.Hour))
 	termResp := ec2QueryRequest(t, ts, map[string]string{
-		"Action":      "TerminateInstances",
+		"Action":       "TerminateInstances",
 		"InstanceId.1": instID,
 	})
 	defer termResp.Body.Close() //nolint:errcheck
@@ -480,14 +480,14 @@ func TestCE_GetCostAndUsage_GroupByTag(t *testing.T) {
 
 	// Launch an m7i.large with Name=cost-tag-test.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
-		"Action":                         "RunInstances",
-		"ImageId":                        "ami-12345678",
-		"InstanceType":                   "m7i.large",
-		"MinCount":                       "1",
-		"MaxCount":                       "1",
+		"Action":                          "RunInstances",
+		"ImageId":                         "ami-12345678",
+		"InstanceType":                    "m7i.large",
+		"MinCount":                        "1",
+		"MaxCount":                        "1",
 		"TagSpecification.1.ResourceType": "instance",
-		"TagSpecification.1.Tag.1.Key":   "Name",
-		"TagSpecification.1.Tag.1.Value": "cost-tag-test",
+		"TagSpecification.1.Tag.1.Key":    "Name",
+		"TagSpecification.1.Tag.1.Value":  "cost-tag-test",
 	})
 	_ = runResp.Body.Close()
 	if runResp.StatusCode != http.StatusOK {

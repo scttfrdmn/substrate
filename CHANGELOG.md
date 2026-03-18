@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.41.2] - 2026-03-18
+
+### Fixed
+
+- **gofmt / linter fixes** (`ec2_plugin.go`, `ce_plugin.go`, `ce_plugin_test.go`, `ce_types.go`,
+  `s3_plugin.go`, `parser.go`, and several test files): Applied `gofmt`; fixed all
+  `golangci-lint` issues — misspellings (`behaviour`→`behavior`, `synthesising`→`synthesizing`,
+  `Synthesise`→`Synthesize`, `modelled`→`modeled`), `ineffassign` on unused `name` reassignment
+  in `deleteKeyPair`, and `nilerr` in `deleteObjects`.
+
 ## [v0.41.1] - 2026-03-18
 
 ### Fixed

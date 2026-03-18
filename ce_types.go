@@ -55,7 +55,7 @@ type CEGroupDefinition struct {
 }
 
 // CEFilter is the top-level filter expression in a GetCostAndUsage request.
-// Only the Dimensions sub-filter is modelled; nested And/Or/Not are not needed
+// Only the Dimensions sub-filter is modeled; nested And/Or/Not are not needed
 // for the use cases Substrate currently supports.
 type CEFilter struct {
 	// Dimensions filters by a named AWS dimension.

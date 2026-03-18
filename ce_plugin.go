@@ -162,7 +162,7 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 				Estimated:  false,
 			}}
 		} else {
-			// Default: group by SERVICE (existing behaviour).
+			// Default: group by SERVICE (existing behavior).
 			bySvc := make(map[string]float64)
 			var totalCost float64
 			if p.store != nil {
@@ -379,7 +379,7 @@ func (p *CEPlugin) computeEC2UsageCost(accountID string, queryStart, queryEnd ti
 
 // computeEC2UsageCostByTag returns per-tag-value EC2 costs grouped by tagKey.
 // Map keys use AWS CE tag format: "TagKey$TagValue".  Instances without the
-// tag are grouped under "TagKey$" (empty value), matching real AWS behaviour.
+// tag are grouped under "TagKey$" (empty value), matching real AWS behavior.
 func (p *CEPlugin) computeEC2UsageCostByTag(accountID string, queryStart, queryEnd time.Time, tagKey string) map[string]float64 {
 	result := make(map[string]float64)
 	if p.state == nil {

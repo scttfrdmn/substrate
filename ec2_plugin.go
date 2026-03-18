@@ -1451,13 +1451,13 @@ func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags 
 	case strings.HasPrefix(id, "nat-"):
 		stateKey = "nat:" + scope + "/" + id
 	default:
-		// Unknown resource type — silently ignore (matches AWS behaviour).
+		// Unknown resource type — silently ignore (matches AWS behavior).
 		return nil
 	}
 
 	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
 	if err != nil || data == nil {
-		return nil // Resource not found — ignore (matches AWS behaviour).
+		return nil // Resource not found — ignore (matches AWS behavior).
 	}
 
 	// Use a generic map to avoid switching on concrete struct types.
@@ -1661,7 +1661,6 @@ func (p *EC2Plugin) deleteKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			var kp EC2KeyPair
 			if json.Unmarshal(data, &kp) == nil && kp.KeyPairID == name {
 				stateKey = k
-				name = kp.KeyName
 				break
 			}
 		}

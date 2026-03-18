@@ -731,7 +731,7 @@ func (p *S3Plugin) deleteObjects(reqCtx *RequestContext, req *AWSRequest, bucket
 	var deleteReq deleteRequest
 	if len(req.Body) > 0 {
 		if xmlErr := xml.Unmarshal(req.Body, &deleteReq); xmlErr != nil {
-			return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil
+			return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr
 		}
 	}
 
@@ -757,7 +757,7 @@ func (p *S3Plugin) deleteObjects(reqCtx *RequestContext, req *AWSRequest, bucket
 		if obj.Key == "" {
 			continue
 		}
-		// Delegate to the single-delete path by synthesising a minimal AWSRequest.
+		// Delegate to the single-delete path by synthesizing a minimal AWSRequest.
 		synReq := &AWSRequest{
 			Operation: "DELETE",
 			Path:      req.Path,

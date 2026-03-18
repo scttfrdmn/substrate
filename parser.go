@@ -77,7 +77,7 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	target := r.Header.Get("X-Amz-Target")
 	authHeader := r.Header.Get("Authorization")
 	// Presigned requests carry auth in query params instead of an Authorization
-	// header.  Synthesise a minimal credential string so all header-based
+	// header.  Synthesize a minimal credential string so all header-based
 	// extraction helpers (service, region, account) work transparently.
 	if authHeader == "" {
 		if credParam := params["X-Amz-Credential"]; credParam != "" {
