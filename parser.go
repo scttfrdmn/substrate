@@ -2,6 +2,7 @@ package substrate
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -454,6 +455,17 @@ func normalizeS3CustomEndpointVirtualHost(host, urlPath string) (bucket, normPat
 	// Standard amazonaws.com virtual-hosted paths are handled by
 	// normalizeS3VirtualHost; skip them here.
 	if strings.HasSuffix(host, ".amazonaws.com") {
+		return "", "", false
+	}
+
+	// IPv4 addresses (e.g. "127.0.0.1") contain dots and would be incorrectly
+	// treated as virtual-hosted hosts. IPv6 addresses in bracket notation
+	// (e.g. "[::1]") must also be excluded. Both are always path-style.
+	ipHost := host
+	if strings.HasPrefix(ipHost, "[") && strings.HasSuffix(ipHost, "]") {
+		ipHost = ipHost[1 : len(ipHost)-1] // strip "[" / "]" from IPv6 URL notation
+	}
+	if net.ParseIP(ipHost) != nil {
 		return "", "", false
 	}
 

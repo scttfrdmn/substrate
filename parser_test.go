@@ -404,6 +404,31 @@ func TestParseAWSRequest_S3CustomEndpoint(t *testing.T) {
 			wantService: "s3",
 			wantPath:    "/my-bucket/obj",
 		},
+		{
+			// IPv4 loopback — dots must NOT be mistaken for a virtual-hosted bucket.
+			// Regression test for #213.
+			name:        "path-style IPv4 loopback",
+			host:        "127.0.0.1:4566",
+			urlPath:     "/my-bucket/my-key.txt",
+			wantService: "s3",
+			wantPath:    "/my-bucket/my-key.txt",
+		},
+		{
+			// IPv4 without port.
+			name:        "path-style IPv4 no port",
+			host:        "192.168.1.1",
+			urlPath:     "/bucket/key",
+			wantService: "s3",
+			wantPath:    "/bucket/key",
+		},
+		{
+			// IPv6 loopback in bracket notation.
+			name:        "path-style IPv6 loopback",
+			host:        "[::1]:4566",
+			urlPath:     "/my-bucket/key",
+			wantService: "s3",
+			wantPath:    "/my-bucket/key",
+		},
 	}
 
 	for _, tt := range tests {

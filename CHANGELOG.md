@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.17] - 2026-03-18
+
+### Fixed
+
+- **S3 path-style requests to IPv4/IPv6 addresses now work correctly** (`parser.go`): `normalizeS3CustomEndpointVirtualHost` treated any host containing a dot as a virtual-hosted-style request and extracted the first octet of an IPv4 address (e.g. `"127"` from `"127.0.0.1"`) as the bucket name. Requests to `127.0.0.1:<port>` would incorrectly route to a non-existent bucket and return `NoSuchBucket`. The fix adds a `net.ParseIP` check before the dot-presence check; IPv4 and IPv6 bracket-notation addresses are now correctly treated as path-style hosts. Fixes #213.
+
+### Changed
+
+- **`StartTestServer` now uses `localhost` instead of `127.0.0.1`** (`testing.go`): the listener address and `TestServer.URL` are now `http://localhost:<port>`. This avoids the IP-address virtual-hosting misparse for callers that use `TestServer.URL` as an S3 base endpoint with path-style requests (the `UsePathStyle = true` pattern). The fix in `parser.go` is the authoritative resolution; this change adds defence-in-depth and simplifies the `URL` field for humans reading test output.
+
 ## [v0.36.16] - 2026-03-18
 
 ### Fixed
@@ -889,3 +899,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.14]: https://github.com/scttfrdmn/substrate/compare/v0.36.13...v0.36.14
 [v0.36.15]: https://github.com/scttfrdmn/substrate/compare/v0.36.14...v0.36.15
 [v0.36.16]: https://github.com/scttfrdmn/substrate/compare/v0.36.15...v0.36.16
+[v0.36.17]: https://github.com/scttfrdmn/substrate/compare/v0.36.16...v0.36.17

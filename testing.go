@@ -14,7 +14,7 @@ import (
 // Create one with [StartTestServer]; it is automatically shut down when the
 // test ends via t.Cleanup.
 type TestServer struct {
-	// URL is the base URL of the server, e.g. "http://127.0.0.1:54321".
+	// URL is the base URL of the server, e.g. "http://localhost:54321".
 	URL string
 	// Port is the TCP port the server is listening on.
 	Port int
@@ -30,7 +30,7 @@ func StartTestServer(t *testing.T) *TestServer {
 	t.Helper()
 
 	cfg := DefaultConfig()
-	cfg.Server.Address = "127.0.0.1:0"
+	cfg.Server.Address = "localhost:0"
 	cfg.EventStore.Enabled = false
 	cfg.Log.Level = "error"
 
@@ -48,7 +48,7 @@ func StartTestServer(t *testing.T) *TestServer {
 
 	// Bind to a random port and keep the listener open to avoid the TOCTOU race
 	// between port reservation and server bind.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("StartTestServer: listen: %v", err)
 	}
@@ -64,7 +64,7 @@ func StartTestServer(t *testing.T) *TestServer {
 	}()
 
 	// Wait until the health endpoint responds.
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	baseURL := fmt.Sprintf("http://localhost:%d", port)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, pingErr := http.Get(baseURL + "/health") //nolint:noctx
