@@ -67,6 +67,15 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	if _, normPath, ok := normalizeS3VirtualHost(host, r.URL.Path); ok {
 		effectivePath = normPath
 		service = "s3"
+	} else if service == "s3" {
+		// Custom-endpoint virtual-hosted style: <bucket>.<host>:<port>
+		// AWS SDK v2 prepends the bucket name to the base-endpoint host even for
+		// non-amazonaws.com endpoints (e.g. my-bucket.localhost:4566).
+		// normalizeS3VirtualHost did not fire, but we already know service=="s3"
+		// from the SigV4 credential scope, so normalise the path here.
+		if _, normPath, ok := normalizeS3CustomEndpointVirtualHost(host, r.URL.Path); ok {
+			effectivePath = normPath
+		}
 	}
 
 	operation := extractOperation(target, params, r.Method)
@@ -356,6 +365,40 @@ func normalizeS3VirtualHost(host, urlPath string) (bucket, normPath string, ok b
 	// Bucket is everything before the "s3" token.
 	bucket = strings.Join(parts[:s3Idx], ".")
 	// Normalised path: /<bucket><urlPath>.
+	normPath = "/" + bucket + urlPath
+	return bucket, normPath, true
+}
+
+// normalizeS3CustomEndpointVirtualHost detects virtual-hosted-style S3 requests
+// sent to a non-amazonaws.com base endpoint (e.g. my-bucket.localhost:4566).
+// AWS SDK v2 always prepends the bucket name to the configured base-endpoint
+// host, so when callers use config.WithBaseEndpoint the Host header looks like
+// "<bucket>.<emulator-host>:<port>" rather than the usual
+// "<bucket>.s3.<region>.amazonaws.com".
+//
+// This function must only be called after the service has already been
+// identified as "s3" via another signal (SigV4 credential scope); it should
+// not be used as a standalone service detector.
+func normalizeS3CustomEndpointVirtualHost(host, urlPath string) (bucket, normPath string, ok bool) {
+	// Strip port.
+	if colon := strings.LastIndexByte(host, ':'); colon > 0 {
+		host = host[:colon]
+	}
+
+	// Standard amazonaws.com virtual-hosted paths are handled by
+	// normalizeS3VirtualHost; skip them here.
+	if strings.HasSuffix(host, ".amazonaws.com") {
+		return "", "", false
+	}
+
+	// The bucket is the first DNS label when the host has at least one dot.
+	// A bare hostname (e.g. "localhost") has no dot and is path-style.
+	dot := strings.IndexByte(host, '.')
+	if dot <= 0 {
+		return "", "", false
+	}
+
+	bucket = host[:dot]
 	normPath = "/" + bucket + urlPath
 	return bucket, normPath, true
 }

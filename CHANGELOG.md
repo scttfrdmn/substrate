@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.2] - 2026-03-17
+
+### Fixed
+
+- **S3 virtual-hosted style with `config.WithBaseEndpoint`** (`parser.go`): AWS SDK v2 prepends the bucket name to the custom base-endpoint host (e.g. `my-bucket.localhost:4566`). `normalizeS3VirtualHost` only handled `.amazonaws.com` hosts, so the bucket was never prepended to the request path and Substrate returned a 501. A new helper `normalizeS3CustomEndpointVirtualHost` fires after the service is identified as `"s3"` (via SigV4 credential scope from v0.36.1) and strips the first DNS label as the bucket name, normalising the path for all S3 plugins. Path-style requests (`localhost:4566/bucket/key`) already worked after v0.36.1. Fixes issue #191.
+
 ## [v0.36.1] - 2026-03-17
 
 ### Fixed
@@ -754,3 +760,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.35.0]: https://github.com/scttfrdmn/substrate/compare/v0.34.0...v0.35.0
 [v0.36.0]: https://github.com/scttfrdmn/substrate/compare/v0.35.0...v0.36.0
 [v0.36.1]: https://github.com/scttfrdmn/substrate/compare/v0.36.0...v0.36.1
+[v0.36.2]: https://github.com/scttfrdmn/substrate/compare/v0.36.1...v0.36.2

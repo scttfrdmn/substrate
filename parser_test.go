@@ -313,6 +313,71 @@ func TestParseAWSRequest_S3VirtualHosted(t *testing.T) {
 	}
 }
 
+// TestParseAWSRequest_S3CustomEndpoint verifies that S3 requests to a single
+// base-endpoint URL are correctly identified and that virtual-hosted style
+// paths are normalised even when the host is not amazonaws.com.
+// This covers the AWS SDK v2 config.WithBaseEndpoint pattern (issue #191).
+func TestParseAWSRequest_S3CustomEndpoint(t *testing.T) {
+	t.Parallel()
+	const s3Auth = "AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc"
+
+	tests := []struct {
+		name        string
+		host        string
+		urlPath     string
+		wantService string
+		wantPath    string
+	}{
+		{
+			// AWS SDK v2 virtual-hosted style: bucket prepended to base endpoint host.
+			name:        "virtual-hosted custom endpoint",
+			host:        "my-bucket.localhost:4566",
+			urlPath:     "/my-key.txt",
+			wantService: "s3",
+			wantPath:    "/my-bucket/my-key.txt",
+		},
+		{
+			// Bucket-root request (no key).
+			name:        "virtual-hosted bucket root",
+			host:        "my-bucket.localhost:4566",
+			urlPath:     "/",
+			wantService: "s3",
+			wantPath:    "/my-bucket/",
+		},
+		{
+			// Path-style with custom endpoint: bucket in path, bare host.
+			name:        "path-style custom endpoint",
+			host:        "localhost:4566",
+			urlPath:     "/my-bucket/my-key.txt",
+			wantService: "s3",
+			wantPath:    "/my-bucket/my-key.txt",
+		},
+		{
+			// Multi-label emulator host (e.g. substrate.local:4566).
+			name:        "virtual-hosted multi-label emulator host",
+			host:        "my-bucket.substrate.local:4566",
+			urlPath:     "/obj",
+			wantService: "s3",
+			wantPath:    "/my-bucket/obj",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodPut, "http://"+tt.host+tt.urlPath, nil)
+			r.Host = tt.host
+			r.Header.Set("Authorization", s3Auth)
+
+			req, _, err := substrate.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantService, req.Service)
+			assert.Equal(t, tt.wantPath, req.Path)
+		})
+	}
+}
+
 // TestParseAWSRequest_ServiceFromSigV4Auth verifies that when a client sends
 // requests to a single base-endpoint URL (Host: localhost:4566) without a
 // service-specific hostname, the service is still correctly identified via the
