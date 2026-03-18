@@ -175,6 +175,13 @@ func (c *TimeController) SetTime(ts time.Time) {
 	c.wallBaseline = time.Now()
 }
 
+// Scale returns the current time acceleration factor.
+func (c *TimeController) Scale() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.scale
+}
+
 // SetScale sets the time acceleration factor.  A scale of 1.0 is real-time;
 // 3600.0 makes one real second equal one simulated hour; 86400.0 makes one
 // real second equal one simulated day.  The current simulated time is

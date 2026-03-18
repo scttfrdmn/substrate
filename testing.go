@@ -18,7 +18,8 @@ type TestServer struct {
 	URL string
 	// Port is the TCP port the server is listening on.
 	Port int
-	srv  *Server
+	tc  *TimeController
+	srv *Server
 }
 
 // StartTestServer starts an in-process Substrate server on a random port,
@@ -82,7 +83,7 @@ func StartTestServer(t *testing.T) *TestServer {
 		<-done
 	})
 
-	return &TestServer{URL: baseURL, Port: port, srv: srv}
+	return &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv}
 }
 
 // ResetState wipes all server state. Call this between test cases that share
@@ -97,4 +98,25 @@ func (ts *TestServer) ResetState(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("ResetState: unexpected status %d", resp.StatusCode)
 	}
+}
+
+// AdvanceTime moves the simulated clock forward by d. Useful for triggering
+// time-dependent logic such as TTL expiry, alert thresholds, or cost accrual
+// without waiting for wall time to pass.
+func (ts *TestServer) AdvanceTime(d time.Duration) {
+	ts.tc.SetTime(ts.tc.Now().Add(d))
+}
+
+// SetTime sets the simulated clock to an absolute timestamp. Useful for
+// establishing a known starting point before running time-sensitive tests.
+func (ts *TestServer) SetTime(t time.Time) {
+	ts.tc.SetTime(t)
+}
+
+// SetScale sets the time acceleration factor. A scale of 1.0 is real-time;
+// 3600.0 makes one real second equal one simulated hour. Use together with
+// [TestServer.AdvanceTime] or [TestServer.SetTime] to drive time-dependent
+// code paths.
+func (ts *TestServer) SetScale(scale float64) {
+	ts.tc.SetScale(scale)
 }

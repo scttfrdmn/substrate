@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	substrate "github.com/scttfrdmn/substrate"
 )
@@ -95,6 +96,100 @@ func TestStartTestServer_stateReset(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("after reset got status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestTestServer_AdvanceTime(t *testing.T) {
+	ts := substrate.StartTestServer(t)
+
+	// Read baseline simulated time via HTTP.
+	resp, err := http.Get(ts.URL + "/v1/control/time") //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET /v1/control/time: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	var before map[string]any
+	if err := json.Unmarshal(body, &before); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	beforeTime, err := time.Parse(time.RFC3339Nano, before["simulated_time"].(string))
+	if err != nil {
+		t.Fatalf("parse before time: %v", err)
+	}
+
+	// Advance by 24 hours in-process.
+	ts.AdvanceTime(24 * time.Hour)
+
+	// Read again via HTTP.
+	resp2, err := http.Get(ts.URL + "/v1/control/time") //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET /v1/control/time after advance: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+
+	var after map[string]any
+	if err := json.Unmarshal(body2, &after); err != nil {
+		t.Fatalf("unmarshal after: %v", err)
+	}
+	afterTime, err := time.Parse(time.RFC3339Nano, after["simulated_time"].(string))
+	if err != nil {
+		t.Fatalf("parse after time: %v", err)
+	}
+
+	diff := afterTime.Sub(beforeTime)
+	if diff < 23*time.Hour || diff > 25*time.Hour {
+		t.Errorf("expected ~24h advance, got %v", diff)
+	}
+}
+
+func TestTestServer_SetTime(t *testing.T) {
+	ts := substrate.StartTestServer(t)
+
+	target := time.Date(2030, 6, 1, 12, 0, 0, 0, time.UTC)
+	ts.SetTime(target)
+
+	resp, err := http.Get(ts.URL + "/v1/control/time") //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET /v1/control/time: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	simTime, err := time.Parse(time.RFC3339Nano, payload["simulated_time"].(string))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !strings.HasPrefix(simTime.UTC().Format(time.RFC3339), "2030-06-01") {
+		t.Errorf("expected 2030-06-01, got %s", simTime)
+	}
+}
+
+func TestTestServer_SetScale(t *testing.T) {
+	ts := substrate.StartTestServer(t)
+
+	ts.SetScale(7200)
+
+	resp, err := http.Get(ts.URL + "/v1/control/time") //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET /v1/control/time: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	scale, ok := payload["scale"].(float64)
+	if !ok || scale != 7200 {
+		t.Errorf("expected scale 7200, got %v", payload["scale"])
 	}
 }
 

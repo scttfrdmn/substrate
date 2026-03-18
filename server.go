@@ -215,6 +215,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/state/reset", s.handleStateReset)
 	r.Get("/v1/emails", s.handleEmails)
 
+	r.Get("/v1/control/time", s.handleGetTime)
+	r.Post("/v1/control/time", s.handleSetTime)
+	r.Post("/v1/control/scale", s.handleSetScale)
+
 	r.Get("/ui", s.handleDebugUI)
 	r.Get("/v1/debug/events", s.handleDebugEvents)
 	r.Get("/v1/debug/events/{seq}/state", s.handleDebugStateAt)

@@ -307,6 +307,74 @@ func (s *Server) stateAtSequence(ctx context.Context, upToSeq int64) ([]byte, er
 	return freshState.Snapshot(ctx)
 }
 
+// timeControlResponse is the JSON shape returned by /v1/control/time.
+type timeControlResponse struct {
+	SimulatedTime string  `json:"simulated_time"`
+	Scale         float64 `json:"scale"`
+}
+
+// handleGetTime returns the current simulated time and scale factor.
+func (s *Server) handleGetTime(w http.ResponseWriter, _ *http.Request) {
+	if s.tc == nil {
+		http.Error(w, `{"error":"time controller not configured"}`, http.StatusNotImplemented)
+		return
+	}
+	writeJSONDebug(w, s.logger, timeControlResponse{
+		SimulatedTime: s.tc.Now().UTC().Format(time.RFC3339Nano),
+		Scale:         s.tc.Scale(),
+	})
+}
+
+// handleSetTime sets the simulated clock to the time specified in the JSON body.
+// The request body must be {"time": "<RFC3339>"}.  Responds with the same shape
+// as GET /v1/control/time.
+func (s *Server) handleSetTime(w http.ResponseWriter, r *http.Request) {
+	if s.tc == nil {
+		http.Error(w, `{"error":"time controller not configured"}`, http.StatusNotImplemented)
+		return
+	}
+	var body struct {
+		Time string `json:"time"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	t, err := time.Parse(time.RFC3339Nano, body.Time)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, body.Time)
+	}
+	if err != nil {
+		http.Error(w, `{"error":"time must be RFC3339 format"}`, http.StatusBadRequest)
+		return
+	}
+	s.tc.SetTime(t)
+	s.handleGetTime(w, r)
+}
+
+// handleSetScale sets the time acceleration factor from the JSON body.
+// The request body must be {"scale": <positive float>}.  Responds with the same
+// shape as GET /v1/control/time.
+func (s *Server) handleSetScale(w http.ResponseWriter, r *http.Request) {
+	if s.tc == nil {
+		http.Error(w, `{"error":"time controller not configured"}`, http.StatusNotImplemented)
+		return
+	}
+	var body struct {
+		Scale float64 `json:"scale"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Scale <= 0 {
+		http.Error(w, `{"error":"scale must be > 0"}`, http.StatusBadRequest)
+		return
+	}
+	s.tc.SetScale(body.Scale)
+	s.handleGetTime(w, r)
+}
+
 // writeJSONDebug marshals v to JSON and writes it to w.
 func writeJSONDebug(w http.ResponseWriter, logger Logger, v interface{}) {
 	body, err := json.Marshal(v)

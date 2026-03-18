@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.10] - 2026-03-18
+
+### Added
+
+- **HTTP time-control endpoints** (`server.go`, `debug_ui.go`): three REST endpoints allow any test harness to drive the simulated clock over HTTP without a Go client. `GET /v1/control/time` returns the current simulated time and scale factor; `POST /v1/control/time` jumps the clock to an arbitrary RFC3339 instant; `POST /v1/control/scale` sets the acceleration factor (e.g. `{"scale":3600}` makes 1 real second equal 1 simulated hour).
+- **`TimeController.Scale()`** (`types.go`): new read-only accessor returns the current time acceleration factor.
+- **`TestServer` time-control methods** (`testing.go`): `AdvanceTime(d time.Duration)`, `SetTime(t time.Time)`, and `SetScale(scale float64)` allow in-process integration tests to drive the simulated clock directly without HTTP calls. Fixes #206.
+
 ## [v0.36.9] - 2026-03-18
 
 ### Fixed
@@ -816,3 +824,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.2]: https://github.com/scttfrdmn/substrate/compare/v0.36.1...v0.36.2
 [v0.36.3]: https://github.com/scttfrdmn/substrate/compare/v0.36.2...v0.36.3
 [v0.36.4]: https://github.com/scttfrdmn/substrate/compare/v0.36.3...v0.36.4
+[v0.36.5]: https://github.com/scttfrdmn/substrate/compare/v0.36.4...v0.36.5
+[v0.36.6]: https://github.com/scttfrdmn/substrate/compare/v0.36.5...v0.36.6
+[v0.36.7]: https://github.com/scttfrdmn/substrate/compare/v0.36.6...v0.36.7
+[v0.36.8]: https://github.com/scttfrdmn/substrate/compare/v0.36.7...v0.36.8
+[v0.36.9]: https://github.com/scttfrdmn/substrate/compare/v0.36.8...v0.36.9
+[v0.36.10]: https://github.com/scttfrdmn/substrate/compare/v0.36.9...v0.36.10
