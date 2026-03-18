@@ -313,6 +313,47 @@ func TestParseAWSRequest_S3VirtualHosted(t *testing.T) {
 	}
 }
 
+// TestParseAWSRequest_ServiceFromSigV4Auth verifies that when a client sends
+// requests to a single base-endpoint URL (Host: localhost:4566) without a
+// service-specific hostname, the service is still correctly identified via the
+// SigV4 credential scope in the Authorization header.  This is the common
+// config.WithBaseEndpoint integration-test pattern.
+func TestParseAWSRequest_ServiceFromSigV4Auth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		authScope   string // "<key>/<date>/<region>/<service>/aws4_request"
+		wantService string
+	}{
+		{"sts", "AKIATEST12345678901/20240101/us-east-1/sts/aws4_request", "sts"},
+		{"ec2", "AKIATEST12345678901/20240101/us-east-1/ec2/aws4_request", "ec2"},
+		{"iam", "AKIATEST12345678901/20240101/us-east-1/iam/aws4_request", "iam"},
+		{"monitoring (CloudWatch)", "AKIATEST12345678901/20240101/us-east-1/monitoring/aws4_request", "monitoring"},
+		{"logs (CWLogs)", "AKIATEST12345678901/20240101/us-east-1/logs/aws4_request", "logs"},
+		{"elasticloadbalancing", "AKIATEST12345678901/20240101/us-east-1/elasticloadbalancing/aws4_request", "elasticloadbalancing"},
+		{"elasticfilesystem→efs", "AKIATEST12345678901/20240101/us-east-1/elasticfilesystem/aws4_request", "efs"},
+		{"ses→sesv2", "AKIATEST12345678901/20240101/us-east-1/ses/aws4_request", "sesv2"},
+		{"kafka→msk", "AKIATEST12345678901/20240101/us-east-1/kafka/aws4_request", "msk"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+			// Host is the emulator address, not a service-specific hostname.
+			r.Host = "localhost:4566"
+			r.Header.Set("Authorization",
+				"AWS4-HMAC-SHA256 Credential="+tt.authScope+", SignedHeaders=content-type;host;x-amz-date, Signature=abc123")
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+			req, _, err := substrate.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantService, req.Service)
+		})
+	}
+}
+
 func TestNormalizeS3VirtualHost(t *testing.T) {
 	tests := []struct {
 		host       string

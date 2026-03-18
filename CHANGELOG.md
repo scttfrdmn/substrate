@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.1] - 2026-03-17
+
+### Fixed
+
+- **Service identification with `config.WithBaseEndpoint`** (`parser.go`): query-protocol services (STS, EC2, IAM, CloudWatch, ELB, …) now resolve correctly when the SDK is configured with a single base endpoint URL (e.g. `http://localhost:8080`) instead of per-service hostnames. `extractService` gains a 4th strategy: reads the service name from the SigV4 `Authorization` credential scope (`…/<region>/<service>/aws4_request`). Added `"ses"→"sesv2"` alias to cover SES v2 SigV4 scope. Fixes issue #190.
+
 ## [v0.36.0] - 2026-03-16
 
 ### Added
@@ -747,3 +753,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.34.0]: https://github.com/scttfrdmn/substrate/compare/v0.32.0...v0.34.0
 [v0.35.0]: https://github.com/scttfrdmn/substrate/compare/v0.34.0...v0.35.0
 [v0.36.0]: https://github.com/scttfrdmn/substrate/compare/v0.35.0...v0.36.0
+[v0.36.1]: https://github.com/scttfrdmn/substrate/compare/v0.36.0...v0.36.1

@@ -63,7 +63,7 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	// S3 virtual-hosted-style URL normalisation.
 	// mybucket.s3[.<region>].amazonaws.com → service="s3", path="/mybucket/..."
 	effectivePath := r.URL.Path
-	service := extractService(target, host, r.URL.Path)
+	service := extractService(target, host, r.URL.Path, authHeader)
 	if _, normPath, ok := normalizeS3VirtualHost(host, r.URL.Path); ok {
 		effectivePath = normPath
 		service = "s3"
@@ -93,8 +93,9 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 }
 
 // extractService determines the AWS service name from available signals, in
-// priority order: X-Amz-Target header, Host header, URL path prefix.
-func extractService(target, host, urlPath string) string {
+// priority order: X-Amz-Target header, Host header, URL path prefix, SigV4
+// credential scope.
+func extractService(target, host, urlPath, authHeader string) string {
 	// 1. X-Amz-Target: "AmazonDynamoDB.GetItem" → "dynamodb"
 	//    or "DynamoDB_20120810.GetItem" → "dynamodb"
 	if target != "" {
@@ -113,6 +114,17 @@ func extractService(target, host, urlPath string) string {
 	// 3. URL path prefix: "/service/..." — emulator-local routing fallback.
 	if svc := extractServiceFromPath(urlPath); svc != "" {
 		return svc
+	}
+
+	// 4. SigV4 Authorization credential scope: the scope encodes the service
+	// name explicitly (e.g. "…/us-east-1/sts/aws4_request"). This covers the
+	// common pattern where callers use a single base-endpoint URL (e.g.
+	// config.WithBaseEndpoint("http://localhost:4566")) so the Host is the
+	// emulator address rather than the service-specific amazonaws.com host.
+	if authHeader != "" {
+		if svc := extractServiceFromAuth(authHeader); svc != "" {
+			return svc
+		}
 	}
 
 	return "unknown"
@@ -158,6 +170,8 @@ var targetServiceAliases = map[string]string{
 	"email": "sesv2",
 	// "Kafka_20181101" → strip version → "Kafka" → lowercase → "kafka" → "msk".
 	"kafka": "msk",
+	// SigV4 service name for Amazon SES v2 is "ses".
+	"ses": "sesv2",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
@@ -367,6 +381,36 @@ func extractRegionFromAuth(authHeader string) string {
 		return ""
 	}
 	return parts[2]
+}
+
+// extractServiceFromAuth parses the AWS service name from the SigV4
+// Authorization header credential scope, e.g.:
+//
+//	AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20130524/us-east-1/sts/aws4_request, …
+//
+// This is the authoritative fallback for query-protocol requests that arrive at
+// a single base endpoint (e.g. localhost:4566) where the Host header does not
+// identify the service.
+func extractServiceFromAuth(authHeader string) string {
+	const credPrefix = "Credential="
+	idx := strings.Index(authHeader, credPrefix)
+	if idx < 0 {
+		return ""
+	}
+	cred := authHeader[idx+len(credPrefix):]
+	if end := strings.IndexAny(cred, ", "); end > 0 {
+		cred = cred[:end]
+	}
+	// cred is now: "<access-key>/<date>/<region>/<service>/aws4_request"
+	parts := strings.Split(cred, "/")
+	if len(parts) < 4 {
+		return ""
+	}
+	svc := strings.ToLower(parts[3])
+	if canonical, ok := targetServiceAliases[svc]; ok {
+		return canonical
+	}
+	return svc
 }
 
 // extractAccount determines the AWS account ID from the Authorization header.
