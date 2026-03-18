@@ -1505,6 +1505,7 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyName:     name,
 		Fingerprint: fp,
 		KeyType:     keyType,
+		CreatedAt:   p.tc.Now().UTC().Format(time.RFC3339),
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}
@@ -1548,6 +1549,7 @@ func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*
 		KeyName        string `xml:"keyName"`
 		KeyFingerprint string `xml:"keyFingerprint"`
 		KeyType        string `xml:"keyType"`
+		CreateTime     string `xml:"createTime,omitempty"`
 	}
 	type response struct {
 		XMLName  xml.Name `xml:"DescribeKeyPairsResponse"`
@@ -1573,6 +1575,7 @@ func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*
 			KeyName:        kp.KeyName,
 			KeyFingerprint: kp.Fingerprint,
 			KeyType:        kp.KeyType,
+			CreateTime:     kp.CreatedAt,
 		})
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -1656,6 +1659,7 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyName:     name,
 		Fingerprint: fp,
 		KeyType:     keyType,
+		CreatedAt:   p.tc.Now().UTC().Format(time.RFC3339),
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}

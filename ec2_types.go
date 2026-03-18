@@ -94,6 +94,9 @@ type EC2KeyPair struct {
 	// KeyType is the type of key pair (e.g. "rsa" or "ed25519").
 	KeyType string `json:"keyType"`
 
+	// CreatedAt is the RFC3339 timestamp when the key pair was created.
+	CreatedAt string `json:"createdAt,omitempty"`
+
 	// AccountID is the AWS account that owns the key pair.
 	AccountID string `json:"accountId"`
 

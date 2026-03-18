@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.20] - 2026-03-18
+
+### Fixed
+
+- **EC2 `DescribeKeyPairs` now includes `createTime` field** (`ec2_plugin.go`, `ec2_types.go`): `EC2KeyPair` was missing a `CreatedAt` field; `CreateKeyPair` and `ImportKeyPair` did not record the creation timestamp and `DescribeKeyPairs` omitted `<createTime>` from the XML response. AWS SDKs that read `KeyPairInfo.CreateTime` would receive `nil`, causing a zero `time.Time` on dereference. The fix adds `CreatedAt string` to `EC2KeyPair`, stamps it with the simulated clock at creation, and emits `<createTime>` in `DescribeKeyPairs`. Fixes #218.
+
+### Added
+
+- **Regression test for EC2 key pair `createTime`** (`ec2_plugin_test.go`): `TestEC2_KeyPair_CreateTime` verifies that `DescribeKeyPairs` returns a non-empty `createTime` after `CreateKeyPair`.
+
 ## [v0.36.19] - 2026-03-18
 
 ### Fixed

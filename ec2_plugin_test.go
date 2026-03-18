@@ -1158,6 +1158,45 @@ func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
 	}
 }
 
+// TestEC2_KeyPair_CreateTime verifies that DescribeKeyPairs includes a non-empty
+// createTime field. Regression test for #218.
+func TestEC2_KeyPair_CreateTime(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	createResp := ec2Request(t, ts, map[string]string{
+		"Action":  "CreateKeyPair",
+		"KeyName": "key-with-time",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateKeyPair: expected 200, got %d", createResp.StatusCode)
+	}
+	createResp.Body.Close() //nolint:errcheck
+
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeKeyPairs",
+		"KeyName.1": "key-with-time",
+	})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeKeyPairs: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		KeyPairs []struct {
+			CreateTime string `xml:"createTime"`
+		} `xml:"keySet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeKeyPairs: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.KeyPairs) != 1 {
+		t.Fatalf("expected 1 key pair, got %d", len(descResult.KeyPairs))
+	}
+	if descResult.KeyPairs[0].CreateTime == "" {
+		t.Error("createTime is empty; want RFC3339 timestamp")
+	}
+}
+
 // TestEC2_KeyPair_KeyType_Default verifies that CreateKeyPair without an explicit
 // KeyType defaults to "rsa" and that DescribeKeyPairs echoes the keyType field.
 // Regression test for #215.
