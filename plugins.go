@@ -263,6 +263,10 @@ func RegisterDefaultPlugins(
 	if err := sfnPlugin.Initialize(ctx, PluginConfig{
 		State:  state,
 		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+			"registry":        registry,
+		},
 	}); err != nil {
 		return fmt.Errorf("initialize stepfunctions plugin: %w", err)
 	}

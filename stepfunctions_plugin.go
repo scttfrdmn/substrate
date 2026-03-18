@@ -15,11 +15,12 @@ import (
 // DeleteStateMachine, ListStateMachines, StartExecution, StopExecution,
 // DescribeExecution, ListExecutions, GetExecutionHistory, CreateActivity,
 // DescribeActivity, ListActivities, DeleteActivity, TagResource, UntagResource,
-// and ListTagsForResource.
+// ListTagsForResource, and StartSyncExecution.
 type StepFunctionsPlugin struct {
-	state  StateManager
-	logger Logger
-	tc     *TimeController
+	state    StateManager
+	logger   Logger
+	tc       *TimeController
+	registry *PluginRegistry // nil = Lambda Task invocation disabled
 }
 
 // Name returns the service name "states".
@@ -34,6 +35,7 @@ func (p *StepFunctionsPlugin) Initialize(_ context.Context, cfg PluginConfig) er
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
+	p.registry, _ = cfg.Options["registry"].(*PluginRegistry)
 	return nil
 }
 
@@ -63,6 +65,8 @@ func (p *StepFunctionsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 		return p.listStateMachines(ctx, req)
 	case "StartExecution":
 		return p.startExecution(ctx, req)
+	case "StartSyncExecution":
+		return p.startSyncExecution(ctx, req)
 	case "StopExecution":
 		return p.stopExecution(ctx, req)
 	case "DescribeExecution":
@@ -556,6 +560,17 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 		StartDate:       now,
 		AccountID:       ctx.AccountID,
 		Region:          ctx.Region,
+		History:         []HistoryEvent{},
+	}
+
+	// Parse and execute the ASL definition synchronously.
+	var def StateMachineDefinition
+	if parseErr := json.Unmarshal([]byte(sm.Definition), &def); parseErr != nil {
+		exec.Status = "FAILED"
+		exec.StopDate = p.tc.Now()
+		exec.ErrorDetails = "InvalidDefinition: " + parseErr.Error()
+	} else {
+		_, _ = p.executeASL(&def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 	}
 
 	if err := p.saveExecution(goCtx, exec); err != nil {
@@ -574,6 +589,71 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 	out := map[string]interface{}{
 		"executionArn": exec.ExecutionArn,
 		"startDate":    exec.StartDate.Format(time.RFC3339),
+	}
+	return statesJSONResponse(http.StatusOK, out)
+}
+
+func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		StateMachineArn string `json:"stateMachineArn"`
+		Name            string `json:"name"`
+		Input           string `json:"input"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+	}
+
+	smName := extractSMNameFromARN(input.StateMachineArn)
+	goCtx := context.Background()
+	sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, smName)
+	if err != nil {
+		return nil, err
+	}
+	if sm == nil {
+		return nil, &AWSError{Code: "StateMachineDoesNotExist", Message: "State machine does not exist: " + input.StateMachineArn, HTTPStatus: http.StatusNotFound}
+	}
+	if sm.Type != "EXPRESS" {
+		return nil, &AWSError{
+			Code:       "InvalidDefinition",
+			Message:    "StartSyncExecution is only supported for EXPRESS workflows",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	var def StateMachineDefinition
+	if parseErr := json.Unmarshal([]byte(sm.Definition), &def); parseErr != nil {
+		return nil, &AWSError{Code: "InvalidDefinition", Message: "invalid ASL: " + parseErr.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+
+	execName := input.Name
+	if execName == "" {
+		execName = "sync-" + generateLambdaRevisionID()[:8]
+	}
+
+	execArn := fmt.Sprintf("arn:aws:states:%s:%s:express:%s:%s", ctx.Region, ctx.AccountID, smName, execName)
+	now := p.tc.Now()
+	exec := &ExecutionState{
+		ExecutionArn:    execArn,
+		StateMachineArn: input.StateMachineArn,
+		Name:            execName,
+		Status:          "RUNNING",
+		Input:           input.Input,
+		StartDate:       now,
+		AccountID:       ctx.AccountID,
+		Region:          ctx.Region,
+		History:         []HistoryEvent{},
+	}
+
+	_, _ = p.executeASL(&def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
+
+	out := map[string]interface{}{
+		"executionArn": exec.ExecutionArn,
+		"startDate":    exec.StartDate.Format(time.RFC3339),
+		"stopDate":     exec.StopDate.Format(time.RFC3339),
+		"status":       exec.Status,
+	}
+	if exec.Output != "" {
+		out["output"] = exec.Output
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -630,17 +710,6 @@ func (p *StepFunctionsPlugin) describeExecution(ctx *RequestContext, req *AWSReq
 	}
 	if exec == nil {
 		return nil, &AWSError{Code: "ExecutionDoesNotExist", Message: "Execution does not exist: " + input.ExecutionArn, HTTPStatus: http.StatusNotFound}
-	}
-
-	// Simulate immediate completion for RUNNING executions.
-	if exec.Status == "RUNNING" {
-		now := p.tc.Now()
-		exec.Status = "SUCCEEDED"
-		exec.StopDate = now
-		exec.Output = `"null"`
-		if saveErr := p.saveExecution(goCtx, exec); saveErr != nil {
-			return nil, fmt.Errorf("stepfunctions describeExecution saveExecution: %w", saveErr)
-		}
 	}
 
 	return statesJSONResponse(http.StatusOK, execToMap(exec))
@@ -744,18 +813,12 @@ func (p *StepFunctionsPlugin) getExecutionHistory(ctx *RequestContext, req *AWSR
 		return nil, &AWSError{Code: "ExecutionDoesNotExist", Message: "Execution does not exist: " + input.ExecutionArn, HTTPStatus: http.StatusNotFound}
 	}
 
-	type histEvent struct {
-		ID        int    `json:"id"`
-		Type      string `json:"type"`
-		Timestamp string `json:"timestamp"`
+	history := exec.History
+	if history == nil {
+		history = []HistoryEvent{}
 	}
-	events := []histEvent{
-		{ID: 1, Type: "ExecutionStarted", Timestamp: exec.StartDate.Format(time.RFC3339)},
-		{ID: 2, Type: "ExecutionSucceeded", Timestamp: exec.StartDate.Add(time.Millisecond).Format(time.RFC3339)},
-	}
-
 	out := map[string]interface{}{
-		"events": events,
+		"events": history,
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }

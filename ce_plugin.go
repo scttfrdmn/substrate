@@ -187,6 +187,9 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 			}
 			sort.Slice(groups, func(i, j int) bool { return groups[i].Keys[0] < groups[j].Keys[0] })
 
+			// TODO(#225): return one ResultByTime per day/month bucket once cost
+			// events are timestamped by the simulated clock. For now a single
+			// aggregate entry covering the full requested period is returned.
 			results = []CECostResultByTime{{
 				TimePeriod: input.TimePeriod,
 				Total:      buildMetrics(totalCost),

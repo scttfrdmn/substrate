@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.39.0] - 2026-03-18
+
+### Added
+
+- **ASL execution engine** (`stepfunctions_asl.go`): Real in-process execution of Amazon
+  States Language definitions replacing the previous stub that auto-flipped executions to
+  SUCCEEDED. Supports all seven state types — Task, Pass, Wait, Choice, Succeed, Fail,
+  Parallel, Map — with synchronous deterministic execution. Closes #151, #152.
+- **Task state Lambda invocation** (`stepfunctions_asl.go`): Task states whose `Resource`
+  is a Lambda ARN dispatch to the Lambda plugin via the plugin registry (same pattern as
+  S3 notifications). Non-Lambda resources return a stub `{}` output. Closes #153.
+- **`StartSyncExecution`** (`stepfunctions_plugin.go`): Express workflows (`type=EXPRESS`)
+  support `StartSyncExecution`, which executes the state machine synchronously and returns
+  `{executionArn, startDate, stopDate, status, output}` in a single response. Attempting
+  `StartSyncExecution` on a STANDARD state machine returns `InvalidDefinition`. Closes #154.
+- **Catch/Retry with configurable backoff** (`stepfunctions_asl.go`): Task states honour
+  `Retry` configs (`MaxAttempts`, `IntervalSeconds`, `BackoffRate`) and `Catch` configs
+  (`ErrorEquals`, `Next`, `ResultPath`). The `TimeController` is advanced by the computed
+  back-off on each retry so tests remain deterministic. `States.ALL` wildcard supported.
+  Closes #155.
+- **Real execution history** (`stepfunctions_plugin.go`): `GetExecutionHistory` now returns
+  the complete ordered event list recorded during execution — `ExecutionStarted`,
+  `StateEntered`, `TaskScheduled`, `TaskSucceeded`/`TaskFailed`, `StateExited`,
+  `ExecutionSucceeded`/`ExecutionFailed` — instead of the previous hardcoded two-event stub.
+- **New ASL types** (`stepfunctions_types.go`): `StateMachineDefinition`, `ASLState`,
+  `RetryConfig`, `CatchConfig`, `ChoiceRule`, `HistoryEvent`; `ExecutionState` gains
+  `History []HistoryEvent` and `ErrorDetails string`.
+
+### Changed
+
+- `StepFunctionsPlugin` now accepts `registry` and `time_controller` options; both are
+  wired by `RegisterDefaultPlugins` (`plugins.go`).
+- `StartExecution` executes the state machine synchronously before returning; the stored
+  execution has a terminal status (`SUCCEEDED` or `FAILED`) by the time the response is sent.
+- `DescribeExecution` returns the stored state as-is (no longer auto-flips RUNNING to
+  SUCCEEDED on first describe).
+
 ## [v0.38.0] - 2026-03-18
 
 ### Added
