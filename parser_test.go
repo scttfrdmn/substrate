@@ -258,6 +258,20 @@ func TestParseAWSRequest_BareQueryKey(t *testing.T) {
 	assert.Equal(t, "1", req.Params["uploads"])
 }
 
+func TestParseAWSRequest_EmptyValueQueryParam(t *testing.T) {
+	// Keys with an explicit empty value (e.g. ?prefix=) must be preserved as ""
+	// and must NOT be converted to "1" (issue #200).
+	r := httptest.NewRequest(http.MethodGet,
+		"http://s3.amazonaws.com/mybucket?list-type=2&prefix=&delimiter=%2F", nil)
+	r.Host = "s3.amazonaws.com"
+
+	req, _, err := substrate.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "", req.Params["prefix"], "explicit empty prefix must be preserved as empty string")
+	assert.Equal(t, "/", req.Params["delimiter"])
+	assert.Equal(t, "2", req.Params["list-type"])
+}
+
 func TestParseAWSRequest_S3VirtualHosted(t *testing.T) {
 	tests := []struct {
 		name        string

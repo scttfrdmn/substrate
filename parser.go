@@ -33,14 +33,30 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	}
 
 	// Build flat params map from query string and form values.
+	// Bare keys (e.g. ?uploads, ?versions) have no "=" in the raw query and
+	// are stored as "1" so callers can detect their presence with a map lookup.
+	// Keys with an explicit empty value (e.g. ?prefix=) must be preserved as ""
+	// to avoid corrupting parameters such as ListObjectsV2 Prefix.
 	params := make(map[string]string)
+	// Build a set of keys that appear with an explicit "=" in the raw query so
+	// we can distinguish them from true bare keys.
+	rawQuery := r.URL.RawQuery
+	explicitEmpty := make(map[string]bool)
+	for _, part := range strings.Split(rawQuery, "&") {
+		if idx := strings.IndexByte(part, '='); idx >= 0 {
+			key := part[:idx]
+			if val := part[idx+1:]; val == "" {
+				explicitEmpty[key] = true
+			}
+		}
+	}
 	if err := r.ParseForm(); err == nil {
 		for k, vs := range r.Form {
 			v := ""
 			if len(vs) > 0 {
 				v = vs[0]
 			}
-			if v == "" {
+			if v == "" && !explicitEmpty[k] {
 				v = "1" // bare key (e.g. ?uploads, ?versions)
 			}
 			params[k] = v
