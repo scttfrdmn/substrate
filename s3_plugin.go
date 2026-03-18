@@ -237,7 +237,7 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["tagging"]; ok {
 				return bucket, "", "GetBucketTagging"
 			}
-			if req.Params["uploads"] == "1" {
+			if _, ok := req.Params["uploads"]; ok {
 				return bucket, "", "ListMultipartUploads"
 			}
 			if _, ok := req.Params["versioning"]; ok {
@@ -294,7 +294,7 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			return bucket, key, "DeleteObject"
 		case "POST":
-			if req.Params["uploads"] == "1" {
+			if _, ok := req.Params["uploads"]; ok {
 				return bucket, key, "CreateMultipartUpload"
 			}
 			if req.Params["uploadId"] != "" {

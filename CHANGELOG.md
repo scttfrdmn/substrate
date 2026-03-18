@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.18] - 2026-03-18
+
+### Fixed
+
+- **EC2 `DescribeImages` now includes `creationDate` field** (`ec2_plugin.go`, `ec2_types.go`): `EC2Image` was missing a `CreationDate` field; `CreateImage` did not record the timestamp and `DescribeImages` omitted `<creationDate>` from the XML response. AWS SDKs that parse `creationDate` to sort or filter AMIs would see an empty value. The fix adds `CreationDate string` to `EC2Image`, stamps it with the current simulated time at `CreateImage` time, and emits `<creationDate>` in `DescribeImages`. Fixes #214.
+
+- **EC2 `DescribeKeyPairs` now includes `keyType` field** (`ec2_plugin.go`, `ec2_types.go`): `EC2KeyPair` was missing a `KeyType` field; `CreateKeyPair` and `ImportKeyPair` did not store the key type and `DescribeKeyPairs` omitted `<keyType>` from the XML response. `CreateKeyPair` now defaults to `"rsa"` and honours an explicit `KeyType` parameter. `ImportKeyPair` infers the type from the OpenSSH public key prefix (`ssh-ed25519` → `"ed25519"`, else `"rsa"`). All three operations now echo `<keyType>` in their XML response. Fixes #215.
+
+- **S3 `CreateMultipartUpload` and `ListMultipartUploads` now recognised with bare or empty `?uploads` query parameter** (`s3_plugin.go`): `parseS3Operation` checked `req.Params["uploads"] == "1"` to detect `?uploads`, but both the bare form (`?uploads`) and the AWS SDK form (`?uploads=`) store an empty string (`""`) in `Params`, never `"1"`. Both operations were silently mis-routed. The fix uses a map presence check (`_, ok := req.Params["uploads"]; ok`) for both routing decisions. Fixes #216.
+
+### Added
+
+- **Regression tests for EC2 `keyType` and `creationDate` fields** (`ec2_plugin_test.go`): `TestEC2_KeyPair_KeyType_Default` verifies `CreateKeyPair` defaults to `"rsa"` and that `DescribeKeyPairs` echoes `keyType`. `TestEC2_KeyPair_KeyType_Ed25519` verifies an explicit `KeyType=ed25519` is stored and returned. `TestEC2_Image_CreationDate` verifies `DescribeImages` returns a non-empty `creationDate`.
+
+- **Regression test for S3 multipart `?uploads=` routing** (`s3_plugin_test.go`): `TestS3_MultipartUpload_ExplicitEmptyUploadsParam` sends `?uploads=` (explicit empty value, AWS SDK style) and verifies `CreateMultipartUpload` and `ListMultipartUploads` are both correctly routed.
+
 ## [v0.36.17] - 2026-03-18
 
 ### Fixed

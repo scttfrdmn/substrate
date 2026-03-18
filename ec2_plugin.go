@@ -1495,10 +1495,16 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 	fp := ec2KeyFingerprint(pubDER)
 
+	keyType := req.Params["KeyType"]
+	if keyType == "" {
+		keyType = "rsa"
+	}
+
 	kp := EC2KeyPair{
 		KeyPairID:   generateKeyPairID(),
 		KeyName:     name,
 		Fingerprint: fp,
+		KeyType:     keyType,
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}
@@ -1511,18 +1517,20 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	type response struct {
-		XMLName     xml.Name `xml:"CreateKeyPairResponse"`
-		XMLNS       string   `xml:"xmlns,attr"`
-		KeyPairID   string   `xml:"keyPairId"`
-		KeyName     string   `xml:"keyName"`
-		KeyFingerprint string `xml:"keyFingerprint"`
-		KeyMaterial string   `xml:"keyMaterial"`
+		XMLName        xml.Name `xml:"CreateKeyPairResponse"`
+		XMLNS          string   `xml:"xmlns,attr"`
+		KeyPairID      string   `xml:"keyPairId"`
+		KeyName        string   `xml:"keyName"`
+		KeyFingerprint string   `xml:"keyFingerprint"`
+		KeyType        string   `xml:"keyType"`
+		KeyMaterial    string   `xml:"keyMaterial"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
 		KeyPairID:      kp.KeyPairID,
 		KeyName:        kp.KeyName,
 		KeyFingerprint: kp.Fingerprint,
+		KeyType:        kp.KeyType,
 		KeyMaterial:    keyMaterial,
 	})
 }
@@ -1539,10 +1547,11 @@ func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*
 		KeyPairID      string `xml:"keyPairId"`
 		KeyName        string `xml:"keyName"`
 		KeyFingerprint string `xml:"keyFingerprint"`
+		KeyType        string `xml:"keyType"`
 	}
 	type response struct {
-		XMLName xml.Name `xml:"DescribeKeyPairsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
+		XMLName  xml.Name `xml:"DescribeKeyPairsResponse"`
+		XMLNS    string   `xml:"xmlns,attr"`
 		KeyPairs []kpItem `xml:"keySet>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -1563,6 +1572,7 @@ func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*
 			KeyPairID:      kp.KeyPairID,
 			KeyName:        kp.KeyName,
 			KeyFingerprint: kp.Fingerprint,
+			KeyType:        kp.KeyType,
 		})
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -1631,10 +1641,21 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 	fp := ec2KeyFingerprint(pubBytes)
 
+	// Infer key type from SSH public key prefix.
+	keyType := "rsa"
+	pubStr := string(pubBytes)
+	switch {
+	case strings.HasPrefix(pubStr, "ssh-ed25519"):
+		keyType = "ed25519"
+	case strings.HasPrefix(pubStr, "ecdsa-"):
+		keyType = "rsa" // EC keys are treated as rsa in EC2 API
+	}
+
 	kp := EC2KeyPair{
 		KeyPairID:   generateKeyPairID(),
 		KeyName:     name,
 		Fingerprint: fp,
+		KeyType:     keyType,
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}
@@ -1652,12 +1673,14 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyPairID      string   `xml:"keyPairId"`
 		KeyName        string   `xml:"keyName"`
 		KeyFingerprint string   `xml:"keyFingerprint"`
+		KeyType        string   `xml:"keyType"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
 		KeyPairID:      kp.KeyPairID,
 		KeyName:        kp.KeyName,
 		KeyFingerprint: kp.Fingerprint,
+		KeyType:        kp.KeyType,
 	})
 }
 
@@ -1911,14 +1934,15 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 
 	imageID := generateImageID()
 	img := EC2Image{
-		ImageID:     imageID,
-		Name:        name,
-		Description: description,
-		InstanceID:  instanceID,
-		State:       "available",
-		Tags:        tags,
-		AccountID:   reqCtx.AccountID,
-		Region:      reqCtx.Region,
+		ImageID:      imageID,
+		Name:         name,
+		Description:  description,
+		InstanceID:   instanceID,
+		State:        "available",
+		CreationDate: p.tc.Now().UTC().Format(time.RFC3339),
+		Tags:         tags,
+		AccountID:    reqCtx.AccountID,
+		Region:       reqCtx.Region,
 	}
 	data, err := json.Marshal(img)
 	if err != nil {
@@ -1974,12 +1998,13 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Value string `xml:"value"`
 	}
 	type imageItem struct {
-		ImageID     string    `xml:"imageId"`
-		Name        string    `xml:"name"`
-		Description string    `xml:"description,omitempty"`
-		State       string    `xml:"imageState"`
-		OwnerID     string    `xml:"imageOwnerId"`
-		Tags        []tagItem `xml:"tagSet>item"`
+		ImageID      string    `xml:"imageId"`
+		Name         string    `xml:"name"`
+		Description  string    `xml:"description,omitempty"`
+		State        string    `xml:"imageState"`
+		OwnerID      string    `xml:"imageOwnerId"`
+		CreationDate string    `xml:"creationDate,omitempty"`
+		Tags         []tagItem `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName xml.Name    `xml:"DescribeImagesResponse"`
@@ -2021,11 +2046,12 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 
 		item := imageItem{
-			ImageID:     img.ImageID,
-			Name:        img.Name,
-			Description: img.Description,
-			State:       img.State,
-			OwnerID:     img.AccountID,
+			ImageID:      img.ImageID,
+			Name:         img.Name,
+			Description:  img.Description,
+			State:        img.State,
+			OwnerID:      img.AccountID,
+			CreationDate: img.CreationDate,
 		}
 		for _, t := range img.Tags {
 			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value})

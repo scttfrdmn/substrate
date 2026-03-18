@@ -1158,6 +1158,140 @@ func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
 	}
 }
 
+// TestEC2_KeyPair_KeyType_Default verifies that CreateKeyPair without an explicit
+// KeyType defaults to "rsa" and that DescribeKeyPairs echoes the keyType field.
+// Regression test for #215.
+func TestEC2_KeyPair_KeyType_Default(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	createResp := ec2Request(t, ts, map[string]string{
+		"Action":  "CreateKeyPair",
+		"KeyName": "key-rsa-default",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateKeyPair: expected 200, got %d", createResp.StatusCode)
+	}
+	var createResult struct {
+		KeyType string `xml:"keyType"`
+	}
+	if err := xml.NewDecoder(createResp.Body).Decode(&createResult); err != nil {
+		t.Fatalf("decode CreateKeyPair response: %v", err)
+	}
+	createResp.Body.Close() //nolint:errcheck
+	if createResult.KeyType != "rsa" {
+		t.Errorf("keyType = %q; want %q", createResult.KeyType, "rsa")
+	}
+
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeKeyPairs",
+		"KeyName.1": "key-rsa-default",
+	})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeKeyPairs: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		KeyPairs []struct {
+			KeyType string `xml:"keyType"`
+		} `xml:"keySet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeKeyPairs: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.KeyPairs) != 1 {
+		t.Fatalf("expected 1 key pair, got %d", len(descResult.KeyPairs))
+	}
+	if descResult.KeyPairs[0].KeyType != "rsa" {
+		t.Errorf("DescribeKeyPairs keyType = %q; want %q", descResult.KeyPairs[0].KeyType, "rsa")
+	}
+}
+
+// TestEC2_KeyPair_KeyType_Ed25519 verifies that an explicit KeyType=ed25519 is
+// stored and returned. Regression test for #215.
+func TestEC2_KeyPair_KeyType_Ed25519(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	createResp := ec2Request(t, ts, map[string]string{
+		"Action":  "CreateKeyPair",
+		"KeyName": "key-ed25519",
+		"KeyType": "ed25519",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateKeyPair ed25519: expected 200, got %d", createResp.StatusCode)
+	}
+	var createResult struct {
+		KeyType string `xml:"keyType"`
+	}
+	if err := xml.NewDecoder(createResp.Body).Decode(&createResult); err != nil {
+		t.Fatalf("decode CreateKeyPair response: %v", err)
+	}
+	createResp.Body.Close() //nolint:errcheck
+	if createResult.KeyType != "ed25519" {
+		t.Errorf("keyType = %q; want %q", createResult.KeyType, "ed25519")
+	}
+}
+
+// TestEC2_Image_CreationDate verifies that DescribeImages includes a non-empty
+// creationDate field. Regression test for #214.
+func TestEC2_Image_CreationDate(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Launch an instance so we have a valid source instance ID.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base",
+		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	if len(runResult.Instances) == 0 {
+		t.Fatal("no instance returned by RunInstances")
+	}
+	instanceID := runResult.Instances[0].InstanceID
+
+	createResp := ec2Request(t, ts, map[string]string{
+		"Action":     "CreateImage",
+		"InstanceId": instanceID,
+		"Name":       "test-ami-date",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateImage: expected 200, got %d", createResp.StatusCode)
+	}
+	createResp.Body.Close() //nolint:errcheck
+
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action":  "DescribeImages",
+		"Owner.1": "self",
+	})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeImages: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		Images []struct {
+			CreationDate string `xml:"creationDate"`
+		} `xml:"imagesSet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeImages: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.Images) == 0 {
+		t.Fatal("no images returned")
+	}
+	if descResult.Images[0].CreationDate == "" {
+		t.Error("creationDate is empty; want RFC3339 timestamp")
+	}
+}
+
 func TestEC2_RunInstances_TagSpecifications(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)

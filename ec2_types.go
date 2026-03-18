@@ -91,6 +91,9 @@ type EC2KeyPair struct {
 	// Fingerprint is the SHA-256 fingerprint of the public key.
 	Fingerprint string `json:"fingerprint"`
 
+	// KeyType is the type of key pair (e.g. "rsa" or "ed25519").
+	KeyType string `json:"keyType"`
+
 	// AccountID is the AWS account that owns the key pair.
 	AccountID string `json:"accountId"`
 
@@ -354,6 +357,9 @@ type EC2Image struct {
 
 	// State is the image state: always "available" in Substrate.
 	State string `json:"state"`
+
+	// CreationDate is the RFC3339 timestamp when the AMI was registered.
+	CreationDate string `json:"creation_date,omitempty"`
 
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`

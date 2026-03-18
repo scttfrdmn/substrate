@@ -956,3 +956,26 @@ func TestS3_DirectoryMarker_AppearsAsPrefix(t *testing.T) {
 	require.Len(t, result.CommonPrefixes, 1)
 	assert.Equal(t, "newdir/", result.CommonPrefixes[0].Prefix)
 }
+
+// TestS3_MultipartUpload_ExplicitEmptyUploadsParam verifies that the AWS SDK
+// style `?uploads=` query parameter (empty value) correctly routes to
+// CreateMultipartUpload and ListMultipartUploads. Regression test for #216.
+func TestS3_MultipartUpload_ExplicitEmptyUploadsParam(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/test-bucket", nil, nil)
+
+	// POST /bucket/key?uploads= should initiate a multipart upload.
+	iw := s3Request(t, srv, http.MethodPost, "/test-bucket/data.bin?uploads=", nil, nil)
+	require.Equal(t, http.StatusOK, iw.Code, "initiate multipart: want 200")
+
+	var initiateResult struct {
+		UploadID string `xml:"UploadId"` //nolint:revive
+	}
+	require.NoError(t, xml.NewDecoder(strings.NewReader(iw.Body.String())).Decode(&initiateResult))
+	require.NotEmpty(t, initiateResult.UploadID, "UploadId must be non-empty")
+
+	// GET /bucket?uploads= should list multipart uploads.
+	lw := s3Request(t, srv, http.MethodGet, "/test-bucket?uploads=", nil, nil)
+	require.Equal(t, http.StatusOK, lw.Code, "list multipart uploads: want 200")
+	assert.Contains(t, lw.Body.String(), initiateResult.UploadID)
+}
