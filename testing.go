@@ -18,8 +18,8 @@ type TestServer struct {
 	URL string
 	// Port is the TCP port the server is listening on.
 	Port int
-	tc  *TimeController
-	srv *Server
+	tc   *TimeController
+	srv  *Server
 }
 
 // StartTestServer starts an in-process Substrate server on a random port,

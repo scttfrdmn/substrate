@@ -795,7 +795,9 @@ func TestS3_DeleteObjects(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var result struct {
-		Deleted []struct{ Key string `xml:"Key"` } `xml:"Deleted"`
+		Deleted []struct {
+			Key string `xml:"Key"`
+		} `xml:"Deleted"`
 	}
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
 	assert.Len(t, result.Deleted, 2)
@@ -819,7 +821,9 @@ func TestS3_DeleteObjects_Quiet(t *testing.T) {
 
 	// Quiet mode: no <Deleted> entries in response.
 	var result struct {
-		Deleted []struct{ Key string `xml:"Key"` } `xml:"Deleted"`
+		Deleted []struct {
+			Key string `xml:"Key"`
+		} `xml:"Deleted"`
 	}
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
 	assert.Empty(t, result.Deleted)

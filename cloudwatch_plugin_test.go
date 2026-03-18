@@ -246,10 +246,10 @@ func TestCW_GetMetricData_Empty(t *testing.T) {
 	srv := newCWAlarmTestServer(t)
 
 	resp := cwRequest(t, srv, map[string]string{
-		"Action":                                "GetMetricData",
-		"StartTime":                             "2024-01-01T00:00:00Z",
-		"EndTime":                               "2024-01-02T00:00:00Z",
-		"MetricDataQueries.member.1.Id":         "size_0",
+		"Action":                        "GetMetricData",
+		"StartTime":                     "2024-01-01T00:00:00Z",
+		"EndTime":                       "2024-01-02T00:00:00Z",
+		"MetricDataQueries.member.1.Id": "size_0",
 		"MetricDataQueries.member.1.MetricStat.Metric.Namespace":  "AWS/S3",
 		"MetricDataQueries.member.1.MetricStat.Metric.MetricName": "BucketSizeBytes",
 		"MetricDataQueries.member.1.MetricStat.Period":            "86400",
@@ -295,14 +295,14 @@ func TestCW_PutMetricData_ListMetrics(t *testing.T) {
 
 	// Publish two metrics in the same namespace.
 	resp := cwRequest(t, srv, map[string]string{
-		"Action":                             "PutMetricData",
-		"Namespace":                          "CargoShip/IntegrationTest",
-		"MetricData.member.1.MetricName":     "RequestCount",
-		"MetricData.member.1.Value":          "42",
-		"MetricData.member.1.Unit":           "Count",
-		"MetricData.member.2.MetricName":     "ErrorRate",
-		"MetricData.member.2.Value":          "0.1",
-		"MetricData.member.2.Unit":           "Percent",
+		"Action":                         "PutMetricData",
+		"Namespace":                      "CargoShip/IntegrationTest",
+		"MetricData.member.1.MetricName": "RequestCount",
+		"MetricData.member.1.Value":      "42",
+		"MetricData.member.1.Unit":       "Count",
+		"MetricData.member.2.MetricName": "ErrorRate",
+		"MetricData.member.2.Value":      "0.1",
+		"MetricData.member.2.Unit":       "Percent",
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close() //nolint:errcheck

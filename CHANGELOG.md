@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.41.1] - 2026-03-18
+
+### Fixed
+
+- **gofmt formatting** (`ec2_plugin.go`, `ec2_plugin_test.go`, `cloudwatch_plugin.go`,
+  `cloudwatch_plugin_test.go`, `parser.go`, `plugin_lifecycle_test.go`, `s3_plugin_test.go`,
+  `testing.go`): Applied `gofmt` to all files that were flagged by the CI lint step.
+
 ## [v0.41.0] - 2026-03-18
 
 ### Added

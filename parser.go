@@ -198,7 +198,7 @@ var targetServiceAliases = map[string]string{
 	"awsinsightsindexservice": "ce",
 	// "AmazonBudgetServiceGateway" → strip "Amazon" → "budgetservicegateway" → "budgets".
 	// "AWSBudgetServiceGateway" → strip "AWS" → "budgetservicegateway" → "budgets".
-	"budgetservicegateway": "budgets",
+	"budgetservicegateway":    "budgets",
 	"awsbudgetservicegateway": "budgets",
 	// "AmazonHealthService" → strip "Amazon" → "healthservice" → "health".
 	"healthservice": "health",

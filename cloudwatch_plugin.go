@@ -521,9 +521,9 @@ func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (
 		Values     []string `xml:"Values>member"`
 	}
 	type response struct {
-		XMLName  xml.Name `xml:"GetMetricDataResponse"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Result   struct {
+		XMLName xml.Name `xml:"GetMetricDataResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Result  struct {
 			MetricDataResults []metricDataResult `xml:"MetricDataResults>member"`
 			NextToken         string             `xml:"NextToken,omitempty"`
 		} `xml:"GetMetricDataResult"`
@@ -627,9 +627,9 @@ func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	type listMetricsResponse struct {
-		XMLName  xml.Name `xml:"ListMetricsResponse"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Result   struct {
+		XMLName xml.Name `xml:"ListMetricsResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Result  struct {
 			Metrics   []cwMetricEntry `xml:"Metrics>member"`
 			NextToken string          `xml:"NextToken,omitempty"`
 		} `xml:"ListMetricsResult"`

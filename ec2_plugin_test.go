@@ -588,7 +588,9 @@ func TestEC2_SecurityGroup_GroupDescription(t *testing.T) {
 
 	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.5.0.0/16"})
 	var vpcResult struct {
-		VPC struct{ VPCID string `xml:"vpcId"` } `xml:"vpc"`
+		VPC struct {
+			VPCID string `xml:"vpcId"`
+		} `xml:"vpc"`
 	}
 	if err := xml.NewDecoder(vpcResp.Body).Decode(&vpcResult); err != nil {
 		t.Fatalf("decode CreateVpc: %v", err)
@@ -604,7 +606,9 @@ func TestEC2_SecurityGroup_GroupDescription(t *testing.T) {
 	if sgResp.StatusCode != http.StatusOK {
 		t.Fatalf("CreateSecurityGroup: expected 200, got %d", sgResp.StatusCode)
 	}
-	var sgResult struct{ GroupID string `xml:"groupId"` }
+	var sgResult struct {
+		GroupID string `xml:"groupId"`
+	}
 	if err := xml.NewDecoder(sgResp.Body).Decode(&sgResult); err != nil {
 		t.Fatalf("decode CreateSecurityGroup: %v", err)
 	}
@@ -901,7 +905,9 @@ func TestEC2_KeyPair_CreateDescribeDelete(t *testing.T) {
 		t.Fatalf("DescribeKeyPairs after delete: expected 200, got %d", afterResp.StatusCode)
 	}
 	var afterResult struct {
-		KeyPairs []struct{ KeyName string `xml:"keyName"` } `xml:"keySet>item"`
+		KeyPairs []struct {
+			KeyName string `xml:"keyName"`
+		} `xml:"keySet>item"`
 	}
 	if err := xml.NewDecoder(afterResp.Body).Decode(&afterResult); err != nil {
 		t.Fatalf("decode DescribeKeyPairs after delete: %v", err)
@@ -919,8 +925,8 @@ func TestEC2_KeyPair_Import(t *testing.T) {
 	// ImportKeyPair with a base64-encoded public key.
 	pubKeyB64 := "c3NoLWVkMjU1MTkgQUFBQUM=" // base64 of "ssh-ed25519 AAAAC" (fake but valid base64)
 	importResp := ec2Request(t, ts, map[string]string{
-		"Action":           "ImportKeyPair",
-		"KeyName":          "imported-key",
+		"Action":            "ImportKeyPair",
+		"KeyName":           "imported-key",
 		"PublicKeyMaterial": pubKeyB64,
 	})
 	if importResp.StatusCode != http.StatusOK {
@@ -955,7 +961,9 @@ func TestEC2_RebootInstances(t *testing.T) {
 		"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
-		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
 	}
 	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
 		t.Fatalf("decode RunInstances: %v", err)
@@ -979,7 +987,9 @@ func TestEC2_CreateDeleteTags(t *testing.T) {
 		"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
-		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
 	}
 	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
 		t.Fatalf("decode RunInstances: %v", err)
@@ -1056,7 +1066,9 @@ func TestEC2_ModifyInstanceAttribute(t *testing.T) {
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
-		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
 	}
 	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
 		t.Fatalf("decode RunInstances: %v", err)
@@ -1108,7 +1120,9 @@ func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
-		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
 	}
 	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
 		t.Fatalf("decode RunInstances: %v", err)
@@ -1202,7 +1216,9 @@ func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
 		"Owner.1": "self",
 	})
 	var descResult2 struct {
-		Images []struct{ ImageID string `xml:"imageId"` } `xml:"imagesSet>item"`
+		Images []struct {
+			ImageID string `xml:"imageId"`
+		} `xml:"imagesSet>item"`
 	}
 	if err := xml.NewDecoder(descResp2.Body).Decode(&descResult2); err != nil {
 		t.Fatalf("decode DescribeImages (post-deregister) response: %v", err)
@@ -1392,11 +1408,11 @@ func TestEC2_RunInstances_TagSpecifications(t *testing.T) {
 
 	// Launch with TagSpecifications for ResourceType=instance.
 	runResp := ec2Request(t, ts, map[string]string{
-		"Action":       "RunInstances",
-		"ImageId":      "ami-1",
-		"InstanceType": "t3.micro",
-		"MinCount":     "1",
-		"MaxCount":     "1",
+		"Action":                          "RunInstances",
+		"ImageId":                         "ami-1",
+		"InstanceType":                    "t3.micro",
+		"MinCount":                        "1",
+		"MaxCount":                        "1",
 		"TagSpecification.1.ResourceType": "instance",
 		"TagSpecification.1.Tag.1.Key":    "Name",
 		"TagSpecification.1.Tag.1.Value":  "my-instance",
@@ -1547,8 +1563,8 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 
 	// Filter by group-name=canopy-default: should return 2 (one per VPC).
 	nameResp := ec2Request(t, ts, map[string]string{
-		"Action":          "DescribeSecurityGroups",
-		"Filter.1.Name":   "group-name",
+		"Action":           "DescribeSecurityGroups",
+		"Filter.1.Name":    "group-name",
 		"Filter.1.Value.1": "canopy-default",
 	})
 	if n := countSGs(nameResp); n != 2 {
@@ -1557,10 +1573,10 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 
 	// Filter by group-name + vpc-id: should return exactly 1.
 	bothResp := ec2Request(t, ts, map[string]string{
-		"Action":          "DescribeSecurityGroups",
-		"Filter.1.Name":   "group-name",
+		"Action":           "DescribeSecurityGroups",
+		"Filter.1.Name":    "group-name",
 		"Filter.1.Value.1": "canopy-default",
-		"Filter.2.Name":   "vpc-id",
+		"Filter.2.Name":    "vpc-id",
 		"Filter.2.Value.1": vpc1,
 	})
 	if n := countSGs(bothResp); n != 1 {
@@ -1569,10 +1585,10 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 
 	// Filter by group-name=canopy-default + vpc-id=vpc1: name must be canopy-default.
 	checkResp := ec2Request(t, ts, map[string]string{
-		"Action":          "DescribeSecurityGroups",
-		"Filter.1.Name":   "group-name",
+		"Action":           "DescribeSecurityGroups",
+		"Filter.1.Name":    "group-name",
 		"Filter.1.Value.1": "canopy-default",
-		"Filter.2.Name":   "vpc-id",
+		"Filter.2.Name":    "vpc-id",
 		"Filter.2.Value.1": vpc1,
 	})
 	if name := firstSGName(checkResp); name != "canopy-default" {
@@ -1581,8 +1597,8 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 
 	// Filter by group-id: should return exactly the requested SG.
 	idResp := ec2Request(t, ts, map[string]string{
-		"Action":          "DescribeSecurityGroups",
-		"Filter.1.Name":   "group-id",
+		"Action":           "DescribeSecurityGroups",
+		"Filter.1.Name":    "group-id",
 		"Filter.1.Value.1": sg1ID,
 	})
 	if n := countSGs(idResp); n != 1 {
@@ -1591,8 +1607,8 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 
 	// Filter by group-name that doesn't exist: empty result.
 	emptyResp := ec2Request(t, ts, map[string]string{
-		"Action":          "DescribeSecurityGroups",
-		"Filter.1.Name":   "group-name",
+		"Action":           "DescribeSecurityGroups",
+		"Filter.1.Name":    "group-name",
 		"Filter.1.Value.1": "nonexistent-sg",
 	})
 	if n := countSGs(emptyResp); n != 0 {
@@ -1619,10 +1635,10 @@ func TestEC2_PublicIP(t *testing.T) {
 	var runResult struct {
 		XMLName   xml.Name `xml:"RunInstancesResponse"`
 		Instances []struct {
-			InstanceID     string `xml:"instanceId"`
-			PublicIPAddr   string `xml:"publicIpAddress"`
-			PublicDNS      string `xml:"dnsName"`
-			PrivateDNS     string `xml:"privateDnsName"`
+			InstanceID   string `xml:"instanceId"`
+			PublicIPAddr string `xml:"publicIpAddress"`
+			PublicDNS    string `xml:"dnsName"`
+			PrivateDNS   string `xml:"privateDnsName"`
 		} `xml:"instancesSet>item"`
 	}
 	if err := xml.NewDecoder(resp.Body).Decode(&runResult); err != nil {
@@ -1780,8 +1796,8 @@ func TestEC2_DescribeAvailabilityZones(t *testing.T) {
 	var result struct {
 		XMLName xml.Name `xml:"DescribeAvailabilityZonesResponse"`
 		AZs     []struct {
-			ZoneName  string `xml:"zoneName"`
-			State     string `xml:"zoneState"`
+			ZoneName   string `xml:"zoneName"`
+			State      string `xml:"zoneState"`
 			RegionName string `xml:"regionName"`
 		} `xml:"availabilityZoneInfo>item"`
 	}
@@ -1811,22 +1827,26 @@ func TestEC2_ModifySubnetAttribute(t *testing.T) {
 	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.0.0.0/16"})
 	defer vpcResp.Body.Close() //nolint:errcheck
 	var vpcResult struct {
-		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
 	}
 	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
 
 	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcResult.Vpc.VpcID, "CidrBlock": "10.0.1.0/24"})
 	defer subResp.Body.Close() //nolint:errcheck
 	var subResult struct {
-		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+		Subnet struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnet"`
 	}
 	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
 	subnetID := subResult.Subnet.SubnetID
 
 	// Modify to enable MapPublicIpOnLaunch.
 	modResp := ec2Request(t, ts, map[string]string{
-		"Action":                 "ModifySubnetAttribute",
-		"SubnetId":               subnetID,
+		"Action":                    "ModifySubnetAttribute",
+		"SubnetId":                  subnetID,
 		"MapPublicIpOnLaunch.Value": "true",
 	})
 	defer modResp.Body.Close() //nolint:errcheck
@@ -1858,7 +1878,9 @@ func TestEC2_ModifyVpcAttribute(t *testing.T) {
 	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.1.0.0/16"})
 	defer vpcResp.Body.Close() //nolint:errcheck
 	var vpcResult struct {
-		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
 	}
 	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
 	vpcID := vpcResult.Vpc.VpcID
@@ -1876,8 +1898,8 @@ func TestEC2_ModifyVpcAttribute(t *testing.T) {
 
 	// Disable DNS support.
 	modResp2 := ec2Request(t, ts, map[string]string{
-		"Action":               "ModifyVpcAttribute",
-		"VpcId":                vpcID,
+		"Action":                 "ModifyVpcAttribute",
+		"VpcId":                  vpcID,
 		"EnableDnsSupport.Value": "false",
 	})
 	defer modResp2.Body.Close() //nolint:errcheck
@@ -2113,7 +2135,9 @@ func TestEC2_NatGateway_CreateDescribeDelete(t *testing.T) {
 	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.2.0.0/16"})
 	defer vpcResp.Body.Close() //nolint:errcheck
 	var vpcResult struct {
-		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
 	}
 	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
 	vpcID := vpcResult.Vpc.VpcID
@@ -2121,7 +2145,9 @@ func TestEC2_NatGateway_CreateDescribeDelete(t *testing.T) {
 	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcID, "CidrBlock": "10.2.1.0/24"})
 	defer subResp.Body.Close() //nolint:errcheck
 	var subResult struct {
-		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+		Subnet struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnet"`
 	}
 	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
 	subnetID := subResult.Subnet.SubnetID
@@ -2204,14 +2230,18 @@ func TestEC2_NatGateway_Private(t *testing.T) {
 	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.3.0.0/16"})
 	defer vpcResp.Body.Close() //nolint:errcheck
 	var vpcResult struct {
-		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
 	}
 	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
 
 	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcResult.Vpc.VpcID, "CidrBlock": "10.3.1.0/24"})
 	defer subResp.Body.Close() //nolint:errcheck
 	var subResult struct {
-		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+		Subnet struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnet"`
 	}
 	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
 
@@ -2252,14 +2282,18 @@ func TestEC2_NatGateway_Filter(t *testing.T) {
 	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.4.0.0/16"})
 	defer vpcResp.Body.Close() //nolint:errcheck
 	var vpcResult struct {
-		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
 	}
 	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
 
 	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcResult.Vpc.VpcID, "CidrBlock": "10.4.1.0/24"})
 	defer subResp.Body.Close() //nolint:errcheck
 	var subResult struct {
-		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+		Subnet struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnet"`
 	}
 	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
 
@@ -2291,8 +2325,8 @@ func TestEC2_NatGateway_Filter(t *testing.T) {
 
 	// Filter by state=available — should return 2.
 	descResp := ec2Request(t, ts, map[string]string{
-		"Action":          "DescribeNatGateways",
-		"Filter.1.Name":   "state",
+		"Action":           "DescribeNatGateways",
+		"Filter.1.Name":    "state",
 		"Filter.1.Value.1": "available",
 	})
 	defer descResp.Body.Close() //nolint:errcheck

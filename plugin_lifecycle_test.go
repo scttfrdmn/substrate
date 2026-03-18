@@ -64,8 +64,8 @@ func TestPluginShutdown_NoOps(t *testing.T) {
 			pluginCfg := cfg
 			if p.Name() == "ec2" || p.Name() == "elb" {
 				pluginCfg = substrate.PluginConfig{
-					State:  state,
-					Logger: logger,
+					State:   state,
+					Logger:  logger,
 					Options: map[string]any{"time_controller": tc},
 				}
 			}

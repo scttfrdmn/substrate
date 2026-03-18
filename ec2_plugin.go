@@ -2180,10 +2180,10 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequ
 	abbrev := azRegionAbbrev(region)
 	azSuffixes := []string{"a", "b", "c"}
 	type azItem struct {
-		ZoneName  string `xml:"zoneName"`
-		State     string `xml:"zoneState"`
+		ZoneName   string `xml:"zoneName"`
+		State      string `xml:"zoneState"`
 		RegionName string `xml:"regionName"`
-		ZoneID    string `xml:"zoneId"`
+		ZoneID     string `xml:"zoneId"`
 	}
 	type response struct {
 		XMLName           xml.Name `xml:"DescribeAvailabilityZonesResponse"`
@@ -2308,12 +2308,12 @@ func (p *EC2Plugin) allocateAddress(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 	type response struct {
-		XMLName             xml.Name `xml:"AllocateAddressResponse"`
-		XMLNS               string   `xml:"xmlns,attr"`
-		PublicIP            string   `xml:"publicIp"`
-		AllocationID        string   `xml:"allocationId"`
-		Domain              string   `xml:"domain"`
-		NetworkBorderGroup  string   `xml:"networkBorderGroup"`
+		XMLName            xml.Name `xml:"AllocateAddressResponse"`
+		XMLNS              string   `xml:"xmlns,attr"`
+		PublicIP           string   `xml:"publicIp"`
+		AllocationID       string   `xml:"allocationId"`
+		Domain             string   `xml:"domain"`
+		NetworkBorderGroup string   `xml:"networkBorderGroup"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:              "http://ec2.amazonaws.com/doc/2016-11-15/",
