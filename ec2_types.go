@@ -57,11 +57,11 @@ type EC2Instance struct {
 	// PublicIPAddress is the public IPv4 address (empty for VPC-only instances).
 	PublicIPAddress string `json:"public_ip_address"`
 
-	// PublicDnsName is the public DNS hostname for the instance.
-	PublicDnsName string `json:"public_dns_name,omitempty"`
+	// PublicDNSName is the public DNS hostname for the instance.
+	PublicDNSName string `json:"public_dns_name,omitempty"`
 
-	// PrivateDnsName is the private DNS hostname for the instance.
-	PrivateDnsName string `json:"private_dns_name,omitempty"`
+	// PrivateDNSName is the private DNS hostname for the instance.
+	PrivateDNSName string `json:"private_dns_name,omitempty"`
 
 	// SecurityGroupIDs holds the security groups attached to the instance.
 	SecurityGroupIDs []string `json:"security_group_ids"`
@@ -124,11 +124,11 @@ type EC2VPC struct {
 	// State is the VPC state: "pending" or "available".
 	State string `json:"state"`
 
-	// EnableDnsSupport indicates whether DNS resolution is enabled for the VPC.
-	EnableDnsSupport bool `json:"enable_dns_support"`
+	// EnableDNSSupport indicates whether DNS resolution is enabled for the VPC.
+	EnableDNSSupport bool `json:"enable_dns_support"`
 
-	// EnableDnsHostnames indicates whether instances receive public DNS hostnames.
-	EnableDnsHostnames bool `json:"enable_dns_hostnames"`
+	// EnableDNSHostnames indicates whether instances receive public DNS hostnames.
+	EnableDNSHostnames bool `json:"enable_dns_hostnames"`
 
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
@@ -157,9 +157,9 @@ type EC2Subnet struct {
 	// IsDefault indicates whether this is the account's default subnet.
 	IsDefault bool `json:"is_default"`
 
-	// MapPublicIpOnLaunch indicates whether instances launched into this subnet
+	// MapPublicIPOnLaunch indicates whether instances launched into this subnet
 	// automatically receive a public IPv4 address.
-	MapPublicIpOnLaunch bool `json:"map_public_ip_on_launch"`
+	MapPublicIPOnLaunch bool `json:"map_public_ip_on_launch"`
 
 	// State is the subnet state: "pending" or "available".
 	State string `json:"state"`

@@ -275,11 +275,11 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			if json.Unmarshal(subnetData, &subnet) == nil {
 				inst.VPCID = subnet.VPCID
 				// Always set private DNS name.
-				inst.PrivateDnsName = ec2PrivateDNSName(inst.PrivateIPAddress, reqCtx.Region)
-				// Assign public IP for default subnets or subnets with MapPublicIpOnLaunch.
-				if subnet.IsDefault || subnet.MapPublicIpOnLaunch {
+				inst.PrivateDNSName = ec2PrivateDNSName(inst.PrivateIPAddress, reqCtx.Region)
+				// Assign public IP for default subnets or subnets with MapPublicIPOnLaunch.
+				if subnet.IsDefault || subnet.MapPublicIPOnLaunch {
 					inst.PublicIPAddress = generatePublicIP(inst.InstanceID)
-					inst.PublicDnsName = ec2PublicDNSName(inst.PublicIPAddress, reqCtx.Region)
+					inst.PublicDNSName = ec2PublicDNSName(inst.PublicIPAddress, reqCtx.Region)
 				}
 			}
 		}
@@ -310,8 +310,8 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		LaunchTime       string `xml:"launchTime"`
 		PrivateIPAddress string `xml:"privateIpAddress"`
 		PublicIPAddress  string `xml:"publicIpAddress,omitempty"`
-		PublicDnsName    string `xml:"dnsName,omitempty"`
-		PrivateDnsName   string `xml:"privateDnsName,omitempty"`
+		PublicDNSName    string `xml:"dnsName,omitempty"`
+		PrivateDNSName   string `xml:"privateDnsName,omitempty"`
 		SubnetID         string `xml:"subnetId"`
 		VpcID            string `xml:"vpcId"`
 		KeyName          string `xml:"keyName,omitempty"`
@@ -341,8 +341,8 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			LaunchTime:       inst.LaunchTime,
 			PrivateIPAddress: inst.PrivateIPAddress,
 			PublicIPAddress:  inst.PublicIPAddress,
-			PublicDnsName:    inst.PublicDnsName,
-			PrivateDnsName:   inst.PrivateDnsName,
+			PublicDNSName:    inst.PublicDNSName,
+			PrivateDNSName:   inst.PrivateDNSName,
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
 			KeyName:          inst.KeyName,
@@ -380,8 +380,8 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		LaunchTime       string       `xml:"launchTime"`
 		PrivateIPAddress string       `xml:"privateIpAddress"`
 		PublicIPAddress  string       `xml:"publicIpAddress,omitempty"`
-		PublicDnsName    string       `xml:"dnsName,omitempty"`
-		PrivateDnsName   string       `xml:"privateDnsName,omitempty"`
+		PublicDNSName    string       `xml:"dnsName,omitempty"`
+		PrivateDNSName   string       `xml:"privateDnsName,omitempty"`
 		SubnetID         string       `xml:"subnetId"`
 		VpcID            string       `xml:"vpcId"`
 		KeyName          string       `xml:"keyName,omitempty"`
@@ -427,8 +427,8 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			LaunchTime:       inst.LaunchTime,
 			PrivateIPAddress: inst.PrivateIPAddress,
 			PublicIPAddress:  inst.PublicIPAddress,
-			PublicDnsName:    inst.PublicDnsName,
-			PrivateDnsName:   inst.PrivateDnsName,
+			PublicDNSName:    inst.PublicDNSName,
+			PrivateDNSName:   inst.PrivateDNSName,
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
 			KeyName:          inst.KeyName,
@@ -436,7 +436,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
 		for _, t := range inst.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value})
+			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
 		}
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
@@ -639,7 +639,7 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		CIDRBlock:        cidr,
 		IsDefault:        false,
 		State:            "available",
-		EnableDnsSupport: true,
+		EnableDNSSupport: true,
 		AccountID:        reqCtx.AccountID,
 		Region:           reqCtx.Region,
 	}
@@ -786,7 +786,7 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		CIDRBlock           string `xml:"cidrBlock"`
 		AvailabilityZone    string `xml:"availabilityZone"`
 		State               string `xml:"state"`
-		MapPublicIpOnLaunch bool   `xml:"mapPublicIpOnLaunch"`
+		MapPublicIPOnLaunch bool   `xml:"mapPublicIpOnLaunch"`
 	}
 	type response struct {
 		XMLName xml.Name     `xml:"DescribeSubnetsResponse"`
@@ -812,7 +812,7 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 			CIDRBlock:           subnet.CIDRBlock,
 			AvailabilityZone:    subnet.AvailabilityZone,
 			State:               subnet.State,
-			MapPublicIpOnLaunch: subnet.MapPublicIpOnLaunch,
+			MapPublicIPOnLaunch: subnet.MapPublicIPOnLaunch,
 		})
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -1457,7 +1457,7 @@ func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags 
 
 	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
 	if err != nil || data == nil {
-		return nil // Resource not found — ignore (matches AWS behavior).
+		return nil //nolint:nilerr // Resource not found — ignore (matches AWS behavior).
 	}
 
 	// Use a generic map to avoid switching on concrete struct types.
@@ -1806,8 +1806,8 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 		CIDRBlock:          "172.31.0.0/16",
 		IsDefault:          true,
 		State:              "available",
-		EnableDnsSupport:   true,
-		EnableDnsHostnames: true,
+		EnableDNSSupport:   true,
+		EnableDNSHostnames: true,
 		AccountID:          reqCtx.AccountID,
 		Region:             reqCtx.Region,
 	}
@@ -1853,7 +1853,7 @@ func (p *EC2Plugin) createDefaultSubnet(ctx context.Context, reqCtx *RequestCont
 		CIDRBlock:           "172.31.0.0/20",
 		AvailabilityZone:    reqCtx.Region + "a",
 		IsDefault:           true,
-		MapPublicIpOnLaunch: true,
+		MapPublicIPOnLaunch: true,
 		State:               "available",
 		AccountID:           reqCtx.AccountID,
 		Region:              reqCtx.Region,
@@ -2143,7 +2143,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			CreationDate: img.CreationDate,
 		}
 		for _, t := range img.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value})
+			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
 		}
 		resp.Images = append(resp.Images, item)
 	}
@@ -2235,8 +2235,8 @@ func (p *EC2Plugin) modifySubnetAttribute(reqCtx *RequestContext, req *AWSReques
 	if unmarshalErr := json.Unmarshal(data, &subnet); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 modifySubnetAttribute unmarshal: %w", unmarshalErr)
 	}
-	if v, ok := req.Params["MapPublicIpOnLaunch.Value"]; ok {
-		subnet.MapPublicIpOnLaunch = v == "true"
+	if v, ok := req.Params["MapPublicIPOnLaunch.Value"]; ok {
+		subnet.MapPublicIPOnLaunch = v == "true"
 	}
 	newData, _ := json.Marshal(subnet)
 	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
@@ -2261,11 +2261,11 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 	if unmarshalErr := json.Unmarshal(data, &vpc); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 modifyVpcAttribute unmarshal: %w", unmarshalErr)
 	}
-	if v, ok := req.Params["EnableDnsSupport.Value"]; ok {
-		vpc.EnableDnsSupport = v == "true"
+	if v, ok := req.Params["EnableDNSSupport.Value"]; ok {
+		vpc.EnableDNSSupport = v == "true"
 	}
-	if v, ok := req.Params["EnableDnsHostnames.Value"]; ok {
-		vpc.EnableDnsHostnames = v == "true"
+	if v, ok := req.Params["EnableDNSHostnames.Value"]; ok {
+		vpc.EnableDNSHostnames = v == "true"
 	}
 	newData, _ := json.Marshal(vpc)
 	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
@@ -2352,7 +2352,7 @@ func (p *EC2Plugin) associateAddress(reqCtx *RequestContext, req *AWSRequest) (*
 			if json.Unmarshal(instData, &inst) == nil {
 				eip.PrivateIPAddress = inst.PrivateIPAddress
 				inst.PublicIPAddress = eip.PublicIP
-				inst.PublicDnsName = ec2PublicDNSName(eip.PublicIP, reqCtx.Region)
+				inst.PublicDNSName = ec2PublicDNSName(eip.PublicIP, reqCtx.Region)
 				newInstData, _ := json.Marshal(inst)
 				_ = p.state.Put(context.Background(), ec2Namespace, instKey, newInstData)
 			}
@@ -2400,7 +2400,7 @@ func (p *EC2Plugin) disassociateAddress(reqCtx *RequestContext, req *AWSRequest)
 				var inst EC2Instance
 				if json.Unmarshal(instData, &inst) == nil {
 					inst.PublicIPAddress = ""
-					inst.PublicDnsName = ""
+					inst.PublicDNSName = ""
 					newInstData, _ := json.Marshal(inst)
 					_ = p.state.Put(context.Background(), ec2Namespace, instKey, newInstData)
 				}

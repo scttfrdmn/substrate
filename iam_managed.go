@@ -1019,7 +1019,7 @@ var managedPolicies = []*IAMPolicy{
 					"route53:GetHealthCheck",
 					"route53:GetHostedZone",
 					"route53:ListHostedZonesByName",
-					"servicediscovery:CreatePrivateDnsNamespace",
+					"servicediscovery:CreatePrivateDNSNamespace",
 					"servicediscovery:CreateService",
 					"servicediscovery:DeleteService",
 					"servicediscovery:GetNamespace",

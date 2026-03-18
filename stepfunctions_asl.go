@@ -400,7 +400,7 @@ func (p *StepFunctionsPlugin) aslInvokeLambda(resource string, input interface{}
 
 	var result interface{}
 	if unmarshalErr := json.Unmarshal(resp.Body, &result); unmarshalErr != nil {
-		return map[string]interface{}{}, nil
+		return map[string]interface{}{}, nil //nolint:nilerr // Non-JSON response: return empty object.
 	}
 	return result, nil
 }

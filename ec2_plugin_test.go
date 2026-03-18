@@ -1773,7 +1773,7 @@ func TestEC2_NoPublicIP_NonDefaultSubnet(t *testing.T) {
 	}
 	inst := runResult.Instances[0]
 
-	// Non-default subnet without MapPublicIpOnLaunch: no public IP.
+	// Non-default subnet without MapPublicIPOnLaunch: no public IP.
 	if inst.PublicIPAddr != "" {
 		t.Errorf("expected empty public IP for non-default subnet, got %q", inst.PublicIPAddr)
 	}
@@ -1843,11 +1843,11 @@ func TestEC2_ModifySubnetAttribute(t *testing.T) {
 	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
 	subnetID := subResult.Subnet.SubnetID
 
-	// Modify to enable MapPublicIpOnLaunch.
+	// Modify to enable MapPublicIPOnLaunch.
 	modResp := ec2Request(t, ts, map[string]string{
 		"Action":                    "ModifySubnetAttribute",
 		"SubnetId":                  subnetID,
-		"MapPublicIpOnLaunch.Value": "true",
+		"MapPublicIPOnLaunch.Value": "true",
 	})
 	defer modResp.Body.Close() //nolint:errcheck
 	if modResp.StatusCode != http.StatusOK {
@@ -1859,14 +1859,14 @@ func TestEC2_ModifySubnetAttribute(t *testing.T) {
 	defer descResp.Body.Close() //nolint:errcheck
 	var descResult struct {
 		Subnets []struct {
-			MapPublicIpOnLaunch bool `xml:"mapPublicIpOnLaunch"`
+			MapPublicIPOnLaunch bool `xml:"mapPublicIpOnLaunch"`
 		} `xml:"subnetSet>item"`
 	}
 	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
 	if len(descResult.Subnets) != 1 {
 		t.Fatalf("expected 1 subnet, got %d", len(descResult.Subnets))
 	}
-	if !descResult.Subnets[0].MapPublicIpOnLaunch {
+	if !descResult.Subnets[0].MapPublicIPOnLaunch {
 		t.Error("expected mapPublicIpOnLaunch=true after modify")
 	}
 }
@@ -1889,7 +1889,7 @@ func TestEC2_ModifyVpcAttribute(t *testing.T) {
 	modResp := ec2Request(t, ts, map[string]string{
 		"Action":                   "ModifyVpcAttribute",
 		"VpcId":                    vpcID,
-		"EnableDnsHostnames.Value": "true",
+		"EnableDNSHostnames.Value": "true",
 	})
 	defer modResp.Body.Close() //nolint:errcheck
 	if modResp.StatusCode != http.StatusOK {
@@ -1900,7 +1900,7 @@ func TestEC2_ModifyVpcAttribute(t *testing.T) {
 	modResp2 := ec2Request(t, ts, map[string]string{
 		"Action":                 "ModifyVpcAttribute",
 		"VpcId":                  vpcID,
-		"EnableDnsSupport.Value": "false",
+		"EnableDNSSupport.Value": "false",
 	})
 	defer modResp2.Body.Close() //nolint:errcheck
 	if modResp2.StatusCode != http.StatusOK {

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.41.3] - 2026-03-18
+
+### Fixed
+
+- **`revive` naming** (`ec2_types.go`, `ec2_plugin.go`, `iam_managed.go`): Renamed struct fields
+  to comply with Go naming conventions — `PublicDnsName`→`PublicDNSName`,
+  `PrivateDnsName`→`PrivateDNSName`, `MapPublicIpOnLaunch`→`MapPublicIPOnLaunch`,
+  `EnableDnsSupport`→`EnableDNSSupport`, `EnableDnsHostnames`→`EnableDNSHostnames`.
+- **`nilerr`** (`ec2_plugin.go`, `stepfunctions_asl.go`): Added `//nolint:nilerr` on intentional
+  nil returns following a non-nil error (resource-not-found pass-through and non-JSON response
+  stub).
+- **`staticcheck` S1016** (`ec2_plugin.go`): Added `//nolint:staticcheck` on `tagItem` struct
+  literals where xml tags differ from the source `EC2Tag` json tags.
+
 ## [v0.41.2] - 2026-03-18
 
 ### Fixed
