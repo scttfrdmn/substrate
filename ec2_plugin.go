@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"encoding/xml"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"strconv"
 	"strings"
@@ -241,12 +242,19 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			Tags:             launchTags,
 		}
 
-		// Look up VPCID from subnet.
+		// Look up VPCID from subnet and decide whether to assign a public IP.
 		subnetData, _ := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
 		if subnetData != nil {
 			var subnet EC2Subnet
 			if json.Unmarshal(subnetData, &subnet) == nil {
 				inst.VPCID = subnet.VPCID
+				// Always set private DNS name.
+				inst.PrivateDnsName = ec2PrivateDNSName(inst.PrivateIPAddress, reqCtx.Region)
+				// Assign public IP for default subnets or subnets with MapPublicIpOnLaunch.
+				if subnet.IsDefault || subnet.MapPublicIpOnLaunch {
+					inst.PublicIPAddress = generatePublicIP(inst.InstanceID)
+					inst.PublicDnsName = ec2PublicDNSName(inst.PublicIPAddress, reqCtx.Region)
+				}
 			}
 		}
 
@@ -275,6 +283,9 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		InstanceType     string `xml:"instanceType"`
 		LaunchTime       string `xml:"launchTime"`
 		PrivateIPAddress string `xml:"privateIpAddress"`
+		PublicIPAddress  string `xml:"publicIpAddress,omitempty"`
+		PublicDnsName    string `xml:"dnsName,omitempty"`
+		PrivateDnsName   string `xml:"privateDnsName,omitempty"`
 		SubnetID         string `xml:"subnetId"`
 		VpcID            string `xml:"vpcId"`
 		KeyName          string `xml:"keyName,omitempty"`
@@ -303,6 +314,9 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			InstanceType:     inst.InstanceType,
 			LaunchTime:       inst.LaunchTime,
 			PrivateIPAddress: inst.PrivateIPAddress,
+			PublicIPAddress:  inst.PublicIPAddress,
+			PublicDnsName:    inst.PublicDnsName,
+			PrivateDnsName:   inst.PrivateDnsName,
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
 			KeyName:          inst.KeyName,
@@ -339,6 +353,9 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		InstanceType     string       `xml:"instanceType"`
 		LaunchTime       string       `xml:"launchTime"`
 		PrivateIPAddress string       `xml:"privateIpAddress"`
+		PublicIPAddress  string       `xml:"publicIpAddress,omitempty"`
+		PublicDnsName    string       `xml:"dnsName,omitempty"`
+		PrivateDnsName   string       `xml:"privateDnsName,omitempty"`
 		SubnetID         string       `xml:"subnetId"`
 		VpcID            string       `xml:"vpcId"`
 		KeyName          string       `xml:"keyName,omitempty"`
@@ -383,6 +400,9 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			InstanceType:     inst.InstanceType,
 			LaunchTime:       inst.LaunchTime,
 			PrivateIPAddress: inst.PrivateIPAddress,
+			PublicIPAddress:  inst.PublicIPAddress,
+			PublicDnsName:    inst.PublicDnsName,
+			PrivateDnsName:   inst.PrivateDnsName,
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
 			KeyName:          inst.KeyName,
@@ -734,11 +754,12 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("ec2 describeSubnets: %w", err)
 	}
 	type subnetItem struct {
-		SubnetID         string `xml:"subnetId"`
-		VpcID            string `xml:"vpcId"`
-		CIDRBlock        string `xml:"cidrBlock"`
-		AvailabilityZone string `xml:"availabilityZone"`
-		State            string `xml:"state"`
+		SubnetID            string `xml:"subnetId"`
+		VpcID               string `xml:"vpcId"`
+		CIDRBlock           string `xml:"cidrBlock"`
+		AvailabilityZone    string `xml:"availabilityZone"`
+		State               string `xml:"state"`
+		MapPublicIpOnLaunch bool   `xml:"mapPublicIpOnLaunch"`
 	}
 	type response struct {
 		XMLName xml.Name     `xml:"DescribeSubnetsResponse"`
@@ -758,7 +779,14 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		if len(ids) > 0 && !containsStr(ids, subnet.SubnetID) {
 			continue
 		}
-		resp.Subnets = append(resp.Subnets, subnetItem{SubnetID: subnet.SubnetID, VpcID: subnet.VPCID, CIDRBlock: subnet.CIDRBlock, AvailabilityZone: subnet.AvailabilityZone, State: subnet.State})
+		resp.Subnets = append(resp.Subnets, subnetItem{
+			SubnetID:            subnet.SubnetID,
+			VpcID:               subnet.VPCID,
+			CIDRBlock:           subnet.CIDRBlock,
+			AvailabilityZone:    subnet.AvailabilityZone,
+			State:               subnet.State,
+			MapPublicIpOnLaunch: subnet.MapPublicIpOnLaunch,
+		})
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -1788,14 +1816,15 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 func (p *EC2Plugin) createDefaultSubnet(ctx context.Context, reqCtx *RequestContext, vpc *EC2VPC) (*EC2Subnet, error) {
 	subnetID := generateSubnetID()
 	subnet := EC2Subnet{
-		SubnetID:         subnetID,
-		VPCID:            vpc.VPCID,
-		CIDRBlock:        "172.31.0.0/20",
-		AvailabilityZone: reqCtx.Region + "a",
-		IsDefault:        true,
-		State:            "available",
-		AccountID:        reqCtx.AccountID,
-		Region:           reqCtx.Region,
+		SubnetID:            subnetID,
+		VPCID:               vpc.VPCID,
+		CIDRBlock:           "172.31.0.0/20",
+		AvailabilityZone:    reqCtx.Region + "a",
+		IsDefault:           true,
+		MapPublicIpOnLaunch: true,
+		State:               "available",
+		AccountID:           reqCtx.AccountID,
+		Region:              reqCtx.Region,
 	}
 	data, _ := json.Marshal(subnet)
 	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
@@ -1820,6 +1849,30 @@ func (p *EC2Plugin) appendToList(scope, listName, id string) error {
 	ids = append(ids, id)
 	newData, _ := json.Marshal(ids)
 	return p.state.Put(context.Background(), ec2Namespace, key, newData)
+}
+
+// generatePublicIP returns a deterministic synthetic public IPv4 address in
+// Amazon's 54.0.0.0/8 range, derived from the instance ID via FNV-32a hash.
+func generatePublicIP(instanceID string) string {
+	h := fnv.New32a()
+	h.Write([]byte(instanceID))
+	n := h.Sum32()
+	return fmt.Sprintf("54.%d.%d.%d", (n>>16)&0xFF, (n>>8)&0xFF, n&0xFF)
+}
+
+// ec2PublicDNSName builds the AWS-format public DNS hostname for a public IP.
+func ec2PublicDNSName(ip, region string) string {
+	dashed := strings.ReplaceAll(ip, ".", "-")
+	if region == "us-east-1" {
+		return fmt.Sprintf("ec2-%s.compute-1.amazonaws.com", dashed)
+	}
+	return fmt.Sprintf("ec2-%s.%s.compute.amazonaws.com", dashed, region)
+}
+
+// ec2PrivateDNSName builds the AWS-format private DNS hostname for a private IP.
+func ec2PrivateDNSName(ip, region string) string {
+	dashed := strings.ReplaceAll(ip, ".", "-")
+	return fmt.Sprintf("ip-%s.%s.compute.internal", dashed, region)
 }
 
 // ec2XMLResponse serializes v to XML and returns an AWSResponse.

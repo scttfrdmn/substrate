@@ -57,6 +57,12 @@ type EC2Instance struct {
 	// PublicIPAddress is the public IPv4 address (empty for VPC-only instances).
 	PublicIPAddress string `json:"public_ip_address"`
 
+	// PublicDnsName is the public DNS hostname for the instance.
+	PublicDnsName string `json:"public_dns_name,omitempty"`
+
+	// PrivateDnsName is the private DNS hostname for the instance.
+	PrivateDnsName string `json:"private_dns_name,omitempty"`
+
 	// SecurityGroupIDs holds the security groups attached to the instance.
 	SecurityGroupIDs []string `json:"security_group_ids"`
 
@@ -144,6 +150,10 @@ type EC2Subnet struct {
 
 	// IsDefault indicates whether this is the account's default subnet.
 	IsDefault bool `json:"is_default"`
+
+	// MapPublicIpOnLaunch indicates whether instances launched into this subnet
+	// automatically receive a public IPv4 address.
+	MapPublicIpOnLaunch bool `json:"map_public_ip_on_launch"`
 
 	// State is the subnet state: "pending" or "available".
 	State string `json:"state"`

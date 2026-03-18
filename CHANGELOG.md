@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.40.0] - 2026-03-18
+
+### Added
+
+- **EC2 public IP / DNS assignment** (`ec2_plugin.go`, `ec2_types.go`): Instances launched
+  into the default VPC subnet (or any subnet with `MapPublicIpOnLaunch=true`) now receive a
+  deterministic synthetic public IPv4 address in Amazon's `54.0.0.0/8` range, a
+  `dnsName` (public DNS), and a `privateDnsName` (private DNS) in both `RunInstances` and
+  `DescribeInstances` XML responses. The public IP is derived from the instance ID via
+  FNV-32a hash, ensuring stable values across replays. DNS name format matches real AWS:
+  `ec2-<a>-<b>-<c>-<d>.compute-1.amazonaws.com` (us-east-1) /
+  `ec2-<a>-<b>-<c>-<d>.<region>.compute.amazonaws.com` (other regions) /
+  `ip-<a>-<b>-<c>-<d>.<region>.compute.internal` (private). Closes #N.
+- `EC2Subnet.MapPublicIpOnLaunch` field persisted in state and surfaced in `DescribeSubnets`
+  XML responses (`mapPublicIpOnLaunch` element). Default subnets created by `ensureDefaultVPC`
+  now set this field to `true`, mirroring real AWS behaviour. Closes #226.
+
 ## [v0.39.0] - 2026-03-18
 
 ### Added

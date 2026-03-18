@@ -1599,3 +1599,170 @@ func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
 		t.Errorf("nonexistent group-name filter: expected 0, got %d", n)
 	}
 }
+
+func TestEC2_PublicIP(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// RunInstances into the default VPC/subnet (no SubnetId specified).
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-12345678",
+		"InstanceType": "t3.micro",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: expected 200, got %d", resp.StatusCode)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var runResult struct {
+		XMLName   xml.Name `xml:"RunInstancesResponse"`
+		Instances []struct {
+			InstanceID     string `xml:"instanceId"`
+			PublicIPAddr   string `xml:"publicIpAddress"`
+			PublicDNS      string `xml:"dnsName"`
+			PrivateDNS     string `xml:"privateDnsName"`
+		} `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances response: %v", err)
+	}
+	if len(runResult.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(runResult.Instances))
+	}
+	inst := runResult.Instances[0]
+
+	// Public IP must be in 54.x.x.x range.
+	if !strings.HasPrefix(inst.PublicIPAddr, "54.") {
+		t.Errorf("expected public IP starting with 54., got %q", inst.PublicIPAddr)
+	}
+	// Public DNS must start with "ec2-" and end with ".amazonaws.com".
+	if !strings.HasPrefix(inst.PublicDNS, "ec2-") || !strings.HasSuffix(inst.PublicDNS, ".amazonaws.com") {
+		t.Errorf("unexpected public DNS name: %q", inst.PublicDNS)
+	}
+	// Private DNS must end with ".compute.internal".
+	if !strings.HasSuffix(inst.PrivateDNS, ".compute.internal") {
+		t.Errorf("unexpected private DNS name: %q", inst.PrivateDNS)
+	}
+
+	// DescribeInstances must return the same fields.
+	resp2 := ec2Request(t, ts, map[string]string{
+		"Action":       "DescribeInstances",
+		"InstanceId.1": inst.InstanceID,
+	})
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeInstances: expected 200, got %d", resp2.StatusCode)
+	}
+	defer resp2.Body.Close() //nolint:errcheck
+
+	var descResult struct {
+		XMLName      xml.Name `xml:"DescribeInstancesResponse"`
+		Reservations []struct {
+			Instances []struct {
+				PublicIPAddr string `xml:"publicIpAddress"`
+				PublicDNS    string `xml:"dnsName"`
+				PrivateDNS   string `xml:"privateDnsName"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	if err := xml.NewDecoder(resp2.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeInstances response: %v", err)
+	}
+	if len(descResult.Reservations) == 0 || len(descResult.Reservations[0].Instances) == 0 {
+		t.Fatal("DescribeInstances returned no instances")
+	}
+	di := descResult.Reservations[0].Instances[0]
+	if di.PublicIPAddr != inst.PublicIPAddr {
+		t.Errorf("DescribeInstances public IP %q != RunInstances %q", di.PublicIPAddr, inst.PublicIPAddr)
+	}
+	if di.PublicDNS != inst.PublicDNS {
+		t.Errorf("DescribeInstances public DNS %q != RunInstances %q", di.PublicDNS, inst.PublicDNS)
+	}
+	if !strings.HasSuffix(di.PrivateDNS, ".compute.internal") {
+		t.Errorf("DescribeInstances private DNS %q missing .compute.internal suffix", di.PrivateDNS)
+	}
+}
+
+func TestEC2_NoPublicIP_NonDefaultSubnet(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create a VPC and a non-default subnet.
+	vpcResp := ec2Request(t, ts, map[string]string{
+		"Action":    "CreateVpc",
+		"CidrBlock": "10.0.0.0/16",
+	})
+	if vpcResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateVpc: expected 200, got %d", vpcResp.StatusCode)
+	}
+	defer vpcResp.Body.Close() //nolint:errcheck
+	var vpcResult struct {
+		XMLName xml.Name `xml:"CreateVpcResponse"`
+		VPC     struct {
+			VPCID string `xml:"vpcId"`
+		} `xml:"vpc"`
+	}
+	if err := xml.NewDecoder(vpcResp.Body).Decode(&vpcResult); err != nil {
+		t.Fatalf("decode CreateVpc: %v", err)
+	}
+	vpcID := vpcResult.VPC.VPCID
+
+	subnetResp := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateSubnet",
+		"VpcId":            vpcID,
+		"CidrBlock":        "10.0.1.0/24",
+		"AvailabilityZone": "us-east-1a",
+	})
+	if subnetResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateSubnet: expected 200, got %d", subnetResp.StatusCode)
+	}
+	defer subnetResp.Body.Close() //nolint:errcheck
+	var subnetResult struct {
+		XMLName xml.Name `xml:"CreateSubnetResponse"`
+		Subnet  struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnet"`
+	}
+	if err := xml.NewDecoder(subnetResp.Body).Decode(&subnetResult); err != nil {
+		t.Fatalf("decode CreateSubnet: %v", err)
+	}
+	subnetID := subnetResult.Subnet.SubnetID
+
+	// RunInstances into the non-default subnet.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-12345678",
+		"InstanceType": "t3.micro",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+		"SubnetId":     subnetID,
+	})
+	if runResp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: expected 200, got %d", runResp.StatusCode)
+	}
+	defer runResp.Body.Close() //nolint:errcheck
+
+	var runResult struct {
+		XMLName   xml.Name `xml:"RunInstancesResponse"`
+		Instances []struct {
+			PublicIPAddr string `xml:"publicIpAddress"`
+			PrivateDNS   string `xml:"privateDnsName"`
+		} `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	if len(runResult.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(runResult.Instances))
+	}
+	inst := runResult.Instances[0]
+
+	// Non-default subnet without MapPublicIpOnLaunch: no public IP.
+	if inst.PublicIPAddr != "" {
+		t.Errorf("expected empty public IP for non-default subnet, got %q", inst.PublicIPAddr)
+	}
+	// Private DNS must still be set.
+	if !strings.HasSuffix(inst.PrivateDNS, ".compute.internal") {
+		t.Errorf("expected private DNS ending in .compute.internal, got %q", inst.PrivateDNS)
+	}
+}
