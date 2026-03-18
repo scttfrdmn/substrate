@@ -59,6 +59,14 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 
 	target := r.Header.Get("X-Amz-Target")
 	authHeader := r.Header.Get("Authorization")
+	// Presigned requests carry auth in query params instead of an Authorization
+	// header.  Synthesise a minimal credential string so all header-based
+	// extraction helpers (service, region, account) work transparently.
+	if authHeader == "" {
+		if credParam := params["X-Amz-Credential"]; credParam != "" {
+			authHeader = "AWS4-HMAC-SHA256 Credential=" + credParam + ","
+		}
+	}
 
 	// S3 virtual-hosted-style URL normalisation.
 	// mybucket.s3[.<region>].amazonaws.com → service="s3", path="/mybucket/..."
@@ -172,7 +180,9 @@ var targetServiceAliases = map[string]string{
 	// "AWSInsightsIndexService" → strip "AWS" → "insightsindexservice" → "ce".
 	"awsinsightsindexservice": "ce",
 	// "AmazonBudgetServiceGateway" → strip "Amazon" → "budgetservicegateway" → "budgets".
+	// "AWSBudgetServiceGateway" → strip "AWS" → "budgetservicegateway" → "budgets".
 	"budgetservicegateway": "budgets",
+	"awsbudgetservicegateway": "budgets",
 	// "AmazonHealthService" → strip "Amazon" → "healthservice" → "health".
 	"healthservice": "health",
 	// "email" is the subdomain name for Amazon SES v2.

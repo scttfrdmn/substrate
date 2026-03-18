@@ -100,6 +100,8 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.headObject(ctx, req, bucket, key)
 	case "DeleteObject":
 		return p.deleteObject(ctx, req, bucket, key)
+	case "DeleteObjects":
+		return p.deleteObjects(ctx, req, bucket)
 	case "CreateMultipartUpload":
 		return p.createMultipartUpload(ctx, req, bucket, key)
 	case "UploadPart":
@@ -246,6 +248,10 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 				return bucket, "", "ListObjectsV2"
 			}
 			return bucket, "", "ListObjects"
+		case "POST":
+			if _, ok := req.Params["delete"]; ok {
+				return bucket, "", "DeleteObjects"
+			}
 		}
 	} else {
 		// Object-level operations.
@@ -671,6 +677,91 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
 
+// deleteObjects handles POST /<bucket>?delete — multi-object delete.
+// The request body is XML: <Delete><Object><Key>…</Key></Object>…</Delete>.
+// The response lists successfully deleted keys and any errors.
+func (p *S3Plugin) deleteObjects(reqCtx *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	bucketData, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if bucketData == nil {
+		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	// Parse the XML request body.
+	type deleteObject struct {
+		Key       string `xml:"Key"`
+		VersionId string `xml:"VersionId"` //nolint:revive // AWS XML element name
+	}
+	type deleteRequest struct {
+		XMLName xml.Name       `xml:"Delete"`
+		Objects []deleteObject `xml:"Object"`
+		Quiet   bool           `xml:"Quiet"`
+	}
+	var deleteReq deleteRequest
+	if len(req.Body) > 0 {
+		if xmlErr := xml.Unmarshal(req.Body, &deleteReq); xmlErr != nil {
+			return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil
+		}
+	}
+
+	type deletedItem struct {
+		Key       string `xml:"Key"`
+		VersionId string `xml:"VersionId,omitempty"` //nolint:revive // AWS XML element name
+	}
+	type errorItem struct {
+		Key     string `xml:"Key"`
+		Code    string `xml:"Code"`
+		Message string `xml:"Message"`
+	}
+	type deleteResult struct {
+		XMLName xml.Name      `xml:"DeleteResult"`
+		XMLNS   string        `xml:"xmlns,attr"`
+		Deleted []deletedItem `xml:"Deleted"`
+		Errors  []errorItem   `xml:"Error"`
+	}
+
+	result := deleteResult{XMLNS: "http://s3.amazonaws.com/doc/2006-03-01/"}
+
+	for _, obj := range deleteReq.Objects {
+		if obj.Key == "" {
+			continue
+		}
+		// Delegate to the single-delete path by synthesising a minimal AWSRequest.
+		synReq := &AWSRequest{
+			Operation: "DELETE",
+			Path:      req.Path,
+			Params:    map[string]string{},
+			Headers:   req.Headers,
+		}
+		if obj.VersionId != "" {
+			synReq.Params["versionId"] = obj.VersionId
+		}
+		// Build a temporary request context scoped to this key.
+		_, delErr := p.deleteObject(reqCtx, synReq, bucket, obj.Key)
+		if delErr != nil {
+			result.Errors = append(result.Errors, errorItem{
+				Key:     obj.Key,
+				Code:    "InternalError",
+				Message: delErr.Error(),
+			})
+			continue
+		}
+		if !deleteReq.Quiet {
+			item := deletedItem{Key: obj.Key}
+			if obj.VersionId != "" {
+				item.VersionId = obj.VersionId
+			}
+			result.Deleted = append(result.Deleted, item)
+		}
+	}
+
+	return s3XMLResponse(http.StatusOK, result)
+}
+
 // copyObject handles PUT /<bucket>/<key> with X-Amz-Copy-Source header.
 func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dstKey string) (*AWSResponse, error) {
 	ctx := context.Background()
@@ -953,7 +1044,7 @@ func (p *S3Plugin) listObjectsV2(_ *RequestContext, req *AWSRequest, bucket stri
 		count++
 	}
 
-	result.KeyCount = count
+	result.KeyCount = len(result.Contents) + len(result.CommonPrefixes)
 	return s3XMLResponse(http.StatusOK, result)
 }
 

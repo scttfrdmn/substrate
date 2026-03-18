@@ -30,6 +30,16 @@ func TestParseAWSRequest_Service(t *testing.T) {
 			wantService: "dynamodb",
 		},
 		{
+			name:        "Budgets AmazonBudgetServiceGateway",
+			target:      "AmazonBudgetServiceGateway.DescribeBudgets",
+			wantService: "budgets",
+		},
+		{
+			name:        "Budgets AWSBudgetServiceGateway",
+			target:      "AWSBudgetServiceGateway.CreateBudget",
+			wantService: "budgets",
+		},
+		{
 			name:        "X-Amz-Target versioned namespace",
 			target:      "DynamoDB_20120810.GetItem",
 			wantService: "dynamodb",

@@ -890,3 +890,155 @@ func TestEC2_KeyPair_Import(t *testing.T) {
 		t.Error("KeyFingerprint is empty")
 	}
 }
+
+func TestEC2_RebootInstances(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Launch an instance first.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	id := runResult.Instances[0].InstanceID
+
+	resp := ec2Request(t, ts, map[string]string{"Action": "RebootInstances", "InstanceId.1": id})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("RebootInstances: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close() //nolint:errcheck
+}
+
+func TestEC2_CreateDeleteTags(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Launch an instance.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	id := runResult.Instances[0].InstanceID
+
+	// CreateTags.
+	tagResp := ec2Request(t, ts, map[string]string{
+		"Action":       "CreateTags",
+		"ResourceId.1": id,
+		"Tag.1.Key":    "Name",
+		"Tag.1.Value":  "my-instance",
+		"Tag.2.Key":    "Env",
+		"Tag.2.Value":  "test",
+	})
+	if tagResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateTags: expected 200, got %d", tagResp.StatusCode)
+	}
+	tagResp.Body.Close() //nolint:errcheck
+
+	// DescribeInstances should reflect updated tags.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeInstances"})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeInstances: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		Reservations []struct {
+			Instances []struct {
+				Tags []struct {
+					Key   string `xml:"key"`
+					Value string `xml:"value"`
+				} `xml:"tagSet>item"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeInstances: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.Reservations) == 0 || len(descResult.Reservations[0].Instances) == 0 {
+		t.Fatal("expected instance in DescribeInstances response")
+	}
+	tags := descResult.Reservations[0].Instances[0].Tags
+	found := false
+	for _, tag := range tags {
+		if tag.Key == "Name" && tag.Value == "my-instance" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Name=my-instance tag not found in %v", tags)
+	}
+
+	// DeleteTags — remove the Name tag.
+	delTagResp := ec2Request(t, ts, map[string]string{
+		"Action":       "DeleteTags",
+		"ResourceId.1": id,
+		"Tag.1.Key":    "Name",
+	})
+	if delTagResp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteTags: expected 200, got %d", delTagResp.StatusCode)
+	}
+	delTagResp.Body.Close() //nolint:errcheck
+}
+
+func TestEC2_ModifyInstanceAttribute(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Launch a t3.micro instance.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-1",
+		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	id := runResult.Instances[0].InstanceID
+
+	// Modify to t3.medium.
+	modResp := ec2Request(t, ts, map[string]string{
+		"Action":             "ModifyInstanceAttribute",
+		"InstanceId":         id,
+		"InstanceType.Value": "t3.medium",
+	})
+	if modResp.StatusCode != http.StatusOK {
+		t.Fatalf("ModifyInstanceAttribute: expected 200, got %d", modResp.StatusCode)
+	}
+	modResp.Body.Close() //nolint:errcheck
+
+	// DescribeInstances should show t3.medium.
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeInstances", "InstanceId.1": id,
+	})
+	var descResult struct {
+		Reservations []struct {
+			Instances []struct {
+				InstanceType string `xml:"instanceType"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeInstances: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.Reservations) == 0 || len(descResult.Reservations[0].Instances) == 0 {
+		t.Fatal("no instance in response")
+	}
+	if got := descResult.Reservations[0].Instances[0].InstanceType; got != "t3.medium" {
+		t.Errorf("InstanceType = %q; want %q", got, "t3.medium")
+	}
+}

@@ -118,6 +118,15 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteRoute(ctx, req)
 	case "DeleteRouteTable":
 		return p.deleteRouteTable(ctx, req)
+	// Instance management operations
+	case "RebootInstances":
+		return p.rebootInstances(ctx, req)
+	case "CreateTags":
+		return p.createTags(ctx, req)
+	case "DeleteTags":
+		return p.deleteTags(ctx, req)
+	case "ModifyInstanceAttribute":
+		return p.modifyInstanceAttribute(ctx, req)
 	// Key pair operations
 	case "CreateKeyPair":
 		return p.createKeyPair(ctx, req)
@@ -290,6 +299,10 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		Code int    `xml:"code"`
 		Name string `xml:"name"`
 	}
+	type tagItem struct {
+		Key   string `xml:"key"`
+		Value string `xml:"value"`
+	}
 	type ec2InstanceItem struct {
 		InstanceID       string       `xml:"instanceId"`
 		ImageID          string       `xml:"imageId"`
@@ -298,7 +311,9 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		PrivateIPAddress string       `xml:"privateIpAddress"`
 		SubnetID         string       `xml:"subnetId"`
 		VpcID            string       `xml:"vpcId"`
+		KeyName          string       `xml:"keyName,omitempty"`
 		State            ec2StateItem `xml:"instanceState"`
+		Tags             []tagItem    `xml:"tagSet>item"`
 	}
 	type reservationItem struct {
 		ReservationID string            `xml:"reservationId"`
@@ -340,9 +355,13 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			PrivateIPAddress: inst.PrivateIPAddress,
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
+			KeyName:          inst.KeyName,
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
+		for _, t := range inst.Tags {
+			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value})
+		}
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
 			resMap[inst.ReservationID] = &reservationItem{
@@ -1222,6 +1241,186 @@ func (p *EC2Plugin) deleteRouteTable(reqCtx *RequestContext, req *AWSRequest) (*
 		Return  bool     `xml:"return"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// --- Instance management operations ---
+
+// rebootInstances handles RebootInstances — a no-op in the emulator.
+func (p *EC2Plugin) rebootInstances(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	type response struct {
+		XMLName xml.Name `xml:"RebootInstancesResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// createTags handles CreateTags — applies key-value tags to one or more EC2 resources.
+func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
+	tags := extractEC2Tags(req.Params)
+	for _, id := range resourceIDs {
+		if err := p.applyTagsToResource(reqCtx, id, tags, false); err != nil {
+			return nil, err
+		}
+	}
+	type response struct {
+		XMLName xml.Name `xml:"CreateTagsResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// deleteTags handles DeleteTags — removes tags from one or more EC2 resources.
+func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
+	tags := extractEC2Tags(req.Params)
+	for _, id := range resourceIDs {
+		if err := p.applyTagsToResource(reqCtx, id, tags, true); err != nil {
+			return nil, err
+		}
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DeleteTagsResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// modifyInstanceAttribute handles ModifyInstanceAttribute — supports InstanceType changes.
+func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	instID := req.Params["InstanceId"]
+	if instID == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "InstanceId is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	stateKey := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + instID
+	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifyInstanceAttribute get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "InvalidInstanceID.NotFound", Message: "Instance not found: " + instID, HTTPStatus: http.StatusBadRequest}
+	}
+
+	var inst EC2Instance
+	if err := json.Unmarshal(data, &inst); err != nil {
+		return nil, fmt.Errorf("ec2 modifyInstanceAttribute unmarshal: %w", err)
+	}
+
+	// Apply supported attribute modifications.
+	if v := req.Params["InstanceType.Value"]; v != "" {
+		inst.InstanceType = v
+	}
+
+	updated, err := json.Marshal(inst)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifyInstanceAttribute marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, stateKey, updated); err != nil {
+		return nil, fmt.Errorf("ec2 modifyInstanceAttribute put: %w", err)
+	}
+
+	type response struct {
+		XMLName xml.Name `xml:"ModifyInstanceAttributeResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// applyTagsToResource loads the EC2 resource identified by id, merges or
+// removes the provided tags, and saves the updated resource back to state.
+// When remove is true, matching tag keys are deleted; otherwise tags are upserted.
+func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags []EC2Tag, remove bool) error {
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	var stateKey string
+	switch {
+	case strings.HasPrefix(id, "i-"):
+		stateKey = "instance:" + scope + "/" + id
+	case strings.HasPrefix(id, "vpc-"):
+		stateKey = "vpc:" + scope + "/" + id
+	case strings.HasPrefix(id, "subnet-"):
+		stateKey = "subnet:" + scope + "/" + id
+	case strings.HasPrefix(id, "sg-"):
+		stateKey = "sg:" + scope + "/" + id
+	case strings.HasPrefix(id, "igw-"):
+		stateKey = "igw:" + scope + "/" + id
+	case strings.HasPrefix(id, "rtb-"):
+		stateKey = "rtb:" + scope + "/" + id
+	default:
+		// Unknown resource type — silently ignore (matches AWS behaviour).
+		return nil
+	}
+
+	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
+	if err != nil || data == nil {
+		return nil // Resource not found — ignore (matches AWS behaviour).
+	}
+
+	// Use a generic map to avoid switching on concrete struct types.
+	var resource map[string]json.RawMessage
+	if err := json.Unmarshal(data, &resource); err != nil {
+		return fmt.Errorf("ec2 applyTagsToResource unmarshal %s: %w", id, err)
+	}
+
+	// Load existing tags.
+	var existing []EC2Tag
+	if raw, ok := resource["tags"]; ok {
+		_ = json.Unmarshal(raw, &existing)
+	}
+
+	if remove {
+		// Build set of keys to remove.
+		removeKeys := make(map[string]bool, len(tags))
+		for _, t := range tags {
+			removeKeys[t.Key] = true
+		}
+		filtered := existing[:0]
+		for _, t := range existing {
+			if !removeKeys[t.Key] {
+				filtered = append(filtered, t)
+			}
+		}
+		existing = filtered
+	} else {
+		// Upsert: update matching keys, append new ones.
+		idx := make(map[string]int, len(existing))
+		for i, t := range existing {
+			idx[t.Key] = i
+		}
+		for _, t := range tags {
+			if i, ok := idx[t.Key]; ok {
+				existing[i].Value = t.Value
+			} else {
+				existing = append(existing, t)
+			}
+		}
+	}
+
+	tagsRaw, _ := json.Marshal(existing)
+	resource["tags"] = json.RawMessage(tagsRaw)
+
+	updated, err := json.Marshal(resource)
+	if err != nil {
+		return fmt.Errorf("ec2 applyTagsToResource marshal %s: %w", id, err)
+	}
+	return p.state.Put(context.Background(), ec2Namespace, stateKey, updated)
+}
+
+// extractEC2Tags extracts Tag.N.Key / Tag.N.Value pairs from query params.
+func extractEC2Tags(params map[string]string) []EC2Tag {
+	var tags []EC2Tag
+	for i := 1; ; i++ {
+		key := params[fmt.Sprintf("Tag.%d.Key", i)]
+		if key == "" {
+			break
+		}
+		tags = append(tags, EC2Tag{Key: key, Value: params[fmt.Sprintf("Tag.%d.Value", i)]})
+	}
+	return tags
 }
 
 // --- Key pair operations ---

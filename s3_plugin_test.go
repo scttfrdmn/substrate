@@ -773,3 +773,116 @@ func TestS3Plugin_ObjectTagging(t *testing.T) {
 	w4 := s3Request(t, srv, http.MethodGet, "/obj-tag-bucket/mykey.txt?tagging", nil, nil)
 	assert.Equal(t, http.StatusOK, w4.Code)
 }
+
+func TestS3_DeleteObjects(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	// Create bucket and upload two objects.
+	s3Request(t, srv, http.MethodPut, "/del-batch-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/del-batch-bucket/file1.txt", []byte("a"), nil)
+	s3Request(t, srv, http.MethodPut, "/del-batch-bucket/file2.txt", []byte("b"), nil)
+	s3Request(t, srv, http.MethodPut, "/del-batch-bucket/file3.txt", []byte("c"), nil)
+
+	// DeleteObjects (multi-delete) for file1 and file2.
+	deleteXML := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<Delete>
+  <Object><Key>file1.txt</Key></Object>
+  <Object><Key>file2.txt</Key></Object>
+</Delete>`)
+	w := s3Request(t, srv, http.MethodPost, "/del-batch-bucket?delete", deleteXML,
+		map[string]string{"Content-Type": "application/xml"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var result struct {
+		Deleted []struct{ Key string `xml:"Key"` } `xml:"Deleted"`
+	}
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
+	assert.Len(t, result.Deleted, 2)
+
+	// file3 should still exist; file1/file2 should be gone.
+	assert.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodGet, "/del-batch-bucket/file3.txt", nil, nil).Code)
+	assert.Equal(t, http.StatusNotFound, s3Request(t, srv, http.MethodGet, "/del-batch-bucket/file1.txt", nil, nil).Code)
+}
+
+func TestS3_DeleteObjects_Quiet(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/del-quiet-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/del-quiet-bucket/obj.txt", []byte("x"), nil)
+
+	deleteXML := []byte(`<Delete><Quiet>true</Quiet><Object><Key>obj.txt</Key></Object></Delete>`)
+	w := s3Request(t, srv, http.MethodPost, "/del-quiet-bucket?delete", deleteXML,
+		map[string]string{"Content-Type": "application/xml"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Quiet mode: no <Deleted> entries in response.
+	var result struct {
+		Deleted []struct{ Key string `xml:"Key"` } `xml:"Deleted"`
+	}
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
+	assert.Empty(t, result.Deleted)
+}
+
+func TestS3_ListObjectsV2_Delimiter(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/delim-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/delim-bucket/data/a.csv", []byte("1"), nil)
+	s3Request(t, srv, http.MethodPut, "/delim-bucket/data/b.csv", []byte("2"), nil)
+	s3Request(t, srv, http.MethodPut, "/delim-bucket/logs/app.log", []byte("3"), nil)
+	s3Request(t, srv, http.MethodPut, "/delim-bucket/readme.txt", []byte("4"), nil)
+
+	// List with delimiter "/" — expects CommonPrefixes for "data/" and "logs/",
+	// Contents for top-level "readme.txt".
+	w := s3Request(t, srv, http.MethodGet, "/delim-bucket?list-type=2&delimiter=%2F", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var result struct {
+		Contents []struct {
+			Key string `xml:"Key"`
+		} `xml:"Contents"`
+		CommonPrefixes []struct {
+			Prefix string `xml:"Prefix"`
+		} `xml:"CommonPrefixes"`
+		KeyCount int `xml:"KeyCount"`
+	}
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &result))
+
+	assert.Len(t, result.Contents, 1, "expected only top-level objects in Contents")
+	assert.Equal(t, "readme.txt", result.Contents[0].Key)
+	assert.Len(t, result.CommonPrefixes, 2, "expected two common prefixes")
+	prefixes := []string{result.CommonPrefixes[0].Prefix, result.CommonPrefixes[1].Prefix}
+	assert.Contains(t, prefixes, "data/")
+	assert.Contains(t, prefixes, "logs/")
+	// KeyCount should include both Contents and CommonPrefixes.
+	assert.Equal(t, 3, result.KeyCount)
+}
+
+func TestS3_PresignedURL_ServiceIdentification(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	// Create a bucket and put an object.
+	s3Request(t, srv, http.MethodPut, "/presign-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/presign-bucket/key.txt", []byte("hello"), nil)
+
+	// Simulate a presigned GET: no Authorization header; X-Amz-Credential in query.
+	// The credential scope contains the service name "s3".
+	r := httptest.NewRequest(http.MethodGet,
+		"http://s3.us-east-1.amazonaws.com/presign-bucket/key.txt"+
+			"?X-Amz-Algorithm=AWS4-HMAC-SHA256"+
+			"&X-Amz-Credential=AKIATEST12345678901%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"+
+			"&X-Amz-Date=20260101T000000Z"+
+			"&X-Amz-Expires=900"+
+			"&X-Amz-SignedHeaders=host"+
+			"&X-Amz-Signature=fakesig",
+		nil)
+	r.Host = "s3.us-east-1.amazonaws.com"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	assert.Equal(t, http.StatusOK, w.Code, "presigned GET should return 200")
+	assert.Equal(t, "hello", w.Body.String())
+}
