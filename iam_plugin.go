@@ -150,6 +150,9 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListRoleTags":
 		return p.listRoleTags(ctx, req)
 
+	case "ListInstanceProfiles":
+		return p.listInstanceProfiles(ctx, req)
+
 	default:
 		return iamErrorResponse("InvalidAction",
 			fmt.Sprintf("Could not find operation %s", req.Operation),
@@ -2452,4 +2455,17 @@ func arnPolicyName(arn string) string {
 		return arn[idx+1:]
 	}
 	return arn
+}
+
+// --- Instance profiles -------------------------------------------------------
+
+// listInstanceProfiles returns an empty (but valid) list of IAM instance
+// profiles.  Substrate does not persist instance profiles; the operation is
+// implemented so that callers that merely enumerate profiles receive a
+// well-formed response instead of an error.
+func (p *IAMPlugin) listInstanceProfiles(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	return iamJSONResponse(http.StatusOK, map[string]any{
+		"InstanceProfiles": []any{},
+		"IsTruncated":      false,
+	})
 }

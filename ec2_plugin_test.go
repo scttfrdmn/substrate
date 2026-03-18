@@ -1042,3 +1042,118 @@ func TestEC2_ModifyInstanceAttribute(t *testing.T) {
 		t.Errorf("InstanceType = %q; want %q", got, "t3.medium")
 	}
 }
+
+func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Launch an instance so we have a valid source instance ID.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base",
+		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct{ InstanceID string `xml:"instanceId"` } `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	if len(runResult.Instances) == 0 {
+		t.Fatal("no instance returned by RunInstances")
+	}
+	instanceID := runResult.Instances[0].InstanceID
+
+	// CreateImage with a tag.
+	createResp := ec2Request(t, ts, map[string]string{
+		"Action":                          "CreateImage",
+		"InstanceId":                      instanceID,
+		"Name":                            "my-snapshot",
+		"Description":                     "test AMI",
+		"NoReboot":                        "true",
+		"TagSpecification.1.ResourceType": "image",
+		"TagSpecification.1.Tag.1.Key":    "canopy:managed",
+		"TagSpecification.1.Tag.1.Value":  "true",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateImage: expected 200, got %d", createResp.StatusCode)
+	}
+	var createResult struct {
+		ImageID string `xml:"imageId"`
+	}
+	if err := xml.NewDecoder(createResp.Body).Decode(&createResult); err != nil {
+		t.Fatalf("decode CreateImage response: %v", err)
+	}
+	createResp.Body.Close() //nolint:errcheck
+	if !strings.HasPrefix(createResult.ImageID, "ami-") {
+		t.Errorf("ImageID = %q; want prefix ami-", createResult.ImageID)
+	}
+	imageID := createResult.ImageID
+
+	// DescribeImages with tag filter should return the AMI.
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action":           "DescribeImages",
+		"Owner.1":          "self",
+		"Filter.1.Name":    "tag:canopy:managed",
+		"Filter.1.Value.1": "true",
+	})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeImages: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		Images []struct {
+			ImageID string `xml:"imageId"`
+			Name    string `xml:"name"`
+			State   string `xml:"imageState"`
+			Tags    []struct {
+				Key   string `xml:"key"`
+				Value string `xml:"value"`
+			} `xml:"tagSet>item"`
+		} `xml:"imagesSet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeImages response: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.Images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(descResult.Images))
+	}
+	if descResult.Images[0].ImageID != imageID {
+		t.Errorf("ImageID = %q; want %q", descResult.Images[0].ImageID, imageID)
+	}
+	if descResult.Images[0].Name != "my-snapshot" {
+		t.Errorf("Name = %q; want %q", descResult.Images[0].Name, "my-snapshot")
+	}
+	if descResult.Images[0].State != "available" {
+		t.Errorf("State = %q; want available", descResult.Images[0].State)
+	}
+	if len(descResult.Images[0].Tags) != 1 || descResult.Images[0].Tags[0].Key != "canopy:managed" {
+		t.Errorf("tags = %v; want [{canopy:managed true}]", descResult.Images[0].Tags)
+	}
+
+	// DeregisterImage removes the AMI.
+	deregResp := ec2Request(t, ts, map[string]string{
+		"Action":  "DeregisterImage",
+		"ImageId": imageID,
+	})
+	if deregResp.StatusCode != http.StatusOK {
+		t.Fatalf("DeregisterImage: expected 200, got %d", deregResp.StatusCode)
+	}
+	deregResp.Body.Close() //nolint:errcheck
+
+	// DescribeImages should return empty list now.
+	descResp2 := ec2Request(t, ts, map[string]string{
+		"Action":  "DescribeImages",
+		"Owner.1": "self",
+	})
+	var descResult2 struct {
+		Images []struct{ ImageID string `xml:"imageId"` } `xml:"imagesSet>item"`
+	}
+	if err := xml.NewDecoder(descResp2.Body).Decode(&descResult2); err != nil {
+		t.Fatalf("decode DescribeImages (post-deregister) response: %v", err)
+	}
+	descResp2.Body.Close() //nolint:errcheck
+	if len(descResult2.Images) != 0 {
+		t.Errorf("expected 0 images after DeregisterImage, got %d", len(descResult2.Images))
+	}
+}

@@ -333,3 +333,36 @@ func randomHex(n int) string {
 	}
 	return hex.EncodeToString(b)
 }
+
+// EC2Image represents an Amazon Machine Image (AMI) registered in Substrate.
+type EC2Image struct {
+	// ImageID is the AMI identifier (e.g. "ami-0123456789abcdef0").
+	ImageID string `json:"image_id"`
+
+	// Name is the user-supplied name for the AMI.
+	Name string `json:"name"`
+
+	// Description is the optional description for the AMI.
+	Description string `json:"description"`
+
+	// InstanceID is the source instance used to create the AMI.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// State is the image state: always "available" in Substrate.
+	State string `json:"state"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the AMI.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the AMI is registered.
+	Region string `json:"region"`
+}
+
+// generateImageID generates a random AMI ID in the format "ami-" followed
+// by 17 hex characters.
+func generateImageID() string {
+	return "ami-" + randomHex(8)
+}

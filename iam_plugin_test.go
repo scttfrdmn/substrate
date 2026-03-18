@@ -988,3 +988,17 @@ func TestIAMPlugin_RoleTagging(t *testing.T) {
 	tags2 := result2["Tags"].([]any)
 	assert.Empty(t, tags2)
 }
+func TestIAMPlugin_ListInstanceProfiles_Empty(t *testing.T) {
+	t.Parallel()
+	srv := newIAMTestServer(t)
+
+	resp := iamRequest(t, srv, "ListInstanceProfiles", map[string]any{})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	profiles, ok := result["InstanceProfiles"]
+	require.True(t, ok, "InstanceProfiles key must be present")
+	assert.Empty(t, profiles, "empty account should have no instance profiles")
+	assert.Equal(t, false, result["IsTruncated"], "IsTruncated should be false")
+}

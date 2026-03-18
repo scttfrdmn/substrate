@@ -240,3 +240,21 @@ func TestCWAlarm_SetAlarmStateNotFound(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
+
+func TestCW_GetMetricData_Empty(t *testing.T) {
+	t.Parallel()
+	srv := newCWAlarmTestServer(t)
+
+	resp := cwRequest(t, srv, map[string]string{
+		"Action":                                "GetMetricData",
+		"StartTime":                             "2024-01-01T00:00:00Z",
+		"EndTime":                               "2024-01-02T00:00:00Z",
+		"MetricDataQueries.member.1.Id":         "size_0",
+		"MetricDataQueries.member.1.MetricStat.Metric.Namespace":  "AWS/S3",
+		"MetricDataQueries.member.1.MetricStat.Metric.MetricName": "BucketSizeBytes",
+		"MetricDataQueries.member.1.MetricStat.Period":            "86400",
+		"MetricDataQueries.member.1.MetricStat.Stat":              "Average",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close() //nolint:errcheck
+}

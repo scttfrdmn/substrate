@@ -58,6 +58,8 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.enableAlarmActions(ctx, req)
 	case "DisableAlarmActions":
 		return p.disableAlarmActions(ctx, req)
+	case "GetMetricData":
+		return p.getMetricData(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -478,4 +480,37 @@ func cwXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
 		Body:       append([]byte(xml.Header), body...),
 	}, nil
+}
+
+// --- GetMetricData -----------------------------------------------------------
+
+// getMetricData handles the GetMetricData operation.  Substrate does not
+// store real metric time-series data, so it returns an empty
+// MetricDataResults list.  Callers that degrade gracefully on zero values
+// (e.g. display "0 bytes") work correctly with this response.
+func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	type metricDataResult struct {
+		ID         string   `xml:"Id"`
+		Label      string   `xml:"Label"`
+		StatusCode string   `xml:"StatusCode"`
+		Timestamps []string `xml:"Timestamps>member"`
+		Values     []string `xml:"Values>member"`
+	}
+	type response struct {
+		XMLName  xml.Name `xml:"GetMetricDataResponse"`
+		XMLNS    string   `xml:"xmlns,attr"`
+		Result   struct {
+			MetricDataResults []metricDataResult `xml:"MetricDataResults>member"`
+			NextToken         string             `xml:"NextToken,omitempty"`
+		} `xml:"GetMetricDataResult"`
+		Metadata struct {
+			RequestID string `xml:"RequestId"`
+		} `xml:"ResponseMetadata"`
+	}
+	return cwXMLResponse(http.StatusOK, response{
+		XMLNS: cloudwatchXMLNS,
+		Metadata: struct {
+			RequestID string `xml:"RequestId"`
+		}{RequestID: ctx.RequestID},
+	})
 }

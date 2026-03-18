@@ -136,6 +136,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteKeyPair(ctx, req)
 	case "ImportKeyPair":
 		return p.importKeyPair(ctx, req)
+	// AMI operations
+	case "CreateImage":
+		return p.createImage(ctx, req)
+	case "DescribeImages":
+		return p.describeImages(ctx, req)
+	case "DeregisterImage":
+		return p.deregisterImage(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -1816,4 +1823,177 @@ func removePerm(perms []EC2IPPermission, target EC2IPPermission) []EC2IPPermissi
 		}
 	}
 	return perms
+}
+
+// --- AMI operations ----------------------------------------------------------
+
+// ec2ImageStateKey returns the state key for an AMI.
+func ec2ImageStateKey(accountID, region, imageID string) string {
+	return "image:" + accountID + "/" + region + "/" + imageID
+}
+
+// createImage creates an AMI from a running or stopped instance.
+func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	instanceID := req.Params["InstanceId"]
+	name := req.Params["Name"]
+	description := req.Params["Description"]
+	if instanceID == "" || name == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "InstanceId and Name are required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Parse TagSpecifications (TagSpecification.1.Tag.N.Key / Value).
+	var tags []EC2Tag
+	for i := 1; ; i++ {
+		key := req.Params[fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)]
+		if key == "" {
+			break
+		}
+		tags = append(tags, EC2Tag{Key: key, Value: req.Params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)]})
+	}
+
+	imageID := generateImageID()
+	img := EC2Image{
+		ImageID:     imageID,
+		Name:        name,
+		Description: description,
+		InstanceID:  instanceID,
+		State:       "available",
+		Tags:        tags,
+		AccountID:   reqCtx.AccountID,
+		Region:      reqCtx.Region,
+	}
+	data, err := json.Marshal(img)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createImage marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, ec2ImageStateKey(reqCtx.AccountID, reqCtx.Region, imageID), data); err != nil {
+		return nil, fmt.Errorf("ec2 createImage put: %w", err)
+	}
+
+	type response struct {
+		XMLName xml.Name `xml:"CreateImageResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		ImageID string   `xml:"imageId"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
+		ImageID: imageID,
+	})
+}
+
+// describeImages lists AMIs owned by the account, with optional tag filters.
+// Supports Owners=["self"] and tag:<key>=<value> Filter entries.
+func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "image:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeImages list: %w", err)
+	}
+
+	// Collect all Filter.N.Name / Filter.N.Value.M pairs.
+	type filterEntry struct {
+		name   string
+		values []string
+	}
+	var filters []filterEntry
+	for i := 1; ; i++ {
+		fn := req.Params["Filter."+strconv.Itoa(i)+".Name"]
+		if fn == "" {
+			break
+		}
+		var vals []string
+		for j := 1; ; j++ {
+			fv := req.Params["Filter."+strconv.Itoa(i)+".Value."+strconv.Itoa(j)]
+			if fv == "" {
+				break
+			}
+			vals = append(vals, fv)
+		}
+		filters = append(filters, filterEntry{name: fn, values: vals})
+	}
+
+	type tagItem struct {
+		Key   string `xml:"key"`
+		Value string `xml:"value"`
+	}
+	type imageItem struct {
+		ImageID     string    `xml:"imageId"`
+		Name        string    `xml:"name"`
+		Description string    `xml:"description,omitempty"`
+		State       string    `xml:"imageState"`
+		OwnerID     string    `xml:"imageOwnerId"`
+		Tags        []tagItem `xml:"tagSet>item"`
+	}
+	type response struct {
+		XMLName xml.Name    `xml:"DescribeImagesResponse"`
+		XMLNS   string      `xml:"xmlns,attr"`
+		Images  []imageItem `xml:"imagesSet>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var img EC2Image
+		if json.Unmarshal(data, &img) != nil {
+			continue
+		}
+
+		// Apply filters.
+		skip := false
+		for _, f := range filters {
+			if strings.HasPrefix(f.name, "tag:") {
+				tagKey := f.name[4:]
+				found := false
+				for _, t := range img.Tags {
+					if t.Key == tagKey && (len(f.values) == 0 || containsStr(f.values, t.Value)) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					skip = true
+					break
+				}
+			}
+		}
+		if skip {
+			continue
+		}
+
+		item := imageItem{
+			ImageID:     img.ImageID,
+			Name:        img.Name,
+			Description: img.Description,
+			State:       img.State,
+			OwnerID:     img.AccountID,
+		}
+		for _, t := range img.Tags {
+			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value})
+		}
+		resp.Images = append(resp.Images, item)
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// deregisterImage removes an AMI from state.
+func (p *EC2Plugin) deregisterImage(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	imageID := req.Params["ImageId"]
+	if imageID == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ImageId is required", HTTPStatus: http.StatusBadRequest}
+	}
+	key := ec2ImageStateKey(reqCtx.AccountID, reqCtx.Region, imageID)
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deregisterImage delete: %w", err)
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DeregisterImageResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:  "http://ec2.amazonaws.com/doc/2016-11-15/",
+		Return: true,
+	})
 }
