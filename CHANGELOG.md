@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.19] - 2026-03-18
+
+### Fixed
+
+- **S3 multipart uploads now preserve user metadata** (`s3_plugin.go`, `s3_types.go`): `x-amz-meta-*` headers supplied to `CreateMultipartUpload` were silently discarded — `S3MultipartUpload` had no `UserMetadata` field, so `completeMultipartUpload` always assembled the final object with an empty metadata map. `HeadObject`/`GetObject` on a completed multipart object would return no metadata regardless of what was provided at initiation. The fix adds `UserMetadata map[string]string` to `S3MultipartUpload`, captures `extractUserMetadata(req.Headers)` in `createMultipartUpload`, and copies it to the assembled `S3Object` in `completeMultipartUpload`. `PutObject` (single-part) was not affected. Fixes #217.
+
+### Added
+
+- **Regression test for multipart user metadata** (`s3_plugin_test.go`): `TestS3_MultipartUpload_UserMetadata` verifies that `X-Amz-Meta-*` headers supplied to `CreateMultipartUpload` are returned by both `HeadObject` and `GetObject` after `CompleteMultipartUpload`.
+
 ## [v0.36.18] - 2026-03-18
 
 ### Fixed

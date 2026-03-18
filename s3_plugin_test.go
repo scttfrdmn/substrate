@@ -979,3 +979,49 @@ func TestS3_MultipartUpload_ExplicitEmptyUploadsParam(t *testing.T) {
 	require.Equal(t, http.StatusOK, lw.Code, "list multipart uploads: want 200")
 	assert.Contains(t, lw.Body.String(), initiateResult.UploadID)
 }
+
+// TestS3_MultipartUpload_UserMetadata verifies that x-amz-meta-* headers supplied
+// to CreateMultipartUpload are preserved on the assembled object after
+// CompleteMultipartUpload. Regression test for #217.
+func TestS3_MultipartUpload_UserMetadata(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/meta-bucket", nil, nil)
+
+	// Initiate multipart upload with user metadata.
+	iw := s3Request(t, srv, http.MethodPost, "/meta-bucket/upload.bin?uploads", nil,
+		map[string]string{
+			"X-Amz-Meta-Author":  "alice",
+			"X-Amz-Meta-Version": "v1",
+		})
+	require.Equal(t, http.StatusOK, iw.Code)
+
+	var ir struct {
+		UploadId string `xml:"UploadId"` //nolint:revive
+	}
+	require.NoError(t, xml.NewDecoder(strings.NewReader(iw.Body.String())).Decode(&ir))
+	require.NotEmpty(t, ir.UploadId)
+
+	// Upload one part.
+	uw := s3Request(t, srv, http.MethodPut,
+		fmt.Sprintf("/meta-bucket/upload.bin?partNumber=1&uploadId=%s", ir.UploadId),
+		[]byte("payload"), nil)
+	require.Equal(t, http.StatusOK, uw.Code)
+
+	// Complete the upload.
+	completeBody := `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>e1</ETag></Part></CompleteMultipartUpload>`
+	cw := s3Request(t, srv, http.MethodPost,
+		"/meta-bucket/upload.bin?uploadId="+ir.UploadId,
+		[]byte(completeBody), nil)
+	require.Equal(t, http.StatusOK, cw.Code)
+
+	// HEAD the object — metadata must be present.
+	hw := s3Request(t, srv, http.MethodHead, "/meta-bucket/upload.bin", nil, nil)
+	require.Equal(t, http.StatusOK, hw.Code)
+	assert.Equal(t, "alice", hw.Header().Get("X-Amz-Meta-Author"), "Author metadata lost after CompleteMultipartUpload")
+	assert.Equal(t, "v1", hw.Header().Get("X-Amz-Meta-Version"), "Version metadata lost after CompleteMultipartUpload")
+
+	// GET also returns the metadata.
+	gw := s3Request(t, srv, http.MethodGet, "/meta-bucket/upload.bin", nil, nil)
+	require.Equal(t, http.StatusOK, gw.Code)
+	assert.Equal(t, "alice", gw.Header().Get("X-Amz-Meta-Author"))
+}

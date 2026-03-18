@@ -1088,11 +1088,12 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 	}
 
 	upload := S3MultipartUpload{
-		UploadID:    uploadID,
-		Bucket:      bucket,
-		Key:         key,
-		ContentType: contentType,
-		Initiated:   p.tc.Now(),
+		UploadID:     uploadID,
+		Bucket:       bucket,
+		Key:          key,
+		ContentType:  contentType,
+		Initiated:    p.tc.Now(),
+		UserMetadata: extractUserMetadata(req.Headers),
 	}
 
 	data, err := json.Marshal(upload)
@@ -1261,7 +1262,7 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		ContentType:  upload.ContentType,
 		Size:         int64(len(combined)),
 		LastModified: p.tc.Now(),
-		UserMetadata: make(map[string]string),
+		UserMetadata: upload.UserMetadata,
 	}
 	objData, err := json.Marshal(obj)
 	if err != nil {

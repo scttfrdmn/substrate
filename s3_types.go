@@ -130,6 +130,9 @@ type S3MultipartUpload struct {
 
 	// Initiated is the time the multipart upload was created.
 	Initiated time.Time `json:"initiated"`
+
+	// UserMetadata holds x-amz-meta-* headers supplied at upload creation.
+	UserMetadata map[string]string `json:"user_metadata,omitempty"`
 }
 
 // S3Part holds metadata for one part within a multipart upload. The part body
