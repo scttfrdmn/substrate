@@ -488,7 +488,27 @@ func cwXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 // store real metric time-series data, so it returns an empty
 // MetricDataResults list.  Callers that degrade gracefully on zero values
 // (e.g. display "0 bytes") work correctly with this response.
-func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+//
+// The AWS SDK Go v2 (cloudwatch v1.55+) sends GetMetricData via the Smithy
+// RPC v2 CBOR protocol (Content-Type: application/cbor).  In that case, an
+// empty CBOR map is returned; otherwise the response is the standard XML.
+func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Smithy RPC v2 CBOR path: SDK sends Content-Type: application/cbor.
+	// Return an empty CBOR map {} (0xa0) — the SDK treats absent fields as
+	// zero values, so MetricDataResults defaults to nil (empty slice).
+	if strings.Contains(req.Headers["Content-Type"], "application/cbor") ||
+		strings.Contains(req.Headers["Smithy-Protocol"], "rpc-v2-cbor") {
+		return &AWSResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string]string{
+				"Content-Type":    "application/cbor",
+				"Smithy-Protocol": "rpc-v2-cbor",
+			},
+			// 0xa0 = CBOR map(0) — empty map.
+			Body: []byte{0xa0},
+		}, nil
+	}
+
 	type metricDataResult struct {
 		ID         string   `xml:"Id"`
 		Label      string   `xml:"Label"`

@@ -258,3 +258,32 @@ func TestCW_GetMetricData_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close() //nolint:errcheck
 }
+
+func TestCW_GetMetricData_SmithyRPCV2CBOR(t *testing.T) {
+	// Verify that GetMetricData returns a CBOR response when called via the
+	// Smithy RPC v2 CBOR protocol (as used by cloudwatch SDK Go v2 v1.55+).
+	t.Parallel()
+	srv := newCWAlarmTestServer(t)
+
+	r := httptest.NewRequest(http.MethodPost,
+		"/service/GraniteServiceVersion20100801/operation/GetMetricData",
+		strings.NewReader("\xa0")) // minimal CBOR empty map body
+	r.Host = "localhost:4566"
+	r.Header.Set("Content-Type", "application/cbor")
+	r.Header.Set("Smithy-Protocol", "rpc-v2-cbor")
+	r.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20240101/us-east-1/monitoring/aws4_request, SignedHeaders=host, Signature=fake")
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	resp := w.Result()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/cbor")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	resp.Body.Close() //nolint:errcheck
+	// 0xa0 = empty CBOR map {}.
+	require.Len(t, body, 1)
+	assert.Equal(t, byte(0xa0), body[0])
+}

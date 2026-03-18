@@ -272,6 +272,26 @@ func TestParseAWSRequest_EmptyValueQueryParam(t *testing.T) {
 	assert.Equal(t, "2", req.Params["list-type"])
 }
 
+func TestParseAWSRequest_SmithyRPCV2(t *testing.T) {
+	// AWS SDK Go v2 cloudwatch v1.55+ sends GetMetricData via rpc-v2-cbor:
+	//   POST /service/GraniteServiceVersion20100801/operation/GetMetricData
+	//   Smithy-Protocol: rpc-v2-cbor
+	//   Content-Type: application/cbor
+	r := httptest.NewRequest(http.MethodPost,
+		"http://localhost:4566/service/GraniteServiceVersion20100801/operation/GetMetricData",
+		nil)
+	r.Host = "localhost:4566"
+	r.Header.Set("Smithy-Protocol", "rpc-v2-cbor")
+	r.Header.Set("Content-Type", "application/cbor")
+	r.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20240101/us-east-1/monitoring/aws4_request, SignedHeaders=host, Signature=fake")
+
+	req, _, err := substrate.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "monitoring", req.Service, "Smithy service ID should resolve to 'monitoring'")
+	assert.Equal(t, "GetMetricData", req.Operation, "operation should be extracted from URL path")
+}
+
 func TestParseAWSRequest_S3VirtualHosted(t *testing.T) {
 	tests := []struct {
 		name        string

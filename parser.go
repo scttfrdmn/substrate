@@ -102,7 +102,7 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 		}
 	}
 
-	operation := extractOperation(target, params, r.Method)
+	operation := extractOperation(target, params, r.Method, r.URL.Path)
 	region := extractRegion(host, authHeader)
 	account := extractAccount(authHeader)
 
@@ -268,8 +268,21 @@ func extractServiceFromHost(host string) string {
 	return svc
 }
 
+// smithyServiceAliases maps Smithy internal service IDs (lower-cased) found in
+// Smithy RPC v2 CBOR URLs (/service/<ServiceId>/operation/<Op>) to Substrate's
+// canonical service names.  Only services that use the rpc-v2-cbor protocol
+// for at least one operation need entries here.
+var smithyServiceAliases = map[string]string{
+	// CloudWatch uses Smithy ID "GraniteServiceVersion20100801" for
+	// operations that have migrated to the rpc-v2-cbor transport (e.g.
+	// GetMetricData in cloudwatch SDK v1.55+).
+	"graniteserviceversion20100801": "monitoring",
+}
+
 // extractServiceFromPath returns the first path segment when the URL path
-// begins with "/service/<name>/".
+// begins with "/service/<name>/".  The segment is looked up in
+// smithyServiceAliases so that Smithy internal service IDs (e.g.
+// "GraniteServiceVersion20100801") are resolved to canonical names.
 func extractServiceFromPath(urlPath string) string {
 	// Expected pattern: /service/<name>/...
 	const prefix = "/service/"
@@ -277,15 +290,37 @@ func extractServiceFromPath(urlPath string) string {
 		return ""
 	}
 	rest := urlPath[len(prefix):]
+	var raw string
 	if slash := strings.IndexByte(rest, '/'); slash > 0 {
-		return strings.ToLower(rest[:slash])
+		raw = strings.ToLower(rest[:slash])
+	} else {
+		raw = strings.ToLower(rest)
 	}
-	return strings.ToLower(rest)
+	if canonical, ok := smithyServiceAliases[raw]; ok {
+		return canonical
+	}
+	return raw
+}
+
+// extractOperationFromPath extracts the operation name from a Smithy RPC v2
+// URL of the form /service/<ServiceId>/operation/<OperationName>.
+func extractOperationFromPath(urlPath string) string {
+	const opToken = "/operation/"
+	idx := strings.Index(urlPath, opToken)
+	if idx < 0 {
+		return ""
+	}
+	op := urlPath[idx+len(opToken):]
+	if slash := strings.IndexByte(op, '/'); slash >= 0 {
+		op = op[:slash]
+	}
+	return op
 }
 
 // extractOperation determines the API operation from available signals, in
-// priority order: X-Amz-Target suffix, Action query/form parameter, HTTP method.
-func extractOperation(target string, params map[string]string, method string) string {
+// priority order: X-Amz-Target suffix, Action query/form parameter, Smithy
+// RPC v2 URL path, HTTP method.
+func extractOperation(target string, params map[string]string, method, urlPath string) string {
 	// 1. X-Amz-Target: "AmazonDynamoDB.GetItem" → "GetItem"
 	if target != "" {
 		if dot := strings.LastIndexByte(target, '.'); dot >= 0 && dot < len(target)-1 {
@@ -298,7 +333,12 @@ func extractOperation(target string, params map[string]string, method string) st
 		return action
 	}
 
-	// 3. Fallback: HTTP method.
+	// 3. Smithy RPC v2 URL: /service/<ServiceId>/operation/<OperationName>
+	if op := extractOperationFromPath(urlPath); op != "" {
+		return op
+	}
+
+	// 4. Fallback: HTTP method.
 	return method
 }
 
