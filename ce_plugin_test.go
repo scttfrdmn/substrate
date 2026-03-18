@@ -204,6 +204,80 @@ func TestCE_GetDimensionValues(t *testing.T) {
 	}
 }
 
+// TestCE_GetCostAndUsage_BlendedCostMetric verifies that when the caller
+// requests "BlendedCost" the response groups use that exact key, not
+// "UnblendedCost".  Regression test for #208.
+func TestCE_GetCostAndUsage_BlendedCostMetric(t *testing.T) {
+	baseline := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	ts, tc := newCEWithEC2TestServer(t)
+	tc.SetTime(baseline)
+
+	// Run an instance so there is non-zero cost.
+	runResp := ec2QueryRequest(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-12345678",
+		"InstanceType": "m7i.large",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+	})
+	_ = runResp.Body.Close()
+
+	tc.SetTime(baseline.Add(10 * time.Hour))
+
+	resp := ceRequest(t, ts, "GetCostAndUsage", map[string]interface{}{
+		"TimePeriod":  map[string]string{"Start": "2026-03-01", "End": "2026-04-01"},
+		"Granularity": "MONTHLY",
+		"Metrics":     []string{"BlendedCost"},
+		"GroupBy": []map[string]string{
+			{"Type": "DIMENSION", "Key": "SERVICE"},
+		},
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var out struct {
+		ResultsByTime []struct {
+			Total  map[string]map[string]string   `json:"Total"`
+			Groups []struct {
+				Keys    []string                     `json:"Keys"`
+				Metrics map[string]map[string]string `json:"Metrics"`
+			} `json:"Groups"`
+		} `json:"ResultsByTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.ResultsByTime) == 0 {
+		t.Fatal("no ResultsByTime")
+	}
+
+	// Total must have BlendedCost key, not UnblendedCost.
+	if _, ok := out.ResultsByTime[0].Total["BlendedCost"]; !ok {
+		t.Errorf("Total missing BlendedCost key; got keys: %v", out.ResultsByTime[0].Total)
+	}
+	if _, ok := out.ResultsByTime[0].Total["UnblendedCost"]; ok {
+		t.Errorf("Total unexpectedly contains UnblendedCost key when BlendedCost was requested")
+	}
+
+	// At least one group must have BlendedCost with a non-empty Amount.
+	const ec2Key = "Amazon Elastic Compute Cloud - Compute"
+	for _, g := range out.ResultsByTime[0].Groups {
+		if len(g.Keys) > 0 && g.Keys[0] == ec2Key {
+			m, ok := g.Metrics["BlendedCost"]
+			if !ok {
+				t.Errorf("EC2 group missing BlendedCost metric; metrics: %v", g.Metrics)
+			}
+			if m["Amount"] == "" || m["Amount"] == "0.000000" {
+				t.Errorf("EC2 BlendedCost.Amount is empty or zero: %q", m["Amount"])
+			}
+			return
+		}
+	}
+	t.Errorf("EC2 group not found in: %+v", out.ResultsByTime[0].Groups)
+}
+
 func TestCE_UnsupportedOperation(t *testing.T) {
 	ts := newCETestServer(t)
 

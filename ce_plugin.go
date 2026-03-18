@@ -126,13 +126,25 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 			totalCost += ec2Cost
 		}
 
+		// Use the caller-requested metric names; default to UnblendedCost.
+		metricNames := input.Metrics
+		if len(metricNames) == 0 {
+			metricNames = []string{"UnblendedCost"}
+		}
+
+		buildMetrics := func(cost float64) map[string]CEMetric {
+			m := make(map[string]CEMetric, len(metricNames))
+			for _, name := range metricNames {
+				m[name] = CEMetric{Amount: fmt.Sprintf("%.6f", cost), Unit: "USD"}
+			}
+			return m
+		}
+
 		groups := make([]CEGroup, 0, len(bySvc))
 		for svc, cost := range bySvc {
 			groups = append(groups, CEGroup{
-				Keys: []string{svc},
-				Metrics: map[string]CEMetric{
-					"UnblendedCost": {Amount: fmt.Sprintf("%.6f", cost), Unit: "USD"},
-				},
+				Keys:    []string{svc},
+				Metrics: buildMetrics(cost),
 			})
 		}
 		sort.Slice(groups, func(i, j int) bool { return groups[i].Keys[0] < groups[j].Keys[0] })
@@ -140,11 +152,9 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 		results = []CECostResultByTime{
 			{
 				TimePeriod: input.TimePeriod,
-				Total: map[string]CEMetric{
-					"UnblendedCost": {Amount: fmt.Sprintf("%.6f", totalCost), Unit: "USD"},
-				},
-				Groups:    groups,
-				Estimated: false,
+				Total:      buildMetrics(totalCost),
+				Groups:     groups,
+				Estimated:  false,
 			},
 		}
 	}

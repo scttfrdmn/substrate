@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.12] - 2026-03-18
+
+### Fixed
+
+- **`GetCostAndUsage` metric key now mirrors the request** (`ce_plugin.go`): groups and the total bucket previously always used `"UnblendedCost"` regardless of the `Metrics` field sent by the caller. Callers that request `"BlendedCost"` (the AWS SDK default) now receive `BlendedCost` keys with non-nil `Amount` values. Fixes #208.
+
 ## [v0.36.11] - 2026-03-18
 
 ### Fixed
@@ -842,3 +848,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.9]: https://github.com/scttfrdmn/substrate/compare/v0.36.8...v0.36.9
 [v0.36.10]: https://github.com/scttfrdmn/substrate/compare/v0.36.9...v0.36.10
 [v0.36.11]: https://github.com/scttfrdmn/substrate/compare/v0.36.10...v0.36.11
+[v0.36.12]: https://github.com/scttfrdmn/substrate/compare/v0.36.11...v0.36.12
