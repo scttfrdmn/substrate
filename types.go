@@ -124,39 +124,68 @@ type SnapshotableStateManager interface {
 	Reset(ctx context.Context) error
 }
 
-// TimeController provides a controllable clock for deterministic testing.
+// TimeController provides a controllable clock for deterministic testing and
+// time-accelerated simulation.
+//
 // By replacing the system clock, Substrate produces identical event timestamps
-// across replay runs.
+// across replay runs.  When a scale factor greater than 1.0 is set via
+// [TimeController.SetScale], the controlled clock advances faster than wall
+// time: a scale of 3600 makes one real second equal one simulated hour.
+//
+// Implementation: the controller stores a (simulated baseline, wall baseline)
+// pair.  Now() computes:
+//
+//	simulated_baseline + (wall_now - wall_baseline) * scale
+//
+// Calling SetTime or SetScale resets both baselines atomically so the new
+// value takes effect immediately without a discontinuous jump.
 type TimeController struct {
-	mu      sync.RWMutex
-	current time.Time
-	scale   float64
+	mu           sync.RWMutex
+	simBaseline  time.Time // simulated time at last SetTime/SetScale call
+	wallBaseline time.Time // real wall time at last SetTime/SetScale call
+	scale        float64
 }
 
-// NewTimeController creates a TimeController whose clock starts at t.
+// NewTimeController creates a TimeController whose simulated clock starts at t
+// with a scale factor of 1.0 (real-time).
 func NewTimeController(t time.Time) *TimeController {
-	return &TimeController{current: t, scale: 1.0}
+	return &TimeController{
+		simBaseline:  t,
+		wallBaseline: time.Now(),
+		scale:        1.0,
+	}
 }
 
-// Now returns the current controlled time.
+// Now returns the current controlled time, advanced from the last SetTime or
+// SetScale call by (wall elapsed) * scale.
 func (c *TimeController) Now() time.Time {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.current
+	elapsed := time.Since(c.wallBaseline)
+	return c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
 }
 
-// SetTime sets the controller's current time to ts.
+// SetTime sets the simulated clock to ts.  The scale factor is preserved and
+// wall-time tracking restarts from this point, so subsequent Now() calls
+// advance from ts.
 func (c *TimeController) SetTime(ts time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.current = ts
+	c.simBaseline = ts
+	c.wallBaseline = time.Now()
 }
 
-// SetScale sets the time acceleration factor. A scale of 86400 advances one
-// real second for each simulated day.
+// SetScale sets the time acceleration factor.  A scale of 1.0 is real-time;
+// 3600.0 makes one real second equal one simulated hour; 86400.0 makes one
+// real second equal one simulated day.  The current simulated time is
+// captured atomically so there is no jump at the transition.
 func (c *TimeController) SetScale(scale float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Capture current simulated time before changing scale.
+	elapsed := time.Since(c.wallBaseline)
+	c.simBaseline = c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+	c.wallBaseline = time.Now()
 	c.scale = scale
 }
 

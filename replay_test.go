@@ -186,14 +186,31 @@ func TestTimeController(t *testing.T) {
 	base := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
 	tc := substrate.NewTimeController(base)
 
-	assert.Equal(t, base, tc.Now())
+	// Now() should be at or just after base (tiny wall-elapsed * 1.0 scale).
+	got := tc.Now()
+	if got.Before(base) {
+		t.Errorf("Now() = %v; want >= %v", got, base)
+	}
+	if got.Sub(base) > time.Second {
+		t.Errorf("Now() drifted too far from base: %v", got.Sub(base))
+	}
 
 	later := base.Add(24 * time.Hour)
 	tc.SetTime(later)
-	assert.Equal(t, later, tc.Now())
+	got2 := tc.Now()
+	if got2.Before(later) {
+		t.Errorf("After SetTime: Now() = %v; want >= %v", got2, later)
+	}
 
+	// After SetScale(86400), 1ms of wall time should advance ~86.4s simulated.
+	tc.SetTime(base)
 	tc.SetScale(86400.0)
-	// Scale is stored; precise time-advancement is implemented later.
+	time.Sleep(2 * time.Millisecond)
+	got3 := tc.Now()
+	simElapsed := got3.Sub(base)
+	if simElapsed < 10*time.Second {
+		t.Errorf("After SetScale(86400), simElapsed = %v after 2ms; want >= 10s", simElapsed)
+	}
 }
 
 func TestPluginRegistry_RouteRequest_NoPlugin(t *testing.T) {
