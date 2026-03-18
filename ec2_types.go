@@ -71,6 +71,27 @@ type EC2Instance struct {
 
 	// Region is the AWS region in which the instance runs.
 	Region string `json:"region"`
+
+	// KeyName is the name of the key pair used to launch the instance.
+	KeyName string `json:"key_name,omitempty"`
+}
+
+// EC2KeyPair represents an EC2 key pair (public/private key used for SSH access).
+type EC2KeyPair struct {
+	// KeyPairID is the AWS-assigned identifier for the key pair.
+	KeyPairID string `json:"keyPairId"`
+
+	// KeyName is the user-supplied name for the key pair.
+	KeyName string `json:"keyName"`
+
+	// Fingerprint is the SHA-256 fingerprint of the public key.
+	Fingerprint string `json:"fingerprint"`
+
+	// AccountID is the AWS account that owns the key pair.
+	AccountID string `json:"accountId"`
+
+	// Region is the AWS region where the key pair is stored.
+	Region string `json:"region"`
 }
 
 // EC2VPC represents an Amazon Virtual Private Cloud.
@@ -285,6 +306,12 @@ func generateIGWID() string {
 // followed by 8 hex characters.
 func generateRTBID() string {
 	return "rtb-" + randomHex(8)
+}
+
+// generateKeyPairID generates a random EC2 key pair ID in the format "key-"
+// followed by 17 hex characters.
+func generateKeyPairID() string {
+	return "key-" + randomHex(17)
 }
 
 // generateReservationID generates a random reservation ID in the format

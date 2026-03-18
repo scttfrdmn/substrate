@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.3] - 2026-03-17
+
+### Added
+
+- **EC2 key pair operations** (`ec2_plugin.go`, `ec2_types.go`): `CreateKeyPair` (generates an EC P-256 key pair, returns PEM `KeyMaterial` and SHA-256 fingerprint), `DescribeKeyPairs` (with optional `KeyName` filter), `DeleteKeyPair` (by name or `KeyPairId`), and `ImportKeyPair` (accepts base64-encoded public key material). `RunInstances` now records `KeyName` on the instance and includes it in the `RunInstancesResponse` XML. Fixes issue #192.
+
 ## [v0.36.2] - 2026-03-17
 
 ### Fixed
@@ -761,3 +767,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.0]: https://github.com/scttfrdmn/substrate/compare/v0.35.0...v0.36.0
 [v0.36.1]: https://github.com/scttfrdmn/substrate/compare/v0.36.0...v0.36.1
 [v0.36.2]: https://github.com/scttfrdmn/substrate/compare/v0.36.1...v0.36.2
+[v0.36.3]: https://github.com/scttfrdmn/substrate/compare/v0.36.2...v0.36.3

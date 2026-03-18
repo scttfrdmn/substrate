@@ -727,3 +727,166 @@ func TestEC2_RouteTable_DescribeDeleteRoute(t *testing.T) {
 	}
 	delRTBResp.Body.Close() //nolint:errcheck
 }
+
+func TestEC2_KeyPair_CreateDescribeDelete(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// CreateKeyPair.
+	createResp := ec2Request(t, ts, map[string]string{
+		"Action":  "CreateKeyPair",
+		"KeyName": "my-test-key",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateKeyPair: expected 200, got %d", createResp.StatusCode)
+	}
+	var createResult struct {
+		XMLName        xml.Name `xml:"CreateKeyPairResponse"`
+		KeyPairID      string   `xml:"keyPairId"`
+		KeyName        string   `xml:"keyName"`
+		KeyFingerprint string   `xml:"keyFingerprint"`
+		KeyMaterial    string   `xml:"keyMaterial"`
+	}
+	if err := xml.NewDecoder(createResp.Body).Decode(&createResult); err != nil {
+		t.Fatalf("decode CreateKeyPair response: %v", err)
+	}
+	createResp.Body.Close() //nolint:errcheck
+	if createResult.KeyName != "my-test-key" {
+		t.Errorf("KeyName = %q; want %q", createResult.KeyName, "my-test-key")
+	}
+	if createResult.KeyPairID == "" {
+		t.Error("KeyPairId is empty")
+	}
+	if createResult.KeyFingerprint == "" {
+		t.Error("KeyFingerprint is empty")
+	}
+	if createResult.KeyMaterial == "" {
+		t.Error("KeyMaterial is empty")
+	}
+
+	// Duplicate CreateKeyPair should return 400.
+	dupResp := ec2Request(t, ts, map[string]string{
+		"Action":  "CreateKeyPair",
+		"KeyName": "my-test-key",
+	})
+	if dupResp.StatusCode != http.StatusBadRequest {
+		t.Errorf("duplicate CreateKeyPair: expected 400, got %d", dupResp.StatusCode)
+	}
+	dupResp.Body.Close() //nolint:errcheck
+
+	// DescribeKeyPairs — no filter → returns our key.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeKeyPairs"})
+	if descResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeKeyPairs: expected 200, got %d", descResp.StatusCode)
+	}
+	var descResult struct {
+		XMLName  xml.Name `xml:"DescribeKeyPairsResponse"`
+		KeyPairs []struct {
+			KeyName string `xml:"keyName"`
+		} `xml:"keySet>item"`
+	}
+	if err := xml.NewDecoder(descResp.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode DescribeKeyPairs: %v", err)
+	}
+	descResp.Body.Close() //nolint:errcheck
+	if len(descResult.KeyPairs) != 1 || descResult.KeyPairs[0].KeyName != "my-test-key" {
+		t.Errorf("DescribeKeyPairs returned %v; want [my-test-key]", descResult.KeyPairs)
+	}
+
+	// DescribeKeyPairs with name filter.
+	filtResp := ec2Request(t, ts, map[string]string{"Action": "DescribeKeyPairs", "KeyName.1": "my-test-key"})
+	if filtResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeKeyPairs filter: expected 200, got %d", filtResp.StatusCode)
+	}
+	filtResp.Body.Close() //nolint:errcheck
+
+	// RunInstances referencing the key pair records KeyName on the instance.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      "ami-12345678",
+		"InstanceType": "t3.micro",
+		"MinCount":     "1",
+		"MaxCount":     "1",
+		"KeyName":      "my-test-key",
+	})
+	if runResp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: expected 200, got %d", runResp.StatusCode)
+	}
+	var runResult struct {
+		Instances []struct {
+			KeyName string `xml:"keyName"`
+		} `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(runResp.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	runResp.Body.Close() //nolint:errcheck
+	if len(runResult.Instances) == 0 || runResult.Instances[0].KeyName != "my-test-key" {
+		t.Errorf("RunInstances KeyName = %q; want %q", func() string {
+			if len(runResult.Instances) > 0 {
+				return runResult.Instances[0].KeyName
+			}
+			return ""
+		}(), "my-test-key")
+	}
+
+	// DeleteKeyPair.
+	delResp := ec2Request(t, ts, map[string]string{
+		"Action":  "DeleteKeyPair",
+		"KeyName": "my-test-key",
+	})
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteKeyPair: expected 200, got %d", delResp.StatusCode)
+	}
+	delResp.Body.Close() //nolint:errcheck
+
+	// After deletion, DescribeKeyPairs returns empty set.
+	afterResp := ec2Request(t, ts, map[string]string{"Action": "DescribeKeyPairs"})
+	if afterResp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeKeyPairs after delete: expected 200, got %d", afterResp.StatusCode)
+	}
+	var afterResult struct {
+		KeyPairs []struct{ KeyName string `xml:"keyName"` } `xml:"keySet>item"`
+	}
+	if err := xml.NewDecoder(afterResp.Body).Decode(&afterResult); err != nil {
+		t.Fatalf("decode DescribeKeyPairs after delete: %v", err)
+	}
+	afterResp.Body.Close() //nolint:errcheck
+	if len(afterResult.KeyPairs) != 0 {
+		t.Errorf("expected 0 key pairs after delete; got %d", len(afterResult.KeyPairs))
+	}
+}
+
+func TestEC2_KeyPair_Import(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// ImportKeyPair with a base64-encoded public key.
+	pubKeyB64 := "c3NoLWVkMjU1MTkgQUFBQUM=" // base64 of "ssh-ed25519 AAAAC" (fake but valid base64)
+	importResp := ec2Request(t, ts, map[string]string{
+		"Action":           "ImportKeyPair",
+		"KeyName":          "imported-key",
+		"PublicKeyMaterial": pubKeyB64,
+	})
+	if importResp.StatusCode != http.StatusOK {
+		t.Fatalf("ImportKeyPair: expected 200, got %d", importResp.StatusCode)
+	}
+	var importResult struct {
+		KeyPairID      string `xml:"keyPairId"`
+		KeyName        string `xml:"keyName"`
+		KeyFingerprint string `xml:"keyFingerprint"`
+	}
+	if err := xml.NewDecoder(importResp.Body).Decode(&importResult); err != nil {
+		t.Fatalf("decode ImportKeyPair: %v", err)
+	}
+	importResp.Body.Close() //nolint:errcheck
+	if importResult.KeyName != "imported-key" {
+		t.Errorf("KeyName = %q; want %q", importResult.KeyName, "imported-key")
+	}
+	if importResult.KeyPairID == "" {
+		t.Error("KeyPairId is empty")
+	}
+	if importResult.KeyFingerprint == "" {
+		t.Error("KeyFingerprint is empty")
+	}
+}

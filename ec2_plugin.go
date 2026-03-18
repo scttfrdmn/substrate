@@ -2,7 +2,14 @@ package substrate
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -111,6 +118,15 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteRoute(ctx, req)
 	case "DeleteRouteTable":
 		return p.deleteRouteTable(ctx, req)
+	// Key pair operations
+	case "CreateKeyPair":
+		return p.createKeyPair(ctx, req)
+	case "DescribeKeyPairs":
+		return p.describeKeyPairs(ctx, req)
+	case "DeleteKeyPair":
+		return p.deleteKeyPair(ctx, req)
+	case "ImportKeyPair":
+		return p.importKeyPair(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -137,6 +153,7 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		maxCount = minCount
 	}
 
+	keyName := req.Params["KeyName"]
 	subnetID := req.Params["SubnetId"]
 	sgID := req.Params["SecurityGroupId.1"]
 	if sgID == "" {
@@ -182,6 +199,7 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			LaunchTime:       now,
 			AccountID:        reqCtx.AccountID,
 			Region:           reqCtx.Region,
+			KeyName:          keyName,
 		}
 
 		// Look up VPCID from subnet.
@@ -220,6 +238,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		PrivateIPAddress string `xml:"privateIpAddress"`
 		SubnetID         string `xml:"subnetId"`
 		VpcID            string `xml:"vpcId"`
+		KeyName          string `xml:"keyName,omitempty"`
 		State            struct {
 			Code int    `xml:"code"`
 			Name string `xml:"name"`
@@ -247,6 +266,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			PrivateIPAddress: inst.PrivateIPAddress,
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
+			KeyName:          inst.KeyName,
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
@@ -1202,6 +1222,215 @@ func (p *EC2Plugin) deleteRouteTable(reqCtx *RequestContext, req *AWSRequest) (*
 		Return  bool     `xml:"return"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// --- Key pair operations ---
+
+func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["KeyName"]
+	if name == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Check for duplicate.
+	existing, _ := p.state.Get(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name)
+	if existing != nil {
+		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Generate an EC P-256 key pair — fast and produces a compact PEM.
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair generate: %w", err)
+	}
+	privDER, err := x509.MarshalPKCS8PrivateKey(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair marshal private key: %w", err)
+	}
+	keyMaterial := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER}))
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair marshal public key: %w", err)
+	}
+	fp := ec2KeyFingerprint(pubDER)
+
+	kp := EC2KeyPair{
+		KeyPairID:   generateKeyPairID(),
+		KeyName:     name,
+		Fingerprint: fp,
+		AccountID:   reqCtx.AccountID,
+		Region:      reqCtx.Region,
+	}
+	data, _ := json.Marshal(kp)
+	if err := p.state.Put(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name, data); err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair put: %w", err)
+	}
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "keypair_names", name); err != nil {
+		return nil, err
+	}
+
+	type response struct {
+		XMLName     xml.Name `xml:"CreateKeyPairResponse"`
+		XMLNS       string   `xml:"xmlns,attr"`
+		KeyPairID   string   `xml:"keyPairId"`
+		KeyName     string   `xml:"keyName"`
+		KeyFingerprint string `xml:"keyFingerprint"`
+		KeyMaterial string   `xml:"keyMaterial"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
+		KeyPairID:      kp.KeyPairID,
+		KeyName:        kp.KeyName,
+		KeyFingerprint: kp.Fingerprint,
+		KeyMaterial:    keyMaterial,
+	})
+}
+
+func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	filterNames := extractIndexedParams(req.Params, "KeyName")
+
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeKeyPairs list: %w", err)
+	}
+
+	type kpItem struct {
+		KeyPairID      string `xml:"keyPairId"`
+		KeyName        string `xml:"keyName"`
+		KeyFingerprint string `xml:"keyFingerprint"`
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DescribeKeyPairsResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		KeyPairs []kpItem `xml:"keySet>item"`
+	}
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var kp EC2KeyPair
+		if json.Unmarshal(data, &kp) != nil {
+			continue
+		}
+		if len(filterNames) > 0 && !containsStr(filterNames, kp.KeyName) {
+			continue
+		}
+		resp.KeyPairs = append(resp.KeyPairs, kpItem{
+			KeyPairID:      kp.KeyPairID,
+			KeyName:        kp.KeyName,
+			KeyFingerprint: kp.Fingerprint,
+		})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+func (p *EC2Plugin) deleteKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["KeyName"]
+	if name == "" {
+		name = req.Params["KeyPairId"]
+	}
+	if name == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName or KeyPairId is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Support lookup by KeyPairId: scan for matching pair.
+	stateKey := "keypair:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + name
+	if strings.HasPrefix(name, "key-") {
+		allKeys, _ := p.state.List(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+		for _, k := range allKeys {
+			data, _ := p.state.Get(context.Background(), ec2Namespace, k)
+			if data == nil {
+				continue
+			}
+			var kp EC2KeyPair
+			if json.Unmarshal(data, &kp) == nil && kp.KeyPairID == name {
+				stateKey = k
+				name = kp.KeyName
+				break
+			}
+		}
+	}
+
+	if err := p.state.Delete(context.Background(), ec2Namespace, stateKey); err != nil {
+		return nil, fmt.Errorf("ec2 deleteKeyPair: %w", err)
+	}
+
+	type response struct {
+		XMLName xml.Name `xml:"DeleteKeyPairResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["KeyName"]
+	pubKeyMaterial := req.Params["PublicKeyMaterial"]
+	if name == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	if pubKeyMaterial == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "PublicKeyMaterial is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Check for duplicate.
+	existing, _ := p.state.Get(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name)
+	if existing != nil {
+		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Decode the public key material and compute a fingerprint.
+	pubBytes, err := base64.StdEncoding.DecodeString(pubKeyMaterial)
+	if err != nil {
+		// Treat as raw bytes if not base64.
+		pubBytes = []byte(pubKeyMaterial)
+	}
+	fp := ec2KeyFingerprint(pubBytes)
+
+	kp := EC2KeyPair{
+		KeyPairID:   generateKeyPairID(),
+		KeyName:     name,
+		Fingerprint: fp,
+		AccountID:   reqCtx.AccountID,
+		Region:      reqCtx.Region,
+	}
+	data, _ := json.Marshal(kp)
+	if err := p.state.Put(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name, data); err != nil {
+		return nil, fmt.Errorf("ec2 importKeyPair put: %w", err)
+	}
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "keypair_names", name); err != nil {
+		return nil, err
+	}
+
+	type response struct {
+		XMLName        xml.Name `xml:"ImportKeyPairResponse"`
+		XMLNS          string   `xml:"xmlns,attr"`
+		KeyPairID      string   `xml:"keyPairId"`
+		KeyName        string   `xml:"keyName"`
+		KeyFingerprint string   `xml:"keyFingerprint"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
+		KeyPairID:      kp.KeyPairID,
+		KeyName:        kp.KeyName,
+		KeyFingerprint: kp.Fingerprint,
+	})
+}
+
+// ec2KeyFingerprint returns a colon-separated SHA-256 hex fingerprint of
+// the provided DER-encoded key bytes, matching the format AWS uses for
+// EC2 key pairs.
+func ec2KeyFingerprint(derBytes []byte) string {
+	sum := sha256.Sum256(derBytes)
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02x", b)
+	}
+	return strings.Join(parts, ":")
 }
 
 // --- Helper functions ---
