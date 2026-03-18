@@ -1,5 +1,7 @@
 # Build output
 bin/
+/substrate
+/substratelocal
 *.exe
 
 # Test and coverage

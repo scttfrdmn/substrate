@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.37.0] - 2026-03-18
+
+### Added
+
+- **HTTP time-control endpoints** (`debug_ui.go`, `server.go`, `types.go`): three new REST
+  endpoints let any external test harness drive Substrate's simulated clock over HTTP without
+  a Go client.
+  - `GET /v1/control/time` — returns `{"simulated_time":"<RFC3339Nano>","scale":<float>}`.
+  - `POST /v1/control/time` — body `{"time":"<RFC3339>"}` jumps the clock to an absolute
+    instant; response is the same shape as GET.
+  - `POST /v1/control/scale` — body `{"scale":<positive float>}` sets the time acceleration
+    factor (1.0 = real-time, 3600.0 = one real second equals one simulated hour); response
+    is the same shape as GET. Returns 400 if scale ≤ 0.
+  - `TimeController.Scale() float64` accessor added to `types.go` (thread-safe, RWMutex).
+  - Nine unit tests in `time_control_test.go` cover GET, POST valid/invalid inputs, and the
+    accelerated-clock property test (`TestTimeScale_AcceleratesTime`). Closes #220.
+
+### Fixed
+
+- **`TestLoadConfig_EnvOverride` test isolation** (`.gitignore`): viper's config discovery
+  was picking up the `substrate` build artifact in the project root and attempting to parse
+  it as YAML, causing the test to fail. Added `/substrate` and `/substratelocal` to
+  `.gitignore` so accidental root-level builds are excluded from version control and do not
+  interfere with config-loading tests.
+
 ## [v0.36.21] - 2026-03-18
 
 ### Fixed
@@ -946,3 +971,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.15]: https://github.com/scttfrdmn/substrate/compare/v0.36.14...v0.36.15
 [v0.36.16]: https://github.com/scttfrdmn/substrate/compare/v0.36.15...v0.36.16
 [v0.36.17]: https://github.com/scttfrdmn/substrate/compare/v0.36.16...v0.36.17
+[v0.36.18]: https://github.com/scttfrdmn/substrate/compare/v0.36.17...v0.36.18
+[v0.36.19]: https://github.com/scttfrdmn/substrate/compare/v0.36.18...v0.36.19
+[v0.36.20]: https://github.com/scttfrdmn/substrate/compare/v0.36.19...v0.36.20
+[v0.36.21]: https://github.com/scttfrdmn/substrate/compare/v0.36.20...v0.36.21
+[v0.37.0]: https://github.com/scttfrdmn/substrate/compare/v0.36.21...v0.37.0
