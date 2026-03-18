@@ -371,6 +371,9 @@ func RegisterDefaultPlugins(
 	if store != nil {
 		ceOpts["event_store"] = store
 	}
+	if tc != nil {
+		ceOpts["time_controller"] = tc
+	}
 	if err := cePlugin.Initialize(ctx, PluginConfig{
 		State:   state,
 		Logger:  logger,

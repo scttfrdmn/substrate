@@ -66,6 +66,10 @@ type EC2Instance struct {
 	// LaunchTime is the UTC time at which the instance was launched.
 	LaunchTime string `json:"launch_time"`
 
+	// TerminatedTime is the UTC time at which the instance was terminated,
+	// or empty if the instance has not been terminated.
+	TerminatedTime string `json:"terminated_time,omitempty"`
+
 	// AccountID is the AWS account that owns the instance.
 	AccountID string `json:"account_id"`
 

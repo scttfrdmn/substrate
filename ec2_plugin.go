@@ -440,6 +440,7 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 48, Name: "terminated"}
+		inst.TerminatedTime = p.tc.Now().UTC().Format(time.RFC3339)
 		newData, _ := json.Marshal(inst)
 		_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
 

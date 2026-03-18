@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.11] - 2026-03-18
+
+### Fixed
+
+- **EC2 `TerminateInstances` now records termination time** (`ec2_plugin.go`, `ec2_types.go`): `EC2Instance` gains a `TerminatedTime` field (RFC3339) set via `p.tc.Now()` when an instance is terminated, ensuring simulated-clock accuracy.
+
+### Added
+
+- **Cost Explorer EC2 usage costs** (`ce_plugin.go`): `GetCostAndUsage` now reflects simulated EC2 compute spend. For each instance in the account, hours overlapping the query window are multiplied by a per-type on-demand rate (17 instance types defined; unknown types fall back to $0.096/hr). Cost accrues from `LaunchTime` to `TerminatedTime` (or `tc.Now()` for running instances), so simulated time advances directly drive `GetCostAndUsage` results. Result appears under the `"Amazon Elastic Compute Cloud - Compute"` service group. Fixes #207.
+- **`CEPlugin` accepts `time_controller` option** (`ce_plugin.go`, `plugins.go`): the `TimeController` is now passed to `CEPlugin` via `RegisterDefaultPlugins` so cost accrual uses simulated time rather than wall-clock time.
+
 ## [v0.36.10] - 2026-03-18
 
 ### Added
@@ -830,3 +841,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.8]: https://github.com/scttfrdmn/substrate/compare/v0.36.7...v0.36.8
 [v0.36.9]: https://github.com/scttfrdmn/substrate/compare/v0.36.8...v0.36.9
 [v0.36.10]: https://github.com/scttfrdmn/substrate/compare/v0.36.9...v0.36.10
+[v0.36.11]: https://github.com/scttfrdmn/substrate/compare/v0.36.10...v0.36.11
