@@ -1235,3 +1235,139 @@ func TestEC2_RunInstances_TagSpecifications(t *testing.T) {
 		t.Errorf("canopy:managed tag = %q; want %q", tagMap["canopy:managed"], "true")
 	}
 }
+
+// TestEC2_DescribeSecurityGroups_Filters verifies that DescribeSecurityGroups
+// correctly filters by group-name, vpc-id, and group-id.  Regression test for #211.
+func TestEC2_DescribeSecurityGroups_Filters(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create two VPCs.
+	makeVPC := func(cidr string) string {
+		t.Helper()
+		r := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": cidr})
+		defer r.Body.Close() //nolint:errcheck
+		var res struct {
+			VPC struct {
+				VPCID string `xml:"vpcId"`
+			} `xml:"vpc"`
+		}
+		if err := xml.NewDecoder(r.Body).Decode(&res); err != nil {
+			t.Fatalf("decode CreateVpc: %v", err)
+		}
+		return res.VPC.VPCID
+	}
+	makeSG := func(name, vpcID string) string {
+		t.Helper()
+		r := ec2Request(t, ts, map[string]string{
+			"Action":      "CreateSecurityGroup",
+			"GroupName":   name,
+			"Description": name,
+			"VpcId":       vpcID,
+		})
+		defer r.Body.Close() //nolint:errcheck
+		var res struct {
+			GroupID string `xml:"groupId"`
+		}
+		if err := xml.NewDecoder(r.Body).Decode(&res); err != nil {
+			t.Fatalf("decode CreateSecurityGroup: %v", err)
+		}
+		return res.GroupID
+	}
+	countSGs := func(resp *http.Response) int {
+		t.Helper()
+		defer resp.Body.Close() //nolint:errcheck
+		var res struct {
+			Groups []struct {
+				GroupID   string `xml:"groupId"`
+				GroupName string `xml:"groupName"`
+			} `xml:"securityGroupInfo>item"`
+		}
+		if err := xml.NewDecoder(resp.Body).Decode(&res); err != nil {
+			t.Fatalf("decode DescribeSecurityGroups: %v", err)
+		}
+		return len(res.Groups)
+	}
+	firstSGName := func(resp *http.Response) string {
+		t.Helper()
+		defer resp.Body.Close() //nolint:errcheck
+		var res struct {
+			Groups []struct {
+				GroupName string `xml:"groupName"`
+			} `xml:"securityGroupInfo>item"`
+		}
+		if err := xml.NewDecoder(resp.Body).Decode(&res); err != nil {
+			t.Fatalf("decode DescribeSecurityGroups: %v", err)
+		}
+		if len(res.Groups) == 0 {
+			return ""
+		}
+		return res.Groups[0].GroupName
+	}
+
+	vpc1 := makeVPC("10.1.0.0/16")
+	vpc2 := makeVPC("10.2.0.0/16")
+	sg1ID := makeSG("canopy-default", vpc1)
+	_ = makeSG("other-sg", vpc1)
+	_ = makeSG("canopy-default", vpc2) // same name, different VPC
+
+	// No filters: all SGs returned (including auto-created "default" SGs).
+	allResp := ec2Request(t, ts, map[string]string{"Action": "DescribeSecurityGroups"})
+	total := countSGs(allResp)
+	if total < 3 {
+		t.Fatalf("expected at least 3 SGs without filter, got %d", total)
+	}
+
+	// Filter by group-name=canopy-default: should return 2 (one per VPC).
+	nameResp := ec2Request(t, ts, map[string]string{
+		"Action":          "DescribeSecurityGroups",
+		"Filter.1.Name":   "group-name",
+		"Filter.1.Value.1": "canopy-default",
+	})
+	if n := countSGs(nameResp); n != 2 {
+		t.Errorf("group-name filter: expected 2, got %d", n)
+	}
+
+	// Filter by group-name + vpc-id: should return exactly 1.
+	bothResp := ec2Request(t, ts, map[string]string{
+		"Action":          "DescribeSecurityGroups",
+		"Filter.1.Name":   "group-name",
+		"Filter.1.Value.1": "canopy-default",
+		"Filter.2.Name":   "vpc-id",
+		"Filter.2.Value.1": vpc1,
+	})
+	if n := countSGs(bothResp); n != 1 {
+		t.Errorf("group-name+vpc-id filter: expected 1, got %d", n)
+	}
+
+	// Filter by group-name=canopy-default + vpc-id=vpc1: name must be canopy-default.
+	checkResp := ec2Request(t, ts, map[string]string{
+		"Action":          "DescribeSecurityGroups",
+		"Filter.1.Name":   "group-name",
+		"Filter.1.Value.1": "canopy-default",
+		"Filter.2.Name":   "vpc-id",
+		"Filter.2.Value.1": vpc1,
+	})
+	if name := firstSGName(checkResp); name != "canopy-default" {
+		t.Errorf("expected group-name=canopy-default, got %q", name)
+	}
+
+	// Filter by group-id: should return exactly the requested SG.
+	idResp := ec2Request(t, ts, map[string]string{
+		"Action":          "DescribeSecurityGroups",
+		"Filter.1.Name":   "group-id",
+		"Filter.1.Value.1": sg1ID,
+	})
+	if n := countSGs(idResp); n != 1 {
+		t.Errorf("group-id filter: expected 1, got %d", n)
+	}
+
+	// Filter by group-name that doesn't exist: empty result.
+	emptyResp := ec2Request(t, ts, map[string]string{
+		"Action":          "DescribeSecurityGroups",
+		"Filter.1.Name":   "group-name",
+		"Filter.1.Value.1": "nonexistent-sg",
+	})
+	if n := countSGs(emptyResp); n != 0 {
+		t.Errorf("nonexistent group-name filter: expected 0, got %d", n)
+	}
+}

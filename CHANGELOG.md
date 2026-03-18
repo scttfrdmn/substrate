@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.36.15] - 2026-03-18
+
+### Fixed
+
+- **`DescribeSecurityGroups` now applies `Filters` parameter** (`ec2_plugin.go`): `group-name`, `vpc-id`, and `group-id` filters are now respected. Previously the `Filters` parameter was silently ignored and all security groups in the account/region were returned. This caused `ensureCanopyDefaultSG`-style idempotency checks to see stale or mismatched groups. Added `extractEC2Filters` helper to parse EC2 query-protocol `Filter.N.Name` / `Filter.N.Value.M` parameters into a name→values map, reusable by other describe operations. Fixes #211.
+
 ## [v0.36.14] - 2026-03-18
 
 ### Fixed
@@ -871,3 +877,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.36.12]: https://github.com/scttfrdmn/substrate/compare/v0.36.11...v0.36.12
 [v0.36.13]: https://github.com/scttfrdmn/substrate/compare/v0.36.12...v0.36.13
 [v0.36.14]: https://github.com/scttfrdmn/substrate/compare/v0.36.13...v0.36.14
+[v0.36.15]: https://github.com/scttfrdmn/substrate/compare/v0.36.14...v0.36.15

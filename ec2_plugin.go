@@ -811,6 +811,7 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 
 func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := extractIndexedParams(req.Params, "GroupId")
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSecurityGroups: %w", err)
@@ -837,6 +838,15 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 			continue
 		}
 		if len(ids) > 0 && !containsStr(ids, sg.GroupID) {
+			continue
+		}
+		if vals, ok := filters["group-name"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupName) {
+			continue
+		}
+		if vals, ok := filters["vpc-id"]; ok && len(vals) > 0 && !containsStr(vals, sg.VPCID) {
+			continue
+		}
+		if vals, ok := filters["group-id"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupID) {
 			continue
 		}
 		resp.Groups = append(resp.Groups, sgItem{GroupID: sg.GroupID, GroupName: sg.GroupName, Description: sg.Description, VpcID: sg.VPCID})
@@ -1816,6 +1826,30 @@ func extractIndexedParams(params map[string]string, prefix string) []string {
 		vals = append(vals, v)
 	}
 	return vals
+}
+
+// extractEC2Filters parses EC2 query-protocol Filter.N.Name / Filter.N.Value.M
+// parameters into a map of filter-name → allowed values.
+func extractEC2Filters(params map[string]string) map[string][]string {
+	filters := make(map[string][]string)
+	for i := 1; ; i++ {
+		name, ok := params[fmt.Sprintf("Filter.%d.Name", i)]
+		if !ok {
+			break
+		}
+		var vals []string
+		for j := 1; ; j++ {
+			v, ok := params[fmt.Sprintf("Filter.%d.Value.%d", i, j)]
+			if !ok {
+				break
+			}
+			vals = append(vals, v)
+		}
+		if name != "" {
+			filters[name] = vals
+		}
+	}
+	return filters
 }
 
 // containsStr reports whether s is in the slice.
