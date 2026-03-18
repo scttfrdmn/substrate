@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -863,6 +864,7 @@ func newFullTestDeployer(t *testing.T) *substrate.StackDeployer {
 		&substrate.LambdaPlugin{},
 		&substrate.SQSPlugin{},
 		&substrate.S3Plugin{},
+		&substrate.EC2Plugin{},
 		&substrate.ACMPlugin{},
 		&substrate.APIGatewayPlugin{},
 		&substrate.APIGatewayV2Plugin{},
@@ -2069,4 +2071,76 @@ func TestCFN_APIGatewayMethod(t *testing.T) {
 	for _, r := range result.Resources {
 		assert.Empty(t, r.Error, "resource %s had error: %s", r.LogicalID, r.Error)
 	}
+}
+
+// TestBettyCFN_EC2EIP verifies the AWS::EC2::EIP CFN resource.
+func TestBettyCFN_EC2EIP(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyEIP": {
+				"Type": "AWS::EC2::EIP",
+				"Properties": {
+					"Domain": "vpc"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "eip-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	r := result.Resources[0]
+	assert.Equal(t, "AWS::EC2::EIP", r.Type)
+	assert.Empty(t, r.Error, "EIP resource error: %s", r.Error)
+	assert.True(t, strings.HasPrefix(r.PhysicalID, "eipalloc-"), "PhysicalID %q should start with eipalloc-", r.PhysicalID)
+}
+
+// TestBettyCFN_EC2NatGateway verifies the AWS::EC2::NatGateway CFN resource.
+func TestBettyCFN_EC2NatGateway(t *testing.T) {
+	d := newFullTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyVPC": {
+				"Type": "AWS::EC2::VPC",
+				"Properties": {"CidrBlock": "10.5.0.0/16"}
+			},
+			"MySubnet": {
+				"Type": "AWS::EC2::Subnet",
+				"Properties": {
+					"VpcId": {"Ref": "MyVPC"},
+					"CidrBlock": "10.5.1.0/24"
+				},
+				"DependsOn": "MyVPC"
+			},
+			"MyEIP": {
+				"Type": "AWS::EC2::EIP",
+				"Properties": {"Domain": "vpc"},
+				"DependsOn": "MySubnet"
+			},
+			"MyNATGW": {
+				"Type": "AWS::EC2::NatGateway",
+				"Properties": {
+					"SubnetId": {"Ref": "MySubnet"},
+					"AllocationId": {"Fn::GetAtt": ["MyEIP", "AllocationId"]}
+				},
+				"DependsOn": "MyEIP"
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "natgw-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 4)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s had error: %s", r.LogicalID, r.Error)
+	}
+	// Find NatGateway resource and verify PhysicalID.
+	for _, r := range result.Resources {
+		if r.Type == "AWS::EC2::NatGateway" {
+			assert.True(t, strings.HasPrefix(r.PhysicalID, "nat-"), "NatGateway PhysicalID %q should start with nat-", r.PhysicalID)
+			return
+		}
+	}
+	t.Fatal("no AWS::EC2::NatGateway resource in result")
 }

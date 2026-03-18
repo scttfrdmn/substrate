@@ -175,6 +175,10 @@ func defaultCostTable() map[string]float64 {
 		// MSK: per-broker-hour prorated per API call.
 		"msk/CreateCluster":       0.0002,
 		"msk/GetBootstrapBrokers": 0.000001,
+		// EC2 Elastic IPs: $0.005/hr when unattached.
+		"ec2/AllocateAddress": 0.005,
+		// EC2 NAT Gateways: $0.045/hr base charge.
+		"ec2/CreateNatGateway": 0.045,
 	}
 }
 

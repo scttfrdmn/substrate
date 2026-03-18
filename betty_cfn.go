@@ -188,6 +188,9 @@ var typePriority = map[string]int{
 	// v0.28.0 — SES v2 and Firehose.
 	"AWS::SES::EmailIdentity":              2,
 	"AWS::KinesisFirehose::DeliveryStream": 3,
+	// v0.41.0 — Elastic IPs and NAT Gateways.
+	"AWS::EC2::EIP":        2,
+	"AWS::EC2::NatGateway": 4,
 	// v0.30.0 — Lambda ESM.
 	"AWS::Lambda::EventSourceMapping": 5,
 	// v0.31.0 — AppSync.
@@ -627,6 +630,11 @@ func (d *StackDeployer) deployResource(
 		return d.deploySESv2EmailIdentity(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::KinesisFirehose::DeliveryStream":
 		return d.deployFirehoseDeliveryStream(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.41.0 — Elastic IPs and NAT Gateways.
+	case "AWS::EC2::EIP":
+		return d.deployEC2EIP(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::EC2::NatGateway":
+		return d.deployEC2NatGateway(ctx, logicalID, res.Properties, streamID, cctx)
 	// v0.30.0 — Lambda ESM.
 	case "AWS::Lambda::EventSourceMapping":
 		return d.deployLambdaEventSourceMapping(ctx, logicalID, res.Properties, streamID, cctx)

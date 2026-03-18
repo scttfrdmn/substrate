@@ -144,6 +144,32 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeImages(ctx, req)
 	case "DeregisterImage":
 		return p.deregisterImage(ctx, req)
+	// Availability Zone operations
+	case "DescribeAvailabilityZones":
+		return p.describeAvailabilityZones(ctx, req)
+	// Subnet/VPC attribute operations
+	case "ModifySubnetAttribute":
+		return p.modifySubnetAttribute(ctx, req)
+	case "ModifyVpcAttribute":
+		return p.modifyVpcAttribute(ctx, req)
+	// Elastic IP operations
+	case "AllocateAddress":
+		return p.allocateAddress(ctx, req)
+	case "AssociateAddress":
+		return p.associateAddress(ctx, req)
+	case "DisassociateAddress":
+		return p.disassociateAddress(ctx, req)
+	case "ReleaseAddress":
+		return p.releaseAddress(ctx, req)
+	case "DescribeAddresses":
+		return p.describeAddresses(ctx, req)
+	// NAT Gateway operations
+	case "CreateNatGateway":
+		return p.createNatGateway(ctx, req)
+	case "DescribeNatGateways":
+		return p.describeNatGateways(ctx, req)
+	case "DeleteNatGateway":
+		return p.deleteNatGateway(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -609,12 +635,13 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	vpcID := generateVPCID()
 	vpc := EC2VPC{
-		VPCID:     vpcID,
-		CIDRBlock: cidr,
-		IsDefault: false,
-		State:     "available",
-		AccountID: reqCtx.AccountID,
-		Region:    reqCtx.Region,
+		VPCID:            vpcID,
+		CIDRBlock:        cidr,
+		IsDefault:        false,
+		State:            "available",
+		EnableDnsSupport: true,
+		AccountID:        reqCtx.AccountID,
+		Region:           reqCtx.Region,
 	}
 	data, err := json.Marshal(vpc)
 	if err != nil {
@@ -1419,6 +1446,10 @@ func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags 
 		stateKey = "igw:" + scope + "/" + id
 	case strings.HasPrefix(id, "rtb-"):
 		stateKey = "rtb:" + scope + "/" + id
+	case strings.HasPrefix(id, "eipalloc-"):
+		stateKey = "eip:" + scope + "/" + id
+	case strings.HasPrefix(id, "nat-"):
+		stateKey = "nat:" + scope + "/" + id
 	default:
 		// Unknown resource type — silently ignore (matches AWS behaviour).
 		return nil
@@ -1772,12 +1803,14 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 	// Create default VPC.
 	vpcID := generateVPCID()
 	vpc := EC2VPC{
-		VPCID:     vpcID,
-		CIDRBlock: "172.31.0.0/16",
-		IsDefault: true,
-		State:     "available",
-		AccountID: reqCtx.AccountID,
-		Region:    reqCtx.Region,
+		VPCID:              vpcID,
+		CIDRBlock:          "172.31.0.0/16",
+		IsDefault:          true,
+		State:              "available",
+		EnableDnsSupport:   true,
+		EnableDnsHostnames: true,
+		AccountID:          reqCtx.AccountID,
+		Region:             reqCtx.Region,
 	}
 	vpcData, _ := json.Marshal(vpc)
 	vpcKey := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
@@ -2136,5 +2169,546 @@ func (p *EC2Plugin) deregisterImage(reqCtx *RequestContext, req *AWSRequest) (*A
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:  "http://ec2.amazonaws.com/doc/2016-11-15/",
 		Return: true,
+	})
+}
+
+// --- Availability Zone operations ---
+
+func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	region := reqCtx.Region
+	// Derive abbreviated region for zoneId (e.g. "use1" from "us-east-1").
+	abbrev := azRegionAbbrev(region)
+	azSuffixes := []string{"a", "b", "c"}
+	type azItem struct {
+		ZoneName  string `xml:"zoneName"`
+		State     string `xml:"zoneState"`
+		RegionName string `xml:"regionName"`
+		ZoneID    string `xml:"zoneId"`
+	}
+	type response struct {
+		XMLName           xml.Name `xml:"DescribeAvailabilityZonesResponse"`
+		XMLNS             string   `xml:"xmlns,attr"`
+		AvailabilityZones []azItem `xml:"availabilityZoneInfo>item"`
+	}
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for i, suffix := range azSuffixes {
+		resp.AvailabilityZones = append(resp.AvailabilityZones, azItem{
+			ZoneName:   region + suffix,
+			State:      "available",
+			RegionName: region,
+			ZoneID:     abbrev + "-az" + strconv.Itoa(i+1),
+		})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// azRegionAbbrev returns a short abbreviation for a region name used in zone IDs
+// (e.g. "us-east-1" → "use1", "eu-west-2" → "euw2").
+func azRegionAbbrev(region string) string {
+	// Remove hyphens and digits, keep first letters of each segment plus trailing digit.
+	parts := strings.Split(region, "-")
+	if len(parts) < 2 {
+		return region
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if len(p) > 0 {
+			sb.WriteByte(p[0])
+			// Append trailing digit if present.
+			if last := p[len(p)-1]; last >= '0' && last <= '9' {
+				sb.WriteByte(last)
+			}
+		}
+	}
+	return sb.String()
+}
+
+// --- Subnet/VPC attribute operations ---
+
+func (p *EC2Plugin) modifySubnetAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	subnetID := req.Params["SubnetId"]
+	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "InvalidSubnetID.NotFound", Message: "The subnet ID '" + subnetID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	}
+	var subnet EC2Subnet
+	if unmarshalErr := json.Unmarshal(data, &subnet); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 modifySubnetAttribute unmarshal: %w", unmarshalErr)
+	}
+	if v, ok := req.Params["MapPublicIpOnLaunch.Value"]; ok {
+		subnet.MapPublicIpOnLaunch = v == "true"
+	}
+	newData, _ := json.Marshal(subnet)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 modifySubnetAttribute put: %w", err)
+	}
+	type response struct {
+		XMLName xml.Name `xml:"ModifySubnetAttributeResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	vpcID := req.Params["VpcId"]
+	key := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "InvalidVpcID.NotFound", Message: "The vpc ID '" + vpcID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	}
+	var vpc EC2VPC
+	if unmarshalErr := json.Unmarshal(data, &vpc); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 modifyVpcAttribute unmarshal: %w", unmarshalErr)
+	}
+	if v, ok := req.Params["EnableDnsSupport.Value"]; ok {
+		vpc.EnableDnsSupport = v == "true"
+	}
+	if v, ok := req.Params["EnableDnsHostnames.Value"]; ok {
+		vpc.EnableDnsHostnames = v == "true"
+	}
+	newData, _ := json.Marshal(vpc)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 modifyVpcAttribute put: %w", err)
+	}
+	type response struct {
+		XMLName xml.Name `xml:"ModifyVpcAttributeResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// --- Elastic IP operations ---
+
+func (p *EC2Plugin) allocateAddress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	domain := req.Params["Domain"]
+	if domain == "" {
+		domain = "vpc"
+	}
+	allocationID := generateAllocationID()
+	publicIP := generatePublicIP(allocationID)
+	eip := EC2ElasticIP{
+		AllocationID: allocationID,
+		PublicIP:     publicIP,
+		Domain:       domain,
+		AccountID:    reqCtx.AccountID,
+		Region:       reqCtx.Region,
+	}
+	data, err := json.Marshal(eip)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 allocateAddress marshal: %w", err)
+	}
+	key := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
+	if err := p.state.Put(context.Background(), ec2Namespace, key, data); err != nil {
+		return nil, fmt.Errorf("ec2 allocateAddress put: %w", err)
+	}
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "eip_ids", allocationID); err != nil {
+		return nil, err
+	}
+	type response struct {
+		XMLName             xml.Name `xml:"AllocateAddressResponse"`
+		XMLNS               string   `xml:"xmlns,attr"`
+		PublicIP            string   `xml:"publicIp"`
+		AllocationID        string   `xml:"allocationId"`
+		Domain              string   `xml:"domain"`
+		NetworkBorderGroup  string   `xml:"networkBorderGroup"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:              "http://ec2.amazonaws.com/doc/2016-11-15/",
+		PublicIP:           publicIP,
+		AllocationID:       allocationID,
+		Domain:             domain,
+		NetworkBorderGroup: reqCtx.Region,
+	})
+}
+
+func (p *EC2Plugin) associateAddress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	allocationID := req.Params["AllocationId"]
+	instanceID := req.Params["InstanceId"]
+	networkInterfaceID := req.Params["NetworkInterfaceId"]
+
+	key := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "InvalidAllocationID.NotFound", Message: "The allocation ID '" + allocationID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	}
+	var eip EC2ElasticIP
+	if unmarshalErr := json.Unmarshal(data, &eip); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 associateAddress unmarshal: %w", unmarshalErr)
+	}
+
+	assocID := generateEIPAssociationID()
+	eip.AssociationID = assocID
+	eip.InstanceID = instanceID
+	eip.NetworkInterfaceID = networkInterfaceID
+
+	// If associating with an instance, update the instance's public IP.
+	if instanceID != "" {
+		instKey := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + instanceID
+		instData, instErr := p.state.Get(context.Background(), ec2Namespace, instKey)
+		if instErr == nil && instData != nil {
+			var inst EC2Instance
+			if json.Unmarshal(instData, &inst) == nil {
+				eip.PrivateIPAddress = inst.PrivateIPAddress
+				inst.PublicIPAddress = eip.PublicIP
+				inst.PublicDnsName = ec2PublicDNSName(eip.PublicIP, reqCtx.Region)
+				newInstData, _ := json.Marshal(inst)
+				_ = p.state.Put(context.Background(), ec2Namespace, instKey, newInstData)
+			}
+		}
+	}
+
+	newData, _ := json.Marshal(eip)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 associateAddress put: %w", err)
+	}
+
+	type response struct {
+		XMLName       xml.Name `xml:"AssociateAddressResponse"`
+		XMLNS         string   `xml:"xmlns,attr"`
+		AssociationID string   `xml:"associationId"`
+		Return        bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:         "http://ec2.amazonaws.com/doc/2016-11-15/",
+		AssociationID: assocID,
+		Return:        true,
+	})
+}
+
+func (p *EC2Plugin) disassociateAddress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	assocID := req.Params["AssociationId"]
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "eip:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 disassociateAddress list: %w", err)
+	}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var eip EC2ElasticIP
+		if json.Unmarshal(data, &eip) != nil || eip.AssociationID != assocID {
+			continue
+		}
+		// Clear instance public IP if associated.
+		if eip.InstanceID != "" {
+			instKey := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + eip.InstanceID
+			instData, instErr := p.state.Get(context.Background(), ec2Namespace, instKey)
+			if instErr == nil && instData != nil {
+				var inst EC2Instance
+				if json.Unmarshal(instData, &inst) == nil {
+					inst.PublicIPAddress = ""
+					inst.PublicDnsName = ""
+					newInstData, _ := json.Marshal(inst)
+					_ = p.state.Put(context.Background(), ec2Namespace, instKey, newInstData)
+				}
+			}
+		}
+		eip.AssociationID = ""
+		eip.InstanceID = ""
+		eip.NetworkInterfaceID = ""
+		eip.PrivateIPAddress = ""
+		newData, _ := json.Marshal(eip)
+		_ = p.state.Put(context.Background(), ec2Namespace, k, newData)
+		break
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DisassociateAddressResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+func (p *EC2Plugin) releaseAddress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	allocationID := req.Params["AllocationId"]
+	key := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "InvalidAllocationID.NotFound", Message: "The allocation ID '" + allocationID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	}
+	var eip EC2ElasticIP
+	if unmarshalErr := json.Unmarshal(data, &eip); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 releaseAddress unmarshal: %w", unmarshalErr)
+	}
+	if eip.AssociationID != "" {
+		return nil, &AWSError{Code: "InvalidIPAddress.InUse", Message: "The address is currently in use and cannot be released", HTTPStatus: http.StatusBadRequest}
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 releaseAddress delete: %w", err)
+	}
+	type response struct {
+		XMLName xml.Name `xml:"ReleaseAddressResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	filterIDs := extractIndexedParams(req.Params, "AllocationId")
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "eip:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeAddresses list: %w", err)
+	}
+	type addressItem struct {
+		AllocationID       string `xml:"allocationId"`
+		PublicIP           string `xml:"publicIp"`
+		AssociationID      string `xml:"associationId,omitempty"`
+		InstanceID         string `xml:"instanceId,omitempty"`
+		NetworkInterfaceID string `xml:"networkInterfaceId,omitempty"`
+		PrivateIPAddress   string `xml:"privateIpAddress,omitempty"`
+		Domain             string `xml:"domain"`
+	}
+	type response struct {
+		XMLName   xml.Name      `xml:"DescribeAddressesResponse"`
+		XMLNS     string        `xml:"xmlns,attr"`
+		Addresses []addressItem `xml:"addressesSet>item"`
+	}
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var eip EC2ElasticIP
+		if json.Unmarshal(data, &eip) != nil {
+			continue
+		}
+		if len(filterIDs) > 0 && !containsStr(filterIDs, eip.AllocationID) {
+			continue
+		}
+		resp.Addresses = append(resp.Addresses, addressItem{
+			AllocationID:       eip.AllocationID,
+			PublicIP:           eip.PublicIP,
+			AssociationID:      eip.AssociationID,
+			InstanceID:         eip.InstanceID,
+			NetworkInterfaceID: eip.NetworkInterfaceID,
+			PrivateIPAddress:   eip.PrivateIPAddress,
+			Domain:             eip.Domain,
+		})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// --- NAT Gateway operations ---
+
+func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	subnetID := req.Params["SubnetId"]
+	allocationID := req.Params["AllocationId"]
+	connectivityType := req.Params["ConnectivityType"]
+	if connectivityType == "" {
+		connectivityType = "public"
+	}
+
+	// Look up subnet to get VPCID.
+	subnetKey := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
+	subnetData, err := p.state.Get(context.Background(), ec2Namespace, subnetKey)
+	if err != nil || subnetData == nil {
+		return nil, &AWSError{Code: "InvalidSubnetID.NotFound", Message: "The subnet ID '" + subnetID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	}
+	var subnet EC2Subnet
+	if unmarshalErr := json.Unmarshal(subnetData, &subnet); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 createNatGateway unmarshal subnet: %w", unmarshalErr)
+	}
+
+	natID := generateNATGatewayID()
+
+	// Compute a stable private IP using FNV hash on the NAT gateway ID.
+	h := fnv.New32a()
+	h.Write([]byte(natID))
+	n := h.Sum32()
+	privateIP := fmt.Sprintf("10.0.%d.%d", (n>>8)&0xFF, n&0xFF)
+
+	gw := EC2NATGateway{
+		NatGatewayID:     natID,
+		SubnetID:         subnetID,
+		VPCID:            subnet.VPCID,
+		PrivateIP:        privateIP,
+		State:            "available",
+		ConnectivityType: connectivityType,
+		CreateTime:       p.tc.Now().UTC().Format(time.RFC3339),
+		AccountID:        reqCtx.AccountID,
+		Region:           reqCtx.Region,
+	}
+
+	// For public NAT gateways, look up the EIP.
+	if connectivityType == "public" && allocationID != "" {
+		eipKey := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
+		eipData, eipErr := p.state.Get(context.Background(), ec2Namespace, eipKey)
+		if eipErr == nil && eipData != nil {
+			var eip EC2ElasticIP
+			if json.Unmarshal(eipData, &eip) == nil {
+				gw.AllocationID = allocationID
+				gw.PublicIP = eip.PublicIP
+			}
+		}
+	}
+
+	// Extract tags from TagSpecification.N.
+	for n := 1; ; n++ {
+		rt := req.Params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
+		if rt == "" {
+			break
+		}
+		if rt != "natgateway" {
+			continue
+		}
+		for m := 1; ; m++ {
+			key := req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
+			if key == "" {
+				break
+			}
+			gw.Tags = append(gw.Tags, EC2Tag{
+				Key:   key,
+				Value: req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)],
+			})
+		}
+	}
+
+	data, marshalErr := json.Marshal(gw)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("ec2 createNatGateway marshal: %w", marshalErr)
+	}
+	stateKey := "nat:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + natID
+	if err := p.state.Put(context.Background(), ec2Namespace, stateKey, data); err != nil {
+		return nil, fmt.Errorf("ec2 createNatGateway put: %w", err)
+	}
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "nat_ids", natID); err != nil {
+		return nil, err
+	}
+
+	type natAddrItem struct {
+		AllocationID string `xml:"allocationId,omitempty"`
+		PublicIP     string `xml:"publicIp,omitempty"`
+		PrivateIP    string `xml:"privateIp"`
+	}
+	type natItem struct {
+		NatGatewayID     string        `xml:"natGatewayId"`
+		SubnetID         string        `xml:"subnetId"`
+		VpcID            string        `xml:"vpcId"`
+		State            string        `xml:"state"`
+		ConnectivityType string        `xml:"connectivityType"`
+		CreateTime       string        `xml:"createTime"`
+		Addresses        []natAddrItem `xml:"natGatewayAddressSet>item"`
+	}
+	type response struct {
+		XMLName    xml.Name `xml:"CreateNatGatewayResponse"`
+		XMLNS      string   `xml:"xmlns,attr"`
+		NatGateway natItem  `xml:"natGateway"`
+	}
+	item := natItem{
+		NatGatewayID:     natID,
+		SubnetID:         subnetID,
+		VpcID:            subnet.VPCID,
+		State:            "available",
+		ConnectivityType: connectivityType,
+		CreateTime:       gw.CreateTime,
+		Addresses: []natAddrItem{{
+			AllocationID: gw.AllocationID,
+			PublicIP:     gw.PublicIP,
+			PrivateIP:    privateIP,
+		}},
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:      "http://ec2.amazonaws.com/doc/2016-11-15/",
+		NatGateway: item,
+	})
+}
+
+func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	filterIDs := extractIndexedParams(req.Params, "NatGatewayId")
+	filters := extractEC2Filters(req.Params)
+
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "nat:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeNatGateways list: %w", err)
+	}
+
+	type natAddrItem struct {
+		AllocationID string `xml:"allocationId,omitempty"`
+		PublicIP     string `xml:"publicIp,omitempty"`
+		PrivateIP    string `xml:"privateIp"`
+	}
+	type natItem struct {
+		NatGatewayID     string        `xml:"natGatewayId"`
+		SubnetID         string        `xml:"subnetId"`
+		VpcID            string        `xml:"vpcId"`
+		State            string        `xml:"state"`
+		ConnectivityType string        `xml:"connectivityType"`
+		CreateTime       string        `xml:"createTime"`
+		Addresses        []natAddrItem `xml:"natGatewayAddressSet>item"`
+	}
+	type response struct {
+		XMLName     xml.Name  `xml:"DescribeNatGatewaysResponse"`
+		XMLNS       string    `xml:"xmlns,attr"`
+		NatGateways []natItem `xml:"natGatewaySet>item"`
+	}
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var gw EC2NATGateway
+		if json.Unmarshal(data, &gw) != nil {
+			continue
+		}
+		if len(filterIDs) > 0 && !containsStr(filterIDs, gw.NatGatewayID) {
+			continue
+		}
+		// Apply filters.
+		if stateVals, ok := filters["state"]; ok && !containsStr(stateVals, gw.State) {
+			continue
+		}
+		if vpcVals, ok := filters["vpc-id"]; ok && !containsStr(vpcVals, gw.VPCID) {
+			continue
+		}
+		resp.NatGateways = append(resp.NatGateways, natItem{
+			NatGatewayID:     gw.NatGatewayID,
+			SubnetID:         gw.SubnetID,
+			VpcID:            gw.VPCID,
+			State:            gw.State,
+			ConnectivityType: gw.ConnectivityType,
+			CreateTime:       gw.CreateTime,
+			Addresses: []natAddrItem{{
+				AllocationID: gw.AllocationID,
+				PublicIP:     gw.PublicIP,
+				PrivateIP:    gw.PrivateIP,
+			}},
+		})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	natID := req.Params["NatGatewayId"]
+	key := "nat:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + natID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "NatGatewayNotFound", Message: "The nat gateway ID '" + natID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	}
+	var gw EC2NATGateway
+	if unmarshalErr := json.Unmarshal(data, &gw); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 deleteNatGateway unmarshal: %w", unmarshalErr)
+	}
+	gw.State = "deleted"
+	newData, _ := json.Marshal(gw)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 deleteNatGateway put: %w", err)
+	}
+	type response struct {
+		XMLName      xml.Name `xml:"DeleteNatGatewayResponse"`
+		XMLNS        string   `xml:"xmlns,attr"`
+		NatGatewayID string   `xml:"natGatewayId"`
+		State        string   `xml:"state"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:        "http://ec2.amazonaws.com/doc/2016-11-15/",
+		NatGatewayID: natID,
+		State:        "deleted",
 	})
 }

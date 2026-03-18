@@ -124,6 +124,12 @@ type EC2VPC struct {
 	// State is the VPC state: "pending" or "available".
 	State string `json:"state"`
 
+	// EnableDnsSupport indicates whether DNS resolution is enabled for the VPC.
+	EnableDnsSupport bool `json:"enable_dns_support"`
+
+	// EnableDnsHostnames indicates whether instances receive public DNS hostnames.
+	EnableDnsHostnames bool `json:"enable_dns_hostnames"`
+
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 
@@ -388,4 +394,91 @@ type EC2Image struct {
 // by 17 hex characters.
 func generateImageID() string {
 	return "ami-" + randomHex(8)
+}
+
+// EC2ElasticIP represents an Amazon EC2 Elastic IP address.
+type EC2ElasticIP struct {
+	// AllocationID is the unique identifier for the Elastic IP allocation.
+	AllocationID string `json:"allocation_id"`
+
+	// PublicIP is the public IPv4 address.
+	PublicIP string `json:"public_ip"`
+
+	// AssociationID is the identifier for the current association, if any.
+	AssociationID string `json:"association_id,omitempty"`
+
+	// InstanceID is the instance associated with this address, if any.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// NetworkInterfaceID is the network interface associated with this address, if any.
+	NetworkInterfaceID string `json:"network_interface_id,omitempty"`
+
+	// PrivateIPAddress is the private IP address associated with the Elastic IP.
+	PrivateIPAddress string `json:"private_ip_address,omitempty"`
+
+	// Domain is the domain of the allocation ("vpc" or "standard").
+	Domain string `json:"domain"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the Elastic IP.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the Elastic IP is allocated.
+	Region string `json:"region"`
+}
+
+// EC2NATGateway represents an Amazon VPC NAT gateway.
+type EC2NATGateway struct {
+	// NatGatewayID is the unique identifier for the NAT gateway.
+	NatGatewayID string `json:"nat_gateway_id"`
+
+	// SubnetID is the subnet in which the NAT gateway resides.
+	SubnetID string `json:"subnet_id"`
+
+	// VPCID is the VPC containing the NAT gateway.
+	VPCID string `json:"vpc_id"`
+
+	// AllocationID is the Elastic IP allocation ID for public NAT gateways.
+	AllocationID string `json:"allocation_id,omitempty"`
+
+	// PublicIP is the public IPv4 address for public NAT gateways.
+	PublicIP string `json:"public_ip,omitempty"`
+
+	// PrivateIP is the private IPv4 address of the NAT gateway.
+	PrivateIP string `json:"private_ip"`
+
+	// State is the NAT gateway state: "pending", "available", "deleting", "deleted".
+	State string `json:"state"`
+
+	// ConnectivityType is "public" or "private".
+	ConnectivityType string `json:"connectivity_type"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// CreateTime is the RFC3339 time at which the NAT gateway was created.
+	CreateTime string `json:"create_time"`
+
+	// AccountID is the AWS account that owns the NAT gateway.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the NAT gateway resides.
+	Region string `json:"region"`
+}
+
+// generateAllocationID generates a random Elastic IP allocation ID.
+func generateAllocationID() string {
+	return "eipalloc-" + randomHex(8)
+}
+
+// generateEIPAssociationID generates a random Elastic IP association ID.
+func generateEIPAssociationID() string {
+	return "eipassoc-" + randomHex(8)
+}
+
+// generateNATGatewayID generates a random NAT gateway ID.
+func generateNATGatewayID() string {
+	return "nat-" + randomHex(8)
 }

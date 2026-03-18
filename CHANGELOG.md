@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.41.0] - 2026-03-18
+
+### Added
+
+- **`DescribeAvailabilityZones`** (`ec2_plugin.go`): Returns 3 synthetic AZs (`{region}a/b/c`,
+  state `available`) for any region. No state required; deterministic for replay.
+- **`ModifySubnetAttribute`** (`ec2_plugin.go`): Toggles `MapPublicIpOnLaunch` on a subnet and
+  persists the change. Returns `InvalidSubnetID.NotFound` (HTTP 400) for unknown subnets.
+- **`ModifyVpcAttribute`** (`ec2_plugin.go`): Toggles `EnableDnsSupport` and `EnableDnsHostnames`
+  on a VPC and persists the changes. Returns `InvalidVpcID.NotFound` (HTTP 400) for unknown VPCs.
+- **`EnableDnsSupport` / `EnableDnsHostnames` fields** (`ec2_types.go`): Added to `EC2VPC`.
+  `createVPC` now sets `EnableDnsSupport: true` (AWS default). `ensureDefaultVPC` additionally
+  sets `EnableDnsHostnames: true` (default VPC default).
+- **Elastic IP operations** (`ec2_plugin.go`, `ec2_types.go`): `AllocateAddress`,
+  `AssociateAddress`, `DisassociateAddress`, `ReleaseAddress`, `DescribeAddresses`. EIPs use
+  `eipalloc-` prefixed IDs. Associating with an instance updates the instance's public IP and
+  DNS. Releasing an associated EIP returns `InvalidIPAddress.InUse` (HTTP 400). State keys:
+  `eip:{acct}/{region}/{allocationID}`. Costs: `ec2/AllocateAddress = $0.005`.
+- **NAT Gateway operations** (`ec2_plugin.go`, `ec2_types.go`): `CreateNatGateway`,
+  `DescribeNatGateways`, `DeleteNatGateway`. Private IP derived deterministically via FNV-32a
+  on the NAT gateway ID. State immediately `available`. `DeleteNatGateway` soft-deletes (state
+  set to `deleted`). `DescribeNatGateways` supports `NatGatewayId.N` and `Filter.N` (`state`,
+  `vpc-id`). State keys: `nat:{acct}/{region}/{natGatewayID}`. Costs:
+  `ec2/CreateNatGateway = $0.045`.
+- **`AWS::EC2::EIP`** (`betty_cfn.go`, `betty_cfn_v41_plugins.go`): CFN support; priority 2.
+  `Ref` / `PhysicalID` = allocationID (`eipalloc-…`). `Fn::GetAtt AllocationId` and `PublicIp`
+  available via `Metadata`.
+- **`AWS::EC2::NatGateway`** (`betty_cfn.go`, `betty_cfn_v41_plugins.go`): CFN support;
+  priority 4 (after subnets and EIPs). `Ref` / `PhysicalID` = natGatewayID (`nat-…`).
+
 ## [v0.40.0] - 2026-03-18
 
 ### Added

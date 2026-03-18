@@ -1766,3 +1766,543 @@ func TestEC2_NoPublicIP_NonDefaultSubnet(t *testing.T) {
 		t.Errorf("expected private DNS ending in .compute.internal, got %q", inst.PrivateDNS)
 	}
 }
+
+// --- v0.41.0 tests ---
+
+func TestEC2_DescribeAvailabilityZones(t *testing.T) {
+	ts := newEC2TestServer(t)
+	resp := ec2Request(t, ts, map[string]string{"Action": "DescribeAvailabilityZones"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var result struct {
+		XMLName xml.Name `xml:"DescribeAvailabilityZonesResponse"`
+		AZs     []struct {
+			ZoneName  string `xml:"zoneName"`
+			State     string `xml:"zoneState"`
+			RegionName string `xml:"regionName"`
+		} `xml:"availabilityZoneInfo>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.AZs) != 3 {
+		t.Fatalf("expected 3 AZs, got %d", len(result.AZs))
+	}
+	for i, suffix := range []string{"a", "b", "c"} {
+		if !strings.HasSuffix(result.AZs[i].ZoneName, suffix) {
+			t.Errorf("AZ[%d] name %q expected suffix %q", i, result.AZs[i].ZoneName, suffix)
+		}
+		if result.AZs[i].State != "available" {
+			t.Errorf("AZ[%d] state %q, expected available", i, result.AZs[i].State)
+		}
+		if result.AZs[i].RegionName != "us-east-1" {
+			t.Errorf("AZ[%d] region %q, expected us-east-1", i, result.AZs[i].RegionName)
+		}
+	}
+}
+
+func TestEC2_ModifySubnetAttribute(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC and subnet.
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.0.0.0/16"})
+	defer vpcResp.Body.Close() //nolint:errcheck
+	var vpcResult struct {
+		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+
+	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcResult.Vpc.VpcID, "CidrBlock": "10.0.1.0/24"})
+	defer subResp.Body.Close() //nolint:errcheck
+	var subResult struct {
+		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+	}
+	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
+	subnetID := subResult.Subnet.SubnetID
+
+	// Modify to enable MapPublicIpOnLaunch.
+	modResp := ec2Request(t, ts, map[string]string{
+		"Action":                 "ModifySubnetAttribute",
+		"SubnetId":               subnetID,
+		"MapPublicIpOnLaunch.Value": "true",
+	})
+	defer modResp.Body.Close() //nolint:errcheck
+	if modResp.StatusCode != http.StatusOK {
+		t.Fatalf("ModifySubnetAttribute: expected 200, got %d", modResp.StatusCode)
+	}
+
+	// Describe and verify.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeSubnets", "SubnetId.1": subnetID})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		Subnets []struct {
+			MapPublicIpOnLaunch bool `xml:"mapPublicIpOnLaunch"`
+		} `xml:"subnetSet>item"`
+	}
+	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
+	if len(descResult.Subnets) != 1 {
+		t.Fatalf("expected 1 subnet, got %d", len(descResult.Subnets))
+	}
+	if !descResult.Subnets[0].MapPublicIpOnLaunch {
+		t.Error("expected mapPublicIpOnLaunch=true after modify")
+	}
+}
+
+func TestEC2_ModifyVpcAttribute(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC.
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.1.0.0/16"})
+	defer vpcResp.Body.Close() //nolint:errcheck
+	var vpcResult struct {
+		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+	vpcID := vpcResult.Vpc.VpcID
+
+	// Enable DNS hostnames.
+	modResp := ec2Request(t, ts, map[string]string{
+		"Action":                   "ModifyVpcAttribute",
+		"VpcId":                    vpcID,
+		"EnableDnsHostnames.Value": "true",
+	})
+	defer modResp.Body.Close() //nolint:errcheck
+	if modResp.StatusCode != http.StatusOK {
+		t.Fatalf("ModifyVpcAttribute: expected 200, got %d", modResp.StatusCode)
+	}
+
+	// Disable DNS support.
+	modResp2 := ec2Request(t, ts, map[string]string{
+		"Action":               "ModifyVpcAttribute",
+		"VpcId":                vpcID,
+		"EnableDnsSupport.Value": "false",
+	})
+	defer modResp2.Body.Close() //nolint:errcheck
+	if modResp2.StatusCode != http.StatusOK {
+		t.Fatalf("ModifyVpcAttribute (dns support): expected 200, got %d", modResp2.StatusCode)
+	}
+}
+
+func TestEC2_ElasticIP_AllocateRelease(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Allocate.
+	allocResp := ec2Request(t, ts, map[string]string{"Action": "AllocateAddress", "Domain": "vpc"})
+	defer allocResp.Body.Close() //nolint:errcheck
+	if allocResp.StatusCode != http.StatusOK {
+		t.Fatalf("AllocateAddress: expected 200, got %d", allocResp.StatusCode)
+	}
+	var allocResult struct {
+		AllocationID string `xml:"allocationId"`
+		PublicIP     string `xml:"publicIp"`
+	}
+	_ = xml.NewDecoder(allocResp.Body).Decode(&allocResult)
+	if !strings.HasPrefix(allocResult.AllocationID, "eipalloc-") {
+		t.Errorf("allocationId %q must start with eipalloc-", allocResult.AllocationID)
+	}
+	if !strings.HasPrefix(allocResult.PublicIP, "54.") {
+		t.Errorf("publicIp %q must start with 54.", allocResult.PublicIP)
+	}
+
+	// DescribeAddresses — should see it.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeAddresses"})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		Addresses []struct {
+			AllocationID string `xml:"allocationId"`
+		} `xml:"addressesSet>item"`
+	}
+	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
+	if len(descResult.Addresses) != 1 {
+		t.Fatalf("expected 1 EIP, got %d", len(descResult.Addresses))
+	}
+
+	// Release.
+	relResp := ec2Request(t, ts, map[string]string{"Action": "ReleaseAddress", "AllocationId": allocResult.AllocationID})
+	defer relResp.Body.Close() //nolint:errcheck
+	if relResp.StatusCode != http.StatusOK {
+		t.Fatalf("ReleaseAddress: expected 200, got %d", relResp.StatusCode)
+	}
+
+	// DescribeAddresses — should be empty.
+	descResp2 := ec2Request(t, ts, map[string]string{"Action": "DescribeAddresses"})
+	defer descResp2.Body.Close() //nolint:errcheck
+	var descResult2 struct {
+		Addresses []struct {
+			AllocationID string `xml:"allocationId"`
+		} `xml:"addressesSet>item"`
+	}
+	_ = xml.NewDecoder(descResp2.Body).Decode(&descResult2)
+	if len(descResult2.Addresses) != 0 {
+		t.Fatalf("expected 0 EIPs after release, got %d", len(descResult2.Addresses))
+	}
+}
+
+func TestEC2_ElasticIP_AssociateDisassociate(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Allocate EIP.
+	allocResp := ec2Request(t, ts, map[string]string{"Action": "AllocateAddress", "Domain": "vpc"})
+	defer allocResp.Body.Close() //nolint:errcheck
+	var allocResult struct {
+		AllocationID string `xml:"allocationId"`
+		PublicIP     string `xml:"publicIp"`
+	}
+	_ = xml.NewDecoder(allocResp.Body).Decode(&allocResult)
+
+	// Launch instance.
+	runResp := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": "ami-test", "MinCount": "1", "MaxCount": "1"})
+	defer runResp.Body.Close() //nolint:errcheck
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	_ = xml.NewDecoder(runResp.Body).Decode(&runResult)
+	instanceID := runResult.Instances[0].InstanceID
+
+	// Associate.
+	assocResp := ec2Request(t, ts, map[string]string{
+		"Action":       "AssociateAddress",
+		"AllocationId": allocResult.AllocationID,
+		"InstanceId":   instanceID,
+	})
+	defer assocResp.Body.Close() //nolint:errcheck
+	if assocResp.StatusCode != http.StatusOK {
+		t.Fatalf("AssociateAddress: expected 200, got %d", assocResp.StatusCode)
+	}
+	var assocResult struct {
+		AssociationID string `xml:"associationId"`
+	}
+	_ = xml.NewDecoder(assocResp.Body).Decode(&assocResult)
+	if !strings.HasPrefix(assocResult.AssociationID, "eipassoc-") {
+		t.Errorf("associationId %q must start with eipassoc-", assocResult.AssociationID)
+	}
+
+	// DescribeAddresses — should show instanceId.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeAddresses", "AllocationId.1": allocResult.AllocationID})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		Addresses []struct {
+			InstanceID string `xml:"instanceId"`
+			PublicIP   string `xml:"publicIp"`
+		} `xml:"addressesSet>item"`
+	}
+	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
+	if len(descResult.Addresses) != 1 || descResult.Addresses[0].InstanceID != instanceID {
+		t.Errorf("expected instanceId %q in DescribeAddresses, got %+v", instanceID, descResult.Addresses)
+	}
+
+	// DescribeInstances — public IP should match EIP.
+	instResp := ec2Request(t, ts, map[string]string{"Action": "DescribeInstances", "InstanceId.1": instanceID})
+	defer instResp.Body.Close() //nolint:errcheck
+	var instResult struct {
+		Reservations []struct {
+			Instances []struct {
+				PublicIP string `xml:"publicIpAddress"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	_ = xml.NewDecoder(instResp.Body).Decode(&instResult)
+	if len(instResult.Reservations) < 1 || len(instResult.Reservations[0].Instances) < 1 {
+		t.Fatal("expected instance in DescribeInstances")
+	}
+	if instResult.Reservations[0].Instances[0].PublicIP != allocResult.PublicIP {
+		t.Errorf("instance publicIp %q, expected EIP %q", instResult.Reservations[0].Instances[0].PublicIP, allocResult.PublicIP)
+	}
+
+	// Disassociate.
+	disResp := ec2Request(t, ts, map[string]string{"Action": "DisassociateAddress", "AssociationId": assocResult.AssociationID})
+	defer disResp.Body.Close() //nolint:errcheck
+	if disResp.StatusCode != http.StatusOK {
+		t.Fatalf("DisassociateAddress: expected 200, got %d", disResp.StatusCode)
+	}
+
+	// DescribeAddresses — no instanceId.
+	descResp2 := ec2Request(t, ts, map[string]string{"Action": "DescribeAddresses", "AllocationId.1": allocResult.AllocationID})
+	defer descResp2.Body.Close() //nolint:errcheck
+	var descResult2 struct {
+		Addresses []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"addressesSet>item"`
+	}
+	_ = xml.NewDecoder(descResp2.Body).Decode(&descResult2)
+	if len(descResult2.Addresses) != 1 || descResult2.Addresses[0].InstanceID != "" {
+		t.Errorf("expected cleared instanceId after disassociate, got %+v", descResult2.Addresses)
+	}
+}
+
+func TestEC2_ElasticIP_ReleaseWhileAssociated(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	allocResp := ec2Request(t, ts, map[string]string{"Action": "AllocateAddress", "Domain": "vpc"})
+	defer allocResp.Body.Close() //nolint:errcheck
+	var allocResult struct {
+		AllocationID string `xml:"allocationId"`
+	}
+	_ = xml.NewDecoder(allocResp.Body).Decode(&allocResult)
+
+	// Launch and associate.
+	runResp := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": "ami-test", "MinCount": "1", "MaxCount": "1"})
+	defer runResp.Body.Close() //nolint:errcheck
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	_ = xml.NewDecoder(runResp.Body).Decode(&runResult)
+
+	assocResp := ec2Request(t, ts, map[string]string{
+		"Action":       "AssociateAddress",
+		"AllocationId": allocResult.AllocationID,
+		"InstanceId":   runResult.Instances[0].InstanceID,
+	})
+	assocResp.Body.Close() //nolint:errcheck
+
+	// Release while associated — should fail with InvalidIPAddress.InUse.
+	relResp := ec2Request(t, ts, map[string]string{"Action": "ReleaseAddress", "AllocationId": allocResult.AllocationID})
+	defer relResp.Body.Close() //nolint:errcheck
+	if relResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for release of associated EIP, got %d", relResp.StatusCode)
+	}
+}
+
+func TestEC2_DescribeAddresses_Filter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Allocate 2 EIPs.
+	r1 := ec2Request(t, ts, map[string]string{"Action": "AllocateAddress"})
+	defer r1.Body.Close() //nolint:errcheck
+	var a1 struct {
+		AllocationID string `xml:"allocationId"`
+	}
+	_ = xml.NewDecoder(r1.Body).Decode(&a1)
+
+	r2 := ec2Request(t, ts, map[string]string{"Action": "AllocateAddress"})
+	defer r2.Body.Close() //nolint:errcheck
+	var a2 struct {
+		AllocationID string `xml:"allocationId"`
+	}
+	_ = xml.NewDecoder(r2.Body).Decode(&a2)
+	_ = a2 // second EIP exists but is not filtered for
+
+	// Filter by first allocationId only.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeAddresses", "AllocationId.1": a1.AllocationID})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		Addresses []struct {
+			AllocationID string `xml:"allocationId"`
+		} `xml:"addressesSet>item"`
+	}
+	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
+	if len(descResult.Addresses) != 1 {
+		t.Fatalf("expected 1 filtered EIP, got %d", len(descResult.Addresses))
+	}
+	if descResult.Addresses[0].AllocationID != a1.AllocationID {
+		t.Errorf("filtered EIP %q, expected %q", descResult.Addresses[0].AllocationID, a1.AllocationID)
+	}
+}
+
+func TestEC2_NatGateway_CreateDescribeDelete(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC and subnet.
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.2.0.0/16"})
+	defer vpcResp.Body.Close() //nolint:errcheck
+	var vpcResult struct {
+		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+	vpcID := vpcResult.Vpc.VpcID
+
+	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcID, "CidrBlock": "10.2.1.0/24"})
+	defer subResp.Body.Close() //nolint:errcheck
+	var subResult struct {
+		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+	}
+	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
+	subnetID := subResult.Subnet.SubnetID
+
+	// Allocate EIP.
+	eipResp := ec2Request(t, ts, map[string]string{"Action": "AllocateAddress"})
+	defer eipResp.Body.Close() //nolint:errcheck
+	var eipResult struct {
+		AllocationID string `xml:"allocationId"`
+	}
+	_ = xml.NewDecoder(eipResp.Body).Decode(&eipResult)
+
+	// Create NAT gateway.
+	natResp := ec2Request(t, ts, map[string]string{
+		"Action":       "CreateNatGateway",
+		"SubnetId":     subnetID,
+		"AllocationId": eipResult.AllocationID,
+	})
+	defer natResp.Body.Close() //nolint:errcheck
+	if natResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateNatGateway: expected 200, got %d", natResp.StatusCode)
+	}
+	var natResult struct {
+		NatGateway struct {
+			NatGatewayID     string `xml:"natGatewayId"`
+			SubnetID         string `xml:"subnetId"`
+			VpcID            string `xml:"vpcId"`
+			State            string `xml:"state"`
+			ConnectivityType string `xml:"connectivityType"`
+		} `xml:"natGateway"`
+	}
+	_ = xml.NewDecoder(natResp.Body).Decode(&natResult)
+	natID := natResult.NatGateway.NatGatewayID
+	if !strings.HasPrefix(natID, "nat-") {
+		t.Errorf("natGatewayId %q must start with nat-", natID)
+	}
+	if natResult.NatGateway.SubnetID != subnetID {
+		t.Errorf("subnetId %q, expected %q", natResult.NatGateway.SubnetID, subnetID)
+	}
+	if natResult.NatGateway.VpcID != vpcID {
+		t.Errorf("vpcId %q, expected %q", natResult.NatGateway.VpcID, vpcID)
+	}
+	if natResult.NatGateway.State != "available" {
+		t.Errorf("state %q, expected available", natResult.NatGateway.State)
+	}
+
+	// DescribeNatGateways.
+	descResp := ec2Request(t, ts, map[string]string{"Action": "DescribeNatGateways", "NatGatewayId.1": natID})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		NatGateways []struct {
+			NatGatewayID string `xml:"natGatewayId"`
+		} `xml:"natGatewaySet>item"`
+	}
+	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
+	if len(descResult.NatGateways) != 1 || descResult.NatGateways[0].NatGatewayID != natID {
+		t.Fatalf("DescribeNatGateways: expected 1 with id %q", natID)
+	}
+
+	// Delete NAT gateway.
+	delResp := ec2Request(t, ts, map[string]string{"Action": "DeleteNatGateway", "NatGatewayId": natID})
+	defer delResp.Body.Close() //nolint:errcheck
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteNatGateway: expected 200, got %d", delResp.StatusCode)
+	}
+	var delResult struct {
+		NatGatewayID string `xml:"natGatewayId"`
+		State        string `xml:"state"`
+	}
+	_ = xml.NewDecoder(delResp.Body).Decode(&delResult)
+	if delResult.State != "deleted" {
+		t.Errorf("state after delete %q, expected deleted", delResult.State)
+	}
+}
+
+func TestEC2_NatGateway_Private(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC and subnet.
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.3.0.0/16"})
+	defer vpcResp.Body.Close() //nolint:errcheck
+	var vpcResult struct {
+		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+
+	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcResult.Vpc.VpcID, "CidrBlock": "10.3.1.0/24"})
+	defer subResp.Body.Close() //nolint:errcheck
+	var subResult struct {
+		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+	}
+	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
+
+	// Create private NAT gateway (no AllocationId needed).
+	natResp := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateNatGateway",
+		"SubnetId":         subResult.Subnet.SubnetID,
+		"ConnectivityType": "private",
+	})
+	defer natResp.Body.Close() //nolint:errcheck
+	if natResp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateNatGateway private: expected 200, got %d", natResp.StatusCode)
+	}
+	var natResult struct {
+		NatGateway struct {
+			ConnectivityType string `xml:"connectivityType"`
+			Addresses        []struct {
+				PublicIP string `xml:"publicIp"`
+			} `xml:"natGatewayAddressSet>item"`
+		} `xml:"natGateway"`
+	}
+	_ = xml.NewDecoder(natResp.Body).Decode(&natResult)
+	if natResult.NatGateway.ConnectivityType != "private" {
+		t.Errorf("connectivityType %q, expected private", natResult.NatGateway.ConnectivityType)
+	}
+	// Private NAT gateway should have no public IP.
+	for _, addr := range natResult.NatGateway.Addresses {
+		if addr.PublicIP != "" {
+			t.Errorf("private NAT GW should have no publicIp, got %q", addr.PublicIP)
+		}
+	}
+}
+
+func TestEC2_NatGateway_Filter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC and subnet.
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.4.0.0/16"})
+	defer vpcResp.Body.Close() //nolint:errcheck
+	var vpcResult struct {
+		Vpc struct{ VpcID string `xml:"vpcId"` } `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+
+	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcResult.Vpc.VpcID, "CidrBlock": "10.4.1.0/24"})
+	defer subResp.Body.Close() //nolint:errcheck
+	var subResult struct {
+		Subnet struct{ SubnetID string `xml:"subnetId"` } `xml:"subnet"`
+	}
+	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
+
+	// Create 2 private NAT gateways.
+	for range 2 {
+		r := ec2Request(t, ts, map[string]string{
+			"Action":           "CreateNatGateway",
+			"SubnetId":         subResult.Subnet.SubnetID,
+			"ConnectivityType": "private",
+		})
+		r.Body.Close() //nolint:errcheck
+	}
+
+	// Create a third and delete it.
+	r3 := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateNatGateway",
+		"SubnetId":         subResult.Subnet.SubnetID,
+		"ConnectivityType": "private",
+	})
+	defer r3.Body.Close() //nolint:errcheck
+	var r3Result struct {
+		NatGateway struct {
+			NatGatewayID string `xml:"natGatewayId"`
+		} `xml:"natGateway"`
+	}
+	_ = xml.NewDecoder(r3.Body).Decode(&r3Result)
+	delR := ec2Request(t, ts, map[string]string{"Action": "DeleteNatGateway", "NatGatewayId": r3Result.NatGateway.NatGatewayID})
+	delR.Body.Close() //nolint:errcheck
+
+	// Filter by state=available — should return 2.
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action":          "DescribeNatGateways",
+		"Filter.1.Name":   "state",
+		"Filter.1.Value.1": "available",
+	})
+	defer descResp.Body.Close() //nolint:errcheck
+	var descResult struct {
+		NatGateways []struct {
+			NatGatewayID string `xml:"natGatewayId"`
+		} `xml:"natGatewaySet>item"`
+	}
+	_ = xml.NewDecoder(descResp.Body).Decode(&descResult)
+	if len(descResult.NatGateways) != 2 {
+		t.Fatalf("expected 2 available NAT gateways, got %d", len(descResult.NatGateways))
+	}
+}
