@@ -146,12 +146,20 @@ func TestFSx_CreateDescribeDelete(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &delResp))
 	assert.Equal(t, "DELETED", delResp.FileSystem.Lifecycle)
 
-	// Describe after delete — should return empty list.
+	// Describe all after delete — should return empty list (DELETED filtered out).
 	resp = fsxRequest(t, ts, "DescribeFileSystems", "{}")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readFSxBody(t, resp)
 	require.NoError(t, json.Unmarshal(body, &descResp))
 	assert.Empty(t, descResp.FileSystems)
+
+	// Describe by ID after delete — should return FileSystemNotFound (satisfies SDK delete waiter).
+	descByIDBody2, err2 := json.Marshal(map[string]interface{}{
+		"FileSystemIds": []string{fsID},
+	})
+	require.NoError(t, err2)
+	resp = fsxRequest(t, ts, "DescribeFileSystems", string(descByIDBody2))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestFSx_DescribeNotFound(t *testing.T) {

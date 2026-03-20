@@ -215,9 +215,17 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 			if err := json.Unmarshal(data, &fs); err != nil {
 				return nil, fmt.Errorf("fsx describeFileSystems unmarshal: %w", err)
 			}
-			if fs.Lifecycle != "DELETED" {
-				result = append(result, fsxToWire(fs))
+			// Treat DELETED the same as not-found so that SDK delete waiters
+			// (NewFileSystemDeletedWaiter) receive FileSystemNotFound and
+			// consider the delete complete on the first poll.
+			if fs.Lifecycle == "DELETED" {
+				return nil, &AWSError{
+					Code:       "FileSystemNotFound",
+					Message:    fmt.Sprintf("File system '%s' does not exist.", id),
+					HTTPStatus: http.StatusBadRequest,
+				}
 			}
+			result = append(result, fsxToWire(fs))
 		}
 		return fsxJSONResponse(http.StatusOK, map[string]interface{}{
 			"FileSystems": result,
