@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.43.2] - 2026-03-19
+
+### Fixed
+
+- **FSx LustreConfiguration in responses** (`fsx_plugin.go`): `CreateFileSystem` and
+  `DescribeFileSystems` now include a `LustreConfiguration` object (`MountName`,
+  `DeploymentType`) in the wire response for LUSTRE file systems. Previously this field was
+  absent, causing nil-pointer panics in any code that dereferenced
+  `fs.LustreConfiguration.MountName`. `DeploymentType` defaults to `SCRATCH_2` when not
+  supplied by the caller; `MountName` is `"fsx"` for SCRATCH_2 and a random hex string for
+  other deployment types. Closes #233.
+
 ## [v0.43.1] - 2026-03-19
 
 ### Fixed

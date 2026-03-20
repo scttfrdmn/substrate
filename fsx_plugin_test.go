@@ -217,6 +217,59 @@ func TestFSx_MultipleFileSystems(t *testing.T) {
 	assert.Len(t, descResp.FileSystems, 3)
 }
 
+// TestFSx_LustreConfiguration verifies that CreateFileSystem for a LUSTRE file
+// system includes LustreConfiguration.MountName and DeploymentType in responses
+// so SDK consumers do not encounter nil-pointer panics (#233).
+func TestFSx_LustreConfiguration(t *testing.T) {
+	srv := newFSxTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Create without specifying DeploymentType — should default to SCRATCH_2.
+	resp := fsxRequest(t, ts, "CreateFileSystem", `{
+		"FileSystemType": "LUSTRE",
+		"StorageCapacity": 1200,
+		"SubnetIds": ["subnet-abc"]
+	}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readFSxBody(t, resp)
+
+	var out struct {
+		FileSystem struct {
+			FileSystemId        string `json:"FileSystemId"`
+			LustreConfiguration struct {
+				MountName      string `json:"MountName"`
+				DeploymentType string `json:"DeploymentType"`
+			} `json:"LustreConfiguration"`
+		} `json:"FileSystem"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.NotEmpty(t, out.FileSystem.LustreConfiguration.MountName, "MountName must be set")
+	assert.Equal(t, "fsx", out.FileSystem.LustreConfiguration.MountName)
+	assert.Equal(t, "SCRATCH_2", out.FileSystem.LustreConfiguration.DeploymentType)
+
+	// Describe should also include LustreConfiguration.
+	descBody, _ := json.Marshal(map[string]interface{}{
+		"FileSystemIds": []string{out.FileSystem.FileSystemId},
+	})
+	resp = fsxRequest(t, ts, "DescribeFileSystems", string(descBody))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body = readFSxBody(t, resp)
+
+	var descOut struct {
+		FileSystems []struct {
+			LustreConfiguration struct {
+				MountName      string `json:"MountName"`
+				DeploymentType string `json:"DeploymentType"`
+			} `json:"LustreConfiguration"`
+		} `json:"FileSystems"`
+	}
+	require.NoError(t, json.Unmarshal(body, &descOut))
+	require.Len(t, descOut.FileSystems, 1)
+	assert.Equal(t, "fsx", descOut.FileSystems[0].LustreConfiguration.MountName)
+	assert.Equal(t, "SCRATCH_2", descOut.FileSystems[0].LustreConfiguration.DeploymentType)
+}
+
 // TestFSx_SDKTargetRouting verifies that requests using the real AWS SDK v2
 // X-Amz-Target header (AWSSimbaAPIService_v20180301.<Op>) are routed to the
 // FSx plugin correctly (#232).

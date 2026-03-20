@@ -37,6 +37,11 @@ type FSxFileSystem struct {
 	Tags []FSxTag `json:"tags,omitempty"`
 	// CreationTime is the Unix epoch timestamp when the file system was created.
 	CreationTime float64 `json:"creation_time"`
+	// LustreMountName is the mount name used for LUSTRE file systems.
+	// For SCRATCH_2 deployments this is always "fsx"; other types use a random value.
+	LustreMountName string `json:"lustre_mount_name,omitempty"`
+	// LustreDeploymentType is the Lustre deployment type (e.g. SCRATCH_2, PERSISTENT_1).
+	LustreDeploymentType string `json:"lustre_deployment_type,omitempty"`
 	// AccountID is the AWS account that owns the file system.
 	AccountID string `json:"account_id"`
 	// Region is the AWS region where the file system resides.
@@ -114,11 +119,14 @@ func (p *FSxPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		FileSystemType  string   `json:"FileSystemType"`
-		StorageCapacity int32    `json:"StorageCapacity"`
-		StorageType     string   `json:"StorageType"`
-		SubnetIDs       []string `json:"SubnetIds"`
-		Tags            []FSxTag `json:"Tags"`
+		FileSystemType      string   `json:"FileSystemType"`
+		StorageCapacity     int32    `json:"StorageCapacity"`
+		StorageType         string   `json:"StorageType"`
+		SubnetIDs           []string `json:"SubnetIds"`
+		Tags                []FSxTag `json:"Tags"`
+		LustreConfiguration struct {
+			DeploymentType string `json:"DeploymentType"`
+		} `json:"LustreConfiguration"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -155,20 +163,37 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
+	// Determine Lustre-specific fields.
+	lustreDeploymentType := input.LustreConfiguration.DeploymentType
+	if strings.ToUpper(input.FileSystemType) == "LUSTRE" && lustreDeploymentType == "" {
+		lustreDeploymentType = "SCRATCH_2"
+	}
+	// MountName for SCRATCH_2 is always "fsx"; other Lustre types use a random value.
+	lustreMountName := ""
+	if strings.ToUpper(input.FileSystemType) == "LUSTRE" {
+		if lustreDeploymentType == "SCRATCH_2" || lustreDeploymentType == "" {
+			lustreMountName = "fsx"
+		} else {
+			lustreMountName = randomHex(8)
+		}
+	}
+
 	fs := FSxFileSystem{
-		FileSystemID:    fsID,
-		FileSystemType:  strings.ToUpper(input.FileSystemType),
-		StorageCapacity: input.StorageCapacity,
-		StorageType:     input.StorageType,
-		VpcID:           vpcID,
-		SubnetIDs:       input.SubnetIDs,
-		DNSName:         fsxDNSName(fsID, ctx.Region),
-		ResourceARN:     arn,
-		Lifecycle:       "AVAILABLE",
-		Tags:            input.Tags,
-		CreationTime:    float64(p.tc.Now().Unix()),
-		AccountID:       ctx.AccountID,
-		Region:          ctx.Region,
+		FileSystemID:         fsID,
+		FileSystemType:       strings.ToUpper(input.FileSystemType),
+		StorageCapacity:      input.StorageCapacity,
+		StorageType:          input.StorageType,
+		VpcID:                vpcID,
+		SubnetIDs:            input.SubnetIDs,
+		DNSName:              fsxDNSName(fsID, ctx.Region),
+		ResourceARN:          arn,
+		Lifecycle:            "AVAILABLE",
+		Tags:                 input.Tags,
+		CreationTime:         float64(p.tc.Now().Unix()),
+		LustreMountName:      lustreMountName,
+		LustreDeploymentType: lustreDeploymentType,
+		AccountID:            ctx.AccountID,
+		Region:               ctx.Region,
 	}
 
 	data, err := json.Marshal(fs)
@@ -333,6 +358,14 @@ func fsxToWire(fs FSxFileSystem) map[string]interface{} {
 	}
 	if fs.Tags == nil {
 		m["Tags"] = []FSxTag{}
+	}
+	// Include LustreConfiguration for LUSTRE file systems so that SDK consumers
+	// can safely dereference LustreConfiguration.MountName without a nil panic.
+	if fs.FileSystemType == "LUSTRE" {
+		m["LustreConfiguration"] = map[string]interface{}{
+			"MountName":      fs.LustreMountName,
+			"DeploymentType": fs.LustreDeploymentType,
+		}
 	}
 	return m
 }
