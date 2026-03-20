@@ -170,6 +170,9 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeNatGateways(ctx, req)
 	case "DeleteNatGateway":
 		return p.deleteNatGateway(ctx, req)
+	// Region operations
+	case "DescribeRegions":
+		return p.describeRegions(ctx, req)
 	// Instance type and spot price operations
 	case "DescribeInstanceTypes":
 		return p.describeInstanceTypes(ctx, req)
@@ -2717,6 +2720,54 @@ func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		NatGatewayID: natID,
 		State:        "deleted",
 	})
+}
+
+// --- DescribeRegions ---------------------------------------------------------
+
+// ec2SeededRegions is the list of regions the emulator reports as enabled.
+var ec2SeededRegions = []struct {
+	Name     string
+	Endpoint string
+}{
+	{"us-east-1", "ec2.us-east-1.amazonaws.com"},
+	{"us-west-2", "ec2.us-west-2.amazonaws.com"},
+	{"eu-west-1", "ec2.eu-west-1.amazonaws.com"},
+}
+
+func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Build optional RegionName.N filter.
+	wanted := map[string]bool{}
+	for i := 1; ; i++ {
+		v := req.Params[fmt.Sprintf("RegionName.%d", i)]
+		if v == "" {
+			break
+		}
+		wanted[v] = true
+	}
+
+	type regionItem struct {
+		RegionName     string `xml:"regionName"`
+		RegionEndpoint string `xml:"regionEndpoint"`
+		OptInStatus    string `xml:"optInStatus"`
+	}
+	type response struct {
+		XMLName    xml.Name     `xml:"DescribeRegionsResponse"`
+		XMLNS      string       `xml:"xmlns,attr"`
+		RegionInfo []regionItem `xml:"regionInfo>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, r := range ec2SeededRegions {
+		if len(wanted) > 0 && !wanted[r.Name] {
+			continue
+		}
+		resp.RegionInfo = append(resp.RegionInfo, regionItem{
+			RegionName:     r.Name,
+			RegionEndpoint: r.Endpoint,
+			OptInStatus:    "opt-in-not-required",
+		})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
 }
 
 // --- Instance type and spot price catalog ------------------------------------

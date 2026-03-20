@@ -2547,3 +2547,68 @@ func TestEC2_DescribeSpotPriceHistory_AZFilter(t *testing.T) {
 		}
 	}
 }
+
+// TestEC2_DescribeRegions verifies the pre-seeded region list is returned.
+func TestEC2_DescribeRegions(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{"Action": "DescribeRegions"})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Regions []struct {
+			RegionName  string `xml:"regionName"`
+			OptInStatus string `xml:"optInStatus"`
+		} `xml:"regionInfo>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode DescribeRegions: %v", err)
+	}
+	if len(result.Regions) < 1 {
+		t.Fatal("expected at least one region")
+	}
+	found := false
+	for _, r := range result.Regions {
+		if r.RegionName == "us-east-1" {
+			found = true
+			if r.OptInStatus != "opt-in-not-required" {
+				t.Errorf("us-east-1: expected opt-in-not-required, got %q", r.OptInStatus)
+			}
+		}
+	}
+	if !found {
+		t.Error("us-east-1 not found in DescribeRegions response")
+	}
+}
+
+// TestEC2_DescribeRegions_Filter verifies RegionName.N filtering.
+func TestEC2_DescribeRegions_Filter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":       "DescribeRegions",
+		"RegionName.1": "us-east-1",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Regions []struct {
+			RegionName string `xml:"regionName"`
+		} `xml:"regionInfo>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Regions) != 1 {
+		t.Fatalf("expected 1 region after filter, got %d", len(result.Regions))
+	}
+	if result.Regions[0].RegionName != "us-east-1" {
+		t.Errorf("expected us-east-1, got %q", result.Regions[0].RegionName)
+	}
+}

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.43.4] - 2026-03-19
+
+### Added
+
+- **EC2 `DescribeRegions`** (`ec2_plugin.go`): Returns a pre-seeded list of three enabled
+  regions (`us-east-1`, `us-west-2`, `eu-west-1`) with `opt-in-not-required` opt-in status
+  and the canonical regional EC2 endpoint. Supports `RegionName.N` filters. Enables testing
+  of code that fans out EC2 calls across regions (e.g. `GetEnabledRegions` in truffle).
+  Closes #235.
+
 ## [v0.43.3] - 2026-03-19
 
 ### Added
@@ -1231,4 +1241,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.43.1]: https://github.com/scttfrdmn/substrate/compare/v0.43.0...v0.43.1
 [v0.43.2]: https://github.com/scttfrdmn/substrate/compare/v0.43.1...v0.43.2
 [v0.43.3]: https://github.com/scttfrdmn/substrate/compare/v0.43.2...v0.43.3
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.43.3...HEAD
+[v0.43.4]: https://github.com/scttfrdmn/substrate/compare/v0.43.3...v0.43.4
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.43.4...HEAD
