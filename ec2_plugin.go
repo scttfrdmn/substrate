@@ -170,6 +170,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeNatGateways(ctx, req)
 	case "DeleteNatGateway":
 		return p.deleteNatGateway(ctx, req)
+	// Instance type and spot price operations
+	case "DescribeInstanceTypes":
+		return p.describeInstanceTypes(ctx, req)
+	case "DescribeInstanceTypeOfferings":
+		return p.describeInstanceTypeOfferings(ctx, req)
+	case "DescribeSpotPriceHistory":
+		return p.describeSpotPriceHistory(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -2710,4 +2717,230 @@ func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		NatGatewayID: natID,
 		State:        "deleted",
 	})
+}
+
+// --- Instance type and spot price catalog ------------------------------------
+
+// ec2InstanceTypeCatalog is a pre-seeded catalog of common instance types
+// available for use without real AWS credentials.
+var ec2InstanceTypeCatalog = []ec2InstanceTypeInfo{
+	{InstanceType: "t3.micro", VCpus: 2, MemoryMiB: 1024, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "c5.xlarge", VCpus: 4, MemoryMiB: 8192, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "c5.2xlarge", VCpus: 8, MemoryMiB: 16384, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "m5.large", VCpus: 2, MemoryMiB: 8192, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "r5.xlarge", VCpus: 4, MemoryMiB: 32768, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "p3.2xlarge", VCpus: 8, MemoryMiB: 62464, GPU: 1, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "g4dn.xlarge", VCpus: 4, MemoryMiB: 16384, GPU: 1, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+	{InstanceType: "inf1.xlarge", VCpus: 4, MemoryMiB: 8192, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
+}
+
+// ec2SpotPriceCatalog maps instance type to stub spot price (USD/hr).
+var ec2SpotPriceCatalog = map[string]string{
+	"t3.micro":    "0.0042",
+	"c5.xlarge":   "0.068",
+	"c5.2xlarge":  "0.136",
+	"m5.large":    "0.038",
+	"r5.xlarge":   "0.076",
+	"p3.2xlarge":  "0.918",
+	"g4dn.xlarge": "0.188",
+	"inf1.xlarge": "0.076",
+}
+
+// ec2InstanceTypeInfo holds the details for one instance type in the catalog.
+type ec2InstanceTypeInfo struct {
+	InstanceType          string
+	VCpus                 int
+	MemoryMiB             int
+	GPU                   int
+	SupportedArchs        []string
+	SupportedUsageClasses []string
+}
+
+// --- DescribeInstanceTypes ---------------------------------------------------
+
+func (p *EC2Plugin) describeInstanceTypes(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Build filter set from InstanceType.N params.
+	wanted := map[string]bool{}
+	for i := 1; ; i++ {
+		v := req.Params[fmt.Sprintf("InstanceType.%d", i)]
+		if v == "" {
+			break
+		}
+		wanted[v] = true
+	}
+
+	type gpuInfoItem struct {
+		Count int `xml:"gpus>item>count"`
+	}
+	type processorInfo struct {
+		SupportedArchitectures []string `xml:"supportedArchitectures>item"`
+	}
+	type memoryInfo struct {
+		SizeInMiB int `xml:"sizeInMiB"`
+	}
+	type vcpuInfo struct {
+		DefaultVCpus int `xml:"defaultVCpus"`
+	}
+	type usageClassItem struct {
+		Value string `xml:",chardata"`
+	}
+	type instanceTypeItem struct {
+		InstanceType          string           `xml:"instanceType"`
+		CurrentGeneration     bool             `xml:"currentGeneration"`
+		VCpuInfo              vcpuInfo         `xml:"vCpuInfo"`
+		MemoryInfo            memoryInfo       `xml:"memoryInfo"`
+		ProcessorInfo         processorInfo    `xml:"processorInfo"`
+		SupportedUsageClasses []usageClassItem `xml:"supportedUsageClasses>item"`
+		GpuInfo               *gpuInfoItem     `xml:"gpuInfo,omitempty"`
+	}
+	type response struct {
+		XMLName       xml.Name           `xml:"DescribeInstanceTypesResponse"`
+		XMLNS         string             `xml:"xmlns,attr"`
+		InstanceTypes []instanceTypeItem `xml:"instanceTypeSet>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, info := range ec2InstanceTypeCatalog {
+		if len(wanted) > 0 && !wanted[info.InstanceType] {
+			continue
+		}
+		item := instanceTypeItem{
+			InstanceType:      info.InstanceType,
+			CurrentGeneration: true,
+			VCpuInfo:          vcpuInfo{DefaultVCpus: info.VCpus},
+			MemoryInfo:        memoryInfo{SizeInMiB: info.MemoryMiB},
+			ProcessorInfo:     processorInfo{SupportedArchitectures: info.SupportedArchs},
+		}
+		for _, uc := range info.SupportedUsageClasses {
+			item.SupportedUsageClasses = append(item.SupportedUsageClasses, usageClassItem{Value: uc})
+		}
+		if info.GPU > 0 {
+			item.GpuInfo = &gpuInfoItem{Count: info.GPU}
+		}
+		resp.InstanceTypes = append(resp.InstanceTypes, item)
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// --- DescribeInstanceTypeOfferings ------------------------------------------
+
+func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Build filter map from Filter.N.{Name,Value.1} params.
+	locationFilter := ""
+	for i := 1; ; i++ {
+		name := req.Params[fmt.Sprintf("Filter.%d.Name", i)]
+		if name == "" {
+			break
+		}
+		if name == "location" {
+			locationFilter = req.Params[fmt.Sprintf("Filter.%d.Value.1", i)]
+		}
+	}
+	// Build instance-type filter from InstanceType.N params.
+	wantedTypes := map[string]bool{}
+	for i := 1; ; i++ {
+		v := req.Params[fmt.Sprintf("InstanceType.%d", i)]
+		if v == "" {
+			break
+		}
+		wantedTypes[v] = true
+	}
+
+	region := reqCtx.Region
+	azSuffixes := []string{"a", "b", "c"}
+
+	type offeringItem struct {
+		InstanceType string `xml:"instanceType"`
+		LocationType string `xml:"locationType"`
+		Location     string `xml:"location"`
+	}
+	type response struct {
+		XMLName               xml.Name       `xml:"DescribeInstanceTypeOfferingsResponse"`
+		XMLNS                 string         `xml:"xmlns,attr"`
+		InstanceTypeOfferings []offeringItem `xml:"instanceTypeOfferingSet>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, info := range ec2InstanceTypeCatalog {
+		if len(wantedTypes) > 0 && !wantedTypes[info.InstanceType] {
+			continue
+		}
+		for _, suffix := range azSuffixes {
+			az := region + suffix
+			if locationFilter != "" && locationFilter != az && locationFilter != region {
+				continue
+			}
+			resp.InstanceTypeOfferings = append(resp.InstanceTypeOfferings, offeringItem{
+				InstanceType: info.InstanceType,
+				LocationType: "availability-zone",
+				Location:     az,
+			})
+		}
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// --- DescribeSpotPriceHistory ------------------------------------------------
+
+func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Build instance-type filter from InstanceType.N params.
+	wantedTypes := map[string]bool{}
+	for i := 1; ; i++ {
+		v := req.Params[fmt.Sprintf("InstanceType.%d", i)]
+		if v == "" {
+			break
+		}
+		wantedTypes[v] = true
+	}
+	// AZ filter.
+	azFilter := req.Params["AvailabilityZone"]
+	// ProductDescription filter (e.g. "Linux/UNIX").
+	pdFilter := req.Params["ProductDescription.1"]
+
+	region := reqCtx.Region
+	azSuffixes := []string{"a", "b", "c"}
+	// Stub timestamp: use time controller's current time.
+	ts := p.tc.Now().UTC().Format(time.RFC3339)
+
+	type spotPriceItem struct {
+		InstanceType       string `xml:"instanceType"`
+		ProductDescription string `xml:"productDescription"`
+		SpotPrice          string `xml:"spotPrice"`
+		Timestamp          string `xml:"timestamp"`
+		AvailabilityZone   string `xml:"availabilityZone"`
+	}
+	type response struct {
+		XMLName          xml.Name        `xml:"DescribeSpotPriceHistoryResponse"`
+		XMLNS            string          `xml:"xmlns,attr"`
+		SpotPriceHistory []spotPriceItem `xml:"spotPriceHistorySet>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, info := range ec2InstanceTypeCatalog {
+		if len(wantedTypes) > 0 && !wantedTypes[info.InstanceType] {
+			continue
+		}
+		price, ok := ec2SpotPriceCatalog[info.InstanceType]
+		if !ok {
+			continue
+		}
+		desc := "Linux/UNIX"
+		if pdFilter != "" && pdFilter != desc {
+			continue
+		}
+		for _, suffix := range azSuffixes {
+			az := region + suffix
+			if azFilter != "" && azFilter != az {
+				continue
+			}
+			resp.SpotPriceHistory = append(resp.SpotPriceHistory, spotPriceItem{
+				InstanceType:       info.InstanceType,
+				ProductDescription: desc,
+				SpotPrice:          price,
+				Timestamp:          ts,
+				AvailabilityZone:   az,
+			})
+		}
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
 }

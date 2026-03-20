@@ -2340,3 +2340,210 @@ func TestEC2_NatGateway_Filter(t *testing.T) {
 		t.Fatalf("expected 2 available NAT gateways, got %d", len(descResult.NatGateways))
 	}
 }
+
+// TestEC2_DescribeInstanceTypes verifies the pre-seeded catalog is returned.
+func TestEC2_DescribeInstanceTypes(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{"Action": "DescribeInstanceTypes"})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		InstanceTypes []struct {
+			InstanceType string `xml:"instanceType"`
+			VCpuInfo     struct {
+				DefaultVCpus int `xml:"defaultVCpus"`
+			} `xml:"vCpuInfo"`
+			MemoryInfo struct {
+				SizeInMiB int `xml:"sizeInMiB"`
+			} `xml:"memoryInfo"`
+		} `xml:"instanceTypeSet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode DescribeInstanceTypes: %v", err)
+	}
+	if len(result.InstanceTypes) < 8 {
+		t.Fatalf("expected at least 8 instance types, got %d", len(result.InstanceTypes))
+	}
+
+	// Spot-check t3.micro entry.
+	found := false
+	for _, it := range result.InstanceTypes {
+		if it.InstanceType == "t3.micro" {
+			found = true
+			if it.VCpuInfo.DefaultVCpus != 2 {
+				t.Errorf("t3.micro: expected 2 vCPUs, got %d", it.VCpuInfo.DefaultVCpus)
+			}
+			if it.MemoryInfo.SizeInMiB != 1024 {
+				t.Errorf("t3.micro: expected 1024 MiB, got %d", it.MemoryInfo.SizeInMiB)
+			}
+		}
+	}
+	if !found {
+		t.Error("t3.micro not found in catalog")
+	}
+}
+
+// TestEC2_DescribeInstanceTypes_Filter verifies filtering by InstanceType.N works.
+func TestEC2_DescribeInstanceTypes_Filter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":         "DescribeInstanceTypes",
+		"InstanceType.1": "c5.xlarge",
+		"InstanceType.2": "r5.xlarge",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		InstanceTypes []struct {
+			InstanceType string `xml:"instanceType"`
+		} `xml:"instanceTypeSet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.InstanceTypes) != 2 {
+		t.Fatalf("expected 2 instance types, got %d", len(result.InstanceTypes))
+	}
+	got := map[string]bool{}
+	for _, it := range result.InstanceTypes {
+		got[it.InstanceType] = true
+	}
+	if !got["c5.xlarge"] || !got["r5.xlarge"] {
+		t.Errorf("expected c5.xlarge and r5.xlarge, got %v", got)
+	}
+}
+
+// TestEC2_DescribeInstanceTypeOfferings verifies offerings are returned per AZ.
+func TestEC2_DescribeInstanceTypeOfferings(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{"Action": "DescribeInstanceTypeOfferings"})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Offerings []struct {
+			InstanceType string `xml:"instanceType"`
+			Location     string `xml:"location"`
+		} `xml:"instanceTypeOfferingSet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 8 types * 3 AZs = 24 offerings.
+	if len(result.Offerings) != 24 {
+		t.Fatalf("expected 24 offerings (8 types * 3 AZs), got %d", len(result.Offerings))
+	}
+}
+
+// TestEC2_DescribeInstanceTypeOfferings_LocationFilter verifies AZ filtering.
+func TestEC2_DescribeInstanceTypeOfferings_LocationFilter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":           "DescribeInstanceTypeOfferings",
+		"Filter.1.Name":    "location",
+		"Filter.1.Value.1": "us-east-1a",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Offerings []struct {
+			Location string `xml:"location"`
+		} `xml:"instanceTypeOfferingSet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 8 types * 1 AZ = 8 offerings.
+	if len(result.Offerings) != 8 {
+		t.Fatalf("expected 8 offerings for us-east-1a, got %d", len(result.Offerings))
+	}
+	for _, o := range result.Offerings {
+		if o.Location != "us-east-1a" {
+			t.Errorf("expected location us-east-1a, got %q", o.Location)
+		}
+	}
+}
+
+// TestEC2_DescribeSpotPriceHistory verifies the stub catalog prices.
+func TestEC2_DescribeSpotPriceHistory(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":         "DescribeSpotPriceHistory",
+		"InstanceType.1": "t3.micro",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Items []struct {
+			InstanceType string `xml:"instanceType"`
+			SpotPrice    string `xml:"spotPrice"`
+			AZ           string `xml:"availabilityZone"`
+		} `xml:"spotPriceHistorySet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 1 type * 3 AZs = 3 items.
+	if len(result.Items) != 3 {
+		t.Fatalf("expected 3 spot price items (t3.micro * 3 AZs), got %d", len(result.Items))
+	}
+	for _, item := range result.Items {
+		if item.InstanceType != "t3.micro" {
+			t.Errorf("expected t3.micro, got %q", item.InstanceType)
+		}
+		if item.SpotPrice != "0.0042" {
+			t.Errorf("expected price 0.0042, got %q", item.SpotPrice)
+		}
+	}
+}
+
+// TestEC2_DescribeSpotPriceHistory_AZFilter verifies AZ filtering.
+func TestEC2_DescribeSpotPriceHistory_AZFilter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":           "DescribeSpotPriceHistory",
+		"AvailabilityZone": "us-east-1b",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Items []struct {
+			AZ string `xml:"availabilityZone"`
+		} `xml:"spotPriceHistorySet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 8 types * 1 AZ = 8 items.
+	if len(result.Items) != 8 {
+		t.Fatalf("expected 8 spot price items (8 types * us-east-1b), got %d", len(result.Items))
+	}
+	for _, item := range result.Items {
+		if item.AZ != "us-east-1b" {
+			t.Errorf("expected us-east-1b, got %q", item.AZ)
+		}
+	}
+}

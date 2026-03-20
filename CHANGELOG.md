@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.43.3] - 2026-03-19
+
+### Added
+
+- **EC2 instance type and spot price operations** (`ec2_plugin.go`): Three new read-only
+  operations enable testing of instance-type discovery and Spot pricing without real AWS
+  credentials.
+  - `DescribeInstanceTypes`: returns a pre-seeded catalog of 8 instance types
+    (`t3.micro`, `c5.xlarge`, `c5.2xlarge`, `m5.large`, `r5.xlarge`, `p3.2xlarge`,
+    `g4dn.xlarge`, `inf1.xlarge`) with vCPU, memory, architecture, and usage-class details.
+    Supports `InstanceType.N` filters.
+  - `DescribeInstanceTypeOfferings`: returns the same catalog for all three AZs in the
+    request region. Supports `location` filter.
+  - `DescribeSpotPriceHistory`: returns fixed stub prices for each seeded instance type.
+    Supports `InstanceType.N`, `AvailabilityZone`, and `ProductDescriptions` filters.
+  Closes #234.
+
 ## [v0.43.2] - 2026-03-19
 
 ### Fixed
@@ -1202,3 +1219,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [v0.37.0]: https://github.com/scttfrdmn/substrate/compare/v0.36.21...v0.37.0
 [v0.37.1]: https://github.com/scttfrdmn/substrate/compare/v0.37.0...v0.37.1
 [v0.38.0]: https://github.com/scttfrdmn/substrate/compare/v0.37.1...v0.38.0
+[v0.39.0]: https://github.com/scttfrdmn/substrate/compare/v0.38.0...v0.39.0
+[v0.40.0]: https://github.com/scttfrdmn/substrate/compare/v0.39.0...v0.40.0
+[v0.41.0]: https://github.com/scttfrdmn/substrate/compare/v0.40.0...v0.41.0
+[v0.41.1]: https://github.com/scttfrdmn/substrate/compare/v0.41.0...v0.41.1
+[v0.41.2]: https://github.com/scttfrdmn/substrate/compare/v0.41.1...v0.41.2
+[v0.41.3]: https://github.com/scttfrdmn/substrate/compare/v0.41.2...v0.41.3
+[v0.42.0]: https://github.com/scttfrdmn/substrate/compare/v0.41.3...v0.42.0
+[v0.42.1]: https://github.com/scttfrdmn/substrate/compare/v0.42.0...v0.42.1
+[v0.43.0]: https://github.com/scttfrdmn/substrate/compare/v0.42.1...v0.43.0
+[v0.43.1]: https://github.com/scttfrdmn/substrate/compare/v0.43.0...v0.43.1
+[v0.43.2]: https://github.com/scttfrdmn/substrate/compare/v0.43.1...v0.43.2
+[v0.43.3]: https://github.com/scttfrdmn/substrate/compare/v0.43.2...v0.43.3
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.43.3...HEAD
