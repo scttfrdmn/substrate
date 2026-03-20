@@ -474,5 +474,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(mskPlugin)
 
+	fsxPlugin := &FSxPlugin{}
+	if err := fsxPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize fsx plugin: %w", err)
+	}
+	registry.Register(fsxPlugin)
+
 	return nil
 }

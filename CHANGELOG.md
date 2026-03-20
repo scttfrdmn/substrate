@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.43.0] - 2026-03-19
+
+### Added
+
+- **FSx plugin** (`fsx_plugin.go`): JSON-protocol plugin on `fsx.{region}.amazonaws.com`
+  (target: `AmazonFSx.<Op>`). Implements `CreateFileSystem`, `DescribeFileSystems`, and
+  `DeleteFileSystem`. Supports `LUSTRE`, `WINDOWS`, `ONTAP`, and `OPENZFS` file system types.
+  State keys: `fs:{acct}/{region}/{id}`, `fs_ids:{acct}/{region}`. File systems transition
+  immediately to `AVAILABLE`; delete soft-marks as `DELETED`. `CreationTime` is returned as
+  a Unix epoch `float64` per AWS SDK requirements. Cost: `fsx/CreateFileSystem = $0.00013`.
+  Betty CFN: `AWS::FSx::FileSystem` at priority 3; `Ref` = `FileSystemId`. Closes #230.
+
+### Fixed
+
+- **Scheduler timestamp format** (`scheduler_plugin.go`): `GetSchedule` and `ListSchedules`
+  now return `CreationDate` and `LastModificationDate` as Unix epoch `float64` values (e.g.
+  `1711929600.0`) instead of RFC3339 strings. The AWS SDK v2 `scheduler` client deserializes
+  these fields as `*time.Time` via a `float64` JSON path and previously panicked or returned
+  a zero time when it received a quoted string. Closes #231.
+
 ## [v0.42.1] - 2026-03-19
 
 ### Fixed

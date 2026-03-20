@@ -272,3 +272,54 @@ func TestScheduler_ListPagination(t *testing.T) {
 	assert.Len(t, page3.Schedules, 1)
 	assert.Empty(t, page3.NextToken)
 }
+
+// TestScheduler_TimestampFormat verifies that CreationDate and LastModificationDate
+// are returned as Unix epoch float64 values, not RFC3339 strings (#231).
+func TestScheduler_TimestampFormat(t *testing.T) {
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	createBody := `{
+		"ScheduleExpression": "rate(1 hour)",
+		"Target": {"Arn": "arn:aws:lambda:us-east-1:000000000000:function:fn", "RoleArn": "arn:aws:iam::000000000000:role/r"},
+		"FlexibleTimeWindow": {"Mode": "OFF"}
+	}`
+	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/ts-test", createBody)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// GetSchedule — verify CreationDate is numeric.
+	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules/ts-test", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSchedulerBody(t, resp)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &raw))
+
+	// CreationDate must decode as a number, not a quoted string.
+	var creationDate float64
+	require.NoError(t, json.Unmarshal(raw["CreationDate"], &creationDate),
+		"CreationDate should be a float64 Unix timestamp, got: %s", raw["CreationDate"])
+	assert.Greater(t, creationDate, float64(0))
+
+	var lastModDate float64
+	require.NoError(t, json.Unmarshal(raw["LastModificationDate"], &lastModDate),
+		"LastModificationDate should be a float64 Unix timestamp, got: %s", raw["LastModificationDate"])
+	assert.Greater(t, lastModDate, float64(0))
+
+	// ListSchedules — verify the same.
+	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body = readSchedulerBody(t, resp)
+
+	var listRaw struct {
+		Schedules []map[string]json.RawMessage `json:"Schedules"`
+	}
+	require.NoError(t, json.Unmarshal(body, &listRaw))
+	require.Len(t, listRaw.Schedules, 1)
+
+	var listCreationDate float64
+	require.NoError(t, json.Unmarshal(listRaw.Schedules[0]["CreationDate"], &listCreationDate),
+		"ListSchedules CreationDate should be float64, got: %s", listRaw.Schedules[0]["CreationDate"])
+	assert.Greater(t, listCreationDate, float64(0))
+}

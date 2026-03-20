@@ -181,6 +181,8 @@ func defaultCostTable() map[string]float64 {
 		"ec2/CreateNatGateway": 0.045,
 		// EventBridge Scheduler: $0.10 per million invocations, approx per-schedule-create.
 		"scheduler/CreateSchedule": 0.0000001,
+		// FSx: per file system per hour, prorated per API call.
+		"fsx/CreateFileSystem": 0.00013,
 	}
 }
 

@@ -45,6 +45,10 @@ linters:
       # Test files may use unexported helpers freely.
       - path: "_test\\.go"
         linters: [revive]
+      # LUSTRE is the official AWS FSx file system type name (based on the Lustre parallel
+      # file system technology); it is not a misspelling of "luster".
+      - text: "LUSTRE"
+        linters: [misspell]
 
 formatters:
   enable:

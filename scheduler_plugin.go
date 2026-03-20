@@ -58,7 +58,7 @@ type SchedulerTarget struct {
 	RetryPolicy *SchedulerRetryPolicy `json:"retry_policy,omitempty"`
 }
 
-// SchedulerRetryPolicy configures retry behaviour for a schedule target.
+// SchedulerRetryPolicy configures retry behavior for a schedule target.
 type SchedulerRetryPolicy struct {
 	// MaximumEventAgeInSeconds is the maximum age in seconds of an event
 	// before it is discarded.
@@ -446,13 +446,14 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 	type targetSummary struct {
 		Arn string `json:"Arn"`
 	}
+	// CreationDate and LastModificationDate are Unix epoch seconds (float64).
 	type schedSummary struct {
 		Arn                  string        `json:"Arn"`
 		Name                 string        `json:"Name"`
 		GroupName            string        `json:"GroupName"`
 		State                string        `json:"State"`
-		CreationDate         string        `json:"CreationDate"`
-		LastModificationDate string        `json:"LastModificationDate"`
+		CreationDate         float64       `json:"CreationDate"`
+		LastModificationDate float64       `json:"LastModificationDate"`
 		Target               targetSummary `json:"Target"`
 	}
 
@@ -469,13 +470,15 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 		if stateFilter != "" && rec.State != stateFilter {
 			continue
 		}
+		ct, _ := time.Parse(time.RFC3339, rec.CreationDate)
+		mt, _ := time.Parse(time.RFC3339, rec.LastModificationDate)
 		schedules = append(schedules, schedSummary{
 			Arn:                  rec.ARN,
 			Name:                 rec.Name,
 			GroupName:            rec.GroupName,
 			State:                rec.State,
-			CreationDate:         rec.CreationDate,
-			LastModificationDate: rec.LastModificationDate,
+			CreationDate:         float64(ct.Unix()),
+			LastModificationDate: float64(mt.Unix()),
 			Target:               targetSummary{Arn: rec.Target.ARN},
 		})
 	}
@@ -490,7 +493,8 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 // --- Wire format -------------------------------------------------------------
 
 // schedWireRecord is the full wire-format representation of a schedule as
-// returned by GetSchedule.
+// returned by GetSchedule. CreationDate and LastModificationDate are Unix epoch
+// seconds (float64) as required by the AWS SDK.
 type schedWireRecord struct {
 	Arn                        string                      `json:"Arn"`
 	Name                       string                      `json:"Name"`
@@ -501,8 +505,8 @@ type schedWireRecord struct {
 	Target                     schedWireTarget             `json:"Target"`
 	FlexibleTimeWindow         schedWireFlexibleTimeWindow `json:"FlexibleTimeWindow"`
 	Description                string                      `json:"Description,omitempty"`
-	CreationDate               string                      `json:"CreationDate"`
-	LastModificationDate       string                      `json:"LastModificationDate"`
+	CreationDate               float64                     `json:"CreationDate"`
+	LastModificationDate       float64                     `json:"LastModificationDate"`
 	ClientToken                string                      `json:"ClientToken,omitempty"`
 }
 
@@ -527,7 +531,10 @@ type schedWireFlexibleTimeWindow struct {
 }
 
 // schedRecordToWire converts a SchedulerRecord to the AWS wire format for GetSchedule.
+// Timestamps are converted from RFC3339 strings to Unix epoch seconds (float64).
 func schedRecordToWire(rec SchedulerRecord) schedWireRecord {
+	ct, _ := time.Parse(time.RFC3339, rec.CreationDate)
+	mt, _ := time.Parse(time.RFC3339, rec.LastModificationDate)
 	w := schedWireRecord{
 		Arn:                        rec.ARN,
 		Name:                       rec.Name,
@@ -536,8 +543,8 @@ func schedRecordToWire(rec SchedulerRecord) schedWireRecord {
 		ScheduleExpressionTimezone: rec.ScheduleExpressionTimezone,
 		State:                      rec.State,
 		Description:                rec.Description,
-		CreationDate:               rec.CreationDate,
-		LastModificationDate:       rec.LastModificationDate,
+		CreationDate:               float64(ct.Unix()),
+		LastModificationDate:       float64(mt.Unix()),
 		ClientToken:                rec.ClientToken,
 		Target: schedWireTarget{
 			Arn:     rec.Target.ARN,

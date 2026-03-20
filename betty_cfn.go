@@ -191,6 +191,8 @@ var typePriority = map[string]int{
 	// v0.41.0 — Elastic IPs and NAT Gateways.
 	"AWS::EC2::EIP":        2,
 	"AWS::EC2::NatGateway": 4,
+	// v0.43.0 — FSx.
+	"AWS::FSx::FileSystem": 3,
 	// v0.30.0 — Lambda ESM.
 	"AWS::Lambda::EventSourceMapping": 5,
 	// v0.31.0 — AppSync.
@@ -647,6 +649,9 @@ func (d *StackDeployer) deployResource(
 		return d.deployAppSyncResolver(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::AppSync::FunctionConfiguration":
 		return d.deployAppSyncFunction(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.43.0 — FSx.
+	case "AWS::FSx::FileSystem":
+		return d.deployFSxFileSystem(ctx, logicalID, res.Properties, streamID, cctx)
 	// v0.34.0 — RDS Aurora cluster and MSK.
 	case "AWS::MSK::Cluster":
 		return d.deployMSKCluster(ctx, logicalID, res.Properties, streamID, cctx)
