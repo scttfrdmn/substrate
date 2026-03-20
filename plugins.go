@@ -210,6 +210,16 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(ebPlugin)
 
+	schedulerPlugin := &SchedulerPlugin{}
+	if err := schedulerPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize scheduler plugin: %w", err)
+	}
+	registry.Register(schedulerPlugin)
+
 	cwPlugin := &CloudWatchPlugin{}
 	if err := cwPlugin.Initialize(ctx, PluginConfig{
 		State:   state,

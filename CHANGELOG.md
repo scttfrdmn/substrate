@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.42.0] - 2026-03-19
+
+### Added
+
+- **EventBridge Scheduler plugin** (`scheduler_plugin.go`): REST-JSON plugin on
+  `scheduler.{region}.amazonaws.com`. Implements `CreateSchedule` (HTTP 201),
+  `GetSchedule`, `UpdateSchedule`, `DeleteSchedule`, `ListSchedules`. State keys:
+  `sched:{acct}/{region}/{groupName}/{name}`. Supports `namePrefix`, `state`, `maxResults`,
+  and `nextToken` (base64 integer offset) pagination on `ListSchedules`. Errors:
+  `ConflictException` (409) on duplicate create, `ResourceNotFoundException` (404) on
+  missing schedule. Cost: `scheduler/CreateSchedule = $0.0000001`. Closes #228.
+
 ## [v0.41.3] - 2026-03-18
 
 ### Fixed

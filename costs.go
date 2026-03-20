@@ -179,6 +179,8 @@ func defaultCostTable() map[string]float64 {
 		"ec2/AllocateAddress": 0.005,
 		// EC2 NAT Gateways: $0.045/hr base charge.
 		"ec2/CreateNatGateway": 0.045,
+		// EventBridge Scheduler: $0.10 per million invocations, approx per-schedule-create.
+		"scheduler/CreateSchedule": 0.0000001,
 	}
 }
 
