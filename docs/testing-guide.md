@@ -3,6 +3,32 @@
 This guide covers Substrate's testing APIs for Go developers. It assumes you
 have already read [Getting Started](getting-started.md).
 
+## Why Substrate Instead of Mocks
+
+The alternative to an emulator is mocking individual AWS SDK interfaces. That
+approach has a well-known failure mode: mock-based tests verify that your code
+calls the right methods with the right arguments — they do not verify that the
+behavior of those calls is correct.
+
+In practice this means:
+
+- A mock `PutObject` that returns `nil` tells you the call was made. It does
+  not tell you whether the object is readable, whether it triggers an S3
+  notification, or whether a subsequent `HeadObject` agrees on its size.
+- Mock files grow large and brittle. A codebase that integrates S3, EC2, and
+  IAM can accumulate 500+ lines of mock setup that must be kept in sync with
+  the production code by hand.
+- When the real AWS service behavior changes (new fields, different error codes,
+  altered pagination), mocks silently diverge. The tests still pass; production
+  still breaks.
+
+Substrate tests are slower to write the first time, but the tests are
+trustworthy in a way mocks cannot be: a `CreateBucket` call creates a bucket
+that a subsequent `ListBuckets` will return, errors use real AWS error codes,
+and cross-service dispatch (S3 → Lambda notifications, SQS → Lambda triggers)
+works without hand-written stubs. The test exercises the code path, not a
+description of it.
+
 ## Quick Start
 
 `StartTestServer` is the entry point for all Go integration tests. It starts

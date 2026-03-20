@@ -15,8 +15,10 @@ import (
 	"time"
 )
 
-// SQSPlugin emulates the Amazon Simple Queue Service (SQS) query-protocol API.
-// It handles CreateQueue, DeleteQueue, GetQueueUrl, GetQueueAttributes,
+// SQSPlugin emulates the Amazon Simple Queue Service (SQS) API.
+// It supports both the query protocol (application/x-www-form-urlencoded) and
+// the JSON protocol (application/x-amz-json-1.0 with X-Amz-Target header).
+// Handled operations: CreateQueue, DeleteQueue, GetQueueUrl, GetQueueAttributes,
 // SetQueueAttributes, ListQueues, TagQueue, UntagQueue, ListQueueTags,
 // SendMessage, SendMessageBatch, ReceiveMessage, DeleteMessage,
 // DeleteMessageBatch, ChangeMessageVisibility, and PurgeQueue.
@@ -100,7 +102,41 @@ func sqsURLKey(queueURL string) string {
 	return queueURL
 }
 
+// sqsIsJSONProtocol reports whether req was sent using the SQS JSON protocol
+// (Content-Type: application/x-amz-json-1.0 with X-Amz-Target header).
+func sqsIsJSONProtocol(req *AWSRequest) bool {
+	return strings.HasPrefix(req.Headers["Content-Type"], "application/x-amz-json")
+}
+
+// sqsJSONResponse marshals v as JSON and returns an AWSResponse with
+// Content-Type: application/x-amz-json-1.0 and the given HTTP status code.
+func sqsJSONResponse(status int, v interface{}) (*AWSResponse, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("sqsJSONResponse marshal: %w", err)
+	}
+	return &AWSResponse{
+		StatusCode: status,
+		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.0"},
+		Body:       body,
+	}, nil
+}
+
+// sqsQueueURLFromRequest extracts the QueueUrl from the request, supporting
+// both query protocol (Params["QueueUrl"]) and JSON protocol (body field "QueueUrl").
+func sqsQueueURLFromRequest(req *AWSRequest) string {
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			QueueURL string `json:"QueueUrl"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		return input.QueueURL
+	}
+	return req.Params["QueueUrl"]
+}
+
 // queueURLFromRequest extracts the queue URL from the QueueUrl param.
+// Deprecated: use sqsQueueURLFromRequest which supports both protocols.
 func queueURLFromRequest(req *AWSRequest) string {
 	return req.Params["QueueUrl"]
 }
@@ -209,7 +245,22 @@ func (p *SQSPlugin) deleteMsg(ctx context.Context, urlKey, msgID string) error {
 // --- Queue operations --------------------------------------------------------
 
 func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	name := req.Params["QueueName"]
+	var name string
+	var attrs map[string]string
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			QueueName  string            `json:"QueueName"`
+			Attributes map[string]string `json:"Attributes"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		name, attrs = input.QueueName, input.Attributes
+		if attrs == nil {
+			attrs = make(map[string]string)
+		}
+	} else {
+		name = req.Params["QueueName"]
+		attrs = parseSQSAttributes(req.Params)
+	}
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "QueueName is required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -222,6 +273,9 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 	if existing != nil {
 		// Idempotent — return existing URL.
+		if sqsIsJSONProtocol(req) {
+			return sqsJSONResponse(http.StatusOK, map[string]string{"QueueUrl": existing.QueueURL})
+		}
 		type result struct {
 			QueueURL string `xml:"QueueUrl"`
 		}
@@ -238,8 +292,6 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		})
 	}
 
-	// Collect Attribute.N.Name / Attribute.N.Value pairs.
-	attrs := parseSQSAttributes(req.Params)
 	now := p.tc.Now().Unix()
 
 	q := &SQSQueue{
@@ -267,6 +319,9 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("sqs createQueue saveQueueNames: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, map[string]string{"QueueUrl": queueURL})
+	}
 	type result struct {
 		QueueURL string `xml:"QueueUrl"`
 	}
@@ -284,7 +339,16 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	name := req.Params["QueueName"]
+	var name string
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			QueueName string `json:"QueueName"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		name = input.QueueName
+	} else {
+		name = req.Params["QueueName"]
+	}
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "QueueName is required", HTTPStatus: http.StatusBadRequest}
 	}
@@ -297,6 +361,9 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, map[string]string{"QueueUrl": q.QueueURL})
+	}
 	type result struct {
 		QueueURL string `xml:"QueueUrl"`
 	}
@@ -314,7 +381,7 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -336,6 +403,10 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	for k, v := range q.Attributes {
 		attrs[k] = v
+	}
+
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, map[string]interface{}{"Attributes": attrs})
 	}
 
 	type attrEntry struct {
@@ -366,7 +437,7 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -375,7 +446,16 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	attrs := parseSQSAttributes(req.Params)
+	var attrs map[string]string
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			Attributes map[string]string `json:"Attributes"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		attrs = input.Attributes
+	} else {
+		attrs = parseSQSAttributes(req.Params)
+	}
 	if q.Attributes == nil {
 		q.Attributes = make(map[string]string)
 	}
@@ -388,6 +468,9 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("sqs setQueueAttributes saveQueue: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"SetQueueAttributesResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`
@@ -400,7 +483,7 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -439,6 +522,9 @@ func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("sqs deleteQueue saveQueueNames: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"DeleteQueueResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`
@@ -451,7 +537,16 @@ func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SQSPlugin) listQueues(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	prefix := req.Params["QueueNamePrefix"]
+	var prefix string
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			QueueNamePrefix string `json:"QueueNamePrefix"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		prefix = input.QueueNamePrefix
+	} else {
+		prefix = req.Params["QueueNamePrefix"]
+	}
 	names, err := p.loadQueueNames(context.Background())
 	if err != nil {
 		return nil, err
@@ -472,6 +567,9 @@ func (p *SQSPlugin) listQueues(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	sort.Strings(filtered)
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, map[string]interface{}{"QueueUrls": filtered})
+	}
 	type result struct {
 		QueueURL []string `xml:"QueueUrl"`
 	}
@@ -489,7 +587,7 @@ func (p *SQSPlugin) listQueues(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 }
 
 func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -498,23 +596,36 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Parse Tag.N.Key / Tag.N.Value pairs.
 	if q.Tags == nil {
 		q.Tags = make(map[string]string)
 	}
-	for i := 1; ; i++ {
-		k := req.Params[fmt.Sprintf("Tag.%d.Key", i)]
-		v := req.Params[fmt.Sprintf("Tag.%d.Value", i)]
-		if k == "" {
-			break
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			Tags map[string]string `json:"Tags"`
 		}
-		q.Tags[k] = v
+		_ = json.Unmarshal(req.Body, &input)
+		for k, v := range input.Tags {
+			q.Tags[k] = v
+		}
+	} else {
+		// Parse Tag.N.Key / Tag.N.Value pairs.
+		for i := 1; ; i++ {
+			k := req.Params[fmt.Sprintf("Tag.%d.Key", i)]
+			v := req.Params[fmt.Sprintf("Tag.%d.Value", i)]
+			if k == "" {
+				break
+			}
+			q.Tags[k] = v
+		}
 	}
 
 	if err := p.saveQueue(context.Background(), q); err != nil {
 		return nil, fmt.Errorf("sqs tagQueue saveQueue: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"TagQueueResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`
@@ -527,7 +638,7 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 }
 
 func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -536,18 +647,31 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	for i := 1; ; i++ {
-		k := req.Params[fmt.Sprintf("TagKey.%d", i)]
-		if k == "" {
-			break
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			TagKeys []string `json:"TagKeys"`
 		}
-		delete(q.Tags, k)
+		_ = json.Unmarshal(req.Body, &input)
+		for _, k := range input.TagKeys {
+			delete(q.Tags, k)
+		}
+	} else {
+		for i := 1; ; i++ {
+			k := req.Params[fmt.Sprintf("TagKey.%d", i)]
+			if k == "" {
+				break
+			}
+			delete(q.Tags, k)
+		}
 	}
 
 	if err := p.saveQueue(context.Background(), q); err != nil {
 		return nil, fmt.Errorf("sqs untagQueue saveQueue: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"UntagQueueResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`
@@ -560,7 +684,7 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 }
 
 func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -583,6 +707,14 @@ func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		ResponseMetadata    responseMetadata `xml:"ResponseMetadata"`
 	}
 
+	if sqsIsJSONProtocol(req) {
+		tags := make(map[string]string, len(q.Tags))
+		for k, v := range q.Tags {
+			tags[k] = v
+		}
+		return sqsJSONResponse(http.StatusOK, map[string]interface{}{"Tags": tags})
+	}
+
 	tags := make([]tagEntry, 0, len(q.Tags))
 	for k, v := range q.Tags {
 		tags = append(tags, tagEntry{Key: k, Value: v})
@@ -599,7 +731,7 @@ func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // --- Message operations ------------------------------------------------------
 
 func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -608,8 +740,29 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	body := req.Params["MessageBody"]
-	delayStr := req.Params["DelaySeconds"]
+	// Extract parameters supporting both protocols.
+	var msgBody, delayStr, msgGroupID, dedupIDParam string
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			MessageBody             string `json:"MessageBody"`
+			DelaySeconds            int    `json:"DelaySeconds"`
+			MessageGroupId          string `json:"MessageGroupId"`
+			MessageDeduplicationId  string `json:"MessageDeduplicationId"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		msgBody = input.MessageBody
+		if input.DelaySeconds > 0 {
+			delayStr = strconv.Itoa(input.DelaySeconds)
+		}
+		msgGroupID = input.MessageGroupId
+		dedupIDParam = input.MessageDeduplicationId
+	} else {
+		msgBody = req.Params["MessageBody"]
+		delayStr = req.Params["DelaySeconds"]
+		msgGroupID = req.Params["MessageGroupId"]
+		dedupIDParam = req.Params["MessageDeduplicationId"]
+	}
+
 	if delayStr == "" {
 		delayStr = getAttrOrDefault(q.Attributes, "DelaySeconds", "0")
 	}
@@ -617,18 +770,18 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 	// FIFO queue enforcement.
 	if q.FifoQueue {
-		if req.Params["MessageGroupId"] == "" {
+		if msgGroupID == "" {
 			return nil, &AWSError{
 				Code:       "MissingParameter",
 				Message:    "The request must contain the parameter MessageGroupId.",
 				HTTPStatus: http.StatusBadRequest,
 			}
 		}
-		dedupID := req.Params["MessageDeduplicationId"]
+		dedupID := dedupIDParam
 		if dedupID == "" {
 			if getAttrOrDefault(q.Attributes, "ContentBasedDeduplication", "false") == "true" {
 				// SHA-256 of body as hex string.
-				dedupID = sqsContentHash(body)
+				dedupID = sqsContentHash(msgBody)
 			} else {
 				return nil, &AWSError{
 					Code:       "InvalidParameterValue",
@@ -641,7 +794,10 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		urlKey := sqsURLKey(queueURL)
 		if existing, dupMsgID := p.checkFIFODedup(context.Background(), urlKey, dedupID, p.tc.Now()); existing {
 			// Return success with original message ID (idempotent).
-			md5Body := computeMD5(body)
+			md5Body := computeMD5(msgBody)
+			if sqsIsJSONProtocol(req) {
+				return sqsJSONResponse(http.StatusOK, map[string]string{"MessageId": dupMsgID, "MD5OfMessageBody": md5Body})
+			}
 			type result struct {
 				MD5OfMessageBody string `xml:"MD5OfMessageBody"`
 				MessageID        string `xml:"MessageId"`
@@ -662,12 +818,12 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		msgID := generateSQSMessageID()
 		p.recordFIFODedup(context.Background(), urlKey, dedupID, msgID, p.tc.Now())
 
-		md5Body := computeMD5(body)
+		md5Body := computeMD5(msgBody)
 		now := p.tc.Now()
 		msg := &SQSMessage{
 			MessageID:     msgID,
 			ReceiptHandle: generateSQSReceiptHandle(),
-			Body:          body,
+			Body:          msgBody,
 			MD5OfBody:     md5Body,
 			Attributes: map[string]string{
 				"SenderId":      ctx.AccountID,
@@ -689,6 +845,9 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		if saveErr := p.saveMsgIDs(context.Background(), urlKey, ids); saveErr != nil {
 			return nil, fmt.Errorf("sqs sendMessage saveMsgIDs: %w", saveErr)
 		}
+		if sqsIsJSONProtocol(req) {
+			return sqsJSONResponse(http.StatusOK, map[string]string{"MessageId": msgID, "MD5OfMessageBody": md5Body})
+		}
 		type result struct {
 			MD5OfMessageBody string `xml:"MD5OfMessageBody"`
 			MessageID        string `xml:"MessageId"`
@@ -707,13 +866,13 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	msgID := generateSQSMessageID()
-	md5Body := computeMD5(body)
+	md5Body := computeMD5(msgBody)
 	now := p.tc.Now()
 
 	msg := &SQSMessage{
 		MessageID:     msgID,
 		ReceiptHandle: generateSQSReceiptHandle(),
-		Body:          body,
+		Body:          msgBody,
 		MD5OfBody:     md5Body,
 		Attributes: map[string]string{
 			"SenderId":      ctx.AccountID,
@@ -739,6 +898,9 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("sqs sendMessage saveMsgIDs: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, map[string]string{"MessageId": msgID, "MD5OfMessageBody": md5Body})
+	}
 	type result struct {
 		MD5OfMessageBody string `xml:"MD5OfMessageBody"`
 		MessageID        string `xml:"MessageId"`
@@ -760,7 +922,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -772,13 +934,68 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	urlKey := sqsURLKey(queueURL)
 	now := p.tc.Now()
 
-	type successEntry struct {
+	type successEntryXML struct {
 		ID               string `xml:"Id"`
 		MessageID        string `xml:"MessageId"`
 		MD5OfMessageBody string `xml:"MD5OfMessageBody"`
 	}
+	type successEntryJSON struct {
+		Id               string `json:"Id"`
+		MessageId        string `json:"MessageId"`
+		MD5OfMessageBody string `json:"MD5OfMessageBody"`
+	}
 
-	var successes []successEntry
+	var successesXML []successEntryXML
+	var successesJSON []successEntryJSON
+
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			Entries []struct {
+				Id           string `json:"Id"`
+				MessageBody  string `json:"MessageBody"`
+				DelaySeconds int    `json:"DelaySeconds"`
+			} `json:"Entries"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		for _, entry := range input.Entries {
+			msgID := generateSQSMessageID()
+			md5Body := computeMD5(entry.MessageBody)
+			msg := &SQSMessage{
+				MessageID:     msgID,
+				ReceiptHandle: generateSQSReceiptHandle(),
+				Body:          entry.MessageBody,
+				MD5OfBody:     md5Body,
+				Attributes: map[string]string{
+					"SenderId":      ctx.AccountID,
+					"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
+				},
+				SentTimestamp: now.UnixMilli(),
+				DelayUntil:    now.Add(time.Duration(entry.DelaySeconds) * time.Second),
+				VisibleAfter:  time.Time{},
+				ReceiveCount:  0,
+			}
+			if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
+				return nil, fmt.Errorf("sqs sendMessageBatch saveMsg: %w", saveErr)
+			}
+			ids, loadErr := p.loadMsgIDs(context.Background(), urlKey)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			ids = append(ids, msgID)
+			if saveErr := p.saveMsgIDs(context.Background(), urlKey, ids); saveErr != nil {
+				return nil, fmt.Errorf("sqs sendMessageBatch saveMsgIDs: %w", saveErr)
+			}
+			successesJSON = append(successesJSON, successEntryJSON{Id: entry.Id, MessageId: msgID, MD5OfMessageBody: md5Body})
+		}
+		if successesJSON == nil {
+			successesJSON = make([]successEntryJSON, 0)
+		}
+		return sqsJSONResponse(http.StatusOK, map[string]interface{}{
+			"Successful": successesJSON,
+			"Failed":     []struct{}{},
+		})
+	}
+
 	for i := 1; ; i++ {
 		entryID := req.Params[fmt.Sprintf("SendMessageBatchRequestEntry.%d.Id", i)]
 		if entryID == "" {
@@ -819,11 +1036,11 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			return nil, fmt.Errorf("sqs sendMessageBatch saveMsgIDs: %w", saveErr)
 		}
 
-		successes = append(successes, successEntry{ID: entryID, MessageID: msgID, MD5OfMessageBody: md5Body})
+		successesXML = append(successesXML, successEntryXML{ID: entryID, MessageID: msgID, MD5OfMessageBody: md5Body})
 	}
 
 	type result struct {
-		SendMessageBatchResultEntry []successEntry `xml:"SendMessageBatchResultEntry"`
+		SendMessageBatchResultEntry []successEntryXML `xml:"SendMessageBatchResultEntry"`
 	}
 	type response struct {
 		XMLName                xml.Name         `xml:"SendMessageBatchResponse"`
@@ -833,13 +1050,13 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	return sqsXMLResponse(http.StatusOK, response{
 		Xmlns:                  "http://queue.amazonaws.com/doc/2012-11-05/",
-		SendMessageBatchResult: result{SendMessageBatchResultEntry: successes},
+		SendMessageBatchResult: result{SendMessageBatchResultEntry: successesXML},
 		ResponseMetadata:       responseMetadata{RequestID: ctx.RequestID},
 	})
 }
 
 func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -848,27 +1065,52 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	maxStr := req.Params["MaxNumberOfMessages"]
-	maxNum := 1
-	if maxStr != "" {
-		if n, parseErr := strconv.Atoi(maxStr); parseErr == nil && n > 0 {
-			maxNum = n
-			if maxNum > 10 {
-				maxNum = 10
+	var maxNum int
+	var visTimeout int
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			MaxNumberOfMessages int `json:"MaxNumberOfMessages"`
+			VisibilityTimeout   int `json:"VisibilityTimeout"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		maxNum = input.MaxNumberOfMessages
+		if maxNum <= 0 {
+			maxNum = 1
+		}
+		if maxNum > 10 {
+			maxNum = 10
+		}
+		visTimeout = input.VisibilityTimeout
+		if visTimeout == 0 {
+			if v := getAttrOrDefault(q.Attributes, "VisibilityTimeout", "30"); v != "" {
+				visTimeout, _ = strconv.Atoi(v)
+			}
+			if visTimeout == 0 {
+				visTimeout = 30
 			}
 		}
-	}
-
-	visStr := req.Params["VisibilityTimeout"]
-	visTimeout := 30
-	if visStr != "" {
-		if n, parseErr := strconv.Atoi(visStr); parseErr == nil {
-			visTimeout = n
-		}
 	} else {
-		if v := getAttrOrDefault(q.Attributes, "VisibilityTimeout", "30"); v != "" {
-			if n, parseErr := strconv.Atoi(v); parseErr == nil {
+		maxStr := req.Params["MaxNumberOfMessages"]
+		maxNum = 1
+		if maxStr != "" {
+			if n, parseErr := strconv.Atoi(maxStr); parseErr == nil && n > 0 {
+				maxNum = n
+				if maxNum > 10 {
+					maxNum = 10
+				}
+			}
+		}
+		visStr := req.Params["VisibilityTimeout"]
+		visTimeout = 30
+		if visStr != "" {
+			if n, parseErr := strconv.Atoi(visStr); parseErr == nil {
 				visTimeout = n
+			}
+		} else {
+			if v := getAttrOrDefault(q.Attributes, "VisibilityTimeout", "30"); v != "" {
+				if n, parseErr := strconv.Atoi(v); parseErr == nil {
+					visTimeout = n
+				}
 			}
 		}
 	}
@@ -881,25 +1123,24 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, err
 	}
 
-	type msgResult struct {
+	type msgResultXML struct {
 		MessageID     string `xml:"MessageId"`
 		ReceiptHandle string `xml:"ReceiptHandle"`
 		MD5OfBody     string `xml:"MD5OfBody"`
 		Body          string `xml:"Body"`
 	}
-	type result struct {
-		Message []msgResult `xml:"Message"`
-	}
-	type response struct {
-		XMLName              xml.Name         `xml:"ReceiveMessageResponse"`
-		Xmlns                string           `xml:"xmlns,attr"`
-		ReceiveMessageResult result           `xml:"ReceiveMessageResult"`
-		ResponseMetadata     responseMetadata `xml:"ResponseMetadata"`
+	type msgResultJSON struct {
+		MessageId     string `json:"MessageId"`
+		ReceiptHandle string `json:"ReceiptHandle"`
+		MD5OfBody     string `json:"MD5OfBody"`
+		Body          string `json:"Body"`
 	}
 
-	var messages []msgResult
+	messagesXML := make([]msgResultXML, 0)
+	messagesJSON := make([]msgResultJSON, 0)
+
 	for _, id := range ids {
-		if len(messages) >= maxNum {
+		if len(messagesXML)+len(messagesJSON) >= maxNum {
 			break
 		}
 		msg, loadErr := p.loadMsg(context.Background(), urlKey, id)
@@ -925,23 +1166,44 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			continue
 		}
 
-		messages = append(messages, msgResult{
-			MessageID:     msg.MessageID,
-			ReceiptHandle: newHandle,
-			MD5OfBody:     msg.MD5OfBody,
-			Body:          msg.Body,
-		})
+		if sqsIsJSONProtocol(req) {
+			messagesJSON = append(messagesJSON, msgResultJSON{
+				MessageId:     msg.MessageID,
+				ReceiptHandle: newHandle,
+				MD5OfBody:     msg.MD5OfBody,
+				Body:          msg.Body,
+			})
+		} else {
+			messagesXML = append(messagesXML, msgResultXML{
+				MessageID:     msg.MessageID,
+				ReceiptHandle: newHandle,
+				MD5OfBody:     msg.MD5OfBody,
+				Body:          msg.Body,
+			})
+		}
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, map[string]interface{}{"Messages": messagesJSON})
+	}
+	type result struct {
+		Message []msgResultXML `xml:"Message"`
+	}
+	type response struct {
+		XMLName              xml.Name         `xml:"ReceiveMessageResponse"`
+		Xmlns                string           `xml:"xmlns,attr"`
+		ReceiveMessageResult result           `xml:"ReceiveMessageResult"`
+		ResponseMetadata     responseMetadata `xml:"ResponseMetadata"`
+	}
 	return sqsXMLResponse(http.StatusOK, response{
 		Xmlns:                "http://queue.amazonaws.com/doc/2012-11-05/",
-		ReceiveMessageResult: result{Message: messages},
+		ReceiveMessageResult: result{Message: messagesXML},
 		ResponseMetadata:     responseMetadata{RequestID: ctx.RequestID},
 	})
 }
 
 func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -950,7 +1212,16 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	receiptHandle := req.Params["ReceiptHandle"]
+	var receiptHandle string
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			ReceiptHandle string `json:"ReceiptHandle"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		receiptHandle = input.ReceiptHandle
+	} else {
+		receiptHandle = req.Params["ReceiptHandle"]
+	}
 	urlKey := sqsURLKey(queueURL)
 
 	// Find message by receipt handle.
@@ -984,6 +1255,9 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		}
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"DeleteMessageResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`
@@ -996,7 +1270,7 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 }
 
 func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1011,10 +1285,54 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 
-	type successEntry struct {
+	type successEntryXML struct {
 		ID string `xml:"Id"`
 	}
-	var successes []successEntry
+	type successEntryJSON struct {
+		Id string `json:"Id"`
+	}
+	var successesXML []successEntryXML
+	var successesJSON []successEntryJSON
+
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			Entries []struct {
+				Id            string `json:"Id"`
+				ReceiptHandle string `json:"ReceiptHandle"`
+			} `json:"Entries"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		for _, entry := range input.Entries {
+			for _, msgID := range ids {
+				msg, loadErr := p.loadMsg(context.Background(), urlKey, msgID)
+				if loadErr != nil || msg == nil {
+					continue
+				}
+				if msg.ReceiptHandle == entry.ReceiptHandle {
+					_ = p.deleteMsg(context.Background(), urlKey, msgID)
+					newIDs := make([]string, 0, len(ids))
+					for _, id := range ids {
+						if id != msgID {
+							newIDs = append(newIDs, id)
+						}
+					}
+					ids = newIDs
+					break
+				}
+			}
+			successesJSON = append(successesJSON, successEntryJSON{Id: entry.Id})
+		}
+		if err := p.saveMsgIDs(context.Background(), urlKey, ids); err != nil {
+			return nil, fmt.Errorf("sqs deleteMessageBatch saveMsgIDs: %w", err)
+		}
+		if successesJSON == nil {
+			successesJSON = make([]successEntryJSON, 0)
+		}
+		return sqsJSONResponse(http.StatusOK, map[string]interface{}{
+			"Successful": successesJSON,
+			"Failed":     []struct{}{},
+		})
+	}
 
 	for i := 1; ; i++ {
 		entryID := req.Params[fmt.Sprintf("DeleteMessageBatchRequestEntry.%d.Id", i)]
@@ -1040,7 +1358,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 				break
 			}
 		}
-		successes = append(successes, successEntry{ID: entryID})
+		successesXML = append(successesXML, successEntryXML{ID: entryID})
 	}
 
 	if err := p.saveMsgIDs(context.Background(), urlKey, ids); err != nil {
@@ -1048,7 +1366,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	type result struct {
-		DeleteMessageBatchResultEntry []successEntry `xml:"DeleteMessageBatchResultEntry"`
+		DeleteMessageBatchResultEntry []successEntryXML `xml:"DeleteMessageBatchResultEntry"`
 	}
 	type response struct {
 		XMLName                  xml.Name         `xml:"DeleteMessageBatchResponse"`
@@ -1058,13 +1376,13 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	return sqsXMLResponse(http.StatusOK, response{
 		Xmlns:                    "http://queue.amazonaws.com/doc/2012-11-05/",
-		DeleteMessageBatchResult: result{DeleteMessageBatchResultEntry: successes},
+		DeleteMessageBatchResult: result{DeleteMessageBatchResultEntry: successesXML},
 		ResponseMetadata:         responseMetadata{RequestID: ctx.RequestID},
 	})
 }
 
 func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1073,9 +1391,21 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
 	}
 
-	receiptHandle := req.Params["ReceiptHandle"]
-	visStr := req.Params["VisibilityTimeout"]
-	vis, _ := strconv.Atoi(visStr)
+	var receiptHandle string
+	var vis int
+	if sqsIsJSONProtocol(req) {
+		var input struct {
+			ReceiptHandle     string `json:"ReceiptHandle"`
+			VisibilityTimeout int    `json:"VisibilityTimeout"`
+		}
+		_ = json.Unmarshal(req.Body, &input)
+		receiptHandle = input.ReceiptHandle
+		vis = input.VisibilityTimeout
+	} else {
+		receiptHandle = req.Params["ReceiptHandle"]
+		visStr := req.Params["VisibilityTimeout"]
+		vis, _ = strconv.Atoi(visStr)
+	}
 
 	urlKey := sqsURLKey(queueURL)
 	ids, err := p.loadMsgIDs(context.Background(), urlKey)
@@ -1097,6 +1427,9 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 		}
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"ChangeMessageVisibilityResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`
@@ -1109,7 +1442,7 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 }
 
 func (p *SQSPlugin) purgeQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := queueURLFromRequest(req)
+	queueURL := sqsQueueURLFromRequest(req)
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1130,6 +1463,9 @@ func (p *SQSPlugin) purgeQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("sqs purgeQueue saveMsgIDs: %w", err)
 	}
 
+	if sqsIsJSONProtocol(req) {
+		return sqsJSONResponse(http.StatusOK, struct{}{})
+	}
 	type response struct {
 		XMLName          xml.Name         `xml:"PurgeQueueResponse"`
 		Xmlns            string           `xml:"xmlns,attr"`

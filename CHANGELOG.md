@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.44.2] - 2026-03-19
+
+### Added
+
+- **SQS JSON protocol support** (`sqs_plugin.go`): `SQSPlugin` now handles both the
+  query protocol (`application/x-www-form-urlencoded`) and the AWS JSON protocol
+  (`application/x-amz-json-1.0` with `X-Amz-Target: AmazonSQS.<Op>`) for all 16
+  operations. Existing query-protocol behaviour is completely unchanged. New helpers:
+  `sqsIsJSONProtocol`, `sqsJSONResponse`, `sqsQueueURLFromRequest`. JSON `ReceiveMessage`
+  always returns `"Messages":[]` (never `null`) when the queue is empty. Closes #236.
+- **12 new SQS JSON protocol tests** (`sqs_plugin_test.go`): cover create/get/delete queue,
+  attributes, send/receive/delete messages, batch operations, tags, visibility changes,
+  purge, error on non-existent queue, and a cross-protocol test (create via JSON, send via
+  query, receive via JSON).
+
+### Note
+
+v0.44.0 and v0.44.1 are tagged at `e11f4b2` (servicequotas routing fix). v0.43.4 is a
+later commit on the same main branch that added EC2 `DescribeRegions`; it supersedes
+v0.44.0/v0.44.1 in functionality. v0.44.2 is built on top of v0.43.4 and consolidates
+all changes onto the v0.44.x line.
+
 ## [v0.43.4] - 2026-03-19
 
 ### Added
