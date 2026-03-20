@@ -216,3 +216,37 @@ func TestFSx_MultipleFileSystems(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &descResp))
 	assert.Len(t, descResp.FileSystems, 3)
 }
+
+// TestFSx_SDKTargetRouting verifies that requests using the real AWS SDK v2
+// X-Amz-Target header (AWSSimbaAPIService_v20180301.<Op>) are routed to the
+// FSx plugin correctly (#232).
+func TestFSx_SDKTargetRouting(t *testing.T) {
+	srv := newFSxTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Use the exact target the AWS SDK v2 FSx client sends.
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/", bytes.NewBufferString(`{
+		"FileSystemType": "LUSTRE",
+		"StorageCapacity": 1200,
+		"SubnetIds": ["subnet-abc"]
+	}`))
+	require.NoError(t, err)
+	req.Host = "fsx.us-east-1.amazonaws.com"
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", "AWSSimbaAPIService_v20180301.CreateFileSystem")
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20240101/us-east-1/fsx/aws4_request, SignedHeaders=host, Signature=fake")
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "SDK-style target should route to FSx plugin")
+
+	body := readFSxBody(t, resp)
+	var out struct {
+		FileSystem struct {
+			FileSystemId string `json:"FileSystemId"`
+		} `json:"FileSystem"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.True(t, strings.HasPrefix(out.FileSystem.FileSystemId, "fs-"))
+}

@@ -208,6 +208,9 @@ var targetServiceAliases = map[string]string{
 	"kafka": "msk",
 	// SigV4 service name for Amazon SES v2 is "ses".
 	"ses": "sesv2",
+	// "AWSSimbaAPIService_v20180301" → strip "_" → "AWSSimbaAPIService" → lowercase → "awssimbaapiservice" → "fsx".
+	// The AWS Go SDK v2 FSx client uses this as the X-Amz-Target namespace.
+	"awssimbaapiservice": "fsx",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
