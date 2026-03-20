@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -570,6 +571,12 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeResponse(w http.ResponseWriter, resp *AWSResponse) {
 	for k, v := range resp.Headers {
 		w.Header().Set(k, v)
+	}
+	// Set Content-Length if the plugin didn't already supply one, so the AWS SDK
+	// can drain the body cleanly and reuse the connection (avoids "failed to
+	// close HTTP response body" warnings).
+	if _, alreadySet := resp.Headers["Content-Length"]; !alreadySet {
+		w.Header().Set("Content-Length", strconv.Itoa(len(resp.Body)))
 	}
 	w.WriteHeader(resp.StatusCode)
 	if len(resp.Body) > 0 {

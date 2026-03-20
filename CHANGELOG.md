@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.42.1] - 2026-03-19
+
+### Fixed
+
+- **Spurious SDK warning** (`server.go`): `writeResponse` now sets `Content-Length` on every
+  response (unless the plugin already supplied one, as S3 HEAD does). This allows the AWS SDK
+  v2 transport to drain and close response bodies cleanly, eliminating the
+  "failed to close HTTP response body, this may affect connection reuse" warning that appeared
+  in `go test -v` output when using `StartTestServer`. Closes #229.
+
 ## [v0.42.0] - 2026-03-19
 
 ### Added
