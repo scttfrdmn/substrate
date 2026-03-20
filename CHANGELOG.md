@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.43.1] - 2026-03-19
+
+### Fixed
+
+- **FSx SDK routing** (`parser.go`): Added `"awssimbaapiservice": "fsx"` to
+  `targetServiceAliases`. The AWS SDK v2 FSx client sends
+  `X-Amz-Target: AWSSimbaAPIService_v20180301.<Op>` — the parser stripped the version
+  suffix (`_v20180301`) leaving `AWSSimbaAPIService` (lowercase: `awssimbaapiservice`), which
+  had no alias and caused a `501 ServiceNotAvailable` error on every FSx SDK call. Closes #232.
+
 ## [v0.43.0] - 2026-03-19
 
 ### Added
