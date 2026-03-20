@@ -47,8 +47,9 @@ type QuotaIncrease struct {
 	// Status is the current status of the request (PENDING, CASE_OPENED, APPROVED, DENIED, CLOSED).
 	Status string `json:"Status"`
 
-	// Created is the ISO-8601 timestamp when the request was created.
-	Created string `json:"Created"`
+	// Created is the Unix epoch (seconds) when the request was created.
+	// Service Quotas uses smithy timestamp encoding (float64) not ISO-8601.
+	Created float64 `json:"Created"`
 }
 
 // defaultServiceQuotas is the built-in quota table for common AWS services.

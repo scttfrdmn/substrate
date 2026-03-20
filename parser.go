@@ -211,6 +211,9 @@ var targetServiceAliases = map[string]string{
 	// "AWSSimbaAPIService_v20180301" → strip "_" → "AWSSimbaAPIService" → lowercase → "awssimbaapiservice" → "fsx".
 	// The AWS Go SDK v2 FSx client uses this as the X-Amz-Target namespace.
 	"awssimbaapiservice": "fsx",
+	// aws-sdk-go-v2 Service Quotas uses "servicequotasv20190624" as the SigV4
+	// signing name in the credential scope.
+	"servicequotasv20190624": "servicequotas",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

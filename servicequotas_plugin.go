@@ -190,7 +190,6 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(req *AWSRequest) (*AWS
 	accountID := "000000000000"
 
 	id := generateSQSMessageID() // reuse UUID generator
-	now := p.tc.Now().UTC().Format(time.RFC3339)
 
 	qi := &QuotaIncrease{
 		ID:           id,
@@ -198,7 +197,7 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(req *AWSRequest) (*AWS
 		QuotaCode:    input.QuotaCode,
 		DesiredValue: input.DesiredValue,
 		Status:       "PENDING",
-		Created:      now,
+		Created:      float64(p.tc.Now().Unix()),
 	}
 
 	ctx := context.Background()
