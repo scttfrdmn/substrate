@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.0] - 2026-03-21
+
+### Added
+
+- **AWS Batch plugin** (`batch_plugin.go`): New `BatchPlugin` for the AWS Batch service.
+  Handles `SubmitJob`, `DescribeJobs`, `TerminateJob`, `ListJobs`,
+  `CreateComputeEnvironment`, `CreateJobQueue`, and `RegisterJobDefinition` via REST/JSON
+  path routing on `batch.{region}.amazonaws.com`. Jobs are immediately stored with
+  `SUCCEEDED` status (deterministic). State namespace `"batch"`, keys `job:`, `job_ids:`.
+  Costs: `batch/SubmitJob = $0.00001`. Closes #237.
+- **Amazon SageMaker plugin** (`sagemaker_plugin.go`): New `SageMakerPlugin` for the
+  SageMaker service. Handles Studio app operations (`CreateApp`, `DeleteApp`, `DescribeApp`,
+  `ListApps`, `ListDomains`, `CreatePresignedDomainUrl`) and training job operations
+  (`CreateTrainingJob`, `DescribeTrainingJob`, `StopTrainingJob`, `ListTrainingJobs`) via
+  JSON-target protocol (`X-Amz-Target: SageMaker.{Op}`). Training jobs are immediately
+  `Completed` (deterministic). State namespace `"sagemaker"`. Costs:
+  `sagemaker/CreateTrainingJob = $0.001`, `sagemaker/CreateApp = $0.0001`. Closes #238.
+- **Amazon EMR Serverless plugin** (`emrserverless_plugin.go`): New `EMRServerlessPlugin`
+  for the EMR Serverless service. Handles `CreateApplication`, `GetApplication`,
+  `DeleteApplication`, `StartJobRun`, `GetJobRun`, `CancelJobRun`, and `ListJobRuns` via
+  REST/JSON path routing on `emrserverless.{region}.amazonaws.com`. Job runs immediately
+  have state `SUCCESS` (deterministic). State namespace `"emrserverless"`. Costs:
+  `emrserverless/StartJobRun = $0.0001`, `emrserverless/CreateApplication = $0.00001`.
+  Closes #239.
+- **Amazon HealthOmics plugin** (`omics_plugin.go`): New `OmicsPlugin` for the HealthOmics
+  service. Handles `StartRun`, `GetRun`, `CancelRun`, and `ListRuns` via REST/JSON path
+  routing on `omics.{region}.amazonaws.com`. Runs are immediately `COMPLETED`
+  (deterministic). Run IDs are 10-digit numeric strings matching real HealthOmics format.
+  State namespace `"omics"`. Costs: `omics/StartRun = $0.001`. Closes #240.
+
+## [v0.44.4] - 2026-03-21
+
+### Added
+
+- **EC2 launch templates** (`ec2_plugin.go`, `ec2_types.go`): Added `CreateLaunchTemplate`,
+  `DescribeLaunchTemplates`, and `DeleteLaunchTemplate` operations. `RunInstances` now
+  resolves `ImageId`, `InstanceType`, `KeyName`, and `SecurityGroupId` from a referenced
+  launch template when those parameters are not supplied directly. New types:
+  `EC2LaunchTemplate`, `EC2LaunchTemplateData`, `generateLaunchTemplateID`. State keys use
+  namespace `"ec2"` with prefix `lt:`, `lt_by_name:`, `lt_ids:`. Closes #243.
+
 ## [v0.44.3] - 2026-03-22
 
 ### Fixed
@@ -1290,4 +1331,8 @@ all changes onto the v0.44.x line.
 [v0.43.2]: https://github.com/scttfrdmn/substrate/compare/v0.43.1...v0.43.2
 [v0.43.3]: https://github.com/scttfrdmn/substrate/compare/v0.43.2...v0.43.3
 [v0.43.4]: https://github.com/scttfrdmn/substrate/compare/v0.43.3...v0.43.4
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.43.4...HEAD
+[v0.44.2]: https://github.com/scttfrdmn/substrate/compare/v0.43.4...v0.44.2
+[v0.44.3]: https://github.com/scttfrdmn/substrate/compare/v0.44.2...v0.44.3
+[v0.44.4]: https://github.com/scttfrdmn/substrate/compare/v0.44.3...v0.44.4
+[v0.45.0]: https://github.com/scttfrdmn/substrate/compare/v0.44.4...v0.45.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.0...HEAD

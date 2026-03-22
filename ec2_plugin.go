@@ -180,6 +180,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeInstanceTypeOfferings(ctx, req)
 	case "DescribeSpotPriceHistory":
 		return p.describeSpotPriceHistory(ctx, req)
+	// Launch template operations
+	case "CreateLaunchTemplate":
+		return p.createLaunchTemplate(ctx, req)
+	case "DescribeLaunchTemplates":
+		return p.describeLaunchTemplates(ctx, req)
+	case "DeleteLaunchTemplate":
+		return p.deleteLaunchTemplate(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -211,6 +218,24 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	sgID := req.Params["SecurityGroupId.1"]
 	if sgID == "" {
 		sgID = req.Params["SecurityGroupIds.1"]
+	}
+
+	// Resolve launch template parameters when no ImageId is provided directly.
+	if imageID == "" {
+		ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
+		ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
+		if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
+			imageID = lt.LatestData.ImageID
+			if instanceType == "t3.micro" && lt.LatestData.InstanceType != "" {
+				instanceType = lt.LatestData.InstanceType
+			}
+			if keyName == "" {
+				keyName = lt.LatestData.KeyName
+			}
+			if sgID == "" && len(lt.LatestData.SecurityGroupIDs) > 0 {
+				sgID = lt.LatestData.SecurityGroupIDs[0]
+			}
+		}
 	}
 
 	// Auto-create default VPC/subnet if none specified.
@@ -2994,4 +3019,219 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 		}
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// --- Launch template operations ---
+
+// resolveLaunchTemplate looks up a launch template by ID or name and returns it,
+// or nil if not found.
+func (p *EC2Plugin) resolveLaunchTemplate(goCtx context.Context, ctx *RequestContext, ltID, ltName string) *EC2LaunchTemplate {
+	if ltID == "" && ltName == "" {
+		return nil
+	}
+	if ltID == "" {
+		// Look up ID by name.
+		nameKey := "lt_by_name:" + ctx.AccountID + "/" + ctx.Region + "/" + ltName
+		data, err := p.state.Get(goCtx, ec2Namespace, nameKey)
+		if err != nil || data == nil {
+			return nil
+		}
+		ltID = string(data)
+	}
+	key := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + ltID
+	data, err := p.state.Get(goCtx, ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil
+	}
+	var lt EC2LaunchTemplate
+	if json.Unmarshal(data, &lt) != nil {
+		return nil
+	}
+	return &lt
+}
+
+func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["LaunchTemplateName"]
+	if name == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "LaunchTemplateName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	goCtx := context.Background()
+
+	// Check for name collision.
+	nameKey := "lt_by_name:" + ctx.AccountID + "/" + ctx.Region + "/" + name
+	existing, _ := p.state.Get(goCtx, ec2Namespace, nameKey)
+	if existing != nil {
+		return nil, &AWSError{
+			Code:       "InvalidLaunchTemplateName.AlreadyExistsException",
+			Message:    "Launch template with name '" + name + "' already exists",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	ltID := generateLaunchTemplateID()
+	now := p.tc.Now().UTC().Format(time.RFC3339)
+
+	// Parse launch template data params.
+	ltData := EC2LaunchTemplateData{
+		ImageID:      req.Params["LaunchTemplateData.ImageId"],
+		InstanceType: req.Params["LaunchTemplateData.InstanceType"],
+		KeyName:      req.Params["LaunchTemplateData.KeyName"],
+	}
+	if sg1 := req.Params["LaunchTemplateData.SecurityGroupId.1"]; sg1 != "" {
+		ltData.SecurityGroupIDs = []string{sg1}
+	}
+	if ud := req.Params["LaunchTemplateData.UserData"]; ud != "" {
+		ltData.UserData = ud
+	}
+
+	lt := EC2LaunchTemplate{
+		LaunchTemplateID:   ltID,
+		LaunchTemplateName: name,
+		DefaultVersionNum:  1,
+		LatestVersionNum:   1,
+		CreatedBy:          ctx.AccountID,
+		CreateTime:         now,
+		LatestData:         ltData,
+		AccountID:          ctx.AccountID,
+		Region:             ctx.Region,
+	}
+
+	ltJSON, err := json.Marshal(lt)
+	if err != nil {
+		return nil, fmt.Errorf("createLaunchTemplate: marshal: %w", err)
+	}
+	ltKey := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + ltID
+	if err := p.state.Put(goCtx, ec2Namespace, ltKey, ltJSON); err != nil {
+		return nil, fmt.Errorf("createLaunchTemplate: put lt: %w", err)
+	}
+	if err := p.state.Put(goCtx, ec2Namespace, nameKey, []byte(ltID)); err != nil {
+		return nil, fmt.Errorf("createLaunchTemplate: put lt_by_name: %w", err)
+	}
+	idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
+	updateStringIndex(goCtx, p.state, ec2Namespace, idsKey, ltID)
+
+	type ltItem struct {
+		LaunchTemplateID   string `xml:"launchTemplateId"`
+		LaunchTemplateName string `xml:"launchTemplateName"`
+		CreateTime         string `xml:"createTime"`
+		DefaultVersionNum  int64  `xml:"defaultVersionNumber"`
+		LatestVersionNum   int64  `xml:"latestVersionNumber"`
+	}
+	type response struct {
+		XMLName        xml.Name `xml:"CreateLaunchTemplateResponse"`
+		XMLNS          string   `xml:"xmlns,attr"`
+		LaunchTemplate ltItem   `xml:"launchTemplate"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/",
+		LaunchTemplate: ltItem{
+			LaunchTemplateID:   ltID,
+			LaunchTemplateName: name,
+			CreateTime:         now,
+			DefaultVersionNum:  1,
+			LatestVersionNum:   1,
+		},
+	})
+}
+
+func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	var lts []EC2LaunchTemplate
+
+	filterID := req.Params["LaunchTemplateId.1"]
+	filterName := req.Params["LaunchTemplateName.1"]
+
+	switch {
+	case filterID != "":
+		if lt := p.resolveLaunchTemplate(goCtx, ctx, filterID, ""); lt != nil {
+			lts = append(lts, *lt)
+		}
+	case filterName != "":
+		if lt := p.resolveLaunchTemplate(goCtx, ctx, "", filterName); lt != nil {
+			lts = append(lts, *lt)
+		}
+	default:
+		idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
+		ids, _ := loadStringIndex(goCtx, p.state, ec2Namespace, idsKey)
+		for _, id := range ids {
+			key := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + id
+			data, err := p.state.Get(goCtx, ec2Namespace, key)
+			if err != nil || data == nil {
+				continue
+			}
+			var lt EC2LaunchTemplate
+			if json.Unmarshal(data, &lt) == nil {
+				lts = append(lts, lt)
+			}
+		}
+	}
+
+	type ltItem struct {
+		LaunchTemplateID   string `xml:"launchTemplateId"`
+		LaunchTemplateName string `xml:"launchTemplateName"`
+		CreateTime         string `xml:"createTime"`
+		DefaultVersionNum  int64  `xml:"defaultVersionNumber"`
+		LatestVersionNum   int64  `xml:"latestVersionNumber"`
+	}
+	type response struct {
+		XMLName         xml.Name `xml:"DescribeLaunchTemplatesResponse"`
+		XMLNS           string   `xml:"xmlns,attr"`
+		LaunchTemplates []ltItem `xml:"launchTemplates>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, lt := range lts {
+		resp.LaunchTemplates = append(resp.LaunchTemplates, ltItem{
+			LaunchTemplateID:   lt.LaunchTemplateID,
+			LaunchTemplateName: lt.LaunchTemplateName,
+			CreateTime:         lt.CreateTime,
+			DefaultVersionNum:  lt.DefaultVersionNum,
+			LatestVersionNum:   lt.LatestVersionNum,
+		})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	ltID := req.Params["LaunchTemplateId"]
+	ltName := req.Params["LaunchTemplateName"]
+
+	lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
+	if lt == nil {
+		return nil, &AWSError{
+			Code:       "InvalidLaunchTemplateId.NotFound",
+			Message:    "The launch template was not found",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	ltKey := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + lt.LaunchTemplateID
+	nameKey := "lt_by_name:" + ctx.AccountID + "/" + ctx.Region + "/" + lt.LaunchTemplateName
+	idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
+
+	if err := p.state.Delete(goCtx, ec2Namespace, ltKey); err != nil {
+		return nil, fmt.Errorf("deleteLaunchTemplate: delete lt: %w", err)
+	}
+	if err := p.state.Delete(goCtx, ec2Namespace, nameKey); err != nil {
+		return nil, fmt.Errorf("deleteLaunchTemplate: delete lt_by_name: %w", err)
+	}
+	removeFromStringIndex(goCtx, p.state, ec2Namespace, idsKey, lt.LaunchTemplateID)
+
+	type ltItem struct {
+		LaunchTemplateID   string `xml:"launchTemplateId"`
+		LaunchTemplateName string `xml:"launchTemplateName"`
+	}
+	type response struct {
+		XMLName        xml.Name `xml:"DeleteLaunchTemplateResponse"`
+		XMLNS          string   `xml:"xmlns,attr"`
+		LaunchTemplate ltItem   `xml:"launchTemplate"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/",
+		LaunchTemplate: ltItem{
+			LaunchTemplateID:   lt.LaunchTemplateID,
+			LaunchTemplateName: lt.LaunchTemplateName,
+		},
+	})
 }

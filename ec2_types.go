@@ -482,3 +482,59 @@ func generateEIPAssociationID() string {
 func generateNATGatewayID() string {
 	return "nat-" + randomHex(8)
 }
+
+// EC2LaunchTemplateData holds the launch parameters stored in an EC2 launch template.
+type EC2LaunchTemplateData struct {
+	// ImageID is the AMI ID to use when launching instances.
+	ImageID string `json:"imageId,omitempty"`
+
+	// InstanceType is the EC2 instance type (e.g. "t3.micro").
+	InstanceType string `json:"instanceType,omitempty"`
+
+	// KeyName is the name of the key pair to use.
+	KeyName string `json:"keyName,omitempty"`
+
+	// SecurityGroupIDs is the list of security group IDs.
+	SecurityGroupIDs []string `json:"securityGroupIds,omitempty"`
+
+	// UserData is the base64-encoded user data script.
+	UserData string `json:"userData,omitempty"`
+}
+
+// EC2LaunchTemplate represents an Amazon EC2 launch template.
+type EC2LaunchTemplate struct {
+	// LaunchTemplateID is the unique identifier (e.g. "lt-0abc1234def56789a").
+	LaunchTemplateID string `json:"launchTemplateId"`
+
+	// LaunchTemplateName is the user-supplied name.
+	LaunchTemplateName string `json:"launchTemplateName"`
+
+	// DefaultVersionNum is the default version number.
+	DefaultVersionNum int64 `json:"defaultVersionNumber"`
+
+	// LatestVersionNum is the latest version number.
+	LatestVersionNum int64 `json:"latestVersionNumber"`
+
+	// CreatedBy is the principal that created the template.
+	CreatedBy string `json:"createdBy"`
+
+	// CreateTime is the RFC3339 timestamp when the template was created.
+	CreateTime string `json:"createTime"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// LatestData holds the launch template parameters for the latest version.
+	LatestData EC2LaunchTemplateData `json:"latestData"`
+
+	// AccountID is the AWS account that owns the launch template.
+	AccountID string `json:"accountID"`
+
+	// Region is the AWS region in which the launch template resides.
+	Region string `json:"region"`
+}
+
+// generateLaunchTemplateID generates a random launch template ID.
+func generateLaunchTemplateID() string {
+	return "lt-" + randomHex(8)
+}

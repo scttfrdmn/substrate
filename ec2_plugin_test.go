@@ -2612,3 +2612,207 @@ func TestEC2_DescribeRegions_Filter(t *testing.T) {
 		t.Errorf("expected us-east-1, got %q", result.Regions[0].RegionName)
 	}
 }
+
+// TestEC2Plugin_CreateDescribeDeleteLaunchTemplate verifies full launch template lifecycle.
+func TestEC2Plugin_CreateDescribeDeleteLaunchTemplate(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":                              "CreateLaunchTemplate",
+		"LaunchTemplateName":                  "my-template",
+		"LaunchTemplateData.ImageId":          "ami-0abcdef1234567890",
+		"LaunchTemplateData.InstanceType":     "t3.small",
+		"LaunchTemplateData.KeyName":          "my-key",
+		"LaunchTemplateData.SecurityGroupId.1": "sg-12345678",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d", resp.StatusCode)
+	}
+	var createResult struct {
+		LaunchTemplate struct {
+			LaunchTemplateID   string `xml:"launchTemplateId"`
+			LaunchTemplateName string `xml:"launchTemplateName"`
+			DefaultVersionNum  int64  `xml:"defaultVersionNumber"`
+			LatestVersionNum   int64  `xml:"latestVersionNumber"`
+		} `xml:"launchTemplate"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&createResult); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	ltID := createResult.LaunchTemplate.LaunchTemplateID
+	if ltID == "" {
+		t.Fatal("expected non-empty launchTemplateId")
+	}
+	if createResult.LaunchTemplate.LaunchTemplateName != "my-template" {
+		t.Errorf("expected my-template, got %q", createResult.LaunchTemplate.LaunchTemplateName)
+	}
+	if createResult.LaunchTemplate.DefaultVersionNum != 1 {
+		t.Errorf("expected defaultVersionNumber=1, got %d", createResult.LaunchTemplate.DefaultVersionNum)
+	}
+
+	// Describe all
+	resp2 := ec2Request(t, ts, map[string]string{"Action": "DescribeLaunchTemplates"})
+	defer resp2.Body.Close() //nolint:errcheck
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("describe: expected 200, got %d", resp2.StatusCode)
+	}
+	var descResult struct {
+		Items []struct {
+			LaunchTemplateID   string `xml:"launchTemplateId"`
+			LaunchTemplateName string `xml:"launchTemplateName"`
+		} `xml:"launchTemplates>item"`
+	}
+	if err := xml.NewDecoder(resp2.Body).Decode(&descResult); err != nil {
+		t.Fatalf("decode describe: %v", err)
+	}
+	if len(descResult.Items) != 1 {
+		t.Fatalf("expected 1 template, got %d", len(descResult.Items))
+	}
+	if descResult.Items[0].LaunchTemplateID != ltID {
+		t.Errorf("expected %q, got %q", ltID, descResult.Items[0].LaunchTemplateID)
+	}
+
+	// Delete
+	resp3 := ec2Request(t, ts, map[string]string{
+		"Action":           "DeleteLaunchTemplate",
+		"LaunchTemplateId": ltID,
+	})
+	defer resp3.Body.Close() //nolint:errcheck
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("delete: expected 200, got %d", resp3.StatusCode)
+	}
+
+	// Confirm deleted — DescribeLaunchTemplates should return empty.
+	resp4 := ec2Request(t, ts, map[string]string{"Action": "DescribeLaunchTemplates"})
+	defer resp4.Body.Close() //nolint:errcheck
+	var afterDelete struct {
+		Items []struct {
+			LaunchTemplateID string `xml:"launchTemplateId"`
+		} `xml:"launchTemplates>item"`
+	}
+	if err := xml.NewDecoder(resp4.Body).Decode(&afterDelete); err != nil {
+		t.Fatalf("decode after-delete: %v", err)
+	}
+	if len(afterDelete.Items) != 0 {
+		t.Fatalf("expected 0 templates after delete, got %d", len(afterDelete.Items))
+	}
+}
+
+// TestEC2Plugin_LaunchTemplate_DuplicateNameError verifies that creating two templates
+// with the same name returns an error.
+func TestEC2Plugin_LaunchTemplate_DuplicateNameError(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	params := map[string]string{
+		"Action":             "CreateLaunchTemplate",
+		"LaunchTemplateName": "dup-template",
+	}
+	resp := ec2Request(t, ts, params)
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first create: expected 200, got %d", resp.StatusCode)
+	}
+
+	resp2 := ec2Request(t, ts, params)
+	defer resp2.Body.Close() //nolint:errcheck
+	if resp2.StatusCode == http.StatusOK {
+		t.Fatal("second create with same name: expected error, got 200")
+	}
+}
+
+// TestEC2Plugin_RunInstances_ViaLaunchTemplate verifies that RunInstances resolves
+// ImageId and InstanceType from a launch template when not supplied directly.
+func TestEC2Plugin_RunInstances_ViaLaunchTemplate(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create a launch template with a specific image and instance type.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":                          "CreateLaunchTemplate",
+		"LaunchTemplateName":              "run-tmpl",
+		"LaunchTemplateData.ImageId":      "ami-launch-template-test",
+		"LaunchTemplateData.InstanceType": "m5.large",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create template: %d", resp.StatusCode)
+	}
+	var cr struct {
+		LaunchTemplate struct {
+			LaunchTemplateID string `xml:"launchTemplateId"`
+		} `xml:"launchTemplate"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	ltID := cr.LaunchTemplate.LaunchTemplateID
+
+	// RunInstances using only the launch template ID (no ImageId).
+	resp2 := ec2Request(t, ts, map[string]string{
+		"Action":                          "RunInstances",
+		"MinCount":                        "1",
+		"MaxCount":                        "1",
+		"LaunchTemplate.LaunchTemplateId": ltID,
+	})
+	defer resp2.Body.Close() //nolint:errcheck
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("run instances: expected 200, got %d", resp2.StatusCode)
+	}
+
+	var runResult struct {
+		Instances []struct {
+			InstanceID   string `xml:"instanceId"`
+			ImageID      string `xml:"imageId"`
+			InstanceType string `xml:"instanceType"`
+		} `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(resp2.Body).Decode(&runResult); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	if len(runResult.Instances) != 1 {
+		t.Fatalf("expected 1 instance, got %d", len(runResult.Instances))
+	}
+	if runResult.Instances[0].ImageID != "ami-launch-template-test" {
+		t.Errorf("expected ami-launch-template-test, got %q", runResult.Instances[0].ImageID)
+	}
+	if runResult.Instances[0].InstanceType != "m5.large" {
+		t.Errorf("expected m5.large, got %q", runResult.Instances[0].InstanceType)
+	}
+}
+
+// TestEC2Plugin_DescribeLaunchTemplates_FilterByName verifies filtering by name.
+func TestEC2Plugin_DescribeLaunchTemplates_FilterByName(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	for _, n := range []string{"alpha", "beta", "gamma"} {
+		r := ec2Request(t, ts, map[string]string{
+			"Action":             "CreateLaunchTemplate",
+			"LaunchTemplateName": n,
+		})
+		r.Body.Close() //nolint:errcheck
+	}
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":               "DescribeLaunchTemplates",
+		"LaunchTemplateName.1": "beta",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Items []struct {
+			LaunchTemplateName string `xml:"launchTemplateName"`
+		} `xml:"launchTemplates>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(result.Items))
+	}
+	if result.Items[0].LaunchTemplateName != "beta" {
+		t.Errorf("expected beta, got %q", result.Items[0].LaunchTemplateName)
+	}
+}
