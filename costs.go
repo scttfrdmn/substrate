@@ -183,6 +183,17 @@ func defaultCostTable() map[string]float64 {
 		"scheduler/CreateSchedule": 0.0000001,
 		// FSx: per file system per hour, prorated per API call.
 		"fsx/CreateFileSystem": 0.00013,
+		// Batch: per job submitted.
+		"batch/SubmitJob":    0.00001,
+		"batch/DescribeJobs": 0.0,
+		// SageMaker: per training job created; per Studio app created.
+		"sagemaker/CreateTrainingJob": 0.001,
+		"sagemaker/CreateApp":         0.0001,
+		// EMR Serverless: per job run submitted; per application created.
+		"emrserverless/StartJobRun":       0.0001,
+		"emrserverless/CreateApplication": 0.00001,
+		// HealthOmics: per workflow run started.
+		"omics/StartRun": 0.001,
 	}
 }
 

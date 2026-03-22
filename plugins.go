@@ -484,5 +484,45 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(fsxPlugin)
 
+	batchPlugin := &BatchPlugin{}
+	if err := batchPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize batch plugin: %w", err)
+	}
+	registry.Register(batchPlugin)
+
+	sageMakerPlugin := &SageMakerPlugin{}
+	if err := sageMakerPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize sagemaker plugin: %w", err)
+	}
+	registry.Register(sageMakerPlugin)
+
+	emrServerlessPlugin := &EMRServerlessPlugin{}
+	if err := emrServerlessPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize emrserverless plugin: %w", err)
+	}
+	registry.Register(emrServerlessPlugin)
+
+	omicsPlugin := &OmicsPlugin{}
+	if err := omicsPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize omics plugin: %w", err)
+	}
+	registry.Register(omicsPlugin)
+
 	return nil
 }
