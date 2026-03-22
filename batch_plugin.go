@@ -75,8 +75,21 @@ func (p *BatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 func parseBatchOperation(method, path string) (op, jobID string) {
 	rest := strings.TrimPrefix(path, "/")
 	switch {
+	// SDK v2 uses operation-named paths (e.g. /v1/submitjob, /v1/describejobs).
 	case rest == "v1/submitjob" && method == "POST":
 		return "SubmitJob", ""
+	case rest == "v1/describejobs" && method == "POST":
+		return "DescribeJobs", ""
+	case rest == "v1/terminatejob" && method == "POST":
+		// SDK sends jobId in the request body; extracted by terminateJob handler.
+		return "TerminateJob", ""
+	case rest == "v1/createcomputeenvironment" && method == "POST":
+		return "CreateComputeEnvironment", ""
+	case rest == "v1/createjobqueue" && method == "POST":
+		return "CreateJobQueue", ""
+	case rest == "v1/registerjobdefinition" && method == "POST":
+		return "RegisterJobDefinition", ""
+	// Legacy REST-style paths retained for backwards compatibility.
 	case rest == "v1/jobs" && method == "POST":
 		return "DescribeJobs", ""
 	case rest == "v1/jobs" && method == "GET":
@@ -197,6 +210,18 @@ func (p *BatchPlugin) describeJobs(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 func (p *BatchPlugin) terminateJob(ctx *RequestContext, req *AWSRequest, jobID string) (*AWSResponse, error) {
 	goCtx := context.Background()
+
+	// SDK v2 sends jobId in the request body (POST /v1/terminatejob); legacy
+	// REST-style callers pass it as a URL path segment.
+	var body struct {
+		JobID  string `json:"jobId"`
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(req.Body, &body)
+	if jobID == "" {
+		jobID = body.JobID
+	}
+
 	key := "job:" + ctx.AccountID + "/" + ctx.Region + "/" + jobID
 	data, err := p.state.Get(goCtx, batchNamespace, key)
 	if err != nil || data == nil {
@@ -207,10 +232,6 @@ func (p *BatchPlugin) terminateJob(ctx *RequestContext, req *AWSRequest, jobID s
 		return nil, fmt.Errorf("terminateJob: unmarshal: %w", err)
 	}
 
-	var body struct {
-		Reason string `json:"reason"`
-	}
-	_ = json.Unmarshal(req.Body, &body)
 	job.Status = "FAILED"
 	if body.Reason != "" {
 		job.StatusReason = body.Reason

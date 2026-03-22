@@ -76,6 +76,9 @@ func parseOmicsOperation(method, path string) (op, runID string) {
 		return "GetRun", strings.TrimPrefix(rest, "run/")
 	case strings.HasPrefix(rest, "run/") && method == "DELETE":
 		return "CancelRun", strings.TrimPrefix(rest, "run/")
+	// SDK v2 uses POST /run/{id}/cancel instead of DELETE /run/{id}.
+	case strings.HasSuffix(rest, "/cancel") && strings.HasPrefix(rest, "run/") && method == "POST":
+		return "CancelRun", strings.TrimSuffix(strings.TrimPrefix(rest, "run/"), "/cancel")
 	}
 	return "", ""
 }
