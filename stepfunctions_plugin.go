@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// sfnEpoch converts t to a float64 Unix epoch seconds value for use in Step
+// Functions API responses. The AWS SDK v2 sfn client expects timestamps as
+// JSON numbers (epoch seconds), not RFC3339 strings.
+func sfnEpoch(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
+
 // StepFunctionsPlugin emulates the AWS Step Functions JSON-protocol API.
 // It handles CreateStateMachine, DescribeStateMachine, UpdateStateMachine,
 // DeleteStateMachine, ListStateMachines, StartExecution, StopExecution,
@@ -356,7 +361,7 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 
 	out := map[string]interface{}{
 		"stateMachineArn": sm.StateMachineArn,
-		"creationDate":    sm.CreatedDate.Format(time.RFC3339),
+		"creationDate":    sfnEpoch(sm.CreatedDate),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -414,7 +419,7 @@ func (p *StepFunctionsPlugin) updateStateMachine(ctx *RequestContext, req *AWSRe
 	}
 
 	out := map[string]interface{}{
-		"updateDate": p.tc.Now().Format(time.RFC3339),
+		"updateDate": sfnEpoch(p.tc.Now()),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -496,10 +501,10 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 	}
 
 	type smEntry struct {
-		StateMachineArn string `json:"stateMachineArn"`
-		Name            string `json:"name"`
-		Type            string `json:"type"`
-		CreationDate    string `json:"creationDate"`
+		StateMachineArn string  `json:"stateMachineArn"`
+		Name            string  `json:"name"`
+		Type            string  `json:"type"`
+		CreationDate    float64 `json:"creationDate"`
 	}
 	entries := make([]smEntry, 0, len(page))
 	for _, n := range page {
@@ -511,7 +516,7 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 			StateMachineArn: sm.StateMachineArn,
 			Name:            sm.Name,
 			Type:            sm.Type,
-			CreationDate:    sm.CreatedDate.Format(time.RFC3339),
+			CreationDate:    sfnEpoch(sm.CreatedDate),
 		})
 	}
 
@@ -588,7 +593,7 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 
 	out := map[string]interface{}{
 		"executionArn": exec.ExecutionArn,
-		"startDate":    exec.StartDate.Format(time.RFC3339),
+		"startDate":    sfnEpoch(exec.StartDate),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -648,8 +653,8 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 
 	out := map[string]interface{}{
 		"executionArn": exec.ExecutionArn,
-		"startDate":    exec.StartDate.Format(time.RFC3339),
-		"stopDate":     exec.StopDate.Format(time.RFC3339),
+		"startDate":    sfnEpoch(exec.StartDate),
+		"stopDate":     sfnEpoch(exec.StopDate),
 		"status":       exec.Status,
 	}
 	if exec.Output != "" {
@@ -688,7 +693,7 @@ func (p *StepFunctionsPlugin) stopExecution(ctx *RequestContext, req *AWSRequest
 	}
 
 	out := map[string]interface{}{
-		"stopDate": now.Format(time.RFC3339),
+		"stopDate": sfnEpoch(now),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -756,12 +761,12 @@ func (p *StepFunctionsPlugin) listExecutions(ctx *RequestContext, req *AWSReques
 	}
 
 	type execEntry struct {
-		ExecutionArn    string `json:"executionArn"`
-		StateMachineArn string `json:"stateMachineArn"`
-		Name            string `json:"name"`
-		Status          string `json:"status"`
-		StartDate       string `json:"startDate"`
-		StopDate        string `json:"stopDate,omitempty"`
+		ExecutionArn    string  `json:"executionArn"`
+		StateMachineArn string  `json:"stateMachineArn"`
+		Name            string  `json:"name"`
+		Status          string  `json:"status"`
+		StartDate       float64 `json:"startDate"`
+		StopDate        float64 `json:"stopDate,omitempty"`
 	}
 	entries := make([]execEntry, 0, len(page))
 	for _, execName := range page {
@@ -777,10 +782,10 @@ func (p *StepFunctionsPlugin) listExecutions(ctx *RequestContext, req *AWSReques
 			StateMachineArn: exec.StateMachineArn,
 			Name:            exec.Name,
 			Status:          exec.Status,
-			StartDate:       exec.StartDate.Format(time.RFC3339),
+			StartDate:       sfnEpoch(exec.StartDate),
 		}
 		if !exec.StopDate.IsZero() {
-			e.StopDate = exec.StopDate.Format(time.RFC3339)
+			e.StopDate = sfnEpoch(exec.StopDate)
 		}
 		entries = append(entries, e)
 	}
@@ -877,7 +882,7 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 
 	out := map[string]interface{}{
 		"activityArn":  act.ActivityArn,
-		"creationDate": act.CreatedDate.Format(time.RFC3339),
+		"creationDate": sfnEpoch(act.CreatedDate),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -903,7 +908,7 @@ func (p *StepFunctionsPlugin) describeActivity(ctx *RequestContext, req *AWSRequ
 	out := map[string]interface{}{
 		"activityArn":  act.ActivityArn,
 		"name":         act.Name,
-		"creationDate": act.CreatedDate.Format(time.RFC3339),
+		"creationDate": sfnEpoch(act.CreatedDate),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -946,9 +951,9 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 	}
 
 	type actEntry struct {
-		ActivityArn  string `json:"activityArn"`
-		Name         string `json:"name"`
-		CreationDate string `json:"creationDate"`
+		ActivityArn  string  `json:"activityArn"`
+		Name         string  `json:"name"`
+		CreationDate float64 `json:"creationDate"`
 	}
 	entries := make([]actEntry, 0, len(page))
 	for _, n := range page {
@@ -959,7 +964,7 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 		entries = append(entries, actEntry{
 			ActivityArn:  act.ActivityArn,
 			Name:         act.Name,
-			CreationDate: act.CreatedDate.Format(time.RFC3339),
+			CreationDate: sfnEpoch(act.CreatedDate),
 		})
 	}
 
@@ -1170,7 +1175,7 @@ func smToMap(sm *StateMachineState) map[string]interface{} {
 		"definition":      sm.Definition,
 		"roleArn":         sm.RoleArn,
 		"type":            sm.Type,
-		"creationDate":    sm.CreatedDate.Format(time.RFC3339),
+		"creationDate":    sfnEpoch(sm.CreatedDate),
 	}
 }
 
@@ -1181,7 +1186,7 @@ func execToMap(exec *ExecutionState) map[string]interface{} {
 		"stateMachineArn": exec.StateMachineArn,
 		"name":            exec.Name,
 		"status":          exec.Status,
-		"startDate":       exec.StartDate.Format(time.RFC3339),
+		"startDate":       sfnEpoch(exec.StartDate),
 	}
 	if exec.Input != "" {
 		out["input"] = exec.Input
@@ -1190,7 +1195,7 @@ func execToMap(exec *ExecutionState) map[string]interface{} {
 		out["output"] = exec.Output
 	}
 	if !exec.StopDate.IsZero() {
-		out["stopDate"] = exec.StopDate.Format(time.RFC3339)
+		out["stopDate"] = sfnEpoch(exec.StopDate)
 	}
 	return out
 }

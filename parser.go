@@ -214,6 +214,9 @@ var targetServiceAliases = map[string]string{
 	// aws-sdk-go-v2 Service Quotas uses "servicequotasv20190624" as the SigV4
 	// signing name in the credential scope.
 	"servicequotasv20190624": "servicequotas",
+	// "AWSStepFunctions" → lowercase → "awsstepfunctions" → "states".
+	// aws-sdk-go-v2 sfn serializers use "AWSStepFunctions" as the X-Amz-Target prefix.
+	"awsstepfunctions": "states",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

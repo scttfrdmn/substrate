@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.44.3] - 2026-03-22
+
+### Fixed
+
+- **StepFunctions routing** (`parser.go`): Added `"awsstepfunctions": "states"` alias to
+  `targetServiceAliases`. The AWS SDK v2 sfn client sends `X-Amz-Target: AWSStepFunctions.*`
+  which was not matched by the existing `"Amazon"` prefix stripping, causing every SDK call
+  to return `ServiceNotAvailable: service not emulated: awsstepfunctions`. Closes #242.
+- **ECS timestamp serialization** (`ecs_types.go`, `epochseconds.go`): Replaced `time.Time`
+  fields `ECSTaskDefinition.RegisteredAt`, `ECSService.CreatedAt`, `ECSTask.StartedAt`, and
+  `ECSTask.StoppedAt` with the new `EpochSeconds` type, which marshals as a JSON float64
+  (Unix epoch seconds). The AWS SDK v2 ECS client uses `smithytime.ParseEpochSeconds` and
+  expects a JSON number, not an RFC3339 string. Closes #241.
+- **Step Functions timestamp serialization** (`stepfunctions_plugin.go`): All response maps
+  (`creationDate`, `startDate`, `stopDate`, `updateDate`) now emit `float64` epoch seconds
+  via the new `sfnEpoch` helper instead of RFC3339 strings. Struct fields in list-response
+  entry types (`smEntry.CreationDate`, `execEntry.StartDate`/`StopDate`,
+  `actEntry.CreationDate`) changed from `string` to `float64`. Fixes the companion timestamp
+  issue noted in #242.
+
+### Added
+
+- **`EpochSeconds` type** (`epochseconds.go`): New package-level type that wraps `time.Time`
+  and marshals/unmarshals as JSON float64 epoch seconds, with RFC3339 string fallback on
+  unmarshal for backward-compatible state reads.
+
 ## [v0.44.2] - 2026-03-19
 
 ### Added

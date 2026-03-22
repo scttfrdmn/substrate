@@ -358,7 +358,7 @@ func (p *ECSPlugin) registerTaskDefinition(ctx *RequestContext, req *AWSRequest)
 		ExecutionRoleArn:        body.ExecutionRoleArn,
 		TaskRoleArn:             body.TaskRoleArn,
 		Tags:                    body.Tags,
-		RegisteredAt:            p.tc.Now(),
+		RegisteredAt:            EpochSeconds(p.tc.Now()),
 		AccountID:               ctx.AccountID,
 		Region:                  ctx.Region,
 	}
@@ -581,7 +581,7 @@ func (p *ECSPlugin) createService(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		Status:         "ACTIVE",
 		LaunchType:     body.LaunchType,
 		Tags:           body.Tags,
-		CreatedAt:      p.tc.Now(),
+		CreatedAt:      EpochSeconds(p.tc.Now()),
 		ClusterName:    clusterName,
 		AccountID:      ctx.AccountID,
 		Region:         ctx.Region,
@@ -819,7 +819,7 @@ func (p *ECSPlugin) runTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			LastStatus:        "RUNNING",
 			DesiredStatus:     "RUNNING",
 			LaunchType:        body.LaunchType,
-			StartedAt:         p.tc.Now(),
+			StartedAt:         EpochSeconds(p.tc.Now()),
 			Tags:              body.Tags,
 			AccountID:         ctx.AccountID,
 			Region:            ctx.Region,
@@ -886,7 +886,7 @@ func (p *ECSPlugin) stopTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 
 	task.LastStatus = "STOPPED"
 	task.DesiredStatus = "STOPPED"
-	task.StoppedAt = p.tc.Now()
+	task.StoppedAt = EpochSeconds(p.tc.Now())
 	task.StoppedReason = body.StoppedReason
 
 	updated, err := json.Marshal(task)

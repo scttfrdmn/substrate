@@ -1,6 +1,6 @@
 package substrate
 
-import "time"
+// No imports needed — EpochSeconds is defined in epochseconds.go in this package.
 
 // ecsNamespace is the state namespace for ECS.
 const ecsNamespace = "ecs"
@@ -35,7 +35,7 @@ type ECSTaskDefinition struct {
 	ExecutionRoleArn        string        `json:"executionRoleArn,omitempty"`
 	TaskRoleArn             string        `json:"taskRoleArn,omitempty"`
 	Tags                    []ECSTag      `json:"tags,omitempty"`
-	RegisteredAt            time.Time     `json:"registeredAt"`
+	RegisteredAt            EpochSeconds  `json:"registeredAt"`
 	AccountID               string        `json:"AccountID"`
 	Region                  string        `json:"Region"`
 }
@@ -51,7 +51,7 @@ type ECSService struct {
 	Status         string    `json:"status"`               // ACTIVE, DRAINING, INACTIVE
 	LaunchType     string    `json:"launchType,omitempty"` // FARGATE, EC2
 	Tags           []ECSTag  `json:"tags,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
+	CreatedAt      EpochSeconds `json:"createdAt"`
 	ClusterName    string    `json:"clusterName"`
 	AccountID      string    `json:"AccountID"`
 	Region         string    `json:"Region"`
@@ -65,8 +65,8 @@ type ECSTask struct {
 	LastStatus        string    `json:"lastStatus"` // PROVISIONING, RUNNING, STOPPED
 	DesiredStatus     string    `json:"desiredStatus"`
 	LaunchType        string    `json:"launchType,omitempty"`
-	StartedAt         time.Time `json:"startedAt,omitempty"`
-	StoppedAt         time.Time `json:"stoppedAt,omitempty"`
+	StartedAt         EpochSeconds `json:"startedAt,omitempty"`
+	StoppedAt         EpochSeconds `json:"stoppedAt,omitempty"`
 	StoppedReason     string    `json:"stoppedReason,omitempty"`
 	Tags              []ECSTag  `json:"tags,omitempty"`
 	AccountID         string    `json:"AccountID"`
