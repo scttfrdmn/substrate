@@ -217,6 +217,8 @@ var targetServiceAliases = map[string]string{
 	// "AWSStepFunctions" → lowercase → "awsstepfunctions" → "states".
 	// aws-sdk-go-v2 sfn serializers use "AWSStepFunctions" as the X-Amz-Target prefix.
 	"awsstepfunctions": "states",
+	// aws-sdk-go-v2 EMR Serverless uses "emr-serverless" as the SigV4 signing name.
+	"emr-serverless": "emrserverless",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
