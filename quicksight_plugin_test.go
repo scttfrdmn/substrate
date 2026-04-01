@@ -80,7 +80,7 @@ func TestQuickSightPlugin_CreateDataSource_ReturnsARN(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
 	resp := qsRequest(t, ts, http.MethodPost,
-		"/accounts/"+qsAccountID+"/datasources",
+		"/accounts/"+qsAccountID+"/data-sources",
 		map[string]string{
 			"DataSourceId": "ds-001",
 			"Name":         "My S3 Source",
@@ -113,12 +113,12 @@ func TestQuickSightPlugin_DescribeDataSource_Existing(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
 	// Create first
-	r := qsRequest(t, ts, http.MethodPost, "/accounts/"+qsAccountID+"/datasources",
+	r := qsRequest(t, ts, http.MethodPost, "/accounts/"+qsAccountID+"/data-sources",
 		map[string]string{"DataSourceId": "ds-002", "Name": "Src2", "Type": "ATHENA"})
 	qsBody(t, r)
 
 	// Describe
-	resp := qsRequest(t, ts, http.MethodGet, "/accounts/"+qsAccountID+"/datasources/ds-002", nil)
+	resp := qsRequest(t, ts, http.MethodGet, "/accounts/"+qsAccountID+"/data-sources/ds-002", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", resp.StatusCode, qsBody(t, resp))
 	}
@@ -143,7 +143,7 @@ func TestQuickSightPlugin_DescribeDataSource_Existing(t *testing.T) {
 func TestQuickSightPlugin_DescribeDataSource_Missing(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
-	resp := qsRequest(t, ts, http.MethodGet, "/accounts/"+qsAccountID+"/datasources/nonexistent", nil)
+	resp := qsRequest(t, ts, http.MethodGet, "/accounts/"+qsAccountID+"/data-sources/nonexistent", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
@@ -155,7 +155,7 @@ func TestQuickSightPlugin_CreateDataSet(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
 	resp := qsRequest(t, ts, http.MethodPost,
-		"/accounts/"+qsAccountID+"/datasets",
+		"/accounts/"+qsAccountID+"/data-sets",
 		map[string]string{
 			"DataSetId": "set-001",
 			"Name":      "My Dataset",
@@ -184,7 +184,7 @@ func TestQuickSightPlugin_DescribeIngestion_Existing(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
 	// CreateDataSet
-	r := qsRequest(t, ts, http.MethodPost, "/accounts/"+qsAccountID+"/datasets",
+	r := qsRequest(t, ts, http.MethodPost, "/accounts/"+qsAccountID+"/data-sets",
 		map[string]string{"DataSetId": "set-002", "Name": "DS2"})
 	var cr struct {
 		IngestionId string `json:"IngestionId"`
@@ -195,7 +195,7 @@ func TestQuickSightPlugin_DescribeIngestion_Existing(t *testing.T) {
 
 	// DescribeIngestion
 	resp := qsRequest(t, ts, http.MethodGet,
-		"/accounts/"+qsAccountID+"/datasets/set-002/ingestions/"+cr.IngestionId, nil)
+		"/accounts/"+qsAccountID+"/data-sets/set-002/ingestions/"+cr.IngestionId, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", resp.StatusCode, qsBody(t, resp))
 	}
@@ -224,7 +224,7 @@ func TestQuickSightPlugin_DescribeIngestion_MissingDataSet(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
 	resp := qsRequest(t, ts, http.MethodGet,
-		"/accounts/"+qsAccountID+"/datasets/no-such-set/ingestions/ing-001", nil)
+		"/accounts/"+qsAccountID+"/data-sets/no-such-set/ingestions/ing-001", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}

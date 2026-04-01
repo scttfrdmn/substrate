@@ -2546,3 +2546,63 @@ func TestDynamoDBPlugin_EmptyStringAttribute(t *testing.T) {
 		t.Errorf("expected 'S' key in comment attribute value, got: %v", commentAV)
 	}
 }
+
+// TestDynamoDBPlugin_EmptyStringAttribute_Scan verifies that flat top-level
+// empty string attributes round-trip correctly through PutItem / Scan (#254).
+// Before fix: {"S":""} was serialised as {} by json omitempty, so a Scan
+// would return {} for those attributes and boto3's TypeDeserializer would
+// raise "Value must be a nonempty dictionary whose key is a valid dynamodb type".
+func TestDynamoDBPlugin_EmptyStringAttribute_Scan(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	// Create table.
+	dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName": "empstr-scan-table",
+		"AttributeDefinitions": []any{
+			map[string]any{"AttributeName": "slug", "AttributeType": "S"},
+		},
+		"KeySchema": []any{
+			map[string]any{"AttributeName": "slug", "KeyType": "HASH"},
+		},
+		"BillingMode": "PAY_PER_REQUEST",
+	})
+
+	// PutItem with flat top-level empty string attributes (mirrors issue #254 repro).
+	putResp := dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "empstr-scan-table",
+		"Item": map[string]any{
+			"slug":        map[string]any{"S": "item1"},
+			"registryUrl": map[string]any{"S": ""},
+			"documentation": map[string]any{"S": ""},
+		},
+	})
+	assert.Equal(t, http.StatusOK, putResp.StatusCode)
+
+	// Scan the table.
+	scanResp := dynamodbRequest(t, srv, "Scan", map[string]any{
+		"TableName": "empstr-scan-table",
+	})
+	assert.Equal(t, http.StatusOK, scanResp.StatusCode)
+
+	var raw map[string]any
+	decodeDynamoJSON(t, scanResp, &raw)
+	itemsRaw, _ := raw["Items"].([]any)
+	if len(itemsRaw) == 0 {
+		t.Fatal("Scan returned no items")
+	}
+	item0, _ := itemsRaw[0].(map[string]any)
+
+	// Verify registryUrl has {"S": ""} — not {} — so boto3 TypeDeserializer succeeds.
+	registryAV, _ := item0["registryUrl"].(map[string]any)
+	if _, ok := registryAV["S"]; !ok {
+		t.Errorf("registryUrl: expected {\"S\":\"\"} but got %v — empty string was lost in scan response", registryAV)
+	}
+	if v, _ := registryAV["S"].(string); v != "" {
+		t.Errorf("registryUrl.S: expected empty string, got %q", v)
+	}
+
+	docAV, _ := item0["documentation"].(map[string]any)
+	if _, ok := docAV["S"]; !ok {
+		t.Errorf("documentation: expected {\"S\":\"\"} but got %v — empty string was lost in scan response", docAV)
+	}
+}

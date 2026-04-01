@@ -79,9 +79,9 @@ func parseQuickSightOperation(method, path string) (op, accountID, resourceID, s
 	acctID := rest[:slashIdx]
 	rest = rest[slashIdx+1:]
 
-	// datasources[/{dataSourceId}]
-	if strings.HasPrefix(rest, "datasources") {
-		suffix := strings.TrimPrefix(rest, "datasources")
+	// data-sources[/{dataSourceId}]
+	if strings.HasPrefix(rest, "data-sources") {
+		suffix := strings.TrimPrefix(rest, "data-sources")
 		suffix = strings.TrimPrefix(suffix, "/")
 		if suffix == "" {
 			if method == "POST" {
@@ -94,16 +94,16 @@ func parseQuickSightOperation(method, path string) (op, accountID, resourceID, s
 		}
 	}
 
-	// datasets[/{dataSetId}/ingestions/{ingestionId}]
-	if strings.HasPrefix(rest, "datasets") {
-		suffix := strings.TrimPrefix(rest, "datasets")
+	// data-sets[/{dataSetId}/ingestions/{ingestionId}]
+	if strings.HasPrefix(rest, "data-sets") {
+		suffix := strings.TrimPrefix(rest, "data-sets")
 		suffix = strings.TrimPrefix(suffix, "/")
 		if suffix == "" {
 			if method == "POST" {
 				return "CreateDataSet", acctID, "", ""
 			}
 		} else {
-			// /datasets/{dataSetId}/ingestions/{ingestionId}
+			// /data-sets/{dataSetId}/ingestions/{ingestionId}
 			if ingIdx := strings.Index(suffix, "/ingestions/"); ingIdx >= 0 {
 				dsID := suffix[:ingIdx]
 				ingID := suffix[ingIdx+len("/ingestions/"):]

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.5] - 2026-04-01
+
+### Fixed
+
+- **QuickSight path routing (#255)**: `parseQuickSightOperation` used the
+  path prefix `datasources` but the AWS QuickSight REST API uses `data-sources`
+  (with a hyphen). Calls to `create_data_source` and `describe_data_source`
+  via boto3 were returning `InvalidAction: QuickSightPlugin: unsupported path`.
+  Fixed by updating the prefix to `data-sources` and `data-sets`; updated
+  existing tests to use the correct API paths.
+- **DynamoDB empty-string attributes in Scan (#254)**: Added `Scan`-specific
+  test (`TestDynamoDBPlugin_EmptyStringAttribute_Scan`) verifying that flat
+  top-level `{"S":""}` attributes survive the `PutItem → Scan` round-trip.
+  The root fix was applied in v0.45.3 (#252); this test documents and guards
+  the Scan code path that boto3's resource `Table.scan()` exercises.
+- **Config loader viper no-extension file detection**: Removed redundant
+  `SetConfigType("yaml")` from `LoadConfig`; with `SetConfigName("substrate")`
+  viper already searches for `substrate.yaml` via extension lookup and the extra
+  `SetConfigType` caused viper to also attempt to open extension-less files
+  (e.g., a locally built `./substrate` binary), producing a YAML parse error
+  that failed `TestLoadConfig_Defaults` and `TestLoadConfig_EnvOverride`.
+
 ## [v0.45.4] - 2026-04-01
 
 ### Added
@@ -1430,4 +1452,6 @@ all changes onto the v0.44.x line.
 [v0.45.1]: https://github.com/scttfrdmn/substrate/compare/v0.45.0...v0.45.1
 [v0.45.2]: https://github.com/scttfrdmn/substrate/compare/v0.45.1...v0.45.2
 [v0.45.3]: https://github.com/scttfrdmn/substrate/compare/v0.45.2...v0.45.3
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.3...HEAD
+[v0.45.4]: https://github.com/scttfrdmn/substrate/compare/v0.45.3...v0.45.4
+[v0.45.5]: https://github.com/scttfrdmn/substrate/compare/v0.45.4...v0.45.5
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.5...HEAD

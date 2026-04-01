@@ -500,7 +500,6 @@ func LoadConfig(path string) (*Config, error) {
 		v.SetConfigFile(path)
 	} else {
 		v.SetConfigName("substrate")
-		v.SetConfigType("yaml")
 		v.AddConfigPath(".")
 	}
 
