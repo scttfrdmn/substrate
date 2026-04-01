@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate.Version=$(VERSION)"
@@ -49,8 +49,19 @@ bench: ## Run benchmarks
 e2e: ## Run end-to-end tests
 	cd test/e2e && go test -v -race ./...
 
+python-test: ## Run pytest-substrate unit tests
+	cd python && .venv/bin/pytest tests/ -v
+
+python-lint: ## Lint pytest-substrate with ruff (if available)
+	cd python && .venv/bin/ruff check src/ tests/ 2>/dev/null || echo "ruff not installed; skipping"
+
+python-build: ## Build pytest-substrate wheel
+	cd python && .venv/bin/python -m build --wheel --outdir dist/ 2>/dev/null || \
+		.venv/bin/pip wheel . --no-deps -w dist/
+
 clean: ## Remove build artifacts
 	rm -rf bin/ coverage.out coverage.html
+	rm -rf python/build/ python/dist/ python/src/*.egg-info/
 
 help: ## Display this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \

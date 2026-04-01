@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.4] - 2026-04-01
+
+### Added
+
+- **pytest-substrate Python package** (`python/`): Incorporated the `pytest-substrate`
+  plugin into the project with proper build hygiene and test coverage.
+  - Added `python/tests/test_server.py` (16 tests) covering `SubstrateServer._find_binary`
+    (env var, home-dir candidate, PATH fallback, not-found error), `_free_port`,
+    `start`/`stop` lifecycle, `_wait_healthy` retry/timeout behaviour, and `reset_state`
+    HTTP POST + error handling — all using `unittest.mock`, no real binary required.
+  - Added `python/tests/test_plugin.py` (4 tests) covering fixture registration and
+    env-var patching.
+  - Added `[tool.pytest.ini_options]` to `python/pyproject.toml` to point pytest at
+    `tests/`.
+  - Added `python-test`, `python-lint`, and `python-build` Makefile targets.
+  - Updated `.gitignore` to exclude `python/.venv/`, `python/build/`, `python/dist/`,
+    `python/src/*.egg-info/`, and `__pycache__/` artifacts.
+  - Removed previously committed build artifacts (`python/build/`, `__pycache__/`,
+    `python/src/pytest_substrate.egg-info/`) from git tracking.
+
 ## [v0.45.3] - 2026-04-01
 
 ### Added

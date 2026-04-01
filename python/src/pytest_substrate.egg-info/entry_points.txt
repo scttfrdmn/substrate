@@ -1,2 +1,0 @@
-[pytest11]
-substrate = pytest_substrate.plugin
