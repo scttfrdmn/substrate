@@ -152,6 +152,8 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getBucketLifecycleConfiguration(ctx, req, bucket)
 	case "DeleteBucketLifecycle":
 		return p.deleteBucketLifecycle(ctx, req, bucket)
+	case "SelectObjectContent":
+		return p.selectObjectContent(ctx, req, bucket, key)
 	default:
 		return nil, &AWSError{
 			Code:       "NotImplemented",
@@ -299,6 +301,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if req.Params["uploadId"] != "" {
 				return bucket, key, "CompleteMultipartUpload"
+			}
+			if _, ok := req.Params["select"]; ok {
+				return bucket, key, "SelectObjectContent"
 			}
 		}
 	}

@@ -544,5 +544,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(bedrockRuntimePlugin)
 
+	athenaPlugin := &AthenaPlugin{}
+	if err := athenaPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize athena plugin: %w", err)
+	}
+	registry.Register(athenaPlugin)
+
 	return nil
 }

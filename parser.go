@@ -219,6 +219,9 @@ var targetServiceAliases = map[string]string{
 	"awsstepfunctions": "states",
 	// aws-sdk-go-v2 EMR Serverless uses "emr-serverless" as the SigV4 signing name.
 	"emr-serverless": "emrserverless",
+	// "AmazonAthena" → strip "Amazon" → "athena" (already correct, but alias
+	// ensures host-based routing of "athena.*" also resolves correctly).
+	"amazonathena": "athena",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

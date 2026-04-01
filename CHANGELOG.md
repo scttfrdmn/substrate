@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.2] - 2026-03-31
+
+### Added
+
+- **Amazon Athena plugin** (`athena_plugin.go`): New `AthenaPlugin` covering
+  `StartQueryExecution`, `GetQueryExecution`, `GetQueryResults`, and
+  `StopQueryExecution` via the JSON-target protocol (`AmazonAthena.{Op}`) on
+  `athena.{region}.amazonaws.com`. Queries immediately transition to `SUCCEEDED`
+  (deterministic), so polling loops exit on the first `GetQueryExecution` call.
+  `GetQueryResults` returns an empty result set (stub; no SQL execution). State
+  namespace `"athena"`, key `query:{acct}/{region}/{id}`. Parser alias
+  `"amazonathena" → "athena"` added. Cost: `athena/StartQueryExecution = $0.000005`.
+  Closes #249.
+- **S3 SelectObjectContent** (`s3_select.go`): New `selectObjectContent` handler on
+  `S3Plugin`. Accepts `POST /{bucket}/{key}?select&select-type=2` with an XML request
+  body defining the SQL expression, input format (CSV with `FileHeaderInfo=USE`, or
+  JSON Lines), and output serialisation. Evaluates a simplified SQL expression
+  (`SELECT *` with optional `WHERE col = 'val'` and `LIMIT n`). Response is an AWS
+  binary event stream (`application/vnd.amazon.eventstream`) containing Records,
+  Stats, and End event frames with correct CRC32 checksums. Cost:
+  `s3/SelectObjectContent = $0.0000004`. Closes #250.
+
 ## [v0.45.1] - 2026-04-01
 
 ### Added
@@ -1357,4 +1379,5 @@ all changes onto the v0.44.x line.
 [v0.44.4]: https://github.com/scttfrdmn/substrate/compare/v0.44.3...v0.44.4
 [v0.45.0]: https://github.com/scttfrdmn/substrate/compare/v0.44.4...v0.45.0
 [v0.45.1]: https://github.com/scttfrdmn/substrate/compare/v0.45.0...v0.45.1
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.1...HEAD
+[v0.45.2]: https://github.com/scttfrdmn/substrate/compare/v0.45.1...v0.45.2
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.2...HEAD

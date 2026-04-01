@@ -199,6 +199,10 @@ func defaultCostTable() map[string]float64 {
 		"quicksight/CreateDataSet":    0.000025,
 		// Bedrock Runtime: per guardrail evaluation unit.
 		"bedrock-runtime/ApplyGuardrail": 0.000075,
+		// Athena: per query execution ($5/TB scanned, stub approximation).
+		"athena/StartQueryExecution": 0.000005,
+		// S3 Select: per query request.
+		"s3/SelectObjectContent": 0.0000004,
 	}
 }
 
