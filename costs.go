@@ -194,6 +194,11 @@ func defaultCostTable() map[string]float64 {
 		"emrserverless/CreateApplication": 0.00001,
 		// HealthOmics: per workflow run started.
 		"omics/StartRun": 0.001,
+		// QuickSight: per data source and dataset created.
+		"quicksight/CreateDataSource": 0.000025,
+		"quicksight/CreateDataSet":    0.000025,
+		// Bedrock Runtime: per guardrail evaluation unit.
+		"bedrock-runtime/ApplyGuardrail": 0.000075,
 	}
 }
 

@@ -524,5 +524,25 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(omicsPlugin)
 
+	quickSightPlugin := &QuickSightPlugin{}
+	if err := quickSightPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize quicksight plugin: %w", err)
+	}
+	registry.Register(quickSightPlugin)
+
+	bedrockRuntimePlugin := &BedrockRuntimePlugin{}
+	if err := bedrockRuntimePlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize bedrock-runtime plugin: %w", err)
+	}
+	registry.Register(bedrockRuntimePlugin)
+
 	return nil
 }

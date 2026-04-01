@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.1] - 2026-04-01
+
+### Added
+
+- **Amazon QuickSight plugin** (`quicksight_plugin.go`): New `QuickSightPlugin` covering
+  `CreateDataSource`, `DescribeDataSource`, `CreateDataSet`, and `DescribeIngestion` via
+  REST/JSON on `quicksight.{region}.amazonaws.com`. Data sources are created with status
+  `CREATION_SUCCESSFUL`; datasets return an `IngestionId` UUID; ingestions immediately
+  report `COMPLETED` (deterministic). Missing resources return 404
+  `ResourceNotFoundException`. State namespace `"quicksight"`. Costs:
+  `quicksight/CreateDataSource = $0.000025`, `quicksight/CreateDataSet = $0.000025`.
+  Closes #247.
+- **Amazon Bedrock Runtime plugin** (`bedrock_runtime_plugin.go`): New
+  `BedrockRuntimePlugin` covering `ApplyGuardrail` via REST/JSON on
+  `bedrock-runtime.{region}.amazonaws.com`. Guardrails are auto-created on first call.
+  Default behaviour is pass-through (`action: NONE`, input text echoed). When a blocklist
+  is seeded under state key `guardrail:{accountId}/{guardrailId}/blocklist`, matching
+  content triggers `action: GUARDRAIL_INTERVENED` with a canned blocked-response message.
+  Supports both `INPUT` and `OUTPUT` sources. Costs:
+  `bedrock-runtime/ApplyGuardrail = $0.000075`. Closes #248.
+
 ## [v0.45.0] - 2026-03-21
 
 ### Added
@@ -1335,4 +1356,5 @@ all changes onto the v0.44.x line.
 [v0.44.3]: https://github.com/scttfrdmn/substrate/compare/v0.44.2...v0.44.3
 [v0.44.4]: https://github.com/scttfrdmn/substrate/compare/v0.44.3...v0.44.4
 [v0.45.0]: https://github.com/scttfrdmn/substrate/compare/v0.44.4...v0.45.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.0...HEAD
+[v0.45.1]: https://github.com/scttfrdmn/substrate/compare/v0.45.0...v0.45.1
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.1...HEAD
