@@ -35,6 +35,27 @@ type GlueDatabase struct {
 	CreatedAt time.Time `json:"CreatedAt"`
 }
 
+// GlueColumn represents a single column in a Glue table's StorageDescriptor.
+type GlueColumn struct {
+	// Name is the column name.
+	Name string `json:"Name"`
+
+	// Type is the Glue data type (e.g. "string", "int", "bigint").
+	Type string `json:"Type,omitempty"`
+
+	// Comment is an optional column comment.
+	Comment string `json:"Comment,omitempty"`
+}
+
+// GlueSerdeInfo holds serialization/deserialization information for a Glue table.
+type GlueSerdeInfo struct {
+	// SerializationLibrary is the fully qualified class name of the SerDe.
+	SerializationLibrary string `json:"SerializationLibrary,omitempty"`
+
+	// Parameters are SerDe-specific key-value parameters.
+	Parameters map[string]string `json:"Parameters,omitempty"`
+}
+
 // GlueTable represents an AWS Glue Data Catalog table.
 type GlueTable struct {
 	// Name is the name of the table.
@@ -52,6 +73,12 @@ type GlueTable struct {
 	// StorageDescriptor describes the physical storage of the table.
 	StorageDescriptor *GlueStorageDescriptor `json:"StorageDescriptor,omitempty"`
 
+	// PartitionKeys are the columns used as partition keys.
+	PartitionKeys []GlueColumn `json:"PartitionKeys,omitempty"`
+
+	// Parameters are table-level key-value metadata pairs.
+	Parameters map[string]string `json:"Parameters,omitempty"`
+
 	// Arn is the ARN of the table.
 	Arn string `json:"Arn"`
 
@@ -67,6 +94,9 @@ type GlueTable struct {
 
 // GlueStorageDescriptor describes the physical storage of a Glue table.
 type GlueStorageDescriptor struct {
+	// Columns are the column definitions of the table.
+	Columns []GlueColumn `json:"Columns,omitempty"`
+
 	// Location is the physical URI of the data (e.g. an S3 path).
 	Location string `json:"Location,omitempty"`
 
@@ -75,6 +105,9 @@ type GlueStorageDescriptor struct {
 
 	// OutputFormat is the output format class for the table.
 	OutputFormat string `json:"OutputFormat,omitempty"`
+
+	// SerdeInfo holds serialization library and parameters.
+	SerdeInfo *GlueSerdeInfo `json:"SerdeInfo,omitempty"`
 }
 
 // GlueConnection represents an AWS Glue connection.

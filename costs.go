@@ -203,6 +203,9 @@ func defaultCostTable() map[string]float64 {
 		"athena/StartQueryExecution": 0.000005,
 		// S3 Select: per query request.
 		"s3/SelectObjectContent": 0.0000004,
+		// OpenSearch: per document indexed.
+		"opensearch/IndexDocument": 0.0000001,
+		"opensearch/Bulk":          0.0000001,
 	}
 }
 

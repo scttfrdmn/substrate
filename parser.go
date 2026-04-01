@@ -222,6 +222,9 @@ var targetServiceAliases = map[string]string{
 	// "AmazonAthena" → strip "Amazon" → "athena" (already correct, but alias
 	// ensures host-based routing of "athena.*" also resolves correctly).
 	"amazonathena": "athena",
+	// OpenSearch Service uses SigV4 service name "es" or "aoss".
+	"es":   "opensearch",
+	"aoss": "opensearch",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
@@ -263,6 +266,15 @@ func extractServiceFromHost(host string) string {
 		return ""
 	}
 	host = strings.TrimSuffix(host, ".amazonaws.com")
+
+	// OpenSearch managed domain: {domain}.{region}.es (before .amazonaws.com strip)
+	// or OpenSearch Serverless: {domain}.{region}.aoss
+	if strings.Contains(host, ".es.") || strings.HasSuffix(host, ".es") {
+		return "opensearch"
+	}
+	if strings.Contains(host, ".aoss.") || strings.HasSuffix(host, ".aoss") {
+		return "opensearch"
+	}
 
 	// AppSync execution endpoint: {apiId}.appsync-api.{region}
 	if strings.Contains(host, ".appsync-api.") {

@@ -2476,3 +2476,73 @@ func TestDynamoDB_QueryBeginsWith(t *testing.T) {
 	decodeDynamoJSON(t, resp, &result)
 	assert.Equal(t, float64(2), result["Count"])
 }
+
+// TestDynamoDBPlugin_EmptyStringAttribute verifies that nested map attributes
+// with empty string values round-trip correctly through PutItem / GetItem (#252).
+func TestDynamoDBPlugin_EmptyStringAttribute(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	// Create table.
+	dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName": "empstr-table",
+		"AttributeDefinitions": []any{
+			map[string]any{"AttributeName": "pk", "AttributeType": "S"},
+		},
+		"KeySchema": []any{
+			map[string]any{"AttributeName": "pk", "KeyType": "HASH"},
+		},
+		"BillingMode": "PAY_PER_REQUEST",
+	})
+
+	// PutItem with nested map containing empty string values.
+	putResp := dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "empstr-table",
+		"Item": map[string]any{
+			"pk": map[string]any{"S": "row1"},
+			"schema": map[string]any{
+				"M": map[string]any{
+					"columns": map[string]any{
+						"L": []any{
+							map[string]any{
+								"M": map[string]any{
+									"name":    map[string]any{"S": "gene"},
+									"type":    map[string]any{"S": "string"},
+									"comment": map[string]any{"S": ""},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	assert.Equal(t, http.StatusOK, putResp.StatusCode)
+
+	// GetItem and verify the empty string is preserved in the response.
+	getResp := dynamodbRequest(t, srv, "GetItem", map[string]any{
+		"TableName": "empstr-table",
+		"Key": map[string]any{
+			"pk": map[string]any{"S": "row1"},
+		},
+	})
+	assert.Equal(t, http.StatusOK, getResp.StatusCode)
+
+	var raw map[string]any
+	decodeDynamoJSON(t, getResp, &raw)
+	itemRaw, _ := raw["Item"].(map[string]any)
+	schemaRaw, _ := itemRaw["schema"].(map[string]any)
+	schemaMRaw, _ := schemaRaw["M"].(map[string]any)
+	columnsRaw, _ := schemaMRaw["columns"].(map[string]any)
+	colsL, _ := columnsRaw["L"].([]any)
+	if len(colsL) == 0 {
+		t.Fatal("columns L list is empty — empty string attribute was likely lost")
+	}
+	col0, _ := colsL[0].(map[string]any)
+	col0M, _ := col0["M"].(map[string]any)
+	commentAV, _ := col0M["comment"].(map[string]any)
+	// Before fix: commentAV would be {} because {"S":""} was omitted by omitempty.
+	// After fix: commentAV should be {"S": ""}.
+	if _, ok := commentAV["S"]; !ok {
+		t.Errorf("expected 'S' key in comment attribute value, got: %v", commentAV)
+	}
+}

@@ -272,6 +272,8 @@ func (p *GluePlugin) createTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			Description       string                 `json:"Description"`
 			TableType         string                 `json:"TableType"`
 			StorageDescriptor *GlueStorageDescriptor `json:"StorageDescriptor"`
+			PartitionKeys     []GlueColumn           `json:"PartitionKeys"`
+			Parameters        map[string]string      `json:"Parameters"`
 		} `json:"TableInput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -285,6 +287,8 @@ func (p *GluePlugin) createTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Description:       input.TableInput.Description,
 		TableType:         input.TableInput.TableType,
 		StorageDescriptor: input.TableInput.StorageDescriptor,
+		PartitionKeys:     input.TableInput.PartitionKeys,
+		Parameters:        input.TableInput.Parameters,
 		Arn:               arn,
 		AccountID:         reqCtx.AccountID,
 		Region:            reqCtx.Region,
@@ -361,6 +365,8 @@ func (p *GluePlugin) updateTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			Name              string                 `json:"Name"`
 			Description       string                 `json:"Description"`
 			StorageDescriptor *GlueStorageDescriptor `json:"StorageDescriptor"`
+			PartitionKeys     []GlueColumn           `json:"PartitionKeys"`
+			Parameters        map[string]string      `json:"Parameters"`
 		} `json:"TableInput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -384,6 +390,12 @@ func (p *GluePlugin) updateTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	if input.TableInput.StorageDescriptor != nil {
 		tbl.StorageDescriptor = input.TableInput.StorageDescriptor
+	}
+	if len(input.TableInput.PartitionKeys) > 0 {
+		tbl.PartitionKeys = input.TableInput.PartitionKeys
+	}
+	if len(input.TableInput.Parameters) > 0 {
+		tbl.Parameters = input.TableInput.Parameters
 	}
 	updated, _ := json.Marshal(tbl)
 	if err := p.state.Put(goCtx, glueNamespace, key, updated); err != nil {

@@ -679,3 +679,108 @@ func TestGluePlugin_TaggingOperations(t *testing.T) {
 		t.Error("Env tag should have been removed")
 	}
 }
+
+// TestGluePlugin_GetTable_PreservesStorageDescriptorColumns verifies that CreateTable
+// preserves Columns, SerdeInfo, PartitionKeys, and Parameters through GetTable (#251).
+func TestGluePlugin_GetTable_PreservesStorageDescriptorColumns(t *testing.T) {
+	ts := newGlueTestServer(t)
+
+	// Create a database.
+	r := glueRequest(t, ts, "CreateDatabase", map[string]interface{}{
+		"DatabaseInput": map[string]interface{}{"Name": "mydb"},
+	})
+	glueBody(t, r)
+
+	// Create a table with full StorageDescriptor, PartitionKeys, and Parameters.
+	r = glueRequest(t, ts, "CreateTable", map[string]interface{}{
+		"DatabaseName": "mydb",
+		"TableInput": map[string]interface{}{
+			"Name":      "mytable",
+			"TableType": "EXTERNAL_TABLE",
+			"StorageDescriptor": map[string]interface{}{
+				"Columns": []interface{}{
+					map[string]interface{}{"Name": "gene", "Type": "string"},
+					map[string]interface{}{"Name": "chrom", "Type": "string"},
+				},
+				"Location":     "s3://my-bucket/data/",
+				"InputFormat":  "org.apache.hadoop.mapred.TextInputFormat",
+				"OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+				"SerdeInfo": map[string]interface{}{
+					"SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+					"Parameters":          map[string]interface{}{"field.delim": ","},
+				},
+			},
+			"PartitionKeys": []interface{}{
+				map[string]interface{}{"Name": "year", "Type": "string"},
+				map[string]interface{}{"Name": "month", "Type": "string"},
+			},
+			"Parameters": map[string]interface{}{
+				"recordCount": "1000000",
+				"EXTERNAL":    "TRUE",
+			},
+		},
+	})
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("CreateTable: expected 200, got %d; body: %s", r.StatusCode, glueBody(t, r))
+	}
+	glueBody(t, r)
+
+	// GetTable and verify all fields are preserved.
+	resp := glueRequest(t, ts, "GetTable", map[string]interface{}{
+		"DatabaseName": "mydb",
+		"Name":         "mytable",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GetTable: expected 200, got %d; body: %s", resp.StatusCode, glueBody(t, resp))
+	}
+	var result struct {
+		Table struct {
+			Name      string `json:"Name"`
+			TableType string `json:"TableType"`
+			StorageDescriptor struct {
+				Columns []struct {
+					Name string `json:"Name"`
+					Type string `json:"Type"`
+				} `json:"Columns"`
+				Location string `json:"Location"`
+				SerdeInfo struct {
+					SerializationLibrary string            `json:"SerializationLibrary"`
+					Parameters           map[string]string `json:"Parameters"`
+				} `json:"SerdeInfo"`
+			} `json:"StorageDescriptor"`
+			PartitionKeys []struct {
+				Name string `json:"Name"`
+				Type string `json:"Type"`
+			} `json:"PartitionKeys"`
+			Parameters map[string]string `json:"Parameters"`
+		} `json:"Table"`
+	}
+	if err := json.Unmarshal(glueBody(t, resp), &result); err != nil {
+		t.Fatalf("decode GetTable: %v", err)
+	}
+
+	tbl := result.Table
+	if tbl.TableType != "EXTERNAL_TABLE" {
+		t.Errorf("TableType: expected EXTERNAL_TABLE, got %q", tbl.TableType)
+	}
+	if len(tbl.StorageDescriptor.Columns) != 2 {
+		t.Errorf("Columns: expected 2, got %d", len(tbl.StorageDescriptor.Columns))
+	} else {
+		if tbl.StorageDescriptor.Columns[0].Name != "gene" {
+			t.Errorf("Columns[0].Name: expected gene, got %q", tbl.StorageDescriptor.Columns[0].Name)
+		}
+	}
+	if tbl.StorageDescriptor.SerdeInfo.SerializationLibrary == "" {
+		t.Error("SerdeInfo.SerializationLibrary: expected non-empty")
+	}
+	if len(tbl.PartitionKeys) != 2 {
+		t.Errorf("PartitionKeys: expected 2, got %d", len(tbl.PartitionKeys))
+	} else {
+		if tbl.PartitionKeys[0].Name != "year" {
+			t.Errorf("PartitionKeys[0].Name: expected year, got %q", tbl.PartitionKeys[0].Name)
+		}
+	}
+	if tbl.Parameters["recordCount"] != "1000000" {
+		t.Errorf("Parameters[recordCount]: expected 1000000, got %q", tbl.Parameters["recordCount"])
+	}
+}

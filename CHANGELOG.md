@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.3] - 2026-04-01
+
+### Added
+
+- **Amazon OpenSearch Service plugin** (`opensearch_plugin.go`): New `OpenSearchPlugin`
+  handling index lifecycle (`CreateIndex`, `DeleteIndex`, `GetIndex`), document operations
+  (`IndexDocument` via `PUT /{index}/_doc/{id}`, `GetDocument`, `DeleteDocument`), bulk
+  indexing (`Bulk`), search with query DSL (`match_all`, `term`, `terms`, `bool.must/
+  should/must_not`, `exists`, `range`, `match`), aggregations (`terms`, `cardinality`,
+  `value_count`, `sum`, `avg`, `max`, `min`), scroll pagination, and cluster health.
+  Routed via host patterns `*.es.amazonaws.com` / `*.aoss.amazonaws.com` and SigV4
+  aliases `"es"` and `"aoss"`. Documents stored under `doc:{index}/{id}` state keys;
+  scroll state under `scroll:{id}`. Auto-creates index on first `IndexDocument` call.
+  Closes #253.
+
+### Fixed
+
+- **Glue `GetTable` drops `StorageDescriptor.Columns`, `SerdeInfo`, `PartitionKeys`,
+  `Parameters`**: `GlueStorageDescriptor` was missing `Columns []GlueColumn` and
+  `SerdeInfo *GlueSerdeInfo`; `GlueTable` was missing `PartitionKeys []GlueColumn` and
+  `Parameters map[string]string`. All four fields are now persisted through `CreateTable`
+  and `UpdateTable` and returned by `GetTable`. Closes #251.
+- **DynamoDB empty string attributes lost in nested maps**: `AttributeValue.S` was
+  `string json:"S,omitempty"` which caused `{"S":""}` to be serialised as `{}` during
+  state persistence. Changed to `*string` so that a pointer to `""` is preserved and
+  round-trips correctly. Fixes the boto3 `TypeError: Value must be a nonempty dictionary
+  whose key is a valid dynamodb type` error on `get_item` for items containing empty
+  string values. Closes #252.
+
 ## [v0.45.2] - 2026-03-31
 
 ### Added
@@ -1380,4 +1409,5 @@ all changes onto the v0.44.x line.
 [v0.45.0]: https://github.com/scttfrdmn/substrate/compare/v0.44.4...v0.45.0
 [v0.45.1]: https://github.com/scttfrdmn/substrate/compare/v0.45.0...v0.45.1
 [v0.45.2]: https://github.com/scttfrdmn/substrate/compare/v0.45.1...v0.45.2
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.2...HEAD
+[v0.45.3]: https://github.com/scttfrdmn/substrate/compare/v0.45.2...v0.45.3
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.3...HEAD

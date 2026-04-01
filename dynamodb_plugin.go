@@ -247,13 +247,21 @@ func extractPrimaryKey(item map[string]*AttributeValue, keySchema []DynamoDBKeyS
 	return pkAttr, pkVal, skAttr, skVal, nil
 }
 
+// avS safely dereferences an AttributeValue's S pointer, returning "" if nil.
+func avS(av *AttributeValue) string {
+	if av == nil || av.S == nil {
+		return ""
+	}
+	return *av.S
+}
+
 // avToString returns a string representation of an AttributeValue for key usage.
 func avToString(av *AttributeValue) string {
 	if av == nil {
 		return ""
 	}
-	if av.S != "" {
-		return av.S
+	if av.S != nil {
+		return *av.S
 	}
 	if av.N != "" {
 		return av.N
@@ -1907,7 +1915,7 @@ func (e *condEvaluator) evalPrimary() (bool, error) {
 			if av1 == nil || av2 == nil {
 				return false, nil
 			}
-			return strings.HasPrefix(av1.S, av2.S), nil
+			return strings.HasPrefix(avS(av1), avS(av2)), nil
 
 		case "contains":
 			e.next()
@@ -1934,12 +1942,12 @@ func (e *condEvaluator) evalPrimary() (bool, error) {
 			if av1 == nil || av2 == nil {
 				return false, nil
 			}
-			if av1.S != "" {
-				return strings.Contains(av1.S, av2.S), nil
+			if av1.S != nil {
+				return strings.Contains(*av1.S, avS(av2)), nil
 			}
 			// Check list contains.
 			for _, elem := range av1.L {
-				if elem != nil && elem.S == av2.S && av2.S != "" {
+				if elem != nil && elem.S != nil && av2.S != nil && *elem.S == *av2.S {
 					return true, nil
 				}
 			}
@@ -1970,7 +1978,7 @@ func (e *condEvaluator) evalPrimary() (bool, error) {
 			if av1 == nil || av2 == nil {
 				return false, nil
 			}
-			return avTypeName(av1) == av2.S, nil
+			return av2.S != nil && avTypeName(av1) == *av2.S, nil
 
 		case "size":
 			// size(path) op value — evaluated as comparison operand below
@@ -2246,7 +2254,7 @@ func avTypeName(av *AttributeValue) string {
 		return ""
 	}
 	switch {
-	case av.S != "":
+	case av.S != nil:
 		return "S"
 	case av.N != "":
 		return "N"
@@ -2276,8 +2284,8 @@ func avSize(av *AttributeValue) int {
 		return 0
 	}
 	switch {
-	case av.S != "":
-		return len(av.S)
+	case av.S != nil:
+		return len(*av.S)
 	case av.N != "":
 		return len(av.N)
 	case len(av.B) > 0:

@@ -554,5 +554,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(athenaPlugin)
 
+	openSearchPlugin := &OpenSearchPlugin{}
+	if err := openSearchPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize opensearch plugin: %w", err)
+	}
+	registry.Register(openSearchPlugin)
+
 	return nil
 }
