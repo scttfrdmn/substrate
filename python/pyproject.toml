@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytest-substrate"
+version = "0.1.0"
+description = "pytest plugin for the substrate AWS emulator"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+authors = [
+    {name = "Scott Friedman"},
+]
+dependencies = ["pytest>=7.0"]
+
+[project.entry-points."pytest11"]
+substrate = "pytest_substrate.plugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]
