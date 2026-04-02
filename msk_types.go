@@ -52,3 +52,31 @@ type MSKEBSStorageInfo struct {
 	// VolumeSize is the size of the EBS volume in GiB.
 	VolumeSize int `json:"VolumeSize"`
 }
+
+// MSKNodeInfo describes a single broker node returned by ListNodes.
+type MSKNodeInfo struct {
+	// BrokerNodeInfo holds broker-specific details.
+	BrokerNodeInfo MSKBrokerNodeInfo `json:"BrokerNodeInfo"`
+	// InstanceType is the EC2 instance type for this broker.
+	InstanceType string `json:"InstanceType"`
+	// NodeARN is the Amazon Resource Name of the broker node.
+	NodeARN string `json:"NodeArn"`
+	// NodeType is always "BROKER" for MSK clusters.
+	NodeType string `json:"NodeType"`
+}
+
+// MSKBrokerNodeInfo holds broker-level details returned by ListNodes.
+type MSKBrokerNodeInfo struct {
+	// BrokerId is the numeric broker identifier (1-based).
+	BrokerId float64 `json:"BrokerId"`
+	// ClientSubnet is the subnet the broker is placed in.
+	ClientSubnet string `json:"ClientSubnet"`
+	// CurrentBrokerSoftwareInfo holds the software version running on the broker.
+	CurrentBrokerSoftwareInfo MSKBrokerSoftwareInfo `json:"CurrentBrokerSoftwareInfo"`
+}
+
+// MSKBrokerSoftwareInfo holds software version information for a broker node.
+type MSKBrokerSoftwareInfo struct {
+	// KafkaVersion is the Apache Kafka version running on the broker.
+	KafkaVersion string `json:"KafkaVersion"`
+}

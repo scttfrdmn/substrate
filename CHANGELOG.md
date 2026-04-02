@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.55.0] - 2026-04-02
+
+### Added
+- **MSK plugin completion (#276)**: Added four missing MSK operations to complete the plugin. `CreateClusterV2` (`POST /api/v2/clusters`) accepts the V2 request shape where broker configuration is nested inside a `Provisioned` sub-object and falls back to top-level fields for backward compatibility. `DescribeClusterV2` (`GET /api/v2/clusters/{arn}`) returns the V2 `ClusterInfo` shape including `ClusterType: "PROVISIONED"` and a `Provisioned` sub-object with `BrokerNodeGroupInfo`, `CurrentBrokerSoftwareInfo`, and `NumberOfBrokerNodes`. `ListClustersV2` (`GET /api/v2/clusters`) returns all clusters in the same V2 shape. `ListNodes` (`GET /v1/clusters/{arn}/nodes`) generates one `MSKNodeInfo` per broker node (1…`NumberOfBrokerNodes`), each with a synthetic node ARN, `NodeType: "BROKER"`, `BrokerId`, `ClientSubnet`, and `KafkaVersion`. Exported types `MSKNodeInfo`, `MSKBrokerNodeInfo`, and `MSKBrokerSoftwareInfo` added to `msk_types.go`.
+
 ## [v0.54.0] - 2026-04-02
 
 ### Added
@@ -1566,4 +1571,9 @@ all changes onto the v0.44.x line.
 [v0.48.0]: https://github.com/scttfrdmn/substrate/compare/v0.47.0...v0.48.0
 [v0.49.0]: https://github.com/scttfrdmn/substrate/compare/v0.48.0...v0.49.0
 [v0.50.0]: https://github.com/scttfrdmn/substrate/compare/v0.49.0...v0.50.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.50.0...HEAD
+[v0.51.0]: https://github.com/scttfrdmn/substrate/compare/v0.50.0...v0.51.0
+[v0.52.0]: https://github.com/scttfrdmn/substrate/compare/v0.51.0...v0.52.0
+[v0.53.0]: https://github.com/scttfrdmn/substrate/compare/v0.52.0...v0.53.0
+[v0.54.0]: https://github.com/scttfrdmn/substrate/compare/v0.53.0...v0.54.0
+[v0.55.0]: https://github.com/scttfrdmn/substrate/compare/v0.54.0...v0.55.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...HEAD

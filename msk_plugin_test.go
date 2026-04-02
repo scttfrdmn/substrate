@@ -212,3 +212,146 @@ func TestMSKPlugin_UnknownPath(t *testing.T) {
 		t.Fatal("want error for unknown path, got nil")
 	}
 }
+
+func TestMSKPlugin_CreateClusterV2_DescribeListV2(t *testing.T) {
+	p, ctx := setupMSKPlugin(t)
+
+	// CreateClusterV2 using Provisioned shape
+	resp, err := p.HandleRequest(ctx, mskRequest("POST", "/api/v2/clusters", map[string]any{
+		"ClusterName": "v2-kafka",
+		"Provisioned": map[string]any{
+			"BrokerNodeGroupInfo": map[string]any{
+				"InstanceType":  "kafka.m5.xlarge",
+				"ClientSubnets": []string{"subnet-a", "subnet-b"},
+			},
+			"KafkaVersion":        "3.6.0",
+			"NumberOfBrokerNodes": 2,
+		},
+	}))
+	if err != nil {
+		t.Fatalf("CreateClusterV2: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var created struct {
+		ClusterARN  string `json:"ClusterArn"`
+		ClusterName string `json:"ClusterName"`
+		State       string `json:"State"`
+	}
+	if err := json.Unmarshal(resp.Body, &created); err != nil {
+		t.Fatalf("unmarshal create v2 response: %v", err)
+	}
+	if created.ClusterARN == "" {
+		t.Error("want non-empty ClusterArn")
+	}
+	if created.ClusterName != "v2-kafka" {
+		t.Errorf("want ClusterName=v2-kafka, got %q", created.ClusterName)
+	}
+	if created.State != "ACTIVE" {
+		t.Errorf("want State=ACTIVE, got %q", created.State)
+	}
+
+	// DescribeClusterV2
+	resp, err = p.HandleRequest(ctx, mskRequest("GET", "/api/v2/clusters/"+created.ClusterARN, nil))
+	if err != nil {
+		t.Fatalf("DescribeClusterV2: %v", err)
+	}
+	var described struct {
+		ClusterInfo struct {
+			ClusterARN  string `json:"ClusterArn"`
+			ClusterName string `json:"ClusterName"`
+			ClusterType string `json:"ClusterType"`
+			State       string `json:"State"`
+			Provisioned struct {
+				NumberOfBrokerNodes int `json:"NumberOfBrokerNodes"`
+			} `json:"Provisioned"`
+		} `json:"ClusterInfo"`
+	}
+	if err := json.Unmarshal(resp.Body, &described); err != nil {
+		t.Fatalf("unmarshal describe v2: %v", err)
+	}
+	if described.ClusterInfo.ClusterType != "PROVISIONED" {
+		t.Errorf("want ClusterType=PROVISIONED, got %q", described.ClusterInfo.ClusterType)
+	}
+	if described.ClusterInfo.ClusterName != "v2-kafka" {
+		t.Errorf("want ClusterName=v2-kafka, got %q", described.ClusterInfo.ClusterName)
+	}
+	if described.ClusterInfo.Provisioned.NumberOfBrokerNodes != 2 {
+		t.Errorf("want NumberOfBrokerNodes=2, got %d", described.ClusterInfo.Provisioned.NumberOfBrokerNodes)
+	}
+
+	// ListClustersV2
+	resp, err = p.HandleRequest(ctx, mskRequest("GET", "/api/v2/clusters", nil))
+	if err != nil {
+		t.Fatalf("ListClustersV2: %v", err)
+	}
+	var listed struct {
+		ClusterInfoList []struct {
+			ClusterName string `json:"ClusterName"`
+			ClusterType string `json:"ClusterType"`
+		} `json:"ClusterInfoList"`
+	}
+	if err := json.Unmarshal(resp.Body, &listed); err != nil {
+		t.Fatalf("unmarshal list v2: %v", err)
+	}
+	if len(listed.ClusterInfoList) != 1 {
+		t.Errorf("want 1 cluster, got %d", len(listed.ClusterInfoList))
+	}
+	if listed.ClusterInfoList[0].ClusterType != "PROVISIONED" {
+		t.Errorf("want ClusterType=PROVISIONED, got %q", listed.ClusterInfoList[0].ClusterType)
+	}
+}
+
+func TestMSKPlugin_ListNodes(t *testing.T) {
+	p, ctx := setupMSKPlugin(t)
+
+	// CreateCluster with 3 broker nodes
+	resp, err := p.HandleRequest(ctx, mskRequest("POST", "/v1/clusters", map[string]any{
+		"ClusterName":         "node-kafka",
+		"KafkaVersion":        "3.5.1",
+		"NumberOfBrokerNodes": 3,
+		"BrokerNodeGroupInfo": map[string]any{
+			"InstanceType":  "kafka.m5.large",
+			"ClientSubnets": []string{"subnet-x"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	var created struct {
+		ClusterARN string `json:"ClusterArn"`
+	}
+	if err := json.Unmarshal(resp.Body, &created); err != nil {
+		t.Fatalf("unmarshal create: %v", err)
+	}
+
+	// ListNodes
+	resp, err = p.HandleRequest(ctx, mskRequest("GET", "/v1/clusters/"+created.ClusterARN+"/nodes", nil))
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	var nodes struct {
+		NodeInfoList []substrate.MSKNodeInfo `json:"NodeInfoList"`
+	}
+	if err := json.Unmarshal(resp.Body, &nodes); err != nil {
+		t.Fatalf("unmarshal nodes: %v", err)
+	}
+	if len(nodes.NodeInfoList) != 3 {
+		t.Fatalf("want 3 nodes, got %d", len(nodes.NodeInfoList))
+	}
+	for i, n := range nodes.NodeInfoList {
+		if n.NodeType != "BROKER" {
+			t.Errorf("node[%d] want NodeType=BROKER, got %q", i, n.NodeType)
+		}
+		if n.NodeARN == "" {
+			t.Errorf("node[%d] want non-empty NodeArn", i)
+		}
+		if n.BrokerNodeInfo.BrokerId == 0 {
+			t.Errorf("node[%d] want non-zero BrokerId", i)
+		}
+		if n.BrokerNodeInfo.CurrentBrokerSoftwareInfo.KafkaVersion == "" {
+			t.Errorf("node[%d] want non-empty KafkaVersion", i)
+		}
+	}
+}
