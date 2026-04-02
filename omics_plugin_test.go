@@ -128,7 +128,7 @@ func TestOmicsPlugin_StartGetCancelRun(t *testing.T) {
 	}
 	omicsBody(t, resp3)
 
-	// GetRun — status should be CANCELLED
+	// GetRun — status should be CANCELED
 	resp4 := omicsRequest(t, ts, http.MethodGet, "/run/"+runID, nil)
 	var afterCancel struct {
 		Status string `json:"status"`
@@ -136,8 +136,8 @@ func TestOmicsPlugin_StartGetCancelRun(t *testing.T) {
 	if err := json.Unmarshal(omicsBody(t, resp4), &afterCancel); err != nil {
 		t.Fatalf("decode after-cancel: %v", err)
 	}
-	if afterCancel.Status != "CANCELLED" {
-		t.Errorf("expected CANCELLED, got %q", afterCancel.Status)
+	if afterCancel.Status != "CANCELED" {
+		t.Errorf("expected CANCELED, got %q", afterCancel.Status)
 	}
 }
 

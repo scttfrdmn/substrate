@@ -116,8 +116,8 @@ func parseEMRServerlessOperation(method, path string) (op, appID, runID string) 
 
 // EMRServerlessApp holds persisted state for an EMR Serverless application.
 type EMRServerlessApp struct {
-	// ApplicationId is the unique identifier for the application.
-	ApplicationId string `json:"applicationId"`
+	// ApplicationID is the unique identifier for the application.
+	ApplicationID string `json:"applicationId"`
 
 	// Name is the user-supplied name.
 	Name string `json:"name"`
@@ -143,11 +143,11 @@ type EMRServerlessApp struct {
 
 // EMRServerlessJobRun holds persisted state for an EMR Serverless job run.
 type EMRServerlessJobRun struct {
-	// ApplicationId is the application this job run belongs to.
-	ApplicationId string `json:"applicationId"`
+	// ApplicationID is the application this job run belongs to.
+	ApplicationID string `json:"applicationId"`
 
-	// JobRunId is the unique identifier for the job run.
-	JobRunId string `json:"jobRunId"`
+	// JobRunID is the unique identifier for the job run.
+	JobRunID string `json:"jobRunId"`
 
 	// Name is an optional user-supplied name.
 	Name string `json:"name,omitempty"`
@@ -178,7 +178,7 @@ func (p *EMRServerlessPlugin) createApplication(ctx *RequestContext, req *AWSReq
 	appID := generateEMRServerlessAppID()
 	arn := fmt.Sprintf("arn:aws:emr-serverless:%s:%s:/applications/%s", ctx.Region, ctx.AccountID, appID)
 	app := EMRServerlessApp{
-		ApplicationId: appID,
+		ApplicationID: appID,
 		Name:          body.Name,
 		Type:          body.Type,
 		ReleaseLabel:  body.ReleaseLabel,
@@ -240,8 +240,8 @@ func (p *EMRServerlessPlugin) startJobRun(ctx *RequestContext, req *AWSRequest, 
 	arn := fmt.Sprintf("arn:aws:emr-serverless:%s:%s:/applications/%s/jobruns/%s",
 		ctx.Region, ctx.AccountID, appID, runID)
 	run := EMRServerlessJobRun{
-		ApplicationId: appID,
-		JobRunId:      runID,
+		ApplicationID: appID,
+		JobRunID:      runID,
 		Name:          body.Name,
 		State:         "SUCCESS",
 		Arn:           arn,
@@ -258,8 +258,8 @@ func (p *EMRServerlessPlugin) startJobRun(ctx *RequestContext, req *AWSRequest, 
 	if err := p.state.Put(goCtx, emrServerlessNamespace, runKey, data); err != nil {
 		return nil, fmt.Errorf("startJobRun: put: %w", err)
 	}
-	runIdsKey := "jobrun_ids:" + ctx.AccountID + "/" + ctx.Region + "/" + appID
-	updateStringIndex(goCtx, p.state, emrServerlessNamespace, runIdsKey, runID)
+	runIDsKey := "jobrun_ids:" + ctx.AccountID + "/" + ctx.Region + "/" + appID
+	updateStringIndex(goCtx, p.state, emrServerlessNamespace, runIDsKey, runID)
 	return emrServerlessJSONResponse(http.StatusOK, map[string]string{
 		"applicationId": appID,
 		"jobRunId":      runID,
@@ -292,7 +292,7 @@ func (p *EMRServerlessPlugin) cancelJobRun(ctx *RequestContext, _ *AWSRequest, a
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("cancelJobRun: unmarshal: %w", err)
 	}
-	run.State = "CANCELLED"
+	run.State = "CANCELED"
 	updated, _ := json.Marshal(run)
 	if err := p.state.Put(goCtx, emrServerlessNamespace, runKey, updated); err != nil {
 		return nil, fmt.Errorf("cancelJobRun: put: %w", err)
@@ -305,12 +305,12 @@ func (p *EMRServerlessPlugin) cancelJobRun(ctx *RequestContext, _ *AWSRequest, a
 
 func (p *EMRServerlessPlugin) listJobRuns(ctx *RequestContext, _ *AWSRequest, appID string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	runIdsKey := "jobrun_ids:" + ctx.AccountID + "/" + ctx.Region + "/" + appID
-	ids, _ := loadStringIndex(goCtx, p.state, emrServerlessNamespace, runIdsKey)
+	runIDsKey := "jobrun_ids:" + ctx.AccountID + "/" + ctx.Region + "/" + appID
+	ids, _ := loadStringIndex(goCtx, p.state, emrServerlessNamespace, runIDsKey)
 
 	type runSummary struct {
-		ApplicationId string `json:"applicationId"`
-		JobRunId      string `json:"jobRunId"`
+		ApplicationID string `json:"applicationId"`
+		JobRunID      string `json:"jobRunId"`
 		State         string `json:"state"`
 	}
 	summaries := make([]runSummary, 0, len(ids))
@@ -322,7 +322,7 @@ func (p *EMRServerlessPlugin) listJobRuns(ctx *RequestContext, _ *AWSRequest, ap
 		}
 		var run EMRServerlessJobRun
 		if json.Unmarshal(data, &run) == nil {
-			summaries = append(summaries, runSummary{ApplicationId: run.ApplicationId, JobRunId: run.JobRunId, State: run.State})
+			summaries = append(summaries, runSummary{ApplicationID: run.ApplicationID, JobRunID: run.JobRunID, State: run.State})
 		}
 	}
 	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRuns": summaries})

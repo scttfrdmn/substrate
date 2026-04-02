@@ -65,8 +65,8 @@ func (p *AthenaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 
 // AthenaQuery holds persisted state for an Athena query execution.
 type AthenaQuery struct {
-	// QueryExecutionId is the unique identifier for the query execution.
-	QueryExecutionId string `json:"QueryExecutionId"`
+	// QueryExecutionID is the unique identifier for the query execution.
+	QueryExecutionID string `json:"QueryExecutionId"`
 
 	// Query is the SQL query string.
 	Query string `json:"Query"`
@@ -77,7 +77,7 @@ type AthenaQuery struct {
 	// OutputLocation is the S3 output location for results.
 	OutputLocation string `json:"OutputLocation"`
 
-	// State is the query state (SUCCEEDED, CANCELLED, FAILED).
+	// State is the query state (SUCCEEDED, CANCELED, FAILED).
 	State string `json:"State"`
 
 	// SubmissionDateTime is the epoch-seconds timestamp of query submission.
@@ -117,7 +117,7 @@ func (p *AthenaPlugin) startQueryExecution(ctx *RequestContext, req *AWSRequest)
 	}
 
 	q := AthenaQuery{
-		QueryExecutionId:   qID,
+		QueryExecutionID:   qID,
 		Query:              body.QueryString,
 		WorkGroup:          wg,
 		OutputLocation:     outputLoc,
@@ -143,19 +143,19 @@ func (p *AthenaPlugin) startQueryExecution(ctx *RequestContext, req *AWSRequest)
 
 func (p *AthenaPlugin) getQueryExecution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		QueryExecutionId string `json:"QueryExecutionId"`
+		QueryExecutionID string `json:"QueryExecutionId"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.QueryExecutionId == "" {
+	if err := json.Unmarshal(req.Body, &body); err != nil || body.QueryExecutionID == "" {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "QueryExecutionId is required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	goCtx := context.Background()
-	key := "query:" + ctx.AccountID + "/" + ctx.Region + "/" + body.QueryExecutionId
+	key := "query:" + ctx.AccountID + "/" + ctx.Region + "/" + body.QueryExecutionID
 	data, err := p.state.Get(goCtx, athenaNamespace, key)
 	if err != nil || data == nil {
 		return nil, &AWSError{
 			Code:       "InvalidRequestException",
-			Message:    "Query execution " + body.QueryExecutionId + " not found",
+			Message:    "Query execution " + body.QueryExecutionID + " not found",
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
@@ -166,7 +166,7 @@ func (p *AthenaPlugin) getQueryExecution(ctx *RequestContext, req *AWSRequest) (
 
 	return athenaJSONResponse(http.StatusOK, map[string]interface{}{
 		"QueryExecution": map[string]interface{}{
-			"QueryExecutionId": q.QueryExecutionId,
+			"QueryExecutionId": q.QueryExecutionID,
 			"Query":            q.Query,
 			"WorkGroup":        q.WorkGroup,
 			"Status": map[string]interface{}{
@@ -183,20 +183,20 @@ func (p *AthenaPlugin) getQueryExecution(ctx *RequestContext, req *AWSRequest) (
 
 func (p *AthenaPlugin) getQueryResults(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		QueryExecutionId string `json:"QueryExecutionId"`
+		QueryExecutionID string `json:"QueryExecutionId"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.QueryExecutionId == "" {
+	if err := json.Unmarshal(req.Body, &body); err != nil || body.QueryExecutionID == "" {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "QueryExecutionId is required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	// Verify the query exists.
 	goCtx := context.Background()
-	key := "query:" + ctx.AccountID + "/" + ctx.Region + "/" + body.QueryExecutionId
+	key := "query:" + ctx.AccountID + "/" + ctx.Region + "/" + body.QueryExecutionID
 	data, err := p.state.Get(goCtx, athenaNamespace, key)
 	if err != nil || data == nil {
 		return nil, &AWSError{
 			Code:       "InvalidRequestException",
-			Message:    "Query execution " + body.QueryExecutionId + " not found",
+			Message:    "Query execution " + body.QueryExecutionID + " not found",
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
@@ -214,19 +214,19 @@ func (p *AthenaPlugin) getQueryResults(ctx *RequestContext, req *AWSRequest) (*A
 
 func (p *AthenaPlugin) stopQueryExecution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		QueryExecutionId string `json:"QueryExecutionId"`
+		QueryExecutionID string `json:"QueryExecutionId"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.QueryExecutionId == "" {
+	if err := json.Unmarshal(req.Body, &body); err != nil || body.QueryExecutionID == "" {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "QueryExecutionId is required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	goCtx := context.Background()
-	key := "query:" + ctx.AccountID + "/" + ctx.Region + "/" + body.QueryExecutionId
+	key := "query:" + ctx.AccountID + "/" + ctx.Region + "/" + body.QueryExecutionID
 	data, err := p.state.Get(goCtx, athenaNamespace, key)
 	if err != nil || data == nil {
 		return nil, &AWSError{
 			Code:       "InvalidRequestException",
-			Message:    "Query execution " + body.QueryExecutionId + " not found",
+			Message:    "Query execution " + body.QueryExecutionID + " not found",
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
@@ -234,7 +234,7 @@ func (p *AthenaPlugin) stopQueryExecution(ctx *RequestContext, req *AWSRequest) 
 	if err := json.Unmarshal(data, &q); err != nil {
 		return nil, fmt.Errorf("stopQueryExecution: unmarshal: %w", err)
 	}
-	q.State = "CANCELLED"
+	q.State = "CANCELED"
 	updated, _ := json.Marshal(q)
 	if err := p.state.Put(goCtx, athenaNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("stopQueryExecution: put: %w", err)

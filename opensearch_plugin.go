@@ -455,7 +455,7 @@ func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSRespo
 		Size      int      `json:"size"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
-		return openSearchError(http.StatusInternalServerError, "internal_error", "bad scroll state"), nil
+		return openSearchError(http.StatusInternalServerError, "internal_error", "bad scroll state"), nil //nolint:nilerr
 	}
 
 	size := state.Size

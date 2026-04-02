@@ -85,14 +85,14 @@ func parseOmicsOperation(method, path string) (op, runID string) {
 
 // OmicsRun holds persisted state for a HealthOmics workflow run.
 type OmicsRun struct {
-	// Id is the 10-digit numeric run identifier.
-	Id string `json:"id"`
+	// ID is the 10-digit numeric run identifier.
+	ID string `json:"id"`
 
 	// Status is the run status (COMPLETED for deterministic emulation).
 	Status string `json:"status"`
 
-	// WorkflowId is the workflow to run.
-	WorkflowId string `json:"workflowId,omitempty"`
+	// WorkflowID is the workflow to run.
+	WorkflowID string `json:"workflowId,omitempty"`
 
 	// WorkflowType is the workflow type (PRIVATE, READY2RUN).
 	WorkflowType string `json:"workflowType,omitempty"`
@@ -103,8 +103,8 @@ type OmicsRun struct {
 	// RoleArn is the IAM role ARN used by the run.
 	RoleArn string `json:"roleArn,omitempty"`
 
-	// OutputUri is the S3 URI for run outputs.
-	OutputUri string `json:"outputUri,omitempty"`
+	// OutputURI is the S3 URI for run outputs.
+	OutputURI string `json:"outputUri,omitempty"`
 
 	// StatusMessage is an optional human-readable status message.
 	StatusMessage string `json:"statusMessage,omitempty"`
@@ -131,13 +131,13 @@ func (p *OmicsPlugin) startRun(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	runID := p.generateOmicsRunID()
 	run := OmicsRun{
-		Id:           runID,
+		ID:           runID,
 		Status:       "COMPLETED",
-		WorkflowId:   body.WorkflowId,
+		WorkflowID:   body.WorkflowId,
 		WorkflowType: body.WorkflowType,
 		Name:         body.Name,
 		RoleArn:      body.RoleArn,
-		OutputUri:    body.OutputUri,
+		OutputURI:    body.OutputUri,
 		AccountID:    ctx.AccountID,
 		Region:       ctx.Region,
 	}
@@ -181,7 +181,7 @@ func (p *OmicsPlugin) cancelRun(ctx *RequestContext, _ *AWSRequest, runID string
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("cancelRun: unmarshal: %w", err)
 	}
-	run.Status = "CANCELLED"
+	run.Status = "CANCELED"
 	updated, _ := json.Marshal(run)
 	if err := p.state.Put(goCtx, omicsNamespace, runKey, updated); err != nil {
 		return nil, fmt.Errorf("cancelRun: put: %w", err)
@@ -195,7 +195,7 @@ func (p *OmicsPlugin) listRuns(ctx *RequestContext, _ *AWSRequest) (*AWSResponse
 	ids, _ := loadStringIndex(goCtx, p.state, omicsNamespace, idsKey)
 
 	type runItem struct {
-		Id     string `json:"id"`
+		ID     string `json:"id"`
 		Status string `json:"status"`
 		Name   string `json:"name,omitempty"`
 	}
@@ -208,7 +208,7 @@ func (p *OmicsPlugin) listRuns(ctx *RequestContext, _ *AWSRequest) (*AWSResponse
 		}
 		var run OmicsRun
 		if json.Unmarshal(data, &run) == nil {
-			items = append(items, runItem{Id: run.Id, Status: run.Status, Name: run.Name})
+			items = append(items, runItem{ID: run.ID, Status: run.Status, Name: run.Name})
 		}
 	}
 	return omicsJSONResponse(http.StatusOK, map[string]interface{}{"items": items})

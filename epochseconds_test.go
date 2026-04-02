@@ -79,7 +79,7 @@ func TestEpochSeconds_MarshalUnmarshal(t *testing.T) {
 		t.Error("expected error for invalid RFC3339 string")
 	}
 
-	// UnmarshalJSON unrecognised token → error.
+	// UnmarshalJSON unrecognized token → error.
 	var e6 substrate.EpochSeconds
 	if err := json.Unmarshal([]byte(`{}`), &e6); err == nil {
 		t.Error("expected error for object token")

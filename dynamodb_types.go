@@ -9,7 +9,7 @@ const dynamodbNamespace = "dynamodb"
 // NULL (null), BOOL (boolean).
 type AttributeValue struct {
 	// S is a string value. Using *string so that empty strings ("") are
-	// preserved in JSON serialisation instead of being dropped by omitempty.
+	// preserved in JSON serialization instead of being dropped by omitempty.
 	S *string `json:"S,omitempty"`
 
 	// N is a number value, stored as a decimal string.

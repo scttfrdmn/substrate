@@ -83,8 +83,8 @@ type SageMakerApp struct {
 	// AppType is the type of app (e.g. "JupyterServer", "KernelGateway").
 	AppType string `json:"AppType"`
 
-	// DomainId is the domain the app belongs to.
-	DomainId string `json:"DomainId"`
+	// DomainID is the domain the app belongs to.
+	DomainID string `json:"DomainId"`
 
 	// UserProfileName is the user profile that owns the app.
 	UserProfileName string `json:"UserProfileName"`
@@ -126,7 +126,7 @@ func (p *SageMakerPlugin) listDomains() (*AWSResponse, error) {
 
 func (p *SageMakerPlugin) listApps(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		DomainIdEquals        string `json:"DomainIdEquals"`
+		DomainIDEquals        string `json:"DomainIdEquals"`
 		UserProfileNameEquals string `json:"UserProfileNameEquals"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
@@ -145,7 +145,7 @@ func (p *SageMakerPlugin) listApps(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		if json.Unmarshal(data, &app) != nil {
 			continue
 		}
-		if body.DomainIdEquals != "" && app.DomainId != body.DomainIdEquals {
+		if body.DomainIDEquals != "" && app.DomainID != body.DomainIDEquals {
 			continue
 		}
 		if body.UserProfileNameEquals != "" && app.UserProfileName != body.UserProfileNameEquals {
@@ -160,7 +160,7 @@ func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 	var body struct {
 		AppName         string `json:"AppName"`
 		AppType         string `json:"AppType"`
-		DomainId        string `json:"DomainId"`
+		DomainID        string `json:"DomainId"`
 		UserProfileName string `json:"UserProfileName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil || body.AppName == "" {
@@ -168,12 +168,12 @@ func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	appArn := fmt.Sprintf("arn:aws:sagemaker:%s:%s:app/%s/%s/%s/%s",
-		ctx.Region, ctx.AccountID, body.DomainId, body.UserProfileName, body.AppType, body.AppName)
+		ctx.Region, ctx.AccountID, body.DomainID, body.UserProfileName, body.AppType, body.AppName)
 	app := SageMakerApp{
 		AppArn:          appArn,
 		AppName:         body.AppName,
 		AppType:         body.AppType,
-		DomainId:        body.DomainId,
+		DomainID:        body.DomainID,
 		UserProfileName: body.UserProfileName,
 		Status:          "InService",
 		AccountID:       ctx.AccountID,
@@ -182,7 +182,7 @@ func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 	goCtx := context.Background()
 	appKey := fmt.Sprintf("app:%s/%s/%s/%s/%s/%s",
-		ctx.AccountID, ctx.Region, body.DomainId, body.UserProfileName, body.AppType, body.AppName)
+		ctx.AccountID, ctx.Region, body.DomainID, body.UserProfileName, body.AppType, body.AppName)
 	data, err := json.Marshal(app)
 	if err != nil {
 		return nil, fmt.Errorf("createApp: marshal: %w", err)
@@ -199,7 +199,7 @@ func (p *SageMakerPlugin) deleteApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 	var body struct {
 		AppName         string `json:"AppName"`
 		AppType         string `json:"AppType"`
-		DomainId        string `json:"DomainId"`
+		DomainID        string `json:"DomainId"`
 		UserProfileName string `json:"UserProfileName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -208,7 +208,7 @@ func (p *SageMakerPlugin) deleteApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 	goCtx := context.Background()
 	appKey := fmt.Sprintf("app:%s/%s/%s/%s/%s/%s",
-		ctx.AccountID, ctx.Region, body.DomainId, body.UserProfileName, body.AppType, body.AppName)
+		ctx.AccountID, ctx.Region, body.DomainID, body.UserProfileName, body.AppType, body.AppName)
 	if err := p.state.Delete(goCtx, sagemakerNamespace, appKey); err != nil {
 		return nil, fmt.Errorf("deleteApp: %w", err)
 	}
@@ -221,7 +221,7 @@ func (p *SageMakerPlugin) describeApp(ctx *RequestContext, req *AWSRequest) (*AW
 	var body struct {
 		AppName         string `json:"AppName"`
 		AppType         string `json:"AppType"`
-		DomainId        string `json:"DomainId"`
+		DomainID        string `json:"DomainId"`
 		UserProfileName string `json:"UserProfileName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -230,7 +230,7 @@ func (p *SageMakerPlugin) describeApp(ctx *RequestContext, req *AWSRequest) (*AW
 
 	goCtx := context.Background()
 	appKey := fmt.Sprintf("app:%s/%s/%s/%s/%s/%s",
-		ctx.AccountID, ctx.Region, body.DomainId, body.UserProfileName, body.AppType, body.AppName)
+		ctx.AccountID, ctx.Region, body.DomainID, body.UserProfileName, body.AppType, body.AppName)
 	data, err := p.state.Get(goCtx, sagemakerNamespace, appKey)
 	if err != nil || data == nil {
 		return nil, &AWSError{Code: "ResourceNotFound", Message: "app " + body.AppName + " not found", HTTPStatus: http.StatusBadRequest}

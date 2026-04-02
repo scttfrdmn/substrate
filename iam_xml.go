@@ -129,7 +129,7 @@ func iamRoleXMLFields(r *IAMRole) string {
 	b.WriteString(r.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
 	b.WriteString("</CreateDate>")
 	if r.MaxSessionDuration > 0 {
-		b.WriteString(fmt.Sprintf("<MaxSessionDuration>%d</MaxSessionDuration>", r.MaxSessionDuration))
+		fmt.Fprintf(&b, "<MaxSessionDuration>%d</MaxSessionDuration>", r.MaxSessionDuration)
 	}
 	if r.Description != "" {
 		b.WriteString("<Description>")
@@ -220,7 +220,7 @@ func iamPolicyXMLFields(p *IAMPolicy) string {
 		b.WriteString(xmlEsc(p.DefaultVersionID))
 		b.WriteString("</DefaultVersionId>")
 	}
-	b.WriteString(fmt.Sprintf("<AttachmentCount>%d</AttachmentCount>", p.AttachmentCount))
+	fmt.Fprintf(&b, "<AttachmentCount>%d</AttachmentCount>", p.AttachmentCount)
 	b.WriteString("<CreateDate>")
 	b.WriteString(p.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
 	b.WriteString("</CreateDate>")

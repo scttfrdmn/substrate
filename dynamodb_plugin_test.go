@@ -2549,7 +2549,7 @@ func TestDynamoDBPlugin_EmptyStringAttribute(t *testing.T) {
 
 // TestDynamoDBPlugin_EmptyStringAttribute_Scan verifies that flat top-level
 // empty string attributes round-trip correctly through PutItem / Scan (#254).
-// Before fix: {"S":""} was serialised as {} by json omitempty, so a Scan
+// Before fix: {"S":""} was serialized as {} by json omitempty, so a Scan
 // would return {} for those attributes and boto3's TypeDeserializer would
 // raise "Value must be a nonempty dictionary whose key is a valid dynamodb type".
 func TestDynamoDBPlugin_EmptyStringAttribute_Scan(t *testing.T) {

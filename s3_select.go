@@ -204,7 +204,7 @@ func s3SelectStatsFrame(bytesScanned, bytesReturned int) []byte {
 	}, []byte(statsXML))
 }
 
-// s3SelectEndFrame returns an End event frame signalling stream completion.
+// s3SelectEndFrame returns an End event frame signaling stream completion.
 func s3SelectEndFrame() []byte {
 	return s3EventFrame([][2]string{
 		{":event-type", "End"},
@@ -227,24 +227,24 @@ func (p *S3Plugin) selectObjectContent(reqCtx *RequestContext, req *AWSRequest, 
 	objKey := "object:" + bucket + "/" + key
 	objData, err := p.state.Get(goCtx, s3Namespace, objKey)
 	if err != nil || objData == nil {
-		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil //nolint:nilerr
 	}
 	var s3obj S3Object
 	if err := json.Unmarshal(objData, &s3obj); err != nil {
-		return s3ErrorResponse("InternalError", "corrupt object metadata", http.StatusInternalServerError), nil
+		return s3ErrorResponse("InternalError", "corrupt object metadata", http.StatusInternalServerError), nil //nolint:nilerr
 	}
 
 	// Load the object body from the afero filesystem.
 	objectBody, err := afero.ReadFile(p.fs, "/"+bucket+"/"+key)
 	if err != nil {
-		return s3ErrorResponse("InternalError", "could not read object body", http.StatusInternalServerError), nil
+		return s3ErrorResponse("InternalError", "could not read object body", http.StatusInternalServerError), nil //nolint:nilerr
 	}
 	_ = s3obj // metadata available if needed for future extensions
 
 	// Parse the XML request body.
 	var selReq selectObjectContentRequest
 	if err := xml.Unmarshal(req.Body, &selReq); err != nil {
-		return s3ErrorResponse("MalformedXML", "The XML provided is not well-formed.", http.StatusBadRequest), nil
+		return s3ErrorResponse("MalformedXML", "The XML provided is not well-formed.", http.StatusBadRequest), nil //nolint:nilerr
 	}
 
 	q := parseS3SelectExpression(selReq.Expression)

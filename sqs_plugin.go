@@ -135,12 +135,6 @@ func sqsQueueURLFromRequest(req *AWSRequest) string {
 	return req.Params["QueueUrl"]
 }
 
-// queueURLFromRequest extracts the queue URL from the QueueUrl param.
-// Deprecated: use sqsQueueURLFromRequest which supports both protocols.
-func queueURLFromRequest(req *AWSRequest) string {
-	return req.Params["QueueUrl"]
-}
-
 // --- State helpers -----------------------------------------------------------
 
 func (p *SQSPlugin) loadQueue(ctx context.Context, queueURL string) (*SQSQueue, error) {
@@ -746,16 +740,16 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		var input struct {
 			MessageBody            string `json:"MessageBody"`
 			DelaySeconds           int    `json:"DelaySeconds"`
-			MessageGroupId         string `json:"MessageGroupId"`
-			MessageDeduplicationId string `json:"MessageDeduplicationId"`
+			MessageGroupID         string `json:"MessageGroupId"`
+			MessageDeduplicationID string `json:"MessageDeduplicationId"`
 		}
 		_ = json.Unmarshal(req.Body, &input)
 		msgBody = input.MessageBody
 		if input.DelaySeconds > 0 {
 			delayStr = strconv.Itoa(input.DelaySeconds)
 		}
-		msgGroupID = input.MessageGroupId
-		dedupIDParam = input.MessageDeduplicationId
+		msgGroupID = input.MessageGroupID
+		dedupIDParam = input.MessageDeduplicationID
 	} else {
 		msgBody = req.Params["MessageBody"]
 		delayStr = req.Params["DelaySeconds"]
@@ -940,8 +934,8 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		MD5OfMessageBody string `xml:"MD5OfMessageBody"`
 	}
 	type successEntryJSON struct {
-		Id               string `json:"Id"`
-		MessageId        string `json:"MessageId"`
+		ID               string `json:"Id"`
+		MessageID        string `json:"MessageId"`
 		MD5OfMessageBody string `json:"MD5OfMessageBody"`
 	}
 
@@ -951,7 +945,7 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	if sqsIsJSONProtocol(req) {
 		var input struct {
 			Entries []struct {
-				Id           string `json:"Id"`
+				ID           string `json:"Id"`
 				MessageBody  string `json:"MessageBody"`
 				DelaySeconds int    `json:"DelaySeconds"`
 			} `json:"Entries"`
@@ -985,7 +979,7 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			if saveErr := p.saveMsgIDs(context.Background(), urlKey, ids); saveErr != nil {
 				return nil, fmt.Errorf("sqs sendMessageBatch saveMsgIDs: %w", saveErr)
 			}
-			successesJSON = append(successesJSON, successEntryJSON{Id: entry.Id, MessageId: msgID, MD5OfMessageBody: md5Body})
+			successesJSON = append(successesJSON, successEntryJSON{ID: entry.ID, MessageID: msgID, MD5OfMessageBody: md5Body})
 		}
 		if successesJSON == nil {
 			successesJSON = make([]successEntryJSON, 0)
@@ -1130,7 +1124,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		Body          string `xml:"Body"`
 	}
 	type msgResultJSON struct {
-		MessageId     string `json:"MessageId"`
+		MessageID     string `json:"MessageId"`
 		ReceiptHandle string `json:"ReceiptHandle"`
 		MD5OfBody     string `json:"MD5OfBody"`
 		Body          string `json:"Body"`
@@ -1168,7 +1162,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 		if sqsIsJSONProtocol(req) {
 			messagesJSON = append(messagesJSON, msgResultJSON{
-				MessageId:     msg.MessageID,
+				MessageID:     msg.MessageID,
 				ReceiptHandle: newHandle,
 				MD5OfBody:     msg.MD5OfBody,
 				Body:          msg.Body,
@@ -1289,7 +1283,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 		ID string `xml:"Id"`
 	}
 	type successEntryJSON struct {
-		Id string `json:"Id"`
+		ID string `json:"Id"`
 	}
 	var successesXML []successEntryXML
 	var successesJSON []successEntryJSON
@@ -1297,7 +1291,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 	if sqsIsJSONProtocol(req) {
 		var input struct {
 			Entries []struct {
-				Id            string `json:"Id"`
+				ID            string `json:"Id"`
 				ReceiptHandle string `json:"ReceiptHandle"`
 			} `json:"Entries"`
 		}
@@ -1320,7 +1314,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 					break
 				}
 			}
-			successesJSON = append(successesJSON, successEntryJSON{Id: entry.Id})
+			successesJSON = append(successesJSON, successEntryJSON{ID: entry.ID})
 		}
 		if err := p.saveMsgIDs(context.Background(), urlKey, ids); err != nil {
 			return nil, fmt.Errorf("sqs deleteMessageBatch saveMsgIDs: %w", err)

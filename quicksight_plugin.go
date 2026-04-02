@@ -119,8 +119,8 @@ func parseQuickSightOperation(method, path string) (op, accountID, resourceID, s
 
 // QuickSightDataSource holds persisted state for a QuickSight data source.
 type QuickSightDataSource struct {
-	// DataSourceId is the unique identifier for the data source.
-	DataSourceId string `json:"DataSourceId"`
+	// DataSourceID is the unique identifier for the data source.
+	DataSourceID string `json:"DataSourceId"`
 
 	// Name is the user-supplied display name.
 	Name string `json:"Name"`
@@ -143,8 +143,8 @@ type QuickSightDataSource struct {
 
 // QuickSightDataSet holds persisted state for a QuickSight dataset.
 type QuickSightDataSet struct {
-	// DataSetId is the unique identifier for the dataset.
-	DataSetId string `json:"DataSetId"`
+	// DataSetID is the unique identifier for the dataset.
+	DataSetID string `json:"DataSetId"`
 
 	// Name is the user-supplied display name.
 	Name string `json:"Name"`
@@ -152,8 +152,8 @@ type QuickSightDataSet struct {
 	// Arn is the ARN of the dataset.
 	Arn string `json:"Arn"`
 
-	// IngestionId is the UUID used to track the initial ingestion.
-	IngestionId string `json:"IngestionId"`
+	// IngestionID is the UUID used to track the initial ingestion.
+	IngestionID string `json:"IngestionId"`
 
 	// AccountID is the AWS account that owns the dataset.
 	AccountID string `json:"AccountID"`
@@ -164,17 +164,17 @@ type QuickSightDataSet struct {
 
 func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest, _ string) (*AWSResponse, error) {
 	var body struct {
-		DataSourceId string `json:"DataSourceId"`
+		DataSourceID string `json:"DataSourceId"`
 		Name         string `json:"Name"`
 		Type         string `json:"Type"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.DataSourceId == "" {
+	if err := json.Unmarshal(req.Body, &body); err != nil || body.DataSourceID == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DataSourceId is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:datasource/%s", ctx.Region, ctx.AccountID, body.DataSourceId)
+	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:datasource/%s", ctx.Region, ctx.AccountID, body.DataSourceID)
 	ds := QuickSightDataSource{
-		DataSourceId: body.DataSourceId,
+		DataSourceID: body.DataSourceID,
 		Name:         body.Name,
 		Type:         body.Type,
 		Arn:          arn,
@@ -184,7 +184,7 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 	}
 
 	goCtx := context.Background()
-	key := "datasource:" + ctx.AccountID + "/" + body.DataSourceId
+	key := "datasource:" + ctx.AccountID + "/" + body.DataSourceID
 	data, err := json.Marshal(ds)
 	if err != nil {
 		return nil, fmt.Errorf("createDataSource: marshal: %w", err)
@@ -195,7 +195,7 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 
 	reqID := generateQuickSightRequestID()
 	return quicksightJSONResponse(http.StatusCreated, map[string]interface{}{
-		"DataSourceId":   body.DataSourceId,
+		"DataSourceId":   body.DataSourceID,
 		"Arn":            arn,
 		"CreationStatus": "CREATION_SUCCESSFUL",
 		"RequestId":      reqID,
@@ -226,27 +226,27 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 
 func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _ string) (*AWSResponse, error) {
 	var body struct {
-		DataSetId string `json:"DataSetId"`
+		DataSetID string `json:"DataSetId"`
 		Name      string `json:"Name"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.DataSetId == "" {
+	if err := json.Unmarshal(req.Body, &body); err != nil || body.DataSetID == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DataSetId is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:dataset/%s", ctx.Region, ctx.AccountID, body.DataSetId)
+	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:dataset/%s", ctx.Region, ctx.AccountID, body.DataSetID)
 	ingestionID := generateQuickSightRequestID()
 
 	ds := QuickSightDataSet{
-		DataSetId:   body.DataSetId,
+		DataSetID:   body.DataSetID,
 		Name:        body.Name,
 		Arn:         arn,
-		IngestionId: ingestionID,
+		IngestionID: ingestionID,
 		AccountID:   ctx.AccountID,
 		Region:      ctx.Region,
 	}
 
 	goCtx := context.Background()
-	key := "dataset:" + ctx.AccountID + "/" + body.DataSetId
+	key := "dataset:" + ctx.AccountID + "/" + body.DataSetID
 	data, err := json.Marshal(ds)
 	if err != nil {
 		return nil, fmt.Errorf("createDataSet: marshal: %w", err)
@@ -256,7 +256,7 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 	}
 
 	return quicksightJSONResponse(http.StatusCreated, map[string]interface{}{
-		"DataSetId":   body.DataSetId,
+		"DataSetId":   body.DataSetID,
 		"Arn":         arn,
 		"IngestionId": ingestionID,
 		"RequestId":   generateQuickSightRequestID(),
