@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.7] - 2026-04-02
+
+### Fixed
+- `parser.go`: add `"bedrock": "bedrock-runtime"` alias to `targetServiceAliases` so boto3 `bedrock-runtime` client requests signed with the SigV4 service name `bedrock` (the actual signing name used when `AWS_ENDPOINT_URL` is set) are routed to `BedrockRuntimePlugin` instead of returning 501 ServiceNotAvailable (closes #262)
+
 ## [v0.45.6] - 2026-04-01
 
 ### Added
