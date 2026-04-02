@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.51.0] - 2026-04-02
+
+### Added
+- **Redshift Data HTTP control plane (#269)**: Added three new server endpoints for test-time configuration of `RedshiftDataPlugin` behaviour. `POST /v1/redshift-data/results` seeds a `GetStatementResult` response keyed by SQL pattern (or `"*"` wildcard). `DELETE /v1/redshift-data/results` removes seeded results (optionally filtered by `?sql=`). `POST /v1/redshift-data/status` overrides the default statement status for new `ExecuteStatement` calls (`FINISHED`, `FAILED`, `ABORTED`, `STARTED`) with an optional `errorMessage`. Configuration is persisted in the `redshift-data-ctrl` state namespace so the plugin reads it at request time — enabling Python/SDK-level tests to configure responses without Go-level plugin initialization. In-memory `"results"` seeded at initialization continue to take precedence over state-based seeds for backward compatibility.
+
 ## [v0.50.0] - 2026-04-02
 
 ### Added

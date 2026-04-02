@@ -221,6 +221,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/control/time", s.handleSetTime)
 	r.Post("/v1/control/scale", s.handleSetScale)
 
+	r.Post("/v1/redshift-data/results", s.handleRedshiftDataSeedResult)
+	r.Delete("/v1/redshift-data/results", s.handleRedshiftDataClearResults)
+	r.Post("/v1/redshift-data/status", s.handleRedshiftDataSetStatus)
+
 	r.Get("/ui", s.handleDebugUI)
 	r.Get("/v1/debug/events", s.handleDebugEvents)
 	r.Get("/v1/debug/events/{seq}/state", s.handleDebugStateAt)

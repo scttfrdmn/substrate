@@ -5,12 +5,27 @@ import "time"
 // redshiftDataNamespace is the state namespace for AWS Redshift Data API resources.
 const redshiftDataNamespace = "redshift-data"
 
+// redshiftDataCtrlNamespace is the state namespace for HTTP control-plane configuration
+// (seeded results and status overrides set via /v1/redshift-data/* endpoints).
+const redshiftDataCtrlNamespace = "redshift-data-ctrl"
+
+// redshiftDataCtrlStatusKey is the state key for the default statement status override.
+const redshiftDataCtrlStatusKey = "status"
+
+// redshiftDataCtrlErrorKey is the state key for the error message on FAILED statements.
+const redshiftDataCtrlErrorKey = "error_message"
+
+// redshiftDataCtrlResultKey returns the state key for a seeded result by SQL pattern.
+func redshiftDataCtrlResultKey(sql string) string { return "result:" + sql }
+
 // RedshiftDataStatement represents an executed SQL statement in the Redshift Data API.
 type RedshiftDataStatement struct {
 	// ID is the unique statement identifier.
 	ID string `json:"Id"`
-	// Status is the execution status (always FINISHED in the emulator).
+	// Status is the execution status (FINISHED, FAILED, ABORTED, or STARTED).
 	Status string `json:"Status"`
+	// Error holds the error message when Status is FAILED.
+	Error string `json:"Error,omitempty"`
 	// QueryString is the SQL that was submitted.
 	QueryString string `json:"QueryString"`
 	// WorkgroupName is the Redshift Serverless workgroup name.

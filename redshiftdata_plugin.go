@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -91,10 +92,25 @@ func (p *RedshiftDataPlugin) executeStatement(reqCtx *RequestContext, req *AWSRe
 		return nil, &AWSError{Code: "ValidationException", Message: "Sql is required", HTTPStatus: http.StatusBadRequest}
 	}
 
+	goCtx := context.Background()
+
+	// Resolve statement status from HTTP control-plane override (or default to FINISHED).
+	status := "FINISHED"
+	errMsg := ""
+	if d, _ := p.state.Get(goCtx, redshiftDataCtrlNamespace, redshiftDataCtrlStatusKey); d != nil {
+		status = strings.TrimSpace(string(d))
+	}
+	if status == "FAILED" {
+		if d, _ := p.state.Get(goCtx, redshiftDataCtrlNamespace, redshiftDataCtrlErrorKey); d != nil {
+			errMsg = strings.TrimSpace(string(d))
+		}
+	}
+
 	id := generateRedshiftDataID()
 	stmt := RedshiftDataStatement{
 		ID:                id,
-		Status:            "FINISHED",
+		Status:            status,
+		Error:             errMsg,
 		QueryString:       input.Sql,
 		WorkgroupName:     input.WorkgroupName,
 		ClusterIdentifier: input.ClusterIdentifier,
@@ -104,7 +120,6 @@ func (p *RedshiftDataPlugin) executeStatement(reqCtx *RequestContext, req *AWSRe
 		Region:            reqCtx.Region,
 	}
 
-	goCtx := context.Background()
 	d, err := json.Marshal(stmt)
 	if err != nil {
 		return nil, fmt.Errorf("redshift-data executeStatement marshal: %w", err)
@@ -131,13 +146,17 @@ func (p *RedshiftDataPlugin) describeStatement(reqCtx *RequestContext, req *AWSR
 		return nil, err
 	}
 
-	return redshiftDataJSONResponse(http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"Id":          stmt.ID,
 		"Status":      stmt.Status,
 		"QueryString": stmt.QueryString,
 		"CreatedAt":   stmt.CreatedAt.Unix(),
 		"UpdatedAt":   stmt.CreatedAt.Unix(),
-	})
+	}
+	if stmt.Error != "" {
+		resp["Error"] = stmt.Error
+	}
+	return redshiftDataJSONResponse(http.StatusOK, resp)
 }
 
 func (p *RedshiftDataPlugin) getStatementResult(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -172,16 +191,39 @@ func (p *RedshiftDataPlugin) getStatementResult(reqCtx *RequestContext, req *AWS
 	})
 }
 
-// lookupResult returns the pre-seeded result for the given SQL, falling back
-// to the wildcard "*" entry, and finally to an empty result.
+// lookupResult returns the pre-seeded result for the given SQL.
+// It checks the in-memory map first (Go-level initialization), then the
+// HTTP control-plane state namespace, falling back to an empty result.
 func (p *RedshiftDataPlugin) lookupResult(sql string) *RedshiftDataResult {
+	// 1. In-memory map (backward compat with Go test initialization).
 	if r, ok := p.results[sql]; ok {
 		return r
 	}
 	if r, ok := p.results["*"]; ok {
 		return r
 	}
+	// 2. State (HTTP control plane, seeded via POST /v1/redshift-data/results).
+	if r := p.loadStateResult(sql); r != nil {
+		return r
+	}
+	if r := p.loadStateResult("*"); r != nil {
+		return r
+	}
 	return &RedshiftDataResult{}
+}
+
+// loadStateResult loads a RedshiftDataResult from the HTTP control-plane
+// state namespace for the given SQL pattern, returning nil if not found.
+func (p *RedshiftDataPlugin) loadStateResult(sql string) *RedshiftDataResult {
+	data, err := p.state.Get(context.Background(), redshiftDataCtrlNamespace, redshiftDataCtrlResultKey(sql))
+	if err != nil || data == nil {
+		return nil
+	}
+	var result RedshiftDataResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil
+	}
+	return &result
 }
 
 // loadStatement loads a RedshiftDataStatement from state or returns a not-found error.
