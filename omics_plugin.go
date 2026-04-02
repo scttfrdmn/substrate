@@ -118,11 +118,11 @@ type OmicsRun struct {
 
 func (p *OmicsPlugin) startRun(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		WorkflowId   string          `json:"workflowId"`
+		WorkflowID   string          `json:"workflowId"`
 		WorkflowType string          `json:"workflowType"`
 		Name         string          `json:"name"`
 		RoleArn      string          `json:"roleArn"`
-		OutputUri    string          `json:"outputUri"`
+		OutputURI    string          `json:"outputUri"`
 		Parameters   json.RawMessage `json:"parameters"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -133,11 +133,11 @@ func (p *OmicsPlugin) startRun(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	run := OmicsRun{
 		ID:           runID,
 		Status:       "COMPLETED",
-		WorkflowID:   body.WorkflowId,
+		WorkflowID:   body.WorkflowID,
 		WorkflowType: body.WorkflowType,
 		Name:         body.Name,
 		RoleArn:      body.RoleArn,
-		OutputURI:    body.OutputUri,
+		OutputURI:    body.OutputURI,
 		AccountID:    ctx.AccountID,
 		Region:       ctx.Region,
 	}
