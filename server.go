@@ -563,6 +563,14 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		s.opts.Metrics.RecordLatency(req.Service, req.Operation, duration)
 	}
 
+	// Attach cost and stream_id to the tracing span.
+	if reqSpan != nil {
+		reqSpan.SetAttributes(
+			attribute.Float64("substrate.cost", cost),
+			attribute.String("substrate.stream_id", streamIDFromContext(reqCtx)),
+		)
+	}
+
 	if routeErr != nil {
 		RecordSpanError(reqSpan, routeErr)
 		s.writeError(w, routeErr, r)

@@ -1,0 +1,27 @@
+# Substrate + Jaeger distributed tracing example.
+#
+# Run:  docker compose -f docker-compose.jaeger.yml up
+# Then open http://localhost:16686 to explore traces in the Jaeger UI.
+# Send AWS API calls to http://localhost:4566 as usual.
+
+services:
+  substrate:
+    image: ghcr.io/scttfrdmn/substrate:latest
+    ports:
+      - "4566:4566"
+    environment:
+      SUBSTRATE_TRACING_ENABLED: "true"
+      SUBSTRATE_TRACING_EXPORTER: "otlp_http"
+      SUBSTRATE_OTLP_ENDPOINT: "http://jaeger:4318"
+      SUBSTRATE_SERVICE_NAME: "substrate"
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"

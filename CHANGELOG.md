@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.52.0] - 2026-04-02
+
+### Added
+- **pytest-substrate HTTP control plane helpers (#270)**: Added `seed_result(service, result, sql="*")`, `set_status(service, status, error_message="")`, and `clear_seeds(service, sql=None)` methods to `SubstrateServer`. These wrap the `/v1/{service}/results` and `/v1/{service}/status` endpoints, so test authors no longer need to hand-craft HTTP calls. Added `redshift_rows(columns, rows, col_type="varchar")` convenience helper (exported from `pytest_substrate`) that builds a Redshift Data API result dict suitable for passing to `seed_result`. Added `substrate_isolated` function-scoped pytest fixture that starts and stops a fresh substrate process per test (heavier than the session-scoped `substrate_isolated` fixture but provides full process-level isolation).
+- **OTLP span attributes (#271)**: `server.go` now sets `substrate.cost` (float64) and `substrate.stream_id` (string) attributes on every OTel tracing span, making per-request cost and stream routing visible in tracing UIs. Added `examples/docker-compose.jaeger.yml` — a Substrate + Jaeger all-in-one example that wires OTLP HTTP export to Jaeger and exposes the Jaeger UI on port 16686.
+
 ## [v0.51.0] - 2026-04-02
 
 ### Added

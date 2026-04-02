@@ -5,6 +5,7 @@ package substrate_test
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -13,6 +14,45 @@ import (
 
 	substrate "github.com/scttfrdmn/substrate"
 )
+
+// TestPluginShutdown_NoopPlugins verifies that all plugins with trivial Shutdown
+// implementations return nil without panicking.  This prevents coverage from
+// silently dropping below the 80 % threshold as new plugins are added.
+func TestPluginShutdown_NoopPlugins(t *testing.T) {
+	ctx := context.Background()
+	state := substrate.NewMemoryStateManager()
+	logger := substrate.NewDefaultLogger(slog.LevelError, false)
+	cfg := substrate.PluginConfig{State: state, Logger: logger}
+
+	plugins := []substrate.Plugin{
+		&substrate.AthenaPlugin{},
+		&substrate.BackupPlugin{},
+		&substrate.BatchPlugin{},
+		&substrate.BedrockRuntimePlugin{},
+		&substrate.CloudTrailPlugin{},
+		&substrate.CodeBuildPlugin{},
+		&substrate.CodeDeployPlugin{},
+		&substrate.CodePipelinePlugin{},
+		&substrate.EMRServerlessPlugin{},
+		&substrate.FSxPlugin{},
+		&substrate.OmicsPlugin{},
+		&substrate.OpenSearchPlugin{},
+		&substrate.QuickSightPlugin{},
+		&substrate.RAMPlugin{},
+		&substrate.RedshiftPlugin{},
+		&substrate.RedshiftDataPlugin{},
+		&substrate.SageMakerPlugin{},
+		&substrate.TransferPlugin{},
+		&substrate.WAFv2Plugin{},
+		&substrate.SchedulerPlugin{},
+		&substrate.SSOPlugin{},
+	}
+
+	for _, p := range plugins {
+		require.NoError(t, p.Initialize(ctx, cfg), "Initialize %s", p.Name())
+		require.NoError(t, p.Shutdown(ctx), "Shutdown %s", p.Name())
+	}
+}
 
 // memStateManager is a simple in-memory StateManager used in tests.
 type memStateManager struct {

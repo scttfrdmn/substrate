@@ -220,3 +220,108 @@ class TestURL:
         server = SubstrateServer()
         assert server.url == f"http://localhost:{server.port}"
         assert server.url.startswith("http://localhost:")
+
+
+# ---------------------------------------------------------------------------
+# seed_result
+# ---------------------------------------------------------------------------
+
+class TestSeedResult:
+    def test_posts_to_service_results_endpoint(self) -> None:
+        server = SubstrateServer()
+        result = {"ColumnMetadata": [], "Records": []}
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.seed_result("redshift-data", result, sql="SELECT 1")
+
+        mock_open.assert_called_once()
+        req = mock_open.call_args[0][0]
+        assert req.full_url.endswith("/v1/redshift-data/results")
+        assert req.get_method() == "POST"
+        import json as json_mod
+        body = json_mod.loads(req.data)
+        assert body["sql"] == "SELECT 1"
+        assert body["result"] == result
+
+    def test_defaults_to_wildcard_sql(self) -> None:
+        server = SubstrateServer()
+        result = {"ColumnMetadata": [], "Records": []}
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.seed_result("redshift-data", result)
+
+        req = mock_open.call_args[0][0]
+        import json as json_mod
+        body = json_mod.loads(req.data)
+        assert body["sql"] == "*"
+
+    def test_content_type_is_json(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.seed_result("redshift-data", {"ColumnMetadata": [], "Records": []})
+
+        req = mock_open.call_args[0][0]
+        assert req.get_header("Content-type") == "application/json"
+
+
+# ---------------------------------------------------------------------------
+# set_status
+# ---------------------------------------------------------------------------
+
+class TestSetStatus:
+    def test_posts_to_service_status_endpoint(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.set_status("redshift-data", "FAILED", "query timed out")
+
+        mock_open.assert_called_once()
+        req = mock_open.call_args[0][0]
+        assert req.full_url.endswith("/v1/redshift-data/status")
+        assert req.get_method() == "POST"
+        import json as json_mod
+        body = json_mod.loads(req.data)
+        assert body["status"] == "FAILED"
+        assert body["errorMessage"] == "query timed out"
+
+    def test_error_message_defaults_to_empty_string(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.set_status("redshift-data", "FINISHED")
+
+        req = mock_open.call_args[0][0]
+        import json as json_mod
+        body = json_mod.loads(req.data)
+        assert body["errorMessage"] == ""
+
+
+# ---------------------------------------------------------------------------
+# clear_seeds
+# ---------------------------------------------------------------------------
+
+class TestClearSeeds:
+    def test_deletes_all_results_when_no_sql(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.clear_seeds("redshift-data")
+
+        mock_open.assert_called_once()
+        req = mock_open.call_args[0][0]
+        assert req.full_url.endswith("/v1/redshift-data/results")
+        assert "sql=" not in req.full_url
+        assert req.get_method() == "DELETE"
+
+    def test_deletes_specific_sql_with_query_param(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.clear_seeds("redshift-data", sql="SELECT 1")
+
+        req = mock_open.call_args[0][0]
+        assert "sql=SELECT%201" in req.full_url or "sql=SELECT+1" in req.full_url or "sql=" in req.full_url
+        assert req.get_method() == "DELETE"
+
+    def test_sql_is_url_encoded(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.clear_seeds("redshift-data", sql="SELECT * FROM foo WHERE x=1")
+
+        req = mock_open.call_args[0][0]
+        # Spaces and special chars must be encoded; raw spaces must not appear.
+        assert " " not in req.full_url

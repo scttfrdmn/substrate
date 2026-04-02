@@ -385,6 +385,43 @@ func TestServer_CredentialRegistry_UnknownKey_Returns403(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
+func TestServer_TracerSpanAttributes(t *testing.T) {
+	// Verify that a server wired with a noop Tracer correctly sets
+	// substrate.cost and substrate.stream_id span attributes without panicking.
+	tracer, shutdown, err := substrate.NewTracer(context.Background(), substrate.TracingConfig{
+		Enabled:     true,
+		Exporter:    "noop",
+		ServiceName: "test",
+	})
+	require.NoError(t, err)
+	defer func() { _ = shutdown(context.Background()) }()
+
+	plug := &serverPlugin{
+		serviceName: "dynamodb",
+		resp: &substrate.AWSResponse{
+			StatusCode: http.StatusOK,
+			Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.0"},
+			Body:       []byte(`{}`),
+		},
+	}
+	cfg := substrate.DefaultConfig()
+	registry := substrate.NewPluginRegistry()
+	registry.Register(plug)
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	state := substrate.NewMemoryStateManager()
+	tc := substrate.NewTimeController(time.Now())
+	logger := substrate.NewDefaultLogger(slog.LevelInfo, false)
+	srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
+		substrate.ServerOptions{Tracer: tracer})
+
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	r.Header.Set("X-Amz-Target", "DynamoDB_20120810.GetItem")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestServer_EmailsEndpoint(t *testing.T) {
 	cfg := substrate.DefaultConfig()
 	registry := substrate.NewPluginRegistry()

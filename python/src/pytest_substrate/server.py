@@ -7,7 +7,9 @@ import shutil
 import socket
 import subprocess
 import time
+import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -63,6 +65,54 @@ class SubstrateServer:
             urllib.request.urlopen(req, timeout=5)
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"substrate state reset failed: {exc.code} {exc.reason}") from exc
+
+    def seed_result(self, service: str, result: dict, sql: str = "*") -> None:
+        """Seed a query result for the given service and SQL pattern.
+
+        The ``result`` dict must match the service's result shape
+        (e.g. ``{"ColumnMetadata": [...], "Records": [[...]]}`` for redshift-data).
+        Use :func:`redshift_rows` to build a Redshift-compatible result dict.
+        The ``sql`` pattern defaults to ``"*"`` (wildcard — matches any statement).
+        """
+        body = json.dumps({"sql": sql, "result": result}).encode()
+        req = urllib.request.Request(
+            f"{self.url}/v1/{service}/results",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+
+    def set_status(self, service: str, status: str, error_message: str = "") -> None:
+        """Set the default statement execution status for the given service.
+
+        Valid statuses for redshift-data: ``"FINISHED"``, ``"FAILED"``,
+        ``"ABORTED"``, ``"STARTED"``.  Pass ``error_message`` to attach an
+        error description when ``status="FAILED"``.
+        """
+        body = json.dumps({"status": status, "errorMessage": error_message}).encode()
+        req = urllib.request.Request(
+            f"{self.url}/v1/{service}/status",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+
+    def clear_seeds(self, service: str, sql: str | None = None) -> None:
+        """Clear seeded results for the given service.
+
+        Pass ``sql`` to remove only that specific SQL pattern; omit it to
+        clear all seeded results for the service.
+        """
+        url = f"{self.url}/v1/{service}/results"
+        if sql is not None:
+            url += f"?sql={urllib.parse.quote(sql, safe='')}"
+        req = urllib.request.Request(url, method="DELETE")
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
 
     # ------------------------------------------------------------------
     # Internal helpers
