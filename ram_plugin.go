@@ -88,7 +88,7 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	share := RAMResourceShare{
 		ResourceShareArn:        shareArn,
 		Name:                    input.Name,
-		OwningAccountId:         reqCtx.AccountID,
+		OwningAccountID:         reqCtx.AccountID,
 		AllowExternalPrincipals: input.AllowExternalPrincipals,
 		Status:                  "ACTIVE",
 		Principals:              input.Principals,

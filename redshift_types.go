@@ -5,9 +5,6 @@ import "time"
 // redshiftNamespace is the state namespace for AWS Redshift resources.
 const redshiftNamespace = "redshift"
 
-// redshiftXMLNS is the XML namespace for Redshift API responses.
-const redshiftXMLNS = "http://redshift.amazonaws.com/doc/2012-12-01/"
-
 // RedshiftCluster represents an AWS Redshift cluster.
 type RedshiftCluster struct {
 	// ClusterIdentifier is the unique identifier for the cluster.

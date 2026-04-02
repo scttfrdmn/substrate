@@ -1002,7 +1002,7 @@ func (p *DynamoDBPlugin) transactGetItems(reqCtx *RequestContext, req *AWSReques
 
 // transactWriteItems implements DynamoDB TransactWriteItems.
 // All condition checks are evaluated first; if any fail the entire transaction is
-// cancelled and TransactionCanceledException is returned with CancellationReasons.
+// canceled and TransactionCanceledException is returned with CancellationReasons.
 // If all conditions pass, all mutations are applied atomically.
 func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
@@ -1048,7 +1048,7 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		Message string `json:"Message,omitempty"`
 	}
 	reasons := make([]cancellationReason, len(input.TransactItems))
-	cancelled := false
+	canceled := false
 
 	for i, ti := range input.TransactItems {
 		var tableName string
@@ -1113,14 +1113,14 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		}
 		if !ok {
 			reasons[i] = cancellationReason{Code: "ConditionalCheckFailed", Message: "The conditional request failed"}
-			cancelled = true
+			canceled = true
 		}
 	}
 
-	if cancelled {
+	if canceled {
 		body, _ := json.Marshal(map[string]interface{}{
 			"__type":              "TransactionCanceledException",
-			"message":             "Transaction cancelled, please refer cancellation reasons for specific reasons",
+			"message":             "Transaction canceled, please refer cancellation reasons for specific reasons",
 			"CancellationReasons": reasons,
 		})
 		return &AWSResponse{

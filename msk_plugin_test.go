@@ -347,8 +347,8 @@ func TestMSKPlugin_ListNodes(t *testing.T) {
 		if n.NodeARN == "" {
 			t.Errorf("node[%d] want non-empty NodeArn", i)
 		}
-		if n.BrokerNodeInfo.BrokerId == 0 {
-			t.Errorf("node[%d] want non-zero BrokerId", i)
+		if n.BrokerNodeInfo.BrokerID == 0 {
+			t.Errorf("node[%d] want non-zero BrokerID", i)
 		}
 		if n.BrokerNodeInfo.CurrentBrokerSoftwareInfo.KafkaVersion == "" {
 			t.Errorf("node[%d] want non-empty KafkaVersion", i)

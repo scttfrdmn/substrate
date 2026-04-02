@@ -67,8 +67,8 @@ type MSKNodeInfo struct {
 
 // MSKBrokerNodeInfo holds broker-level details returned by ListNodes.
 type MSKBrokerNodeInfo struct {
-	// BrokerId is the numeric broker identifier (1-based).
-	BrokerId float64 `json:"BrokerId"`
+	// BrokerID is the numeric broker identifier (1-based).
+	BrokerID float64 `json:"BrokerId"`
 	// ClientSubnet is the subnet the broker is placed in.
 	ClientSubnet string `json:"ClientSubnet"`
 	// CurrentBrokerSoftwareInfo holds the software version running on the broker.

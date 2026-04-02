@@ -11,8 +11,8 @@ const transferNamespace = "transfer"
 
 // TransferServer represents an AWS Transfer Family server.
 type TransferServer struct {
-	// ServerId is the unique identifier for the server (e.g. s-01234567890abcdef).
-	ServerId string `json:"ServerId"`
+	// ServerID is the unique identifier for the server (e.g. s-01234567890abcdef).
+	ServerID string `json:"ServerId"`
 	// Arn is the ARN of the server.
 	Arn string `json:"Arn"`
 	// Domain is the type of file-transfer protocol (SFTP, FTP, FTPS).
@@ -41,8 +41,8 @@ type TransferUser struct {
 	UserName string `json:"UserName"`
 	// Arn is the ARN of the user.
 	Arn string `json:"Arn"`
-	// ServerId is the ID of the server this user belongs to.
-	ServerId string `json:"ServerId"`
+	// ServerID is the ID of the server this user belongs to.
+	ServerID string `json:"ServerId"`
 	// HomeDirectory is the landing directory for the user.
 	HomeDirectory string `json:"HomeDirectory,omitempty"`
 	// Role is the IAM role ARN that controls user access.

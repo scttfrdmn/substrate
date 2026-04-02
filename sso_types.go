@@ -13,8 +13,8 @@ const ssoNamespace = "sso"
 type SSOInstance struct {
 	// InstanceArn is the ARN of the IAM Identity Center instance.
 	InstanceArn string `json:"InstanceArn"`
-	// IdentityStoreId is the ID of the Identity Store associated with this instance.
-	IdentityStoreId string `json:"IdentityStoreId"`
+	// IdentityStoreID is the ID of the Identity Store associated with this instance.
+	IdentityStoreID string `json:"IdentityStoreId"`
 	// Status is the status of the instance.
 	Status string `json:"Status"` // ACTIVE
 	// CreatedDate is when the instance was created.
@@ -47,14 +47,14 @@ type SSOPermissionSet struct {
 type SSOAccountAssignment struct {
 	// PermissionSetArn is the ARN of the permission set.
 	PermissionSetArn string `json:"PermissionSetArn"`
-	// TargetId is the account ID being assigned to.
-	TargetId string `json:"TargetId"`
+	// TargetID is the account ID being assigned to.
+	TargetID string `json:"TargetId"`
 	// TargetType specifies the type of target (AWS_ACCOUNT).
 	TargetType string `json:"TargetType"`
 	// PrincipalType specifies whether the principal is a USER or GROUP.
 	PrincipalType string `json:"PrincipalType"`
-	// PrincipalId is the ID of the user or group.
-	PrincipalId string `json:"PrincipalId"`
+	// PrincipalID is the ID of the user or group.
+	PrincipalID string `json:"PrincipalId"`
 	// AccountID is the AWS account that owns this assignment.
 	AccountID string `json:"AccountID"`
 	// InstanceArn is the ARN of the instance this assignment belongs to.
@@ -68,8 +68,8 @@ func generateSSOInstanceArn() string {
 	return "arn:aws:sso:::instance/" + hex.EncodeToString(b)[:26]
 }
 
-// generateSSOIdentityStoreId generates a random identity store ID.
-func generateSSOIdentityStoreId() string {
+// generateSSOIdentityStoreID generates a random identity store ID.
+func generateSSOIdentityStoreID() string {
 	b := make([]byte, 5)
 	_, _ = rand.Read(b)
 	return "d-" + hex.EncodeToString(b)[:10]

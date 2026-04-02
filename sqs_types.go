@@ -65,8 +65,8 @@ type SQSMessage struct {
 	// ReceiveCount is how many times the message has been received.
 	ReceiveCount int `json:"ReceiveCount"`
 
-	// MessageGroupId is the FIFO message group identifier. Empty for standard queues.
-	MessageGroupId string `json:"MessageGroupId,omitempty"`
+	// MessageGroupID is the FIFO message group identifier. Empty for standard queues.
+	MessageGroupID string `json:"MessageGroupId,omitempty"`
 }
 
 // SQSMessageAttribute holds a single user-defined message attribute.

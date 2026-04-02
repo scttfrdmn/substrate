@@ -28,16 +28,16 @@ type BackupVault struct {
 
 // BackupPlan represents an AWS Backup plan.
 type BackupPlan struct {
-	// BackupPlanId is the unique identifier for the backup plan.
-	BackupPlanId string `json:"BackupPlanId"`
+	// BackupPlanID is the unique identifier for the backup plan.
+	BackupPlanID string `json:"BackupPlanId"`
 	// BackupPlanArn is the ARN of the backup plan.
 	BackupPlanArn string `json:"BackupPlanArn"`
 	// BackupPlanName is the display name of the backup plan.
 	BackupPlanName string `json:"BackupPlanName"`
 	// Rules contains the backup rules for this plan.
 	Rules []map[string]interface{} `json:"Rules,omitempty"`
-	// VersionId is the unique, randomly generated, Unicode, UTF-8 encoded version ID.
-	VersionId string `json:"VersionId"`
+	// VersionID is the unique, randomly generated, Unicode, UTF-8 encoded version ID.
+	VersionID string `json:"VersionId"`
 	// CreationDate is when the plan was created.
 	CreationDate time.Time `json:"CreationDate"`
 	// LastExecutionDate is the last time the plan was executed.
@@ -50,12 +50,12 @@ type BackupPlan struct {
 
 // BackupSelection represents an AWS Backup selection (resources assigned to a plan).
 type BackupSelection struct {
-	// SelectionId is the unique identifier for the backup selection.
-	SelectionId string `json:"SelectionId"`
+	// SelectionID is the unique identifier for the backup selection.
+	SelectionID string `json:"SelectionId"`
 	// SelectionName is the display name of the backup selection.
 	SelectionName string `json:"SelectionName"`
-	// BackupPlanId is the ID of the backup plan this selection belongs to.
-	BackupPlanId string `json:"BackupPlanId"`
+	// BackupPlanID is the ID of the backup plan this selection belongs to.
+	BackupPlanID string `json:"BackupPlanId"`
 	// IamRoleArn is the ARN of the IAM role for the backup selection.
 	IamRoleArn string `json:"IamRoleArn,omitempty"`
 	// Resources is the list of ARNs for resources to back up.

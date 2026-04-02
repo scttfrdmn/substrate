@@ -2788,7 +2788,7 @@ func TestDynamoDB_TransactWriteItems_ConditionCheckFails_AllOrNothing(t *testing
 	var outB map[string]any
 	decodeDynamoJSON(t, getB, &outB)
 	_, bExists := outB["Item"]
-	assert.False(t, bExists, "B must not exist — transaction was cancelled")
+	assert.False(t, bExists, "B must not exist — transaction was canceled")
 }
 
 func TestDynamoDB_TransactWriteItems_ConditionCheckPasses(t *testing.T) {

@@ -184,11 +184,11 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 	now := p.tc.Now()
 
 	plan := BackupPlan{
-		BackupPlanId:   planID,
+		BackupPlanID:   planID,
 		BackupPlanArn:  fmt.Sprintf("arn:aws:backup:%s:%s:backup-plan:%s", reqCtx.Region, reqCtx.AccountID, planID),
 		BackupPlanName: input.BackupPlan.BackupPlanName,
 		Rules:          input.BackupPlan.Rules,
-		VersionId:      versionID,
+		VersionID:      versionID,
 		CreationDate:   now,
 		AccountID:      reqCtx.AccountID,
 		Region:         reqCtx.Region,
@@ -219,9 +219,9 @@ func (p *BackupPlugin) getBackupPlan(reqCtx *RequestContext, planID string) (*AW
 		return nil, err
 	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"BackupPlanId":  plan.BackupPlanId,
+		"BackupPlanId":  plan.BackupPlanID,
 		"BackupPlanArn": plan.BackupPlanArn,
-		"VersionId":     plan.VersionId,
+		"VersionId":     plan.VersionID,
 		"CreationDate":  plan.CreationDate,
 		"BackupPlan": map[string]interface{}{
 			"BackupPlanName": plan.BackupPlanName,
@@ -252,7 +252,7 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 	if input.BackupPlan.Rules != nil {
 		plan.Rules = input.BackupPlan.Rules
 	}
-	plan.VersionId = generateBackupUUID()
+	plan.VersionID = generateBackupUUID()
 
 	goCtx := context.Background()
 	data, err := json.Marshal(plan)
@@ -265,10 +265,10 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 	}
 
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"BackupPlanId":  plan.BackupPlanId,
+		"BackupPlanId":  plan.BackupPlanID,
 		"BackupPlanArn": plan.BackupPlanArn,
 		"UpdatedAt":     p.tc.Now(),
-		"VersionId":     plan.VersionId,
+		"VersionId":     plan.VersionID,
 	})
 }
 
@@ -298,10 +298,10 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, er
 			continue
 		}
 		summaries = append(summaries, map[string]interface{}{
-			"BackupPlanId":   plan.BackupPlanId,
+			"BackupPlanId":   plan.BackupPlanID,
 			"BackupPlanArn":  plan.BackupPlanArn,
 			"BackupPlanName": plan.BackupPlanName,
-			"VersionId":      plan.VersionId,
+			"VersionId":      plan.VersionID,
 			"CreationDate":   plan.CreationDate,
 		})
 	}
@@ -334,9 +334,9 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 	selectionID := generateBackupUUID()
 	now := p.tc.Now()
 	selection := BackupSelection{
-		SelectionId:   selectionID,
+		SelectionID:   selectionID,
 		SelectionName: input.BackupSelection.SelectionName,
-		BackupPlanId:  planID,
+		BackupPlanID:  planID,
 		IamRoleArn:    input.BackupSelection.IamRoleArn,
 		Resources:     input.BackupSelection.Resources,
 		CreationDate:  now,
@@ -368,8 +368,8 @@ func (p *BackupPlugin) getBackupSelection(reqCtx *RequestContext, planID, select
 		return nil, err
 	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"SelectionId":  selection.SelectionId,
-		"BackupPlanId": selection.BackupPlanId,
+		"SelectionId":  selection.SelectionID,
+		"BackupPlanId": selection.BackupPlanID,
 		"CreationDate": selection.CreationDate,
 		"BackupSelection": map[string]interface{}{
 			"SelectionName": selection.SelectionName,

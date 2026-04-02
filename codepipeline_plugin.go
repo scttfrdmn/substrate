@@ -343,7 +343,7 @@ func (p *CodePipelinePlugin) getPipelineState(reqCtx *RequestContext, req *AWSRe
 func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		PipelineName        string `json:"pipelineName"`
-		PipelineExecutionId string `json:"pipelineExecutionId"`
+		PipelineExecutionID string `json:"pipelineExecutionId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -352,13 +352,13 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 	}
 
 	goCtx := context.Background()
-	key := codepipelineExecKey(reqCtx.AccountID, reqCtx.Region, input.PipelineExecutionId)
+	key := codepipelineExecKey(reqCtx.AccountID, reqCtx.Region, input.PipelineExecutionID)
 	data, err := p.state.Get(goCtx, codepipelineNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("codepipeline getPipelineExecution get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "PipelineExecutionNotFoundException", Message: "Execution " + input.PipelineExecutionId + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "PipelineExecutionNotFoundException", Message: "Execution " + input.PipelineExecutionID + " not found.", HTTPStatus: http.StatusNotFound}
 	}
 
 	var exec CodePipelineExecution

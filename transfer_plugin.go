@@ -88,7 +88,7 @@ func (p *TransferPlugin) createServer(reqCtx *RequestContext, req *AWSRequest) (
 
 	serverID := generateTransferServerID()
 	server := TransferServer{
-		ServerId:             serverID,
+		ServerID:             serverID,
 		Arn:                  fmt.Sprintf("arn:aws:transfer:%s:%s:server/%s", reqCtx.Region, reqCtx.AccountID, serverID),
 		Domain:               input.Domain,
 		EndpointType:         input.EndpointType,
@@ -118,14 +118,14 @@ func (p *TransferPlugin) createServer(reqCtx *RequestContext, req *AWSRequest) (
 
 func (p *TransferPlugin) describeServer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId string `json:"ServerId"`
+		ServerID string `json:"ServerId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	server, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerId)
+	server, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (p *TransferPlugin) describeServer(reqCtx *RequestContext, req *AWSRequest)
 
 func (p *TransferPlugin) updateServer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId     string        `json:"ServerId"`
+		ServerID     string        `json:"ServerId"`
 		EndpointType string        `json:"EndpointType"`
 		Tags         []TransferTag `json:"Tags"`
 	}
@@ -145,7 +145,7 @@ func (p *TransferPlugin) updateServer(reqCtx *RequestContext, req *AWSRequest) (
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	server, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerId)
+	server, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID)
 	if err != nil {
 		return nil, err
 	}
@@ -162,45 +162,45 @@ func (p *TransferPlugin) updateServer(reqCtx *RequestContext, req *AWSRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("transfer updateServer marshal: %w", err)
 	}
-	key := transferServerKey(reqCtx.AccountID, reqCtx.Region, server.ServerId)
+	key := transferServerKey(reqCtx.AccountID, reqCtx.Region, server.ServerID)
 	if err := p.state.Put(goCtx, transferNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("transfer updateServer put: %w", err)
 	}
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"ServerId": server.ServerId,
+		"ServerId": server.ServerID,
 	})
 }
 
 func (p *TransferPlugin) deleteServer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId string `json:"ServerId"`
+		ServerID string `json:"ServerId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	if _, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerId); err != nil {
+	if _, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID); err != nil {
 		return nil, err
 	}
 
 	goCtx := context.Background()
 	// Cascade-delete all users for this server.
-	userNames, _ := loadStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerId))
+	userNames, _ := loadStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID))
 	for _, userName := range userNames {
-		userKey := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerId, userName)
+		userKey := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerID, userName)
 		_ = p.state.Delete(goCtx, transferNamespace, userKey)
 	}
 	// Clear the user names index.
-	_ = p.state.Delete(goCtx, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerId))
+	_ = p.state.Delete(goCtx, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID))
 
 	// Delete the server.
-	key := transferServerKey(reqCtx.AccountID, reqCtx.Region, input.ServerId)
+	key := transferServerKey(reqCtx.AccountID, reqCtx.Region, input.ServerID)
 	if err := p.state.Delete(goCtx, transferNamespace, key); err != nil {
 		return nil, fmt.Errorf("transfer deleteServer delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), input.ServerId)
+	removeFromStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), input.ServerID)
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{})
 }
@@ -219,7 +219,7 @@ func (p *TransferPlugin) listServers(reqCtx *RequestContext, _ *AWSRequest) (*AW
 		}
 		summaries = append(summaries, map[string]interface{}{
 			"Arn":      server.Arn,
-			"ServerId": server.ServerId,
+			"ServerId": server.ServerID,
 			"Domain":   server.Domain,
 			"State":    server.State,
 		})
@@ -232,7 +232,7 @@ func (p *TransferPlugin) listServers(reqCtx *RequestContext, _ *AWSRequest) (*AW
 
 func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId      string        `json:"ServerId"`
+		ServerID      string        `json:"ServerId"`
 		UserName      string        `json:"UserName"`
 		HomeDirectory string        `json:"HomeDirectory"`
 		Role          string        `json:"Role"`
@@ -243,29 +243,29 @@ func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*A
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	if input.ServerId == "" || input.UserName == "" {
+	if input.ServerID == "" || input.UserName == "" {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "ServerId and UserName are required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	// Verify server exists.
-	if _, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerId); err != nil {
+	if _, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID); err != nil {
 		return nil, err
 	}
 
 	goCtx := context.Background()
-	userKey := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerId, input.UserName)
+	userKey := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
 	existing, err := p.state.Get(goCtx, transferNamespace, userKey)
 	if err != nil {
 		return nil, fmt.Errorf("transfer createUser get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ConflictException", Message: "User " + input.UserName + " already exists on server " + input.ServerId + ".", HTTPStatus: http.StatusConflict}
+		return nil, &AWSError{Code: "ConflictException", Message: "User " + input.UserName + " already exists on server " + input.ServerID + ".", HTTPStatus: http.StatusConflict}
 	}
 
 	user := TransferUser{
 		UserName:      input.UserName,
-		Arn:           fmt.Sprintf("arn:aws:transfer:%s:%s:user/%s/%s", reqCtx.Region, reqCtx.AccountID, input.ServerId, input.UserName),
-		ServerId:      input.ServerId,
+		Arn:           fmt.Sprintf("arn:aws:transfer:%s:%s:user/%s/%s", reqCtx.Region, reqCtx.AccountID, input.ServerID, input.UserName),
+		ServerID:      input.ServerID,
 		HomeDirectory: input.HomeDirectory,
 		Role:          input.Role,
 		Tags:          input.Tags,
@@ -280,17 +280,17 @@ func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Put(goCtx, transferNamespace, userKey, data); err != nil {
 		return nil, fmt.Errorf("transfer createUser put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerId), input.UserName)
+	updateStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID), input.UserName)
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"ServerId": input.ServerId,
+		"ServerId": input.ServerID,
 		"UserName": input.UserName,
 	})
 }
 
 func (p *TransferPlugin) describeUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId string `json:"ServerId"`
+		ServerID string `json:"ServerId"`
 		UserName string `json:"UserName"`
 	}
 	if len(req.Body) > 0 {
@@ -298,19 +298,19 @@ func (p *TransferPlugin) describeUser(reqCtx *RequestContext, req *AWSRequest) (
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerId, input.UserName)
+	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
 	if err != nil {
 		return nil, err
 	}
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"ServerId": input.ServerId,
+		"ServerId": input.ServerID,
 		"User":     user,
 	})
 }
 
 func (p *TransferPlugin) updateUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId      string `json:"ServerId"`
+		ServerID      string `json:"ServerId"`
 		UserName      string `json:"UserName"`
 		HomeDirectory string `json:"HomeDirectory"`
 		Role          string `json:"Role"`
@@ -320,7 +320,7 @@ func (p *TransferPlugin) updateUser(reqCtx *RequestContext, req *AWSRequest) (*A
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerId, input.UserName)
+	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -337,20 +337,20 @@ func (p *TransferPlugin) updateUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err != nil {
 		return nil, fmt.Errorf("transfer updateUser marshal: %w", err)
 	}
-	key := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerId, input.UserName)
+	key := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
 	if err := p.state.Put(goCtx, transferNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("transfer updateUser put: %w", err)
 	}
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"ServerId": input.ServerId,
+		"ServerId": input.ServerID,
 		"UserName": input.UserName,
 	})
 }
 
 func (p *TransferPlugin) deleteUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId string `json:"ServerId"`
+		ServerID string `json:"ServerId"`
 		UserName string `json:"UserName"`
 	}
 	if len(req.Body) > 0 {
@@ -358,41 +358,41 @@ func (p *TransferPlugin) deleteUser(reqCtx *RequestContext, req *AWSRequest) (*A
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	if _, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerId, input.UserName); err != nil {
+	if _, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName); err != nil {
 		return nil, err
 	}
 
 	goCtx := context.Background()
-	key := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerId, input.UserName)
+	key := transferUserKey(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
 	if err := p.state.Delete(goCtx, transferNamespace, key); err != nil {
 		return nil, fmt.Errorf("transfer deleteUser delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerId), input.UserName)
+	removeFromStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID), input.UserName)
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
 func (p *TransferPlugin) listUsers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerId string `json:"ServerId"`
+		ServerID string `json:"ServerId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	if input.ServerId == "" {
+	if input.ServerID == "" {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "ServerId is required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	goCtx := context.Background()
-	names, err := loadStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerId))
+	names, err := loadStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID))
 	if err != nil {
 		return nil, fmt.Errorf("transfer listUsers load index: %w", err)
 	}
 	summaries := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerId, name)
+		user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, name)
 		if err != nil {
 			continue
 		}
@@ -404,7 +404,7 @@ func (p *TransferPlugin) listUsers(reqCtx *RequestContext, req *AWSRequest) (*AW
 		})
 	}
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"ServerId":  input.ServerId,
+		"ServerId":  input.ServerID,
 		"Users":     summaries,
 		"NextToken": "",
 	})

@@ -410,7 +410,7 @@ func (p *MSKPlugin) listNodes(_ *RequestContext, _ *AWSRequest, clusterARN strin
 			cluster.Region, cluster.AccountID, cluster.ClusterName, uuid, i+1)
 		nodes[i] = MSKNodeInfo{
 			BrokerNodeInfo: MSKBrokerNodeInfo{
-				BrokerId:     brokerID,
+				BrokerID:     brokerID,
 				ClientSubnet: clientSubnet,
 				CurrentBrokerSoftwareInfo: MSKBrokerSoftwareInfo{
 					KafkaVersion: cluster.KafkaVersion,

@@ -827,7 +827,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			DelayUntil:     now.Add(time.Duration(delay) * time.Second),
 			VisibleAfter:   time.Time{},
 			ReceiveCount:   0,
-			MessageGroupId: msgGroupID,
+			MessageGroupID: msgGroupID,
 		}
 		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
 			return nil, fmt.Errorf("sqs sendMessage saveMsg: %w", saveErr)
@@ -1123,14 +1123,14 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		ReceiptHandle  string `xml:"ReceiptHandle"`
 		MD5OfBody      string `xml:"MD5OfBody"`
 		Body           string `xml:"Body"`
-		MessageGroupId string `xml:"MessageGroupId,omitempty"`
+		MessageGroupID string `xml:"MessageGroupId,omitempty"`
 	}
 	type msgResultJSON struct {
 		MessageID      string `json:"MessageId"`
 		ReceiptHandle  string `json:"ReceiptHandle"`
 		MD5OfBody      string `json:"MD5OfBody"`
 		Body           string `json:"Body"`
-		MessageGroupId string `json:"MessageGroupId,omitempty"`
+		MessageGroupID string `json:"MessageGroupId,omitempty"`
 	}
 
 	messagesXML := make([]msgResultXML, 0)
@@ -1159,8 +1159,8 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		// FIFO: enforce single-group-per-call.
 		if q.FifoQueue {
 			if fifoGroup == "" {
-				fifoGroup = msg.MessageGroupId
-			} else if msg.MessageGroupId != fifoGroup {
+				fifoGroup = msg.MessageGroupID
+			} else if msg.MessageGroupID != fifoGroup {
 				continue
 			}
 		}
@@ -1182,7 +1182,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 				ReceiptHandle:  newHandle,
 				MD5OfBody:      msg.MD5OfBody,
 				Body:           msg.Body,
-				MessageGroupId: msg.MessageGroupId,
+				MessageGroupID: msg.MessageGroupID,
 			})
 		} else {
 			messagesXML = append(messagesXML, msgResultXML{
@@ -1190,7 +1190,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 				ReceiptHandle:  newHandle,
 				MD5OfBody:      msg.MD5OfBody,
 				Body:           msg.Body,
-				MessageGroupId: msg.MessageGroupId,
+				MessageGroupID: msg.MessageGroupID,
 			})
 		}
 	}

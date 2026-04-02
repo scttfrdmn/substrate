@@ -90,7 +90,7 @@ func (p *SSOPlugin) ensureInstance(goCtx context.Context, acct string) (*SSOInst
 
 	inst := SSOInstance{
 		InstanceArn:     generateSSOInstanceArn(),
-		IdentityStoreId: generateSSOIdentityStoreId(),
+		IdentityStoreID: generateSSOIdentityStoreID(),
 		Status:          "ACTIVE",
 		CreatedDate:     p.tc.Now(),
 		AccountID:       acct,
@@ -115,7 +115,7 @@ func (p *SSOPlugin) listInstances(reqCtx *RequestContext, _ *AWSRequest) (*AWSRe
 		"Instances": []map[string]interface{}{
 			{
 				"InstanceArn":     inst.InstanceArn,
-				"IdentityStoreId": inst.IdentityStoreId,
+				"IdentityStoreId": inst.IdentityStoreID,
 				"Status":          inst.Status,
 				"CreatedDate":     inst.CreatedDate,
 			},
@@ -330,10 +330,10 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 	var input struct {
 		InstanceArn      string `json:"InstanceArn"`
 		PermissionSetArn string `json:"PermissionSetArn"`
-		TargetId         string `json:"TargetId"`
+		TargetID         string `json:"TargetId"`
 		TargetType       string `json:"TargetType"`
 		PrincipalType    string `json:"PrincipalType"`
-		PrincipalId      string `json:"PrincipalId"`
+		PrincipalID      string `json:"PrincipalId"`
 	}
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &input)
@@ -341,10 +341,10 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 
 	assignment := SSOAccountAssignment{
 		PermissionSetArn: input.PermissionSetArn,
-		TargetId:         input.TargetId,
+		TargetID:         input.TargetID,
 		TargetType:       input.TargetType,
 		PrincipalType:    input.PrincipalType,
-		PrincipalId:      input.PrincipalId,
+		PrincipalID:      input.PrincipalID,
 		AccountID:        reqCtx.AccountID,
 		InstanceArn:      input.InstanceArn,
 	}
@@ -354,11 +354,11 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 	if err != nil {
 		return nil, fmt.Errorf("sso createAccountAssignment marshal: %w", err)
 	}
-	key := ssoAssignmentKey(reqCtx.AccountID, input.PermissionSetArn, input.TargetId, input.PrincipalType, input.PrincipalId)
+	key := ssoAssignmentKey(reqCtx.AccountID, input.PermissionSetArn, input.TargetID, input.PrincipalType, input.PrincipalID)
 	if err := p.state.Put(goCtx, ssoNamespace, key, d); err != nil {
 		return nil, fmt.Errorf("sso createAccountAssignment put: %w", err)
 	}
-	compositeKey := input.TargetId + "/" + input.PrincipalType + "/" + input.PrincipalId
+	compositeKey := input.TargetID + "/" + input.PrincipalType + "/" + input.PrincipalID
 	updateStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey)
 
 	requestID := generateSSORequestID()
@@ -367,10 +367,10 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 			"Status":           "SUCCEEDED",
 			"RequestId":        requestID,
 			"PermissionSetArn": input.PermissionSetArn,
-			"TargetId":         input.TargetId,
+			"TargetId":         input.TargetID,
 			"TargetType":       input.TargetType,
 			"PrincipalType":    input.PrincipalType,
-			"PrincipalId":      input.PrincipalId,
+			"PrincipalId":      input.PrincipalID,
 		},
 	})
 }
@@ -379,21 +379,21 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 	var input struct {
 		InstanceArn      string `json:"InstanceArn"`
 		PermissionSetArn string `json:"PermissionSetArn"`
-		TargetId         string `json:"TargetId"`
+		TargetID         string `json:"TargetId"`
 		TargetType       string `json:"TargetType"`
 		PrincipalType    string `json:"PrincipalType"`
-		PrincipalId      string `json:"PrincipalId"`
+		PrincipalID      string `json:"PrincipalId"`
 	}
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &input)
 	}
 
 	goCtx := context.Background()
-	key := ssoAssignmentKey(reqCtx.AccountID, input.PermissionSetArn, input.TargetId, input.PrincipalType, input.PrincipalId)
+	key := ssoAssignmentKey(reqCtx.AccountID, input.PermissionSetArn, input.TargetID, input.PrincipalType, input.PrincipalID)
 	if err := p.state.Delete(goCtx, ssoNamespace, key); err != nil {
 		return nil, fmt.Errorf("sso deleteAccountAssignment delete: %w", err)
 	}
-	compositeKey := input.TargetId + "/" + input.PrincipalType + "/" + input.PrincipalId
+	compositeKey := input.TargetID + "/" + input.PrincipalType + "/" + input.PrincipalID
 	removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey)
 
 	requestID := generateSSORequestID()
@@ -408,7 +408,7 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 func (p *SSOPlugin) listAccountAssignments(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		PermissionSetArn string `json:"PermissionSetArn"`
-		AccountId        string `json:"AccountId"`
+		AccountID        string `json:"AccountId"`
 	}
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &input)
@@ -429,7 +429,7 @@ func (p *SSOPlugin) listAccountAssignments(reqCtx *RequestContext, req *AWSReque
 		}
 		targetID, principalType, principalID := parts[0], parts[1], parts[2]
 		// Filter by AccountId if provided.
-		if input.AccountId != "" && targetID != input.AccountId {
+		if input.AccountID != "" && targetID != input.AccountID {
 			continue
 		}
 		assignments = append(assignments, map[string]interface{}{

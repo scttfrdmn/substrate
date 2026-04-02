@@ -81,14 +81,14 @@ func (p *RedshiftDataPlugin) executeStatement(reqCtx *RequestContext, req *AWSRe
 		ClusterIdentifier string `json:"ClusterIdentifier"`
 		Database          string `json:"Database"`
 		SecretArn         string `json:"SecretArn"`
-		Sql               string `json:"Sql"`
+		SQL               string `json:"Sql"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, &AWSError{Code: "ValidationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	if input.Sql == "" {
+	if input.SQL == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "Sql is required", HTTPStatus: http.StatusBadRequest}
 	}
 
@@ -111,7 +111,7 @@ func (p *RedshiftDataPlugin) executeStatement(reqCtx *RequestContext, req *AWSRe
 		ID:                id,
 		Status:            status,
 		Error:             errMsg,
-		QueryString:       input.Sql,
+		QueryString:       input.SQL,
 		WorkgroupName:     input.WorkgroupName,
 		ClusterIdentifier: input.ClusterIdentifier,
 		Database:          input.Database,

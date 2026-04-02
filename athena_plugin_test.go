@@ -407,7 +407,7 @@ func TestAthenaPlugin_GetQueryResults_Seeded(t *testing.T) {
 		QueryExecutionId string `json:"QueryExecutionId"`
 	}
 	b, _ := io.ReadAll(startResp.Body)
-	startResp.Body.Close()
+	_ = startResp.Body.Close()
 	require.NoError(t, json.Unmarshal(b, &started))
 
 	// GetQueryResults — should return seeded rows.
@@ -426,7 +426,7 @@ func TestAthenaPlugin_GetQueryResults_Seeded(t *testing.T) {
 		} `json:"ResultSet"`
 	}
 	b2, _ := io.ReadAll(getResp.Body)
-	getResp.Body.Close()
+	_ = getResp.Body.Close()
 	require.NoError(t, json.Unmarshal(b2, &result))
 	require.Len(t, result.ResultSet.Rows, 1)
 	assert.Equal(t, "alice", result.ResultSet.Rows[0].Data[0].VarCharValue)
@@ -466,7 +466,7 @@ func TestAthena_ControlPlane_SeedAndClear(t *testing.T) {
 	seedResp, err := http.Post(ts.URL+"/v1/athena/results", "application/json", strings.NewReader(seedBody))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, seedResp.StatusCode)
-	seedResp.Body.Close()
+	_ = seedResp.Body.Close()
 
 	// Start a query and get results — should return seeded rows.
 	startResp, err := http.DefaultClient.Do(newAthenaHTTPRequest(t, ts, "StartQueryExecution", map[string]interface{}{
@@ -477,7 +477,7 @@ func TestAthena_ControlPlane_SeedAndClear(t *testing.T) {
 		QueryExecutionId string `json:"QueryExecutionId"`
 	}
 	b, _ := io.ReadAll(startResp.Body)
-	startResp.Body.Close()
+	_ = startResp.Body.Close()
 	require.NoError(t, json.Unmarshal(b, &started))
 
 	getResp, err := http.DefaultClient.Do(newAthenaHTTPRequest(t, ts, "GetQueryResults", map[string]string{
@@ -485,7 +485,7 @@ func TestAthena_ControlPlane_SeedAndClear(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	b2, _ := io.ReadAll(getResp.Body)
-	getResp.Body.Close()
+	_ = getResp.Body.Close()
 	require.Equal(t, http.StatusOK, getResp.StatusCode)
 	assert.Contains(t, string(b2), "42")
 
@@ -494,7 +494,7 @@ func TestAthena_ControlPlane_SeedAndClear(t *testing.T) {
 	delResp, err := http.DefaultClient.Do(delReq)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, delResp.StatusCode)
-	delResp.Body.Close()
+	_ = delResp.Body.Close()
 
 	// Start another query; GetQueryResults — should now return empty rows.
 	startResp2, err := http.DefaultClient.Do(newAthenaHTTPRequest(t, ts, "StartQueryExecution", map[string]interface{}{
@@ -505,7 +505,7 @@ func TestAthena_ControlPlane_SeedAndClear(t *testing.T) {
 		QueryExecutionId string `json:"QueryExecutionId"`
 	}
 	b3, _ := io.ReadAll(startResp2.Body)
-	startResp2.Body.Close()
+	_ = startResp2.Body.Close()
 	require.NoError(t, json.Unmarshal(b3, &started2))
 
 	getResp2, err := http.DefaultClient.Do(newAthenaHTTPRequest(t, ts, "GetQueryResults", map[string]string{
@@ -518,7 +518,7 @@ func TestAthena_ControlPlane_SeedAndClear(t *testing.T) {
 		} `json:"ResultSet"`
 	}
 	b4, _ := io.ReadAll(getResp2.Body)
-	getResp2.Body.Close()
+	_ = getResp2.Body.Close()
 	require.NoError(t, json.Unmarshal(b4, &result2))
 	assert.Empty(t, result2.ResultSet.Rows)
 }

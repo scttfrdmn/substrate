@@ -18,7 +18,7 @@ import (
 //	{"bucket": "my-bucket", "key": "path/to/obj", "method": "GET", "expires": 3600}
 //
 // The method defaults to "GET" and expires defaults to 3600 seconds.
-// Response: {"url": "http://...", "method": "GET", "expires": 3600}
+// Response: {"url": "http://...", "method": "GET", "expires": 3600}.
 func (s *Server) handleS3Presign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Bucket  string `json:"bucket"`

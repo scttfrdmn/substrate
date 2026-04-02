@@ -14,8 +14,8 @@ type RAMResourceShare struct {
 	ResourceShareArn string `json:"resourceShareArn"`
 	// Name is the display name of the resource share.
 	Name string `json:"name"`
-	// OwningAccountId is the account that owns the resource share.
-	OwningAccountId string `json:"owningAccountId"`
+	// OwningAccountID is the account that owns the resource share.
+	OwningAccountID string `json:"owningAccountId"`
 	// AllowExternalPrincipals indicates whether the share can include external accounts.
 	AllowExternalPrincipals bool `json:"allowExternalPrincipals"`
 	// Status is the status of the resource share (ACTIVE).
