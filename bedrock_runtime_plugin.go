@@ -126,12 +126,12 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 	_ = json.Unmarshal(data, &blocklist)
 
 	usage := map[string]int{
-		"topicPolicyUnitsProcessed":                       0,
-		"contentPolicyUnitsProcessed":                     1,
-		"wordPolicyUnitsProcessed":                        0,
-		"sensitiveInformationPolicyUnitsProcessed":         0,
-		"sensitiveInformationPolicyFreeUnitsProcessed":     0,
-		"contextualGroundingPolicyUnitsProcessed":          0,
+		"topicPolicyUnitsProcessed":                    0,
+		"contentPolicyUnitsProcessed":                  1,
+		"wordPolicyUnitsProcessed":                     0,
+		"sensitiveInformationPolicyUnitsProcessed":     0,
+		"sensitiveInformationPolicyFreeUnitsProcessed": 0,
+		"contextualGroundingPolicyUnitsProcessed":      0,
 	}
 
 	// Check blocklist.

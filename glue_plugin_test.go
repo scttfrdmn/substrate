@@ -707,7 +707,7 @@ func TestGluePlugin_GetTable_PreservesStorageDescriptorColumns(t *testing.T) {
 				"OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
 				"SerdeInfo": map[string]interface{}{
 					"SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
-					"Parameters":          map[string]interface{}{"field.delim": ","},
+					"Parameters":           map[string]interface{}{"field.delim": ","},
 				},
 			},
 			"PartitionKeys": []interface{}{
@@ -735,14 +735,14 @@ func TestGluePlugin_GetTable_PreservesStorageDescriptorColumns(t *testing.T) {
 	}
 	var result struct {
 		Table struct {
-			Name      string `json:"Name"`
-			TableType string `json:"TableType"`
+			Name              string `json:"Name"`
+			TableType         string `json:"TableType"`
 			StorageDescriptor struct {
 				Columns []struct {
 					Name string `json:"Name"`
 					Type string `json:"Type"`
 				} `json:"Columns"`
-				Location string `json:"Location"`
+				Location  string `json:"Location"`
 				SerdeInfo struct {
 					SerializationLibrary string            `json:"SerializationLibrary"`
 					Parameters           map[string]string `json:"Parameters"`

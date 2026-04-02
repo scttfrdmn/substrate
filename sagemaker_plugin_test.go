@@ -308,11 +308,11 @@ func TestSageMakerPlugin_ListTrainingJobs(t *testing.T) {
 			},
 			"OutputDataConfig": map[string]string{"S3OutputPath": "s3://bucket/output"},
 			"ResourceConfig": map[string]interface{}{
-				"InstanceType":  "ml.m5.large",
-				"InstanceCount": 1,
+				"InstanceType":   "ml.m5.large",
+				"InstanceCount":  1,
 				"VolumeSizeInGB": 10,
 			},
-			"RoleArn": "arn:aws:iam::123456789012:role/SageMakerRole",
+			"RoleArn":           "arn:aws:iam::123456789012:role/SageMakerRole",
 			"StoppingCondition": map[string]int{"MaxRuntimeInSeconds": 3600},
 		})
 		if r.StatusCode != http.StatusOK {

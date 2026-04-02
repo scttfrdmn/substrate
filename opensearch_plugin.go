@@ -120,9 +120,9 @@ func (p *OpenSearchPlugin) createIndex(_ *RequestContext, req *AWSRequest, index
 			"index ["+index+"] already exists"), nil
 	}
 	meta := map[string]interface{}{
-		"index":        index,
-		"created_at":   p.tc.Now().Format(time.RFC3339),
-		"doc_count":    0,
+		"index":      index,
+		"created_at": p.tc.Now().Format(time.RFC3339),
+		"doc_count":  0,
 	}
 	// Optionally parse mappings/settings from body.
 	if len(req.Body) > 0 {
@@ -540,18 +540,18 @@ func (p *OpenSearchPlugin) clearScroll(_ *RequestContext, req *AWSRequest) (*AWS
 
 func (p *OpenSearchPlugin) clusterHealth() (*AWSResponse, error) {
 	return openSearchOK(map[string]interface{}{
-		"cluster_name":                 "substrate",
-		"status":                       "green",
-		"timed_out":                    false,
-		"number_of_nodes":              1,
-		"number_of_data_nodes":         1,
-		"active_primary_shards":        1,
-		"active_shards":                1,
-		"relocating_shards":            0,
-		"initializing_shards":          0,
-		"unassigned_shards":            0,
-		"delayed_unassigned_shards":    0,
-		"number_of_pending_tasks":      0,
+		"cluster_name":                    "substrate",
+		"status":                          "green",
+		"timed_out":                       false,
+		"number_of_nodes":                 1,
+		"number_of_data_nodes":            1,
+		"active_primary_shards":           1,
+		"active_shards":                   1,
+		"relocating_shards":               0,
+		"initializing_shards":             0,
+		"unassigned_shards":               0,
+		"delayed_unassigned_shards":       0,
+		"number_of_pending_tasks":         0,
 		"active_shards_percent_as_number": 100.0,
 	}), nil
 }

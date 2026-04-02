@@ -2571,8 +2571,8 @@ func TestDynamoDBPlugin_EmptyStringAttribute_Scan(t *testing.T) {
 	putResp := dynamodbRequest(t, srv, "PutItem", map[string]any{
 		"TableName": "empstr-scan-table",
 		"Item": map[string]any{
-			"slug":        map[string]any{"S": "item1"},
-			"registryUrl": map[string]any{"S": ""},
+			"slug":          map[string]any{"S": "item1"},
+			"registryUrl":   map[string]any{"S": ""},
 			"documentation": map[string]any{"S": ""},
 		},
 	})

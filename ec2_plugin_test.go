@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	substrate "github.com/scttfrdmn/substrate"
+	"github.com/stretchr/testify/assert"
 )
 
 // newEC2TestServer builds a minimal Server with the EC2 plugin registered.
@@ -2621,11 +2621,11 @@ func TestEC2Plugin_CreateDescribeDeleteLaunchTemplate(t *testing.T) {
 
 	// Create
 	resp := ec2Request(t, ts, map[string]string{
-		"Action":                              "CreateLaunchTemplate",
-		"LaunchTemplateName":                  "my-template",
-		"LaunchTemplateData.ImageId":          "ami-0abcdef1234567890",
-		"LaunchTemplateData.InstanceType":     "t3.small",
-		"LaunchTemplateData.KeyName":          "my-key",
+		"Action":                               "CreateLaunchTemplate",
+		"LaunchTemplateName":                   "my-template",
+		"LaunchTemplateData.ImageId":           "ami-0abcdef1234567890",
+		"LaunchTemplateData.InstanceType":      "t3.small",
+		"LaunchTemplateData.KeyName":           "my-key",
 		"LaunchTemplateData.SecurityGroupId.1": "sg-12345678",
 	})
 	defer resp.Body.Close() //nolint:errcheck
@@ -2843,7 +2843,7 @@ func TestEC2_EBS_CreateDescribeDeleteVolume(t *testing.T) {
 
 	// DescribeVolumes by ID.
 	resp2 := ec2Request(t, ts, map[string]string{
-		"Action":    "DescribeVolumes",
+		"Action":     "DescribeVolumes",
 		"VolumeId.1": volID,
 	})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
@@ -2859,7 +2859,7 @@ func TestEC2_EBS_CreateDescribeDeleteVolume(t *testing.T) {
 
 	// DescribeVolumes should now return empty.
 	resp4 := ec2Request(t, ts, map[string]string{
-		"Action":    "DescribeVolumes",
+		"Action":     "DescribeVolumes",
 		"VolumeId.1": volID,
 	})
 	assert.Equal(t, http.StatusOK, resp4.StatusCode)
@@ -2907,7 +2907,7 @@ func TestEC2_EBS_AttachDetachVolume(t *testing.T) {
 
 	// DescribeVolumes should show in-use.
 	descResp := ec2Request(t, ts, map[string]string{
-		"Action":    "DescribeVolumes",
+		"Action":     "DescribeVolumes",
 		"VolumeId.1": volID,
 	})
 	descBody, _ := io.ReadAll(descResp.Body)
@@ -2922,7 +2922,7 @@ func TestEC2_EBS_AttachDetachVolume(t *testing.T) {
 
 	// Volume should be available again.
 	descResp2 := ec2Request(t, ts, map[string]string{
-		"Action":    "DescribeVolumes",
+		"Action":     "DescribeVolumes",
 		"VolumeId.1": volID,
 	})
 	descBody2, _ := io.ReadAll(descResp2.Body)

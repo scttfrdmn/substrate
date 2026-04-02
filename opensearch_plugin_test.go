@@ -136,7 +136,7 @@ func TestOpenSearchPlugin_IndexDocument_AndGet(t *testing.T) {
 
 	// Index a document (auto-creates index).
 	r := osReq(t, ts, http.MethodPut, "/test-idx/_doc/doc1", map[string]interface{}{
-		"gene": "BRCA1",
+		"gene":  "BRCA1",
 		"chrom": "17",
 	})
 	if r.StatusCode != http.StatusCreated {

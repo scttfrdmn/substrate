@@ -95,9 +95,9 @@ type AthenaQuery struct {
 
 func (p *AthenaPlugin) startQueryExecution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		QueryString          string `json:"QueryString"`
-		WorkGroup            string `json:"WorkGroup"`
-		ResultConfiguration  *struct {
+		QueryString         string `json:"QueryString"`
+		WorkGroup           string `json:"WorkGroup"`
+		ResultConfiguration *struct {
 			OutputLocation string `json:"OutputLocation"`
 		} `json:"ResultConfiguration"`
 	}

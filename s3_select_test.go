@@ -113,10 +113,10 @@ func s3SelectXMLRequest(expression, inputFormat string) []byte {
 		JSON *jsonOutput `xml:"JSON"`
 	}
 	type request struct {
-		XMLName            xml.Name            `xml:"SelectObjectContentRequest"`
-		Expression         string              `xml:"Expression"`
-		ExpressionType     string              `xml:"ExpressionType"`
-		InputSerialization inputSerialization  `xml:"InputSerialization"`
+		XMLName             xml.Name            `xml:"SelectObjectContentRequest"`
+		Expression          string              `xml:"Expression"`
+		ExpressionType      string              `xml:"ExpressionType"`
+		InputSerialization  inputSerialization  `xml:"InputSerialization"`
 		OutputSerialization outputSerialization `xml:"OutputSerialization"`
 	}
 	req := request{

@@ -126,7 +126,7 @@ func (p *SageMakerPlugin) listDomains() (*AWSResponse, error) {
 
 func (p *SageMakerPlugin) listApps(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		DomainIdEquals      string `json:"DomainIdEquals"`
+		DomainIdEquals        string `json:"DomainIdEquals"`
 		UserProfileNameEquals string `json:"UserProfileNameEquals"`
 	}
 	_ = json.Unmarshal(req.Body, &body)

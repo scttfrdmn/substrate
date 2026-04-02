@@ -1567,7 +1567,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		}
 	}
 
-	return iamXMLEmptyResponse("Put"+actionSuffix+"Policy"), nil
+	return iamXMLEmptyResponse("Put" + actionSuffix + "Policy"), nil
 }
 
 // getInlinePolicy retrieves an inline policy document for a user or role.
@@ -1671,7 +1671,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 		return nil, err
 	}
 
-	return iamXMLEmptyResponse("Delete"+actionSuffix+"Policy"), nil
+	return iamXMLEmptyResponse("Delete" + actionSuffix + "Policy"), nil
 }
 
 // listInlinePolicies returns the names of all inline policies for a user or role.
@@ -1805,7 +1805,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 		}
 	}
 
-	return iamXMLEmptyResponse("Put"+actionSuffix+"PermissionsBoundary"), nil
+	return iamXMLEmptyResponse("Put" + actionSuffix + "PermissionsBoundary"), nil
 }
 
 // deletePermissionsBoundary clears the permissions boundary from a user or role.
@@ -1873,7 +1873,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 		}
 	}
 
-	return iamXMLEmptyResponse("Delete"+actionSuffix+"PermissionsBoundary"), nil
+	return iamXMLEmptyResponse("Delete" + actionSuffix + "PermissionsBoundary"), nil
 }
 
 // --- Tagging operations ----------------------------------------------------

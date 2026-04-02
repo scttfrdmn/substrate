@@ -17,8 +17,8 @@ import (
 
 // selectObjectContentRequest is the XML request body for S3 SelectObjectContent.
 type selectObjectContentRequest struct {
-	Expression     string `xml:"Expression"`
-	ExpressionType string `xml:"ExpressionType"`
+	Expression         string `xml:"Expression"`
+	ExpressionType     string `xml:"ExpressionType"`
 	InputSerialization struct {
 		CSV *struct {
 			FileHeaderInfo string `xml:"FileHeaderInfo"`
@@ -302,7 +302,7 @@ func (p *S3Plugin) selectObjectContent(reqCtx *RequestContext, req *AWSRequest, 
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
 		Headers: map[string]string{
-			"Content-Type": "application/vnd.amazon.eventstream",
+			"Content-Type":     "application/vnd.amazon.eventstream",
 			"x-amz-request-id": fmt.Sprintf("EXAMPLE%d", bytesScanned),
 		},
 		Body: stream.Bytes(),

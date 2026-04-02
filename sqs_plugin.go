@@ -744,10 +744,10 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	var msgBody, delayStr, msgGroupID, dedupIDParam string
 	if sqsIsJSONProtocol(req) {
 		var input struct {
-			MessageBody             string `json:"MessageBody"`
-			DelaySeconds            int    `json:"DelaySeconds"`
-			MessageGroupId          string `json:"MessageGroupId"`
-			MessageDeduplicationId  string `json:"MessageDeduplicationId"`
+			MessageBody            string `json:"MessageBody"`
+			DelaySeconds           int    `json:"DelaySeconds"`
+			MessageGroupId         string `json:"MessageGroupId"`
+			MessageDeduplicationId string `json:"MessageDeduplicationId"`
 		}
 		_ = json.Unmarshal(req.Body, &input)
 		msgBody = input.MessageBody
