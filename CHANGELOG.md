@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.9] - 2026-04-02
+
+### Added
+- `POST /_substrate/reset` endpoint as an alias for `POST /v1/state/reset`, providing a stable reset URL for Docker-based test environments and LocalStack drop-in use cases (closes #259)
+
 ## [v0.45.8] - 2026-04-02
 
 ### Fixed

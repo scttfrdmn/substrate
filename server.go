@@ -214,6 +214,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Get("/_localstack/health", s.handleLocalStackHealth)
 	r.Get("/_localstack/info", s.handleLocalStackHealth)
 	r.Post("/v1/state/reset", s.handleStateReset)
+	r.Post("/_substrate/reset", s.handleStateReset)
 	r.Get("/v1/emails", s.handleEmails)
 
 	r.Get("/v1/control/time", s.handleGetTime)
