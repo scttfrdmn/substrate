@@ -161,8 +161,48 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 				Groups:     groups,
 				Estimated:  false,
 			}}
+		} else if strings.EqualFold(input.Granularity, "DAILY") {
+			// DAILY granularity: emit one ResultByTime per calendar day.
+			var allEvents []*Event
+			if p.store != nil {
+				evts, err := p.store.GetEvents(context.Background(), EventFilter{
+					AccountID: reqCtx.AccountID,
+					StartTime: start,
+					EndTime:   end,
+				})
+				if err != nil {
+					p.logger.Error("ce: GetEvents failed", "error", err)
+				} else {
+					allEvents = evts
+				}
+			}
+			// Bucket event costs by UTC calendar day.
+			costByDay := make(map[time.Time]float64)
+			for _, ev := range allEvents {
+				day := ev.Timestamp.UTC().Truncate(24 * time.Hour)
+				costByDay[day] += ev.Cost
+			}
+
+			results = []CECostResultByTime{}
+			for d := start; d.Before(end); d = d.AddDate(0, 0, 1) {
+				dayEnd := d.AddDate(0, 0, 1)
+				if dayEnd.After(end) {
+					dayEnd = end
+				}
+				dailyCost := costByDay[d]
+				dailyCost += p.computeEC2UsageCost(reqCtx.AccountID, d, dayEnd)
+				results = append(results, CECostResultByTime{
+					TimePeriod: CEDateInterval{
+						Start: d.Format("2006-01-02"),
+						End:   dayEnd.Format("2006-01-02"),
+					},
+					Total:     buildMetrics(dailyCost),
+					Groups:    []CEGroup{},
+					Estimated: false,
+				})
+			}
 		} else {
-			// Default: group by SERVICE (existing behavior).
+			// Default: aggregate over the full requested period, grouped by SERVICE.
 			bySvc := make(map[string]float64)
 			var totalCost float64
 			if p.store != nil {
@@ -187,9 +227,6 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 			}
 			sort.Slice(groups, func(i, j int) bool { return groups[i].Keys[0] < groups[j].Keys[0] })
 
-			// TODO(#225): return one ResultByTime per day/month bucket once cost
-			// events are timestamped by the simulated clock. For now a single
-			// aggregate entry covering the full requested period is returned.
 			results = []CECostResultByTime{{
 				TimePeriod: input.TimePeriod,
 				Total:      buildMetrics(totalCost),

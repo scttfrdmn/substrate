@@ -229,6 +229,9 @@ var targetServiceAliases = map[string]string{
 	// the SigV4 signing name in the credential scope when AWS_ENDPOINT_URL is set.
 	// Route these requests to BedrockRuntimePlugin.
 	"bedrock": "bedrock-runtime",
+	// "AmazonSQS" → strip "Amazon" → "amazonsqs" → "sqs".
+	// aws-sdk-go-v2 SQS JSON protocol uses X-Amz-Target: AmazonSQS.{Op}.
+	"amazonsqs": "sqs",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

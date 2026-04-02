@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.10] - 2026-04-02
+
+### Added
+- **SQS JSON protocol routing (#236)**: Added `"amazonsqs": "sqs"` alias to `targetServiceAliases` in `parser.go` so that SigV4 credential-scope service names of `amazonsqs` (used by aws-sdk-go-v2 SQS JSON protocol) are correctly routed to `SQSPlugin`. The plugin already supported JSON protocol (`Content-Type: application/x-amz-json-1.0`, `X-Amz-Target: AmazonSQS.*`) via `sqsIsJSONProtocol()`; this completes the routing path for credential-scope–based dispatch.
+- **CE daily granularity (#225)**: `GetCostAndUsage` with `Granularity: "DAILY"` now returns one `ResultByTime` per calendar day over the requested range (including zero-cost days), matching real AWS Cost Explorer behavior. The aggregate (non-DAILY) code path is unchanged. EC2 compute cost is correctly bucketed per day by calling `computeEC2UsageCost` over each individual day window.
+
 ## [v0.45.9] - 2026-04-02
 
 ### Added
@@ -1497,4 +1503,7 @@ all changes onto the v0.44.x line.
 [v0.45.4]: https://github.com/scttfrdmn/substrate/compare/v0.45.3...v0.45.4
 [v0.45.5]: https://github.com/scttfrdmn/substrate/compare/v0.45.4...v0.45.5
 [v0.45.6]: https://github.com/scttfrdmn/substrate/compare/v0.45.5...v0.45.6
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.6...HEAD
+[v0.45.8]: https://github.com/scttfrdmn/substrate/compare/v0.45.6...v0.45.8
+[v0.45.9]: https://github.com/scttfrdmn/substrate/compare/v0.45.8...v0.45.9
+[v0.45.10]: https://github.com/scttfrdmn/substrate/compare/v0.45.9...v0.45.10
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.10...HEAD
