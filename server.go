@@ -226,6 +226,9 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Delete("/v1/redshift-data/results", s.handleRedshiftDataClearResults)
 	r.Post("/v1/redshift-data/status", s.handleRedshiftDataSetStatus)
 
+	r.Post("/v1/athena/results", s.handleAthenaSeedResult)
+	r.Delete("/v1/athena/results", s.handleAthenaClearResults)
+
 	// S3 control-plane endpoints.
 	r.Post("/v1/s3/presign", s.handleS3Presign)
 

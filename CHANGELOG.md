@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.54.0] - 2026-04-02
+
+### Added
+- **Athena plugin completion (#275)**: Completed the Amazon Athena plugin with 5 new operations and control-plane seeding. Added `ListQueryExecutions` (paginated, with optional `WorkGroup` filter), `CreateWorkGroup`, `GetWorkGroup` (the `"primary"` workgroup auto-exists), `DeleteWorkGroup`, and `ListWorkGroups`. `GetQueryResults` now returns pre-seeded rows via the new `POST /v1/athena/results` control-plane endpoint (SQL-keyed or `"*"` wildcard, same pattern as RedshiftData); `DELETE /v1/athena/results` clears seeded results. `AthenaResultSet`, `AthenaResultRow`, `AthenaValue`, `AthenaColumnInfo`, and `AthenaWorkGroup` types are exported for test use.
+
 ## [v0.53.0] - 2026-04-02
 
 ### Added
