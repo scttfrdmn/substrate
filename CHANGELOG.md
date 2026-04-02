@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.50.0] - 2026-04-02
+
+### Added
+- **Redshift Data API plugin (#268)**: Added `RedshiftDataPlugin` with 3 operations: `ExecuteStatement`, `DescribeStatement`, `GetStatementResult`. Uses JSON-target protocol `RedshiftData_20191217.{Op}`; parser alias `"redshiftdata": "redshift-data"` added to `targetServiceAliases`. `ExecuteStatement` stores the statement and returns `{Id: "<uuid>"}` immediately. `DescribeStatement` always returns `Status: "FINISHED"` (deterministic, no simulated latency). `GetStatementResult` returns pre-seeded rows from the `"results"` plugin option (keyed by SQL or `"*"` wildcard), enabling tests to drive specific query responses. Row values use the Redshift Data API typed field format: `{stringValue}`, `{longValue}`, `{doubleValue}`, `{booleanValue}`, `{isNull}`. No cost entries (Redshift Data API is free within Redshift pricing).
+
 ## [v0.49.0] - 2026-04-02
 
 ### Added
@@ -1537,4 +1542,5 @@ all changes onto the v0.44.x line.
 [v0.47.0]: https://github.com/scttfrdmn/substrate/compare/v0.46.0...v0.47.0
 [v0.48.0]: https://github.com/scttfrdmn/substrate/compare/v0.47.0...v0.48.0
 [v0.49.0]: https://github.com/scttfrdmn/substrate/compare/v0.48.0...v0.49.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.49.0...HEAD
+[v0.50.0]: https://github.com/scttfrdmn/substrate/compare/v0.49.0...v0.50.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.50.0...HEAD

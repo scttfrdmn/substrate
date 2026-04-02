@@ -664,5 +664,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(redshiftPlugin)
 
+	redshiftDataPlugin := &RedshiftDataPlugin{}
+	if err := redshiftDataPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize redshift-data plugin: %w", err)
+	}
+	registry.Register(redshiftDataPlugin)
+
 	return nil
 }

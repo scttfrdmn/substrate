@@ -242,6 +242,9 @@ var targetServiceAliases = map[string]string{
 	// "AWSSSOAdminService" → strip "AWS" → "ssoadminservice" → "sso".
 	// aws-sdk-go-v2 SSO Admin client uses X-Amz-Target: AWSSSOAdminService.{Op}.
 	"awsssoadminservice": "sso",
+	// "RedshiftData_20191217" → strip version → "RedshiftData" → lowercase → "redshiftdata".
+	// Both aws-sdk-go-v2 and boto3 use this X-Amz-Target namespace for the Data API.
+	"redshiftdata": "redshift-data",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
