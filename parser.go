@@ -225,6 +225,10 @@ var targetServiceAliases = map[string]string{
 	// OpenSearch Service uses SigV4 service name "es" or "aoss".
 	"es":   "opensearch",
 	"aoss": "opensearch",
+	// boto3's bedrock-runtime client uses "bedrock" (not "bedrock-runtime") as
+	// the SigV4 signing name in the credential scope when AWS_ENDPOINT_URL is set.
+	// Route these requests to BedrockRuntimePlugin.
+	"bedrock": "bedrock-runtime",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
