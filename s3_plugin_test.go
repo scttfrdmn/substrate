@@ -875,12 +875,13 @@ func TestS3_PresignedURL_ServiceIdentification(t *testing.T) {
 
 	// Simulate a presigned GET: no Authorization header; X-Amz-Credential in query.
 	// The credential scope contains the service name "s3".
+	// Use a recent date with a very long expiry so the request is never considered expired.
 	r := httptest.NewRequest(http.MethodGet,
 		"http://s3.us-east-1.amazonaws.com/presign-bucket/key.txt"+
 			"?X-Amz-Algorithm=AWS4-HMAC-SHA256"+
-			"&X-Amz-Credential=AKIATEST12345678901%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"+
-			"&X-Amz-Date=20260101T000000Z"+
-			"&X-Amz-Expires=900"+
+			"&X-Amz-Credential=AKIATEST12345678901%2F20260402%2Fus-east-1%2Fs3%2Faws4_request"+
+			"&X-Amz-Date=20260402T000000Z"+
+			"&X-Amz-Expires=604800"+
 			"&X-Amz-SignedHeaders=host"+
 			"&X-Amz-Signature=fakesig",
 		nil)

@@ -935,3 +935,134 @@ func TestSQSPlugin_CrossProtocol(t *testing.T) {
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "from-query-protocol", msgs[0].(map[string]interface{})["Body"])
 }
+
+// --- FIFO group ordering -----------------------------------------------------
+
+func TestSQS_FIFO_ReceiveMessage_SingleGroup(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+
+	// Create FIFO queue.
+	createResp := sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
+		"QueueName":  "orders.fifo",
+		"Attributes": map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+	})
+	require.Equal(t, http.StatusOK, createResp.StatusCode)
+	createOut := readJSONBody(t, createResp)
+	queueURL, _ := createOut["QueueUrl"].(string)
+	require.NotEmpty(t, queueURL)
+
+	// Send 3 messages with same group.
+	for _, body := range []string{"msg1", "msg2", "msg3"} {
+		resp := sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
+			"QueueUrl":       queueURL,
+			"MessageBody":    body,
+			"MessageGroupId": "G1",
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	// Receive up to 10 — should get all 3 from G1.
+	recvResp := sqsJSONRequest(t, srv, "ReceiveMessage", map[string]interface{}{
+		"QueueUrl":            queueURL,
+		"MaxNumberOfMessages": 10,
+	})
+	require.Equal(t, http.StatusOK, recvResp.StatusCode)
+	recvOut := readJSONBody(t, recvResp)
+	msgs, _ := recvOut["Messages"].([]interface{})
+	require.Len(t, msgs, 3)
+
+	// All should have MessageGroupId = "G1".
+	for _, m := range msgs {
+		msg := m.(map[string]interface{})
+		assert.Equal(t, "G1", msg["MessageGroupId"])
+	}
+}
+
+func TestSQS_FIFO_ReceiveMessage_TwoGroups_OnlyOneGroupPerCall(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+
+	createResp := sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
+		"QueueName":  "mixed.fifo",
+		"Attributes": map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+	})
+	require.Equal(t, http.StatusOK, createResp.StatusCode)
+	out := readJSONBody(t, createResp)
+	queueURL := out["QueueUrl"].(string)
+
+	// Send interleaved: G1, G2, G1.
+	for _, m := range []struct{ body, group string }{
+		{"a", "G1"},
+		{"b", "G2"},
+		{"c", "G1"},
+	} {
+		resp := sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
+			"QueueUrl":       queueURL,
+			"MessageBody":    m.body,
+			"MessageGroupId": m.group,
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	// First receive: should only return G1 messages (a and c).
+	recvResp := sqsJSONRequest(t, srv, "ReceiveMessage", map[string]interface{}{
+		"QueueUrl":            queueURL,
+		"MaxNumberOfMessages": 10,
+		"VisibilityTimeout":   0,
+	})
+	require.Equal(t, http.StatusOK, recvResp.StatusCode)
+	recvOut := readJSONBody(t, recvResp)
+	msgs, _ := recvOut["Messages"].([]interface{})
+	require.NotEmpty(t, msgs, "should have at least one message")
+	for _, m := range msgs {
+		msg := m.(map[string]interface{})
+		assert.Equal(t, "G1", msg["MessageGroupId"], "first call should only return G1 messages")
+	}
+}
+
+func TestSQS_FIFO_SendMessage_RequiresGroupId(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+
+	createResp := sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
+		"QueueName":  "strict.fifo",
+		"Attributes": map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+	})
+	require.Equal(t, http.StatusOK, createResp.StatusCode)
+	out := readJSONBody(t, createResp)
+	queueURL := out["QueueUrl"].(string)
+
+	// SendMessage without MessageGroupId.
+	resp := sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
+		"QueueUrl":    queueURL,
+		"MessageBody": "no-group",
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestSQS_FIFO_ReceiveMessage_GroupIdInResponse(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+
+	createResp := sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
+		"QueueName":  "resp-check.fifo",
+		"Attributes": map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "true"},
+	})
+	require.Equal(t, http.StatusOK, createResp.StatusCode)
+	out := readJSONBody(t, createResp)
+	queueURL := out["QueueUrl"].(string)
+
+	sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
+		"QueueUrl":       queueURL,
+		"MessageBody":    "hello",
+		"MessageGroupId": "myGroup",
+	})
+
+	recvResp := sqsJSONRequest(t, srv, "ReceiveMessage", map[string]interface{}{
+		"QueueUrl":            queueURL,
+		"MaxNumberOfMessages": 1,
+	})
+	require.Equal(t, http.StatusOK, recvResp.StatusCode)
+	recvOut := readJSONBody(t, recvResp)
+	msgs := recvOut["Messages"].([]interface{})
+	require.Len(t, msgs, 1)
+	msg := msgs[0].(map[string]interface{})
+	assert.Equal(t, "myGroup", msg["MessageGroupId"])
+}

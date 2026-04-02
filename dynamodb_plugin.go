@@ -87,6 +87,11 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 		return p.getShardIterator(ctx, req)
 	case "GetRecords":
 		return p.getRecords(ctx, req)
+	// Transactions.
+	case "TransactGetItems":
+		return p.transactGetItems(ctx, req)
+	case "TransactWriteItems":
+		return p.transactWriteItems(ctx, req)
 	// PartiQL.
 	case "ExecuteStatement":
 		return p.executeStatement(ctx, req)
@@ -943,6 +948,289 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
 		"UnprocessedItems": map[string]interface{}{},
 	})
+}
+
+// --- Transact operations -----------------------------------------------------
+
+// transactGetItems implements DynamoDB TransactGetItems.
+// It returns an array of item responses in the same order as the request.
+func (p *DynamoDBPlugin) transactGetItems(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		TransactItems []struct {
+			Get *struct {
+				TableName                string                     `json:"TableName"`
+				Key                      map[string]*AttributeValue `json:"Key"`
+				ProjectionExpression     string                     `json:"ProjectionExpression"`
+				ExpressionAttributeNames map[string]string          `json:"ExpressionAttributeNames"`
+			} `json:"Get"`
+		} `json:"TransactItems"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+
+	responses := make([]map[string]interface{}, 0, len(input.TransactItems))
+	for _, ti := range input.TransactItems {
+		if ti.Get == nil {
+			responses = append(responses, map[string]interface{}{})
+			continue
+		}
+		g := ti.Get
+		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, g.TableName)
+		if err != nil {
+			return nil, err
+		}
+		if tbl == nil {
+			return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + g.TableName, HTTPStatus: http.StatusBadRequest}
+		}
+		_, pkVal, _, skVal, err := extractPrimaryKey(g.Key, tbl.KeySchema)
+		if err != nil {
+			return nil, err
+		}
+		item, err := p.loadItem(context.Background(), reqCtx.AccountID, g.TableName, dynamodbItemKey(pkVal, skVal))
+		if err != nil {
+			return nil, err
+		}
+		entry := map[string]interface{}{}
+		if item != nil {
+			entry["Item"] = applyProjection(item, g.ProjectionExpression, g.ExpressionAttributeNames)
+		}
+		responses = append(responses, entry)
+	}
+	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{"Responses": responses})
+}
+
+// transactWriteItems implements DynamoDB TransactWriteItems.
+// All condition checks are evaluated first; if any fail the entire transaction is
+// cancelled and TransactionCanceledException is returned with CancellationReasons.
+// If all conditions pass, all mutations are applied atomically.
+func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		TransactItems []struct {
+			Put *struct {
+				TableName                 string                     `json:"TableName"`
+				Item                      map[string]*AttributeValue `json:"Item"`
+				ConditionExpression       string                     `json:"ConditionExpression"`
+				ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+				ExpressionAttributeValues map[string]*AttributeValue `json:"ExpressionAttributeValues"`
+			} `json:"Put"`
+			Update *struct {
+				TableName                 string                     `json:"TableName"`
+				Key                       map[string]*AttributeValue `json:"Key"`
+				UpdateExpression          string                     `json:"UpdateExpression"`
+				ConditionExpression       string                     `json:"ConditionExpression"`
+				ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+				ExpressionAttributeValues map[string]*AttributeValue `json:"ExpressionAttributeValues"`
+			} `json:"Update"`
+			Delete *struct {
+				TableName                 string                     `json:"TableName"`
+				Key                       map[string]*AttributeValue `json:"Key"`
+				ConditionExpression       string                     `json:"ConditionExpression"`
+				ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+				ExpressionAttributeValues map[string]*AttributeValue `json:"ExpressionAttributeValues"`
+			} `json:"Delete"`
+			ConditionCheck *struct {
+				TableName                 string                     `json:"TableName"`
+				Key                       map[string]*AttributeValue `json:"Key"`
+				ConditionExpression       string                     `json:"ConditionExpression"`
+				ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+				ExpressionAttributeValues map[string]*AttributeValue `json:"ExpressionAttributeValues"`
+			} `json:"ConditionCheck"`
+		} `json:"TransactItems"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Phase 1: evaluate all condition expressions.
+	type cancellationReason struct {
+		Code    string `json:"Code"`
+		Message string `json:"Message,omitempty"`
+	}
+	reasons := make([]cancellationReason, len(input.TransactItems))
+	cancelled := false
+
+	for i, ti := range input.TransactItems {
+		var tableName string
+		var key map[string]*AttributeValue
+		var condExpr string
+		var names map[string]string
+		var vals map[string]*AttributeValue
+
+		switch {
+		case ti.Put != nil:
+			tableName = ti.Put.TableName
+			key = ti.Put.Item
+			condExpr = ti.Put.ConditionExpression
+			names = ti.Put.ExpressionAttributeNames
+			vals = ti.Put.ExpressionAttributeValues
+		case ti.Update != nil:
+			tableName = ti.Update.TableName
+			key = ti.Update.Key
+			condExpr = ti.Update.ConditionExpression
+			names = ti.Update.ExpressionAttributeNames
+			vals = ti.Update.ExpressionAttributeValues
+		case ti.Delete != nil:
+			tableName = ti.Delete.TableName
+			key = ti.Delete.Key
+			condExpr = ti.Delete.ConditionExpression
+			names = ti.Delete.ExpressionAttributeNames
+			vals = ti.Delete.ExpressionAttributeValues
+		case ti.ConditionCheck != nil:
+			tableName = ti.ConditionCheck.TableName
+			key = ti.ConditionCheck.Key
+			condExpr = ti.ConditionCheck.ConditionExpression
+			names = ti.ConditionCheck.ExpressionAttributeNames
+			vals = ti.ConditionCheck.ExpressionAttributeValues
+		}
+
+		reasons[i] = cancellationReason{Code: "None"}
+
+		if condExpr == "" {
+			continue
+		}
+
+		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, tableName)
+		if err != nil {
+			return nil, err
+		}
+		if tbl == nil {
+			return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + tableName, HTTPStatus: http.StatusBadRequest}
+		}
+
+		_, pkVal, _, skVal, keyErr := extractPrimaryKey(key, tbl.KeySchema)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		currentItem, loadErr := p.loadItem(context.Background(), reqCtx.AccountID, tableName, dynamodbItemKey(pkVal, skVal))
+		if loadErr != nil {
+			return nil, loadErr
+		}
+
+		ok, evalErr := evalDynamoCondition(condExpr, names, vals, currentItem)
+		if evalErr != nil {
+			return nil, &AWSError{Code: "ValidationException", Message: evalErr.Error(), HTTPStatus: http.StatusBadRequest}
+		}
+		if !ok {
+			reasons[i] = cancellationReason{Code: "ConditionalCheckFailed", Message: "The conditional request failed"}
+			cancelled = true
+		}
+	}
+
+	if cancelled {
+		body, _ := json.Marshal(map[string]interface{}{
+			"__type":              "TransactionCanceledException",
+			"message":             "Transaction cancelled, please refer cancellation reasons for specific reasons",
+			"CancellationReasons": reasons,
+		})
+		return &AWSResponse{
+			StatusCode: http.StatusBadRequest,
+			Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.0"},
+			Body:       body,
+		}, nil
+	}
+
+	// Phase 2: apply all mutations.
+	for _, ti := range input.TransactItems {
+		switch {
+		case ti.Put != nil:
+			put := ti.Put
+			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, put.TableName)
+			if err != nil {
+				return nil, err
+			}
+			if tbl == nil {
+				return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + put.TableName, HTTPStatus: http.StatusBadRequest}
+			}
+			_, pkVal, _, skVal, err := extractPrimaryKey(put.Item, tbl.KeySchema)
+			if err != nil {
+				return nil, err
+			}
+			ik := dynamodbItemKey(pkVal, skVal)
+			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, put.TableName, ik)
+			if err := p.saveItem(context.Background(), reqCtx.AccountID, put.TableName, ik, put.Item); err != nil {
+				return nil, fmt.Errorf("transactWriteItems put saveItem: %w", err)
+			}
+			if old == nil {
+				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, put.TableName)
+				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, put.TableName, append(keys, ik))
+			}
+			eventName := "MODIFY"
+			if old == nil {
+				eventName = "INSERT"
+			}
+			p.appendStreamRecord(context.Background(), reqCtx.AccountID, put.TableName, eventName, old, put.Item)
+
+		case ti.Update != nil:
+			upd := ti.Update
+			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, upd.TableName)
+			if err != nil {
+				return nil, err
+			}
+			if tbl == nil {
+				return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + upd.TableName, HTTPStatus: http.StatusBadRequest}
+			}
+			_, pkVal, _, skVal, err := extractPrimaryKey(upd.Key, tbl.KeySchema)
+			if err != nil {
+				return nil, err
+			}
+			ik := dynamodbItemKey(pkVal, skVal)
+			item, _ := p.loadItem(context.Background(), reqCtx.AccountID, upd.TableName, ik)
+			isNew := item == nil
+			if isNew {
+				item = make(map[string]*AttributeValue)
+				for k, v := range upd.Key {
+					item[k] = v
+				}
+			}
+			old := copyItem(item)
+			if upd.UpdateExpression != "" {
+				if err := applyUpdateExpression(item, upd.UpdateExpression, upd.ExpressionAttributeNames, upd.ExpressionAttributeValues); err != nil {
+					return nil, &AWSError{Code: "ValidationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+				}
+			}
+			if err := p.saveItem(context.Background(), reqCtx.AccountID, upd.TableName, ik, item); err != nil {
+				return nil, fmt.Errorf("transactWriteItems update saveItem: %w", err)
+			}
+			if isNew {
+				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, upd.TableName)
+				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, upd.TableName, append(keys, ik))
+			}
+			p.appendStreamRecord(context.Background(), reqCtx.AccountID, upd.TableName, "MODIFY", old, item)
+
+		case ti.Delete != nil:
+			del := ti.Delete
+			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, del.TableName)
+			if err != nil {
+				return nil, err
+			}
+			if tbl == nil {
+				return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + del.TableName, HTTPStatus: http.StatusBadRequest}
+			}
+			_, pkVal, _, skVal, err := extractPrimaryKey(del.Key, tbl.KeySchema)
+			if err != nil {
+				return nil, err
+			}
+			ik := dynamodbItemKey(pkVal, skVal)
+			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, del.TableName, ik)
+			if old != nil {
+				if err := p.deleteItemByKey(context.Background(), reqCtx.AccountID, del.TableName, ik); err != nil {
+					return nil, fmt.Errorf("transactWriteItems delete: %w", err)
+				}
+				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, del.TableName)
+				newKeys := make([]string, 0, len(keys))
+				for _, k := range keys {
+					if k != ik {
+						newKeys = append(newKeys, k)
+					}
+				}
+				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, del.TableName, newKeys)
+				p.appendStreamRecord(context.Background(), reqCtx.AccountID, del.TableName, "REMOVE", old, nil)
+			}
+		}
+	}
+
+	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
 // --- Query and Scan ----------------------------------------------------------

@@ -517,7 +517,9 @@ func TestWAFv2Plugin_DisassociateWebACL(t *testing.T) {
 		t.Fatalf("CreateWebACL: %v", err)
 	}
 	var createResult struct {
-		Summary struct{ ARN string `json:"ARN"` } `json:"Summary"`
+		Summary struct {
+			ARN string `json:"ARN"`
+		} `json:"Summary"`
 	}
 	if err := json.Unmarshal(resp.Body, &createResult); err != nil {
 		t.Fatalf("unmarshal create: %v", err)

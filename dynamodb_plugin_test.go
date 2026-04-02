@@ -2606,3 +2606,229 @@ func TestDynamoDBPlugin_EmptyStringAttribute_Scan(t *testing.T) {
 		t.Errorf("documentation: expected {\"S\":\"\"} but got %v — empty string was lost in scan response", docAV)
 	}
 }
+
+// --- TransactGetItems --------------------------------------------------------
+
+func TestDynamoDB_TransactGetItems(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	// Create table and put two items.
+	createResp := dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "txget-table",
+		"KeySchema":            []map[string]any{{"AttributeName": "PK", "KeyType": "HASH"}},
+		"AttributeDefinitions": []map[string]any{{"AttributeName": "PK", "AttributeType": "S"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+	})
+	require.Equal(t, http.StatusOK, createResp.StatusCode)
+
+	putItem := func(pk, val string) {
+		resp := dynamodbRequest(t, srv, "PutItem", map[string]any{
+			"TableName": "txget-table",
+			"Item":      map[string]any{"PK": map[string]any{"S": pk}, "val": map[string]any{"S": val}},
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	putItem("A", "alpha")
+	putItem("B", "bravo")
+
+	// TransactGetItems for A, C (missing), B.
+	txResp := dynamodbRequest(t, srv, "TransactGetItems", map[string]any{
+		"TransactItems": []any{
+			map[string]any{"Get": map[string]any{"TableName": "txget-table", "Key": map[string]any{"PK": map[string]any{"S": "A"}}}},
+			map[string]any{"Get": map[string]any{"TableName": "txget-table", "Key": map[string]any{"PK": map[string]any{"S": "C"}}}},
+			map[string]any{"Get": map[string]any{"TableName": "txget-table", "Key": map[string]any{"PK": map[string]any{"S": "B"}}}},
+		},
+	})
+	require.Equal(t, http.StatusOK, txResp.StatusCode)
+
+	var out map[string]any
+	decodeDynamoJSON(t, txResp, &out)
+	responses, ok := out["Responses"].([]any)
+	require.True(t, ok, "Responses should be an array")
+	require.Len(t, responses, 3, "should have 3 response entries")
+
+	// First: A found.
+	r0 := responses[0].(map[string]any)
+	item0 := r0["Item"].(map[string]any)
+	assert.Equal(t, "alpha", item0["val"].(map[string]any)["S"])
+
+	// Second: C not found — empty object.
+	r1 := responses[1].(map[string]any)
+	_, hasItem := r1["Item"]
+	assert.False(t, hasItem, "missing key should return entry without Item")
+
+	// Third: B found.
+	r2 := responses[2].(map[string]any)
+	item2 := r2["Item"].(map[string]any)
+	assert.Equal(t, "bravo", item2["val"].(map[string]any)["S"])
+}
+
+// --- TransactWriteItems ------------------------------------------------------
+
+func TestDynamoDB_TransactWriteItems_AllSuccess(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "txwrite-ok",
+		"KeySchema":            []map[string]any{{"AttributeName": "PK", "KeyType": "HASH"}},
+		"AttributeDefinitions": []map[string]any{{"AttributeName": "PK", "AttributeType": "S"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+	})
+
+	// Pre-seed item X for Update and Delete.
+	dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "txwrite-ok",
+		"Item":      map[string]any{"PK": map[string]any{"S": "X"}, "v": map[string]any{"S": "old"}},
+	})
+	dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "txwrite-ok",
+		"Item":      map[string]any{"PK": map[string]any{"S": "Y"}, "v": map[string]any{"S": "del"}},
+	})
+
+	txResp := dynamodbRequest(t, srv, "TransactWriteItems", map[string]any{
+		"TransactItems": []any{
+			// Put new item A.
+			map[string]any{"Put": map[string]any{
+				"TableName": "txwrite-ok",
+				"Item":      map[string]any{"PK": map[string]any{"S": "A"}, "v": map[string]any{"S": "new"}},
+			}},
+			// Update X.
+			map[string]any{"Update": map[string]any{
+				"TableName":                 "txwrite-ok",
+				"Key":                       map[string]any{"PK": map[string]any{"S": "X"}},
+				"UpdateExpression":          "SET v = :v",
+				"ExpressionAttributeValues": map[string]any{":v": map[string]any{"S": "updated"}},
+			}},
+			// Delete Y.
+			map[string]any{"Delete": map[string]any{
+				"TableName": "txwrite-ok",
+				"Key":       map[string]any{"PK": map[string]any{"S": "Y"}},
+			}},
+		},
+	})
+	require.Equal(t, http.StatusOK, txResp.StatusCode)
+
+	// Verify A was put.
+	getA := dynamodbRequest(t, srv, "GetItem", map[string]any{
+		"TableName": "txwrite-ok",
+		"Key":       map[string]any{"PK": map[string]any{"S": "A"}},
+	})
+	var outA map[string]any
+	decodeDynamoJSON(t, getA, &outA)
+	assert.Equal(t, "new", outA["Item"].(map[string]any)["v"].(map[string]any)["S"])
+
+	// Verify X was updated.
+	getX := dynamodbRequest(t, srv, "GetItem", map[string]any{
+		"TableName": "txwrite-ok",
+		"Key":       map[string]any{"PK": map[string]any{"S": "X"}},
+	})
+	var outX map[string]any
+	decodeDynamoJSON(t, getX, &outX)
+	assert.Equal(t, "updated", outX["Item"].(map[string]any)["v"].(map[string]any)["S"])
+
+	// Verify Y was deleted.
+	getY := dynamodbRequest(t, srv, "GetItem", map[string]any{
+		"TableName": "txwrite-ok",
+		"Key":       map[string]any{"PK": map[string]any{"S": "Y"}},
+	})
+	var outY map[string]any
+	decodeDynamoJSON(t, getY, &outY)
+	_, yExists := outY["Item"]
+	assert.False(t, yExists, "Y should have been deleted")
+}
+
+func TestDynamoDB_TransactWriteItems_ConditionCheckFails_AllOrNothing(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "txwrite-cancel",
+		"KeySchema":            []map[string]any{{"AttributeName": "PK", "KeyType": "HASH"}},
+		"AttributeDefinitions": []map[string]any{{"AttributeName": "PK", "AttributeType": "S"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+	})
+	// Seed item for the condition check.
+	dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "txwrite-cancel",
+		"Item":      map[string]any{"PK": map[string]any{"S": "Guard"}, "status": map[string]any{"S": "locked"}},
+	})
+
+	// Transaction: Put B + ConditionCheck Guard.status = "open" (will fail).
+	txResp := dynamodbRequest(t, srv, "TransactWriteItems", map[string]any{
+		"TransactItems": []any{
+			map[string]any{"Put": map[string]any{
+				"TableName": "txwrite-cancel",
+				"Item":      map[string]any{"PK": map[string]any{"S": "B"}, "v": map[string]any{"S": "new"}},
+			}},
+			map[string]any{"ConditionCheck": map[string]any{
+				"TableName":                 "txwrite-cancel",
+				"Key":                       map[string]any{"PK": map[string]any{"S": "Guard"}},
+				"ConditionExpression":       "#s = :open",
+				"ExpressionAttributeNames":  map[string]any{"#s": "status"},
+				"ExpressionAttributeValues": map[string]any{":open": map[string]any{"S": "open"}},
+			}},
+		},
+	})
+	assert.Equal(t, http.StatusBadRequest, txResp.StatusCode)
+
+	var errOut map[string]any
+	decodeDynamoJSON(t, txResp, &errOut)
+	assert.Contains(t, errOut["__type"], "TransactionCanceledException")
+
+	reasons := errOut["CancellationReasons"].([]any)
+	r0 := reasons[0].(map[string]any)
+	assert.Equal(t, "None", r0["Code"], "Put had no condition — should be None")
+	r1 := reasons[1].(map[string]any)
+	assert.Equal(t, "ConditionalCheckFailed", r1["Code"])
+
+	// B must NOT have been written (all-or-nothing).
+	getB := dynamodbRequest(t, srv, "GetItem", map[string]any{
+		"TableName": "txwrite-cancel",
+		"Key":       map[string]any{"PK": map[string]any{"S": "B"}},
+	})
+	var outB map[string]any
+	decodeDynamoJSON(t, getB, &outB)
+	_, bExists := outB["Item"]
+	assert.False(t, bExists, "B must not exist — transaction was cancelled")
+}
+
+func TestDynamoDB_TransactWriteItems_ConditionCheckPasses(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "txwrite-pass",
+		"KeySchema":            []map[string]any{{"AttributeName": "PK", "KeyType": "HASH"}},
+		"AttributeDefinitions": []map[string]any{{"AttributeName": "PK", "AttributeType": "S"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+	})
+	dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "txwrite-pass",
+		"Item":      map[string]any{"PK": map[string]any{"S": "Guard"}, "status": map[string]any{"S": "open"}},
+	})
+
+	txResp := dynamodbRequest(t, srv, "TransactWriteItems", map[string]any{
+		"TransactItems": []any{
+			map[string]any{"Put": map[string]any{
+				"TableName": "txwrite-pass",
+				"Item":      map[string]any{"PK": map[string]any{"S": "B"}, "v": map[string]any{"S": "new"}},
+			}},
+			map[string]any{"ConditionCheck": map[string]any{
+				"TableName":                 "txwrite-pass",
+				"Key":                       map[string]any{"PK": map[string]any{"S": "Guard"}},
+				"ConditionExpression":       "#s = :open",
+				"ExpressionAttributeNames":  map[string]any{"#s": "status"},
+				"ExpressionAttributeValues": map[string]any{":open": map[string]any{"S": "open"}},
+			}},
+		},
+	})
+	assert.Equal(t, http.StatusOK, txResp.StatusCode)
+
+	// B should now exist.
+	getB := dynamodbRequest(t, srv, "GetItem", map[string]any{
+		"TableName": "txwrite-pass",
+		"Key":       map[string]any{"PK": map[string]any{"S": "B"}},
+	})
+	var outB map[string]any
+	decodeDynamoJSON(t, getB, &outB)
+	_, bExists := outB["Item"]
+	assert.True(t, bExists, "B should exist — transaction committed")
+}

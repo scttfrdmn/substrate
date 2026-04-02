@@ -823,10 +823,11 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 				"SenderId":      ctx.AccountID,
 				"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
 			},
-			SentTimestamp: now.UnixMilli(),
-			DelayUntil:    now.Add(time.Duration(delay) * time.Second),
-			VisibleAfter:  time.Time{},
-			ReceiveCount:  0,
+			SentTimestamp:  now.UnixMilli(),
+			DelayUntil:     now.Add(time.Duration(delay) * time.Second),
+			VisibleAfter:   time.Time{},
+			ReceiveCount:   0,
+			MessageGroupId: msgGroupID,
 		}
 		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
 			return nil, fmt.Errorf("sqs sendMessage saveMsg: %w", saveErr)
@@ -1118,20 +1119,26 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	type msgResultXML struct {
-		MessageID     string `xml:"MessageId"`
-		ReceiptHandle string `xml:"ReceiptHandle"`
-		MD5OfBody     string `xml:"MD5OfBody"`
-		Body          string `xml:"Body"`
+		MessageID      string `xml:"MessageId"`
+		ReceiptHandle  string `xml:"ReceiptHandle"`
+		MD5OfBody      string `xml:"MD5OfBody"`
+		Body           string `xml:"Body"`
+		MessageGroupId string `xml:"MessageGroupId,omitempty"`
 	}
 	type msgResultJSON struct {
-		MessageID     string `json:"MessageId"`
-		ReceiptHandle string `json:"ReceiptHandle"`
-		MD5OfBody     string `json:"MD5OfBody"`
-		Body          string `json:"Body"`
+		MessageID      string `json:"MessageId"`
+		ReceiptHandle  string `json:"ReceiptHandle"`
+		MD5OfBody      string `json:"MD5OfBody"`
+		Body           string `json:"Body"`
+		MessageGroupId string `json:"MessageGroupId,omitempty"`
 	}
 
 	messagesXML := make([]msgResultXML, 0)
 	messagesJSON := make([]msgResultJSON, 0)
+
+	// fifoGroup locks all messages in this ReceiveMessage call to a single
+	// message group (AWS FIFO spec: at most one group returned per call).
+	fifoGroup := ""
 
 	for _, id := range ids {
 		if len(messagesXML)+len(messagesJSON) >= maxNum {
@@ -1149,6 +1156,15 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			continue
 		}
 
+		// FIFO: enforce single-group-per-call.
+		if q.FifoQueue {
+			if fifoGroup == "" {
+				fifoGroup = msg.MessageGroupId
+			} else if msg.MessageGroupId != fifoGroup {
+				continue
+			}
+		}
+
 		// Update receipt handle and visibility timeout.
 		newHandle := generateSQSReceiptHandle()
 		msg.ReceiptHandle = newHandle
@@ -1162,17 +1178,19 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 		if sqsIsJSONProtocol(req) {
 			messagesJSON = append(messagesJSON, msgResultJSON{
-				MessageID:     msg.MessageID,
-				ReceiptHandle: newHandle,
-				MD5OfBody:     msg.MD5OfBody,
-				Body:          msg.Body,
+				MessageID:      msg.MessageID,
+				ReceiptHandle:  newHandle,
+				MD5OfBody:      msg.MD5OfBody,
+				Body:           msg.Body,
+				MessageGroupId: msg.MessageGroupId,
 			})
 		} else {
 			messagesXML = append(messagesXML, msgResultXML{
-				MessageID:     msg.MessageID,
-				ReceiptHandle: newHandle,
-				MD5OfBody:     msg.MD5OfBody,
-				Body:          msg.Body,
+				MessageID:      msg.MessageID,
+				ReceiptHandle:  newHandle,
+				MD5OfBody:      msg.MD5OfBody,
+				Body:           msg.Body,
+				MessageGroupId: msg.MessageGroupId,
 			})
 		}
 	}

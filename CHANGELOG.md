@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.53.0] - 2026-04-02
+
+### Added
+- **DynamoDB TransactWriteItems and TransactGetItems (#272)**: Added `TransactGetItems` returning an ordered `Responses` array (one `{Item:{...}}` entry per requested key, or `{}` for missing items). Added `TransactWriteItems` with full two-phase commit semantics: all `ConditionExpression` predicates are evaluated before any mutation is applied; if any fails, the entire transaction is cancelled and a `TransactionCanceledException` (HTTP 400) is returned with a `CancellationReasons` array identifying which items caused the failure. Supports `Put`, `Update`, `Delete`, and `ConditionCheck` operations in a single transaction. Cost entries: `dynamodb/TransactGetItems: $0.00000025`, `dynamodb/TransactWriteItems: $0.00000125`.
+- **S3 presigned URL expiry enforcement (#273)**: The server now validates `X-Amz-Date` + `X-Amz-Expires` on presigned requests (those carrying `X-Amz-Algorithm` in the query string instead of an `Authorization` header). Expired requests receive `403 AccessDenied` with `Request has expired.` Added `POST /v1/s3/presign` control-plane endpoint that generates substrate-compatible presigned URLs using the server's simulated clock, suitable for testing time-sensitive S3 access patterns.
+- **SQS FIFO message group ordering (#274)**: `SQSMessage` now stores `MessageGroupId`. `ReceiveMessage` on FIFO queues enforces single-group-per-call isolation (locks to the first group encountered in the queue and skips messages from other groups in the same call), matching the AWS FIFO ordering guarantee. `MessageGroupId` is included in `ReceiveMessage` responses. `SendMessage` to a FIFO queue without `MessageGroupId` returns a validation error.
+
 ## [v0.52.0] - 2026-04-02
 
 ### Added

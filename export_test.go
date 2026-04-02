@@ -3,6 +3,8 @@ package substrate
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"time"
 )
 
 // This file exports internal symbols for use in external test packages.
@@ -180,4 +182,9 @@ func LambdaPluginCreateFunctionForTest(p *LambdaPlugin, fn LambdaFunction) {
 // InvokeLambdaForTest calls the unexported invoke method directly.
 func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
 	return p.invoke(ctx, req, name)
+}
+
+// CheckPresignedExpiryForTest exposes checkPresignedExpiry for white-box tests.
+func CheckPresignedExpiryForTest(q url.Values, now time.Time) bool {
+	return checkPresignedExpiry(q, now)
 }

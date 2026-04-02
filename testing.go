@@ -19,7 +19,7 @@ type TestServer struct {
 	// URL is the base URL of the server, e.g. "http://localhost:54321".
 	URL string
 	// Port is the TCP port the server is listening on.
-	Port int
+	Port  int
 	tc    *TimeController
 	srv   *Server
 	state StateManager

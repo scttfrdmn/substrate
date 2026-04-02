@@ -325,7 +325,7 @@ func (p *CodePipelinePlugin) getPipelineState(reqCtx *RequestContext, req *AWSRe
 		stageStates = append(stageStates, map[string]interface{}{
 			"stageName": stageName,
 			"latestExecution": map[string]interface{}{
-				"status":     "Succeeded",
+				"status":              "Succeeded",
 				"pipelineExecutionId": "",
 			},
 		})

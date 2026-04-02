@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -224,6 +225,9 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/redshift-data/results", s.handleRedshiftDataSeedResult)
 	r.Delete("/v1/redshift-data/results", s.handleRedshiftDataClearResults)
 	r.Post("/v1/redshift-data/status", s.handleRedshiftDataSetStatus)
+
+	// S3 control-plane endpoints.
+	r.Post("/v1/s3/presign", s.handleS3Presign)
 
 	r.Get("/ui", s.handleDebugUI)
 	r.Get("/v1/debug/events", s.handleDebugEvents)
@@ -469,6 +473,14 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Step 1.65: presigned URL expiry check.
+	// Presigned requests carry X-Amz-Algorithm in the query string; verify
+	// X-Amz-Date + X-Amz-Expires have not elapsed.
+	if checkPresignedExpiry(r.URL.Query(), s.tc.Now()) {
+		s.writeError(w, &AWSError{Code: "AccessDenied", Message: "Request has expired.", HTTPStatus: http.StatusForbidden}, r)
+		return
+	}
+
 	// Step 2: cross-service IAM authorization.
 	if s.opts.Auth != nil {
 		if authErr := s.opts.Auth.CheckAccess(reqCtx, req); authErr != nil {
@@ -652,4 +664,29 @@ func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request) {
 	if _, writeErr := w.Write(body); writeErr != nil {
 		s.logger.Warn("failed to write error body", "err", writeErr)
 	}
+}
+
+// checkPresignedExpiry reports whether the request is a presigned URL whose
+// expiry has elapsed.  A presigned request is identified by the presence of
+// X-Amz-Algorithm in the query string (SigV4 pre-signed URL format).
+// If X-Amz-Date or X-Amz-Expires are absent or malformed the function returns
+// false (conservative — treat as unexpired).
+func checkPresignedExpiry(q url.Values, now time.Time) bool {
+	if q.Get("X-Amz-Algorithm") == "" {
+		return false
+	}
+	dateStr := q.Get("X-Amz-Date")
+	expiresStr := q.Get("X-Amz-Expires")
+	if dateStr == "" || expiresStr == "" {
+		return false
+	}
+	t, err := time.Parse("20060102T150405Z", dateStr)
+	if err != nil {
+		return false
+	}
+	secs, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil {
+		return false
+	}
+	return now.After(t.Add(time.Duration(secs) * time.Second))
 }

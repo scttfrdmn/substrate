@@ -93,17 +93,17 @@ func (p *CodeBuildPlugin) createProject(reqCtx *RequestContext, req *AWSRequest)
 
 	now := p.tc.Now()
 	project := CodeBuildProject{
-		Name:        input.Name,
-		ARN:         fmt.Sprintf("arn:aws:codebuild:%s:%s:project/%s", reqCtx.Region, reqCtx.AccountID, input.Name),
-		Description: input.Description,
-		Source:      input.Source,
-		Artifacts:   input.Artifacts,
-		Environment: input.Environment,
-		ServiceRole: input.ServiceRole,
-		Created:     now,
+		Name:         input.Name,
+		ARN:          fmt.Sprintf("arn:aws:codebuild:%s:%s:project/%s", reqCtx.Region, reqCtx.AccountID, input.Name),
+		Description:  input.Description,
+		Source:       input.Source,
+		Artifacts:    input.Artifacts,
+		Environment:  input.Environment,
+		ServiceRole:  input.ServiceRole,
+		Created:      now,
 		LastModified: now,
-		AccountID:   reqCtx.AccountID,
-		Region:      reqCtx.Region,
+		AccountID:    reqCtx.AccountID,
+		Region:       reqCtx.Region,
 	}
 
 	data, err := json.Marshal(project)

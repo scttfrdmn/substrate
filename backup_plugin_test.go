@@ -158,9 +158,9 @@ func TestBackupPlugin_PlanCRUD(t *testing.T) {
 			"BackupPlanName": "my-plan",
 			"Rules": []map[string]any{
 				{
-					"RuleName":           "daily-rule",
+					"RuleName":              "daily-rule",
 					"TargetBackupVaultName": "my-vault",
-					"ScheduleExpression":   "cron(0 12 * * ? *)",
+					"ScheduleExpression":    "cron(0 12 * * ? *)",
 				},
 			},
 		},
