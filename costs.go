@@ -150,8 +150,8 @@ func defaultCostTable() map[string]float64 {
 		"rds/CreateDBSnapshot": 0.00002,
 		"rds/ModifyDBInstance": 0.0001,
 		// ElastiCache: per-node-hour prorated per API call.
-		"elasticache/CreateCacheCluster":     0.0001,
-		"elasticache/CreateReplicationGroup": 0.0001,
+		"elasticache/CreateCacheCluster":     0.017,
+		"elasticache/CreateReplicationGroup": 0.034,
 		// EFS: per-GB-month prorated per API call.
 		"elasticfilesystem/CreateFileSystem":  0.00003,
 		"elasticfilesystem/CreateAccessPoint": 0.00001,

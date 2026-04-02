@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.56.0] - 2026-04-02
+
+### Added
+- **ElastiCache plugin (#277)**: Added `ElastiCachePlugin` with 17 operations covering cache clusters, replication groups, subnet groups, parameter groups, and resource tagging. Uses AWS Query (`Action=`) protocol with XML responses (namespace `https://elasticache.amazonaws.com/doc/2015-02-02/`). Operations: `CreateCacheCluster`, `DescribeCacheClusters` (with `CacheClusterId` filter and `MaxRecords`/`Marker` pagination), `ModifyCacheCluster`, `DeleteCacheCluster`, `CreateReplicationGroup`, `DescribeReplicationGroups`, `ModifyReplicationGroup`, `DeleteReplicationGroup`, `CreateCacheSubnetGroup`, `DescribeCacheSubnetGroups`, `DeleteCacheSubnetGroup`, `CreateCacheParameterGroup`, `DescribeCacheParameterGroups`, `DeleteCacheParameterGroup`, `AddTagsToResource`, `ListTagsForResource`, `RemoveTagsFromResource`. All clusters start with status `available`. Endpoint address uses the real AWS format `{id}.{hash}.cfg.{region}.cache.amazonaws.com:{port}` with a deterministic hash. Cost entries: `elasticache/CreateCacheCluster: $0.017`, `elasticache/CreateReplicationGroup: $0.034`.
+
 ## [v0.55.0] - 2026-04-02
 
 ### Added
@@ -1576,4 +1581,5 @@ all changes onto the v0.44.x line.
 [v0.53.0]: https://github.com/scttfrdmn/substrate/compare/v0.52.0...v0.53.0
 [v0.54.0]: https://github.com/scttfrdmn/substrate/compare/v0.53.0...v0.54.0
 [v0.55.0]: https://github.com/scttfrdmn/substrate/compare/v0.54.0...v0.55.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...HEAD
+[v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...HEAD

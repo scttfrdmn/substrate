@@ -129,7 +129,7 @@ func (p *ElastiCachePlugin) createCacheCluster(reqCtx *RequestContext, req *AWSR
 	// Memcached uses a configuration endpoint; Redis uses a primary endpoint
 	// (omitted here for simplicity — callers read ConfigurationEndpoint).
 	cluster.ConfigurationEndpoint = &ElastiCacheEndpoint{
-		Address: id + ".cfg." + reqCtx.Region + ".cache.amazonaws.com",
+		Address: id + "." + elasticacheClusterHash(id) + ".cfg." + reqCtx.Region + ".cache.amazonaws.com",
 		Port:    port,
 	}
 
@@ -965,7 +965,18 @@ func (p *ElastiCachePlugin) removeFromIndex(scope, indexName, id string) {
 	_ = p.state.Put(context.Background(), elasticacheNamespace, key, newData)
 }
 
-// --- ARN helpers ---
+// --- ARN and endpoint helpers ---
+
+// elasticacheClusterHash returns a deterministic 6-char lowercase hex string
+// derived from the cluster ID. AWS embeds a similar short hash in the real
+// endpoint address format: {id}.{hash}.cfg.{region}.cache.amazonaws.com.
+func elasticacheClusterHash(id string) string {
+	var h uint32
+	for _, b := range []byte(id) {
+		h = h*31 + uint32(b)
+	}
+	return fmt.Sprintf("%06x", h&0xFFFFFF)
+}
 
 func elasticacheClusterARN(region, acct, id string) string {
 	return "arn:aws:elasticache:" + region + ":" + acct + ":cluster:" + id
