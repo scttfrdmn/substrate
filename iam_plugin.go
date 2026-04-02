@@ -222,7 +222,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("put user: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"User": user})
+	return iamXMLResponse(http.StatusOK, "CreateUser", iamSingleUserXML(user))
 }
 
 func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -260,7 +260,7 @@ func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"User": user})
+	return iamXMLResponse(http.StatusOK, "GetUser", iamSingleUserXML(user))
 }
 
 func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -305,7 +305,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("delete user: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DeleteUser"), nil
 }
 
 func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -347,14 +347,11 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		users = append(users, &u)
 	}
 
-	result := map[string]any{
-		"Users":       users,
-		"IsTruncated": isTruncated,
-	}
+	xml := iamUserListXML(users) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
-		result["Marker"] = nextMarker
+		xml += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
-	return iamJSONResponse(http.StatusOK, result)
+	return iamXMLResponse(http.StatusOK, "ListUsers", xml)
 }
 
 // --- Role operations -------------------------------------------------------
@@ -426,7 +423,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("put role: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"Role": role})
+	return iamXMLResponse(http.StatusOK, "CreateRole", iamSingleRoleXML(role))
 }
 
 func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -456,7 +453,7 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"Role": role})
+	return iamXMLResponse(http.StatusOK, "GetRole", iamSingleRoleXML(role))
 }
 
 func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -500,7 +497,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("delete role: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DeleteRole"), nil
 }
 
 func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -542,14 +539,11 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		roles = append(roles, &r)
 	}
 
-	result := map[string]any{
-		"Roles":       roles,
-		"IsTruncated": isTruncated,
-	}
+	xmlStr := iamRoleListXML(roles) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
-		result["Marker"] = nextMarker
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
-	return iamJSONResponse(http.StatusOK, result)
+	return iamXMLResponse(http.StatusOK, "ListRoles", xmlStr)
 }
 
 // --- Group operations ------------------------------------------------------
@@ -602,7 +596,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("put group: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"Group": group})
+	return iamXMLResponse(http.StatusOK, "CreateGroup", iamSingleGroupXML(group))
 }
 
 func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -638,11 +632,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, fmt.Errorf("unmarshal group: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"Group":       group,
-		"Users":       []*IAMUser{},
-		"IsTruncated": false,
-	})
+	return iamXMLResponse(http.StatusOK, "GetGroup", iamSingleGroupXML(&group)+iamUserListXML(nil)+"<IsTruncated>false</IsTruncated>")
 }
 
 func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -676,7 +666,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("delete group: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DeleteGroup"), nil
 }
 
 func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -715,14 +705,11 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		groups = append(groups, &g)
 	}
 
-	result := map[string]any{
-		"Groups":      groups,
-		"IsTruncated": isTruncated,
-	}
+	xmlStr := iamGroupListXML(groups) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
-		result["Marker"] = nextMarker
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
-	return iamJSONResponse(http.StatusOK, result)
+	return iamXMLResponse(http.StatusOK, "ListGroups", xmlStr)
 }
 
 // --- Policy attachment (user) ----------------------------------------------
@@ -762,7 +749,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	for _, a := range arns {
 		if a == params.PolicyArn {
-			return iamJSONResponse(http.StatusOK, map[string]any{})
+			return iamXMLEmptyResponse("AttachUserPolicy"), nil
 		}
 	}
 	arns = append(arns, params.PolicyArn)
@@ -770,7 +757,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("AttachUserPolicy"), nil
 }
 
 func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -815,7 +802,7 @@ func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DetachUserPolicy"), nil
 }
 
 func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -848,10 +835,7 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 		policies = append(policies, IAMAttachedPolicy{PolicyName: name, PolicyARN: arn})
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"AttachedPolicies": policies,
-		"IsTruncated":      false,
-	})
+	return iamXMLResponse(http.StatusOK, "ListAttachedUserPolicies", iamAttachedPoliciesXML(policies)+"<IsTruncated>false</IsTruncated>")
 }
 
 // --- Policy attachment (role) ----------------------------------------------
@@ -891,7 +875,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	for _, a := range arns {
 		if a == params.PolicyArn {
-			return iamJSONResponse(http.StatusOK, map[string]any{})
+			return iamXMLEmptyResponse("AttachRolePolicy"), nil
 		}
 	}
 	arns = append(arns, params.PolicyArn)
@@ -899,7 +883,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("AttachRolePolicy"), nil
 }
 
 func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -944,7 +928,7 @@ func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DetachRolePolicy"), nil
 }
 
 func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -977,10 +961,7 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 		policies = append(policies, IAMAttachedPolicy{PolicyName: name, PolicyARN: arn})
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"AttachedPolicies": policies,
-		"IsTruncated":      false,
-	})
+	return iamXMLResponse(http.StatusOK, "ListAttachedRolePolicies", iamAttachedPoliciesXML(policies)+"<IsTruncated>false</IsTruncated>")
 }
 
 // --- Policy CRUD -----------------------------------------------------------
@@ -1050,7 +1031,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("put policy: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"Policy": policy})
+	return iamXMLResponse(http.StatusOK, "CreatePolicy", iamSinglePolicyXML(policy))
 }
 
 func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1072,7 +1053,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 	// Check managed policies first.
 	if mp, ok := GetManagedPolicy(params.PolicyArn); ok {
-		return iamJSONResponse(http.StatusOK, map[string]any{"Policy": mp})
+		return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(mp))
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+params.PolicyArn)
@@ -1089,7 +1070,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("unmarshal policy: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"Policy": &policy})
+	return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(&policy))
 }
 
 func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1123,7 +1104,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("delete policy: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DeletePolicy"), nil
 }
 
 func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1163,14 +1144,11 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		policies = append(policies, &pol)
 	}
 
-	result := map[string]any{
-		"Policies":    policies,
-		"IsTruncated": isTruncated,
-	}
+	xmlStr := iamPolicyListXML(policies) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
-		result["Marker"] = nextMarker
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
-	return iamJSONResponse(http.StatusOK, result)
+	return iamXMLResponse(http.StatusOK, "ListPolicies", xmlStr)
 }
 
 // --- Access key operations -------------------------------------------------
@@ -1236,7 +1214,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{"AccessKey": accessKey})
+	return iamXMLResponse(http.StatusOK, "CreateAccessKey", iamAccessKeyXML(accessKey, true))
 }
 
 func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1291,7 +1269,7 @@ func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DeleteAccessKey"), nil
 }
 
 func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1344,10 +1322,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		})
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"AccessKeyMetadata": keys,
-		"IsTruncated":       false,
-	})
+	return iamXMLResponse(http.StatusOK, "ListAccessKeys", iamAccessKeyMetaListXML(keys)+"<IsTruncated>false</IsTruncated>")
 }
 
 // --- Authorization ---------------------------------------------------------
@@ -1592,7 +1567,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		}
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("Put"+actionSuffix+"Policy"), nil
 }
 
 // getInlinePolicy retrieves an inline policy document for a user or role.
@@ -1634,17 +1609,9 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 
 	entityKey := entityName
 	if entityType == "role" {
-		return iamJSONResponse(http.StatusOK, map[string]any{
-			"RoleName":       entityKey,
-			"PolicyName":     params.PolicyName,
-			"PolicyDocument": string(raw),
-		})
+		return iamXMLResponse(http.StatusOK, "GetRolePolicy", "<RoleName>"+xmlEsc(entityKey)+"</RoleName><PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName><PolicyDocument>"+xmlEsc(string(raw))+"</PolicyDocument>")
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"UserName":       entityKey,
-		"PolicyName":     params.PolicyName,
-		"PolicyDocument": string(raw),
-	})
+	return iamXMLResponse(http.StatusOK, "GetUserPolicy", "<UserName>"+xmlEsc(entityKey)+"</UserName><PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName><PolicyDocument>"+xmlEsc(string(raw))+"</PolicyDocument>")
 }
 
 // deleteInlinePolicy removes an inline policy from a user or role.
@@ -1704,7 +1671,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 		return nil, err
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("Delete"+actionSuffix+"Policy"), nil
 }
 
 // listInlinePolicies returns the names of all inline policies for a user or role.
@@ -1741,11 +1708,11 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 
 	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems)
 
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"PolicyNames": page,
-		"IsTruncated": isTruncated,
-		"Marker":      nextMarker,
-	})
+	xmlStr := iamStringListXML("PolicyNames", page) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
+	if nextMarker != "" {
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
+	}
+	return iamXMLResponse(http.StatusOK, "List"+actionSuffix+"Policies", xmlStr)
 }
 
 // --- Permission boundaries -------------------------------------------------
@@ -1838,7 +1805,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 		}
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("Put"+actionSuffix+"PermissionsBoundary"), nil
 }
 
 // deletePermissionsBoundary clears the permissions boundary from a user or role.
@@ -1906,7 +1873,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 		}
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("Delete"+actionSuffix+"PermissionsBoundary"), nil
 }
 
 // --- Tagging operations ----------------------------------------------------
@@ -1962,7 +1929,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, fmt.Errorf("tagUser put: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("TagUser"), nil
 }
 
 func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2013,7 +1980,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("untagUser put: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("UntagUser"), nil
 }
 
 func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2075,14 +2042,11 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		end = len(tags)
 	}
 
-	result := map[string]any{
-		"Tags":        tags[startIdx:end],
-		"IsTruncated": isTruncated,
-	}
+	xmlStr := iamTagListXML(tags[startIdx:end]) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
-		result["Marker"] = nextMarker
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
-	return iamJSONResponse(http.StatusOK, result)
+	return iamXMLResponse(http.StatusOK, "ListUserTags", xmlStr)
 }
 
 func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2136,7 +2100,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, fmt.Errorf("tagRole put: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("TagRole"), nil
 }
 
 func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2187,7 +2151,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("untagRole put: %w", err)
 	}
 
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("UntagRole"), nil
 }
 
 func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2248,14 +2212,11 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		end = len(tags)
 	}
 
-	result := map[string]any{
-		"Tags":        tags[startIdx:end],
-		"IsTruncated": isTruncated,
-	}
+	xmlStr := iamTagListXML(tags[startIdx:end]) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
-		result["Marker"] = nextMarker
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
-	return iamJSONResponse(http.StatusOK, result)
+	return iamXMLResponse(http.StatusOK, "ListRoleTags", xmlStr)
 }
 
 // --- State helpers ---------------------------------------------------------
@@ -2365,33 +2326,8 @@ func (p *IAMPlugin) saveStringList(goCtx context.Context, key string, list []str
 }
 
 // --- Response/error helpers ------------------------------------------------
-
-// iamErrorResponse builds a JSON-encoded IAM error response. IAM uses JSON
-// errors (not XML), with a "__type" field identifying the error code.
-func iamErrorResponse(code, message string, status int) *AWSResponse {
-	body, _ := json.Marshal(map[string]string{
-		"__type":  code,
-		"message": message,
-	})
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
-		Body:       body,
-	}
-}
-
-// iamJSONResponse builds a successful JSON response.
-func iamJSONResponse(status int, v any) (*AWSResponse, error) {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("marshal IAM response: %w", err)
-	}
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
-		Body:       body,
-	}, nil
-}
+// iamErrorResponse is defined in iam_xml.go and returns an XML error response.
+// iamXMLResponse and iamXMLEmptyResponse are also defined in iam_xml.go.
 
 // parseIAMBody unmarshals an IAM JSON request body into dst.
 // An empty body is treated as an empty JSON object.
@@ -2514,7 +2450,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, iamNamespace, key, raw); err != nil {
 		return nil, fmt.Errorf("put instance profile: %w", err)
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{"InstanceProfile": profile})
+	return iamXMLResponse(http.StatusOK, "CreateInstanceProfile", iamSingleInstanceProfileXML(profile))
 }
 
 func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2542,7 +2478,7 @@ func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWS
 	if err := json.Unmarshal(data, &profile); err != nil {
 		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{"InstanceProfile": profile})
+	return iamXMLResponse(http.StatusOK, "GetInstanceProfile", iamSingleInstanceProfileXML(&profile))
 }
 
 func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2578,7 +2514,7 @@ func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*
 	if err := p.state.Delete(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName); err != nil {
 		return nil, fmt.Errorf("delete instance profile: %w", err)
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("DeleteInstanceProfile"), nil
 }
 
 func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2635,7 +2571,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName, raw); err != nil {
 		return nil, fmt.Errorf("put instance profile: %w", err)
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("AddRoleToInstanceProfile"), nil
 }
 
 func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2683,7 +2619,7 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSReq
 	if err := p.state.Put(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName, raw); err != nil {
 		return nil, fmt.Errorf("put instance profile: %w", err)
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{})
+	return iamXMLEmptyResponse("RemoveRoleFromInstanceProfile"), nil
 }
 
 // listInstanceProfiles returns persisted IAM instance profiles.
@@ -2705,8 +2641,5 @@ func (p *IAMPlugin) listInstanceProfiles(_ *RequestContext, _ *AWSRequest) (*AWS
 		}
 		profiles = append(profiles, profile)
 	}
-	return iamJSONResponse(http.StatusOK, map[string]any{
-		"InstanceProfiles": profiles,
-		"IsTruncated":      false,
-	})
+	return iamXMLResponse(http.StatusOK, "ListInstanceProfiles", iamInstanceProfileListXML(profiles)+"<IsTruncated>false</IsTruncated>")
 }

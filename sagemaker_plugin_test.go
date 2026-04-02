@@ -252,3 +252,89 @@ func TestSageMakerPlugin_CreatePresignedDomainUrl(t *testing.T) {
 		t.Error("expected non-empty AuthorizedUrl")
 	}
 }
+
+// TestSageMakerPlugin_DeleteApp verifies DeleteApp removes the app.
+func TestSageMakerPlugin_DeleteApp(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+
+	// Create an app first.
+	createResp := sagemakerRequest(t, ts, "CreateApp", map[string]string{
+		"AppName":         "test-app",
+		"AppType":         "KernelGateway",
+		"DomainId":        "d-del1",
+		"UserProfileName": "user-del",
+	})
+	if createResp.StatusCode != http.StatusOK {
+		t.Fatalf("createApp: expected 200, got %d", createResp.StatusCode)
+	}
+	sagemakerBody(t, createResp)
+
+	// Delete the app.
+	delResp := sagemakerRequest(t, ts, "DeleteApp", map[string]string{
+		"AppName":         "test-app",
+		"AppType":         "KernelGateway",
+		"DomainId":        "d-del1",
+		"UserProfileName": "user-del",
+	})
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("deleteApp: expected 200, got %d", delResp.StatusCode)
+	}
+	sagemakerBody(t, delResp)
+
+	// Describe after delete → not found.
+	descResp := sagemakerRequest(t, ts, "DescribeApp", map[string]string{
+		"AppName":         "test-app",
+		"AppType":         "KernelGateway",
+		"DomainId":        "d-del1",
+		"UserProfileName": "user-del",
+	})
+	if descResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("describeApp after delete: expected 400, got %d", descResp.StatusCode)
+	}
+	sagemakerBody(t, descResp)
+}
+
+// TestSageMakerPlugin_ListTrainingJobs verifies listing after creation.
+func TestSageMakerPlugin_ListTrainingJobs(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+
+	// Create two training jobs.
+	for _, name := range []string{"job-list-1", "job-list-2"} {
+		r := sagemakerRequest(t, ts, "CreateTrainingJob", map[string]interface{}{
+			"TrainingJobName": name,
+			"AlgorithmSpecification": map[string]string{
+				"TrainingInputMode": "File",
+				"TrainingImage":     "123456789012.dkr.ecr.us-east-1.amazonaws.com/algo:latest",
+			},
+			"OutputDataConfig": map[string]string{"S3OutputPath": "s3://bucket/output"},
+			"ResourceConfig": map[string]interface{}{
+				"InstanceType":  "ml.m5.large",
+				"InstanceCount": 1,
+				"VolumeSizeInGB": 10,
+			},
+			"RoleArn": "arn:aws:iam::123456789012:role/SageMakerRole",
+			"StoppingCondition": map[string]int{"MaxRuntimeInSeconds": 3600},
+		})
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("createTrainingJob %s: expected 200, got %d", name, r.StatusCode)
+		}
+		sagemakerBody(t, r)
+	}
+
+	// List training jobs.
+	listResp := sagemakerRequest(t, ts, "ListTrainingJobs", map[string]interface{}{})
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("listTrainingJobs: expected 200, got %d", listResp.StatusCode)
+	}
+	var result struct {
+		TrainingJobSummaries []struct {
+			TrainingJobName string `json:"TrainingJobName"`
+		} `json:"TrainingJobSummaries"`
+	}
+	if err := json.Unmarshal(sagemakerBody(t, listResp), &result); err != nil {
+		t.Fatalf("decode listTrainingJobs: %v", err)
+	}
+	if len(result.TrainingJobSummaries) != 2 {
+		t.Fatalf("expected 2 training jobs, got %d", len(result.TrainingJobSummaries))
+	}
+}

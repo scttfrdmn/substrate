@@ -1,9 +1,11 @@
 package substrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"sort"
 	"strings"
@@ -775,12 +777,10 @@ func (d *StackDeployer) deployIAMRole(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		var result struct {
-			Role struct {
-				ARN string `json:"Arn"`
-			} `json:"Role"`
+			ARN string `xml:"CreateRoleResult>Role>Arn"`
 		}
-		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
-			dr.ARN = result.Role.ARN
+		if xmlErr := xmlUnmarshalIAM(resp.Body, &result); xmlErr == nil {
+			dr.ARN = result.ARN
 		}
 	}
 
@@ -827,12 +827,10 @@ func (d *StackDeployer) deployIAMPolicy(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		var result struct {
-			Policy struct {
-				ARN string `json:"Arn"`
-			} `json:"Policy"`
+			ARN string `xml:"CreatePolicyResult>Policy>Arn"`
 		}
-		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
-			dr.ARN = result.Policy.ARN
+		if xmlErr := xmlUnmarshalIAM(resp.Body, &result); xmlErr == nil {
+			dr.ARN = result.ARN
 		}
 	}
 
@@ -2490,6 +2488,13 @@ func parseCFNTemplate(cfn string) (*cfnTemplate, error) {
 		return nil, fmt.Errorf("invalid CloudFormation template (JSON: %w)", err)
 	}
 	return &tmpl, nil
+}
+
+// xmlUnmarshalIAM strips the IAM namespace from body and unmarshals into dst.
+// Used to parse XML responses from IAMPlugin (which uses the iam.amazonaws.com namespace).
+func xmlUnmarshalIAM(body []byte, dst interface{}) error {
+	body = bytes.ReplaceAll(body, []byte(` xmlns="`+iamXMLNS+`"`), nil)
+	return xml.Unmarshal(body, dst)
 }
 
 // marshalToJSON marshals v to a JSON string. Returns "" on nil or error.

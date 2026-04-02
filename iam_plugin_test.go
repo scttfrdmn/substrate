@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"log/slog"
 	"net/http"
@@ -54,12 +55,121 @@ func iamRequest(t *testing.T, srv *substrate.Server, operation string, body any)
 	return w.Result()
 }
 
-// decodeJSON decodes the response body as JSON into dst.
-func decodeJSON(t *testing.T, r *http.Response, dst any) {
+// iamListWrappers are IAM XML element names that represent lists.
+// The XML parser returns []any{} for these even when empty.
+var iamListWrappers = map[string]bool{
+	"Users": true, "Roles": true, "Groups": true, "Policies": true,
+	"AttachedPolicies": true, "PolicyNames": true, "Tags": true,
+	"AccessKeyMetadata": true, "InstanceProfiles": true,
+}
+
+// decodeIAMXML decodes an IAM XML response body into *dst.
+// For error responses (ErrorResponse element), dst gets {"__type": code, "message": msg}.
+// For success responses, dst gets the content of the {Op}Result element as map[string]any.
+// List elements with <member> children become []any; IsTruncated becomes bool.
+func decodeIAMXML(t *testing.T, r *http.Response, dst *map[string]any) {
 	t.Helper()
 	body, err := io.ReadAll(r.Body)
 	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(body, dst))
+
+	if bytes.Contains(body, []byte("<ErrorResponse")) {
+		var errData struct {
+			Code    string `xml:"Error>Code"`
+			Message string `xml:"Error>Message"`
+		}
+		_ = xml.Unmarshal(body, &errData)
+		*dst = map[string]any{"__type": errData.Code, "message": errData.Message}
+		return
+	}
+
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	// Skip root start element (e.g. <CreateUserResponse>).
+	_, skipErr := dec.Token()
+	require.NoError(t, skipErr)
+
+	outerAny, parseErr := xmlParseIAMElement(dec, "")
+	require.NoError(t, parseErr)
+
+	outerMap, ok := outerAny.(map[string]any)
+	if !ok {
+		*dst = map[string]any{}
+		return
+	}
+	// Find the {Op}Result child.
+	for k, v := range outerMap {
+		if strings.HasSuffix(k, "Result") {
+			if m, ok2 := v.(map[string]any); ok2 {
+				*dst = m
+				return
+			}
+			*dst = map[string]any{}
+			return
+		}
+	}
+	*dst = map[string]any{}
+}
+
+// xmlParseIAMElement recursively reads tokens from dec until the matching
+// end element. elemName is the name of the element being parsed.
+func xmlParseIAMElement(dec *xml.Decoder, elemName string) (any, error) {
+	type child struct {
+		name string
+		val  any
+	}
+	var children []child
+	var text strings.Builder
+
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			val, err := xmlParseIAMElement(dec, t.Name.Local)
+			if err != nil {
+				return nil, err
+			}
+			children = append(children, child{t.Name.Local, val})
+		case xml.EndElement:
+			s := strings.TrimSpace(text.String())
+			if len(children) == 0 {
+				// Known list wrapper with no members → empty slice.
+				if iamListWrappers[elemName] {
+					return []any{}, nil
+				}
+				if s == "true" {
+					return true, nil
+				}
+				if s == "false" {
+					return false, nil
+				}
+				return s, nil
+			}
+			// All children named "member" → list.
+			allMember := true
+			for _, c := range children {
+				if c.name != "member" {
+					allMember = false
+					break
+				}
+			}
+			if allMember {
+				items := make([]any, len(children))
+				for i, c := range children {
+					items[i] = c.val
+				}
+				return items, nil
+			}
+			m := make(map[string]any, len(children))
+			for _, c := range children {
+				m[c.name] = c.val
+			}
+			return m, nil
+		case xml.CharData:
+			text.Write(t)
+		}
+	}
 }
 
 // --- User tests ------------------------------------------------------------
@@ -70,7 +180,7 @@ func TestIAMPlugin_CreateUser_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	user := result["User"].(map[string]any)
 	assert.Equal(t, "alice", user["UserName"])
 	assert.NotEmpty(t, user["UserId"])
@@ -84,7 +194,7 @@ func TestIAMPlugin_CreateUser_CustomPath(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	user := result["User"].(map[string]any)
 	assert.Equal(t, "/eng/", user["Path"])
 	assert.Contains(t, user["Arn"].(string), ":user/eng/bob")
@@ -96,8 +206,8 @@ func TestIAMPlugin_CreateUser_Duplicate(t *testing.T) {
 	resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "alice"})
 
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
-	var result map[string]string
-	decodeJSON(t, resp, &result)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
 	assert.Equal(t, "EntityAlreadyExistsException", result["__type"])
 }
 
@@ -105,8 +215,8 @@ func TestIAMPlugin_CreateUser_MissingName(t *testing.T) {
 	srv := newIAMTestServer(t)
 	resp := iamRequest(t, srv, "CreateUser", map[string]any{})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	var result map[string]string
-	decodeJSON(t, resp, &result)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
 	assert.Equal(t, "ValidationError", result["__type"])
 }
 
@@ -118,7 +228,7 @@ func TestIAMPlugin_GetUser_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	user := result["User"].(map[string]any)
 	assert.Equal(t, "alice", user["UserName"])
 }
@@ -127,8 +237,8 @@ func TestIAMPlugin_GetUser_NotFound(t *testing.T) {
 	srv := newIAMTestServer(t)
 	resp := iamRequest(t, srv, "GetUser", map[string]any{"UserName": "nobody"})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-	var result map[string]string
-	decodeJSON(t, resp, &result)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
 	assert.Equal(t, "NoSuchEntityException", result["__type"])
 }
 
@@ -154,8 +264,8 @@ func TestIAMPlugin_DeleteUser_WithAttachedPolicy(t *testing.T) {
 
 	resp := iamRequest(t, srv, "DeleteUser", map[string]any{"UserName": "alice"})
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
-	var result map[string]string
-	decodeJSON(t, resp, &result)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
 	assert.Equal(t, "DeleteConflictException", result["__type"])
 }
 
@@ -165,7 +275,7 @@ func TestIAMPlugin_ListUsers_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	users := result["Users"].([]any)
 	assert.Empty(t, users)
 	assert.False(t, result["IsTruncated"].(bool))
@@ -181,7 +291,7 @@ func TestIAMPlugin_ListUsers_Multiple(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	users := result["Users"].([]any)
 	assert.Len(t, users, 3)
 }
@@ -195,7 +305,7 @@ func TestIAMPlugin_ListUsers_Pagination(t *testing.T) {
 	// Page 1: MaxItems=2.
 	resp1 := iamRequest(t, srv, "ListUsers", map[string]any{"MaxItems": 2})
 	var page1 map[string]any
-	decodeJSON(t, resp1, &page1)
+	decodeIAMXML(t, resp1, &page1)
 	assert.True(t, page1["IsTruncated"].(bool))
 	assert.Len(t, page1["Users"].([]any), 2)
 	marker := page1["Marker"].(string)
@@ -204,14 +314,14 @@ func TestIAMPlugin_ListUsers_Pagination(t *testing.T) {
 	// Page 2: using marker.
 	resp2 := iamRequest(t, srv, "ListUsers", map[string]any{"MaxItems": 2, "Marker": marker})
 	var page2 map[string]any
-	decodeJSON(t, resp2, &page2)
+	decodeIAMXML(t, resp2, &page2)
 	assert.Len(t, page2["Users"].([]any), 2)
 
 	// Page 3: remaining.
 	marker2 := page2["Marker"].(string)
 	resp3 := iamRequest(t, srv, "ListUsers", map[string]any{"MaxItems": 2, "Marker": marker2})
 	var page3 map[string]any
-	decodeJSON(t, resp3, &page3)
+	decodeIAMXML(t, resp3, &page3)
 	assert.Len(t, page3["Users"].([]any), 1)
 	assert.False(t, page3["IsTruncated"].(bool))
 }
@@ -229,10 +339,23 @@ func TestIAMPlugin_CreateRole_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	role := result["Role"].(map[string]any)
 	assert.Equal(t, "lambda-role", role["RoleName"])
 	assert.Contains(t, role["Arn"].(string), ":role/lambda-role")
+}
+
+func TestIAMPlugin_CreateRole_WithDescription(t *testing.T) {
+	srv := newIAMTestServer(t)
+	resp := iamRequest(t, srv, "CreateRole", map[string]any{
+		"RoleName":    "described-role",
+		"Description": "A test role with description.",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
+	role := result["Role"].(map[string]any)
+	assert.Equal(t, "A test role with description.", role["Description"])
 }
 
 func TestIAMPlugin_CreateRole_Duplicate(t *testing.T) {
@@ -276,7 +399,7 @@ func TestIAMPlugin_ListRoles(t *testing.T) {
 	resp := iamRequest(t, srv, "ListRoles", map[string]any{})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	assert.Len(t, result["Roles"].([]any), 2)
 }
 
@@ -288,7 +411,7 @@ func TestIAMPlugin_CreateGroup_GetGroup(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var create map[string]any
-	decodeJSON(t, resp, &create)
+	decodeIAMXML(t, resp, &create)
 	assert.Equal(t, "devs", create["Group"].(map[string]any)["GroupName"])
 
 	resp2 := iamRequest(t, srv, "GetGroup", map[string]any{"GroupName": "devs"})
@@ -317,7 +440,7 @@ func TestIAMPlugin_AttachDetachUserPolicy(t *testing.T) {
 	// List.
 	resp2 := iamRequest(t, srv, "ListAttachedUserPolicies", map[string]any{"UserName": "alice"})
 	var listResult map[string]any
-	decodeJSON(t, resp2, &listResult)
+	decodeIAMXML(t, resp2, &listResult)
 	attached := listResult["AttachedPolicies"].([]any)
 	require.Len(t, attached, 1)
 	assert.Equal(t, "arn:aws:iam::aws:policy/ReadOnlyAccess",
@@ -333,7 +456,7 @@ func TestIAMPlugin_AttachDetachUserPolicy(t *testing.T) {
 	// List again — should be empty.
 	resp4 := iamRequest(t, srv, "ListAttachedUserPolicies", map[string]any{"UserName": "alice"})
 	var listResult2 map[string]any
-	decodeJSON(t, resp4, &listResult2)
+	decodeIAMXML(t, resp4, &listResult2)
 	assert.Empty(t, listResult2["AttachedPolicies"].([]any))
 }
 
@@ -347,7 +470,7 @@ func TestIAMPlugin_AttachUserPolicy_Idempotent(t *testing.T) {
 
 	resp := iamRequest(t, srv, "ListAttachedUserPolicies", map[string]any{"UserName": "alice"})
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	// No duplicates.
 	assert.Len(t, result["AttachedPolicies"].([]any), 1)
 }
@@ -374,7 +497,7 @@ func TestIAMPlugin_AttachDetachRolePolicy(t *testing.T) {
 
 	resp := iamRequest(t, srv, "ListAttachedRolePolicies", map[string]any{"RoleName": "myrole"})
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	attached := result["AttachedPolicies"].([]any)
 	require.Len(t, attached, 1)
 	assert.Equal(t, "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
@@ -394,7 +517,7 @@ func TestIAMPlugin_CreateGetPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var createResult map[string]any
-	decodeJSON(t, resp, &createResult)
+	decodeIAMXML(t, resp, &createResult)
 	pol := createResult["Policy"].(map[string]any)
 	arn := pol["Arn"].(string)
 	assert.Contains(t, arn, ":policy/my-s3-policy")
@@ -412,7 +535,7 @@ func TestIAMPlugin_GetPolicy_Managed(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	pol := result["Policy"].(map[string]any)
 	assert.Equal(t, "AdministratorAccess", pol["PolicyName"])
 }
@@ -424,7 +547,7 @@ func TestIAMPlugin_DeletePolicy(t *testing.T) {
 	// Get ARN from list.
 	listResp := iamRequest(t, srv, "ListPolicies", map[string]any{})
 	var listResult map[string]any
-	decodeJSON(t, listResp, &listResult)
+	decodeIAMXML(t, listResp, &listResult)
 	policies := listResult["Policies"].([]any)
 	require.Len(t, policies, 1)
 	arn := policies[0].(map[string]any)["Arn"].(string)
@@ -446,7 +569,7 @@ func TestIAMPlugin_CreateListDeleteAccessKey(t *testing.T) {
 	resp := iamRequest(t, srv, "CreateAccessKey", map[string]any{"UserName": "alice"})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var createResult map[string]any
-	decodeJSON(t, resp, &createResult)
+	decodeIAMXML(t, resp, &createResult)
 	key := createResult["AccessKey"].(map[string]any)
 	keyID := key["AccessKeyId"].(string)
 	assert.True(t, len(keyID) == 21)
@@ -456,7 +579,7 @@ func TestIAMPlugin_CreateListDeleteAccessKey(t *testing.T) {
 	// List.
 	listResp := iamRequest(t, srv, "ListAccessKeys", map[string]any{"UserName": "alice"})
 	var listResult map[string]any
-	decodeJSON(t, listResp, &listResult)
+	decodeIAMXML(t, listResp, &listResult)
 	metadata := listResult["AccessKeyMetadata"].([]any)
 	require.Len(t, metadata, 1)
 	// Secret not included in list response.
@@ -473,7 +596,7 @@ func TestIAMPlugin_CreateListDeleteAccessKey(t *testing.T) {
 	// List again — empty.
 	listResp2 := iamRequest(t, srv, "ListAccessKeys", map[string]any{"UserName": "alice"})
 	var listResult2 map[string]any
-	decodeJSON(t, listResp2, &listResult2)
+	decodeIAMXML(t, listResp2, &listResult2)
 	assert.Empty(t, listResult2["AccessKeyMetadata"].([]any))
 }
 
@@ -487,7 +610,7 @@ func TestIAMPlugin_ListGroups(t *testing.T) {
 	resp := iamRequest(t, srv, "ListGroups", map[string]any{})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	assert.Len(t, result["Groups"].([]any), 3)
 	assert.False(t, result["IsTruncated"].(bool))
 }
@@ -499,7 +622,7 @@ func TestIAMPlugin_ListGroups_Pagination(t *testing.T) {
 	}
 	resp := iamRequest(t, srv, "ListGroups", map[string]any{"MaxItems": 2})
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	assert.True(t, result["IsTruncated"].(bool))
 	assert.Len(t, result["Groups"].([]any), 2)
 }
@@ -523,7 +646,7 @@ func TestIAMPlugin_DetachRolePolicy(t *testing.T) {
 	// Verify removed.
 	listResp := iamRequest(t, srv, "ListAttachedRolePolicies", map[string]any{"RoleName": "myrole"})
 	var listResult map[string]any
-	decodeJSON(t, listResp, &listResult)
+	decodeIAMXML(t, listResp, &listResult)
 	assert.Empty(t, listResult["AttachedPolicies"].([]any))
 }
 
@@ -583,7 +706,7 @@ func TestIAMPlugin_ListRoles_Pagination(t *testing.T) {
 	}
 	resp := iamRequest(t, srv, "ListRoles", map[string]any{"MaxItems": 2})
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	assert.True(t, result["IsTruncated"].(bool))
 }
 
@@ -716,8 +839,8 @@ func TestIAMPlugin_UnknownOperation(t *testing.T) {
 	srv := newIAMTestServer(t)
 	resp := iamRequest(t, srv, "DoSomethingWeird", nil)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	var result map[string]string
-	decodeJSON(t, resp, &result)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
 	assert.Equal(t, "InvalidAction", result["__type"])
 }
 
@@ -746,7 +869,7 @@ func TestIAMPlugin_PutGetDeleteListUserPolicy(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var getResult map[string]any
-	decodeJSON(t, resp, &getResult)
+	decodeIAMXML(t, resp, &getResult)
 	assert.Equal(t, "alice", getResult["UserName"])
 	assert.Equal(t, "ReadPolicy", getResult["PolicyName"])
 	assert.NotEmpty(t, getResult["PolicyDocument"])
@@ -755,7 +878,7 @@ func TestIAMPlugin_PutGetDeleteListUserPolicy(t *testing.T) {
 	resp = iamRequest(t, srv, "ListUserPolicies", map[string]any{"UserName": "alice"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var listResult map[string]any
-	decodeJSON(t, resp, &listResult)
+	decodeIAMXML(t, resp, &listResult)
 	names := listResult["PolicyNames"].([]any)
 	assert.Equal(t, 1, len(names))
 	assert.Equal(t, "ReadPolicy", names[0])
@@ -799,14 +922,14 @@ func TestIAMPlugin_PutGetDeleteListRolePolicy(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var getResult map[string]any
-	decodeJSON(t, resp, &getResult)
+	decodeIAMXML(t, resp, &getResult)
 	assert.Equal(t, "MyRole", getResult["RoleName"])
 	assert.Equal(t, "S3Full", getResult["PolicyName"])
 
 	resp = iamRequest(t, srv, "ListRolePolicies", map[string]any{"RoleName": "MyRole"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var listResult map[string]any
-	decodeJSON(t, resp, &listResult)
+	decodeIAMXML(t, resp, &listResult)
 	names := listResult["PolicyNames"].([]any)
 	assert.Equal(t, 1, len(names))
 
@@ -835,7 +958,7 @@ func TestIAMPlugin_PermissionsBoundary_User(t *testing.T) {
 	resp = iamRequest(t, srv, "GetUser", map[string]any{"UserName": "bounded-user"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	user := result["User"].(map[string]any)
 	boundary := user["PermissionsBoundary"].(map[string]any)
 	assert.Equal(t, "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess", boundary["PolicyArn"])
@@ -850,7 +973,7 @@ func TestIAMPlugin_PermissionsBoundary_User(t *testing.T) {
 	resp = iamRequest(t, srv, "GetUser", map[string]any{"UserName": "bounded-user"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result2 map[string]any
-	decodeJSON(t, resp, &result2)
+	decodeIAMXML(t, resp, &result2)
 	user2 := result2["User"].(map[string]any)
 	_, hasBoundary := user2["PermissionsBoundary"]
 	assert.False(t, hasBoundary)
@@ -878,7 +1001,7 @@ func TestIAMPlugin_PermissionsBoundary_Deny(t *testing.T) {
 	resp = iamRequest(t, srv, "GetUser", map[string]any{"UserName": "restricted"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	user := result["User"].(map[string]any)
 	assert.NotNil(t, user["PermissionsBoundary"])
 }
@@ -898,6 +1021,13 @@ func TestIAMPlugin_PermissionsBoundary_Role(t *testing.T) {
 		"PermissionsBoundary": "arn:aws:iam::aws:policy/PowerUserAccess",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// GetRole should reflect the boundary.
+	resp = iamRequest(t, srv, "GetRole", map[string]any{"RoleName": "BoundedRole"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var roleResult map[string]any
+	decodeIAMXML(t, resp, &roleResult)
+	assert.NotNil(t, roleResult["Role"].(map[string]any)["PermissionsBoundary"])
 
 	resp = iamRequest(t, srv, "DeleteRolePermissionsBoundary", map[string]any{
 		"RoleName": "BoundedRole",
@@ -926,7 +1056,7 @@ func TestIAMPlugin_UserTagging(t *testing.T) {
 	resp = iamRequest(t, srv, "ListUserTags", map[string]any{"UserName": "tagged-user"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	tags := result["Tags"].([]any)
 	assert.Len(t, tags, 2)
 
@@ -941,7 +1071,7 @@ func TestIAMPlugin_UserTagging(t *testing.T) {
 	resp = iamRequest(t, srv, "ListUserTags", map[string]any{"UserName": "tagged-user"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result2 map[string]any
-	decodeJSON(t, resp, &result2)
+	decodeIAMXML(t, resp, &result2)
 	tags2 := result2["Tags"].([]any)
 	assert.Len(t, tags2, 1)
 }
@@ -969,7 +1099,7 @@ func TestIAMPlugin_RoleTagging(t *testing.T) {
 	resp = iamRequest(t, srv, "ListRoleTags", map[string]any{"RoleName": "tagged-role"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	tags := result["Tags"].([]any)
 	assert.Len(t, tags, 1)
 
@@ -984,7 +1114,7 @@ func TestIAMPlugin_RoleTagging(t *testing.T) {
 	resp = iamRequest(t, srv, "ListRoleTags", map[string]any{"RoleName": "tagged-role"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var result2 map[string]any
-	decodeJSON(t, resp, &result2)
+	decodeIAMXML(t, resp, &result2)
 	tags2 := result2["Tags"].([]any)
 	assert.Empty(t, tags2)
 }
@@ -996,7 +1126,7 @@ func TestIAMPlugin_ListInstanceProfiles_Empty(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result map[string]any
-	decodeJSON(t, resp, &result)
+	decodeIAMXML(t, resp, &result)
 	profiles, ok := result["InstanceProfiles"]
 	require.True(t, ok, "InstanceProfiles key must be present")
 	assert.Empty(t, profiles, "empty account should have no instance profiles")
@@ -1014,7 +1144,7 @@ func TestIAMPlugin_InstanceProfile_FullLifecycle(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var createOut map[string]any
-	decodeJSON(t, resp, &createOut)
+	decodeIAMXML(t, resp, &createOut)
 	prof, _ := createOut["InstanceProfile"].(map[string]any)
 	assert.Equal(t, "my-profile", prof["InstanceProfileName"])
 	assert.Contains(t, prof["Arn"].(string), "instance-profile")
@@ -1043,7 +1173,7 @@ func TestIAMPlugin_InstanceProfile_FullLifecycle(t *testing.T) {
 		"InstanceProfileName": "my-profile",
 	})
 	var getOut map[string]any
-	decodeJSON(t, resp4, &getOut)
+	decodeIAMXML(t, resp4, &getOut)
 	prof4, _ := getOut["InstanceProfile"].(map[string]any)
 	roles, _ := prof4["Roles"].([]any)
 	assert.Len(t, roles, 1)
@@ -1088,7 +1218,7 @@ func TestIAMPlugin_ListInstanceProfiles_ReflectsCreated(t *testing.T) {
 	resp := iamRequest(t, srv, "ListInstanceProfiles", map[string]any{})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	var out map[string]any
-	decodeJSON(t, resp, &out)
+	decodeIAMXML(t, resp, &out)
 	profiles, _ := out["InstanceProfiles"].([]any)
 	assert.Len(t, profiles, 2)
 }

@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.45.7] - 2026-04-02
 
 ### Fixed
-- `parser.go`: add `"bedrock": "bedrock-runtime"` alias to `targetServiceAliases` so boto3 `bedrock-runtime` client requests signed with the SigV4 service name `bedrock` (the actual signing name used when `AWS_ENDPOINT_URL` is set) are routed to `BedrockRuntimePlugin` instead of returning 501 ServiceNotAvailable (closes #262)
+- **IAM**: Plugin now returns proper Query+XML protocol responses matching the AWS IAM wire format; all operations emit `<{Op}Response xmlns="https://iam.amazonaws.com/doc/2010-05-08/">` envelopes with `<{Op}Result>` inner elements and `<ResponseMetadata>` — fixes Go SDK v2 IAM client deserialization failures and enables end-to-end IAM client compatibility (closes #260)
+- **SSM**: `SendCommand` `RequestedDateTime` field now serialised as Unix epoch `float64` (e.g. `1700000000.0`) instead of RFC3339 string, matching the smithy deserializer expectation of the Go SDK v2 SSM client (closes #261)
+- **Parser**: route SigV4 service name `bedrock` to `bedrock-runtime` plugin when using a unified endpoint URL — fixes boto3 `bedrock-runtime` client calls that sign with service name `bedrock` (closes #262)
 
 ## [v0.45.6] - 2026-04-01
 

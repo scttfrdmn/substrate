@@ -765,8 +765,9 @@ type SSMCommand struct {
 	// Status is the overall command status.
 	Status string `json:"Status"`
 
-	// RequestedDateTime is the RFC3339 time the command was submitted.
-	RequestedDateTime string `json:"RequestedDateTime"`
+	// RequestedDateTime is the Unix epoch seconds when the command was submitted.
+	// The Go SDK smithy deserializer expects float64 (not RFC3339) for DateTime fields.
+	RequestedDateTime float64 `json:"RequestedDateTime"`
 }
 
 // SSMCommandInvocation holds the per-instance output of an SSM command.
@@ -804,7 +805,7 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	commandID := generateSSMCommandID()
-	now := p.tc.Now().UTC().Format(time.RFC3339)
+	nowUnix := float64(p.tc.Now().Unix())
 
 	cmd := SSMCommand{
 		CommandID:         commandID,
@@ -812,7 +813,7 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		InstanceIDs:       input.InstanceIDs,
 		Parameters:        input.Parameters,
 		Status:            "Success",
-		RequestedDateTime: now,
+		RequestedDateTime: nowUnix,
 	}
 	data, err := json.Marshal(cmd)
 	if err != nil {
