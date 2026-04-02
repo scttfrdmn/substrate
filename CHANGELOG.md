@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.48.0] - 2026-04-02
+
+### Added
+- **AWS Backup plugin (#265)**: Added `BackupPlugin` with 12 operations: `CreateBackupVault`, `DescribeBackupVault`, `DeleteBackupVault`, `ListBackupVaults`, `CreateBackupPlan`, `GetBackupPlan`, `UpdateBackupPlan`, `DeleteBackupPlan`, `ListBackupPlans`, `CreateBackupSelection`, `GetBackupSelection`, `DeleteBackupSelection`. Uses REST/JSON protocol (no X-Amz-Target); path-based routing via `parseBackupOperation` following the EFS pattern. No parser alias needed — service name is derived directly from the `backup` SigV4 credential scope or host. `UpdateBackupPlan` regenerates `VersionId`. Cost entry: `backup/CreateBackupPlan: $0.000001`.
+- **AWS Transfer Family plugin (#265)**: Added `TransferPlugin` with 10 operations: `CreateServer`, `DescribeServer`, `UpdateServer`, `DeleteServer`, `ListServers`, `CreateUser`, `DescribeUser`, `UpdateUser`, `DeleteUser`, `ListUsers`. Uses JSON-target protocol `TransferService.{Op}`; parser alias `"transferservice": "transfer"` added to `targetServiceAliases`. Server IDs use real format `s-{17 hex chars}`. `DescribeServer` always returns `State: "ONLINE"`. `DeleteServer` cascades to delete all users. Cost entry: `transfer/CreateServer: $0.30`.
+
 ## [v0.47.0] - 2026-04-02
 
 ### Added
@@ -1522,4 +1528,5 @@ all changes onto the v0.44.x line.
 [v0.45.10]: https://github.com/scttfrdmn/substrate/compare/v0.45.9...v0.45.10
 [v0.46.0]: https://github.com/scttfrdmn/substrate/compare/v0.45.10...v0.46.0
 [v0.47.0]: https://github.com/scttfrdmn/substrate/compare/v0.46.0...v0.47.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.47.0...HEAD
+[v0.48.0]: https://github.com/scttfrdmn/substrate/compare/v0.47.0...v0.48.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.48.0...HEAD

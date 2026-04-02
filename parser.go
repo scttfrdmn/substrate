@@ -236,6 +236,9 @@ var targetServiceAliases = map[string]string{
 	// → "waf" → but extractServiceFromTarget lowercases the whole prefix:
 	// "AWSWAF_20190729" → lowercase → "awswaf_20190729" → strip "_" suffix → "awswaf" → "wafv2".
 	"awswaf": "wafv2",
+	// "TransferService" → lowercase → "transferservice" → "transfer".
+	// aws-sdk-go-v2 Transfer Family uses X-Amz-Target: TransferService.{Op}.
+	"transferservice": "transfer",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

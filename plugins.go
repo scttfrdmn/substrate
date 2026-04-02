@@ -614,5 +614,25 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(codedeployPlugin)
 
+	backupPlugin := &BackupPlugin{}
+	if err := backupPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize backup plugin: %w", err)
+	}
+	registry.Register(backupPlugin)
+
+	transferPlugin := &TransferPlugin{}
+	if err := transferPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize transfer plugin: %w", err)
+	}
+	registry.Register(transferPlugin)
+
 	return nil
 }

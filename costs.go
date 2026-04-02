@@ -217,6 +217,10 @@ func defaultCostTable() map[string]float64 {
 		"codepipeline/StartPipelineExecution": 0.000001,
 		// CodeDeploy: free for EC2/on-premises, approximated per deployment.
 		"codedeploy/CreateDeployment": 0.000001,
+		// AWS Backup: pricing based on protected storage; approximated per plan.
+		"backup/CreateBackupPlan": 0.000001,
+		// Transfer Family: $0.30/protocol/hour, approximated per server creation.
+		"transfer/CreateServer": 0.30,
 	}
 }
 
