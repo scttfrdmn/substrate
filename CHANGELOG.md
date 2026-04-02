@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.47.0] - 2026-04-02
+
+### Added
+- **CodeBuild plugin (#264)**: Added `CodeBuildPlugin` with 7 operations: `CreateProject`, `BatchGetProjects`, `UpdateProject`, `DeleteProject`, `ListProjects`, `StartBuild`, `BatchGetBuilds`. Uses JSON-target protocol `CodeBuild_20161006.{Op}` (no parser alias needed). `StartBuild` immediately returns `buildStatus: "SUCCEEDED"` (deterministic). Error codes: `ResourceAlreadyExistsException` (duplicate project), `ResourceNotFoundException` (missing project). Cost entry: `codebuild/StartBuild: $0.0001`.
+- **CodePipeline plugin (#264)**: Added `CodePipelinePlugin` with 8 operations: `CreatePipeline`, `GetPipeline`, `UpdatePipeline`, `DeletePipeline`, `ListPipelines`, `StartPipelineExecution`, `GetPipelineState`, `GetPipelineExecution`. Uses JSON-target protocol `CodePipeline_20150709.{Op}` (no parser alias needed). `StartPipelineExecution` immediately returns `status: "Succeeded"` (deterministic); `GetPipelineState` reports all stages as `Succeeded`; `UpdatePipeline` increments the pipeline version. Error codes: `PipelineNameInUseException`, `PipelineNotFoundException`, `PipelineExecutionNotFoundException`. Cost entry: `codepipeline/StartPipelineExecution: $0.000001`.
+- **CodeDeploy plugin (#264)**: Added `CodeDeployPlugin` with 9 operations: `CreateApplication`, `GetApplication`, `DeleteApplication`, `ListApplications`, `CreateDeploymentGroup`, `GetDeploymentGroup`, `DeleteDeploymentGroup`, `CreateDeployment`, `GetDeployment`. Uses JSON-target protocol `CodeDeploy_20141006.{Op}` (no parser alias needed). `CreateDeployment` immediately returns `status: "Succeeded"` (deterministic); deployment IDs use real CodeDeploy format `d-{9-char uppercase alphanumeric}`. Error codes: `ApplicationAlreadyExistsException`, `ApplicationDoesNotExistException`, `DeploymentGroupAlreadyExistsException`, `DeploymentGroupDoesNotExistException`, `DeploymentDoesNotExistException`. Cost entry: `codedeploy/CreateDeployment: $0.000001`.
+
 ## [v0.46.0] - 2026-04-02
 
 ### Added
@@ -1514,4 +1521,5 @@ all changes onto the v0.44.x line.
 [v0.45.9]: https://github.com/scttfrdmn/substrate/compare/v0.45.8...v0.45.9
 [v0.45.10]: https://github.com/scttfrdmn/substrate/compare/v0.45.9...v0.45.10
 [v0.46.0]: https://github.com/scttfrdmn/substrate/compare/v0.45.10...v0.46.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.46.0...HEAD
+[v0.47.0]: https://github.com/scttfrdmn/substrate/compare/v0.46.0...v0.47.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.47.0...HEAD

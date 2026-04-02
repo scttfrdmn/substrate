@@ -584,5 +584,35 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(cloudTrailPlugin)
 
+	codebuildPlugin := &CodeBuildPlugin{}
+	if err := codebuildPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize codebuild plugin: %w", err)
+	}
+	registry.Register(codebuildPlugin)
+
+	codepipelinePlugin := &CodePipelinePlugin{}
+	if err := codepipelinePlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize codepipeline plugin: %w", err)
+	}
+	registry.Register(codepipelinePlugin)
+
+	codedeployPlugin := &CodeDeployPlugin{}
+	if err := codedeployPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize codedeploy plugin: %w", err)
+	}
+	registry.Register(codedeployPlugin)
+
 	return nil
 }

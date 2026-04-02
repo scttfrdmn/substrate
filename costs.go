@@ -211,6 +211,12 @@ func defaultCostTable() map[string]float64 {
 		"wafv2/AssociateWebACL": 0.000001,
 		// CloudTrail: $0.10 per 100,000 management events, approximated per trail creation.
 		"cloudtrail/CreateTrail": 0.000002,
+		// CodeBuild: $0.005 per build minute (BUILD_GENERAL1_SMALL), approximated per build.
+		"codebuild/StartBuild": 0.0001,
+		// CodePipeline: $1/month per active pipeline, approximated per execution.
+		"codepipeline/StartPipelineExecution": 0.000001,
+		// CodeDeploy: free for EC2/on-premises, approximated per deployment.
+		"codedeploy/CreateDeployment": 0.000001,
 	}
 }
 
