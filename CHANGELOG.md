@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.45.7] - 2026-04-02
+## [v0.45.8] - 2026-04-02
 
 ### Fixed
 - **IAM**: Plugin now returns proper Query+XML protocol responses matching the AWS IAM wire format; all operations emit `<{Op}Response xmlns="https://iam.amazonaws.com/doc/2010-05-08/">` envelopes with `<{Op}Result>` inner elements and `<ResponseMetadata>` — fixes Go SDK v2 IAM client deserialization failures and enables end-to-end IAM client compatibility (closes #260)
