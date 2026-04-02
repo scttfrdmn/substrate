@@ -253,3 +253,25 @@ func generateIAMID(prefix string) string {
 	}
 	return prefix + string(out)
 }
+
+// IAMInstanceProfile represents an AWS IAM instance profile — a container
+// that passes an IAM role to an EC2 instance.
+type IAMInstanceProfile struct {
+	// InstanceProfileName is the user-supplied name of the instance profile.
+	InstanceProfileName string `json:"InstanceProfileName"`
+
+	// InstanceProfileID is the AWS-generated unique identifier.
+	InstanceProfileID string `json:"InstanceProfileId"`
+
+	// ARN is the Amazon Resource Name for the instance profile.
+	ARN string `json:"Arn"`
+
+	// Path is the IAM path for the instance profile.
+	Path string `json:"Path"`
+
+	// Roles holds the IAM role attached to this profile (at most one per AWS rules).
+	Roles []IAMRole `json:"Roles"`
+
+	// CreateDate is when the instance profile was created.
+	CreateDate time.Time `json:"CreateDate"`
+}

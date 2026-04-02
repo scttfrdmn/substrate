@@ -150,6 +150,16 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListRoleTags":
 		return p.listRoleTags(ctx, req)
 
+	case "CreateInstanceProfile":
+		return p.createInstanceProfile(ctx, req)
+	case "GetInstanceProfile":
+		return p.getInstanceProfile(ctx, req)
+	case "DeleteInstanceProfile":
+		return p.deleteInstanceProfile(ctx, req)
+	case "AddRoleToInstanceProfile":
+		return p.addRoleToInstanceProfile(ctx, req)
+	case "RemoveRoleFromInstanceProfile":
+		return p.removeRoleFromInstanceProfile(ctx, req)
 	case "ListInstanceProfiles":
 		return p.listInstanceProfiles(ctx, req)
 
@@ -2459,13 +2469,244 @@ func arnPolicyName(arn string) string {
 
 // --- Instance profiles -------------------------------------------------------
 
-// listInstanceProfiles returns an empty (but valid) list of IAM instance
-// profiles.  Substrate does not persist instance profiles; the operation is
-// implemented so that callers that merely enumerate profiles receive a
-// well-formed response instead of an error.
+// --- Instance profile operations ---
+
+func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		InstanceProfileName string `json:"InstanceProfileName"`
+		Path                string `json:"Path"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.InstanceProfileName == "" {
+		return iamErrorResponse("ValidationError", "InstanceProfileName is required", http.StatusBadRequest), nil
+	}
+	if params.Path == "" {
+		params.Path = "/"
+	}
+
+	goCtx := context.Background()
+	key := "instance_profile:" + params.InstanceProfileName
+	existing, err := p.state.Get(goCtx, iamNamespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("get instance profile: %w", err)
+	}
+	if existing != nil {
+		return iamErrorResponse("EntityAlreadyExistsException",
+			fmt.Sprintf("Instance Profile %s already exists.", params.InstanceProfileName),
+			http.StatusConflict), nil
+	}
+
+	profile := &IAMInstanceProfile{
+		InstanceProfileName: params.InstanceProfileName,
+		InstanceProfileID:   generateIAMID("AIPA"),
+		ARN:                 fmt.Sprintf("arn:aws:iam::%s:instance-profile%s%s", ctx.AccountID, params.Path, params.InstanceProfileName),
+		Path:                params.Path,
+		Roles:               []IAMRole{},
+		CreateDate:          p.now().UTC(),
+	}
+
+	raw, err := json.Marshal(profile)
+	if err != nil {
+		return nil, fmt.Errorf("marshal instance profile: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, key, raw); err != nil {
+		return nil, fmt.Errorf("put instance profile: %w", err)
+	}
+	return iamJSONResponse(http.StatusOK, map[string]any{"InstanceProfile": profile})
+}
+
+func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		InstanceProfileName string `json:"InstanceProfileName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.InstanceProfileName == "" {
+		return iamErrorResponse("ValidationError", "InstanceProfileName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	data, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	if err != nil {
+		return nil, fmt.Errorf("get instance profile: %w", err)
+	}
+	if data == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
+			http.StatusNotFound), nil
+	}
+	var profile IAMInstanceProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
+	}
+	return iamJSONResponse(http.StatusOK, map[string]any{"InstanceProfile": profile})
+}
+
+func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		InstanceProfileName string `json:"InstanceProfileName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.InstanceProfileName == "" {
+		return iamErrorResponse("ValidationError", "InstanceProfileName is required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	data, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	if err != nil {
+		return nil, fmt.Errorf("get instance profile: %w", err)
+	}
+	if data == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
+			http.StatusNotFound), nil
+	}
+	var profile IAMInstanceProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
+	}
+	if len(profile.Roles) > 0 {
+		return iamErrorResponse("DeleteConflictException",
+			"Cannot delete entity, must detach all roles first.",
+			http.StatusConflict), nil
+	}
+	if err := p.state.Delete(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName); err != nil {
+		return nil, fmt.Errorf("delete instance profile: %w", err)
+	}
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		InstanceProfileName string `json:"InstanceProfileName"`
+		RoleName            string `json:"RoleName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.InstanceProfileName == "" || params.RoleName == "" {
+		return iamErrorResponse("ValidationError", "InstanceProfileName and RoleName are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	profData, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	if err != nil {
+		return nil, fmt.Errorf("get instance profile: %w", err)
+	}
+	if profData == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
+			http.StatusNotFound), nil
+	}
+	var profile IAMInstanceProfile
+	if err := json.Unmarshal(profData, &profile); err != nil {
+		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
+	}
+	if len(profile.Roles) > 0 {
+		return iamErrorResponse("LimitExceededException",
+			"Instance profile "+params.InstanceProfileName+" already has a role.",
+			http.StatusConflict), nil
+	}
+
+	roleData, err := p.state.Get(goCtx, iamNamespace, "role:"+params.RoleName)
+	if err != nil {
+		return nil, fmt.Errorf("get role: %w", err)
+	}
+	if roleData == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("Role %s cannot be found.", params.RoleName),
+			http.StatusNotFound), nil
+	}
+	var role IAMRole
+	if err := json.Unmarshal(roleData, &role); err != nil {
+		return nil, fmt.Errorf("unmarshal role: %w", err)
+	}
+
+	profile.Roles = []IAMRole{role}
+	raw, err := json.Marshal(profile)
+	if err != nil {
+		return nil, fmt.Errorf("marshal instance profile: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName, raw); err != nil {
+		return nil, fmt.Errorf("put instance profile: %w", err)
+	}
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		InstanceProfileName string `json:"InstanceProfileName"`
+		RoleName            string `json:"RoleName"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.InstanceProfileName == "" || params.RoleName == "" {
+		return iamErrorResponse("ValidationError", "InstanceProfileName and RoleName are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+	profData, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	if err != nil {
+		return nil, fmt.Errorf("get instance profile: %w", err)
+	}
+	if profData == nil {
+		return iamErrorResponse("NoSuchEntityException",
+			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
+			http.StatusNotFound), nil
+	}
+	var profile IAMInstanceProfile
+	if err := json.Unmarshal(profData, &profile); err != nil {
+		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
+	}
+
+	filtered := profile.Roles[:0]
+	for _, r := range profile.Roles {
+		if r.RoleName != params.RoleName {
+			filtered = append(filtered, r)
+		}
+	}
+	profile.Roles = filtered
+	if profile.Roles == nil {
+		profile.Roles = []IAMRole{}
+	}
+
+	raw, err := json.Marshal(profile)
+	if err != nil {
+		return nil, fmt.Errorf("marshal instance profile: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName, raw); err != nil {
+		return nil, fmt.Errorf("put instance profile: %w", err)
+	}
+	return iamJSONResponse(http.StatusOK, map[string]any{})
+}
+
+// listInstanceProfiles returns persisted IAM instance profiles.
 func (p *IAMPlugin) listInstanceProfiles(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, iamNamespace, "instance_profile:")
+	if err != nil {
+		return nil, fmt.Errorf("list instance profiles: %w", err)
+	}
+	profiles := make([]IAMInstanceProfile, 0, len(keys))
+	for _, k := range keys {
+		data, getErr := p.state.Get(goCtx, iamNamespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var profile IAMInstanceProfile
+		if err := json.Unmarshal(data, &profile); err != nil {
+			continue
+		}
+		profiles = append(profiles, profile)
+	}
 	return iamJSONResponse(http.StatusOK, map[string]any{
-		"InstanceProfiles": []any{},
+		"InstanceProfiles": profiles,
 		"IsTruncated":      false,
 	})
 }

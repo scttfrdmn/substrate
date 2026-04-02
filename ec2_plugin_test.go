@@ -2,6 +2,7 @@ package substrate_test
 
 import (
 	"encoding/xml"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	substrate "github.com/scttfrdmn/substrate"
 )
 
@@ -2815,4 +2817,123 @@ func TestEC2Plugin_DescribeLaunchTemplates_FilterByName(t *testing.T) {
 	if result.Items[0].LaunchTemplateName != "beta" {
 		t.Errorf("expected beta, got %q", result.Items[0].LaunchTemplateName)
 	}
+}
+
+// --- EBS volume tests (#256) ---
+
+func TestEC2_EBS_CreateDescribeDeleteVolume(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// CreateVolume.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateVolume",
+		"AvailabilityZone": "us-east-1a",
+		"Size":             "20",
+		"VolumeType":       "gp3",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), "vol-")
+	assert.Contains(t, string(body), "available")
+
+	// Extract volume ID.
+	start := strings.Index(string(body), "vol-")
+	end := strings.IndexAny(string(body)[start:], "<") + start
+	volID := string(body)[start:end]
+
+	// DescribeVolumes by ID.
+	resp2 := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeVolumes",
+		"VolumeId.1": volID,
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body2, _ := io.ReadAll(resp2.Body)
+	assert.Contains(t, string(body2), volID)
+
+	// DeleteVolume.
+	resp3 := ec2Request(t, ts, map[string]string{
+		"Action":   "DeleteVolume",
+		"VolumeId": volID,
+	})
+	assert.Equal(t, http.StatusOK, resp3.StatusCode)
+
+	// DescribeVolumes should now return empty.
+	resp4 := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeVolumes",
+		"VolumeId.1": volID,
+	})
+	assert.Equal(t, http.StatusOK, resp4.StatusCode)
+	body4, _ := io.ReadAll(resp4.Body)
+	assert.NotContains(t, string(body4), volID)
+}
+
+func TestEC2_EBS_AttachDetachVolume(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Launch an instance to attach to.
+	runResp := ec2Request(t, ts, map[string]string{
+		"Action":   "RunInstances",
+		"ImageId":  "ami-test",
+		"MinCount": "1",
+		"MaxCount": "1",
+	})
+	assert.Equal(t, http.StatusOK, runResp.StatusCode)
+	runBody, _ := io.ReadAll(runResp.Body)
+	iStart := strings.Index(string(runBody), "i-")
+	iEnd := strings.IndexAny(string(runBody)[iStart:], "<") + iStart
+	instanceID := string(runBody)[iStart:iEnd]
+
+	// Create a volume.
+	cvResp := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateVolume",
+		"AvailabilityZone": "us-east-1a",
+		"Size":             "10",
+	})
+	cvBody, _ := io.ReadAll(cvResp.Body)
+	vStart := strings.Index(string(cvBody), "vol-")
+	vEnd := strings.IndexAny(string(cvBody)[vStart:], "<") + vStart
+	volID := string(cvBody)[vStart:vEnd]
+
+	// AttachVolume.
+	attResp := ec2Request(t, ts, map[string]string{
+		"Action":     "AttachVolume",
+		"VolumeId":   volID,
+		"InstanceId": instanceID,
+		"Device":     "/dev/xvdf",
+	})
+	assert.Equal(t, http.StatusOK, attResp.StatusCode)
+	attBody, _ := io.ReadAll(attResp.Body)
+	assert.Contains(t, string(attBody), "attached")
+
+	// DescribeVolumes should show in-use.
+	descResp := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeVolumes",
+		"VolumeId.1": volID,
+	})
+	descBody, _ := io.ReadAll(descResp.Body)
+	assert.Contains(t, string(descBody), "in-use")
+
+	// DetachVolume.
+	detResp := ec2Request(t, ts, map[string]string{
+		"Action":   "DetachVolume",
+		"VolumeId": volID,
+	})
+	assert.Equal(t, http.StatusOK, detResp.StatusCode)
+
+	// Volume should be available again.
+	descResp2 := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeVolumes",
+		"VolumeId.1": volID,
+	})
+	descBody2, _ := io.ReadAll(descResp2.Body)
+	assert.Contains(t, string(descBody2), "available")
+}
+
+func TestEC2_DeleteSnapshot_Stub(t *testing.T) {
+	ts := newEC2TestServer(t)
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":     "DeleteSnapshot",
+		"SnapshotId": "snap-0123456789abcdef0",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

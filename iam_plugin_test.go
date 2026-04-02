@@ -1002,3 +1002,93 @@ func TestIAMPlugin_ListInstanceProfiles_Empty(t *testing.T) {
 	assert.Empty(t, profiles, "empty account should have no instance profiles")
 	assert.Equal(t, false, result["IsTruncated"], "IsTruncated should be false")
 }
+
+// --- Instance profile tests (#257) ---
+
+func TestIAMPlugin_InstanceProfile_FullLifecycle(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	// CreateInstanceProfile.
+	resp := iamRequest(t, srv, "CreateInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var createOut map[string]any
+	decodeJSON(t, resp, &createOut)
+	prof, _ := createOut["InstanceProfile"].(map[string]any)
+	assert.Equal(t, "my-profile", prof["InstanceProfileName"])
+	assert.Contains(t, prof["Arn"].(string), "instance-profile")
+
+	// GetInstanceProfile.
+	resp2 := iamRequest(t, srv, "GetInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+
+	// Create a role to attach.
+	iamRequest(t, srv, "CreateRole", map[string]any{
+		"RoleName":                 "my-role",
+		"AssumeRolePolicyDocument": `{"Version":"2012-10-17","Statement":[]}`,
+	})
+
+	// AddRoleToInstanceProfile.
+	resp3 := iamRequest(t, srv, "AddRoleToInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+		"RoleName":            "my-role",
+	})
+	assert.Equal(t, http.StatusOK, resp3.StatusCode)
+
+	// GetInstanceProfile should now show the role.
+	resp4 := iamRequest(t, srv, "GetInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+	})
+	var getOut map[string]any
+	decodeJSON(t, resp4, &getOut)
+	prof4, _ := getOut["InstanceProfile"].(map[string]any)
+	roles, _ := prof4["Roles"].([]any)
+	assert.Len(t, roles, 1)
+
+	// Cannot add a second role.
+	resp5 := iamRequest(t, srv, "AddRoleToInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+		"RoleName":            "my-role",
+	})
+	assert.Equal(t, http.StatusConflict, resp5.StatusCode)
+
+	// RemoveRoleFromInstanceProfile.
+	resp6 := iamRequest(t, srv, "RemoveRoleFromInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+		"RoleName":            "my-role",
+	})
+	assert.Equal(t, http.StatusOK, resp6.StatusCode)
+
+	// DeleteInstanceProfile.
+	resp7 := iamRequest(t, srv, "DeleteInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+	})
+	assert.Equal(t, http.StatusOK, resp7.StatusCode)
+
+	// GetInstanceProfile should now 404.
+	resp8 := iamRequest(t, srv, "GetInstanceProfile", map[string]any{
+		"InstanceProfileName": "my-profile",
+	})
+	assert.Equal(t, http.StatusNotFound, resp8.StatusCode)
+}
+
+func TestIAMPlugin_ListInstanceProfiles_ReflectsCreated(t *testing.T) {
+	srv := newIAMTestServer(t)
+
+	iamRequest(t, srv, "CreateInstanceProfile", map[string]any{
+		"InstanceProfileName": "profile-a",
+	})
+	iamRequest(t, srv, "CreateInstanceProfile", map[string]any{
+		"InstanceProfileName": "profile-b",
+	})
+
+	resp := iamRequest(t, srv, "ListInstanceProfiles", map[string]any{})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var out map[string]any
+	decodeJSON(t, resp, &out)
+	profiles, _ := out["InstanceProfiles"].([]any)
+	assert.Len(t, profiles, 2)
+}

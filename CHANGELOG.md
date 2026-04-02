@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.45.6] - 2026-04-01
+
+### Added
+
+- **EC2 EBS volume operations (#256)**: Added `CreateVolume`, `DescribeVolumes`,
+  `AttachVolume`, `DetachVolume`, `DeleteVolume` to `EC2Plugin` with full state
+  machine (`available` → `in-use` → `available` → deleted). Volume state is
+  queryable immediately after each operation. `AttachVolume` transitions the
+  volume to `in-use` and stores the attachment; `DetachVolume` restores it to
+  `available`. `DeleteVolume` rejects volumes in `in-use` state.
+  Added `DeleteSnapshot` stub (accepts any snapshot ID, returns success; Substrate
+  does not persist snapshots). New `EC2Volume`/`EC2VolumeAttachment` types in
+  `ec2_types.go`. State key: `volume:{acct}/{region}/{volumeId}`.
+- **IAM instance profile operations (#257)**: Added `CreateInstanceProfile`,
+  `GetInstanceProfile`, `DeleteInstanceProfile`, `AddRoleToInstanceProfile`,
+  `RemoveRoleFromInstanceProfile` to `IAMPlugin`. Profiles are persisted in state
+  under key `instance_profile:{name}`. AWS one-role-per-profile constraint enforced
+  by `AddRoleToInstanceProfile` (returns `LimitExceededException` if already
+  populated). `DeleteInstanceProfile` rejects non-empty profiles with
+  `DeleteConflictException`. `ListInstanceProfiles` now returns persisted profiles
+  instead of a hardcoded empty list. New `IAMInstanceProfile` type in `iam_types.go`.
+- **SSM Run Command (#258)**: Added `SendCommand`, `GetCommandInvocation`, and
+  `DescribeInstanceInformation` to `SSMPlugin`. `SendCommand` stores a command
+  record and creates per-instance invocation records immediately with
+  `Status: "Success"` (deterministic test mode). `GetCommandInvocation` returns
+  status and stdout/stderr for any previously sent command. `DescribeInstanceInformation`
+  enumerates running EC2 instances and reports them as SSM-managed (`PingStatus:
+  "Online"`). New `SSMCommand`/`SSMCommandInvocation` types. State keys:
+  `command:{acct}/{region}/{commandId}`, `invocation:{acct}/{region}/{commandId}/{instanceId}`.
+
 ## [v0.45.5] - 2026-04-01
 
 ### Fixed
@@ -1454,4 +1484,5 @@ all changes onto the v0.44.x line.
 [v0.45.3]: https://github.com/scttfrdmn/substrate/compare/v0.45.2...v0.45.3
 [v0.45.4]: https://github.com/scttfrdmn/substrate/compare/v0.45.3...v0.45.4
 [v0.45.5]: https://github.com/scttfrdmn/substrate/compare/v0.45.4...v0.45.5
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.5...HEAD
+[v0.45.6]: https://github.com/scttfrdmn/substrate/compare/v0.45.5...v0.45.6
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.6...HEAD

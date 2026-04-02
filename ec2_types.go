@@ -538,3 +538,65 @@ type EC2LaunchTemplate struct {
 func generateLaunchTemplateID() string {
 	return "lt-" + randomHex(8)
 }
+
+// EC2VolumeAttachment represents the attachment of an EBS volume to an instance.
+type EC2VolumeAttachment struct {
+	// InstanceID is the ID of the attached instance.
+	InstanceID string `json:"instance_id"`
+
+	// Device is the device name on the instance (e.g. "/dev/xvdf").
+	Device string `json:"device"`
+
+	// State is the attachment state: "attaching", "attached", "detaching", "detached".
+	State string `json:"state"`
+
+	// AttachTime is the RFC3339 time the volume was attached.
+	AttachTime string `json:"attach_time"`
+}
+
+// EC2Volume represents an Amazon EBS volume.
+type EC2Volume struct {
+	// VolumeID is the unique identifier (e.g. "vol-0123456789abcdef0").
+	VolumeID string `json:"volume_id"`
+
+	// Size is the volume size in GiB.
+	Size int `json:"size"`
+
+	// VolumeType is the EBS volume type (e.g. "gp2", "gp3", "io1").
+	VolumeType string `json:"volume_type"`
+
+	// AvailabilityZone is the AZ in which the volume resides.
+	AvailabilityZone string `json:"availability_zone"`
+
+	// State is the volume state: "creating", "available", "in-use", "deleting", "deleted".
+	State string `json:"state"`
+
+	// SnapshotID is the ID of the snapshot from which the volume was created, if any.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+
+	// Encrypted indicates whether the volume is encrypted.
+	Encrypted bool `json:"encrypted"`
+
+	// IOPS is the provisioned IOPS (for io1/io2/gp3 volumes).
+	IOPS int `json:"iops,omitempty"`
+
+	// Attachments holds the current instance attachments.
+	Attachments []EC2VolumeAttachment `json:"attachments,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// CreateTime is the RFC3339 timestamp when the volume was created.
+	CreateTime string `json:"create_time"`
+
+	// AccountID is the AWS account that owns the volume.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the volume resides.
+	Region string `json:"region"`
+}
+
+// generateVolumeID generates a random EBS volume ID.
+func generateVolumeID() string {
+	return "vol-" + randomHex(8)
+}

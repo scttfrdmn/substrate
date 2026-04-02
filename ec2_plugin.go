@@ -187,6 +187,19 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeLaunchTemplates(ctx, req)
 	case "DeleteLaunchTemplate":
 		return p.deleteLaunchTemplate(ctx, req)
+	// EBS volume operations
+	case "CreateVolume":
+		return p.createVolume(ctx, req)
+	case "DescribeVolumes":
+		return p.describeVolumes(ctx, req)
+	case "DeleteVolume":
+		return p.deleteVolume(ctx, req)
+	case "AttachVolume":
+		return p.attachVolume(ctx, req)
+	case "DetachVolume":
+		return p.detachVolume(ctx, req)
+	case "DeleteSnapshot":
+		return p.deleteSnapshot(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -3234,4 +3247,377 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 			LaunchTemplateName: lt.LaunchTemplateName,
 		},
 	})
+}
+
+// --- EBS volume operations ---
+
+func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	az := req.Params["AvailabilityZone"]
+	if az == "" {
+		az = reqCtx.Region + "a"
+	}
+	sizeStr := req.Params["Size"]
+	size := 8
+	if sizeStr != "" {
+		if n, err := strconv.Atoi(sizeStr); err == nil && n > 0 {
+			size = n
+		}
+	}
+	volType := req.Params["VolumeType"]
+	if volType == "" {
+		volType = "gp2"
+	}
+	snapshotID := req.Params["SnapshotId"]
+	encrypted := strings.ToLower(req.Params["Encrypted"]) == "true"
+
+	vol := EC2Volume{
+		VolumeID:         generateVolumeID(),
+		Size:             size,
+		VolumeType:       volType,
+		AvailabilityZone: az,
+		State:            "available",
+		SnapshotID:       snapshotID,
+		Encrypted:        encrypted,
+		CreateTime:       p.tc.Now().UTC().Format(time.RFC3339),
+		AccountID:        reqCtx.AccountID,
+		Region:           reqCtx.Region,
+	}
+
+	data, err := json.Marshal(vol)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createVolume marshal: %w", err)
+	}
+	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vol.VolumeID
+	if err := p.state.Put(context.Background(), ec2Namespace, key, data); err != nil {
+		return nil, fmt.Errorf("ec2 createVolume state.Put: %w", err)
+	}
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "volume_ids", vol.VolumeID); err != nil {
+		return nil, err
+	}
+
+	type attachmentItem struct {
+		VolumeID   string `xml:"volumeId"`
+		InstanceID string `xml:"instanceId"`
+		Device     string `xml:"device"`
+		Status     string `xml:"status"`
+	}
+	type response struct {
+		XMLName          xml.Name         `xml:"CreateVolumeResponse"`
+		XMLNS            string           `xml:"xmlns,attr"`
+		VolumeID         string           `xml:"volumeId"`
+		Size             int              `xml:"size"`
+		VolumeType       string           `xml:"volumeType"`
+		AvailabilityZone string           `xml:"availabilityZone"`
+		Status           string           `xml:"status"`
+		Encrypted        bool             `xml:"encrypted"`
+		CreateTime       string           `xml:"createTime"`
+		SnapshotID       string           `xml:"snapshotId"`
+		AttachmentSet    []attachmentItem `xml:"attachmentSet>item"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:            "http://ec2.amazonaws.com/doc/2016-11-15/",
+		VolumeID:         vol.VolumeID,
+		Size:             vol.Size,
+		VolumeType:       vol.VolumeType,
+		AvailabilityZone: vol.AvailabilityZone,
+		Status:           vol.State,
+		Encrypted:        vol.Encrypted,
+		CreateTime:       vol.CreateTime,
+		SnapshotID:       vol.SnapshotID,
+	})
+}
+
+func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Collect requested volume IDs from repeated VolumeId.N params.
+	requestedIDs := map[string]bool{}
+	for i := 1; ; i++ {
+		id := req.Params[fmt.Sprintf("VolumeId.%d", i)]
+		if id == "" {
+			break
+		}
+		requestedIDs[id] = true
+	}
+
+	// Collect filter values (volume-id, status, attachment.instance-id).
+	filterVolumeIDs := map[string]bool{}
+	filterStatuses := map[string]bool{}
+	filterInstanceIDs := map[string]bool{}
+	for i := 1; ; i++ {
+		name := req.Params[fmt.Sprintf("Filter.%d.Name", i)]
+		if name == "" {
+			break
+		}
+		for j := 1; ; j++ {
+			val := req.Params[fmt.Sprintf("Filter.%d.Value.%d", i, j)]
+			if val == "" {
+				break
+			}
+			switch name {
+			case "volume-id":
+				filterVolumeIDs[val] = true
+			case "status":
+				filterStatuses[val] = true
+			case "attachment.instance-id":
+				filterInstanceIDs[val] = true
+			}
+		}
+	}
+
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "volume:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeVolumes list: %w", err)
+	}
+
+	type attachItem struct {
+		VolumeID   string `xml:"volumeId"`
+		InstanceID string `xml:"instanceId"`
+		Device     string `xml:"device"`
+		Status     string `xml:"status"`
+		AttachTime string `xml:"attachTime"`
+	}
+	type volItem struct {
+		VolumeID         string       `xml:"volumeId"`
+		Size             int          `xml:"size"`
+		VolumeType       string       `xml:"volumeType"`
+		AvailabilityZone string       `xml:"availabilityZone"`
+		Status           string       `xml:"status"`
+		Encrypted        bool         `xml:"encrypted"`
+		CreateTime       string       `xml:"createTime"`
+		SnapshotID       string       `xml:"snapshotId"`
+		AttachmentSet    []attachItem `xml:"attachmentSet>item"`
+	}
+	var volumes []volItem
+
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var vol EC2Volume
+		if err := json.Unmarshal(data, &vol); err != nil {
+			continue
+		}
+		// Filter by requested IDs.
+		if len(requestedIDs) > 0 && !requestedIDs[vol.VolumeID] {
+			continue
+		}
+		// Filter by volume-id filter.
+		if len(filterVolumeIDs) > 0 && !filterVolumeIDs[vol.VolumeID] {
+			continue
+		}
+		// Filter by status.
+		if len(filterStatuses) > 0 && !filterStatuses[vol.State] {
+			continue
+		}
+		// Filter by attachment.instance-id.
+		if len(filterInstanceIDs) > 0 {
+			found := false
+			for _, att := range vol.Attachments {
+				if filterInstanceIDs[att.InstanceID] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		item := volItem{
+			VolumeID:         vol.VolumeID,
+			Size:             vol.Size,
+			VolumeType:       vol.VolumeType,
+			AvailabilityZone: vol.AvailabilityZone,
+			Status:           vol.State,
+			Encrypted:        vol.Encrypted,
+			CreateTime:       vol.CreateTime,
+			SnapshotID:       vol.SnapshotID,
+		}
+		for _, att := range vol.Attachments {
+			item.AttachmentSet = append(item.AttachmentSet, attachItem{
+				VolumeID:   vol.VolumeID,
+				InstanceID: att.InstanceID,
+				Device:     att.Device,
+				Status:     att.State,
+				AttachTime: att.AttachTime,
+			})
+		}
+		volumes = append(volumes, item)
+	}
+
+	type volumeSet struct {
+		Items []volItem `xml:"item"`
+	}
+	type response struct {
+		XMLName   xml.Name  `xml:"DescribeVolumesResponse"`
+		XMLNS     string    `xml:"xmlns,attr"`
+		VolumeSet volumeSet `xml:"volumeSet"`
+	}
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	resp.VolumeSet.Items = volumes
+	if resp.VolumeSet.Items == nil {
+		resp.VolumeSet.Items = []volItem{}
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+func (p *EC2Plugin) deleteVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	volID := req.Params["VolumeId"]
+	if volID == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId is required", HTTPStatus: http.StatusBadRequest}
+	}
+	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + volID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteVolume get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "InvalidVolume.NotFound", Message: "The volume '" + volID + "' does not exist.", HTTPStatus: http.StatusBadRequest}
+	}
+	var vol EC2Volume
+	if err := json.Unmarshal(data, &vol); err != nil {
+		return nil, fmt.Errorf("ec2 deleteVolume unmarshal: %w", err)
+	}
+	if vol.State == "in-use" {
+		return nil, &AWSError{Code: "VolumeInUse", Message: "Volume " + volID + " is currently attached to " + vol.Attachments[0].InstanceID, HTTPStatus: http.StatusBadRequest}
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deleteVolume delete: %w", err)
+	}
+	removeFromStringIndex(context.Background(), p.state, ec2Namespace, "volume_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, volID)
+
+	type response struct {
+		XMLName xml.Name `xml:"DeleteVolumeResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	volID := req.Params["VolumeId"]
+	instanceID := req.Params["InstanceId"]
+	device := req.Params["Device"]
+	if volID == "" || instanceID == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId and InstanceId are required", HTTPStatus: http.StatusBadRequest}
+	}
+	if device == "" {
+		device = "/dev/xvdf"
+	}
+	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + volID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 attachVolume get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "InvalidVolume.NotFound", Message: "The volume '" + volID + "' does not exist.", HTTPStatus: http.StatusBadRequest}
+	}
+	var vol EC2Volume
+	if err := json.Unmarshal(data, &vol); err != nil {
+		return nil, fmt.Errorf("ec2 attachVolume unmarshal: %w", err)
+	}
+	if vol.State != "available" {
+		return nil, &AWSError{Code: "IncorrectState", Message: "Volume " + volID + " is not in available state.", HTTPStatus: http.StatusBadRequest}
+	}
+
+	attachTime := p.tc.Now().UTC().Format(time.RFC3339)
+	vol.State = "in-use"
+	vol.Attachments = []EC2VolumeAttachment{{
+		InstanceID: instanceID,
+		Device:     device,
+		State:      "attached",
+		AttachTime: attachTime,
+	}}
+
+	newData, err := json.Marshal(vol)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 attachVolume marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 attachVolume state.Put: %w", err)
+	}
+
+	type response struct {
+		XMLName    xml.Name `xml:"AttachVolumeResponse"`
+		XMLNS      string   `xml:"xmlns,attr"`
+		VolumeID   string   `xml:"volumeId"`
+		InstanceID string   `xml:"instanceId"`
+		Device     string   `xml:"device"`
+		Status     string   `xml:"status"`
+		AttachTime string   `xml:"attachTime"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:      "http://ec2.amazonaws.com/doc/2016-11-15/",
+		VolumeID:   volID,
+		InstanceID: instanceID,
+		Device:     device,
+		Status:     "attached",
+		AttachTime: attachTime,
+	})
+}
+
+func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	volID := req.Params["VolumeId"]
+	if volID == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId is required", HTTPStatus: http.StatusBadRequest}
+	}
+	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + volID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 detachVolume get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "InvalidVolume.NotFound", Message: "The volume '" + volID + "' does not exist.", HTTPStatus: http.StatusBadRequest}
+	}
+	var vol EC2Volume
+	if err := json.Unmarshal(data, &vol); err != nil {
+		return nil, fmt.Errorf("ec2 detachVolume unmarshal: %w", err)
+	}
+
+	var prevInstanceID, prevDevice string
+	if len(vol.Attachments) > 0 {
+		prevInstanceID = vol.Attachments[0].InstanceID
+		prevDevice = vol.Attachments[0].Device
+	}
+	vol.State = "available"
+	vol.Attachments = nil
+
+	newData, err := json.Marshal(vol)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 detachVolume marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 detachVolume state.Put: %w", err)
+	}
+
+	type response struct {
+		XMLName    xml.Name `xml:"DetachVolumeResponse"`
+		XMLNS      string   `xml:"xmlns,attr"`
+		VolumeID   string   `xml:"volumeId"`
+		InstanceID string   `xml:"instanceId"`
+		Device     string   `xml:"device"`
+		Status     string   `xml:"status"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:      "http://ec2.amazonaws.com/doc/2016-11-15/",
+		VolumeID:   volID,
+		InstanceID: prevInstanceID,
+		Device:     prevDevice,
+		Status:     "detached",
+	})
+}
+
+// deleteSnapshot is a stub that accepts DeleteSnapshot requests without error.
+// Substratefs does not persist snapshots; the operation succeeds to allow
+// AMI deregistration cleanup workflows to proceed.
+func (p *EC2Plugin) deleteSnapshot(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	snapshotID := req.Params["SnapshotId"]
+	if snapshotID == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "SnapshotId is required", HTTPStatus: http.StatusBadRequest}
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DeleteSnapshotResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }

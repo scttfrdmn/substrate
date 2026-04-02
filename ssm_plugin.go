@@ -2,6 +2,7 @@ package substrate
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,13 @@ func (p *SSMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.listTagsForResource(ctx, req)
 	case "LabelParameterVersion":
 		return p.labelParameterVersion(ctx, req)
+	// Run Command operations
+	case "SendCommand":
+		return p.sendCommand(ctx, req)
+	case "GetCommandInvocation":
+		return p.getCommandInvocation(ctx, req)
+	case "DescribeInstanceInformation":
+		return p.describeInstanceInformation(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -726,4 +734,214 @@ func ssmJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
 		Body:       body,
 	}, nil
+}
+
+// --- Run Command operations ---
+
+// ssmCommandKey returns the state key for an SSM command record.
+func ssmCommandKey(accountID, region, commandID string) string {
+	return "command:" + accountID + "/" + region + "/" + commandID
+}
+
+// ssmInvocationKey returns the state key for a command invocation record.
+func ssmInvocationKey(accountID, region, commandID, instanceID string) string {
+	return "invocation:" + accountID + "/" + region + "/" + commandID + "/" + instanceID
+}
+
+// SSMCommand holds persisted state for an SSM Run Command submission.
+type SSMCommand struct {
+	// CommandID is the unique identifier for this command.
+	CommandID string `json:"CommandId"`
+
+	// DocumentName is the name of the SSM document (e.g. "AWS-RunShellScript").
+	DocumentName string `json:"DocumentName"`
+
+	// InstanceIDs holds the target instance identifiers.
+	InstanceIDs []string `json:"InstanceIds"`
+
+	// Parameters holds the document parameters.
+	Parameters map[string][]string `json:"Parameters"`
+
+	// Status is the overall command status.
+	Status string `json:"Status"`
+
+	// RequestedDateTime is the RFC3339 time the command was submitted.
+	RequestedDateTime string `json:"RequestedDateTime"`
+}
+
+// SSMCommandInvocation holds the per-instance output of an SSM command.
+type SSMCommandInvocation struct {
+	// CommandID is the parent command identifier.
+	CommandID string `json:"CommandId"`
+
+	// InstanceID is the target instance.
+	InstanceID string `json:"InstanceId"`
+
+	// Status is the invocation status ("Success", "Failed", etc.).
+	Status string `json:"Status"`
+
+	// StandardOutputContent is the captured stdout.
+	StandardOutputContent string `json:"StandardOutputContent"`
+
+	// StandardErrorContent is the captured stderr.
+	StandardErrorContent string `json:"StandardErrorContent"`
+
+	// DocumentName is the SSM document that was executed.
+	DocumentName string `json:"DocumentName"`
+}
+
+func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		DocumentName string              `json:"DocumentName"`
+		InstanceIDs  []string            `json:"InstanceIds"`
+		Parameters   map[string][]string `json:"Parameters"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	if input.DocumentName == "" {
+		return nil, &AWSError{Code: "InvalidDocument", Message: "DocumentName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	commandID := generateSSMCommandID()
+	now := p.tc.Now().UTC().Format(time.RFC3339)
+
+	cmd := SSMCommand{
+		CommandID:         commandID,
+		DocumentName:      input.DocumentName,
+		InstanceIDs:       input.InstanceIDs,
+		Parameters:        input.Parameters,
+		Status:            "Success",
+		RequestedDateTime: now,
+	}
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("ssm sendCommand marshal: %w", err)
+	}
+	goCtx := context.Background()
+	if err := p.state.Put(goCtx, ssmNamespace, ssmCommandKey(ctx.AccountID, ctx.Region, commandID), data); err != nil {
+		return nil, fmt.Errorf("ssm sendCommand state.Put: %w", err)
+	}
+
+	// Create per-instance invocation records immediately (Success in test mode).
+	for _, instID := range input.InstanceIDs {
+		inv := SSMCommandInvocation{
+			CommandID:             commandID,
+			InstanceID:            instID,
+			Status:                "Success",
+			StandardOutputContent: "",
+			StandardErrorContent:  "",
+			DocumentName:          input.DocumentName,
+		}
+		invData, _ := json.Marshal(inv)
+		_ = p.state.Put(goCtx, ssmNamespace, ssmInvocationKey(ctx.AccountID, ctx.Region, commandID, instID), invData)
+	}
+
+	return ssmJSONResponse(http.StatusOK, map[string]any{
+		"Command": map[string]any{
+			"CommandId":         commandID,
+			"DocumentName":      cmd.DocumentName,
+			"InstanceIds":       cmd.InstanceIDs,
+			"Parameters":        cmd.Parameters,
+			"Status":            cmd.Status,
+			"RequestedDateTime": cmd.RequestedDateTime,
+		},
+	})
+}
+
+func (p *SSMPlugin) getCommandInvocation(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		CommandID  string `json:"CommandId"`
+		InstanceID string `json:"InstanceId"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	if input.CommandID == "" || input.InstanceID == "" {
+		return nil, &AWSError{Code: "InvalidCommandId", Message: "CommandId and InstanceId are required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	goCtx := context.Background()
+	data, err := p.state.Get(goCtx, ssmNamespace, ssmInvocationKey(ctx.AccountID, ctx.Region, input.CommandID, input.InstanceID))
+	if err != nil {
+		return nil, fmt.Errorf("ssm getCommandInvocation state.Get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{
+			Code:       "InvocationDoesNotExist",
+			Message:    "The command " + input.CommandID + " has not been run on instance " + input.InstanceID,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	var inv SSMCommandInvocation
+	if err := json.Unmarshal(data, &inv); err != nil {
+		return nil, fmt.Errorf("ssm getCommandInvocation unmarshal: %w", err)
+	}
+	return ssmJSONResponse(http.StatusOK, map[string]any{
+		"CommandId":             inv.CommandID,
+		"InstanceId":            inv.InstanceID,
+		"Status":                inv.Status,
+		"StandardOutputContent": inv.StandardOutputContent,
+		"StandardErrorContent":  inv.StandardErrorContent,
+		"DocumentName":          inv.DocumentName,
+	})
+}
+
+// describeInstanceInformation returns all EC2 instances in the region as
+// SSM-managed. In test mode every running instance is considered to have
+// the SSM agent installed and active.
+func (p *SSMPlugin) describeInstanceInformation(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, ec2Namespace, "instance:"+ctx.AccountID+"/"+ctx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ssm describeInstanceInformation list: %w", err)
+	}
+
+	type instanceInfo struct {
+		InstanceID      string `json:"InstanceId"`
+		PingStatus      string `json:"PingStatus"`
+		AgentVersion    string `json:"AgentVersion"`
+		PlatformType    string `json:"PlatformType"`
+		PlatformName    string `json:"PlatformName"`
+		PlatformVersion string `json:"PlatformVersion"`
+		IsLatestVersion bool   `json:"IsLatestVersion"`
+	}
+
+	infos := make([]instanceInfo, 0, len(keys))
+	for _, k := range keys {
+		data, getErr := p.state.Get(goCtx, ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var inst EC2Instance
+		if err := json.Unmarshal(data, &inst); err != nil {
+			continue
+		}
+		if inst.State.Name != "running" {
+			continue
+		}
+		infos = append(infos, instanceInfo{
+			InstanceID:      inst.InstanceID,
+			PingStatus:      "Online",
+			AgentVersion:    "3.2.0.0",
+			PlatformType:    "Linux",
+			PlatformName:    "Amazon Linux",
+			PlatformVersion: "2",
+			IsLatestVersion: true,
+		})
+	}
+
+	return ssmJSONResponse(http.StatusOK, map[string]any{
+		"InstanceInformationList": infos,
+	})
+}
+
+// generateSSMCommandID generates a UUID-format command ID.
+func generateSSMCommandID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("ssm: rand.Read: %v", err))
+	}
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -200,3 +200,64 @@ func TestSSMPlugin_GetParametersByPath(t *testing.T) {
 	require.True(t, ok)
 	assert.Len(t, params2, 3)
 }
+
+// --- Run Command tests (#258) ---
+
+func TestSSMPlugin_SendCommand_GetCommandInvocation(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	instanceID := "i-0123456789abcdef0"
+
+	// SendCommand.
+	resp := ssmRequest(t, srv, "SendCommand", map[string]interface{}{
+		"DocumentName": "AWS-RunShellScript",
+		"InstanceIds":  []string{instanceID},
+		"Parameters":   map[string][]string{"commands": {"echo hello"}},
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var sendOut map[string]interface{}
+	b, _ := io.ReadAll(resp.Body)
+	require.NoError(t, json.Unmarshal(b, &sendOut))
+	cmdMap, _ := sendOut["Command"].(map[string]interface{})
+	commandID, _ := cmdMap["CommandId"].(string)
+	assert.NotEmpty(t, commandID)
+	assert.Equal(t, "Success", cmdMap["Status"])
+
+	// GetCommandInvocation.
+	resp2 := ssmRequest(t, srv, "GetCommandInvocation", map[string]interface{}{
+		"CommandId":  commandID,
+		"InstanceId": instanceID,
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+
+	var invOut map[string]interface{}
+	b2, _ := io.ReadAll(resp2.Body)
+	require.NoError(t, json.Unmarshal(b2, &invOut))
+	assert.Equal(t, "Success", invOut["Status"])
+	assert.Equal(t, commandID, invOut["CommandId"])
+	assert.Equal(t, instanceID, invOut["InstanceId"])
+}
+
+func TestSSMPlugin_GetCommandInvocation_Missing(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	resp := ssmRequest(t, srv, "GetCommandInvocation", map[string]interface{}{
+		"CommandId":  "no-such-command",
+		"InstanceId": "i-0000000000000000",
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestSSMPlugin_DescribeInstanceInformation(t *testing.T) {
+	// DescribeInstanceInformation with no EC2 instances returns empty list.
+	srv := newSSMTestServer(t)
+	resp := ssmRequest(t, srv, "DescribeInstanceInformation", map[string]interface{}{})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out map[string]interface{}
+	b, _ := io.ReadAll(resp.Body)
+	require.NoError(t, json.Unmarshal(b, &out))
+	list, _ := out["InstanceInformationList"].([]interface{})
+	assert.Empty(t, list)
+}
