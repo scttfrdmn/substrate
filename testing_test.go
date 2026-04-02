@@ -193,6 +193,60 @@ func TestTestServer_SetScale(t *testing.T) {
 	}
 }
 
+func TestTestServer_SeedSSMParameter(t *testing.T) {
+	ts := substrate.StartTestServer(t)
+
+	// Seed a public AMI discovery path.
+	ts.SeedSSMParameter("/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64", "ami-0123456789abcdef0")
+
+	// Seed a second parameter via the batch helper.
+	ts.SeedSSMParameters(map[string]string{
+		"/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id": "ami-ubuntu2404",
+	})
+
+	// Verify that GetParameter returns the seeded values via HTTP.
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64", "ami-0123456789abcdef0"},
+		{"/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id", "ami-ubuntu2404"},
+	} {
+		body, _ := json.Marshal(map[string]string{"Name": tc.name})
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/", strings.NewReader(string(body))) //nolint:noctx
+		req.Host = "ssm.us-east-1.amazonaws.com"
+		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+		req.Header.Set("X-Amz-Target", "AmazonSSM.GetParameter")
+		req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/ssm/aws4_request, SignedHeaders=host;x-amz-date, Signature=fakesig")
+		req.Header.Set("X-Amz-Date", "20260101T000000Z")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GetParameter %s: %v", tc.name, err)
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GetParameter %s: status %d body %s", tc.name, resp.StatusCode, respBody)
+			continue
+		}
+
+		var result struct {
+			Parameter struct {
+				Name  string `json:"Name"`
+				Value string `json:"Value"`
+			} `json:"Parameter"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			t.Fatalf("unmarshal %s: %v", tc.name, err)
+		}
+		if result.Parameter.Value != tc.value {
+			t.Errorf("GetParameter %s: want value %q, got %q", tc.name, tc.value, result.Parameter.Value)
+		}
+	}
+}
+
 func TestStartTestServer_localstackInfoAlias(t *testing.T) {
 	ts := substrate.StartTestServer(t)
 

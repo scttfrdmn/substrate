@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.46.0] - 2026-04-02
+
+### Added
+- **WAFv2 plugin (#263)**: Added `WAFv2Plugin` with 13 operations: `CreateWebACL`, `GetWebACL`, `UpdateWebACL`, `DeleteWebACL`, `ListWebACLs`, `AssociateWebACL`, `DisassociateWebACL`, `GetWebACLForResource`, `CreateIPSet`, `GetIPSet`, `UpdateIPSet`, `DeleteIPSet`, `ListIPSets`. Uses JSON-target protocol `AWSWAF_20190729.{Op}`; parser alias `"awswaf": "wafv2"` added to `targetServiceAliases`. LockToken-based optimistic concurrency control (UUID CAS tokens) on Update/Delete operations, regenerated after each successful mutation. Cost entries: `wafv2/CreateWebACL: $5.00`, `wafv2/AssociateWebACL: $0.000001`.
+- **CloudTrail plugin (#263)**: Added `CloudTrailPlugin` with 8 operations: `CreateTrail`, `GetTrail`, `GetTrailStatus`, `UpdateTrail`, `DeleteTrail`, `DescribeTrails`, `StartLogging`, `StopLogging`. Uses JSON-target protocol `CloudTrail_20131101.{Op}` (no parser alias needed). `GetTrailStatus` deterministically returns `IsLogging: true` with `LatestDeliveryTime` set to the current simulated timestamp. Cost entry: `cloudtrail/CreateTrail: $0.000002`.
+- **TestServer.SeedSSMParameter (#267)**: Added `SeedSSMParameter(name, value string)` and `SeedSSMParameters(params map[string]string)` helpers to `TestServer`. These inject SSM String parameters directly into the in-memory store (bypassing the HTTP layer), enabling tests to pre-seed public AWS SSM paths used for AMI discovery (e.g. `/aws/service/canonical/...`, `/aws/service/ami-amazon-linux-latest/...`) without requiring additional SSM client setup.
+
 ## [v0.45.10] - 2026-04-02
 
 ### Added
@@ -1506,4 +1513,5 @@ all changes onto the v0.44.x line.
 [v0.45.8]: https://github.com/scttfrdmn/substrate/compare/v0.45.6...v0.45.8
 [v0.45.9]: https://github.com/scttfrdmn/substrate/compare/v0.45.8...v0.45.9
 [v0.45.10]: https://github.com/scttfrdmn/substrate/compare/v0.45.9...v0.45.10
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.45.10...HEAD
+[v0.46.0]: https://github.com/scttfrdmn/substrate/compare/v0.45.10...v0.46.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.46.0...HEAD

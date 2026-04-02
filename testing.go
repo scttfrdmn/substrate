@@ -2,10 +2,12 @@ package substrate
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"testing"
 	"time"
 )
@@ -18,8 +20,9 @@ type TestServer struct {
 	URL string
 	// Port is the TCP port the server is listening on.
 	Port int
-	tc   *TimeController
-	srv  *Server
+	tc    *TimeController
+	srv   *Server
+	state StateManager
 }
 
 // StartTestServer starts an in-process Substrate server on a random port,
@@ -83,7 +86,7 @@ func StartTestServer(t *testing.T) *TestServer {
 		<-done
 	})
 
-	return &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv}
+	return &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv, state: state}
 }
 
 // ResetState wipes all server state. Call this between test cases that share
@@ -119,4 +122,81 @@ func (ts *TestServer) SetTime(t time.Time) {
 // code paths.
 func (ts *TestServer) SetScale(scale float64) {
 	ts.tc.SetScale(scale)
+}
+
+// seedSSMAccountID is the AWS account ID used for seeded SSM parameters.
+// It matches the account that the built-in test key AKIATEST12345678901 maps to.
+const seedSSMAccountID = "123456789012"
+
+// seedSSMRegion is the default AWS region used for seeded SSM parameters.
+const seedSSMRegion = "us-east-1"
+
+// SeedSSMParameter pre-populates an SSM Parameter Store path with a string
+// value, bypassing the HTTP layer. This is useful for seeding public AWS SSM
+// paths used for AMI discovery (e.g. /aws/service/canonical/... or
+// /aws/service/ami-amazon-linux-latest/...) so that code under test can resolve
+// AMI IDs without requiring a real AWS account or additional client setup.
+//
+// Parameters are stored under account 123456789012 and region us-east-1, which
+// are the defaults used by the built-in test credentials. The value is stored
+// as a String parameter at version 1. Call this before running the code under
+// test; call [TestServer.ResetState] between test cases to clear seeded values.
+func (ts *TestServer) SeedSSMParameter(name, value string) {
+	if ts.state == nil {
+		return
+	}
+	// Ensure name starts with /.
+	if len(name) > 0 && name[0] != '/' {
+		name = "/" + name
+	}
+
+	ctx := context.Background()
+	param := &SSMParameter{
+		Name:             name,
+		Type:             "String",
+		Value:            value,
+		Version:          1,
+		LastModifiedDate: ts.tc.Now(),
+		AccountID:        seedSSMAccountID,
+		Region:           seedSSMRegion,
+		ARN:              ssmParameterARN(seedSSMRegion, seedSSMAccountID, name),
+	}
+	data, err := json.Marshal(param)
+	if err != nil {
+		return
+	}
+	stateKey := "parameter:" + seedSSMAccountID + "/" + seedSSMRegion + "/" + name
+	_ = ts.state.Put(ctx, ssmNamespace, stateKey, data)
+
+	// Update the paths index.
+	pathsKey := "parameter_paths:" + seedSSMAccountID + "/" + seedSSMRegion
+	existing, _ := ts.state.Get(ctx, ssmNamespace, pathsKey)
+	var paths []string
+	if existing != nil {
+		_ = json.Unmarshal(existing, &paths)
+	}
+	// Add name if not already present.
+	found := false
+	for _, p := range paths {
+		if p == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		paths = append(paths, name)
+		sort.Strings(paths)
+		if pathsData, err := json.Marshal(paths); err == nil {
+			_ = ts.state.Put(ctx, ssmNamespace, pathsKey, pathsData)
+		}
+	}
+}
+
+// SeedSSMParameters pre-populates multiple SSM Parameter Store paths in a
+// single call. It is a convenience wrapper around [TestServer.SeedSSMParameter].
+// The params map keys are parameter names and values are their string values.
+func (ts *TestServer) SeedSSMParameters(params map[string]string) {
+	for name, value := range params {
+		ts.SeedSSMParameter(name, value)
+	}
 }

@@ -232,6 +232,10 @@ var targetServiceAliases = map[string]string{
 	// "AmazonSQS" → strip "Amazon" → "amazonsqs" → "sqs".
 	// aws-sdk-go-v2 SQS JSON protocol uses X-Amz-Target: AmazonSQS.{Op}.
 	"amazonsqs": "sqs",
+	// "AWSWAF_20190729" → strip "AWS" → "waf_20190729" → strip version suffix
+	// → "waf" → but extractServiceFromTarget lowercases the whole prefix:
+	// "AWSWAF_20190729" → lowercase → "awswaf_20190729" → strip "_" suffix → "awswaf" → "wafv2".
+	"awswaf": "wafv2",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

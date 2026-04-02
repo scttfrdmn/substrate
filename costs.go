@@ -206,6 +206,11 @@ func defaultCostTable() map[string]float64 {
 		// OpenSearch: per document indexed.
 		"opensearch/IndexDocument": 0.0000001,
 		"opensearch/Bulk":          0.0000001,
+		// WAFv2: $5.00 per Web ACL per month, approximated per creation call.
+		"wafv2/CreateWebACL":    5.00,
+		"wafv2/AssociateWebACL": 0.000001,
+		// CloudTrail: $0.10 per 100,000 management events, approximated per trail creation.
+		"cloudtrail/CreateTrail": 0.000002,
 	}
 }
 

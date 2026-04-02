@@ -564,5 +564,25 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(openSearchPlugin)
 
+	wafv2Plugin := &WAFv2Plugin{}
+	if err := wafv2Plugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize wafv2 plugin: %w", err)
+	}
+	registry.Register(wafv2Plugin)
+
+	cloudTrailPlugin := &CloudTrailPlugin{}
+	if err := cloudTrailPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize cloudtrail plugin: %w", err)
+	}
+	registry.Register(cloudTrailPlugin)
+
 	return nil
 }
