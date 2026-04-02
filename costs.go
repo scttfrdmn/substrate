@@ -221,6 +221,10 @@ func defaultCostTable() map[string]float64 {
 		"backup/CreateBackupPlan": 0.000001,
 		// Transfer Family: $0.30/protocol/hour, approximated per server creation.
 		"transfer/CreateServer": 0.30,
+		// Redshift: $0.25/node/hour for dc2.large, approximated per cluster creation.
+		"redshift/CreateCluster": 0.0002,
+		// Redshift snapshot storage approximated per snapshot.
+		"redshift/CreateClusterSnapshot": 0.00002,
 	}
 }
 

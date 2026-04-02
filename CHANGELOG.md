@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.49.0] - 2026-04-02
+
+### Added
+- **IAM Identity Center (SSO) plugin (#266)**: Added `SSOPlugin` with 12 operations: `ListInstances`, `CreatePermissionSet`, `DescribePermissionSet`, `UpdatePermissionSet`, `DeletePermissionSet`, `ListPermissionSets`, `AttachManagedPolicyToPermissionSet`, `DetachManagedPolicyFromPermissionSet`, `ListManagedPoliciesInPermissionSet`, `CreateAccountAssignment`, `DeleteAccountAssignment`, `ListAccountAssignments`. Uses JSON-target protocol `AWSSSOAdminService.{Op}`; parser alias `"awsssoadminservice": "sso"` added to `targetServiceAliases`. SSO instance is auto-created on first `ListInstances` call (singleton per account). SSO and RAM carry no per-operation cost.
+- **Resource Access Manager (RAM) plugin (#266)**: Added `RAMPlugin` with 8 operations: `CreateResourceShare`, `GetResourceShares`, `UpdateResourceShare`, `DeleteResourceShare`, `AssociateResourceShare`, `DisassociateResourceShare`, `ListPrincipals`, `ListResources`. Uses REST/JSON protocol; `parseRAMOperation` normalizes lowercase POST paths to PascalCase operation names. Resource share ARNs use `arn:aws:ram:{region}:{acct}:resource-share/{uuid}`. `GetResourceShares` supports filtering by name and by ARN list. `AssociateResourceShare`/`DisassociateResourceShare` atomically update principal and resource lists.
+- **Amazon Redshift plugin (#266)**: Added `RedshiftPlugin` with 10 operations: `CreateCluster`, `DescribeClusters`, `ModifyCluster`, `DeleteCluster`, `CreateClusterParameterGroup`, `DescribeClusterParameterGroups`, `CreateClusterSubnetGroup`, `DescribeClusterSubnetGroups`, `CreateClusterSnapshot`, `DescribeClusterSnapshots`. Uses AWS Query (Action=) protocol with XML responses (`Content-Type: text/xml; charset=UTF-8`). No parser alias needed — service name is derived from `redshift.{region}.amazonaws.com` host. Clusters start with `ClusterStatus: "available"` and endpoint `{id}.{acct}.{region}.redshift.amazonaws.com:5439`. Error codes: `ClusterAlreadyExistsFault` (duplicate), `ClusterNotFoundFault` (not found). Cost entries: `redshift/CreateCluster: $0.0002`, `redshift/CreateClusterSnapshot: $0.00002`.
+
 ## [v0.48.0] - 2026-04-02
 
 ### Added
@@ -1529,4 +1536,5 @@ all changes onto the v0.44.x line.
 [v0.46.0]: https://github.com/scttfrdmn/substrate/compare/v0.45.10...v0.46.0
 [v0.47.0]: https://github.com/scttfrdmn/substrate/compare/v0.46.0...v0.47.0
 [v0.48.0]: https://github.com/scttfrdmn/substrate/compare/v0.47.0...v0.48.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.48.0...HEAD
+[v0.49.0]: https://github.com/scttfrdmn/substrate/compare/v0.48.0...v0.49.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.49.0...HEAD

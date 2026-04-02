@@ -239,6 +239,9 @@ var targetServiceAliases = map[string]string{
 	// "TransferService" → lowercase → "transferservice" → "transfer".
 	// aws-sdk-go-v2 Transfer Family uses X-Amz-Target: TransferService.{Op}.
 	"transferservice": "transfer",
+	// "AWSSSOAdminService" → strip "AWS" → "ssoadminservice" → "sso".
+	// aws-sdk-go-v2 SSO Admin client uses X-Amz-Target: AWSSSOAdminService.{Op}.
+	"awsssoadminservice": "sso",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

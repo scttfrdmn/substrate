@@ -634,5 +634,35 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(transferPlugin)
 
+	ssoPlugin := &SSOPlugin{}
+	if err := ssoPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize sso plugin: %w", err)
+	}
+	registry.Register(ssoPlugin)
+
+	ramPlugin := &RAMPlugin{}
+	if err := ramPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize ram plugin: %w", err)
+	}
+	registry.Register(ramPlugin)
+
+	redshiftPlugin := &RedshiftPlugin{}
+	if err := redshiftPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize redshift plugin: %w", err)
+	}
+	registry.Register(redshiftPlugin)
+
 	return nil
 }
