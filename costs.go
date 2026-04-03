@@ -227,6 +227,9 @@ func defaultCostTable() map[string]float64 {
 		"redshift/CreateCluster": 0.0002,
 		// Redshift snapshot storage approximated per snapshot.
 		"redshift/CreateClusterSnapshot": 0.00002,
+		// Timestream: $0.50/million write records; $1.00/million query data bytes (approx).
+		"timestream/WriteRecords": 0.0000005,
+		"timestream/Query":        0.000001,
 	}
 }
 

@@ -674,5 +674,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(redshiftDataPlugin)
 
+	timestreamPlugin := &TimestreamPlugin{}
+	if err := timestreamPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}); err != nil {
+		return fmt.Errorf("initialize timestream plugin: %w", err)
+	}
+	registry.Register(timestreamPlugin)
+
 	return nil
 }

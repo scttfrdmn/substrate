@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.58.0] - 2026-04-02
+
+### Added
+- **Amazon Timestream plugin (#279)**: Added `TimestreamPlugin` with 12 operations covering both the Timestream Write and Query APIs under service name `"timestream"` (derived from `X-Amz-Target: Timestream_20181101.{Op}`). Write operations: `CreateDatabase`, `DescribeDatabase`, `DeleteDatabase`, `ListDatabases`, `CreateTable`, `DescribeTable`, `DeleteTable`, `ListTables`, `WriteRecords`. `WriteRecords` validates that the target database and table exist and returns `RecordsIngested` counts (records are counted but not stored). Query operations: `DescribeEndpoints` (returns a synthetic regional endpoint), `Query` (returns seeded rows or empty), `CancelQuery` (no-op acknowledgement). Control-plane endpoints `POST /v1/timestream-query/results` and `DELETE /v1/timestream-query/results` seed and clear `Query` responses, keyed by query string or `"*"` wildcard, following the Athena/RedshiftData pattern. Cost entries: `timestream/WriteRecords: $0.0000005`, `timestream/Query: $0.000001`. Closes #279.
+
 ## [v0.57.0] - 2026-04-02
 
 ### Added
@@ -1594,4 +1599,5 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...HEAD
+[v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...HEAD
