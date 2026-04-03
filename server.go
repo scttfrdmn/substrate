@@ -229,6 +229,11 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/athena/results", s.handleAthenaSeedResult)
 	r.Delete("/v1/athena/results", s.handleAthenaClearResults)
 
+	// Fault injection control-plane endpoints.
+	r.Post("/v1/fault/rules", s.handleFaultSetRules)
+	r.Delete("/v1/fault/rules", s.handleFaultClearRules)
+	r.Get("/v1/fault/rules", s.handleFaultGetRules)
+
 	// S3 control-plane endpoints.
 	r.Post("/v1/s3/presign", s.handleS3Presign)
 
@@ -283,6 +288,10 @@ func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	if err := sm.Reset(r.Context()); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
+	}
+	// Also clear any active fault injection rules so tests start clean.
+	if s.opts.Fault != nil {
+		s.opts.Fault.UpdateConfig(FaultConfig{Enabled: false})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

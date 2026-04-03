@@ -12,44 +12,44 @@ import (
 type FaultRule struct {
 	// Service restricts the rule to a specific AWS service name (e.g. "s3").
 	// An empty string matches all services.
-	Service string
+	Service string `json:"service,omitempty"`
 
 	// Operation restricts the rule to a specific AWS operation (e.g. "PutObject").
 	// An empty string matches all operations.
-	Operation string
+	Operation string `json:"operation,omitempty"`
 
 	// FaultType selects the kind of fault: "error" or "latency".
-	FaultType string
+	FaultType string `json:"fault_type"`
 
 	// ErrorCode is the AWS error code returned when FaultType is "error"
 	// (e.g. "InternalError").
-	ErrorCode string
+	ErrorCode string `json:"error_code,omitempty"`
 
 	// HTTPStatus is the HTTP status code returned with an injected error.
 	// Defaults to 500 when zero.
-	HTTPStatus int
+	HTTPStatus int `json:"http_status,omitempty"`
 
 	// ErrorMsg is the human-readable error message returned with an injected error.
-	ErrorMsg string
+	ErrorMsg string `json:"error_msg,omitempty"`
 
 	// LatencyMs is the artificial delay in milliseconds injected when FaultType
 	// is "latency".
-	LatencyMs int
+	LatencyMs int `json:"latency_ms,omitempty"`
 
 	// Probability is the fraction of matching requests that actually trigger the
 	// fault, in the range [0.0, 1.0]. A value of 1.0 (the default) fires on
 	// every matching request.
-	Probability float64
+	Probability float64 `json:"probability,omitempty"`
 }
 
 // FaultConfig holds the configuration for fault injection.
 type FaultConfig struct {
 	// Enabled gates fault injection. When false, InjectFault is a no-op.
-	Enabled bool
+	Enabled bool `json:"enabled"`
 
 	// Rules is the ordered list of fault rules. Rules are evaluated in order;
 	// the first matching rule fires.
-	Rules []FaultRule
+	Rules []FaultRule `json:"rules"`
 }
 
 // FaultController injects configurable faults (errors and latency) into the
@@ -130,6 +130,14 @@ func (f *FaultController) UpdateConfig(cfg FaultConfig) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.config = cfg
+}
+
+// GetConfig returns a snapshot of the current fault injection configuration.
+// It is safe to call concurrently with InjectFault and UpdateConfig.
+func (f *FaultController) GetConfig() FaultConfig {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.config
 }
 
 // ruleMatches reports whether rule applies to req based on Service and Operation

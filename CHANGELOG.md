@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.56.1] - 2026-04-02
+
+### Added
+- **HTTP API for fault injection rules (#280)**: Added three control-plane endpoints for managing fault injection at runtime. `GET /v1/fault/rules` returns the current `FaultConfig` as JSON. `POST /v1/fault/rules` replaces the active config (decoded from a JSON `FaultConfig` body). `DELETE /v1/fault/rules` disables fault injection and clears all rules. All three endpoints return `501 Not Implemented` when the server was started without a `FaultController`. `handleStateReset` now also clears fault rules so a state reset returns the server to a clean fault-free state. `FaultConfig` and `FaultRule` gained JSON struct tags; `FaultController` gained a `GetConfig() FaultConfig` accessor.
+
 ## [v0.56.0] - 2026-04-02
 
 ### Added
@@ -1582,4 +1587,5 @@ all changes onto the v0.44.x line.
 [v0.54.0]: https://github.com/scttfrdmn/substrate/compare/v0.53.0...v0.54.0
 [v0.55.0]: https://github.com/scttfrdmn/substrate/compare/v0.54.0...v0.55.0
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...HEAD
+[v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...HEAD
