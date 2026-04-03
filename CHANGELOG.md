@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.57.0] - 2026-04-02
+
+### Added
+- **AppSync API key operations (#278)**: Added `CreateApiKey` (`POST /v1/apis/{apiId}/ApiKeys`) and `ListApiKeys` (`GET /v1/apis/{apiId}/ApiKeys`) to the existing `AppSyncPlugin`. Both operations validate that the target GraphQL API exists (returning `NotFoundException` HTTP 404 if not). `CreateApiKey` accepts an optional `description` field and sets a one-year expiry from the server's simulated clock. `ListApiKeys` returns all keys scoped to the API. New exported type `AppSyncAPIKey` added. Closes #278.
+
 ## [v0.56.1] - 2026-04-02
 
 ### Added
@@ -1588,4 +1593,5 @@ all changes onto the v0.44.x line.
 [v0.55.0]: https://github.com/scttfrdmn/substrate/compare/v0.54.0...v0.55.0
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...HEAD
+[v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...HEAD

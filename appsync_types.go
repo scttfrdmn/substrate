@@ -53,6 +53,16 @@ type AppSyncFunction struct {
 	FunctionARN    string `json:"functionArn"`
 }
 
+// AppSyncAPIKey represents an AppSync API key used to authenticate GraphQL requests.
+type AppSyncAPIKey struct {
+	// ID is the API key identifier.
+	ID string `json:"id"`
+	// Description is an optional human-readable description.
+	Description string `json:"description,omitempty"`
+	// Expires is the Unix epoch time (seconds) at which the key expires.
+	Expires int64 `json:"expires"`
+}
+
 // State key helpers (return the key portion; namespace is always appSyncNamespace).
 
 func appSyncAPIKey(acct, region, apiID string) string {
@@ -91,6 +101,14 @@ func appSyncSchemaKey(acct, region, apiID string) string {
 	return fmt.Sprintf("schema:%s/%s/%s", acct, region, apiID)
 }
 
+func appSyncAPIKeyStateKey(acct, region, apiID, keyID string) string {
+	return fmt.Sprintf("apikey:%s/%s/%s/%s", acct, region, apiID, keyID)
+}
+
+func appSyncAPIKeyIDsKey(acct, region, apiID string) string {
+	return fmt.Sprintf("apikey_ids:%s/%s/%s", acct, region, apiID)
+}
+
 // generateAppSyncAPIID returns a new unique AppSync API ID (13 lowercase hex chars).
 func generateAppSyncAPIID() string {
 	return randomHex(13)
@@ -98,6 +116,11 @@ func generateAppSyncAPIID() string {
 
 // generateAppSyncFunctionID returns a new unique AppSync function ID.
 func generateAppSyncFunctionID() string {
+	return randomHex(26)
+}
+
+// generateAppSyncAPIKeyID returns a new unique AppSync API key ID.
+func generateAppSyncAPIKeyID() string {
 	return randomHex(26)
 }
 
@@ -128,6 +151,8 @@ func generateAppSyncFunctionID() string {
 //	DELETE /v1/apis/{apiId}/functions/{functionId} → DeleteFunction
 //	POST   /v1/apis/{apiId}/schemacreation        → StartSchemaCreation
 //	GET    /v1/apis/{apiId}/schema                → GetIntrospectionSchema
+//	POST   /v1/apis/{apiId}/ApiKeys               → CreateApiKey
+//	GET    /v1/apis/{apiId}/ApiKeys               → ListApiKeys
 //	POST   /graphql                               → ExecuteGraphQL
 func parseAppSyncOperation(method, path string) (op, apiID, segment, resourceID string) {
 	// GraphQL execution endpoint.
@@ -244,6 +269,13 @@ func parseAppSyncOperation(method, path string) (op, apiID, segment, resourceID 
 			case "DELETE":
 				return "DeleteFunction", apiID, segment, funcID
 			}
+		}
+	case "ApiKeys":
+		switch method {
+		case "POST":
+			return "CreateApiKey", apiID, segment, ""
+		case "GET":
+			return "ListApiKeys", apiID, segment, ""
 		}
 	case "schemacreation":
 		return "StartSchemaCreation", apiID, segment, ""

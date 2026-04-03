@@ -626,3 +626,89 @@ func TestCFN_AppSyncFunctionMissingApiId(t *testing.T) {
 		t.Fatal("expected non-nil result")
 	}
 }
+
+// TestAppSync_ApiKeyCRUD covers CreateApiKey and ListApiKeys.
+func TestAppSync_ApiKeyCRUD(t *testing.T) {
+	ts := newAppSyncTestServer(t)
+
+	// Create a GraphQL API first.
+	resp := appSyncRequest(t, ts, http.MethodPost, "/v1/apis", map[string]any{
+		"name":               "key-test-api",
+		"authenticationType": "API_KEY",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateGraphqlApi: got %d", resp.StatusCode)
+	}
+	body := appSyncBody(t, resp)
+	apiMap, _ := body["graphqlApi"].(map[string]interface{})
+	apiID, _ := apiMap["apiId"].(string)
+	if apiID == "" {
+		t.Fatal("expected non-empty apiId")
+	}
+
+	// CreateApiKey with a description.
+	resp2 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/ApiKeys", map[string]any{
+		"description": "test-key",
+	})
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("CreateApiKey: got %d", resp2.StatusCode)
+	}
+	body2 := appSyncBody(t, resp2)
+	keyMap, ok := body2["apiKey"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected apiKey in CreateApiKey response")
+	}
+	keyID, _ := keyMap["id"].(string)
+	if keyID == "" {
+		t.Error("want non-empty key id")
+	}
+	if keyMap["expires"] == nil {
+		t.Error("want non-nil expires")
+	}
+	desc, _ := keyMap["description"].(string)
+	if desc != "test-key" {
+		t.Errorf("want description=test-key, got %q", desc)
+	}
+
+	// ListApiKeys — should return 1 key.
+	resp3 := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/ApiKeys", nil)
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("ListApiKeys: got %d", resp3.StatusCode)
+	}
+	body3 := appSyncBody(t, resp3)
+	apiKeys, _ := body3["apiKeys"].([]interface{})
+	if len(apiKeys) != 1 {
+		t.Fatalf("want 1 api key, got %d", len(apiKeys))
+	}
+	firstKey, _ := apiKeys[0].(map[string]interface{})
+	if firstKey["id"] != keyID {
+		t.Errorf("want key id %q, got %q", keyID, firstKey["id"])
+	}
+
+	// CreateApiKey again (no description) → 2 keys.
+	resp4 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/ApiKeys", nil)
+	if resp4.StatusCode != http.StatusOK {
+		t.Fatalf("second CreateApiKey: got %d", resp4.StatusCode)
+	}
+	_ = appSyncBody(t, resp4)
+
+	resp5 := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/ApiKeys", nil)
+	if resp5.StatusCode != http.StatusOK {
+		t.Fatalf("second ListApiKeys: got %d", resp5.StatusCode)
+	}
+	body5 := appSyncBody(t, resp5)
+	apiKeys2, _ := body5["apiKeys"].([]interface{})
+	if len(apiKeys2) != 2 {
+		t.Errorf("want 2 api keys, got %d", len(apiKeys2))
+	}
+
+	// CreateApiKey on nonexistent API → 404.
+	resp6 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/nonexistent/ApiKeys", map[string]any{
+		"description": "should-fail",
+	})
+	if resp6.StatusCode != http.StatusNotFound {
+		t.Errorf("want 404 for unknown API, got %d", resp6.StatusCode)
+	}
+	_, _ = io.ReadAll(resp6.Body)
+	_ = resp6.Body.Close()
+}

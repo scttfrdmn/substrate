@@ -78,6 +78,10 @@ func (p *AppSyncPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 		return p.getFunction(ctx, req, apiID, resourceID)
 	case "DeleteFunction":
 		return p.deleteFunction(ctx, req, apiID, resourceID)
+	case "CreateApiKey":
+		return p.createAPIKey(ctx, req, apiID)
+	case "ListApiKeys":
+		return p.listAPIKeys(ctx, req, apiID)
 	case "StartSchemaCreation":
 		return p.startSchemaCreation(ctx, req, apiID)
 	case "GetIntrospectionSchema":
@@ -498,6 +502,55 @@ func (p *AppSyncPlugin) deleteFunction(reqCtx *RequestContext, req *AWSRequest, 
 	}
 	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID)
 	return &AWSResponse{StatusCode: http.StatusNoContent}, nil
+}
+
+// --- API Key operations ---
+
+func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	if _, err := p.loadAPI(reqCtx.AccountID, reqCtx.Region, apiID); err != nil {
+		return nil, err
+	}
+	var input struct {
+		Description string `json:"description"`
+	}
+	// Ignore decode error — description is optional and body may be empty.
+	_ = json.Unmarshal(req.Body, &input)
+
+	keyID := generateAppSyncAPIKeyID()
+	key := AppSyncAPIKey{
+		ID:          keyID,
+		Description: input.Description,
+		Expires:     p.tc.Now().Unix() + 365*24*3600,
+	}
+	data, _ := json.Marshal(key)
+	goCtx := context.Background()
+	acct, region := reqCtx.AccountID, reqCtx.Region
+	if err := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKeyStateKey(acct, region, apiID, keyID), data); err != nil {
+		return nil, fmt.Errorf("put appsync api key: %w", err)
+	}
+	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIKeyIDsKey(acct, region, apiID), keyID)
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKey": key})
+}
+
+func (p *AppSyncPlugin) listAPIKeys(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	if _, err := p.loadAPI(reqCtx.AccountID, reqCtx.Region, apiID); err != nil {
+		return nil, err
+	}
+	goCtx := context.Background()
+	acct, region := reqCtx.AccountID, reqCtx.Region
+	ids, _ := loadStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIKeyIDsKey(acct, region, apiID))
+	keys := make([]AppSyncAPIKey, 0, len(ids))
+	for _, id := range ids {
+		raw, err := p.state.Get(goCtx, appSyncNamespace, appSyncAPIKeyStateKey(acct, region, apiID, id))
+		if err != nil || raw == nil {
+			continue
+		}
+		var key AppSyncAPIKey
+		if err2 := json.Unmarshal(raw, &key); err2 == nil {
+			keys = append(keys, key)
+		}
+	}
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKeys": keys})
 }
 
 // --- Schema operations ---
