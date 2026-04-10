@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -92,6 +93,78 @@ const cfnNamespace = "cfn"
 
 // cfnStubNamespace is the state namespace for generic CFN stub resource props.
 const cfnStubNamespace = "cfn_stub"
+
+// CFNChangeSet describes a pending set of changes to a CloudFormation stack.
+type CFNChangeSet struct {
+	// ChangeSetName is the name of the change set.
+	ChangeSetName string `json:"ChangeSetName"`
+
+	// StackName is the target stack.
+	StackName string `json:"StackName"`
+
+	// Status is the change set status (e.g., "CREATE_COMPLETE").
+	Status string `json:"Status"`
+
+	// TemplateBody is the proposed template.
+	TemplateBody string `json:"TemplateBody"`
+
+	// Parameters holds the proposed parameter values.
+	Parameters map[string]string `json:"Parameters"`
+
+	// Changes lists the resource-level changes.
+	Changes []CFNResourceChange `json:"Changes"`
+
+	// CreatedAt is the creation timestamp.
+	CreatedAt time.Time `json:"CreatedAt"`
+}
+
+// CFNResourceChange describes a single resource-level change in a change set.
+type CFNResourceChange struct {
+	// Action is "Add", "Modify", or "Remove".
+	Action string `json:"Action"`
+
+	// LogicalID is the CloudFormation logical resource ID.
+	LogicalID string `json:"LogicalResourceId"`
+
+	// ResourceType is the CloudFormation resource type.
+	ResourceType string `json:"ResourceType"`
+
+	// Replacement is "True", "False", or "Conditional" for Modify actions.
+	Replacement string `json:"Replacement,omitempty"`
+}
+
+// CFNDriftResult holds the result of a stack drift detection operation.
+type CFNDriftResult struct {
+	// StackName is the name of the stack.
+	StackName string `json:"StackName"`
+
+	// DriftStatus is "IN_SYNC", "DRIFTED", or "NOT_CHECKED".
+	DriftStatus string `json:"StackDriftStatus"`
+
+	// DriftedCount is the number of drifted resources.
+	DriftedCount int `json:"DriftedResourceCount"`
+
+	// ResourceDrifts lists per-resource drift entries.
+	ResourceDrifts []CFNResourceDriftEntry `json:"ResourceDrifts"`
+
+	// DetectedAt is the time drift was detected.
+	DetectedAt time.Time `json:"DetectedAt"`
+}
+
+// CFNResourceDriftEntry describes the drift status of a single stack resource.
+type CFNResourceDriftEntry struct {
+	// LogicalID is the CloudFormation logical resource ID.
+	LogicalID string `json:"LogicalResourceId"`
+
+	// ResourceType is the CloudFormation resource type.
+	ResourceType string `json:"ResourceType"`
+
+	// PhysicalID is the actual resource identifier.
+	PhysicalID string `json:"PhysicalResourceId"`
+
+	// DriftStatus is "IN_SYNC", "DELETED", or "NOT_CHECKED".
+	DriftStatus string `json:"StackResourceDriftStatus"`
+}
 
 // typePriority determines deployment order for CloudFormation resources.
 // Lower numbers deploy first.
@@ -444,6 +517,300 @@ func (d *StackDeployer) saveStackNames(ctx context.Context, names []string) erro
 		return fmt.Errorf("cfn saveStackNames marshal: %w", err)
 	}
 	return d.state.Put(ctx, cfnNamespace, "stack_names", data)
+}
+
+// CreateChangeSet compares a proposed template against the current stack state
+// and returns a change set describing the differences. The change set is persisted
+// in state and can be executed later via [StackDeployer.ExecuteChangeSet].
+func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSetName, templateBody string, params map[string]string) (*CFNChangeSet, error) {
+	if d.state == nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: state manager required")
+	}
+
+	// Load existing stack.
+	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+	if err != nil || data == nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: stack %q not found", stackName)
+	}
+	var stack CFNStackState
+	if err := json.Unmarshal(data, &stack); err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: unmarshal stack: %w", err)
+	}
+
+	// Parse old and new templates.
+	oldTmpl, err := parseCFNTemplate(stack.TemplateBody)
+	if err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: parse old template: %w", err)
+	}
+	newTmpl, err := parseCFNTemplate(templateBody)
+	if err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: parse new template: %w", err)
+	}
+
+	// Diff resources.
+	changes := diffCFNResources(oldTmpl.Resources, newTmpl.Resources)
+
+	cs := &CFNChangeSet{
+		ChangeSetName: changeSetName,
+		StackName:     stackName,
+		Status:        "CREATE_COMPLETE",
+		TemplateBody:  templateBody,
+		Parameters:    params,
+		Changes:       changes,
+		CreatedAt:     d.tc.Now(),
+	}
+
+	// Persist.
+	csData, err := json.Marshal(cs)
+	if err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: marshal: %w", err)
+	}
+	csKey := "changeset:" + stackName + "/" + changeSetName
+	if err := d.state.Put(ctx, cfnNamespace, csKey, csData); err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: put: %w", err)
+	}
+
+	// Update index.
+	names, _ := d.loadChangeSetNames(ctx, stackName)
+	names = append(names, changeSetName)
+	_ = d.saveChangeSetNames(ctx, stackName, names)
+
+	return cs, nil
+}
+
+// DescribeChangeSet returns a previously created change set.
+func (d *StackDeployer) DescribeChangeSet(ctx context.Context, stackName, changeSetName string) (*CFNChangeSet, error) {
+	if d.state == nil {
+		return nil, fmt.Errorf("cfn DescribeChangeSet: state manager required")
+	}
+	data, err := d.state.Get(ctx, cfnNamespace, "changeset:"+stackName+"/"+changeSetName)
+	if err != nil || data == nil {
+		return nil, fmt.Errorf("cfn DescribeChangeSet: change set %q not found", changeSetName)
+	}
+	var cs CFNChangeSet
+	if err := json.Unmarshal(data, &cs); err != nil {
+		return nil, fmt.Errorf("cfn DescribeChangeSet: unmarshal: %w", err)
+	}
+	return &cs, nil
+}
+
+// ExecuteChangeSet applies a change set by calling UpdateStack with the change
+// set's template and parameters, then deletes the consumed change set.
+func (d *StackDeployer) ExecuteChangeSet(ctx context.Context, stackName, changeSetName string) (*DeployResult, error) {
+	cs, err := d.DescribeChangeSet(ctx, stackName, changeSetName)
+	if err != nil {
+		return nil, err
+	}
+	result, err := d.UpdateStack(ctx, cs.TemplateBody, stackName, cs.Parameters)
+	if err != nil {
+		return nil, err
+	}
+	_ = d.DeleteChangeSet(ctx, stackName, changeSetName)
+	return result, nil
+}
+
+// ListChangeSets returns all change sets for a stack.
+func (d *StackDeployer) ListChangeSets(ctx context.Context, stackName string) ([]CFNChangeSet, error) {
+	if d.state == nil {
+		return nil, nil
+	}
+	names, err := d.loadChangeSetNames(ctx, stackName)
+	if err != nil {
+		return nil, err
+	}
+	sets := make([]CFNChangeSet, 0, len(names))
+	for _, name := range names {
+		data, getErr := d.state.Get(ctx, cfnNamespace, "changeset:"+stackName+"/"+name)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var cs CFNChangeSet
+		if unmarshalErr := json.Unmarshal(data, &cs); unmarshalErr != nil {
+			continue
+		}
+		sets = append(sets, cs)
+	}
+	return sets, nil
+}
+
+// DeleteChangeSet removes a change set without executing it.
+func (d *StackDeployer) DeleteChangeSet(ctx context.Context, stackName, changeSetName string) error {
+	if d.state == nil {
+		return nil
+	}
+	if err := d.state.Delete(ctx, cfnNamespace, "changeset:"+stackName+"/"+changeSetName); err != nil {
+		return fmt.Errorf("cfn DeleteChangeSet: %w", err)
+	}
+	names, _ := d.loadChangeSetNames(ctx, stackName)
+	newNames := make([]string, 0, len(names))
+	for _, n := range names {
+		if n != changeSetName {
+			newNames = append(newNames, n)
+		}
+	}
+	return d.saveChangeSetNames(ctx, stackName, newNames)
+}
+
+// DetectStackDrift checks whether stack resources still exist in their
+// respective service state. Returns IN_SYNC if all resources exist, DRIFTED if
+// any resource has been deleted outside of CloudFormation.
+func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) (*CFNDriftResult, error) {
+	if d.state == nil {
+		return nil, fmt.Errorf("cfn DetectStackDrift: state manager required")
+	}
+	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+	if err != nil || data == nil {
+		return nil, fmt.Errorf("cfn DetectStackDrift: stack %q not found", stackName)
+	}
+	var stack CFNStackState
+	if err := json.Unmarshal(data, &stack); err != nil {
+		return nil, fmt.Errorf("cfn DetectStackDrift: unmarshal: %w", err)
+	}
+
+	result := &CFNDriftResult{
+		StackName:   stackName,
+		DriftStatus: "IN_SYNC",
+		DetectedAt:  d.tc.Now(),
+	}
+
+	for _, dr := range stack.Resources {
+		entry := CFNResourceDriftEntry{
+			LogicalID:    dr.LogicalID,
+			ResourceType: dr.Type,
+			PhysicalID:   dr.PhysicalID,
+			DriftStatus:  "NOT_CHECKED",
+		}
+
+		checker, ok := cfnDriftCheckers[dr.Type]
+		if ok {
+			exists := checker(d, ctx, testAccountID, defaultRegion, dr.PhysicalID)
+			if exists {
+				entry.DriftStatus = "IN_SYNC"
+			} else {
+				entry.DriftStatus = "DELETED"
+				result.DriftedCount++
+			}
+		}
+
+		result.ResourceDrifts = append(result.ResourceDrifts, entry)
+	}
+
+	if result.DriftedCount > 0 {
+		result.DriftStatus = "DRIFTED"
+	}
+
+	return result, nil
+}
+
+func (d *StackDeployer) loadChangeSetNames(ctx context.Context, stackName string) ([]string, error) {
+	data, err := d.state.Get(ctx, cfnNamespace, "changeset_names:"+stackName)
+	if err != nil || data == nil {
+		return nil, nil //nolint:nilerr
+	}
+	var names []string
+	if err := json.Unmarshal(data, &names); err != nil {
+		return nil, fmt.Errorf("cfn loadChangeSetNames: %w", err)
+	}
+	return names, nil
+}
+
+func (d *StackDeployer) saveChangeSetNames(ctx context.Context, stackName string, names []string) error {
+	data, err := json.Marshal(names)
+	if err != nil {
+		return fmt.Errorf("cfn saveChangeSetNames: %w", err)
+	}
+	return d.state.Put(ctx, cfnNamespace, "changeset_names:"+stackName, data)
+}
+
+// diffCFNResources compares old and new template resource maps and returns
+// the list of changes (Add, Modify, Remove).
+func diffCFNResources(oldRes, newRes map[string]cfnResource) []CFNResourceChange {
+	var changes []CFNResourceChange
+
+	// Added and Modified.
+	for logicalID, newR := range newRes {
+		oldR, exists := oldRes[logicalID]
+		if !exists {
+			changes = append(changes, CFNResourceChange{
+				Action:       "Add",
+				LogicalID:    logicalID,
+				ResourceType: newR.Type,
+			})
+			continue
+		}
+		if oldR.Type != newR.Type {
+			// Type changed → replacement (remove old + add new).
+			changes = append(changes, CFNResourceChange{
+				Action:       "Remove",
+				LogicalID:    logicalID,
+				ResourceType: oldR.Type,
+			})
+			changes = append(changes, CFNResourceChange{
+				Action:       "Add",
+				LogicalID:    logicalID,
+				ResourceType: newR.Type,
+			})
+			continue
+		}
+		if !reflect.DeepEqual(oldR.Properties, newR.Properties) {
+			changes = append(changes, CFNResourceChange{
+				Action:       "Modify",
+				LogicalID:    logicalID,
+				ResourceType: newR.Type,
+				Replacement:  "False",
+			})
+		}
+	}
+
+	// Removed.
+	for logicalID, oldR := range oldRes {
+		if _, exists := newRes[logicalID]; !exists {
+			changes = append(changes, CFNResourceChange{
+				Action:       "Remove",
+				LogicalID:    logicalID,
+				ResourceType: oldR.Type,
+			})
+		}
+	}
+
+	// Sort for deterministic output.
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Action != changes[j].Action {
+			return changes[i].Action < changes[j].Action
+		}
+		return changes[i].LogicalID < changes[j].LogicalID
+	})
+
+	return changes
+}
+
+// cfnDriftCheckers maps CFN resource types to functions that check whether the
+// resource still exists in plugin state. Returns true if the resource exists.
+var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool{
+	"AWS::S3::Bucket": func(d *StackDeployer, ctx context.Context, _, _, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "s3", "bucket:"+physicalID)
+		return data != nil
+	},
+	"AWS::DynamoDB::Table": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "dynamodb", "table:"+acct+"/"+physicalID)
+		return data != nil
+	},
+	"AWS::SQS::Queue": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "sqs", "queue:"+acct+"/"+region+"/"+physicalID)
+		return data != nil
+	},
+	"AWS::SNS::Topic": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "sns", "topic:"+acct+"/"+region+"/"+physicalID)
+		return data != nil
+	},
+	"AWS::Lambda::Function": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "lambda", "function:"+acct+"/"+region+"/"+physicalID)
+		return data != nil
+	},
+	"AWS::IAM::Role": func(d *StackDeployer, ctx context.Context, _, _, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "iam", "role:"+physicalID)
+		return data != nil
+	},
 }
 
 // deployResource dispatches a single CFN resource to the correct deploy helper.

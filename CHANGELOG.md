@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.61.0] - 2026-04-10
+
+### Added
+- **CloudFormation change sets (#289)**: Added `CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`, `ListChangeSets`, and `DeleteChangeSet` to `StackDeployer`. `CreateChangeSet` diffs old vs. new template resources to produce Add/Modify/Remove entries. Type changes result in Remove+Add (replacement). Property changes use `reflect.DeepEqual` comparison. `ExecuteChangeSet` applies changes via `UpdateStack` then deletes the consumed change set. Change sets stored at `changeset:{stackName}/{name}` in the `"cfn"` namespace. Closes #289.
+- **CloudFormation drift detection (#290)**: Added `DetectStackDrift` to `StackDeployer`. Checks each deployed resource against its service's plugin state to detect deletions made outside CloudFormation. Supported resource types: S3 Bucket, DynamoDB Table, SQS Queue, SNS Topic, Lambda Function, IAM Role. Returns per-resource drift status (`IN_SYNC`, `DELETED`, `NOT_CHECKED`) and aggregate stack drift status (`IN_SYNC` or `DRIFTED`). Closes #290.
+
 ## [v0.60.0] - 2026-04-10
 
 ### Added
@@ -1626,6 +1632,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.61.0]: https://github.com/scttfrdmn/substrate/compare/v0.60.0...v0.61.0
 [v0.60.0]: https://github.com/scttfrdmn/substrate/compare/v0.59.0...v0.60.0
 [v0.59.0]: https://github.com/scttfrdmn/substrate/compare/v0.58.2...v0.59.0
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2

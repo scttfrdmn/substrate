@@ -2144,3 +2144,187 @@ func TestBettyCFN_EC2NatGateway(t *testing.T) {
 	}
 	t.Fatal("no AWS::EC2::NatGateway resource in result")
 }
+
+// newTestDeployerWithState creates a deployer and returns the state manager for
+// direct state manipulation in drift tests.
+func newTestDeployerWithState(t *testing.T) (*substrate.StackDeployer, *substrate.MemoryStateManager) {
+	t.Helper()
+	cfg := substrate.DefaultConfig()
+	registry := substrate.NewPluginRegistry()
+	state := substrate.NewMemoryStateManager()
+	logger := substrate.NewDefaultLogger(slog.LevelError, false)
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := substrate.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	fs := afero.NewMemMapFs()
+	costs := substrate.NewCostController(substrate.CostConfig{Enabled: true})
+
+	iamPlugin := &substrate.IAMPlugin{}
+	require.NoError(t, iamPlugin.Initialize(context.Background(), substrate.PluginConfig{State: state, Logger: logger}))
+	registry.Register(iamPlugin)
+
+	s3Plugin := &substrate.S3Plugin{}
+	require.NoError(t, s3Plugin.Initialize(context.Background(), substrate.PluginConfig{
+		State: state, Logger: logger,
+		Options: map[string]any{"time_controller": tc, "fs": fs, "registry": registry},
+	}))
+	registry.Register(s3Plugin)
+
+	snsPlugin := &substrate.SNSPlugin{}
+	require.NoError(t, snsPlugin.Initialize(context.Background(), substrate.PluginConfig{
+		State: state, Logger: logger,
+		Options: map[string]any{"time_controller": tc, "registry": registry},
+	}))
+	registry.Register(snsPlugin)
+
+	return substrate.NewStackDeployer(registry, store, state, tc, logger, costs), state
+}
+
+func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
+	d := newTestDeployer(t)
+
+	// Deploy initial stack with S3 bucket.
+	tmpl1 := `{
+		"Resources": {
+			"MyBucket": {
+				"Type": "AWS::S3::Bucket",
+				"Properties": {"BucketName": "cs-test-bucket"}
+			},
+			"MyRole": {
+				"Type": "AWS::IAM::Role",
+				"Properties": {
+					"RoleName": "cs-test-role",
+					"AssumeRolePolicyDocument": {"Statement": []}
+				}
+			}
+		}
+	}`
+	_, err := d.Deploy(context.Background(), tmpl1, "cs-stack", nil)
+	require.NoError(t, err)
+
+	// Create change set: add SNS topic, remove IAM role, keep S3 bucket.
+	tmpl2 := `{
+		"Resources": {
+			"MyBucket": {
+				"Type": "AWS::S3::Bucket",
+				"Properties": {"BucketName": "cs-test-bucket"}
+			},
+			"MyTopic": {
+				"Type": "AWS::SNS::Topic",
+				"Properties": {"TopicName": "cs-test-topic"}
+			}
+		}
+	}`
+	cs, err := d.CreateChangeSet(context.Background(), "cs-stack", "my-changes", tmpl2, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "CREATE_COMPLETE", cs.Status)
+	assert.Equal(t, "cs-stack", cs.StackName)
+
+	// Verify changes: 1 Add (MyTopic), 1 Remove (MyRole), 0 Modify (MyBucket unchanged).
+	adds, removes, modifies := 0, 0, 0
+	for _, c := range cs.Changes {
+		switch c.Action {
+		case "Add":
+			adds++
+			assert.Equal(t, "MyTopic", c.LogicalID)
+		case "Remove":
+			removes++
+			assert.Equal(t, "MyRole", c.LogicalID)
+		case "Modify":
+			modifies++
+		}
+	}
+	assert.Equal(t, 1, adds, "expected 1 Add")
+	assert.Equal(t, 1, removes, "expected 1 Remove")
+	assert.Equal(t, 0, modifies, "expected 0 Modify (bucket unchanged)")
+
+	// Describe change set.
+	described, err := d.DescribeChangeSet(context.Background(), "cs-stack", "my-changes")
+	require.NoError(t, err)
+	assert.Equal(t, cs.ChangeSetName, described.ChangeSetName)
+	assert.Len(t, described.Changes, len(cs.Changes))
+
+	// Execute change set.
+	result, err := d.ExecuteChangeSet(context.Background(), "cs-stack", "my-changes")
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+
+	// Describe after execute → not found.
+	_, err = d.DescribeChangeSet(context.Background(), "cs-stack", "my-changes")
+	assert.Error(t, err)
+}
+
+func TestCFN_ChangeSet_ListAndDelete(t *testing.T) {
+	d := newTestDeployer(t)
+
+	tmpl := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "list-bucket"}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "list-stack", nil)
+	require.NoError(t, err)
+
+	tmpl2 := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "list-bucket-v2"}}}}`
+
+	// Create two change sets.
+	_, err = d.CreateChangeSet(context.Background(), "list-stack", "cs-a", tmpl2, nil)
+	require.NoError(t, err)
+	_, err = d.CreateChangeSet(context.Background(), "list-stack", "cs-b", tmpl2, nil)
+	require.NoError(t, err)
+
+	sets, err := d.ListChangeSets(context.Background(), "list-stack")
+	require.NoError(t, err)
+	assert.Len(t, sets, 2)
+
+	// Delete one.
+	require.NoError(t, d.DeleteChangeSet(context.Background(), "list-stack", "cs-a"))
+	sets2, err := d.ListChangeSets(context.Background(), "list-stack")
+	require.NoError(t, err)
+	assert.Len(t, sets2, 1)
+	assert.Equal(t, "cs-b", sets2[0].ChangeSetName)
+}
+
+func TestCFN_ChangeSet_ModifyProperties(t *testing.T) {
+	d := newTestDeployer(t)
+
+	tmpl1 := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "mod-bucket"}}}}`
+	_, err := d.Deploy(context.Background(), tmpl1, "mod-stack", nil)
+	require.NoError(t, err)
+
+	// Change bucket name property.
+	tmpl2 := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "mod-bucket-v2"}}}}`
+	cs, err := d.CreateChangeSet(context.Background(), "mod-stack", "mod-cs", tmpl2, nil)
+	require.NoError(t, err)
+	require.Len(t, cs.Changes, 1)
+	assert.Equal(t, "Modify", cs.Changes[0].Action)
+	assert.Equal(t, "B", cs.Changes[0].LogicalID)
+}
+
+func TestCFN_DriftDetection_InSync(t *testing.T) {
+	d, _ := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "drift-bucket"}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-stack", nil)
+	require.NoError(t, err)
+
+	result, err := d.DetectStackDrift(context.Background(), "drift-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+	assert.Equal(t, 0, result.DriftedCount)
+	require.Len(t, result.ResourceDrifts, 1)
+	assert.Equal(t, "IN_SYNC", result.ResourceDrifts[0].DriftStatus)
+}
+
+func TestCFN_DriftDetection_Deleted(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "drift-del-bucket"}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-del-stack", nil)
+	require.NoError(t, err)
+
+	// Delete bucket directly from state (bypassing CloudFormation).
+	require.NoError(t, state.Delete(context.Background(), "s3", "bucket:drift-del-bucket"))
+
+	result, err := d.DetectStackDrift(context.Background(), "drift-del-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "DRIFTED", result.DriftStatus)
+	assert.Equal(t, 1, result.DriftedCount)
+	require.Len(t, result.ResourceDrifts, 1)
+	assert.Equal(t, "DELETED", result.ResourceDrifts[0].DriftStatus)
+}
