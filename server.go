@@ -232,6 +232,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/timestream-query/results", s.handleTimestreamSeedResult)
 	r.Delete("/v1/timestream-query/results", s.handleTimestreamClearResults)
 
+	// Bedrock Runtime control-plane endpoints.
+	r.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
+	r.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
+
 	// Fault injection control-plane endpoints.
 	r.Post("/v1/fault/rules", s.handleFaultSetRules)
 	r.Delete("/v1/fault/rules", s.handleFaultClearRules)

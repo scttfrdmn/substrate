@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.58.1] - 2026-04-09
+
+### Added
+- **Bedrock Runtime InvokeModel (#281)**: Added `InvokeModel` operation to the existing `BedrockRuntimePlugin`, accepting `POST /model/{modelId}/invoke`. Returns a deterministic canned response in Claude Messages API format by default (type `message`, role `assistant`, stubbed text). Control-plane endpoints `POST /v1/bedrock-runtime/responses` and `DELETE /v1/bedrock-runtime/responses` seed and clear custom responses per model ID or `"*"` wildcard, following the Athena/RedshiftData/Timestream pattern. Exact model ID matches take priority over wildcard. Cost entry: `bedrock-runtime/InvokeModel: $0.000015`. Closes #281.
+
 ## [v0.58.0] - 2026-04-02
 
 ### Added
@@ -1599,5 +1604,6 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
 [Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...HEAD

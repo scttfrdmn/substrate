@@ -12,6 +12,14 @@ import (
 // bedrockRuntimeNamespace is the state namespace for Amazon Bedrock Runtime.
 const bedrockRuntimeNamespace = "bedrock-runtime"
 
+// bedrockRuntimeCtrlNamespace is the state namespace for Bedrock Runtime control-plane data.
+const bedrockRuntimeCtrlNamespace = "bedrock-runtime-ctrl"
+
+// bedrockRuntimeCtrlResponseKey returns the state key for a seeded model response.
+func bedrockRuntimeCtrlResponseKey(modelID string) string {
+	return "response:" + modelID
+}
+
 // BedrockRuntimePlugin emulates the Amazon Bedrock Runtime service.
 // It handles ApplyGuardrail for the bedrock-runtime host, supporting
 // pass-through (action NONE) and blocklist-based intervention
@@ -42,10 +50,12 @@ func (p *BedrockRuntimePlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a Bedrock Runtime request to the appropriate handler.
 func (p *BedrockRuntimePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, guardrailID, version := parseBedrockRuntimeOperation(req.Operation, req.Path)
+	op, resourceID, version := parseBedrockRuntimeOperation(req.Operation, req.Path)
 	switch op {
 	case "ApplyGuardrail":
-		return p.applyGuardrail(ctx, req, guardrailID, version)
+		return p.applyGuardrail(ctx, req, resourceID, version)
+	case "InvokeModel":
+		return p.invokeModel(ctx, req, resourceID)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -56,10 +66,25 @@ func (p *BedrockRuntimePlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 }
 
 // parseBedrockRuntimeOperation maps an HTTP method and path to a Bedrock Runtime
-// operation name plus guardrailID and version.
-func parseBedrockRuntimeOperation(method, path string) (op, guardrailID, version string) {
-	// /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply
+// operation name plus resource IDs.
+func parseBedrockRuntimeOperation(method, path string) (op, id1, id2 string) {
 	rest := strings.TrimPrefix(path, "/")
+
+	// /model/{modelId}/invoke
+	if strings.HasPrefix(rest, "model/") {
+		rest = strings.TrimPrefix(rest, "model/")
+		slashIdx := strings.IndexByte(rest, '/')
+		if slashIdx >= 0 {
+			modelID := rest[:slashIdx]
+			suffix := rest[slashIdx+1:]
+			if suffix == "invoke" && method == "POST" {
+				return "InvokeModel", modelID, ""
+			}
+		}
+		return "", "", ""
+	}
+
+	// /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply
 	if !strings.HasPrefix(rest, "guardrail/") {
 		return "", "", ""
 	}
@@ -165,6 +190,39 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 		"assessments": []interface{}{},
 		"usage":       usage,
 	})
+}
+
+// invokeModel handles the InvokeModel operation, returning a seeded or default
+// canned response.
+func (p *BedrockRuntimePlugin) invokeModel(_ *RequestContext, _ *AWSRequest, modelID string) (*AWSResponse, error) {
+	goCtx := context.Background()
+
+	// Check for seeded response: exact modelID match, then "*" wildcard.
+	for _, key := range []string{
+		bedrockRuntimeCtrlResponseKey(modelID),
+		bedrockRuntimeCtrlResponseKey("*"),
+	} {
+		data, err := p.state.Get(goCtx, bedrockRuntimeCtrlNamespace, key)
+		if err == nil && data != nil {
+			return &AWSResponse{
+				StatusCode: http.StatusOK,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       data,
+			}, nil
+		}
+	}
+
+	// Default canned response (Claude Messages API format).
+	defaultBody := map[string]interface{}{
+		"id":          "msg-substrate-stub",
+		"type":        "message",
+		"role":        "assistant",
+		"model":       modelID,
+		"content":     []map[string]string{{"type": "text", "text": "Hello! This is a stubbed response from Substrate."}},
+		"stop_reason": "end_turn",
+		"usage":       map[string]int{"input_tokens": 0, "output_tokens": 0},
+	}
+	return bedrockRuntimeJSONResponse(http.StatusOK, defaultBody)
 }
 
 // bedrockRuntimeJSONResponse serializes v to JSON and returns an AWSResponse.
