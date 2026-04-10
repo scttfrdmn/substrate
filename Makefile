@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate.Version=$(VERSION)"
@@ -58,6 +58,23 @@ python-lint: ## Lint pytest-substrate with ruff (if available)
 python-build: ## Build pytest-substrate wheel
 	cd python && .venv/bin/python -m build --wheel --outdir dist/ 2>/dev/null || \
 		.venv/bin/pip wheel . --no-deps -w dist/
+
+vuln: ## Run Go vulnerability check
+	govulncheck ./...
+
+scan-fs: ## Trivy filesystem scan for HIGH/CRITICAL vulnerabilities
+	trivy fs --severity HIGH,CRITICAL .
+
+scan-image: ## Trivy container image scan
+	trivy image --severity HIGH,CRITICAL ghcr.io/scttfrdmn/substrate:$(VERSION)
+
+scan-iac: ## Trivy IaC misconfiguration scan
+	trivy config .
+
+sast: ## Semgrep static analysis
+	semgrep scan --config=auto --error .
+
+security: vuln scan-fs scan-iac sast ## Run all security checks
 
 clean: ## Remove build artifacts
 	rm -rf bin/ coverage.out coverage.html

@@ -12,8 +12,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 
 # Stage 2: runtime
 FROM alpine:3.21
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata && \
+    addgroup -S substrate && adduser -S substrate -G substrate && \
+    mkdir -p /var/lib/substrate && chown substrate:substrate /var/lib/substrate
 COPY --from=builder /substrate /usr/local/bin/substrate
+USER substrate
 EXPOSE 4566
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://localhost:4566/health || exit 1
 ENTRYPOINT ["/usr/local/bin/substrate"]
 CMD ["server"]

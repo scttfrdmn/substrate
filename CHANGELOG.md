@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.58.2] - 2026-04-09
+
+### Fixed
+- **Dependency CVEs (#282)**: Bumped `go.opentelemetry.io/otel/sdk` v1.42.0 → v1.43.0 (CVE-2026-39883, HIGH) and `google.golang.org/grpc` v1.79.2 → v1.80.0 (CVE-2026-33186, CRITICAL). Both root and `test/e2e` modules updated.
+
+### Security
+- **Dockerfile non-root user (#283)**: Added dedicated `substrate` user and `USER substrate` directive so the container no longer runs as root. Added `HEALTHCHECK` instruction. Closes #283.
+- **K8s deployment hardening (#284)**: Added pod-level and container-level `securityContext` (runAsNonRoot, readOnlyRootFilesystem, allowPrivilegeEscalation=false, drop ALL capabilities, RuntimeDefault seccomp profile). Pinned image tag from `:latest` to `v0.58.1`. Closes #284.
+- **Security scanning**: Added `make security` target (govulncheck + trivy + semgrep) and `.github/workflows/security.yml` CI workflow with weekly cron.
+
 ## [v0.58.1] - 2026-04-09
 
 ### Added
@@ -1604,6 +1614,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
 [Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...HEAD

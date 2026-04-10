@@ -15,10 +15,21 @@ spec:
       labels:
         app: substrate
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: substrate
-          image: ghcr.io/scttfrdmn/substrate:latest
+          image: ghcr.io/scttfrdmn/substrate:v0.58.1
           args: ["server", "--config", "/etc/substrate/config.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 4566
               name: http
