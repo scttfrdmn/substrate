@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"strings"
 )
 
 // ec2Namespace is the service name used in state keys.
@@ -599,4 +601,52 @@ type EC2Volume struct {
 // generateVolumeID generates a random EBS volume ID.
 func generateVolumeID() string {
 	return "vol-" + randomHex(8)
+}
+
+// SecurityGroupAllowed checks if (protocol, port, sourceCIDR) is permitted by
+// any rule in the given set. Protocol "-1" matches all traffic. CIDR
+// "0.0.0.0/0" matches all sources.
+func SecurityGroupAllowed(rules []EC2IPPermission, protocol string, port int, sourceCIDR string) bool {
+	for _, rule := range rules {
+		if !sgProtocolMatches(rule.IPProtocol, protocol) {
+			continue
+		}
+		if rule.IPProtocol != "-1" && (port < rule.FromPort || port > rule.ToPort) {
+			continue
+		}
+		if sgCIDRMatches(rule.IPRanges, sourceCIDR) {
+			return true
+		}
+	}
+	return false
+}
+
+func sgProtocolMatches(ruleProto, queryProto string) bool {
+	if ruleProto == "-1" {
+		return true
+	}
+	return strings.EqualFold(ruleProto, queryProto)
+}
+
+func sgCIDRMatches(ruleCIDRs []string, source string) bool {
+	if len(ruleCIDRs) == 0 {
+		return true // no CIDR restriction
+	}
+	sourceIP := net.ParseIP(source)
+	for _, cidr := range ruleCIDRs {
+		if cidr == "0.0.0.0/0" || cidr == "::/0" {
+			return true
+		}
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			if cidr == source {
+				return true // exact match fallback
+			}
+			continue
+		}
+		if sourceIP != nil && network.Contains(sourceIP) {
+			return true
+		}
+	}
+	return false
 }

@@ -273,6 +273,56 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
+	// Collect all specified security group IDs.
+	var securityGroupIDs []string
+	for n := 1; ; n++ {
+		id := req.Params[fmt.Sprintf("SecurityGroupId.%d", n)]
+		if id == "" {
+			id = req.Params[fmt.Sprintf("SecurityGroupIds.%d", n)]
+		}
+		if id == "" {
+			break
+		}
+		securityGroupIDs = append(securityGroupIDs, id)
+	}
+	if len(securityGroupIDs) == 0 && sgID != "" {
+		securityGroupIDs = []string{sgID}
+	}
+
+	// Resolve VPCID from subnet for SG validation.
+	var targetVPCID string
+	if subnetID != "" {
+		subData, _ := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
+		if subData != nil {
+			var sub EC2Subnet
+			if json.Unmarshal(subData, &sub) == nil {
+				targetVPCID = sub.VPCID
+			}
+		}
+	}
+
+	// Validate security groups exist and belong to the target VPC.
+	for _, id := range securityGroupIDs {
+		sgData, sgErr := p.state.Get(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+id)
+		if sgErr != nil || sgData == nil {
+			return nil, &AWSError{
+				Code:       "InvalidGroup.NotFound",
+				Message:    "The security group '" + id + "' does not exist",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		if targetVPCID != "" {
+			var sg EC2SecurityGroup
+			if json.Unmarshal(sgData, &sg) == nil && sg.VPCID != targetVPCID {
+				return nil, &AWSError{
+					Code:       "InvalidGroup.NotFound",
+					Message:    "The security group '" + id + "' does not belong to VPC '" + targetVPCID + "'",
+					HTTPStatus: http.StatusBadRequest,
+				}
+			}
+		}
+	}
+
 	// Extract tags for instances from TagSpecification.N (ResourceType=instance).
 	var launchTags []EC2Tag
 	for n := 1; ; n++ {
@@ -308,7 +358,7 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			State:            EC2InstanceState{Code: 16, Name: "running"},
 			SubnetID:         subnetID,
 			PrivateIPAddress: fmt.Sprintf("172.31.%d.%d", i+1, i+10),
-			SecurityGroupIDs: filterEmpty([]string{sgID}),
+			SecurityGroupIDs: filterEmpty(securityGroupIDs),
 			LaunchTime:       now,
 			AccountID:        reqCtx.AccountID,
 			Region:           reqCtx.Region,
@@ -919,11 +969,22 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSecurityGroups: %w", err)
 	}
+	type ipRangeItem struct {
+		CidrIP string `xml:"cidrIp"` //nolint:revive
+	}
+	type permItem struct {
+		IPProtocol string        `xml:"ipProtocol"` //nolint:revive
+		FromPort   int           `xml:"fromPort"`
+		ToPort     int           `xml:"toPort"`
+		IPRanges   []ipRangeItem `xml:"ipRanges>item"` //nolint:revive
+	}
 	type sgItem struct {
-		GroupID     string `xml:"groupId"`
-		GroupName   string `xml:"groupName"`
-		Description string `xml:"groupDescription"`
-		VpcID       string `xml:"vpcId"`
+		GroupID        string     `xml:"groupId"`
+		GroupName      string     `xml:"groupName"`
+		Description    string     `xml:"groupDescription"`
+		VpcID          string     `xml:"vpcId"`
+		IPPermissions  []permItem `xml:"ipPermissions>item"`       //nolint:revive
+		IPPermissionsE []permItem `xml:"ipPermissionsEgress>item"` //nolint:revive
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeSecurityGroupsResponse"`
@@ -952,7 +1013,22 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if vals, ok := filters["group-id"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupID) {
 			continue
 		}
-		resp.Groups = append(resp.Groups, sgItem{GroupID: sg.GroupID, GroupName: sg.GroupName, Description: sg.Description, VpcID: sg.VPCID})
+		item := sgItem{GroupID: sg.GroupID, GroupName: sg.GroupName, Description: sg.Description, VpcID: sg.VPCID}
+		for _, rule := range sg.IngressRules {
+			pi := permItem{IPProtocol: rule.IPProtocol, FromPort: rule.FromPort, ToPort: rule.ToPort}
+			for _, cidr := range rule.IPRanges {
+				pi.IPRanges = append(pi.IPRanges, ipRangeItem{CidrIP: cidr})
+			}
+			item.IPPermissions = append(item.IPPermissions, pi)
+		}
+		for _, rule := range sg.EgressRules {
+			pi := permItem{IPProtocol: rule.IPProtocol, FromPort: rule.FromPort, ToPort: rule.ToPort}
+			for _, cidr := range rule.IPRanges {
+				pi.IPRanges = append(pi.IPRanges, ipRangeItem{CidrIP: cidr})
+			}
+			item.IPPermissionsE = append(item.IPPermissionsE, pi)
+		}
+		resp.Groups = append(resp.Groups, item)
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -1232,9 +1308,21 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeRouteTables: %w", err)
 	}
+	type routeItem struct {
+		DestCIDR  string `xml:"destinationCidrBlock"`
+		GatewayID string `xml:"gatewayId"`
+		State     string `xml:"state"`
+	}
+	type assocItem struct {
+		AssociationID string `xml:"routeTableAssociationId"`
+		SubnetID      string `xml:"subnetId,omitempty"`
+		Main          bool   `xml:"main"`
+	}
 	type rtbItem struct {
-		RouteTableID string `xml:"routeTableId"`
-		VpcID        string `xml:"vpcId"`
+		RouteTableID string      `xml:"routeTableId"`
+		VpcID        string      `xml:"vpcId"`
+		Routes       []routeItem `xml:"routeSet>item"`
+		Associations []assocItem `xml:"associationSet>item"`
 	}
 	type response struct {
 		XMLName     xml.Name  `xml:"DescribeRouteTablesResponse"`
@@ -1254,7 +1342,14 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 		if len(ids) > 0 && !containsStr(ids, rtb.RouteTableID) {
 			continue
 		}
-		resp.RouteTables = append(resp.RouteTables, rtbItem{rtb.RouteTableID, rtb.VPCID})
+		item := rtbItem{RouteTableID: rtb.RouteTableID, VpcID: rtb.VPCID}
+		for _, r := range rtb.Routes {
+			item.Routes = append(item.Routes, routeItem{DestCIDR: r.DestinationCIDR, GatewayID: r.GatewayID, State: r.State})
+		}
+		for _, a := range rtb.Associations {
+			item.Associations = append(item.Associations, assocItem{AssociationID: a.AssociationID, SubnetID: a.SubnetID, Main: a.Main}) //nolint:staticcheck // XML tags differ from JSON tags.
+		}
+		resp.RouteTables = append(resp.RouteTables, item)
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -1885,6 +1980,11 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 		p.logger.Warn("ec2: failed to create default sg", "err", err)
 	}
 	_ = p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "sg_ids", sgID)
+
+	// Create main route table with local route + IGW route for default VPC.
+	if _, rtErr := p.createRouteTableForVPC(reqCtx, vpcID, "172.31.0.0/16", true); rtErr != nil {
+		p.logger.Warn("ec2: failed to create default route table", "err", rtErr)
+	}
 
 	subnet, err := p.createDefaultSubnet(ctx, reqCtx, &vpc)
 	if err != nil {

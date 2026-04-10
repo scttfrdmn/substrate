@@ -2937,3 +2937,159 @@ func TestEC2_DeleteSnapshot_Stub(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
+
+func TestEC2_RunInstances_InvalidSG(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC + subnet.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":    "CreateVpc",
+		"CidrBlock": "10.0.0.0/16",
+	})
+	if !assert.Equal(t, http.StatusOK, resp.StatusCode) {
+		t.FailNow()
+	}
+	body := readBody(t, resp)
+	vpcID := ec2ExtractXML(body, "vpcId")
+
+	resp2 := ec2Request(t, ts, map[string]string{
+		"Action":    "CreateSubnet",
+		"VpcId":     vpcID,
+		"CidrBlock": "10.0.1.0/24",
+	})
+	if !assert.Equal(t, http.StatusOK, resp2.StatusCode) {
+		t.FailNow()
+	}
+	body2 := readBody(t, resp2)
+	subnetID := ec2ExtractXML(body2, "subnetId")
+
+	// RunInstances with nonexistent SG → error.
+	resp3 := ec2Request(t, ts, map[string]string{
+		"Action":            "RunInstances",
+		"ImageId":           "ami-12345678",
+		"InstanceType":      "t2.micro",
+		"SubnetId":          subnetID,
+		"SecurityGroupId.1": "sg-nonexistent",
+		"MinCount":          "1",
+		"MaxCount":          "1",
+	})
+	assert.Equal(t, http.StatusBadRequest, resp3.StatusCode)
+	body3 := readBody(t, resp3)
+	assert.Contains(t, body3, "InvalidGroup.NotFound")
+}
+
+// ec2ExtractXML extracts the text content of the first occurrence of an XML tag.
+func ec2ExtractXML(body, tag string) string {
+	start := strings.Index(body, "<"+tag+">")
+	if start < 0 {
+		return ""
+	}
+	start += len("<" + tag + ">")
+	end := strings.Index(body[start:], "</"+tag+">")
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end]
+}
+
+func TestEC2_DescribeSecurityGroups_FullRules(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":    "CreateVpc",
+		"CidrBlock": "10.0.0.0/16",
+	})
+	if !assert.Equal(t, http.StatusOK, resp.StatusCode) {
+		t.FailNow()
+	}
+	body := readBody(t, resp)
+	vpcID := ec2ExtractXML(body, "vpcId")
+
+	// Create SG.
+	resp2 := ec2Request(t, ts, map[string]string{
+		"Action":           "CreateSecurityGroup",
+		"GroupName":        "full-rules-sg",
+		"GroupDescription": "test sg",
+		"VpcId":            vpcID,
+	})
+	if !assert.Equal(t, http.StatusOK, resp2.StatusCode) {
+		t.FailNow()
+	}
+	body2 := readBody(t, resp2)
+	sgID := ec2ExtractXML(body2, "groupId")
+
+	// Add ingress rule.
+	resp3 := ec2Request(t, ts, map[string]string{
+		"Action":                            "AuthorizeSecurityGroupIngress",
+		"GroupId":                           sgID,
+		"IpPermissions.1.IpProtocol":        "tcp",
+		"IpPermissions.1.FromPort":          "443",
+		"IpPermissions.1.ToPort":            "443",
+		"IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
+	})
+	assert.Equal(t, http.StatusOK, resp3.StatusCode)
+
+	// Describe — should contain full IpPermissions.
+	resp4 := ec2Request(t, ts, map[string]string{
+		"Action":    "DescribeSecurityGroups",
+		"GroupId.1": sgID,
+	})
+	assert.Equal(t, http.StatusOK, resp4.StatusCode)
+	body4 := readBody(t, resp4)
+	assert.Contains(t, body4, "ipPermissions")
+	assert.Contains(t, body4, "tcp")
+	assert.Contains(t, body4, "443")
+	assert.Contains(t, body4, "0.0.0.0/0")
+}
+
+func TestEC2_DescribeRouteTables_FullRoutes(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Create VPC — should auto-create main route table.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":    "CreateVpc",
+		"CidrBlock": "10.0.0.0/16",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// DescribeRouteTables — should include routes and associations.
+	resp2 := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeRouteTables",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body2 := readBody(t, resp2)
+	// Main route table should have local route.
+	assert.Contains(t, body2, "10.0.0.0/16")
+	assert.Contains(t, body2, "local")
+	assert.Contains(t, body2, "active")
+}
+
+func TestEC2_SecurityGroupAllowed(t *testing.T) {
+	rules := []substrate.EC2IPPermission{
+		{IPProtocol: "tcp", FromPort: 80, ToPort: 80, IPRanges: []string{"0.0.0.0/0"}},
+		{IPProtocol: "tcp", FromPort: 443, ToPort: 443, IPRanges: []string{"10.0.0.0/8"}},
+	}
+
+	// TCP 80 from anywhere → allowed.
+	assert.True(t, substrate.SecurityGroupAllowed(rules, "tcp", 80, "192.168.1.1"))
+
+	// TCP 443 from 10.0.1.1 (within 10.0.0.0/8) → allowed.
+	assert.True(t, substrate.SecurityGroupAllowed(rules, "tcp", 443, "10.0.1.1"))
+
+	// TCP 443 from 192.168.1.1 (not in 10.0.0.0/8) → denied.
+	assert.False(t, substrate.SecurityGroupAllowed(rules, "tcp", 443, "192.168.1.1"))
+
+	// TCP 22 from anywhere → denied (no rule for port 22).
+	assert.False(t, substrate.SecurityGroupAllowed(rules, "tcp", 22, "0.0.0.0"))
+
+	// UDP 80 → denied (wrong protocol).
+	assert.False(t, substrate.SecurityGroupAllowed(rules, "udp", 80, "0.0.0.0"))
+
+	// All-traffic rule.
+	allRules := []substrate.EC2IPPermission{
+		{IPProtocol: "-1", IPRanges: []string{"0.0.0.0/0"}},
+	}
+	assert.True(t, substrate.SecurityGroupAllowed(allRules, "tcp", 22, "1.2.3.4"))
+	assert.True(t, substrate.SecurityGroupAllowed(allRules, "udp", 53, "10.0.0.1"))
+}

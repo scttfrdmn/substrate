@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.63.0] - 2026-04-10
+
+### Added
+- **EC2 security group enforcement (#292)**: `RunInstances` now validates that specified security groups exist and belong to the target VPC, returning `InvalidGroup.NotFound` on mismatch. `DescribeSecurityGroups` response expanded to include full `ipPermissions` and `ipPermissionsEgress` sets with protocol, port range, and CIDR details. Added exported `SecurityGroupAllowed(rules, protocol, port, sourceCIDR)` function for evaluating whether traffic is permitted by a set of security group rules — supports protocol matching (`-1` = all), port range checking, and CIDR containment via `net.ParseCIDR`. Closes #292.
+- **VPC route table improvements (#293)**: `DescribeRouteTables` response expanded to include full `routeSet` (destination CIDR, gateway ID, state) and `associationSet` (association ID, subnet ID, main flag). `CreateVpc` and `ensureDefaultVPC` now auto-create a main route table with a local route for the VPC CIDR. Closes #293.
+
 ## [v0.62.0] - 2026-04-10
 
 ### Added
@@ -1637,6 +1643,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.63.0]: https://github.com/scttfrdmn/substrate/compare/v0.62.0...v0.63.0
 [v0.62.0]: https://github.com/scttfrdmn/substrate/compare/v0.61.0...v0.62.0
 [v0.61.0]: https://github.com/scttfrdmn/substrate/compare/v0.60.0...v0.61.0
 [v0.60.0]: https://github.com/scttfrdmn/substrate/compare/v0.59.0...v0.60.0
