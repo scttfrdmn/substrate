@@ -79,6 +79,11 @@ func (p *StepFunctionsPlugin) executeASL(
 			return p.aslFail(exec, &histID, state.Error, state.Cause)
 		}
 
+		// Apply Parameters to transform input before execution.
+		if state.Parameters != nil {
+			effectiveInput = aslApplyParameters(state.Parameters, effectiveInput)
+		}
+
 		// Execute the state.
 		var result interface{}
 		var nextState string
@@ -141,6 +146,11 @@ func (p *StepFunctionsPlugin) executeASL(
 			appendEvent(ev)
 			stateName = nextState
 			continue
+		}
+
+		// Apply ResultSelector to filter task result before merging.
+		if state.ResultSelector != nil && result != nil {
+			result = aslApplyParameters(state.ResultSelector, result)
 		}
 
 		// Apply ResultPath: merge result into current input.
@@ -249,7 +259,17 @@ func (p *StepFunctionsPlugin) aslRunTask(
 	var lastErr *aslStateError
 
 	for {
+		startTime := p.tc.Now()
 		result, invokeErr := p.aslInvokeResource(state.Resource, input, reqCtx)
+
+		// Check TimeoutSeconds.
+		if invokeErr == nil && state.TimeoutSeconds > 0 {
+			elapsed := p.tc.Now().Sub(startTime)
+			if elapsed > time.Duration(state.TimeoutSeconds)*time.Second {
+				invokeErr = fmt.Errorf("task timed out after %v", elapsed)
+			}
+		}
+
 		if invokeErr == nil {
 			ev := HistoryEvent{ID: nextID(), Type: "TaskSucceeded", Timestamp: p.tc.Now()}
 			d := map[string]interface{}{"output": aslMarshalStr(result)}
@@ -258,7 +278,11 @@ func (p *StepFunctionsPlugin) aslRunTask(
 			return result, state.Next, nil
 		}
 
-		lastErr = &aslStateError{Error: "States.TaskFailed", Cause: invokeErr.Error()}
+		errCode := "States.TaskFailed"
+		if strings.Contains(invokeErr.Error(), "timed out") {
+			errCode = "States.Timeout"
+		}
+		lastErr = &aslStateError{Error: errCode, Cause: invokeErr.Error()}
 
 		// Find matching retry config.
 		maxAttempts := 0
@@ -460,6 +484,26 @@ func aslEvalRule(rule *ChoiceRule, input interface{}) bool {
 	case rule.NumericLessThan != nil:
 		n, ok := varVal.(float64)
 		return ok && n < *rule.NumericLessThan
+	case rule.StringGreaterThanOrEquals != nil:
+		s, ok := varVal.(string)
+		return ok && s >= *rule.StringGreaterThanOrEquals
+	case rule.StringLessThanOrEquals != nil:
+		s, ok := varVal.(string)
+		return ok && s <= *rule.StringLessThanOrEquals
+	case rule.NumericGreaterThanOrEquals != nil:
+		n, ok := varVal.(float64)
+		return ok && n >= *rule.NumericGreaterThanOrEquals
+	case rule.NumericLessThanOrEquals != nil:
+		n, ok := varVal.(float64)
+		return ok && n <= *rule.NumericLessThanOrEquals
+	case rule.IsNull != nil:
+		isNull := varVal == nil
+		return isNull == *rule.IsNull
+	case rule.IsPresent != nil:
+		// IsPresent checks whether the variable path resolves to any value.
+		// Since we already resolved it above (and returned false on error),
+		// reaching here means the variable is present.
+		return *rule.IsPresent
 	}
 	return false
 }
@@ -473,6 +517,25 @@ func aslErrorMatches(errCode string, errorEquals []string) bool {
 		}
 	}
 	return false
+}
+
+// aslApplyParameters constructs a new JSON object from params, resolving
+// any keys ending with ".$" as JSONPath references into input.
+func aslApplyParameters(params map[string]interface{}, input interface{}) interface{} {
+	result := make(map[string]interface{})
+	for key, val := range params {
+		if strings.HasSuffix(key, ".$") {
+			cleanKey := strings.TrimSuffix(key, ".$")
+			path, _ := val.(string)
+			resolved, err := aslGetPath(input, path)
+			if err == nil {
+				result[cleanKey] = resolved
+			}
+		} else {
+			result[key] = val
+		}
+	}
+	return result
 }
 
 // --- JSONPath-style helpers ---

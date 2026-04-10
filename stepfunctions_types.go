@@ -142,6 +142,24 @@ type ChoiceRule struct {
 	// NumericLessThan matches when the variable is numerically less.
 	NumericLessThan *float64 `json:"NumericLessThan"`
 
+	// StringGreaterThanOrEquals matches when the variable is lexicographically >= the value.
+	StringGreaterThanOrEquals *string `json:"StringGreaterThanOrEquals"` //nolint:revive
+
+	// StringLessThanOrEquals matches when the variable is lexicographically <= the value.
+	StringLessThanOrEquals *string `json:"StringLessThanOrEquals"` //nolint:revive
+
+	// NumericGreaterThanOrEquals matches when the variable is numerically >= the value.
+	NumericGreaterThanOrEquals *float64 `json:"NumericGreaterThanOrEquals"` //nolint:revive
+
+	// NumericLessThanOrEquals matches when the variable is numerically <= the value.
+	NumericLessThanOrEquals *float64 `json:"NumericLessThanOrEquals"` //nolint:revive
+
+	// IsNull matches when the variable is null (true) or non-null (false).
+	IsNull *bool `json:"IsNull"`
+
+	// IsPresent matches when the variable exists (true) or is absent (false).
+	IsPresent *bool `json:"IsPresent"`
+
 	// And requires all nested rules to match.
 	And []ChoiceRule `json:"And"`
 

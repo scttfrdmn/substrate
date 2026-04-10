@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.62.0] - 2026-04-10
+
+### Added
+- **Step Functions ASL depth (#291)**: Added `Parameters` support — transforms state input using JSONPath `.$` references and static values before execution. Added `ResultSelector` support — filters task output before `ResultPath` merging. Added `TimeoutSeconds` enforcement for Task states — raises `States.Timeout` when exceeded, caught by `Catch` blocks. Added 6 new Choice operators: `StringGreaterThanOrEquals`, `StringLessThanOrEquals`, `NumericGreaterThanOrEquals`, `NumericLessThanOrEquals`, `IsNull`, `IsPresent`. Closes #291.
+
 ## [v0.61.0] - 2026-04-10
 
 ### Added
@@ -1632,6 +1637,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.62.0]: https://github.com/scttfrdmn/substrate/compare/v0.61.0...v0.62.0
 [v0.61.0]: https://github.com/scttfrdmn/substrate/compare/v0.60.0...v0.61.0
 [v0.60.0]: https://github.com/scttfrdmn/substrate/compare/v0.59.0...v0.60.0
 [v0.59.0]: https://github.com/scttfrdmn/substrate/compare/v0.58.2...v0.59.0

@@ -901,3 +901,134 @@ func TestSFN_ResultPath_MergesIntoInput(t *testing.T) {
 	// Result 42 merged at $.result, existing field preserved.
 	assert.JSONEq(t, `{"existing":"value","result":42}`, d["output"].(string))
 }
+
+func TestSFN_Parameters(t *testing.T) {
+	p, ctx := setupStepFunctionsPlugin(t)
+
+	// Pass state with Parameters that selects $.data and adds a static field.
+	def := `{
+		"StartAt": "Transform",
+		"States": {
+			"Transform": {
+				"Type": "Pass",
+				"Parameters": {
+					"selected.$": "$.data",
+					"static": "hello"
+				},
+				"End": true
+			}
+		}
+	}`
+	smArn := sfnCreate(t, p, ctx, "ParamsSM", def, "STANDARD")
+	d := sfnStartAndDescribe(t, p, ctx, smArn, "params-exec", `{"data":"world","extra":"ignored"}`)
+	assert.Equal(t, "SUCCEEDED", d["status"])
+	assert.JSONEq(t, `{"selected":"world","static":"hello"}`, d["output"].(string))
+}
+
+func TestSFN_ResultSelector(t *testing.T) {
+	p, ctx := setupStepFunctionsPlugin(t)
+
+	// Pass state returns a complex result; ResultSelector picks a subset.
+	def := `{
+		"StartAt": "DoWork",
+		"States": {
+			"DoWork": {
+				"Type": "Pass",
+				"Result": {"output": "useful", "metadata": "noise"},
+				"ResultSelector": {
+					"value.$": "$.output"
+				},
+				"End": true
+			}
+		}
+	}`
+	smArn := sfnCreate(t, p, ctx, "RSelSM", def, "STANDARD")
+	d := sfnStartAndDescribe(t, p, ctx, smArn, "rsel-exec", `{}`)
+	assert.Equal(t, "SUCCEEDED", d["status"])
+	assert.JSONEq(t, `{"value":"useful"}`, d["output"].(string))
+}
+
+func TestSFN_Choice_OrEquals(t *testing.T) {
+	p, ctx := setupStepFunctionsPlugin(t)
+
+	def := `{
+		"StartAt": "Check",
+		"States": {
+			"Check": {
+				"Type": "Choice",
+				"Choices": [
+					{
+						"Variable": "$.score",
+						"NumericGreaterThanOrEquals": 90,
+						"Next": "A"
+					},
+					{
+						"Variable": "$.score",
+						"NumericLessThanOrEquals": 10,
+						"Next": "F"
+					}
+				],
+				"Default": "B"
+			},
+			"A": {"Type": "Pass", "Result": "grade-A", "End": true},
+			"B": {"Type": "Pass", "Result": "grade-B", "End": true},
+			"F": {"Type": "Pass", "Result": "grade-F", "End": true}
+		}
+	}`
+	smArn := sfnCreate(t, p, ctx, "OrEqSM", def, "STANDARD")
+
+	// Score=95 → A (>= 90).
+	d1 := sfnStartAndDescribe(t, p, ctx, smArn, "oreq-1", `{"score":95}`)
+	assert.Equal(t, "SUCCEEDED", d1["status"])
+	assert.Contains(t, d1["output"], "grade-A")
+
+	// Score=5 → F (<= 10).
+	d2 := sfnStartAndDescribe(t, p, ctx, smArn, "oreq-2", `{"score":5}`)
+	assert.Equal(t, "SUCCEEDED", d2["status"])
+	assert.Contains(t, d2["output"], "grade-F")
+
+	// Score=50 → B (default).
+	d3 := sfnStartAndDescribe(t, p, ctx, smArn, "oreq-3", `{"score":50}`)
+	assert.Equal(t, "SUCCEEDED", d3["status"])
+	assert.Contains(t, d3["output"], "grade-B")
+}
+
+func TestSFN_Choice_IsNull(t *testing.T) {
+	p, ctx := setupStepFunctionsPlugin(t)
+
+	def := `{
+		"StartAt": "Check",
+		"States": {
+			"Check": {
+				"Type": "Choice",
+				"Choices": [
+					{
+						"Variable": "$.value",
+						"IsNull": true,
+						"Next": "NullBranch"
+					},
+					{
+						"Variable": "$.other",
+						"IsPresent": true,
+						"Next": "PresentBranch"
+					}
+				],
+				"Default": "DefaultBranch"
+			},
+			"NullBranch": {"Type": "Pass", "Result": "was-null", "End": true},
+			"PresentBranch": {"Type": "Pass", "Result": "was-present", "End": true},
+			"DefaultBranch": {"Type": "Pass", "Result": "default", "End": true}
+		}
+	}`
+	smArn := sfnCreate(t, p, ctx, "IsNullSM", def, "STANDARD")
+
+	// Value is null → NullBranch.
+	d1 := sfnStartAndDescribe(t, p, ctx, smArn, "isnull-1", `{"value":null}`)
+	assert.Equal(t, "SUCCEEDED", d1["status"])
+	assert.Contains(t, d1["output"], "was-null")
+
+	// Other field present → PresentBranch.
+	d2 := sfnStartAndDescribe(t, p, ctx, smArn, "isnull-2", `{"value":"not-null","other":"exists"}`)
+	assert.Equal(t, "SUCCEEDED", d2["status"])
+	assert.Contains(t, d2["output"], "was-present")
+}
