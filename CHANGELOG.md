@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.60.0] - 2026-04-10
+
+### Added
+- **SNS message delivery enhancements (#288)**: SNS `Publish` now wraps messages in the standard SNS notification JSON envelope (Type, MessageId, TopicArn, Subject, Message, Timestamp, Signature) before delivering to SQS subscribers, matching real AWS behavior. Added HTTP/S protocol support — subscriptions with protocol `http` or `https` receive a POST with the SNS envelope body and `x-amz-sns-message-type: Notification` header. Added `FilterPolicy` field to `SNSSubscription` — when set, only messages whose attributes match all policy keys are delivered. Message attributes are parsed from `MessageAttributes.entry.N.*` request params. Subject is now passed through to the envelope and Lambda event records. Closes #288.
+
 ## [v0.59.0] - 2026-04-10
 
 ### Added
@@ -1621,6 +1626,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.60.0]: https://github.com/scttfrdmn/substrate/compare/v0.59.0...v0.60.0
 [v0.59.0]: https://github.com/scttfrdmn/substrate/compare/v0.58.2...v0.59.0
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1

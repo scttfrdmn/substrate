@@ -1,11 +1,13 @@
 package substrate
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -717,9 +719,11 @@ func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	topicARN := req.Params["TopicArn"]
 	message := req.Params["Message"]
 	subject := req.Params["Subject"]
-	_ = subject
 
 	topicName := snsNameFromARN(topicARN)
+
+	// Parse message attributes from request params (MessageAttributes.entry.N.*).
+	msgAttrs := parseSNSMessageAttributes(req.Params)
 
 	// Fan out to subscriptions.
 	goCtx := context.Background()
@@ -735,7 +739,11 @@ func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		if loadErr != nil || sub == nil {
 			continue
 		}
-		p.dispatchToSubscriber(ctx, sub, message)
+		// Apply filter policy: skip if subscription has a policy and message doesn't match.
+		if len(sub.FilterPolicy) > 0 && !matchesSNSFilterPolicy(sub.FilterPolicy, msgAttrs) {
+			continue
+		}
+		p.dispatchToSubscriber(ctx, sub, message, subject)
 	}
 
 	type result struct {
@@ -755,13 +763,14 @@ func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 }
 
 // dispatchToSubscriber delivers a message to a single subscriber endpoint.
-func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscription, message string) {
-	if p.registry == nil {
+func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscription, message, subject string) {
+	if p.registry == nil && sub.Protocol != "http" && sub.Protocol != "https" {
 		return
 	}
-	goCtx := context.Background()
 	switch sub.Protocol {
 	case "sqs":
+		envelope := p.buildSNSEnvelope(sub, message, subject)
+		envelopeBytes, _ := json.Marshal(envelope)
 		queueURL := sub.Endpoint
 		_, err := p.registry.RouteRequest(ctx, &AWSRequest{
 			Service:   "sqs",
@@ -770,7 +779,7 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 			Params: map[string]string{
 				"Action":      "SendMessage",
 				"QueueUrl":    queueURL,
-				"MessageBody": message,
+				"MessageBody": string(envelopeBytes),
 			},
 		})
 		if err != nil {
@@ -790,6 +799,7 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 					"EventSubscriptionArn": sub.ARN,
 					"Sns": map[string]interface{}{
 						"TopicArn": sub.TopicARN,
+						"Subject":  subject,
 						"Message":  message,
 					},
 				},
@@ -806,10 +816,87 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 		if err != nil {
 			p.logger.Warn("sns dispatch to lambda failed", "function", fnName, "err", err)
 		}
+	case "http", "https":
+		envelope := p.buildSNSEnvelope(sub, message, subject)
+		envelopeBytes, _ := json.Marshal(envelope)
+		httpReq, reqErr := http.NewRequest(http.MethodPost, sub.Endpoint, bytes.NewReader(envelopeBytes))
+		if reqErr != nil {
+			p.logger.Warn("sns dispatch to http: build request failed", "endpoint", sub.Endpoint, "err", reqErr)
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("x-amz-sns-message-type", "Notification")
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			p.logger.Warn("sns dispatch to http failed", "endpoint", sub.Endpoint, "err", doErr)
+			return
+		}
+		_, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 	default:
 		p.logger.Warn("sns dispatch: unsupported protocol (no-op)", "protocol", sub.Protocol, "endpoint", sub.Endpoint)
 	}
-	_ = goCtx // satisfy the context usage requirement
+}
+
+// buildSNSEnvelope wraps a message in the standard SNS notification JSON envelope.
+func (p *SNSPlugin) buildSNSEnvelope(sub *SNSSubscription, message, subject string) map[string]interface{} {
+	return map[string]interface{}{
+		"Type":             "Notification",
+		"MessageId":        generateSNSSubID(),
+		"TopicArn":         sub.TopicARN,
+		"Subject":          subject,
+		"Message":          message,
+		"Timestamp":        p.tc.Now().UTC().Format(time.RFC3339),
+		"SignatureVersion": "1",
+		"Signature":        "stub",
+		"SigningCertURL":   "https://sns.us-east-1.amazonaws.com/stub.pem",
+		"UnsubscribeURL":   "https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=" + sub.ARN,
+	}
+}
+
+// parseSNSMessageAttributes extracts message attributes from Publish request params.
+// AWS format: MessageAttributes.entry.N.Name / MessageAttributes.entry.N.Value.StringValue.
+func parseSNSMessageAttributes(params map[string]string) map[string]string {
+	attrs := make(map[string]string)
+	for i := 1; ; i++ {
+		prefix := fmt.Sprintf("MessageAttributes.entry.%d.", i)
+		name := params[prefix+"Name"]
+		if name == "" {
+			break
+		}
+		value := params[prefix+"Value.StringValue"]
+		if value != "" {
+			attrs[name] = value
+		}
+	}
+	return attrs
+}
+
+// matchesSNSFilterPolicy evaluates a subscription filter policy against message
+// attributes. All policy keys must have at least one matching value.
+func matchesSNSFilterPolicy(policy map[string]interface{}, msgAttrs map[string]string) bool {
+	for key, allowedRaw := range policy {
+		attrVal, exists := msgAttrs[key]
+		if !exists {
+			return false
+		}
+		allowed, ok := allowedRaw.([]interface{})
+		if !ok {
+			continue
+		}
+		matched := false
+		for _, v := range allowed {
+			if fmt.Sprintf("%v", v) == attrVal {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *SNSPlugin) publishBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -834,13 +921,14 @@ func (p *SNSPlugin) publishBatch(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			break
 		}
 		message := req.Params[fmt.Sprintf("PublishBatchRequestEntries.member.%d.Message", i)]
+		batchSubject := req.Params[fmt.Sprintf("PublishBatchRequestEntries.member.%d.Subject", i)]
 		msgID := generateSNSSubID()
 		for _, subARN := range subIDs {
 			sub, loadErr := p.loadSub(goCtx, ctx.AccountID, ctx.Region, subARN)
 			if loadErr != nil || sub == nil {
 				continue
 			}
-			p.dispatchToSubscriber(ctx, sub, message)
+			p.dispatchToSubscriber(ctx, sub, message, batchSubject)
 		}
 		successes = append(successes, successEntry{ID: entryID, MessageId: msgID})
 	}

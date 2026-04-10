@@ -54,6 +54,10 @@ type SNSSubscription struct {
 
 	// Region is the AWS region where the subscription resides.
 	Region string `json:"Region"`
+
+	// FilterPolicy holds an optional message filtering policy. When set,
+	// only messages whose attributes match the policy are delivered.
+	FilterPolicy map[string]interface{} `json:"FilterPolicy,omitempty"`
 }
 
 // snsTopicARN constructs an SNS topic ARN from region, account, and name.
