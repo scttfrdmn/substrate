@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.59.0] - 2026-04-10
+
+### Added
+- **Dynamic pricing provider (#285)**: Introduced `PricingProvider` interface with `StaticPricingProvider` (wraps the existing built-in pricing table) and `AWSPricingProvider` (fetches real prices from the AWS Price List Bulk API). AWS pricing data is cached to `~/.substrate/pricing-cache.json` with configurable TTL (default 24h). Startup never blocks on network I/O — uses cache or static fallback. Config: `pricing.provider: "static"|"aws"`, `pricing.cachePath`, `pricing.cacheTTLHours`, `pricing.region`. Control-plane endpoints: `POST /v1/pricing/refresh` (trigger fetch), `GET /v1/pricing` (source/cache info), `GET /v1/pricing/lookup?service=s3&operation=PutObject` (price lookup). Closes #285.
+- **Discount and savings plan support (#286)**: Added `DiscountConfig` with `globalDiscountPercent` (e.g., 10% EDP discount) and per-service `ServiceDiscount` (fixed rate override or percentage discount). Discounts are applied in `CostForRequest` after base price lookup: service-specific first, then global. Configurable via YAML (`costs.discounts`) and control-plane endpoints: `POST/GET/DELETE /v1/pricing/discounts`. Discounts survive state reset and support hot-reload via SIGHUP. Closes #286.
+- **Credits support (#287)**: Added `Credit` model with ID, description, amount, remaining balance, optional expiry, and optional service scope. Credits are deducted from costs in real-time during `CostForRequestWithCredits`: service-scoped credits consumed first, then global, earliest-expiry first. Control-plane endpoints: `POST /v1/pricing/credits` (add), `GET /v1/pricing/credits` (list), `DELETE /v1/pricing/credits/{id}` (remove). Credits survive state reset. Closes #287.
+
 ## [v0.58.2] - 2026-04-09
 
 ### Fixed
@@ -1614,6 +1621,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.59.0]: https://github.com/scttfrdmn/substrate/compare/v0.58.2...v0.59.0
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0

@@ -241,6 +241,17 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Delete("/v1/fault/rules", s.handleFaultClearRules)
 	r.Get("/v1/fault/rules", s.handleFaultGetRules)
 
+	// Pricing control-plane endpoints.
+	r.Post("/v1/pricing/refresh", s.handlePricingRefresh)
+	r.Get("/v1/pricing", s.handlePricingGet)
+	r.Get("/v1/pricing/lookup", s.handlePricingLookup)
+	r.Post("/v1/pricing/discounts", s.handlePricingSetDiscounts)
+	r.Get("/v1/pricing/discounts", s.handlePricingGetDiscounts)
+	r.Delete("/v1/pricing/discounts", s.handlePricingClearDiscounts)
+	r.Post("/v1/pricing/credits", s.handlePricingAddCredit)
+	r.Get("/v1/pricing/credits", s.handlePricingListCredits)
+	r.Delete("/v1/pricing/credits/{id}", s.handlePricingRemoveCredit)
+
 	// S3 control-plane endpoints.
 	r.Post("/v1/s3/presign", s.handleS3Presign)
 

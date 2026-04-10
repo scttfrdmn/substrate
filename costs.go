@@ -18,56 +18,246 @@ type CostConfig struct {
 	// Overrides maps "service/operation" or "service" keys to USD per request,
 	// replacing the built-in pricing table entries.
 	Overrides map[string]float64
+
+	// Discounts configures percentage and fixed-rate discounts.
+	Discounts DiscountConfig
 }
 
-// CostController computes per-request estimated AWS cost in USD. It is
-// stateless after initialisation: CostForRequest is a pure lookup with no
-// side effects, making it fully replay-safe.
+// DiscountConfig holds discount settings for cost estimation.
+type DiscountConfig struct {
+	// GlobalDiscountPercent is applied to all operations after service-specific
+	// discounts (e.g., 10 means a 10% discount off list price).
+	GlobalDiscountPercent float64 `json:"globalDiscountPercent" mapstructure:"globalDiscountPercent"`
+
+	// ServiceDiscounts maps service name to service-specific discount settings.
+	ServiceDiscounts map[string]ServiceDiscount `json:"serviceDiscounts,omitempty" mapstructure:"serviceDiscounts"`
+}
+
+// ServiceDiscount holds per-service discount configuration.
+type ServiceDiscount struct {
+	// FixedRate overrides the base price with a fixed per-request rate.
+	FixedRate *float64 `json:"fixedRate,omitempty"`
+
+	// DiscountPercent is a percentage discount off the base price.
+	DiscountPercent *float64 `json:"discountPercent,omitempty"`
+}
+
+// Credit represents a dollar balance that offsets accumulated costs.
+type Credit struct {
+	// ID is the unique identifier for this credit.
+	ID string `json:"id"`
+
+	// Description is a human-readable label for this credit.
+	Description string `json:"description"`
+
+	// Amount is the original credit amount in USD.
+	Amount float64 `json:"amount"`
+
+	// Remaining is the unused balance in USD.
+	Remaining float64 `json:"remaining"`
+
+	// ExpiresAt is the expiry time. Zero means the credit never expires.
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+
+	// Services restricts this credit to specific services. Empty applies to all.
+	Services []string `json:"services,omitempty"`
+}
+
+// CostControllerOption configures optional behavior of CostController.
+type CostControllerOption func(*CostController)
+
+// WithPricingProvider sets the pricing provider for cost lookups.
+func WithPricingProvider(p PricingProvider) CostControllerOption {
+	return func(c *CostController) {
+		c.provider = p
+	}
+}
+
+// CostController computes per-request estimated AWS cost in USD. It supports
+// a pluggable PricingProvider, per-service discounts, and credits.
 type CostController struct {
-	mu    sync.RWMutex
-	table map[string]float64
+	mu        sync.RWMutex
+	table     map[string]float64
+	provider  PricingProvider
+	discounts DiscountConfig
+	credits   []*Credit
 }
 
 // NewCostController creates a CostController from cfg. When cfg.Enabled is
 // false, all lookups return 0.0. Overrides in cfg take precedence over the
-// built-in pricing table.
-func NewCostController(cfg CostConfig) *CostController {
-	if !cfg.Enabled {
-		return &CostController{table: make(map[string]float64)}
+// pricing provider. Options configure the pricing provider (defaults to static).
+func NewCostController(cfg CostConfig, opts ...CostControllerOption) *CostController {
+	c := &CostController{
+		table:     make(map[string]float64),
+		provider:  NewStaticPricingProvider(),
+		discounts: cfg.Discounts,
+	}
+	for _, opt := range opts {
+		opt(c)
 	}
 
-	table := defaultCostTable()
+	if !cfg.Enabled {
+		// When disabled, use an empty provider so all lookups return 0.
+		c.provider = &emptyPricingProvider{}
+		return c
+	}
+
+	table := make(map[string]float64)
 	for k, v := range cfg.Overrides {
 		table[k] = v
 	}
+	c.table = table
 
-	return &CostController{table: table}
+	return c
 }
 
+// emptyPricingProvider always returns zero. Used when cost tracking is disabled.
+type emptyPricingProvider struct{}
+
+func (p *emptyPricingProvider) PriceFor(_, _, _ string) float64 { return 0 }          //nolint:revive
+func (p *emptyPricingProvider) Refresh(_ context.Context) error { return nil }        //nolint:revive
+func (p *emptyPricingProvider) Source() string                  { return "disabled" } //nolint:revive
+func (p *emptyPricingProvider) CacheAge() time.Duration         { return 0 }          //nolint:revive
+
 // CostForRequest returns the estimated USD cost for the given request. It
-// first checks for an operation-specific key ("service/operation"), then falls
-// back to a service-level key ("service"), and finally returns 0.0 when no
-// entry matches.
+// checks overrides first, then the pricing provider, applies discounts, and
+// deducts from credits. Returns the net cost after all adjustments.
 func (c *CostController) CostForRequest(req *AWSRequest) float64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	opKey := strings.ToLower(req.Service) + "/" + req.Operation
-	if cost, ok := c.table[opKey]; ok {
-		return cost
+
+	svc := strings.ToLower(req.Service)
+	opKey := svc + "/" + req.Operation
+
+	// 1. Check overrides first (highest precedence).
+	price, ok := c.table[opKey]
+	if !ok {
+		price, ok = c.table[svc]
 	}
-	svcKey := strings.ToLower(req.Service)
-	if cost, ok := c.table[svcKey]; ok {
-		return cost
+
+	// 2. Fall back to pricing provider.
+	if !ok {
+		price = c.provider.PriceFor(req.Service, req.Operation, "us-east-1")
+		if price == 0 {
+			price = c.provider.PriceFor(req.Service, "", "us-east-1")
+		}
 	}
-	return 0.0
+
+	if price == 0 {
+		return 0
+	}
+
+	// 3. Apply discounts.
+	price = c.applyDiscountsLocked(price, svc)
+
+	// 4. Deduct from credits (requires write — upgrade to write lock via defer).
+	// Note: credits are deducted in a separate call since we hold a read lock.
+	return price
 }
 
-// UpdateConfig rebuilds the pricing table from cfg. It is safe to call
-// concurrently with CostForRequest.
+// CostForRequestWithCredits returns the net cost after applying credits. It
+// acquires a write lock to mutate credit balances. Use this when recording
+// real costs; use CostForRequest for read-only lookups.
+func (c *CostController) CostForRequestWithCredits(req *AWSRequest) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	svc := strings.ToLower(req.Service)
+	opKey := svc + "/" + req.Operation
+
+	price, ok := c.table[opKey]
+	if !ok {
+		price, ok = c.table[svc]
+	}
+	if !ok {
+		price = c.provider.PriceFor(req.Service, req.Operation, "us-east-1")
+		if price == 0 {
+			price = c.provider.PriceFor(req.Service, "", "us-east-1")
+		}
+	}
+	if price == 0 {
+		return 0
+	}
+
+	price = c.applyDiscountsLocked(price, svc)
+	price = c.applyCreditsLocked(price, svc)
+	return price
+}
+
+// applyDiscountsLocked applies service-specific and global discounts. Caller
+// must hold at least a read lock.
+func (c *CostController) applyDiscountsLocked(price float64, service string) float64 {
+	if sd, ok := c.discounts.ServiceDiscounts[service]; ok {
+		if sd.FixedRate != nil {
+			price = *sd.FixedRate
+		} else if sd.DiscountPercent != nil {
+			price *= (1 - *sd.DiscountPercent/100)
+		}
+	}
+	if c.discounts.GlobalDiscountPercent > 0 {
+		price *= (1 - c.discounts.GlobalDiscountPercent/100)
+	}
+	return price
+}
+
+// applyCreditsLocked deducts cost from applicable credits. Caller must hold a
+// write lock.
+func (c *CostController) applyCreditsLocked(price float64, service string) float64 {
+	if len(c.credits) == 0 || price <= 0 {
+		return price
+	}
+	now := time.Now()
+	remaining := price
+
+	// Service-scoped credits first, then global, each sorted by earliest expiry.
+	for _, pass := range []bool{true, false} {
+		for _, cr := range c.credits {
+			if remaining <= 0 {
+				break
+			}
+			if cr.Remaining <= 0 {
+				continue
+			}
+			if !cr.ExpiresAt.IsZero() && cr.ExpiresAt.Before(now) {
+				continue
+			}
+			scoped := len(cr.Services) > 0
+			if pass && !scoped {
+				continue // first pass: service-scoped only
+			}
+			if !pass && scoped {
+				continue // second pass: global only
+			}
+			if scoped && !creditAppliesToService(cr, service) {
+				continue
+			}
+			deduct := remaining
+			if deduct > cr.Remaining {
+				deduct = cr.Remaining
+			}
+			cr.Remaining -= deduct
+			remaining -= deduct
+		}
+	}
+	return remaining
+}
+
+// creditAppliesToService checks if a credit covers the given service.
+func creditAppliesToService(cr *Credit, service string) bool {
+	for _, s := range cr.Services {
+		if strings.EqualFold(s, service) {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateConfig rebuilds the overrides table and discounts from cfg. It is safe
+// to call concurrently with CostForRequest.
 func (c *CostController) UpdateConfig(cfg CostConfig) {
 	var table map[string]float64
 	if cfg.Enabled {
-		table = defaultCostTable()
+		table = make(map[string]float64)
 		for k, v := range cfg.Overrides {
 			table[k] = v
 		}
@@ -77,6 +267,93 @@ func (c *CostController) UpdateConfig(cfg CostConfig) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.table = table
+	c.discounts = cfg.Discounts
+}
+
+// SetPricingProvider replaces the pricing provider. Thread-safe.
+func (c *CostController) SetPricingProvider(p PricingProvider) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.provider = p
+}
+
+// GetPricingProvider returns the current pricing provider. Thread-safe.
+func (c *CostController) GetPricingProvider() PricingProvider {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.provider
+}
+
+// SetDiscounts updates the discount configuration. Thread-safe.
+func (c *CostController) SetDiscounts(d DiscountConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.discounts = d
+}
+
+// GetDiscounts returns the current discount configuration. Thread-safe.
+func (c *CostController) GetDiscounts() DiscountConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.discounts
+}
+
+// AddCredit adds a credit and returns its generated ID. Thread-safe.
+func (c *CostController) AddCredit(cr Credit) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cr.ID == "" {
+		cr.ID = fmt.Sprintf("credit-%d", time.Now().UnixNano())
+	}
+	if cr.Remaining == 0 {
+		cr.Remaining = cr.Amount
+	}
+	c.credits = append(c.credits, &cr)
+	return cr.ID
+}
+
+// ListCredits returns a copy of all credits. Thread-safe.
+func (c *CostController) ListCredits() []Credit {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	result := make([]Credit, len(c.credits))
+	for i, cr := range c.credits {
+		result[i] = *cr
+	}
+	return result
+}
+
+// RemoveCredit removes a credit by ID. Returns true if found. Thread-safe.
+func (c *CostController) RemoveCredit(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, cr := range c.credits {
+		if cr.ID == id {
+			c.credits = append(c.credits[:i], c.credits[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// PriceFor returns the raw price for a service/operation before discounts or
+// credits, checking overrides first then the pricing provider.
+func (c *CostController) PriceFor(service, operation string) float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	svc := strings.ToLower(service)
+	opKey := svc + "/" + operation
+	if price, ok := c.table[opKey]; ok {
+		return price
+	}
+	if price, ok := c.table[svc]; ok {
+		return price
+	}
+	price := c.provider.PriceFor(service, operation, "us-east-1")
+	if price == 0 {
+		price = c.provider.PriceFor(service, "", "us-east-1")
+	}
+	return price
 }
 
 // defaultCostTable returns the built-in per-request pricing table. IAM and

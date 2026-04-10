@@ -31,6 +31,9 @@ type Config struct {
 	// Costs controls per-request cost estimation.
 	Costs CostCfg `mapstructure:"costs"`
 
+	// Pricing controls the pricing data source (static or AWS).
+	Pricing PricingCfg `mapstructure:"pricing"`
+
 	// Metrics controls the Prometheus /metrics endpoint.
 	Metrics MetricsCfg `mapstructure:"metrics"`
 
@@ -276,12 +279,31 @@ type CostCfg struct {
 	// Overrides maps "service/operation" or "service" keys to USD per request,
 	// overriding the built-in pricing table.
 	Overrides map[string]float64 `mapstructure:"overrides"`
+
+	// Discounts configures percentage and fixed-rate discounts.
+	Discounts DiscountConfig `mapstructure:"discounts"`
 }
 
 // ToCostConfig converts CostCfg to the [CostConfig] type used by
 // [NewCostController].
 func (c CostCfg) ToCostConfig() CostConfig {
 	return CostConfig(c)
+}
+
+// PricingCfg is the YAML-friendly configuration for the pricing data source.
+type PricingCfg struct {
+	// Provider selects the pricing source: "static" (default) or "aws".
+	Provider string `mapstructure:"provider"`
+
+	// CachePath is the file path for the pricing cache. Default
+	// ~/.substrate/pricing-cache.json.
+	CachePath string `mapstructure:"cachePath"`
+
+	// CacheTTLHours is the cache time-to-live in hours. Default 24.
+	CacheTTLHours int `mapstructure:"cacheTTLHours"`
+
+	// Region is the AWS region for pricing lookups. Default us-east-1.
+	Region string `mapstructure:"region"`
 }
 
 // FaultCfg is the YAML-friendly configuration for fault injection.
@@ -408,6 +430,12 @@ func DefaultConfig() *Config {
 		},
 		Costs: CostCfg{
 			Enabled: true,
+		},
+		Pricing: PricingCfg{
+			Provider:      "static",
+			CachePath:     "~/.substrate/pricing-cache.json",
+			CacheTTLHours: 24,
+			Region:        "us-east-1",
 		},
 		Metrics: MetricsCfg{
 			Enabled: false,

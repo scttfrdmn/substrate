@@ -117,7 +117,19 @@ configured address will have their requests emulated and recorded.`,
 				return fmt.Errorf("initialize consistency controller: %w", err)
 			}
 
-			costCtrl := substrate.NewCostController(cfg.Costs.ToCostConfig())
+			var pricingProvider substrate.PricingProvider
+			switch cfg.Pricing.Provider {
+			case "aws":
+				pricingProvider = substrate.NewAWSPricingProvider(substrate.AWSPricingConfig{
+					CachePath:     cfg.Pricing.CachePath,
+					CacheTTLHours: cfg.Pricing.CacheTTLHours,
+					Region:        cfg.Pricing.Region,
+				})
+			default:
+				pricingProvider = substrate.NewStaticPricingProvider()
+			}
+			costCtrl := substrate.NewCostController(cfg.Costs.ToCostConfig(),
+				substrate.WithPricingProvider(pricingProvider))
 
 			var faultCtrl *substrate.FaultController
 			if cfg.Fault.Enabled || len(cfg.Fault.Rules) > 0 {
@@ -170,6 +182,7 @@ configured address will have their requests emulated and recorded.`,
 						consistencyCtrl.UpdateConfig(newCC)
 					}
 					costCtrl.UpdateConfig(newCfg.Costs.ToCostConfig())
+					costCtrl.SetDiscounts(newCfg.Costs.Discounts)
 					if faultCtrl != nil {
 						faultCtrl.UpdateConfig(newCfg.Fault.ToFaultConfig())
 					}
