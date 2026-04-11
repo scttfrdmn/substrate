@@ -375,3 +375,58 @@ func TestTimestream_WriteAndQuery(t *testing.T) {
 	_, _ = io.ReadAll(resp7.Body)
 	_ = resp7.Body.Close()
 }
+
+// TestTimestream_WriteQueryRoundtrip verifies that records written via WriteRecords
+// can be retrieved via Query using SELECT * FROM db.table syntax.
+func TestTimestream_WriteQueryRoundtrip(t *testing.T) {
+	ts := newTimestreamTestServer(t)
+
+	// Create database and table.
+	for _, op := range []struct {
+		op   string
+		body map[string]any
+	}{
+		{"CreateDatabase", map[string]any{"DatabaseName": "roundtrip_db"}},
+		{"CreateTable", map[string]any{"DatabaseName": "roundtrip_db", "TableName": "metrics"}},
+	} {
+		r := tsRequest(t, ts, op.op, op.body)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("%s: got %d", op.op, r.StatusCode)
+		}
+		_, _ = io.ReadAll(r.Body)
+		_ = r.Body.Close()
+	}
+
+	// WriteRecords with 2 records.
+	records := []map[string]any{
+		{"MeasureName": "cpu", "MeasureValue": "75"},
+		{"MeasureName": "memory", "MeasureValue": "60"},
+	}
+	resp := tsRequest(t, ts, "WriteRecords", map[string]any{
+		"DatabaseName": "roundtrip_db",
+		"TableName":    "metrics",
+		"Records":      records,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("WriteRecords: got %d", resp.StatusCode)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	// Query using SELECT * FROM roundtrip_db.metrics.
+	resp2 := tsRequest(t, ts, "Query", map[string]any{
+		"QueryString": "SELECT * FROM roundtrip_db.metrics",
+	})
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("Query: got %d", resp2.StatusCode)
+	}
+	body2 := tsBody(t, resp2)
+	rows, _ := body2["Rows"].([]interface{})
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows from written records, got %d", len(rows))
+	}
+	cols, _ := body2["ColumnInfo"].([]interface{})
+	if len(cols) == 0 {
+		t.Error("want non-empty ColumnInfo")
+	}
+}

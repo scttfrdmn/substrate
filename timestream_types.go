@@ -101,3 +101,7 @@ func timestreamTableNamesKey(acct, region, dbName string) string {
 }
 
 func timestreamCtrlResultKey(qs string) string { return "result:" + qs }
+
+func timestreamRecordsKey(acct, region, dbName, tableName string) string {
+	return fmt.Sprintf("records:%s/%s/%s/%s", acct, region, dbName, tableName)
+}

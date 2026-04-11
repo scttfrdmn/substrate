@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.64.0] - 2026-04-10
+
+### Added
+- **Deepen stub services (#294)**:
+  - **CloudFront**: Invalidations are now persisted in state. Added `GetInvalidation` (GET `/distribution/{id}/invalidation/{invId}`) and `ListInvalidations` (GET `/distribution/{id}/invalidation`) operations. Invalidation IDs and status are retrievable after creation.
+  - **Health**: Added `state` field to `HealthPlugin` and `HealthEvent` type with seedable events via control-plane endpoints `POST /v1/health/events` and `DELETE /v1/health/events`. `DescribeEvents` returns seeded events. `DescribeEventDetails` filters by requested ARNs.
+  - **Timestream**: `WriteRecords` now stores ingested records at `records:{acct}/{region}/{db}/{table}`. `Query` serves stored records for `SELECT * FROM db.table` syntax (basic SQL parsing), falling back to seeded results then empty. Write→Query roundtrip works without control-plane seeding.
+
 ## [v0.63.0] - 2026-04-10
 
 ### Added
@@ -1643,6 +1651,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.64.0]: https://github.com/scttfrdmn/substrate/compare/v0.63.0...v0.64.0
 [v0.63.0]: https://github.com/scttfrdmn/substrate/compare/v0.62.0...v0.63.0
 [v0.62.0]: https://github.com/scttfrdmn/substrate/compare/v0.61.0...v0.62.0
 [v0.61.0]: https://github.com/scttfrdmn/substrate/compare/v0.60.0...v0.61.0

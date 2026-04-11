@@ -44,6 +44,11 @@ func (p *CloudFrontPlugin) Shutdown(_ context.Context) error { return nil }
 // The operation is derived from the HTTP method and URL path.
 func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	op, distID := parseCloudFrontOperation(req.Operation, req.Path, req.Params)
+	// Handle GetInvalidation (op includes invID after colon).
+	if strings.HasPrefix(op, "GetInvalidation:") {
+		invID := strings.TrimPrefix(op, "GetInvalidation:")
+		return p.getInvalidation(ctx, distID, invID)
+	}
 	switch op {
 	case "CreateDistribution":
 		return p.createDistribution(ctx, req)
@@ -59,6 +64,8 @@ func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.listDistributions(ctx, req)
 	case "CreateInvalidation":
 		return p.createInvalidation(ctx, req, distID)
+	case "ListInvalidations":
+		return p.listInvalidations(ctx, distID)
 	case "TagResource":
 		return p.tagResource(ctx, req)
 	case "ListTagsForResource":
@@ -145,6 +152,17 @@ func parseCloudFrontOperation(method, path string, params map[string]string) (op
 	case "invalidation":
 		if method == http.MethodPost {
 			return "CreateInvalidation", id
+		}
+		if method == http.MethodGet {
+			return "ListInvalidations", id
+		}
+	}
+
+	// /distribution/{id}/invalidation/{invID}
+	if strings.HasPrefix(suffix, "invalidation/") {
+		invID := strings.TrimPrefix(suffix, "invalidation/")
+		if method == http.MethodGet && invID != "" {
+			return "GetInvalidation:" + invID, id
 		}
 	}
 	return "", id
@@ -359,6 +377,20 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest
 	// Use I prefix for invalidation IDs per CloudFront API convention.
 	invID = "I" + invID[1:]
 
+	now := p.tc.Now().UTC()
+	inv := CloudFrontInvalidation{
+		ID:         invID,
+		Status:     "Completed",
+		CreateTime: now,
+	}
+
+	// Persist invalidation.
+	goCtx := context.Background()
+	invData, _ := json.Marshal(inv)
+	invKey := "cfinval:" + ctx.AccountID + "/" + distID + "/" + invID
+	_ = p.state.Put(goCtx, cloudfrontNamespace, invKey, invData)
+	updateStringIndex(goCtx, p.state, cloudfrontNamespace, "cfinval_ids:"+ctx.AccountID+"/"+distID, invID)
+
 	type xmlInvalidation struct {
 		XMLName    xml.Name `xml:"Invalidation"`
 		ID         string   `xml:"Id"`
@@ -366,10 +398,60 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest
 		CreateTime string   `xml:"CreateTime"`
 	}
 	return cloudfrontXMLResponse(http.StatusCreated, xmlInvalidation{
-		ID:         invID,
-		Status:     "Completed",
-		CreateTime: p.tc.Now().UTC().Format(time.RFC3339),
+		ID:         inv.ID,
+		Status:     inv.Status,
+		CreateTime: now.Format(time.RFC3339),
 	})
+}
+
+func (p *CloudFrontPlugin) getInvalidation(ctx *RequestContext, distID, invID string) (*AWSResponse, error) {
+	goCtx := context.Background()
+	data, err := p.state.Get(goCtx, cloudfrontNamespace, "cfinval:"+ctx.AccountID+"/"+distID+"/"+invID)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "NoSuchInvalidation", Message: "invalidation not found: " + invID, HTTPStatus: http.StatusNotFound}
+	}
+	var inv CloudFrontInvalidation
+	if err := json.Unmarshal(data, &inv); err != nil {
+		return nil, fmt.Errorf("cloudfront getInvalidation unmarshal: %w", err)
+	}
+	type xmlInvalidation struct {
+		XMLName    xml.Name `xml:"Invalidation"`
+		ID         string   `xml:"Id"`
+		Status     string   `xml:"Status"`
+		CreateTime string   `xml:"CreateTime"`
+	}
+	return cloudfrontXMLResponse(http.StatusOK, xmlInvalidation{
+		ID: inv.ID, Status: inv.Status, CreateTime: inv.CreateTime.Format(time.RFC3339),
+	})
+}
+
+func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string) (*AWSResponse, error) {
+	goCtx := context.Background()
+	ids, _ := loadStringIndex(goCtx, p.state, cloudfrontNamespace, "cfinval_ids:"+ctx.AccountID+"/"+distID)
+
+	type invSummary struct {
+		ID         string `xml:"Id"`
+		Status     string `xml:"Status"`
+		CreateTime string `xml:"CreateTime"`
+	}
+	type xmlList struct {
+		XMLName     xml.Name     `xml:"InvalidationList"`
+		Items       []invSummary `xml:"Items>InvalidationSummary"`
+		Quantity    int          `xml:"Quantity"`
+		IsTruncated bool         `xml:"IsTruncated"`
+	}
+	var items []invSummary
+	for _, id := range ids {
+		data, err := p.state.Get(goCtx, cloudfrontNamespace, "cfinval:"+ctx.AccountID+"/"+distID+"/"+id)
+		if err != nil || data == nil {
+			continue
+		}
+		var inv CloudFrontInvalidation
+		if json.Unmarshal(data, &inv) == nil {
+			items = append(items, invSummary{ID: inv.ID, Status: inv.Status, CreateTime: inv.CreateTime.Format(time.RFC3339)})
+		}
+	}
+	return cloudfrontXMLResponse(http.StatusOK, xmlList{Items: items, Quantity: len(items)})
 }
 
 // --- Tagging ----------------------------------------------------------------

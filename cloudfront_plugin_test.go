@@ -311,3 +311,79 @@ func TestCloudFrontPlugin_GetDistributionConfig(t *testing.T) {
 		t.Errorf("want Id=%q, got %q", distID, result.ID)
 	}
 }
+
+func TestCloudFront_Invalidation_GetAndList(t *testing.T) {
+	p, ctx := setupCloudFrontPlugin(t)
+
+	// Create distribution.
+	resp, err := p.HandleRequest(ctx, cfRequest("POST", "/2020-05-31/distribution", nil, cfDistributionConfigXML))
+	if err != nil {
+		t.Fatalf("CreateDistribution: %v", err)
+	}
+	var createResp struct {
+		XMLName xml.Name `xml:"Distribution"`
+		ID      string   `xml:"Id"`
+	}
+	if err := xml.Unmarshal(resp.Body, &createResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	distID := createResp.ID
+
+	// Create invalidation.
+	invResp, err := p.HandleRequest(ctx, cfRequest("POST", "/2020-05-31/distribution/"+distID+"/invalidation", nil, ""))
+	if err != nil {
+		t.Fatalf("CreateInvalidation: %v", err)
+	}
+	if invResp.StatusCode != http.StatusCreated {
+		t.Fatalf("want 201, got %d", invResp.StatusCode)
+	}
+	var invResult struct {
+		XMLName xml.Name `xml:"Invalidation"`
+		ID      string   `xml:"Id"`
+		Status  string   `xml:"Status"`
+	}
+	if err := xml.Unmarshal(invResp.Body, &invResult); err != nil {
+		t.Fatalf("unmarshal invalidation: %v", err)
+	}
+	if invResult.Status != "Completed" {
+		t.Errorf("want Status=Completed, got %q", invResult.Status)
+	}
+	if !strings.HasPrefix(invResult.ID, "I") {
+		t.Errorf("invalidation ID should start with I, got %q", invResult.ID)
+	}
+
+	// GetInvalidation.
+	getResp, err := p.HandleRequest(ctx, cfRequest("GET", "/2020-05-31/distribution/"+distID+"/invalidation/"+invResult.ID, nil, ""))
+	if err != nil {
+		t.Fatalf("GetInvalidation: %v", err)
+	}
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GetInvalidation: want 200, got %d", getResp.StatusCode)
+	}
+	var getResult struct {
+		XMLName xml.Name `xml:"Invalidation"`
+		ID      string   `xml:"Id"`
+	}
+	if err := xml.Unmarshal(getResp.Body, &getResult); err != nil {
+		t.Fatalf("unmarshal GetInvalidation: %v", err)
+	}
+	if getResult.ID != invResult.ID {
+		t.Errorf("want ID=%q, got %q", invResult.ID, getResult.ID)
+	}
+
+	// ListInvalidations.
+	listResp, err := p.HandleRequest(ctx, cfRequest("GET", "/2020-05-31/distribution/"+distID+"/invalidation", nil, ""))
+	if err != nil {
+		t.Fatalf("ListInvalidations: %v", err)
+	}
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("ListInvalidations: want 200, got %d", listResp.StatusCode)
+	}
+	body := string(listResp.Body)
+	if !strings.Contains(body, invResult.ID) {
+		t.Errorf("ListInvalidations should contain invalidation ID %q", invResult.ID)
+	}
+	if !strings.Contains(body, "<Quantity>1</Quantity>") {
+		t.Errorf("ListInvalidations should have Quantity=1, body: %s", body)
+	}
+}

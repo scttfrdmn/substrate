@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -293,6 +295,18 @@ func (p *TimestreamPlugin) writeRecords(reqCtx *RequestContext, req *AWSRequest)
 	if _, err := p.loadTable(reqCtx.AccountID, reqCtx.Region, input.DatabaseName, input.TableName); err != nil {
 		return nil, err
 	}
+	// Store records for later query retrieval.
+	goCtx := context.Background()
+	recordsKey := timestreamRecordsKey(reqCtx.AccountID, reqCtx.Region, input.DatabaseName, input.TableName)
+	var existing []map[string]any
+	if data, err := p.state.Get(goCtx, timestreamNamespace, recordsKey); err == nil && data != nil {
+		_ = json.Unmarshal(data, &existing)
+	}
+	existing = append(existing, input.Records...)
+	if data, err := json.Marshal(existing); err == nil {
+		_ = p.state.Put(goCtx, timestreamNamespace, recordsKey, data)
+	}
+
 	n := int64(len(input.Records))
 	return timestreamJSONResponse(http.StatusOK, map[string]any{
 		"RecordsIngested": map[string]any{
@@ -316,13 +330,13 @@ func (p *TimestreamPlugin) describeEndpoints(reqCtx *RequestContext, _ *AWSReque
 	})
 }
 
-func (p *TimestreamPlugin) query(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		QueryString string `json:"QueryString"`
 	}
 	_ = json.Unmarshal(req.Body, &input)
 
-	result := p.lookupQueryResult(input.QueryString)
+	result := p.lookupQueryResult(input.QueryString, reqCtx.AccountID, reqCtx.Region)
 
 	rows := result.Rows
 	if rows == nil {
@@ -346,8 +360,10 @@ func (p *TimestreamPlugin) cancelQuery(_ *RequestContext, _ *AWSRequest) (*AWSRe
 }
 
 // lookupQueryResult returns the seeded result for the given query string,
-// falling back to the wildcard "*" seed, and finally an empty result.
-func (p *TimestreamPlugin) lookupQueryResult(qs string) TimestreamQueryResult {
+// falling back to the wildcard "*" seed, then to stored records from
+// WriteRecords if the query matches "SELECT * FROM db.table", and finally
+// an empty result.
+func (p *TimestreamPlugin) lookupQueryResult(qs, accountID, region string) TimestreamQueryResult {
 	goCtx := context.Background()
 	for _, key := range []string{qs, "*"} {
 		raw, err := p.state.Get(goCtx, timestreamCtrlNamespace, timestreamCtrlResultKey(key))
@@ -359,7 +375,86 @@ func (p *TimestreamPlugin) lookupQueryResult(qs string) TimestreamQueryResult {
 			return result
 		}
 	}
+
+	// Try to serve from stored records if query matches SELECT * FROM db.table.
+	if db, table, ok := parseTimestreamSelect(qs); ok {
+		recordsKey := timestreamRecordsKey(accountID, region, db, table)
+		raw, err := p.state.Get(goCtx, timestreamNamespace, recordsKey)
+		if err == nil && raw != nil {
+			return recordsToQueryResult(raw)
+		}
+	}
+
 	return TimestreamQueryResult{}
+}
+
+// parseTimestreamSelect extracts db and table from a simple SELECT * FROM db.table query.
+func parseTimestreamSelect(sql string) (db, table string, ok bool) {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	if !strings.HasPrefix(upper, "SELECT") {
+		return "", "", false
+	}
+	fromIdx := strings.Index(upper, "FROM")
+	if fromIdx < 0 {
+		return "", "", false
+	}
+	rest := strings.TrimSpace(sql[fromIdx+4:])
+	// Remove trailing WHERE/ORDER/LIMIT clauses.
+	for _, kw := range []string{" WHERE ", " ORDER ", " LIMIT ", " GROUP "} {
+		if idx := strings.Index(strings.ToUpper(rest), kw); idx >= 0 {
+			rest = rest[:idx]
+		}
+	}
+	rest = strings.TrimSpace(rest)
+	// Strip quotes.
+	rest = strings.ReplaceAll(rest, "\"", "")
+	// Split on dot.
+	parts := strings.SplitN(rest, ".", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// recordsToQueryResult converts stored WriteRecords data to a TimestreamQueryResult.
+func recordsToQueryResult(raw []byte) TimestreamQueryResult {
+	var records []map[string]any
+	if err := json.Unmarshal(raw, &records); err != nil || len(records) == 0 {
+		return TimestreamQueryResult{}
+	}
+
+	// Collect unique column names from all records.
+	colSet := make(map[string]bool)
+	for _, rec := range records {
+		for k := range rec {
+			colSet[k] = true
+		}
+	}
+	var colNames []string
+	for name := range colSet {
+		colNames = append(colNames, name)
+	}
+	sort.Strings(colNames)
+	sortedCols := make([]TimestreamColumnInfo, len(colNames))
+	for i, name := range colNames {
+		sortedCols[i] = TimestreamColumnInfo{Name: name, Type: TimestreamColumnInfoType{ScalarType: "VARCHAR"}}
+	}
+
+	// Build rows.
+	var rows []TimestreamRow
+	for _, rec := range records {
+		var data []TimestreamDatum
+		for _, name := range colNames {
+			val := ""
+			if v, ok := rec[name]; ok {
+				val = fmt.Sprintf("%v", v)
+			}
+			data = append(data, TimestreamDatum{ScalarValue: val})
+		}
+		rows = append(rows, TimestreamRow{Data: data})
+	}
+
+	return TimestreamQueryResult{Rows: rows, ColumnInfo: sortedCols}
 }
 
 // --- Load helpers ---

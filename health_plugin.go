@@ -10,10 +10,37 @@ import (
 // healthNamespace is the service name used by HealthPlugin.
 const healthNamespace = "health"
 
-// HealthPlugin provides a stub emulation of the AWS Health API.
-// All operations return valid empty responses satisfying the SDK shape.
-// No persistent state is required.
+// HealthEvent represents a seedable AWS Health event.
+type HealthEvent struct {
+	// Arn is the event ARN.
+	Arn string `json:"arn"`
+
+	// Service is the affected AWS service.
+	Service string `json:"service"`
+
+	// EventTypeCode identifies the event type.
+	EventTypeCode string `json:"eventTypeCode"`
+
+	// EventTypeCategory is "issue", "accountNotification", or "scheduledChange".
+	EventTypeCategory string `json:"eventTypeCategory"`
+
+	// Region is the affected region.
+	Region string `json:"region"`
+
+	// StatusCode is "open", "closed", or "upcoming".
+	StatusCode string `json:"statusCode"`
+
+	// StartTime is the event start as a Unix timestamp.
+	StartTime float64 `json:"startTime,omitempty"`
+
+	// Description is a human-readable description.
+	Description string `json:"description,omitempty"`
+}
+
+// HealthPlugin provides emulation of the AWS Health API with seedable events.
+// Events are seeded via the POST /v1/health/events control-plane endpoint.
 type HealthPlugin struct {
+	state  StateManager
 	logger Logger
 }
 
@@ -22,6 +49,7 @@ func (p *HealthPlugin) Name() string { return healthNamespace }
 
 // Initialize configures the HealthPlugin with the provided configuration.
 func (p *HealthPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
+	p.state = cfg.State
 	p.logger = cfg.Logger
 	return nil
 }
@@ -29,13 +57,13 @@ func (p *HealthPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 // Shutdown is a no-op for HealthPlugin.
 func (p *HealthPlugin) Shutdown(_ context.Context) error { return nil }
 
-// HandleRequest dispatches a Health JSON-target request to the appropriate stub handler.
+// HandleRequest dispatches a Health JSON-target request to the appropriate handler.
 func (p *HealthPlugin) HandleRequest(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	switch req.Operation {
 	case "DescribeEvents":
 		return p.describeEvents()
 	case "DescribeEventDetails":
-		return p.describeEventDetails()
+		return p.describeEventDetails(req)
 	case "DescribeAffectedEntities":
 		return p.describeAffectedEntities()
 	case "DescribeEventAggregates":
@@ -49,9 +77,28 @@ func (p *HealthPlugin) HandleRequest(_ *RequestContext, req *AWSRequest) (*AWSRe
 	}
 }
 
+func (p *HealthPlugin) loadEvents() []HealthEvent {
+	if p.state == nil {
+		return nil
+	}
+	data, err := p.state.Get(context.Background(), healthNamespace, "events")
+	if err != nil || data == nil {
+		return nil
+	}
+	var events []HealthEvent
+	if json.Unmarshal(data, &events) != nil {
+		return nil
+	}
+	return events
+}
+
 func (p *HealthPlugin) describeEvents() (*AWSResponse, error) {
+	events := p.loadEvents()
+	if events == nil {
+		events = []HealthEvent{}
+	}
 	out := map[string]interface{}{
-		"Events":    []interface{}{},
+		"Events":    events,
 		"NextToken": "",
 	}
 	body, err := json.Marshal(out)
@@ -61,9 +108,34 @@ func (p *HealthPlugin) describeEvents() (*AWSResponse, error) {
 	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
 }
 
-func (p *HealthPlugin) describeEventDetails() (*AWSResponse, error) {
+func (p *HealthPlugin) describeEventDetails(req *AWSRequest) (*AWSResponse, error) {
+	events := p.loadEvents()
+
+	// Parse requested ARNs from request body.
+	var input struct {
+		EventArns []string `json:"eventArns"`
+	}
+	_ = json.Unmarshal(req.Body, &input)
+
+	var successSet []map[string]interface{}
+	for _, ev := range events {
+		for _, arn := range input.EventArns {
+			if ev.Arn == arn {
+				successSet = append(successSet, map[string]interface{}{
+					"Event": ev,
+					"EventDescription": map[string]string{
+						"LatestDescription": ev.Description,
+					},
+				})
+			}
+		}
+	}
+	if successSet == nil {
+		successSet = []map[string]interface{}{}
+	}
+
 	out := map[string]interface{}{
-		"SuccessfulSet": []interface{}{},
+		"SuccessfulSet": successSet,
 		"FailedSet":     []interface{}{},
 	}
 	body, err := json.Marshal(out)
