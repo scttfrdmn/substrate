@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.65.0] - 2026-04-10
+
+### Added
+- **CLI enhancements (#295)**: Added 4 new subcommands to the `substrate` CLI. `substrate status` connects to a running server and displays version, plugin count, simulated time, request count, and total cost. `substrate inspect [service]` lists registered services or shows recent events for a specific service. `substrate pricing` manages pricing configuration with sub-subcommands `info` (show source/cache age), `refresh` (fetch from AWS), and `lookup --service=s3 --operation=PutObject` (price query). `substrate reset` resets all server state via `POST /v1/state/reset`. All subcommands accept `--address` flag (default `http://localhost:4566`). Closes #295.
+
 ## [v0.64.0] - 2026-04-10
 
 ### Added
@@ -1651,6 +1656,7 @@ all changes onto the v0.44.x line.
 [v0.56.0]: https://github.com/scttfrdmn/substrate/compare/v0.55.0...v0.56.0
 [v0.56.1]: https://github.com/scttfrdmn/substrate/compare/v0.56.0...v0.56.1
 [v0.57.0]: https://github.com/scttfrdmn/substrate/compare/v0.56.1...v0.57.0
+[v0.65.0]: https://github.com/scttfrdmn/substrate/compare/v0.64.0...v0.65.0
 [v0.64.0]: https://github.com/scttfrdmn/substrate/compare/v0.63.0...v0.64.0
 [v0.63.0]: https://github.com/scttfrdmn/substrate/compare/v0.62.0...v0.63.0
 [v0.62.0]: https://github.com/scttfrdmn/substrate/compare/v0.61.0...v0.62.0

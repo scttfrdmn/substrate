@@ -11,14 +11,22 @@
 //	debug         Inspect events in a recorded stream
 //	export        Export recorded events (NDJSON or CSV)
 //	validate-plan Validate a Terraform JSON plan
+//	status        Show server status and summary
+//	inspect       Show recent events for a service
+//	pricing       Manage pricing configuration
+//	reset         Reset server state
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,6 +68,10 @@ of CDK, CloudFormation, and Terraform infrastructure code.`,
 	root.AddCommand(newDebugCmd())
 	root.AddCommand(newExportCmd())
 	root.AddCommand(newValidatePlanCmd())
+	root.AddCommand(newStatusCmd())
+	root.AddCommand(newInspectCmd())
+	root.AddCommand(newPricingCmd())
+	root.AddCommand(newResetCmd())
 
 	return root
 }
@@ -454,5 +466,222 @@ Full interactive time-travel debugging will be available in a later release.`,
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to substrate.yaml config file")
 
+	return cmd
+}
+
+// --- HTTP client helpers for CLI subcommands ---
+
+func cliGet(address, path string) ([]byte, error) {
+	resp, err := http.Get(address + path) //nolint:gosec,noctx
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	return io.ReadAll(resp.Body)
+}
+
+func cliPost(address, path string, body []byte) ([]byte, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = strings.NewReader(string(body))
+	}
+	resp, err := http.Post(address+path, "application/json", bodyReader) //nolint:gosec,noctx
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	return io.ReadAll(resp.Body)
+}
+
+func newStatusCmd() *cobra.Command {
+	var address string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show server status and summary",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			healthData, err := cliGet(address, "/health")
+			if err != nil {
+				return fmt.Errorf("server unreachable at %s: %w", address, err)
+			}
+			var health map[string]interface{}
+			_ = json.Unmarshal(healthData, &health)
+
+			readyData, _ := cliGet(address, "/ready")
+			var ready map[string]interface{}
+			_ = json.Unmarshal(readyData, &ready)
+			pluginCount := 0
+			if plugins, ok := ready["plugins"].([]interface{}); ok {
+				pluginCount = len(plugins)
+			}
+
+			timeData, _ := cliGet(address, "/v1/control/time")
+			var timeInfo map[string]interface{}
+			_ = json.Unmarshal(timeData, &timeInfo)
+
+			costData, _ := cliGet(address, "/v1/debug/costs")
+			var costs map[string]interface{}
+			_ = json.Unmarshal(costData, &costs)
+
+			fmt.Printf("Server:     %s\n", address)
+			if v, ok := health["version"]; ok {
+				fmt.Printf("Version:    %v\n", v)
+			}
+			if s, ok := health["status"]; ok {
+				fmt.Printf("Status:     %v\n", s)
+			}
+			fmt.Printf("Plugins:    %d registered\n", pluginCount)
+			if t, ok := timeInfo["simulated_time"]; ok {
+				scale := timeInfo["scale"]
+				fmt.Printf("Sim. Time:  %v (scale: %vx)\n", t, scale)
+			}
+			if rc, ok := costs["RequestCount"]; ok {
+				fmt.Printf("Requests:   %.0f\n", rc)
+			}
+			if tc, ok := costs["TotalCost"]; ok {
+				fmt.Printf("Total Cost: $%.4f\n", tc)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&address, "address", "http://localhost:4566", "server address")
+	return cmd
+}
+
+func newInspectCmd() *cobra.Command {
+	var address string
+	cmd := &cobra.Command{
+		Use:   "inspect [service]",
+		Short: "Show recent events for a service, or list registered services",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				data, err := cliGet(address, "/ready")
+				if err != nil {
+					return err
+				}
+				var ready map[string]interface{}
+				_ = json.Unmarshal(data, &ready)
+				plugins, _ := ready["plugins"].([]interface{})
+				fmt.Println("Registered services:")
+				for _, p := range plugins {
+					fmt.Printf("  %v\n", p)
+				}
+				return nil
+			}
+			service := args[0]
+			data, err := cliGet(address, "/v1/debug/events?service="+service+"&limit=100")
+			if err != nil {
+				return err
+			}
+			var result struct {
+				Events []struct {
+					Sequence   int64   `json:"seq"`
+					Timestamp  string  `json:"timestamp"`
+					Operation  string  `json:"operation"`
+					StatusCode int     `json:"status_code"`
+					Cost       float64 `json:"cost"`
+					DurationMS int64   `json:"duration_ms"`
+					Error      string  `json:"error"`
+				} `json:"events"`
+				Count int `json:"count"`
+			}
+			_ = json.Unmarshal(data, &result)
+			fmt.Printf("Recent events for %s (%d):\n", service, result.Count)
+			for _, ev := range result.Events {
+				errStr := ""
+				if ev.Error != "" {
+					errStr = "  ERROR: " + ev.Error
+				}
+				fmt.Printf("  #%-4d %-25s %-30s %3d  $%.7f  %dms%s\n",
+					ev.Sequence, ev.Timestamp, ev.Operation,
+					ev.StatusCode, ev.Cost, ev.DurationMS, errStr)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&address, "address", "http://localhost:4566", "server address")
+	return cmd
+}
+
+func newPricingCmd() *cobra.Command {
+	var address string
+	cmd := &cobra.Command{
+		Use:   "pricing",
+		Short: "Manage pricing configuration",
+	}
+	cmd.PersistentFlags().StringVar(&address, "address", "http://localhost:4566", "server address")
+
+	infoCmd := &cobra.Command{
+		Use:   "info",
+		Short: "Show current pricing source and cache info",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			data, err := cliGet(address, "/v1/pricing")
+			if err != nil {
+				return err
+			}
+			var info map[string]interface{}
+			_ = json.Unmarshal(data, &info)
+			fmt.Printf("Source:    %v\n", info["source"])
+			fmt.Printf("Cache Age: %v\n", info["cacheAge"])
+			return nil
+		},
+	}
+
+	refreshCmd := &cobra.Command{
+		Use:   "refresh",
+		Short: "Fetch latest pricing data from AWS",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			data, err := cliPost(address, "/v1/pricing/refresh", nil)
+			if err != nil {
+				return err
+			}
+			var result map[string]interface{}
+			_ = json.Unmarshal(data, &result)
+			fmt.Printf("Pricing refreshed. Source: %v\n", result["source"])
+			return nil
+		},
+	}
+
+	var service, operation string
+	lookupCmd := &cobra.Command{
+		Use:   "lookup",
+		Short: "Look up price for a service/operation",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			path := fmt.Sprintf("/v1/pricing/lookup?service=%s&operation=%s", service, operation)
+			data, err := cliGet(address, path)
+			if err != nil {
+				return err
+			}
+			var result map[string]interface{}
+			_ = json.Unmarshal(data, &result)
+			fmt.Printf("Service:   %v\n", result["service"])
+			fmt.Printf("Operation: %v\n", result["operation"])
+			fmt.Printf("Price:     $%v\n", result["price"])
+			return nil
+		},
+	}
+	lookupCmd.Flags().StringVar(&service, "service", "", "AWS service name (required)")
+	lookupCmd.Flags().StringVar(&operation, "operation", "", "operation name")
+	_ = lookupCmd.MarkFlagRequired("service")
+
+	cmd.AddCommand(infoCmd, refreshCmd, lookupCmd)
+	return cmd
+}
+
+func newResetCmd() *cobra.Command {
+	var address string
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Reset server state",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			_, err := cliPost(address, "/v1/state/reset", nil)
+			if err != nil {
+				return err
+			}
+			fmt.Println("State reset successfully.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&address, "address", "http://localhost:4566", "server address")
 	return cmd
 }
