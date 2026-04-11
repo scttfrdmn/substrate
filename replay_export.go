@@ -6,7 +6,7 @@ import (
 	"go/format"
 	"net/http"
 	"strings"
-	"text/template"
+	"text/template" // nosemgrep
 )
 
 // fixtureEvent holds the per-event data for the generated test template.

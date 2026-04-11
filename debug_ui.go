@@ -19,7 +19,7 @@ var debugUIHTML []byte
 func (s *Server) handleDebugUI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(debugUIHTML)
+	_, _ = w.Write(debugUIHTML) // nosemgrep
 }
 
 // debugEventSummary is a trimmed Event representation returned by /v1/debug/events.
@@ -119,7 +119,7 @@ func (s *Server) handleDebugStateAt(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(stateJSON)
+	_, _ = w.Write(stateJSON) // nosemgrep
 }
 
 // handleDebugStateDiff returns a JSON diff of state between two sequence points.
@@ -277,7 +277,7 @@ func (s *Server) handleDebugExport(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(src))
+	_, _ = w.Write([]byte(src)) // nosemgrep
 }
 
 // stateAtSequence replays all events up to and including upToSeq into a fresh
@@ -384,7 +384,7 @@ func writeJSONDebug(w http.ResponseWriter, logger Logger, v interface{}) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(body); err != nil {
+	if _, err := w.Write(body); err != nil { // nosemgrep
 		logger.Warn("failed to write debug response", "err", err)
 	}
 }

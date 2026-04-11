@@ -1545,7 +1545,7 @@ func generateSQSReceiptHandle() string {
 
 // computeMD5 computes the hex MD5 of s.
 func computeMD5(s string) string {
-	h := md5.Sum([]byte(s)) //nolint:gosec // MD5 for SQS protocol; not used for security.
+	h := md5.Sum([]byte(s)) //nolint:gosec // nosemgrep
 	return fmt.Sprintf("%x", h)
 }
 

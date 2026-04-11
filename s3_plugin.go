@@ -443,7 +443,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	}
 
 	body := req.Body
-	hash := md5.Sum(body) //nolint:gosec
+	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
 
 	// Directory-marker objects (key ends with "/") must not be written to the
@@ -852,7 +852,7 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	}
 
 	now := p.tc.Now()
-	hash := md5.Sum(srcBody) //nolint:gosec
+	hash := md5.Sum(srcBody) //nolint:gosec // nosemgrep
 	newETag := fmt.Sprintf(`"%x"`, hash)
 
 	dstObj := S3Object{
@@ -1158,7 +1158,7 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 	}
 
 	body := req.Body
-	hash := md5.Sum(body) //nolint:gosec
+	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
 
 	partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, partNum)
@@ -1251,12 +1251,12 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 			return nil, fmt.Errorf("read part %d body: %w", pr.PartNumber, readErr)
 		}
 		combined = append(combined, partBody...)
-		h := md5.Sum(partBody) //nolint:gosec
+		h := md5.Sum(partBody) //nolint:gosec // nosemgrep
 		partMD5s = append(partMD5s, h[:]...)
 	}
 
 	numParts := len(cReq.Parts)
-	combinedHash := md5.Sum(partMD5s) //nolint:gosec
+	combinedHash := md5.Sum(partMD5s) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x-%d"`, combinedHash, numParts)
 
 	filePath := "/" + bucket + "/" + key

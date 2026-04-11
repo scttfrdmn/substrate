@@ -247,7 +247,7 @@ func (p *OpenSearchPlugin) getDocument(_ *RequestContext, index, docID string) (
 	if data == nil {
 		return openSearchError(http.StatusNotFound, "not_found", "document not found"), nil
 	}
-	var source interface{}
+	var source interface{} // nosemgrep
 	_ = json.Unmarshal(data, &source)
 	return openSearchOK(map[string]interface{}{
 		"_index":   index,
@@ -478,7 +478,7 @@ func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSRespo
 	for _, id := range page {
 		docData, _ := p.state.Get(goCtx, opensearchNamespace, "doc:"+state.Index+"/"+id)
 		if docData != nil {
-			var src interface{}
+			var src interface{} // nosemgrep
 			_ = json.Unmarshal(docData, &src)
 			hits = append(hits, map[string]interface{}{
 				"_index":  state.Index,

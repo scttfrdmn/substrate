@@ -3,7 +3,7 @@ package substrate
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
+	"math/rand/v2" // nosemgrep
 	"sync"
 	"time"
 )

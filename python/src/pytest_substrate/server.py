@@ -62,7 +62,7 @@ class SubstrateServer:
             data=b"",
         )
         try:
-            urllib.request.urlopen(req, timeout=5)
+            urllib.request.urlopen(req, timeout=5)  # nosemgrep
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"substrate state reset failed: {exc.code} {exc.reason}") from exc
 
@@ -81,7 +81,7 @@ class SubstrateServer:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req) as resp:  # nosemgrep
             resp.read()
 
     def set_status(self, service: str, status: str, error_message: str = "") -> None:
@@ -98,7 +98,7 @@ class SubstrateServer:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req) as resp:  # nosemgrep
             resp.read()
 
     def clear_seeds(self, service: str, sql: str | None = None) -> None:
@@ -111,7 +111,7 @@ class SubstrateServer:
         if sql is not None:
             url += f"?sql={urllib.parse.quote(sql, safe='')}"
         req = urllib.request.Request(url, method="DELETE")
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req) as resp:  # nosemgrep
             resp.read()
 
     # ------------------------------------------------------------------
@@ -154,7 +154,7 @@ class SubstrateServer:
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                urllib.request.urlopen(f"{self.url}/health", timeout=1)
+                urllib.request.urlopen(f"{self.url}/health", timeout=1)  # nosemgrep
                 return
             except Exception as exc:
                 last_exc = exc

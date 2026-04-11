@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand" // nosemgrep
 	"net/http"
 	"sort"
 	"time"

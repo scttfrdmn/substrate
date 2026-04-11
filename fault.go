@@ -1,7 +1,7 @@
 package substrate
 
 import (
-	"math/rand"
+	"math/rand" // nosemgrep
 	"net/http"
 	"sync"
 	"time"

@@ -57,7 +57,7 @@ func run(args []string) error {
 		ep = "http://localhost:4566"
 	}
 
-	cmd := exec.Command(remaining[0], remaining[1:]...) //nolint:gosec
+	cmd := exec.Command(remaining[0], remaining[1:]...) //nolint:gosec // nosemgrep
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

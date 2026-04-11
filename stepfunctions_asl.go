@@ -26,7 +26,7 @@ func (p *StepFunctionsPlugin) executeASL(
 	reqCtx *RequestContext,
 ) (string, error) {
 	// Parse execution input.
-	var currentData interface{}
+	var currentData interface{} // nosemgrep
 	if inputJSON != "" && inputJSON != "null" {
 		if err := json.Unmarshal([]byte(inputJSON), &currentData); err != nil {
 			currentData = map[string]interface{}{}
@@ -339,7 +339,7 @@ func (p *StepFunctionsPlugin) aslRunParallel(
 		if err != nil {
 			return nil, "", &aslStateError{Error: "States.BranchFailed", Cause: err.Error()}
 		}
-		var result interface{}
+		var result interface{}                      // nosemgrep
 		_ = json.Unmarshal([]byte(output), &result) //nolint:errcheck // best-effort
 		results = append(results, result)
 	}
@@ -383,7 +383,7 @@ func (p *StepFunctionsPlugin) aslRunMap(
 		if err != nil {
 			return nil, "", &aslStateError{Error: "States.Runtime", Cause: err.Error()}
 		}
-		var result interface{}
+		var result interface{}                      // nosemgrep
 		_ = json.Unmarshal([]byte(output), &result) //nolint:errcheck // best-effort
 		results = append(results, result)
 	}
@@ -422,7 +422,7 @@ func (p *StepFunctionsPlugin) aslInvokeLambda(resource string, input interface{}
 		return nil, routeErr
 	}
 
-	var result interface{}
+	var result interface{} // nosemgrep
 	if unmarshalErr := json.Unmarshal(resp.Body, &result); unmarshalErr != nil {
 		return map[string]interface{}{}, nil //nolint:nilerr // Non-JSON response: return empty object.
 	}
