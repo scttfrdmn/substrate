@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Module tag integrity advisory (#296)**: Documented that tags **v0.45.1** and
+  **v0.45.2** are poisoned — both were re-cut after publication, so their current
+  GitHub content no longer matches the hash recorded in Go's immutable checksum
+  database (`sum.golang.org`), breaking `go.sum` verification for every consumer.
+  Verified the blast radius is limited to these two tags (v0.45.0 and v0.45.3+
+  are clean). Consumers must upgrade to v0.45.3 or later and regenerate `go.sum`.
+  The tags will not be re-cut. See `SECURITY.md` for full details and hashes.
+  Added the release-process rule that published tags are never moved (a release
+  mistake is fixed by a new patch version). Closes #296.
+
 ## [v0.65.0] - 2026-04-10
 
 ### Added

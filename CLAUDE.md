@@ -40,6 +40,11 @@ Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections.
 1. Move `## [Unreleased]` entries to a new `## [vX.Y.Z] - YYYY-MM-DD` section.
 2. Add the comparison link at the bottom of `CHANGELOG.md`.
 3. Tag: `git tag -s vX.Y.Z -m "vX.Y.Z"` then `git push origin vX.Y.Z`.
+   **Never move or re-cut a published tag.** Go's checksum database
+   (`sum.golang.org`) permanently records a tag's hash on first fetch; moving the
+   tag changes the content but not the recorded hash, which breaks `go.sum`
+   verification for every consumer (see `SECURITY.md`, #296). Fix any release
+   mistake by cutting a new patch version, never by re-tagging.
 4. Close the issues the release resolves. A `(#N)` reference in a commit or PR
    **title** only links — it does not auto-close. Use a `Closes #N` / `Fixes #N`
    keyword in the PR **body** (or the merged commit message body), or close the
