@@ -40,6 +40,13 @@ Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections.
 1. Move `## [Unreleased]` entries to a new `## [vX.Y.Z] - YYYY-MM-DD` section.
 2. Add the comparison link at the bottom of `CHANGELOG.md`.
 3. Tag: `git tag -s vX.Y.Z -m "vX.Y.Z"` then `git push origin vX.Y.Z`.
+4. Close the issues the release resolves. A `(#N)` reference in a commit or PR
+   **title** only links — it does not auto-close. Use a `Closes #N` / `Fixes #N`
+   keyword in the PR **body** (or the merged commit message body), or close the
+   issue manually. Only close an issue when every acceptance-criteria checkbox
+   is met; if a release ships part of an issue, comment with what shipped vs.
+   what remains and leave it open.
+5. Close the release's milestone once all its issues are closed.
 
 ## AWS service emulation
 
