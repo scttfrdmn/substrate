@@ -231,11 +231,29 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	keyName := req.Params["KeyName"]
+	iamInstanceProfile := req.Params["IamInstanceProfile.Name"]
+	if iamInstanceProfile == "" {
+		iamInstanceProfile = req.Params["IamInstanceProfile.Arn"]
+	}
+	userData := req.Params["UserData"]
+
 	subnetID := req.Params["SubnetId"]
 	sgID := req.Params["SecurityGroupId.1"]
 	if sgID == "" {
 		sgID = req.Params["SecurityGroupIds.1"]
 	}
+
+	// Networking can be specified either at the top level (above) or nested in a
+	// NetworkInterface spec (NetworkInterface.1.*). The AWS SDK puts SubnetId,
+	// security groups, and AssociatePublicIpAddress inside the network interface
+	// whenever a public-IP preference is set — which spawn always does. Fall back
+	// to the nested form so that subnet/SG/public-IP aren't silently dropped.
+	if subnetID == "" {
+		subnetID = req.Params["NetworkInterface.1.SubnetId"]
+	}
+	// AssociatePublicIpAddress=true forces a public IP even on a non-default
+	// subnet; "" means "use the subnet default".
+	associatePublicIP := strings.EqualFold(req.Params["NetworkInterface.1.AssociatePublicIpAddress"], "true")
 
 	// Resolve launch template parameters when no ImageId is provided directly.
 	if imageID == "" {
@@ -277,7 +295,8 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
-	// Collect all specified security group IDs.
+	// Collect all specified security group IDs, from top-level params or the
+	// nested NetworkInterface.1.* form (SecurityGroupId.M or Groups.M).
 	var securityGroupIDs []string
 	for n := 1; ; n++ {
 		id := req.Params[fmt.Sprintf("SecurityGroupId.%d", n)]
@@ -288,6 +307,18 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			break
 		}
 		securityGroupIDs = append(securityGroupIDs, id)
+	}
+	if len(securityGroupIDs) == 0 {
+		for n := 1; ; n++ {
+			id := req.Params[fmt.Sprintf("NetworkInterface.1.SecurityGroupId.%d", n)]
+			if id == "" {
+				id = req.Params[fmt.Sprintf("NetworkInterface.1.Groups.%d", n)]
+			}
+			if id == "" {
+				break
+			}
+			securityGroupIDs = append(securityGroupIDs, id)
+		}
 	}
 	if len(securityGroupIDs) == 0 && sgID != "" {
 		securityGroupIDs = []string{sgID}
@@ -355,19 +386,21 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 
 	for i := 0; i < maxCount; i++ {
 		inst := EC2Instance{
-			InstanceID:       generateEC2InstanceID(),
-			ReservationID:    reservationID,
-			ImageID:          imageID,
-			InstanceType:     instanceType,
-			State:            EC2InstanceState{Code: 16, Name: "running"},
-			SubnetID:         subnetID,
-			PrivateIPAddress: fmt.Sprintf("172.31.%d.%d", i+1, i+10),
-			SecurityGroupIDs: filterEmpty(securityGroupIDs),
-			LaunchTime:       now,
-			AccountID:        reqCtx.AccountID,
-			Region:           reqCtx.Region,
-			KeyName:          keyName,
-			Tags:             launchTags,
+			InstanceID:         generateEC2InstanceID(),
+			ReservationID:      reservationID,
+			ImageID:            imageID,
+			InstanceType:       instanceType,
+			State:              EC2InstanceState{Code: 16, Name: "running"},
+			SubnetID:           subnetID,
+			PrivateIPAddress:   fmt.Sprintf("172.31.%d.%d", i+1, i+10),
+			SecurityGroupIDs:   filterEmpty(securityGroupIDs),
+			LaunchTime:         now,
+			AccountID:          reqCtx.AccountID,
+			Region:             reqCtx.Region,
+			KeyName:            keyName,
+			IamInstanceProfile: iamInstanceProfile,
+			UserData:           userData,
+			Tags:               launchTags,
 		}
 
 		// Look up VPCID from subnet and decide whether to assign a public IP.
@@ -378,8 +411,10 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 				inst.VPCID = subnet.VPCID
 				// Always set private DNS name.
 				inst.PrivateDNSName = ec2PrivateDNSName(inst.PrivateIPAddress, reqCtx.Region)
-				// Assign public IP for default subnets or subnets with MapPublicIPOnLaunch.
-				if subnet.IsDefault || subnet.MapPublicIPOnLaunch {
+				// Assign public IP for default subnets, subnets with
+				// MapPublicIPOnLaunch, or when the launch explicitly requested
+				// AssociatePublicIpAddress=true (the spawn #308 behavior).
+				if subnet.IsDefault || subnet.MapPublicIPOnLaunch || associatePublicIP {
 					inst.PublicIPAddress = generatePublicIP(inst.InstanceID)
 					inst.PublicDNSName = ec2PublicDNSName(inst.PublicIPAddress, reqCtx.Region)
 				}
