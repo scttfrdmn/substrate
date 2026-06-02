@@ -247,6 +247,11 @@ func (p *SNSPlugin) createTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		AccountID: ctx.AccountID,
 		Region:    ctx.Region,
 	}
+	// CreateTopic accepts initial attributes in real AWS; persist DisplayName so
+	// it round-trips and is drift-checkable.
+	if dn := req.Params["DisplayName"]; dn != "" {
+		topic.Attributes = map[string]string{"DisplayName": dn}
+	}
 	if err := p.saveTopic(goCtx, topic); err != nil {
 		return nil, fmt.Errorf("sns createTopic saveTopic: %w", err)
 	}

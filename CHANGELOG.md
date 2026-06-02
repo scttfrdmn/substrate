@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CloudFormation drift detection — property-level `MODIFIED` for all
+  drift-checkable types (#290)**: Extended `cfnDriftComparators` with comparators
+  for DynamoDB (`BillingMode`, `ProvisionedThroughput` read/write capacity),
+  Lambda (`Runtime`, `Handler`, `Timeout`, `MemorySize`), IAM Role
+  (`AssumeRolePolicyDocument` via the new order-insensitive `policyDocumentsEqual`
+  helper, plus `Description`/`Path`), SQS (queue attributes —
+  `VisibilityTimeout`, `MessageRetentionPeriod`, `DelaySeconds`,
+  `ReceiveMessageWaitTimeSeconds`, `MaximumMessageSize`), and SNS (`DisplayName`).
+  To make SQS/SNS comparable, `deploySQSQueue` and `deploySNSTopic` now forward
+  declared properties, and SNS `CreateTopic` persists an initial `DisplayName`.
+  Comparison is **template-declared-only**: a property is checked solely when the
+  template explicitly declares it, so deploy-applied defaults never produce false
+  drift (the S3 versioning comparator was aligned to the same rule). This
+  completes #290. Also fixed latent state-key bugs in the existing SQS, SNS, and
+  Lambda existence drift-checkers (spurious region component / ARN-vs-name) and a
+  pre-existing bug where `deployLambdaFunction` sent `Timeout`/`MemorySize` as
+  strings, causing `CreateFunction` to reject the request. Closes #290.
 - **CloudFormation drift detection — MODIFIED + describe operations (#290)**:
   `DetectStackDrift` now reports `MODIFIED` (in addition to `IN_SYNC`/`DELETED`/
   `NOT_CHECKED`) via a new `cfnDriftComparators` map that performs property-level
@@ -24,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DETECTION_IN_PROGRESS → DETECTION_COMPLETE` lifecycle, with the in-progress
   record persisted before synchronous detection runs). New types
   `CFNPropertyDiff` and `CFNDriftDetectionStatus`; `CFNResourceDriftEntry` gained
-  `PropertyDifferences`. Partially addresses #290 (property-level `MODIFIED`
-  remains existence-only for non-S3-versioning resource types; #290 stays open).
+  `PropertyDifferences`. (Broadened to all drift-checkable types in the entry
+  above.)
 - **VPC route table completion (#293)**: Added `ReplaceRoute` (repoints an
   existing route's target; returns `InvalidRoute.NotFound` for an unknown
   destination) and `ReplaceRouteTableAssociation` (repoints a subnet association
