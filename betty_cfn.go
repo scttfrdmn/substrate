@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -948,16 +949,19 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 		data, _ := d.state.Get(ctx, "dynamodb", "table:"+acct+"/"+physicalID)
 		return data != nil
 	},
-	"AWS::SQS::Queue": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
-		data, _ := d.state.Get(ctx, "sqs", "queue:"+acct+"/"+region+"/"+physicalID)
+	"AWS::SQS::Queue": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
+		// SQS state key is account/queue-name (no region component).
+		data, _ := d.state.Get(ctx, "sqs", "queue:"+acct+"/"+physicalID)
 		return data != nil
 	},
 	"AWS::SNS::Topic": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
-		data, _ := d.state.Get(ctx, "sns", "topic:"+acct+"/"+region+"/"+physicalID)
+		// PhysicalID is the topic ARN; the SNS state key is name-based.
+		data, _ := d.state.Get(ctx, "sns", "topic:"+acct+"/"+region+"/"+snsTopicNameFromPhysicalID(physicalID))
 		return data != nil
 	},
-	"AWS::Lambda::Function": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
-		data, _ := d.state.Get(ctx, "lambda", "function:"+acct+"/"+region+"/"+physicalID)
+	"AWS::Lambda::Function": func(d *StackDeployer, ctx context.Context, _, _, physicalID string) bool {
+		// Lambda state key is the bare function name (no account/region).
+		data, _ := d.state.Get(ctx, "lambda", "function:"+physicalID)
 		return data != nil
 	},
 	"AWS::IAM::Role": func(d *StackDeployer, ctx context.Context, _, _, physicalID string) bool {
@@ -979,52 +983,277 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 // paths do not store template-comparable properties. New comparators can be
 // added here as the underlying plugins persist more properties.
 var cfnDriftComparators = map[string]func(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff{
-	"AWS::S3::Bucket": compareS3BucketDrift,
+	"AWS::S3::Bucket":       compareS3BucketDrift,
+	"AWS::DynamoDB::Table":  compareDynamoDBTableDrift,
+	"AWS::Lambda::Function": compareLambdaFunctionDrift,
+	"AWS::IAM::Role":        compareIAMRoleDrift,
+	"AWS::SQS::Queue":       compareSQSQueueDrift,
+	"AWS::SNS::Topic":       compareSNSTopicDrift,
+}
+
+// cfnDriftResourceProps re-parses the stack template and returns the declared
+// Properties map plus a resolution context for the given deployed resource.
+// It returns (nil, nil, false) when the template cannot be parsed or the
+// resource is absent, so callers can simply skip drift comparison.
+func cfnDriftResourceProps(stack *CFNStackState, dr DeployedResource) (map[string]interface{}, *cfnContext, bool) {
+	tmpl, err := parseCFNTemplate(stack.TemplateBody)
+	if err != nil {
+		return nil, nil, false
+	}
+	res, ok := tmpl.Resources[dr.LogicalID]
+	if !ok {
+		return nil, nil, false
+	}
+	cctx := buildCFNContext(tmpl, stack.Parameters, defaultRegion, testAccountID, stack.StackName)
+	evaluateConditions(tmpl, cctx)
+	return res.Properties, cctx, true
+}
+
+// driftDiff builds a NOT_EQUAL property difference for a property the template
+// explicitly declares whose live value diverges from the expected value.
+func driftDiff(path, expected, actual string) CFNPropertyDiff {
+	return CFNPropertyDiff{
+		PropertyPath:   path,
+		ExpectedValue:  expected,
+		ActualValue:    actual,
+		DifferenceType: "NOT_EQUAL",
+	}
 }
 
 // compareS3BucketDrift compares a deployed S3 bucket's VersioningConfiguration
 // against its live state, reporting a property difference if they diverge.
 func compareS3BucketDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	// Derive the expected versioning status from the template definition,
-	// resolving any intrinsics/params exactly as at deploy time.
-	tmpl, err := parseCFNTemplate(stack.TemplateBody)
-	if err != nil {
-		return nil
-	}
-	res, ok := tmpl.Resources[dr.LogicalID]
+	props, cctx, ok := cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
-	cctx := buildCFNContext(tmpl, stack.Parameters, defaultRegion, testAccountID, stack.StackName)
-	evaluateConditions(tmpl, cctx)
-
-	expected := ""
-	if vc, ok := res.Properties["VersioningConfiguration"].(map[string]interface{}); ok {
-		expected = resolveValue(vc["Status"], cctx)
+	// Template-declared-only: compare versioning solely when the template
+	// declares VersioningConfiguration.
+	vc, ok := props["VersioningConfiguration"].(map[string]interface{})
+	if !ok {
+		return nil
 	}
+	expected := resolveValue(vc["Status"], cctx)
 
 	// Actual versioning status is stored verbatim under bucket_versioning:{name}.
 	actual := ""
 	if data, _ := d.state.Get(ctx, "s3", "bucket_versioning:"+dr.PhysicalID); data != nil {
 		actual = string(data)
 	}
-
 	if expected == actual {
 		return nil
 	}
-	diffType := "NOT_EQUAL"
-	switch {
-	case expected == "":
-		diffType = "ADD" // present live, absent in template
-	case actual == "":
-		diffType = "REMOVE" // defined in template, absent live
+	return []CFNPropertyDiff{driftDiff("/VersioningConfiguration/Status", expected, actual)}
+}
+
+// compareDynamoDBTableDrift compares a deployed DynamoDB table's declared
+// BillingMode and provisioned throughput against live state.
+func compareDynamoDBTableDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
+	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	if !ok {
+		return nil
 	}
-	return []CFNPropertyDiff{{
-		PropertyPath:   "/VersioningConfiguration/Status",
-		ExpectedValue:  expected,
-		ActualValue:    actual,
-		DifferenceType: diffType,
-	}}
+	data, _ := d.state.Get(ctx, "dynamodb", "table:"+testAccountID+"/"+dr.PhysicalID)
+	if data == nil {
+		return nil
+	}
+	var tbl DynamoDBTable
+	if json.Unmarshal(data, &tbl) != nil {
+		return nil
+	}
+
+	var diffs []CFNPropertyDiff
+	if _, declared := props["BillingMode"]; declared {
+		expected := resolveStringProp(props, "BillingMode", "", cctx)
+		if expected != "" && expected != tbl.BillingModeSummary.BillingMode {
+			diffs = append(diffs, driftDiff("/BillingMode", expected, tbl.BillingModeSummary.BillingMode))
+		}
+	}
+	if pt, declared := props["ProvisionedThroughput"].(map[string]interface{}); declared {
+		if expRead := resolveValue(pt["ReadCapacityUnits"], cctx); expRead != "" {
+			actRead := strconv.FormatInt(tbl.ProvisionedThroughput.ReadCapacityUnits, 10)
+			if expRead != actRead {
+				diffs = append(diffs, driftDiff("/ProvisionedThroughput/ReadCapacityUnits", expRead, actRead))
+			}
+		}
+		if expWrite := resolveValue(pt["WriteCapacityUnits"], cctx); expWrite != "" {
+			actWrite := strconv.FormatInt(tbl.ProvisionedThroughput.WriteCapacityUnits, 10)
+			if expWrite != actWrite {
+				diffs = append(diffs, driftDiff("/ProvisionedThroughput/WriteCapacityUnits", expWrite, actWrite))
+			}
+		}
+	}
+	return diffs
+}
+
+// compareLambdaFunctionDrift compares a deployed Lambda function's declared
+// configuration properties against live state.
+func compareLambdaFunctionDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
+	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	if !ok {
+		return nil
+	}
+	data, _ := d.state.Get(ctx, "lambda", "function:"+dr.PhysicalID)
+	if data == nil {
+		return nil
+	}
+	var fn LambdaFunction
+	if json.Unmarshal(data, &fn) != nil {
+		return nil
+	}
+
+	var diffs []CFNPropertyDiff
+	if _, declared := props["Runtime"]; declared {
+		if exp := resolveStringProp(props, "Runtime", "", cctx); exp != "" && exp != fn.Runtime {
+			diffs = append(diffs, driftDiff("/Runtime", exp, fn.Runtime))
+		}
+	}
+	if _, declared := props["Handler"]; declared {
+		if exp := resolveStringProp(props, "Handler", "", cctx); exp != "" && exp != fn.Handler {
+			diffs = append(diffs, driftDiff("/Handler", exp, fn.Handler))
+		}
+	}
+	if _, declared := props["Timeout"]; declared {
+		if exp := resolveValue(props["Timeout"], cctx); exp != "" {
+			if act := strconv.Itoa(fn.Timeout); exp != act {
+				diffs = append(diffs, driftDiff("/Timeout", exp, act))
+			}
+		}
+	}
+	if _, declared := props["MemorySize"]; declared {
+		if exp := resolveValue(props["MemorySize"], cctx); exp != "" {
+			if act := strconv.Itoa(fn.MemorySize); exp != act {
+				diffs = append(diffs, driftDiff("/MemorySize", exp, act))
+			}
+		}
+	}
+	return diffs
+}
+
+// compareIAMRoleDrift compares a deployed IAM role's declared Description, Path,
+// and AssumeRolePolicyDocument against live state. The trust policy is compared
+// order-independently via policyDocumentsEqual.
+func compareIAMRoleDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
+	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	if !ok {
+		return nil
+	}
+	data, _ := d.state.Get(ctx, "iam", "role:"+dr.PhysicalID)
+	if data == nil {
+		return nil
+	}
+	var role IAMRole
+	if json.Unmarshal(data, &role) != nil {
+		return nil
+	}
+
+	var diffs []CFNPropertyDiff
+	if _, declared := props["Description"]; declared {
+		if exp := resolveStringProp(props, "Description", "", cctx); exp != role.Description {
+			diffs = append(diffs, driftDiff("/Description", exp, role.Description))
+		}
+	}
+	if _, declared := props["Path"]; declared {
+		if exp := resolveStringProp(props, "Path", "", cctx); exp != "" && exp != role.Path {
+			diffs = append(diffs, driftDiff("/Path", exp, role.Path))
+		}
+	}
+	if raw, declared := props["AssumeRolePolicyDocument"]; declared {
+		var expected PolicyDocument
+		// The template value is a JSON object (or string); unmarshal it the same
+		// way the IAM CreateRole handler stores the live document.
+		if err := json.Unmarshal([]byte(marshalToJSON(raw)), &expected); err == nil {
+			if !policyDocumentsEqual(expected, role.AssumeRolePolicyDocument) {
+				diffs = append(diffs, driftDiff(
+					"/AssumeRolePolicyDocument",
+					marshalToJSON(expected),
+					marshalToJSON(role.AssumeRolePolicyDocument),
+				))
+			}
+		}
+	}
+	return diffs
+}
+
+// sqsDriftAttributes are the SQS queue CloudFormation properties whose names map
+// 1:1 to SQS queue attributes; deploySQSQueue forwards declared ones and
+// compareSQSQueueDrift checks them.
+var sqsDriftAttributes = []string{
+	"VisibilityTimeout",
+	"MessageRetentionPeriod",
+	"DelaySeconds",
+	"ReceiveMessageWaitTimeSeconds",
+	"MaximumMessageSize",
+}
+
+// compareSQSQueueDrift compares a deployed SQS queue's declared attribute
+// properties against the live queue attributes.
+func compareSQSQueueDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
+	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	if !ok {
+		return nil
+	}
+	data, _ := d.state.Get(ctx, "sqs", "queue:"+testAccountID+"/"+dr.PhysicalID)
+	if data == nil {
+		return nil
+	}
+	var q SQSQueue
+	if json.Unmarshal(data, &q) != nil {
+		return nil
+	}
+
+	var diffs []CFNPropertyDiff
+	for _, name := range sqsDriftAttributes {
+		if _, declared := props[name]; !declared {
+			continue
+		}
+		exp := resolveValue(props[name], cctx)
+		if exp == "" {
+			continue
+		}
+		if act := q.Attributes[name]; exp != act {
+			diffs = append(diffs, driftDiff("/"+name, exp, act))
+		}
+	}
+	return diffs
+}
+
+// snsTopicNameFromPhysicalID returns the topic name from an SNS topic physical
+// ID, which is the topic ARN (arn:aws:sns:{region}:{acct}:{name}). A bare name
+// is returned unchanged.
+func snsTopicNameFromPhysicalID(physicalID string) string {
+	if idx := strings.LastIndexByte(physicalID, ':'); idx >= 0 {
+		return physicalID[idx+1:]
+	}
+	return physicalID
+}
+
+// compareSNSTopicDrift compares a deployed SNS topic's declared DisplayName
+// against live state.
+func compareSNSTopicDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
+	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	if !ok {
+		return nil
+	}
+	if _, declared := props["DisplayName"]; !declared {
+		return nil
+	}
+	name := snsTopicNameFromPhysicalID(dr.PhysicalID)
+	data, _ := d.state.Get(ctx, "sns", "topic:"+testAccountID+"/"+defaultRegion+"/"+name)
+	if data == nil {
+		return nil
+	}
+	var topic SNSTopic
+	if json.Unmarshal(data, &topic) != nil {
+		return nil
+	}
+
+	exp := resolveValue(props["DisplayName"], cctx)
+	act := topic.Attributes["DisplayName"]
+	if exp == act {
+		return nil
+	}
+	return []CFNPropertyDiff{driftDiff("/DisplayName", exp, act)}
 }
 
 // deployResource dispatches a single CFN resource to the correct deploy helper.
@@ -1435,11 +1664,18 @@ func (d *StackDeployer) deployLambdaFunction(
 		"Handler":      resolveStringProp(props, "Handler", "index.handler", cctx),
 		"Description":  resolveStringProp(props, "Description", "", cctx),
 	}
+	// Timeout and MemorySize are numeric in the Lambda API; convert the resolved
+	// string so the JSON body unmarshals into the int fields (CreateFunction
+	// rejects string values otherwise).
 	if timeout := resolveStringProp(props, "Timeout", "", cctx); timeout != "" {
-		body["Timeout"] = timeout
+		if n, convErr := strconv.Atoi(timeout); convErr == nil {
+			body["Timeout"] = n
+		}
 	}
 	if memory := resolveStringProp(props, "MemorySize", "", cctx); memory != "" {
-		body["MemorySize"] = memory
+		if n, convErr := strconv.Atoi(memory); convErr == nil {
+			body["MemorySize"] = n
+		}
 	}
 
 	bodyBytes, err := json.Marshal(body)
@@ -1487,15 +1723,30 @@ func (d *StackDeployer) deploySQSQueue(
 ) (DeployedResource, float64, error) {
 	queueName := resolveStringProp(props, "QueueName", logicalID, cctx)
 
+	params := map[string]string{
+		"Action":    "CreateQueue",
+		"QueueName": queueName,
+	}
+	// Forward declared queue attributes so they round-trip into SQSQueue.Attributes
+	// (CreateQueue persists them via parseSQSAttributes) and become drift-checkable.
+	attrIdx := 0
+	for _, name := range sqsDriftAttributes {
+		if _, declared := props[name]; !declared {
+			continue
+		}
+		if v := resolveValue(props[name], cctx); v != "" {
+			attrIdx++
+			params[fmt.Sprintf("Attribute.%d.Name", attrIdx)] = name
+			params[fmt.Sprintf("Attribute.%d.Value", attrIdx)] = v
+		}
+	}
+
 	req := &AWSRequest{
 		Service:   "sqs",
 		Operation: "CreateQueue",
 		Body:      nil,
 		Headers:   map[string]string{},
-		Params: map[string]string{
-			"Action":    "CreateQueue",
-			"QueueName": queueName,
-		},
+		Params:    params,
 	}
 
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
@@ -2250,17 +2501,26 @@ func (d *StackDeployer) deploySNSTopic(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	topicName := resolveStringProp(props, "TopicName", logicalID, cctx)
+	params := map[string]string{
+		"Action": "CreateTopic",
+		"Name":   topicName,
+	}
+	// Forward DisplayName when declared so it round-trips and is drift-checkable.
+	if _, declared := props["DisplayName"]; declared {
+		if dn := resolveValue(props["DisplayName"], cctx); dn != "" {
+			params["DisplayName"] = dn
+		}
+	}
 	req := &AWSRequest{
 		Service:   "sns",
 		Operation: "CreateTopic",
 		Body:      nil,
 		Headers:   map[string]string{},
-		Params: map[string]string{
-			"Action": "CreateTopic",
-			"Name":   topicName,
-		},
+		Params:    params,
 	}
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+	// PhysicalID is the topic ARN (CloudFormation Ref on an SNS topic returns its
+	// ARN); the drift checker/comparator derive the topic name from it.
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::SNS::Topic", PhysicalID: topicName}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()

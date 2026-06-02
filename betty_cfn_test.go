@@ -2176,6 +2176,24 @@ func newTestDeployerWithState(t *testing.T) (*substrate.StackDeployer, *substrat
 	}))
 	registry.Register(snsPlugin)
 
+	dynamoPlugin := &substrate.DynamoDBPlugin{}
+	require.NoError(t, dynamoPlugin.Initialize(context.Background(), substrate.PluginConfig{
+		State: state, Logger: logger, Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(dynamoPlugin)
+
+	lambdaPlugin := &substrate.LambdaPlugin{}
+	require.NoError(t, lambdaPlugin.Initialize(context.Background(), substrate.PluginConfig{
+		State: state, Logger: logger, Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(lambdaPlugin)
+
+	sqsPlugin := &substrate.SQSPlugin{}
+	require.NoError(t, sqsPlugin.Initialize(context.Background(), substrate.PluginConfig{
+		State: state, Logger: logger, Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(sqsPlugin)
+
 	return substrate.NewStackDeployer(registry, store, state, tc, logger, costs), state
 }
 
@@ -2415,4 +2433,254 @@ func TestCFN_StartStackDriftDetection_UnknownStack(t *testing.T) {
 	d, _ := newTestDeployerWithState(t)
 	_, err := d.StartStackDriftDetection(context.Background(), "no-such-stack")
 	require.Error(t, err)
+}
+
+// TestCFN_DriftDetection_DynamoDB_Modified verifies MODIFIED drift on a DynamoDB
+// table's provisioned throughput changed outside CloudFormation.
+func TestCFN_DriftDetection_DynamoDB_Modified(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"T": {"Type": "AWS::DynamoDB::Table", "Properties": {
+		"TableName": "drift-ddb",
+		"AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+		"KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+		"BillingMode": "PROVISIONED",
+		"ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+	}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-ddb-stack", nil)
+	require.NoError(t, err)
+
+	// In sync immediately after deploy.
+	result, err := d.DetectStackDrift(context.Background(), "drift-ddb-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+
+	// Mutate read capacity directly in state (bypassing CloudFormation).
+	raw, err := state.Get(context.Background(), "dynamodb", "table:123456789012/drift-ddb")
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	var tbl map[string]any
+	require.NoError(t, json.Unmarshal(raw, &tbl))
+	pt := tbl["ProvisionedThroughput"].(map[string]any)
+	pt["ReadCapacityUnits"] = 99
+	mutated, _ := json.Marshal(tbl)
+	require.NoError(t, state.Put(context.Background(), "dynamodb", "table:123456789012/drift-ddb", mutated))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-ddb-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "DRIFTED", result.DriftStatus)
+	require.Len(t, result.ResourceDrifts, 1)
+	entry := result.ResourceDrifts[0]
+	assert.Equal(t, "MODIFIED", entry.DriftStatus)
+	require.Len(t, entry.PropertyDifferences, 1)
+	assert.Equal(t, "/ProvisionedThroughput/ReadCapacityUnits", entry.PropertyDifferences[0].PropertyPath)
+	assert.Equal(t, "5", entry.PropertyDifferences[0].ExpectedValue)
+	assert.Equal(t, "99", entry.PropertyDifferences[0].ActualValue)
+}
+
+// TestCFN_DriftDetection_Lambda_Modified verifies MODIFIED drift on a Lambda
+// function's Timeout changed outside CloudFormation.
+func TestCFN_DriftDetection_Lambda_Modified(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"F": {"Type": "AWS::Lambda::Function", "Properties": {
+		"FunctionName": "drift-fn", "Runtime": "python3.12", "Handler": "index.handler",
+		"Role": "arn:aws:iam::123456789012:role/r", "Timeout": 30, "MemorySize": 256
+	}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-fn-stack", nil)
+	require.NoError(t, err)
+
+	result, err := d.DetectStackDrift(context.Background(), "drift-fn-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+
+	// Change Timeout directly in state.
+	key := "function:drift-fn"
+	raw, err := state.Get(context.Background(), "lambda", key)
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	var fn map[string]any
+	require.NoError(t, json.Unmarshal(raw, &fn))
+	fn["Timeout"] = 60
+	mutated, _ := json.Marshal(fn)
+	require.NoError(t, state.Put(context.Background(), "lambda", key, mutated))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-fn-stack")
+	require.NoError(t, err)
+	require.Len(t, result.ResourceDrifts, 1)
+	entry := result.ResourceDrifts[0]
+	assert.Equal(t, "MODIFIED", entry.DriftStatus)
+	require.Len(t, entry.PropertyDifferences, 1)
+	assert.Equal(t, "/Timeout", entry.PropertyDifferences[0].PropertyPath)
+	assert.Equal(t, "30", entry.PropertyDifferences[0].ExpectedValue)
+	assert.Equal(t, "60", entry.PropertyDifferences[0].ActualValue)
+}
+
+// TestCFN_DriftDetection_SQS_Modified verifies MODIFIED drift on a queue's
+// VisibilityTimeout changed outside CloudFormation, and that an undeclared
+// property does not produce drift (template-declared-only rule).
+func TestCFN_DriftDetection_SQS_Modified(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"Q": {"Type": "AWS::SQS::Queue", "Properties": {
+		"QueueName": "drift-q", "VisibilityTimeout": 45
+	}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-q-stack", nil)
+	require.NoError(t, err)
+
+	result, err := d.DetectStackDrift(context.Background(), "drift-q-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+
+	// Change VisibilityTimeout directly in state.
+	key := "queue:123456789012/drift-q"
+	raw, err := state.Get(context.Background(), "sqs", key)
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	var q map[string]any
+	require.NoError(t, json.Unmarshal(raw, &q))
+	attrs, _ := q["Attributes"].(map[string]any)
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	attrs["VisibilityTimeout"] = "90"
+	q["Attributes"] = attrs
+	mutated, _ := json.Marshal(q)
+	require.NoError(t, state.Put(context.Background(), "sqs", key, mutated))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-q-stack")
+	require.NoError(t, err)
+	require.Len(t, result.ResourceDrifts, 1)
+	entry := result.ResourceDrifts[0]
+	assert.Equal(t, "MODIFIED", entry.DriftStatus)
+	require.Len(t, entry.PropertyDifferences, 1)
+	assert.Equal(t, "/VisibilityTimeout", entry.PropertyDifferences[0].PropertyPath)
+	assert.Equal(t, "45", entry.PropertyDifferences[0].ExpectedValue)
+	assert.Equal(t, "90", entry.PropertyDifferences[0].ActualValue)
+}
+
+// TestCFN_DriftDetection_SNS_Modified verifies MODIFIED drift on a topic's
+// DisplayName changed outside CloudFormation (and that the existence checker
+// works now that the physical ID is the ARN).
+func TestCFN_DriftDetection_SNS_Modified(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"Tp": {"Type": "AWS::SNS::Topic", "Properties": {
+		"TopicName": "drift-topic", "DisplayName": "My Topic"
+	}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-topic-stack", nil)
+	require.NoError(t, err)
+
+	// Existence checker + comparator both in sync after deploy.
+	result, err := d.DetectStackDrift(context.Background(), "drift-topic-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+	require.Len(t, result.ResourceDrifts, 1)
+	assert.Equal(t, "IN_SYNC", result.ResourceDrifts[0].DriftStatus)
+
+	// Change DisplayName directly in state.
+	key := "topic:123456789012/us-east-1/drift-topic"
+	raw, err := state.Get(context.Background(), "sns", key)
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	var topic map[string]any
+	require.NoError(t, json.Unmarshal(raw, &topic))
+	topic["Attributes"] = map[string]any{"DisplayName": "Renamed"}
+	mutated, _ := json.Marshal(topic)
+	require.NoError(t, state.Put(context.Background(), "sns", key, mutated))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-topic-stack")
+	require.NoError(t, err)
+	require.Len(t, result.ResourceDrifts, 1)
+	entry := result.ResourceDrifts[0]
+	assert.Equal(t, "MODIFIED", entry.DriftStatus)
+	require.Len(t, entry.PropertyDifferences, 1)
+	assert.Equal(t, "/DisplayName", entry.PropertyDifferences[0].PropertyPath)
+	assert.Equal(t, "My Topic", entry.PropertyDifferences[0].ExpectedValue)
+	assert.Equal(t, "Renamed", entry.PropertyDifferences[0].ActualValue)
+}
+
+// TestCFN_DriftDetection_IAMRole_PolicyReorderInSync verifies an IAM role whose
+// trust-policy statements are reordered (but semantically identical) does NOT
+// report drift, and that a genuine Description change does.
+func TestCFN_DriftDetection_IAMRole_Modified(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"R": {"Type": "AWS::IAM::Role", "Properties": {
+		"RoleName": "drift-role", "Description": "original",
+		"AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [
+			{"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"},
+			{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}
+		]}
+	}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-role-stack", nil)
+	require.NoError(t, err)
+
+	// In sync after deploy.
+	result, err := d.DetectStackDrift(context.Background(), "drift-role-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+
+	// Reorder the stored trust-policy statements (semantically identical) and
+	// confirm this does NOT register as drift.
+	key := "role:drift-role"
+	raw, err := state.Get(context.Background(), "iam", key)
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	var role map[string]any
+	require.NoError(t, json.Unmarshal(raw, &role))
+	doc := role["AssumeRolePolicyDocument"].(map[string]any)
+	stmts := doc["Statement"].([]any)
+	stmts[0], stmts[1] = stmts[1], stmts[0]
+	doc["Statement"] = stmts
+	reordered, _ := json.Marshal(role)
+	require.NoError(t, state.Put(context.Background(), "iam", key, reordered))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-role-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus, "reordered-but-equal trust policy must not drift")
+
+	// Now change Description → genuine drift.
+	raw, err = state.Get(context.Background(), "iam", key)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &role))
+	role["Description"] = "changed"
+	mutated, _ := json.Marshal(role)
+	require.NoError(t, state.Put(context.Background(), "iam", key, mutated))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-role-stack")
+	require.NoError(t, err)
+	require.Len(t, result.ResourceDrifts, 1)
+	entry := result.ResourceDrifts[0]
+	assert.Equal(t, "MODIFIED", entry.DriftStatus)
+	require.Len(t, entry.PropertyDifferences, 1)
+	assert.Equal(t, "/Description", entry.PropertyDifferences[0].PropertyPath)
+	assert.Equal(t, "original", entry.PropertyDifferences[0].ExpectedValue)
+	assert.Equal(t, "changed", entry.PropertyDifferences[0].ActualValue)
+}
+
+// TestCFN_DriftDetection_DeclaredOnly verifies that a property NOT declared in
+// the template does not produce drift even when live state diverges.
+func TestCFN_DriftDetection_DeclaredOnly(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	// Template omits VisibilityTimeout entirely.
+	tmpl := `{"Resources": {"Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "declq"}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "declq-stack", nil)
+	require.NoError(t, err)
+
+	// Set a VisibilityTimeout directly in state — not declared, so not drift.
+	key := "queue:123456789012/declq"
+	raw, err := state.Get(context.Background(), "sqs", key)
+	require.NoError(t, err)
+	require.NotNil(t, raw)
+	var q map[string]any
+	require.NoError(t, json.Unmarshal(raw, &q))
+	q["Attributes"] = map[string]any{"VisibilityTimeout": "120"}
+	mutated, _ := json.Marshal(q)
+	require.NoError(t, state.Put(context.Background(), "sqs", key, mutated))
+
+	result, err := d.DetectStackDrift(context.Background(), "declq-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus, "undeclared property must not produce drift")
 }
