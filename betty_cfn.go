@@ -162,8 +162,52 @@ type CFNResourceDriftEntry struct {
 	// PhysicalID is the actual resource identifier.
 	PhysicalID string `json:"PhysicalResourceId"`
 
-	// DriftStatus is "IN_SYNC", "DELETED", or "NOT_CHECKED".
+	// DriftStatus is "IN_SYNC", "MODIFIED", "DELETED", or "NOT_CHECKED".
 	DriftStatus string `json:"StackResourceDriftStatus"`
+
+	// PropertyDifferences lists per-property differences when DriftStatus is
+	// "MODIFIED". It is empty for all other statuses.
+	PropertyDifferences []CFNPropertyDiff `json:"PropertyDifferences,omitempty"`
+}
+
+// CFNPropertyDiff describes a single property-level difference between the
+// expected (template) and actual (live) value of a drifted resource.
+type CFNPropertyDiff struct {
+	// PropertyPath is the JSON-path-like path to the differing property.
+	PropertyPath string `json:"PropertyPath"`
+
+	// ExpectedValue is the value defined by the template.
+	ExpectedValue string `json:"ExpectedValue"`
+
+	// ActualValue is the value found in live service state.
+	ActualValue string `json:"ActualValue"`
+
+	// DifferenceType is "ADD", "REMOVE", or "NOT_EQUAL".
+	DifferenceType string `json:"DifferenceType"`
+}
+
+// CFNDriftDetectionStatus holds the status of an asynchronous drift-detection
+// operation started by [StackDeployer.StartStackDriftDetection].
+type CFNDriftDetectionStatus struct {
+	// StackDriftDetectionID is the ID returned by StartStackDriftDetection.
+	StackDriftDetectionID string `json:"StackDriftDetectionId"`
+
+	// StackName identifies the stack the detection ran against.
+	StackName string `json:"StackId"`
+
+	// DetectionStatus is "DETECTION_IN_PROGRESS", "DETECTION_COMPLETE", or
+	// "DETECTION_FAILED".
+	DetectionStatus string `json:"DetectionStatus"`
+
+	// StackDriftStatus is "DRIFTED", "IN_SYNC", or "NOT_CHECKED" once detection
+	// completes.
+	StackDriftStatus string `json:"StackDriftStatus"`
+
+	// DriftedStackResourceCount is the number of drifted resources.
+	DriftedStackResourceCount int `json:"DriftedStackResourceCount"`
+
+	// Timestamp is when the detection record was last updated.
+	Timestamp time.Time `json:"Timestamp"`
 }
 
 // typePriority determines deployment order for CloudFormation resources.
@@ -684,11 +728,21 @@ func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) 
 		checker, ok := cfnDriftCheckers[dr.Type]
 		if ok {
 			exists := checker(d, ctx, testAccountID, defaultRegion, dr.PhysicalID)
-			if exists {
-				entry.DriftStatus = "IN_SYNC"
-			} else {
+			switch {
+			case !exists:
 				entry.DriftStatus = "DELETED"
 				result.DriftedCount++
+			default:
+				entry.DriftStatus = "IN_SYNC"
+				// For resource types with a property comparator, check whether
+				// the live resource has drifted from its template definition.
+				if cmp, hasCmp := cfnDriftComparators[dr.Type]; hasCmp {
+					if diffs := cmp(ctx, d, &stack, dr); len(diffs) > 0 {
+						entry.DriftStatus = "MODIFIED"
+						entry.PropertyDifferences = diffs
+						result.DriftedCount++
+					}
+				}
 			}
 		}
 
@@ -700,6 +754,105 @@ func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) 
 	}
 
 	return result, nil
+}
+
+// DescribeStackResourceDrifts returns the per-resource drift entries for a
+// stack, optionally filtered to the given drift statuses (e.g. {"MODIFIED"}).
+// An empty statusFilters returns all entries. Drift is recomputed on each call.
+func (d *StackDeployer) DescribeStackResourceDrifts(ctx context.Context, stackName string, statusFilters []string) ([]CFNResourceDriftEntry, error) {
+	result, err := d.DetectStackDrift(ctx, stackName)
+	if err != nil {
+		return nil, err
+	}
+	if len(statusFilters) == 0 {
+		return result.ResourceDrifts, nil
+	}
+	filtered := make([]CFNResourceDriftEntry, 0, len(result.ResourceDrifts))
+	for _, e := range result.ResourceDrifts {
+		for _, s := range statusFilters {
+			if e.DriftStatus == s {
+				filtered = append(filtered, e)
+				break
+			}
+		}
+	}
+	return filtered, nil
+}
+
+// StartStackDriftDetection begins a drift-detection operation and returns its
+// detection ID. The operation runs synchronously, but the IN_PROGRESS record is
+// persisted before detection runs so a concurrent
+// [StackDeployer.DescribeStackDriftDetectionStatus] read can observe it.
+func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName string) (string, error) {
+	if d.state == nil {
+		return "", fmt.Errorf("cfn StartStackDriftDetection: state manager required")
+	}
+	if data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName); err != nil || data == nil {
+		return "", fmt.Errorf("cfn StartStackDriftDetection: stack %q not found", stackName)
+	}
+
+	detectionID := generateRequestID()
+	// Persist the in-progress record before running detection.
+	inProgress := &CFNDriftDetectionStatus{
+		StackDriftDetectionID: detectionID,
+		StackName:             stackName,
+		DetectionStatus:       "DETECTION_IN_PROGRESS",
+		Timestamp:             d.tc.Now(),
+	}
+	if err := d.saveDriftDetection(ctx, inProgress); err != nil {
+		return "", err
+	}
+
+	result, err := d.DetectStackDrift(ctx, stackName)
+	if err != nil {
+		failed := &CFNDriftDetectionStatus{
+			StackDriftDetectionID: detectionID,
+			StackName:             stackName,
+			DetectionStatus:       "DETECTION_FAILED",
+			Timestamp:             d.tc.Now(),
+		}
+		_ = d.saveDriftDetection(ctx, failed)
+		return detectionID, err
+	}
+
+	complete := &CFNDriftDetectionStatus{
+		StackDriftDetectionID:     detectionID,
+		StackName:                 stackName,
+		DetectionStatus:           "DETECTION_COMPLETE",
+		StackDriftStatus:          result.DriftStatus,
+		DriftedStackResourceCount: result.DriftedCount,
+		Timestamp:                 d.tc.Now(),
+	}
+	if err := d.saveDriftDetection(ctx, complete); err != nil {
+		return "", err
+	}
+	return detectionID, nil
+}
+
+// DescribeStackDriftDetectionStatus returns the status of a previously started
+// drift-detection operation.
+func (d *StackDeployer) DescribeStackDriftDetectionStatus(ctx context.Context, detectionID string) (*CFNDriftDetectionStatus, error) {
+	data, err := d.state.Get(ctx, cfnNamespace, "drift_detection:"+detectionID)
+	if err != nil || data == nil {
+		return nil, fmt.Errorf("cfn DescribeStackDriftDetectionStatus: detection %q not found", detectionID)
+	}
+	var status CFNDriftDetectionStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return nil, fmt.Errorf("cfn DescribeStackDriftDetectionStatus: unmarshal: %w", err)
+	}
+	return &status, nil
+}
+
+// saveDriftDetection persists a drift-detection status record.
+func (d *StackDeployer) saveDriftDetection(ctx context.Context, status *CFNDriftDetectionStatus) error {
+	data, err := json.Marshal(status)
+	if err != nil {
+		return fmt.Errorf("cfn saveDriftDetection: marshal: %w", err)
+	}
+	if err := d.state.Put(ctx, cfnNamespace, "drift_detection:"+status.StackDriftDetectionID, data); err != nil {
+		return fmt.Errorf("cfn saveDriftDetection: put: %w", err)
+	}
+	return nil
 }
 
 func (d *StackDeployer) loadChangeSetNames(ctx context.Context, stackName string) ([]string, error) {
@@ -811,6 +964,67 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 		data, _ := d.state.Get(ctx, "iam", "role:"+physicalID)
 		return data != nil
 	},
+}
+
+// cfnDriftComparators holds optional property-level drift comparators, keyed by
+// CloudFormation resource type. A comparator runs only after the existence
+// check passes; it returns the property differences between the template
+// (expected) and live service state (actual), or nil/empty when in sync.
+//
+// Property-level drift is only as faithful as the properties a service plugin
+// actually persists in its own state. Today the sole comparator covers
+// S3 VersioningConfiguration, which is both pushed by the deploy path and
+// independently readable from S3 state; other drift-checkable resource types
+// (DynamoDB/SQS/SNS/Lambda/IAM) remain existence-only because their deploy
+// paths do not store template-comparable properties. New comparators can be
+// added here as the underlying plugins persist more properties.
+var cfnDriftComparators = map[string]func(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff{
+	"AWS::S3::Bucket": compareS3BucketDrift,
+}
+
+// compareS3BucketDrift compares a deployed S3 bucket's VersioningConfiguration
+// against its live state, reporting a property difference if they diverge.
+func compareS3BucketDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
+	// Derive the expected versioning status from the template definition,
+	// resolving any intrinsics/params exactly as at deploy time.
+	tmpl, err := parseCFNTemplate(stack.TemplateBody)
+	if err != nil {
+		return nil
+	}
+	res, ok := tmpl.Resources[dr.LogicalID]
+	if !ok {
+		return nil
+	}
+	cctx := buildCFNContext(tmpl, stack.Parameters, defaultRegion, testAccountID, stack.StackName)
+	evaluateConditions(tmpl, cctx)
+
+	expected := ""
+	if vc, ok := res.Properties["VersioningConfiguration"].(map[string]interface{}); ok {
+		expected = resolveValue(vc["Status"], cctx)
+	}
+
+	// Actual versioning status is stored verbatim under bucket_versioning:{name}.
+	actual := ""
+	if data, _ := d.state.Get(ctx, "s3", "bucket_versioning:"+dr.PhysicalID); data != nil {
+		actual = string(data)
+	}
+
+	if expected == actual {
+		return nil
+	}
+	diffType := "NOT_EQUAL"
+	switch {
+	case expected == "":
+		diffType = "ADD" // present live, absent in template
+	case actual == "":
+		diffType = "REMOVE" // defined in template, absent live
+	}
+	return []CFNPropertyDiff{{
+		PropertyPath:   "/VersioningConfiguration/Status",
+		ExpectedValue:  expected,
+		ActualValue:    actual,
+		DifferenceType: diffType,
+	}}
 }
 
 // deployResource dispatches a single CFN resource to the correct deploy helper.
