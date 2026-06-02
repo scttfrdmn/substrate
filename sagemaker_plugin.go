@@ -110,6 +110,10 @@ type SageMakerTrainingJob struct {
 	// TrainingJobStatus is the job status (InProgress, Completed, Stopped, Failed).
 	TrainingJobStatus string `json:"TrainingJobStatus"`
 
+	// FailureReason describes why the job failed; set only for Failed jobs (e.g.
+	// a CapacityError when ML compute capacity could not be provisioned).
+	FailureReason string `json:"FailureReason,omitempty"`
+
 	// CreationTime is the epoch-seconds timestamp when the job was created.
 	CreationTime float64 `json:"CreationTime"`
 
@@ -298,7 +302,33 @@ func (p *SageMakerPlugin) describeTrainingJob(ctx *RequestContext, req *AWSReque
 	if err := json.Unmarshal(data, &job); err != nil {
 		return nil, fmt.Errorf("describeTrainingJob: unmarshal: %w", err)
 	}
+	p.applySeededTrainingJobStatus(goCtx, job.TrainingJobName, &job)
 	return sagemakerJSONResponse(http.StatusOK, job)
+}
+
+// applySeededTrainingJobStatus overrides a training job's terminal status and
+// FailureReason from a control-plane seed, if any (exact name match first, then
+// the "*" wildcard). This lets tests exercise capacity-retry paths by forcing a
+// job to report Failed with a CapacityError FailureReason.
+func (p *SageMakerPlugin) applySeededTrainingJobStatus(goCtx context.Context, name string, job *SageMakerTrainingJob) {
+	for _, key := range []string{
+		sagemakerCtrlTrainingJobStatusKey(name),
+		sagemakerCtrlTrainingJobStatusKey("*"),
+	} {
+		data, err := p.state.Get(goCtx, sagemakerCtrlNamespace, key)
+		if err != nil || data == nil {
+			continue
+		}
+		var seed struct {
+			Status        string `json:"status"`
+			FailureReason string `json:"failureReason"`
+		}
+		if json.Unmarshal(data, &seed) == nil && seed.Status != "" {
+			job.TrainingJobStatus = seed.Status
+			job.FailureReason = seed.FailureReason
+		}
+		return
+	}
 }
 
 func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

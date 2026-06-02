@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -355,4 +356,224 @@ func TestBedrockRuntimePlugin_InvokeModel_WildcardSeed(t *testing.T) {
 	if result3["completion"] != "wildcard-response" {
 		t.Errorf("expected wildcard-response for other model, got %v", result3)
 	}
+}
+
+// brJobRequest sends a Bedrock control-plane ModelInvocationJob request to the
+// given path/method, returning the response.
+func brJobRequest(t *testing.T, ts *httptest.Server, method, path string, body interface{}) *http.Response {
+	t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal job body: %v", err)
+		}
+		rdr = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, ts.URL+path, rdr)
+	if err != nil {
+		t.Fatalf("build job request: %v", err)
+	}
+	req.Host = "bedrock.us-east-1.amazonaws.com"
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do job request: %v", err)
+	}
+	return resp
+}
+
+// TestBedrockModelInvocationJob_Lifecycle exercises create → get → stop → list.
+func TestBedrockModelInvocationJob_Lifecycle(t *testing.T) {
+	setup := newBedrockRuntimeTestServer(t)
+
+	// Create.
+	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{
+		"jobName":          "batch-1",
+		"modelId":          "anthropic.claude-3-sonnet",
+		"roleArn":          "arn:aws:iam::123456789012:role/BedrockBatch",
+		"inputDataConfig":  map[string]any{"s3InputDataConfig": map[string]string{"s3Uri": "s3://in/"}},
+		"outputDataConfig": map[string]any{"s3OutputDataConfig": map[string]string{"s3Uri": "s3://out/"}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	var created struct {
+		JobArn string `json:"jobArn"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if created.JobArn == "" {
+		t.Fatal("expected non-empty jobArn")
+	}
+	// jobId is the trailing ARN segment.
+	jobID := created.JobArn[strings.LastIndexByte(created.JobArn, '/')+1:]
+
+	// Get → Submitted.
+	resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/"+jobID, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d", resp.StatusCode)
+	}
+	var got struct {
+		JobName string `json:"jobName"`
+		ModelID string `json:"modelId"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &got); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if got.Status != "Submitted" || got.JobName != "batch-1" || got.ModelID != "anthropic.claude-3-sonnet" {
+		t.Fatalf("unexpected job: %+v", got)
+	}
+
+	// List → one summary.
+	resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-jobs", nil)
+	var listed struct {
+		InvocationJobSummaries []struct {
+			JobArn string `json:"jobArn"`
+			Status string `json:"status"`
+		} `json:"invocationJobSummaries"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.InvocationJobSummaries) != 1 || listed.InvocationJobSummaries[0].Status != "Submitted" {
+		t.Fatalf("unexpected list: %+v", listed)
+	}
+
+	// Stop → Stopped.
+	resp = brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job/"+jobID+"/stop", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stop status = %d", resp.StatusCode)
+	}
+	_ = brBody(t, resp)
+	resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/"+jobID, nil)
+	if err := json.Unmarshal(brBody(t, resp), &got); err != nil {
+		t.Fatalf("decode get-after-stop: %v", err)
+	}
+	if got.Status != "Stopped" {
+		t.Fatalf("expected Stopped, got %q", got.Status)
+	}
+}
+
+// TestBedrockModelInvocationJob_NotFound verifies a missing job returns 404.
+func TestBedrockModelInvocationJob_NotFound(t *testing.T) {
+	setup := newBedrockRuntimeTestServer(t)
+	resp := brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/does-not-exist", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	_ = brBody(t, resp)
+}
+
+// TestBedrockModelInvocationJob_SeededStatus verifies the control-plane status
+// seed drives a job's GetModelInvocationJob status and message.
+func TestBedrockModelInvocationJob_SeededStatus(t *testing.T) {
+	setup := newBedrockRuntimeTestServer(t)
+
+	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{
+		"jobName": "batch-seed",
+		"modelId": "anthropic.claude-3-haiku",
+	})
+	var created struct {
+		JobArn string `json:"jobArn"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	jobID := created.JobArn[strings.LastIndexByte(created.JobArn, '/')+1:]
+
+	// Seed status for this specific job via the control plane.
+	seedResp := brJobRequest(t, setup.server, http.MethodPost, "/v1/bedrock/model-invocation-job-status", map[string]any{
+		"jobId":   jobID,
+		"status":  "Completed",
+		"message": "all done",
+	})
+	if seedResp.StatusCode != http.StatusOK {
+		t.Fatalf("seed status = %d", seedResp.StatusCode)
+	}
+	_ = brBody(t, seedResp)
+
+	resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/"+jobID, nil)
+	var got struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &got); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if got.Status != "Completed" || got.Message != "all done" {
+		t.Fatalf("expected seeded Completed/all done, got %+v", got)
+	}
+}
+
+// TestBedrockModelInvocationJob_ClearStatus verifies the DELETE control endpoint
+// removes a seeded status (both targeted and clear-all).
+func TestBedrockModelInvocationJob_ClearStatus(t *testing.T) {
+	setup := newBedrockRuntimeTestServer(t)
+	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{"jobName": "j", "modelId": "m"})
+	var created struct {
+		JobArn string `json:"jobArn"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	jobID := created.JobArn[strings.LastIndexByte(created.JobArn, '/')+1:]
+
+	// Seed wildcard, then clear all, then confirm default Submitted is restored.
+	_ = brBody(t, brJobRequest(t, setup.server, http.MethodPost, "/v1/bedrock/model-invocation-job-status", map[string]any{"status": "Failed"}))
+	delReq, _ := http.NewRequest(http.MethodDelete, setup.server.URL+"/v1/bedrock/model-invocation-job-status", nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("clear status = %d", delResp.StatusCode)
+	}
+	_ = brBody(t, delResp)
+
+	resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/"+jobID, nil)
+	var got struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(brBody(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Status != "Submitted" {
+		t.Fatalf("expected Submitted after clear, got %q", got.Status)
+	}
+}
+
+// TestBedrockModelInvocationJob_Validation verifies create without jobName and
+// seed without status are rejected.
+func TestBedrockModelInvocationJob_Validation(t *testing.T) {
+	setup := newBedrockRuntimeTestServer(t)
+	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{"modelId": "m"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing jobName, got %d", resp.StatusCode)
+	}
+	_ = brBody(t, resp)
+
+	seedResp := brJobRequest(t, setup.server, http.MethodPost, "/v1/bedrock/model-invocation-job-status", map[string]any{"jobId": "x"})
+	if seedResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing status, got %d", seedResp.StatusCode)
+	}
+	_ = brBody(t, seedResp)
+}
+
+// TestBedrockModelInvocationJob_ClearTargeted covers the targeted-delete branch
+// of the job-status control endpoint.
+func TestBedrockModelInvocationJob_ClearTargeted(t *testing.T) {
+	setup := newBedrockRuntimeTestServer(t)
+	_ = brBody(t, brJobRequest(t, setup.server, http.MethodPost, "/v1/bedrock/model-invocation-job-status", map[string]any{"jobId": "j1", "status": "Failed"}))
+	del, _ := http.NewRequest(http.MethodDelete, setup.server.URL+"/v1/bedrock/model-invocation-job-status?jobId=j1", nil)
+	resp, err := http.DefaultClient.Do(del)
+	if err != nil {
+		t.Fatalf("clear targeted: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("clear targeted status = %d", resp.StatusCode)
+	}
+	_ = brBody(t, resp)
 }

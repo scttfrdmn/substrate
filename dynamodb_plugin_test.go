@@ -2832,3 +2832,89 @@ func TestDynamoDB_TransactWriteItems_ConditionCheckPasses(t *testing.T) {
 	_, bExists := outB["Item"]
 	assert.True(t, bExists, "B should exist — transaction committed")
 }
+
+// TestDynamoDB_CreateTableTags verifies that Tags supplied to CreateTable are
+// stored and returned by ListTagsOfResource.
+func TestDynamoDB_CreateTableTags(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+	resp := dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "tagged",
+		"AttributeDefinitions": []map[string]string{{"AttributeName": "id", "AttributeType": "S"}},
+		"KeySchema":            []map[string]string{{"AttributeName": "id", "KeyType": "HASH"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+		"Tags": []map[string]string{
+			{"Key": "lagotto:managed", "Value": "cli"},
+			{"Key": "env", "Value": "test"},
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	arn := "arn:aws:dynamodb:us-east-1:123456789012:table/tagged"
+	resp = dynamodbRequest(t, srv, "ListTagsOfResource", map[string]any{"ResourceArn": arn})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var out struct {
+		Tags []struct {
+			Key   string `json:"Key"`
+			Value string `json:"Value"`
+		} `json:"Tags"`
+	}
+	decodeDynamoJSON(t, resp, &out)
+	require.Len(t, out.Tags, 2)
+	// Sorted by key: "env" before "lagotto:managed".
+	require.Equal(t, "env", out.Tags[0].Key)
+	require.Equal(t, "test", out.Tags[0].Value)
+	require.Equal(t, "lagotto:managed", out.Tags[1].Key)
+	require.Equal(t, "cli", out.Tags[1].Value)
+}
+
+// TestDynamoDB_TagUntagResource verifies TagResource adds tags and UntagResource
+// removes them.
+func TestDynamoDB_TagUntagResource(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+	resp := dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "tbl",
+		"AttributeDefinitions": []map[string]string{{"AttributeName": "id", "AttributeType": "S"}},
+		"KeySchema":            []map[string]string{{"AttributeName": "id", "KeyType": "HASH"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	arn := "arn:aws:dynamodb:us-east-1:123456789012:table/tbl"
+
+	resp = dynamodbRequest(t, srv, "TagResource", map[string]any{
+		"ResourceArn": arn,
+		"Tags":        []map[string]string{{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp = dynamodbRequest(t, srv, "UntagResource", map[string]any{
+		"ResourceArn": arn,
+		"TagKeys":     []string{"a"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp = dynamodbRequest(t, srv, "ListTagsOfResource", map[string]any{"ResourceArn": arn})
+	var out struct {
+		Tags []struct {
+			Key   string `json:"Key"`
+			Value string `json:"Value"`
+		} `json:"Tags"`
+	}
+	decodeDynamoJSON(t, resp, &out)
+	require.Len(t, out.Tags, 1)
+	require.Equal(t, "b", out.Tags[0].Key)
+}
+
+// TestDynamoDB_TagResourceNotFound verifies tagging a missing table returns
+// ResourceNotFoundException.
+func TestDynamoDB_TagResourceNotFound(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+	resp := dynamodbRequest(t, srv, "ListTagsOfResource", map[string]any{
+		"ResourceArn": "arn:aws:dynamodb:us-east-1:123456789012:table/ghost",
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	var out struct {
+		Code string `json:"Code"`
+	}
+	decodeDynamoJSON(t, resp, &out)
+	require.Equal(t, "ResourceNotFoundException", out.Code)
+}
