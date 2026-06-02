@@ -86,6 +86,14 @@ type EC2Instance struct {
 
 	// KeyName is the name of the key pair used to launch the instance.
 	KeyName string `json:"key_name,omitempty"`
+
+	// IamInstanceProfile is the ARN or name of the IAM instance profile attached
+	// at launch (echoed back so callers can verify it was applied).
+	IamInstanceProfile string `json:"iam_instance_profile,omitempty"`
+
+	// UserData is the base64-encoded user-data supplied at launch (stored so
+	// callers can verify it was accepted; not executed).
+	UserData string `json:"user_data,omitempty"`
 }
 
 // EC2KeyPair represents an EC2 key pair (public/private key used for SSH access).

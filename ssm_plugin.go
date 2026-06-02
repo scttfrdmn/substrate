@@ -3,7 +3,9 @@ package substrate
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -245,6 +247,13 @@ func (p *SSMPlugin) getParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, err
 	}
 	if param == nil {
+		// AWS publishes managed public parameters under /aws/service/* (e.g. the
+		// latest-AMI parameters that tools resolve to discover an AMI). They're
+		// not user-created, so synthesize a deterministic value rather than 404.
+		if mp := resolveManagedParameter(name, ctx.Region); mp != nil {
+			out := map[string]interface{}{"Parameter": mp}
+			return ssmJSONResponse(http.StatusOK, out)
+		}
 		return nil, &AWSError{
 			Code:       "ParameterNotFound",
 			Message:    fmt.Sprintf("Parameter %q not found", name),
@@ -263,6 +272,37 @@ func (p *SSMPlugin) getParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		},
 	}
 	return ssmJSONResponse(http.StatusOK, out)
+}
+
+// resolveManagedParameter returns a synthetic value for AWS-managed public
+// parameters under /aws/service/* that callers expect to exist without creating
+// them — primarily the latest-AMI parameters
+// (/aws/service/ami-amazon-linux-latest/*, /aws/service/ami-windows-latest/*,
+// /aws/service/canonical/ubuntu/*, /aws/service/ecs/optimized-ami/*). The AMI id
+// is deterministic per (name, region) so repeated lookups are stable. Returns
+// nil for non-managed names.
+func resolveManagedParameter(name, region string) map[string]interface{} {
+	if !strings.HasPrefix(name, "/aws/service/") {
+		return nil
+	}
+	isAMI := strings.Contains(name, "ami-") ||
+		strings.Contains(name, "/optimized-ami/") ||
+		strings.Contains(name, "/ubuntu/") ||
+		strings.Contains(name, "-latest")
+	if !isAMI {
+		return nil
+	}
+	// Deterministic 17-hex-char AMI id derived from name+region.
+	sum := sha256.Sum256([]byte(region + ":" + name))
+	amiID := "ami-" + hex.EncodeToString(sum[:])[:17]
+	return map[string]interface{}{
+		"Name":             name,
+		"Type":             "String",
+		"Value":            amiID,
+		"Version":          int64(1),
+		"ARN":              fmt.Sprintf("arn:aws:ssm:%s::parameter%s", region, name),
+		"LastModifiedDate": int64(0),
+	}
 }
 
 func (p *SSMPlugin) getParameters(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
