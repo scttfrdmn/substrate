@@ -113,8 +113,12 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.associateRouteTable(ctx, req)
 	case "DisassociateRouteTable":
 		return p.disassociateRouteTable(ctx, req)
+	case "ReplaceRouteTableAssociation":
+		return p.replaceRouteTableAssociation(ctx, req)
 	case "CreateRoute":
 		return p.createRoute(ctx, req)
+	case "ReplaceRoute":
+		return p.replaceRoute(ctx, req)
 	case "DeleteRoute":
 		return p.deleteRoute(ctx, req)
 	case "DeleteRouteTable":
@@ -753,7 +757,7 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, err
 	}
 	// Create default route table for VPC.
-	if _, err := p.createRouteTableForVPC(reqCtx, vpcID, cidr, true); err != nil {
+	if _, err := p.createRouteTableForVPC(reqCtx, vpcID, cidr, true, ""); err != nil {
 		p.logger.Warn("ec2: failed to create default route table", "err", err)
 	}
 
@@ -1261,7 +1265,7 @@ func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSReques
 
 func (p *EC2Plugin) createRouteTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	vpcID := req.Params["VpcId"]
-	rtbID, err := p.createRouteTableForVPC(reqCtx, vpcID, "", false)
+	rtbID, err := p.createRouteTableForVPC(reqCtx, vpcID, "", false, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1277,7 +1281,7 @@ func (p *EC2Plugin) createRouteTable(reqCtx *RequestContext, req *AWSRequest) (*
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", RouteTable: rtbItem{rtbID, vpcID}})
 }
 
-func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localCIDR string, main bool) (string, error) {
+func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localCIDR string, main bool, igwID string) (string, error) {
 	rtbID := generateRTBID()
 	rtb := EC2RouteTable{
 		RouteTableID: rtbID,
@@ -1287,6 +1291,11 @@ func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localC
 	}
 	if localCIDR != "" {
 		rtb.Routes = []EC2Route{{DestinationCIDR: localCIDR, GatewayID: "local", State: "active"}}
+	}
+	// A default VPC's main route table carries a default route to its attached
+	// internet gateway, matching real AWS.
+	if igwID != "" {
+		rtb.Routes = append(rtb.Routes, EC2Route{DestinationCIDR: "0.0.0.0/0", GatewayID: igwID, State: "active"})
 	}
 	if main {
 		rtb.Associations = []EC2RTAssociation{{AssociationID: generateAssociationID(), Main: true}}
@@ -1302,8 +1311,20 @@ func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localC
 	return rtbID, nil
 }
 
+// routeTableHasSubnet reports whether the route table has an association with
+// any of the given subnet IDs.
+func routeTableHasSubnet(rtb EC2RouteTable, subnetIDs []string) bool {
+	for _, a := range rtb.Associations {
+		if a.SubnetID != "" && containsStr(subnetIDs, a.SubnetID) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := extractIndexedParams(req.Params, "RouteTableId")
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "rtb:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeRouteTables: %w", err)
@@ -1340,6 +1361,15 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 			continue
 		}
 		if len(ids) > 0 && !containsStr(ids, rtb.RouteTableID) {
+			continue
+		}
+		if vals, ok := filters["vpc-id"]; ok && !containsStr(vals, rtb.VPCID) {
+			continue
+		}
+		if vals, ok := filters["association.route-table-id"]; ok && !containsStr(vals, rtb.RouteTableID) {
+			continue
+		}
+		if vals, ok := filters["association.subnet-id"]; ok && !routeTableHasSubnet(rtb, vals) {
 			continue
 		}
 		item := rtbItem{RouteTableID: rtb.RouteTableID, VpcID: rtb.VPCID}
@@ -1439,6 +1469,129 @@ func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		Return  bool     `xml:"return"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// routeTargetGateway returns the route target gateway ID from whichever EC2
+// route-target parameter the caller supplied (internet/NAT gateway, instance,
+// or network interface), normalised to the single GatewayID field Substrate
+// stores per route.
+func routeTargetGateway(params map[string]string) string {
+	for _, k := range []string{"GatewayId", "NatGatewayId", "InstanceId", "NetworkInterfaceId", "TransitGatewayId", "VpcPeeringConnectionId"} {
+		if v := params[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (p *EC2Plugin) replaceRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	rtbID := req.Params["RouteTableId"]
+	destCIDR := req.Params["DestinationCidrBlock"]
+	gwID := routeTargetGateway(req.Params)
+	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil || data == nil {
+		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	}
+	var rtb EC2RouteTable
+	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 replaceRoute unmarshal: %w", unmarshalErr)
+	}
+	found := false
+	for i := range rtb.Routes {
+		if rtb.Routes[i].DestinationCIDR == destCIDR {
+			rtb.Routes[i].GatewayID = gwID
+			rtb.Routes[i].State = "active"
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, &AWSError{Code: "InvalidRoute.NotFound", Message: "no route with destination " + destCIDR, HTTPStatus: http.StatusBadRequest}
+	}
+	newData, _ := json.Marshal(rtb)
+	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	type response struct {
+		XMLName xml.Name `xml:"ReplaceRouteResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// replaceRouteTableAssociation repoints an existing subnet association to a
+// different route table, returning a new association ID (matching AWS, which
+// allocates a fresh rtbassoc-* on replacement).
+func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	assocID := req.Params["AssociationId"]
+	newRtbID := req.Params["RouteTableId"]
+
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "rtb:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation list: %w", err)
+	}
+
+	// Locate and remove the existing association, capturing its subnet/main flag.
+	var moved EC2RTAssociation
+	found := false
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var rtb EC2RouteTable
+		if json.Unmarshal(data, &rtb) != nil {
+			continue
+		}
+		newAssoc := rtb.Associations[:0]
+		for _, a := range rtb.Associations {
+			if a.AssociationID == assocID {
+				moved = a
+				found = true
+			} else {
+				newAssoc = append(newAssoc, a)
+			}
+		}
+		if found {
+			rtb.Associations = newAssoc
+			updated, _ := json.Marshal(rtb)
+			_ = p.state.Put(context.Background(), ec2Namespace, k, updated)
+			break
+		}
+	}
+	if !found {
+		return nil, &AWSError{Code: "InvalidAssociationID.NotFound", Message: "association " + assocID + " not found", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Attach a fresh association to the target route table.
+	newKey := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + newRtbID
+	data, getErr := p.state.Get(context.Background(), ec2Namespace, newKey)
+	if getErr != nil || data == nil {
+		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	}
+	var target EC2RouteTable
+	if unmarshalErr := json.Unmarshal(data, &target); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation unmarshal: %w", unmarshalErr)
+	}
+	newAssocID := generateAssociationID()
+	target.Associations = append(target.Associations, EC2RTAssociation{AssociationID: newAssocID, SubnetID: moved.SubnetID, Main: moved.Main})
+	newData, _ := json.Marshal(target)
+	_ = p.state.Put(context.Background(), ec2Namespace, newKey, newData)
+
+	type assocState struct {
+		State string `xml:"state"`
+	}
+	type response struct {
+		XMLName          xml.Name   `xml:"ReplaceRouteTableAssociationResponse"`
+		XMLNS            string     `xml:"xmlns,attr"`
+		NewAssociationID string     `xml:"newAssociationId"`
+		AssociationState assocState `xml:"associationState"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:            "http://ec2.amazonaws.com/doc/2016-11-15/",
+		NewAssociationID: newAssocID,
+		AssociationState: assocState{State: "associated"},
+	})
 }
 
 func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1981,8 +2134,26 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 	}
 	_ = p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "sg_ids", sgID)
 
-	// Create main route table with local route + IGW route for default VPC.
-	if _, rtErr := p.createRouteTableForVPC(reqCtx, vpcID, "172.31.0.0/16", true); rtErr != nil {
+	// Create and attach a default internet gateway so the main route table can
+	// carry a 0.0.0.0/0 → igw route, matching a real default VPC.
+	igwID := generateIGWID()
+	igw := EC2InternetGateway{
+		InternetGatewayID: igwID,
+		Attachments:       []EC2IGWAttachment{{VPCID: vpcID, State: "available"}},
+		AccountID:         reqCtx.AccountID,
+		Region:            reqCtx.Region,
+	}
+	igwData, _ := json.Marshal(igw)
+	igwKey := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
+	if err := p.state.Put(ctx, ec2Namespace, igwKey, igwData); err != nil {
+		p.logger.Warn("ec2: failed to create default internet gateway", "err", err)
+		igwID = ""
+	} else {
+		_ = p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "igw_ids", igwID)
+	}
+
+	// Create main route table with local route + default IGW route.
+	if _, rtErr := p.createRouteTableForVPC(reqCtx, vpcID, "172.31.0.0/16", true, igwID); rtErr != nil {
 		p.logger.Warn("ec2: failed to create default route table", "err", rtErr)
 	}
 

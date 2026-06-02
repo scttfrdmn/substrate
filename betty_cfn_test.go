@@ -2328,3 +2328,91 @@ func TestCFN_DriftDetection_Deleted(t *testing.T) {
 	require.Len(t, result.ResourceDrifts, 1)
 	assert.Equal(t, "DELETED", result.ResourceDrifts[0].DriftStatus)
 }
+
+// TestCFN_DriftDetection_Modified verifies property-level MODIFIED drift for an
+// S3 bucket whose VersioningConfiguration is changed outside CloudFormation.
+func TestCFN_DriftDetection_Modified(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "drift-mod-bucket", "VersioningConfiguration": {"Status": "Enabled"}}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-mod-stack", nil)
+	require.NoError(t, err)
+
+	// Sanity: freshly deployed, versioning Enabled → IN_SYNC.
+	result, err := d.DetectStackDrift(context.Background(), "drift-mod-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "IN_SYNC", result.DriftStatus)
+
+	// Change versioning directly in state (bypassing CloudFormation).
+	require.NoError(t, state.Put(context.Background(), "s3", "bucket_versioning:drift-mod-bucket", []byte("Suspended")))
+
+	result, err = d.DetectStackDrift(context.Background(), "drift-mod-stack")
+	require.NoError(t, err)
+	assert.Equal(t, "DRIFTED", result.DriftStatus)
+	assert.Equal(t, 1, result.DriftedCount)
+	require.Len(t, result.ResourceDrifts, 1)
+	entry := result.ResourceDrifts[0]
+	assert.Equal(t, "MODIFIED", entry.DriftStatus)
+	require.Len(t, entry.PropertyDifferences, 1)
+	assert.Equal(t, "/VersioningConfiguration/Status", entry.PropertyDifferences[0].PropertyPath)
+	assert.Equal(t, "Enabled", entry.PropertyDifferences[0].ExpectedValue)
+	assert.Equal(t, "Suspended", entry.PropertyDifferences[0].ActualValue)
+	assert.Equal(t, "NOT_EQUAL", entry.PropertyDifferences[0].DifferenceType)
+}
+
+// TestCFN_DescribeStackResourceDrifts_Filter verifies status filtering.
+func TestCFN_DescribeStackResourceDrifts_Filter(t *testing.T) {
+	d, state := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "drift-f-bucket", "VersioningConfiguration": {"Status": "Enabled"}}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-f-stack", nil)
+	require.NoError(t, err)
+	require.NoError(t, state.Put(context.Background(), "s3", "bucket_versioning:drift-f-bucket", []byte("Suspended")))
+
+	// Filter to MODIFIED → one entry.
+	mod, err := d.DescribeStackResourceDrifts(context.Background(), "drift-f-stack", []string{"MODIFIED"})
+	require.NoError(t, err)
+	require.Len(t, mod, 1)
+	assert.Equal(t, "MODIFIED", mod[0].DriftStatus)
+
+	// Filter to DELETED → none.
+	del, err := d.DescribeStackResourceDrifts(context.Background(), "drift-f-stack", []string{"DELETED"})
+	require.NoError(t, err)
+	assert.Empty(t, del)
+
+	// No filter → all entries.
+	all, err := d.DescribeStackResourceDrifts(context.Background(), "drift-f-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+}
+
+// TestCFN_DriftDetectionStatus verifies the start/describe detection-status flow.
+func TestCFN_DriftDetectionStatus(t *testing.T) {
+	d, _ := newTestDeployerWithState(t)
+
+	tmpl := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "drift-s-bucket"}}}}`
+	_, err := d.Deploy(context.Background(), tmpl, "drift-s-stack", nil)
+	require.NoError(t, err)
+
+	id, err := d.StartStackDriftDetection(context.Background(), "drift-s-stack")
+	require.NoError(t, err)
+	require.NotEmpty(t, id)
+
+	status, err := d.DescribeStackDriftDetectionStatus(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, "DETECTION_COMPLETE", status.DetectionStatus)
+	assert.Equal(t, "IN_SYNC", status.StackDriftStatus)
+	assert.Equal(t, 0, status.DriftedStackResourceCount)
+	assert.Equal(t, id, status.StackDriftDetectionID)
+
+	// Unknown detection ID → error.
+	_, err = d.DescribeStackDriftDetectionStatus(context.Background(), "nonexistent")
+	require.Error(t, err)
+}
+
+// TestCFN_StartStackDriftDetection_UnknownStack verifies an unknown stack errors.
+func TestCFN_StartStackDriftDetection_UnknownStack(t *testing.T) {
+	d, _ := newTestDeployerWithState(t)
+	_, err := d.StartStackDriftDetection(context.Background(), "no-such-stack")
+	require.Error(t, err)
+}

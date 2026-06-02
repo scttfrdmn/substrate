@@ -3093,3 +3093,175 @@ func TestEC2_SecurityGroupAllowed(t *testing.T) {
 	assert.True(t, substrate.SecurityGroupAllowed(allRules, "tcp", 22, "1.2.3.4"))
 	assert.True(t, substrate.SecurityGroupAllowed(allRules, "udp", 53, "10.0.0.1"))
 }
+
+// TestEC2_ReplaceRoute verifies ReplaceRoute repoints an existing route to a new
+// gateway, and returns InvalidRoute.NotFound for an unknown destination.
+func TestEC2_ReplaceRoute(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.7.0.0/16"})
+	var vpcResult struct {
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+	vpcResp.Body.Close() //nolint:errcheck
+	vpcID := vpcResult.Vpc.VpcID
+
+	rtbResp := ec2Request(t, ts, map[string]string{"Action": "CreateRouteTable", "VpcId": vpcID})
+	var rtbResult struct {
+		RouteTable struct {
+			RouteTableID string `xml:"routeTableId"`
+		} `xml:"routeTable"`
+	}
+	_ = xml.NewDecoder(rtbResp.Body).Decode(&rtbResult)
+	rtbResp.Body.Close() //nolint:errcheck
+	rtbID := rtbResult.RouteTable.RouteTableID
+
+	// Create a route to igw-aaa, then replace its target with igw-bbb.
+	r := ec2Request(t, ts, map[string]string{
+		"Action": "CreateRoute", "RouteTableId": rtbID,
+		"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-aaa",
+	})
+	r.Body.Close() //nolint:errcheck
+
+	repl := ec2Request(t, ts, map[string]string{
+		"Action": "ReplaceRoute", "RouteTableId": rtbID,
+		"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-bbb",
+	})
+	assert.Equal(t, http.StatusOK, repl.StatusCode)
+	repl.Body.Close() //nolint:errcheck
+
+	desc := ec2Request(t, ts, map[string]string{"Action": "DescribeRouteTables", "RouteTableId.1": rtbID})
+	body := readBody(t, desc)
+	assert.Contains(t, body, "igw-bbb")
+	assert.NotContains(t, body, "igw-aaa")
+
+	// Replacing a non-existent route → InvalidRoute.NotFound.
+	bad := ec2Request(t, ts, map[string]string{
+		"Action": "ReplaceRoute", "RouteTableId": rtbID,
+		"DestinationCidrBlock": "192.168.0.0/16", "GatewayId": "igw-ccc",
+	})
+	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
+	bad.Body.Close() //nolint:errcheck
+}
+
+// TestEC2_ReplaceRouteTableAssociation verifies an association can be repointed
+// to a different route table, yielding a fresh association ID.
+func TestEC2_ReplaceRouteTableAssociation(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	vpcResp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.8.0.0/16"})
+	var vpcResult struct {
+		Vpc struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpc"`
+	}
+	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
+	vpcResp.Body.Close() //nolint:errcheck
+	vpcID := vpcResult.Vpc.VpcID
+
+	subResp := ec2Request(t, ts, map[string]string{"Action": "CreateSubnet", "VpcId": vpcID, "CidrBlock": "10.8.1.0/24"})
+	var subResult struct {
+		Subnet struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnet"`
+	}
+	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
+	subResp.Body.Close() //nolint:errcheck
+	subnetID := subResult.Subnet.SubnetID
+
+	mkRTB := func() string {
+		resp := ec2Request(t, ts, map[string]string{"Action": "CreateRouteTable", "VpcId": vpcID})
+		var res struct {
+			RouteTable struct {
+				RouteTableID string `xml:"routeTableId"`
+			} `xml:"routeTable"`
+		}
+		_ = xml.NewDecoder(resp.Body).Decode(&res)
+		resp.Body.Close() //nolint:errcheck
+		return res.RouteTable.RouteTableID
+	}
+	rtb1, rtb2 := mkRTB(), mkRTB()
+
+	assocResp := ec2Request(t, ts, map[string]string{"Action": "AssociateRouteTable", "RouteTableId": rtb1, "SubnetId": subnetID})
+	var assocResult struct {
+		AssociationID string `xml:"associationId"`
+	}
+	_ = xml.NewDecoder(assocResp.Body).Decode(&assocResult)
+	assocResp.Body.Close() //nolint:errcheck
+	oldAssoc := assocResult.AssociationID
+	assert.NotEmpty(t, oldAssoc)
+
+	replResp := ec2Request(t, ts, map[string]string{
+		"Action": "ReplaceRouteTableAssociation", "AssociationId": oldAssoc, "RouteTableId": rtb2,
+	})
+	assert.Equal(t, http.StatusOK, replResp.StatusCode)
+	var replResult struct {
+		NewAssociationID string `xml:"newAssociationId"`
+	}
+	_ = xml.NewDecoder(replResp.Body).Decode(&replResult)
+	replResp.Body.Close() //nolint:errcheck
+	assert.NotEmpty(t, replResult.NewAssociationID)
+	assert.NotEqual(t, oldAssoc, replResult.NewAssociationID)
+
+	// rtb2 now carries the association for the subnet; filter by subnet returns rtb2.
+	desc := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeRouteTables", "Filter.1.Name": "association.subnet-id", "Filter.1.Value.1": subnetID,
+	})
+	body := readBody(t, desc)
+	assert.Contains(t, body, rtb2)
+	assert.NotContains(t, body, rtb1)
+
+	// Replacing an unknown association → InvalidAssociationID.NotFound.
+	bad := ec2Request(t, ts, map[string]string{
+		"Action": "ReplaceRouteTableAssociation", "AssociationId": "rtbassoc-ghost", "RouteTableId": rtb2,
+	})
+	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
+	bad.Body.Close() //nolint:errcheck
+}
+
+// TestEC2_DescribeRouteTables_VpcFilter verifies filtering by vpc-id.
+func TestEC2_DescribeRouteTables_VpcFilter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	mkVPC := func(cidr string) string {
+		resp := ec2Request(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": cidr})
+		var res struct {
+			Vpc struct {
+				VpcID string `xml:"vpcId"`
+			} `xml:"vpc"`
+		}
+		_ = xml.NewDecoder(resp.Body).Decode(&res)
+		resp.Body.Close() //nolint:errcheck
+		return res.Vpc.VpcID
+	}
+	vpcA, vpcB := mkVPC("10.10.0.0/16"), mkVPC("10.11.0.0/16")
+
+	desc := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeRouteTables", "Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcA,
+	})
+	body := readBody(t, desc)
+	assert.Contains(t, body, vpcA)
+	assert.NotContains(t, body, vpcB)
+}
+
+// TestEC2_DefaultVPC_IGWRoute verifies that triggering default-VPC creation
+// yields a main route table with a 0.0.0.0/0 → igw route.
+func TestEC2_DefaultVPC_IGWRoute(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// RunInstances with no SubnetId triggers ensureDefaultVPC.
+	run := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+		"MinCount": "1", "MaxCount": "1",
+	})
+	assert.Equal(t, http.StatusOK, run.StatusCode)
+	run.Body.Close() //nolint:errcheck
+
+	desc := ec2Request(t, ts, map[string]string{"Action": "DescribeRouteTables"})
+	body := readBody(t, desc)
+	assert.Contains(t, body, "0.0.0.0/0")
+	assert.Contains(t, body, "igw-")
+}

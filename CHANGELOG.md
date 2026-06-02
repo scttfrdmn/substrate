@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **CloudFormation drift detection — MODIFIED + describe operations (#290)**:
+  `DetectStackDrift` now reports `MODIFIED` (in addition to `IN_SYNC`/`DELETED`/
+  `NOT_CHECKED`) via a new `cfnDriftComparators` map that performs property-level
+  comparison of live state against the template (re-parsed and intrinsic/param-
+  resolved at drift-check time). The S3 `VersioningConfiguration` comparator is
+  implemented end-to-end (deploy a bucket with versioning, change it outside
+  CloudFormation, and drift reports `MODIFIED` with a `PropertyDifferences`
+  entry). Property-level drift is bounded by what each plugin persists, so the
+  other drift-checkable types (DynamoDB/SQS/SNS/Lambda/IAM) remain existence-only
+  for now; the comparator map makes adding more types straightforward. Added
+  `StackDeployer.DescribeStackResourceDrifts(stackName, statusFilters)` (returns
+  per-resource entries, optionally filtered by drift status) and
+  `StartStackDriftDetection` / `DescribeStackDriftDetectionStatus` (the
+  `DETECTION_IN_PROGRESS → DETECTION_COMPLETE` lifecycle, with the in-progress
+  record persisted before synchronous detection runs). New types
+  `CFNPropertyDiff` and `CFNDriftDetectionStatus`; `CFNResourceDriftEntry` gained
+  `PropertyDifferences`. Partially addresses #290 (property-level `MODIFIED`
+  remains existence-only for non-S3-versioning resource types; #290 stays open).
+- **VPC route table completion (#293)**: Added `ReplaceRoute` (repoints an
+  existing route's target; returns `InvalidRoute.NotFound` for an unknown
+  destination) and `ReplaceRouteTableAssociation` (repoints a subnet association
+  to a different route table, returning a fresh `newAssociationId`; returns
+  `InvalidAssociationID.NotFound` for an unknown association). `DescribeRouteTables`
+  now honours the `vpc-id`, `association.subnet-id`, and `association.route-table-id`
+  filters (via the existing `extractEC2Filters` helper), not just `RouteTableId`.
+  `ensureDefaultVPC` now creates and attaches a default internet gateway and adds
+  a `0.0.0.0/0 → igw-…` route to the default VPC's main route table (previously
+  only the local route was present, despite the code comment). Closes #293.
+
 ### Security
 - **Module tag integrity advisory (#296)**: Documented that tags **v0.45.1** and
   **v0.45.2** are poisoned — both were re-cut after publication, so their current
