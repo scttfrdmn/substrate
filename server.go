@@ -232,9 +232,14 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/timestream-query/results", s.handleTimestreamSeedResult)
 	r.Delete("/v1/timestream-query/results", s.handleTimestreamClearResults)
 
+	r.Post("/v1/sagemaker/training-job-status", s.handleSageMakerSeedTrainingJobStatus)
+	r.Delete("/v1/sagemaker/training-job-status", s.handleSageMakerClearTrainingJobStatus)
+
 	// Bedrock Runtime control-plane endpoints.
 	r.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
 	r.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
+	r.Post("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeSeedJobStatus)
+	r.Delete("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeClearJobStatus)
 
 	// Fault injection control-plane endpoints.
 	r.Post("/v1/fault/rules", s.handleFaultSetRules)

@@ -1,5 +1,7 @@
 package substrate
 
+import "strings"
+
 // dynamodbNamespace is the state namespace used by DynamoDBPlugin.
 const dynamodbNamespace = "dynamodb"
 
@@ -199,4 +201,31 @@ func dynamodbItemKey(pkVal, skVal string) string {
 // dynamodbTableARN constructs the ARN for a DynamoDB table.
 func dynamodbTableARN(region, accountID, tableName string) string {
 	return "arn:aws:dynamodb:" + region + ":" + accountID + ":table/" + tableName
+}
+
+// dynamodbTableNameFromARN extracts the table name from a DynamoDB resource ARN
+// of the form arn:aws:dynamodb:{region}:{account}:table/{name}[/...]. It returns
+// an empty string if the ARN does not reference a table.
+func dynamodbTableNameFromARN(arn string) string {
+	const marker = ":table/"
+	idx := strings.Index(arn, marker)
+	if idx < 0 {
+		return ""
+	}
+	name := arn[idx+len(marker):]
+	// Drop any sub-resource suffix (e.g. "/index/..." or "/stream/...").
+	if slash := strings.IndexByte(name, '/'); slash >= 0 {
+		name = name[:slash]
+	}
+	return name
+}
+
+// DynamoDBTag is a single key/value resource tag on a DynamoDB table, matching
+// the AWS wire shape of {"Key": "...", "Value": "..."}.
+type DynamoDBTag struct {
+	// Key is the tag key.
+	Key string `json:"Key"`
+
+	// Value is the tag value.
+	Value string `json:"Value"`
 }

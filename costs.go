@@ -479,6 +479,8 @@ func defaultCostTable() map[string]float64 {
 		// Bedrock Runtime: per guardrail evaluation unit; per model invocation.
 		"bedrock-runtime/ApplyGuardrail": 0.000075,
 		"bedrock-runtime/InvokeModel":    0.000015,
+		// Bedrock control-plane batch inference job submission.
+		"bedrock-runtime/CreateModelInvocationJob": 0.000015,
 		// Athena: per query execution ($5/TB scanned, stub approximation).
 		"athena/StartQueryExecution": 0.000005,
 		// S3 Select: per query request.

@@ -61,3 +61,66 @@ func (s *Server) handleBedrockRuntimeClearResponses(w http.ResponseWriter, r *ht
 	}
 	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true})
 }
+
+// handleBedrockRuntimeSeedJobStatus handles POST /v1/bedrock/model-invocation-job-status.
+// It seeds the status (and optional message) returned by GetModelInvocationJob for
+// a given job ID (or wildcard "*"), letting tests drive a job to InProgress,
+// Completed, Failed, etc. without simulated time.
+// Body: {"jobId": "<id>", "status": "Failed", "message": "..."}
+// The "jobId" field defaults to "*" (wildcard) if omitted or empty.
+func (s *Server) handleBedrockRuntimeSeedJobStatus(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		JobID   string `json:"jobId"`
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	if body.Status == "" {
+		http.Error(w, `{"error":"status is required"}`, http.StatusBadRequest)
+		return
+	}
+	jobID := body.JobID
+	if jobID == "" {
+		jobID = "*"
+	}
+	seed, err := json.Marshal(map[string]string{"status": body.Status, "message": body.Message})
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	if err := s.state.Put(r.Context(), bedrockRuntimeCtrlNamespace, bedrockRuntimeCtrlJobStatusKey(jobID), seed); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true, "jobId": jobID})
+}
+
+// handleBedrockRuntimeClearJobStatus handles DELETE /v1/bedrock/model-invocation-job-status.
+// With ?jobId=... it removes the seeded status for that specific job.
+// Without a query param it removes all seeded job statuses.
+func (s *Server) handleBedrockRuntimeClearJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := r.URL.Query().Get("jobId")
+	if jobID != "" {
+		if err := s.state.Delete(r.Context(), bedrockRuntimeCtrlNamespace, bedrockRuntimeCtrlJobStatusKey(jobID)); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true})
+		return
+	}
+	keys, err := s.state.List(r.Context(), bedrockRuntimeCtrlNamespace, "jobstatus:")
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	for _, k := range keys {
+		if err := s.state.Delete(r.Context(), bedrockRuntimeCtrlNamespace, k); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+	}
+	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true})
+}

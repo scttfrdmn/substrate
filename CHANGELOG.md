@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Bedrock control-plane batch inference (#297)**: Added the ModelInvocationJob
+  APIs to `BedrockRuntimePlugin` (the control plane shares the `bedrock` SigV4
+  signing name with the data plane and is distinguished by request path, so no
+  parser change was needed). `CreateModelInvocationJob` (`POST
+  /model-invocation-job`) stores a job in the `Submitted` state and returns its
+  `jobArn`; `GetModelInvocationJob` (`GET /model-invocation-job/{jobId}`) returns
+  the job; `StopModelInvocationJob` (`POST /model-invocation-job/{jobId}/stop`)
+  transitions it to `Stopped`; `ListModelInvocationJobs` (`GET
+  /model-invocation-jobs`) returns summaries. New control-plane endpoints `POST`
+  and `DELETE /v1/bedrock/model-invocation-job-status` seed and clear a status
+  override (keyed by job ID or `"*"`), letting tests drive a job through
+  `InProgress`/`Completed`/`Failed` without simulated time. Cost entry:
+  `bedrock-runtime/CreateModelInvocationJob: $0.000015`. Closes #297.
+- **DynamoDB resource tagging (#298)**: `CreateTable` now stores the `Tags` list
+  supplied at creation time, and the plugin implements `TagResource`,
+  `UntagResource`, and `ListTagsOfResource`. Tags are stored on the table record
+  and keyed by the table ARN (`arn:aws:dynamodb:{region}:{acct}:table/{name}`,
+  parsed via the new `dynamodbTableNameFromARN` helper, which tolerates
+  `/index/...` and `/stream/...` suffixes). `ListTagsOfResource` returns tags
+  sorted by key for deterministic output; tagging a non-existent table returns
+  `ResourceNotFoundException`. This lets tag-based ownership logic (e.g. a tool
+  tagging its own tables `lagotto:managed=cli`) be tested end-to-end. Closes #298.
+- **SageMaker training-job CapacityError seeding (#299)**: `DescribeTrainingJob`
+  now honours a seeded terminal status and `FailureReason`, so a job can be made
+  to report `Failed` with a `CapacityError` reason for capacity-retry testing
+  (the default unseeded behaviour remains `Completed`). New control-plane
+  endpoints `POST` and `DELETE /v1/sagemaker/training-job-status` seed and clear
+  the override, keyed by training job name or `"*"` (mirroring the
+  Athena/RedshiftData/Timestream/Bedrock seeding pattern). Added `FailureReason`
+  to `SageMakerTrainingJob`. Closes #299.
+
 ### Security
 - **Module tag integrity advisory (#296)**: Documented that tags **v0.45.1** and
   **v0.45.2** are poisoned — both were re-cut after publication, so their current
