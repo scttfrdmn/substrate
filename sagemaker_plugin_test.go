@@ -338,3 +338,176 @@ func TestSageMakerPlugin_ListTrainingJobs(t *testing.T) {
 		t.Fatalf("expected 2 training jobs, got %d", len(result.TrainingJobSummaries))
 	}
 }
+
+// smSeedTrainingJobStatus POSTs a seeded terminal status to the control plane.
+func smSeedTrainingJobStatus(t *testing.T, ts *httptest.Server, jobName, status, failureReason string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]string{
+		"trainingJobName": jobName,
+		"status":          status,
+		"failureReason":   failureReason,
+	})
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/sagemaker/training-job-status", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("build seed request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do seed request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed status = %d", resp.StatusCode)
+	}
+}
+
+const capacityErrorReason = "CapacityError: Unable to provision requested ML compute capacity. Please retry using a different ML instance type."
+
+// TestSageMaker_DescribeTrainingJob_DefaultCompleted verifies the unseeded path
+// still reports Completed (existing behavior, guarded).
+func TestSageMaker_DescribeTrainingJob_DefaultCompleted(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+	resp := sagemakerRequest(t, ts, "CreateTrainingJob", map[string]any{"TrainingJobName": "ok-job"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	_ = sagemakerBody(t, resp)
+
+	resp = sagemakerRequest(t, ts, "DescribeTrainingJob", map[string]any{"TrainingJobName": "ok-job"})
+	var job struct {
+		TrainingJobStatus string `json:"TrainingJobStatus"`
+		FailureReason     string `json:"FailureReason"`
+	}
+	if err := json.Unmarshal(sagemakerBody(t, resp), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if job.TrainingJobStatus != "Completed" || job.FailureReason != "" {
+		t.Fatalf("expected Completed/no-reason, got %+v", job)
+	}
+}
+
+// TestSageMaker_DescribeTrainingJob_SeededCapacityError verifies a seeded Failed
+// status with a CapacityError FailureReason is returned, enabling capacity-retry
+// testing.
+func TestSageMaker_DescribeTrainingJob_SeededCapacityError(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+	resp := sagemakerRequest(t, ts, "CreateTrainingJob", map[string]any{"TrainingJobName": "cap-job"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	_ = sagemakerBody(t, resp)
+
+	smSeedTrainingJobStatus(t, ts, "cap-job", "Failed", capacityErrorReason)
+
+	resp = sagemakerRequest(t, ts, "DescribeTrainingJob", map[string]any{"TrainingJobName": "cap-job"})
+	var job struct {
+		TrainingJobStatus string `json:"TrainingJobStatus"`
+		FailureReason     string `json:"FailureReason"`
+	}
+	if err := json.Unmarshal(sagemakerBody(t, resp), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if job.TrainingJobStatus != "Failed" {
+		t.Fatalf("expected Failed, got %q", job.TrainingJobStatus)
+	}
+	if job.FailureReason != capacityErrorReason {
+		t.Fatalf("expected CapacityError reason, got %q", job.FailureReason)
+	}
+}
+
+// TestSageMaker_TrainingJobStatus_Wildcard verifies a "*" seed applies to any job.
+func TestSageMaker_TrainingJobStatus_Wildcard(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+	resp := sagemakerRequest(t, ts, "CreateTrainingJob", map[string]any{"TrainingJobName": "any-job"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	_ = sagemakerBody(t, resp)
+
+	smSeedTrainingJobStatus(t, ts, "", "Failed", capacityErrorReason) // empty name → "*"
+
+	resp = sagemakerRequest(t, ts, "DescribeTrainingJob", map[string]any{"TrainingJobName": "any-job"})
+	var job struct {
+		TrainingJobStatus string `json:"TrainingJobStatus"`
+	}
+	if err := json.Unmarshal(sagemakerBody(t, resp), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if job.TrainingJobStatus != "Failed" {
+		t.Fatalf("expected wildcard Failed, got %q", job.TrainingJobStatus)
+	}
+}
+
+// TestSageMaker_ClearTrainingJobStatus verifies the DELETE control endpoint
+// removes a seeded status so the job reverts to its stored Completed status.
+func TestSageMaker_ClearTrainingJobStatus(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+	_ = sagemakerBody(t, sagemakerRequest(t, ts, "CreateTrainingJob", map[string]any{"TrainingJobName": "clr-job"}))
+	smSeedTrainingJobStatus(t, ts, "clr-job", "Failed", capacityErrorReason)
+
+	// Targeted clear.
+	delReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/v1/sagemaker/training-job-status?trainingJobName=clr-job", nil)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("clear status = %d", delResp.StatusCode)
+	}
+	delResp.Body.Close() //nolint:errcheck
+
+	resp := sagemakerRequest(t, ts, "DescribeTrainingJob", map[string]any{"TrainingJobName": "clr-job"})
+	var job struct {
+		TrainingJobStatus string `json:"TrainingJobStatus"`
+	}
+	if err := json.Unmarshal(sagemakerBody(t, resp), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if job.TrainingJobStatus != "Completed" {
+		t.Fatalf("expected Completed after clear, got %q", job.TrainingJobStatus)
+	}
+}
+
+// TestSageMaker_SeedTrainingJobStatus_Errors covers the control-endpoint error
+// and clear-all paths.
+func TestSageMaker_SeedTrainingJobStatus_Errors(t *testing.T) {
+	ts := newSageMakerTestServer(t)
+
+	// Missing status → 400.
+	bad, _ := json.Marshal(map[string]string{"trainingJobName": "x"})
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/sagemaker/training-job-status", bytes.NewReader(bad))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing status, got %d", resp.StatusCode)
+	}
+	resp.Body.Close() //nolint:errcheck
+
+	// Malformed JSON → 400.
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/v1/sagemaker/training-job-status", bytes.NewReader([]byte("{not json")))
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed bad: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad JSON, got %d", resp.StatusCode)
+	}
+	resp.Body.Close() //nolint:errcheck
+
+	// Seed a wildcard then clear-all (no query param).
+	smSeedTrainingJobStatus(t, ts, "", "Failed", capacityErrorReason)
+	del, _ := http.NewRequest(http.MethodDelete, ts.URL+"/v1/sagemaker/training-job-status", nil)
+	resp, err = http.DefaultClient.Do(del)
+	if err != nil {
+		t.Fatalf("clear-all: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("clear-all status = %d", resp.StatusCode)
+	}
+	resp.Body.Close() //nolint:errcheck
+}

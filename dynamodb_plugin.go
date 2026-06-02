@@ -97,6 +97,13 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 		return p.executeStatement(ctx, req)
 	case "BatchExecuteStatement":
 		return p.batchExecuteStatement(ctx, req)
+	// Resource tagging.
+	case "TagResource":
+		return p.tagResource(ctx, req)
+	case "UntagResource":
+		return p.untagResource(ctx, req)
+	case "ListTagsOfResource":
+		return p.listTagsOfResource(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "UnknownOperationException",
@@ -295,6 +302,7 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 			Projection DynamoDBProjection         `json:"Projection"`
 		} `json:"LocalSecondaryIndexes"`
 		StreamSpecification *DynamoDBStreamSpecification `json:"StreamSpecification"`
+		Tags                []DynamoDBTag                `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: "Failed to parse request: " + err.Error(), HTTPStatus: http.StatusBadRequest}
@@ -367,6 +375,15 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		ItemCount:              0,
 	}
 
+	// Store any tags supplied at table creation time so they can be read back
+	// via ListTagsOfResource.
+	if len(input.Tags) > 0 {
+		tbl.Tags = make(map[string]string, len(input.Tags))
+		for _, t := range input.Tags {
+			tbl.Tags[t.Key] = t.Value
+		}
+	}
+
 	// Generate stream ARN if streams enabled.
 	if input.StreamSpecification != nil && input.StreamSpecification.StreamEnabled {
 		tbl.LatestStreamARN = tableARN + "/stream/" + now.UTC().Format("2006-01-02T15:04:05.999")
@@ -387,6 +404,95 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
 		"TableDescription": tbl,
+	})
+}
+
+// loadTableForTagging resolves a DynamoDB resource ARN to its table, returning a
+// ResourceNotFoundException if the ARN is malformed or the table does not exist.
+func (p *DynamoDBPlugin) loadTableForTagging(ctx *RequestContext, resourceARN string) (*DynamoDBTable, error) {
+	tableName := dynamodbTableNameFromARN(resourceARN)
+	if tableName == "" {
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Invalid ResourceArn: " + resourceARN, HTTPStatus: http.StatusBadRequest}
+	}
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, tableName)
+	if err != nil {
+		return nil, err
+	}
+	if tbl == nil {
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + tableName, HTTPStatus: http.StatusBadRequest}
+	}
+	return tbl, nil
+}
+
+func (p *DynamoDBPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		ResourceArn string        `json:"ResourceArn"`
+		Tags        []DynamoDBTag `json:"Tags"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	tbl, err := p.loadTableForTagging(ctx, input.ResourceArn)
+	if err != nil {
+		return nil, err
+	}
+	if tbl.Tags == nil {
+		tbl.Tags = make(map[string]string, len(input.Tags))
+	}
+	for _, t := range input.Tags {
+		tbl.Tags[t.Key] = t.Value
+	}
+	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+		return nil, fmt.Errorf("dynamodb tagResource saveTable: %w", err)
+	}
+	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{})
+}
+
+func (p *DynamoDBPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		ResourceArn string   `json:"ResourceArn"`
+		TagKeys     []string `json:"TagKeys"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	tbl, err := p.loadTableForTagging(ctx, input.ResourceArn)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range input.TagKeys {
+		delete(tbl.Tags, k)
+	}
+	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+		return nil, fmt.Errorf("dynamodb untagResource saveTable: %w", err)
+	}
+	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{})
+}
+
+func (p *DynamoDBPlugin) listTagsOfResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		ResourceArn string `json:"ResourceArn"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	tbl, err := p.loadTableForTagging(ctx, input.ResourceArn)
+	if err != nil {
+		return nil, err
+	}
+	// Emit tags sorted by key for deterministic output.
+	keys := make([]string, 0, len(tbl.Tags))
+	for k := range tbl.Tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	tags := make([]DynamoDBTag, 0, len(keys))
+	for _, k := range keys {
+		tags = append(tags, DynamoDBTag{Key: k, Value: tbl.Tags[k]})
+	}
+	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
+		"Tags":      tags,
+		"NextToken": nil,
 	})
 }
 
