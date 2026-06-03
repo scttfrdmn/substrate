@@ -1,0 +1,51 @@
+/* substrate docs — Atkinson Hyperlegible + brand palette (shared look with spore.host) */
+
+:root {
+  --vp-font-family-base: 'Atkinson Hyperlegible', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --vp-font-family-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+
+  /* Brand colours mapped to VitePress tokens */
+  --vp-c-brand-1: #4059E5;   /* brand blue */
+  --vp-c-brand-2: #1E3EA6;   /* brand navy */
+  --vp-c-brand-3: #42D4D4;   /* brand teal */
+  --vp-c-brand-soft: rgba(64, 89, 229, 0.1);
+}
+
+/* ── Typography ── */
+.vp-doc h1 { letter-spacing: -0.025em; }
+.vp-doc h2 { letter-spacing: -0.02em; padding-top: 1.5rem; }
+.vp-doc h3 { letter-spacing: -0.01em; }
+.vp-doc p  { line-height: 1.75; }
+
+/* ── Nav ── */
+.VPNavBar { border-bottom: 1px solid var(--vp-c-divider); }
+.VPNavBarTitle .title { font-weight: 700; letter-spacing: -0.01em; }
+
+/* ── Sidebar ── */
+.VPSidebarItem.level-0 > .item .text { font-weight: 600; }
+
+/* ── Home hero ── */
+.VPHero .tagline { font-size: 1.1rem !important; line-height: 1.7; }
+.VPHero .name { letter-spacing: -0.03em; }
+.VPHero .actions .VPButton.brand {
+  background: var(--vp-c-brand-1);
+  border-color: var(--vp-c-brand-1);
+}
+
+/* ── Feature cards on landing ── */
+.VPFeature .title { letter-spacing: -0.01em; }
+
+/* ── Code blocks ── */
+.vp-doc [class*='language-'] {
+  border-radius: 8px;
+}
+
+/* ── Custom containers ── */
+.vp-doc .tip     { border-color: var(--vp-c-brand-1); }
+.vp-doc .warning { border-color: #d97706; }
+.vp-doc .danger  { border-color: #dc2626; }
+
+/* ── Tables (reference pages) ── */
+.vp-doc table { font-size: 0.875rem; }
+.vp-doc table th { font-weight: 700; }
+.vp-doc table code { font-size: 0.8rem; }

@@ -32,7 +32,7 @@ description of it.
 ## Quick Start
 
 `StartTestServer` is the entry point for all Go integration tests. It starts
-an in-process Substrate server on a random port, registers all 37 service
+an in-process Substrate server on a random port, registers all 63 service
 plugins, and schedules `t.Cleanup` to shut the server down automatically.
 
 ```go
@@ -474,7 +474,7 @@ import (
     "github.com/aws/aws-sdk-go-v2/credentials"
     awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
     "github.com/aws/aws-sdk-go-v2/service/sqs"
-    substrate "github.com/scttfrdmn/substrate"
+    substrate "github.com/scttfrdmn/substrate/emulator"
 )
 
 func TestLambdaSQSTrigger(t *testing.T) {

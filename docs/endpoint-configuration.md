@@ -183,7 +183,7 @@ exposes this endpoint and returns all registered plugins as `"available"`:
     "lambda": "available",
     ...
   },
-  "version": "v0.24.0"
+  "version": "v0.68.0"
 }
 ```
 
