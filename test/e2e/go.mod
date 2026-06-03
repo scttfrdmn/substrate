@@ -2,6 +2,8 @@ module github.com/scttfrdmn/substrate/test/e2e
 
 go 1.26
 
+toolchain go1.26.4
+
 require (
 	github.com/aws/aws-sdk-go-v2 v1.32.5
 	github.com/aws/aws-sdk-go-v2/config v1.28.0
