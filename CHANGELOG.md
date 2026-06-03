@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.66.1] - 2026-06-02
+
 ### Added
 - **Scope & philosophy documentation**: Documented substrate's defining scope
   boundary — it models what is observable through an AWS API call (request/
@@ -1793,5 +1795,6 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.66.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.66.1...HEAD
+[v0.66.1]: https://github.com/scttfrdmn/substrate/compare/v0.66.0...v0.66.1
 [v0.66.0]: https://github.com/scttfrdmn/substrate/compare/v0.65.0...v0.66.0
