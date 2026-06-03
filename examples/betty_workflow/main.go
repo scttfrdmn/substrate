@@ -1,4 +1,5 @@
 //go:build ignore
+
 // Run: go run examples/betty_workflow/main.go
 
 // Package main demonstrates the full Betty.codes validation workflow using
@@ -24,7 +25,7 @@ import (
 
 	"github.com/spf13/afero"
 
-	substrate "github.com/scttfrdmn/substrate"
+	substrate "github.com/scttfrdmn/substrate/emulator"
 )
 
 func main() {

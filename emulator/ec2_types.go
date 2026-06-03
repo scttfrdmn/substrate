@@ -1,0 +1,660 @@
+package emulator
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"net"
+	"strings"
+)
+
+// ec2Namespace is the service name used in state keys.
+const ec2Namespace = "ec2"
+
+// EC2InstanceState holds the code and name of an EC2 instance state.
+type EC2InstanceState struct {
+	// Code is the numeric state code (0=pending, 16=running, 32=shutting-down,
+	// 48=terminated, 64=stopping, 80=stopped).
+	Code int `json:"code"`
+
+	// Name is the human-readable state name.
+	Name string `json:"name"`
+}
+
+// EC2Tag is a key-value tag attached to an EC2 resource.
+type EC2Tag struct {
+	// Key is the tag key.
+	Key string `json:"key"`
+
+	// Value is the tag value.
+	Value string `json:"value"`
+}
+
+// EC2Instance represents an Amazon EC2 instance.
+type EC2Instance struct {
+	// InstanceID is the unique identifier for the instance (e.g. "i-0123456789abcdef0").
+	InstanceID string `json:"instance_id"`
+
+	// ReservationID groups instances launched together.
+	ReservationID string `json:"reservation_id"`
+
+	// ImageID is the AMI used to launch the instance.
+	ImageID string `json:"image_id"`
+
+	// InstanceType is the EC2 instance type (e.g. "t3.micro").
+	InstanceType string `json:"instance_type"`
+
+	// State is the current instance lifecycle state.
+	State EC2InstanceState `json:"state"`
+
+	// SubnetID is the VPC subnet the instance was launched into.
+	SubnetID string `json:"subnet_id"`
+
+	// VPCID is the VPC the instance belongs to.
+	VPCID string `json:"vpc_id"`
+
+	// PrivateIPAddress is the primary private IPv4 address.
+	PrivateIPAddress string `json:"private_ip_address"`
+
+	// PublicIPAddress is the public IPv4 address (empty for VPC-only instances).
+	PublicIPAddress string `json:"public_ip_address"`
+
+	// PublicDNSName is the public DNS hostname for the instance.
+	PublicDNSName string `json:"public_dns_name,omitempty"`
+
+	// PrivateDNSName is the private DNS hostname for the instance.
+	PrivateDNSName string `json:"private_dns_name,omitempty"`
+
+	// SecurityGroupIDs holds the security groups attached to the instance.
+	SecurityGroupIDs []string `json:"security_group_ids"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// LaunchTime is the UTC time at which the instance was launched.
+	LaunchTime string `json:"launch_time"`
+
+	// TerminatedTime is the UTC time at which the instance was terminated,
+	// or empty if the instance has not been terminated.
+	TerminatedTime string `json:"terminated_time,omitempty"`
+
+	// AccountID is the AWS account that owns the instance.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the instance runs.
+	Region string `json:"region"`
+
+	// KeyName is the name of the key pair used to launch the instance.
+	KeyName string `json:"key_name,omitempty"`
+
+	// IamInstanceProfile is the ARN or name of the IAM instance profile attached
+	// at launch (echoed back so callers can verify it was applied).
+	IamInstanceProfile string `json:"iam_instance_profile,omitempty"`
+
+	// UserData is the base64-encoded user-data supplied at launch (stored so
+	// callers can verify it was accepted; not executed).
+	UserData string `json:"user_data,omitempty"`
+}
+
+// EC2KeyPair represents an EC2 key pair (public/private key used for SSH access).
+type EC2KeyPair struct {
+	// KeyPairID is the AWS-assigned identifier for the key pair.
+	KeyPairID string `json:"keyPairId"`
+
+	// KeyName is the user-supplied name for the key pair.
+	KeyName string `json:"keyName"`
+
+	// Fingerprint is the SHA-256 fingerprint of the public key.
+	Fingerprint string `json:"fingerprint"`
+
+	// KeyType is the type of key pair (e.g. "rsa" or "ed25519").
+	KeyType string `json:"keyType"`
+
+	// CreatedAt is the RFC3339 timestamp when the key pair was created.
+	CreatedAt string `json:"createdAt,omitempty"`
+
+	// AccountID is the AWS account that owns the key pair.
+	AccountID string `json:"accountId"`
+
+	// Region is the AWS region where the key pair is stored.
+	Region string `json:"region"`
+}
+
+// EC2VPC represents an Amazon Virtual Private Cloud.
+type EC2VPC struct {
+	// VPCID is the unique identifier for the VPC.
+	VPCID string `json:"vpc_id"`
+
+	// CIDRBlock is the primary IPv4 CIDR block.
+	CIDRBlock string `json:"cidr_block"`
+
+	// IsDefault indicates whether this is the account's default VPC.
+	IsDefault bool `json:"is_default"`
+
+	// State is the VPC state: "pending" or "available".
+	State string `json:"state"`
+
+	// EnableDNSSupport indicates whether DNS resolution is enabled for the VPC.
+	EnableDNSSupport bool `json:"enable_dns_support"`
+
+	// EnableDNSHostnames indicates whether instances receive public DNS hostnames.
+	EnableDNSHostnames bool `json:"enable_dns_hostnames"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the VPC.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the VPC resides.
+	Region string `json:"region"`
+}
+
+// EC2Subnet represents a VPC subnet.
+type EC2Subnet struct {
+	// SubnetID is the unique identifier for the subnet.
+	SubnetID string `json:"subnet_id"`
+
+	// VPCID is the VPC this subnet belongs to.
+	VPCID string `json:"vpc_id"`
+
+	// CIDRBlock is the IPv4 CIDR block for the subnet.
+	CIDRBlock string `json:"cidr_block"`
+
+	// AvailabilityZone is the availability zone for the subnet.
+	AvailabilityZone string `json:"availability_zone"`
+
+	// IsDefault indicates whether this is the account's default subnet.
+	IsDefault bool `json:"is_default"`
+
+	// MapPublicIPOnLaunch indicates whether instances launched into this subnet
+	// automatically receive a public IPv4 address.
+	MapPublicIPOnLaunch bool `json:"map_public_ip_on_launch"`
+
+	// State is the subnet state: "pending" or "available".
+	State string `json:"state"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the subnet.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the subnet resides.
+	Region string `json:"region"`
+}
+
+// EC2IPPermission represents an inbound or outbound IP permission rule in a
+// security group.
+type EC2IPPermission struct {
+	// IPProtocol is the IP protocol name ("tcp", "udp", "icmp") or number,
+	// or "-1" for all traffic.
+	IPProtocol string `json:"ip_protocol"`
+
+	// FromPort is the start of the port range (inclusive).
+	FromPort int `json:"from_port"`
+
+	// ToPort is the end of the port range (inclusive).
+	ToPort int `json:"to_port"`
+
+	// IPRanges holds the IPv4 CIDR ranges for this permission.
+	IPRanges []string `json:"ip_ranges,omitempty"`
+}
+
+// EC2SecurityGroup represents a VPC security group.
+type EC2SecurityGroup struct {
+	// GroupID is the unique identifier for the security group.
+	GroupID string `json:"group_id"`
+
+	// GroupName is the name of the security group.
+	GroupName string `json:"group_name"`
+
+	// Description is a description of the security group.
+	Description string `json:"description"`
+
+	// VPCID is the VPC this security group is associated with.
+	VPCID string `json:"vpc_id"`
+
+	// IngressRules holds the ingress (inbound) permission rules.
+	IngressRules []EC2IPPermission `json:"ingress_rules,omitempty"`
+
+	// EgressRules holds the egress (outbound) permission rules.
+	EgressRules []EC2IPPermission `json:"egress_rules,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the security group.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the security group resides.
+	Region string `json:"region"`
+}
+
+// EC2IGWAttachment represents the attachment of an internet gateway to a VPC.
+type EC2IGWAttachment struct {
+	// VPCID is the ID of the VPC the gateway is attached to.
+	VPCID string `json:"vpc_id"`
+
+	// State is the attachment state (e.g. "available").
+	State string `json:"state"`
+}
+
+// EC2InternetGateway represents an Amazon VPC internet gateway.
+type EC2InternetGateway struct {
+	// InternetGatewayID is the unique identifier for the internet gateway.
+	InternetGatewayID string `json:"internet_gateway_id"`
+
+	// Attachments lists the VPCs this gateway is attached to.
+	Attachments []EC2IGWAttachment `json:"attachments,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the internet gateway.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the internet gateway resides.
+	Region string `json:"region"`
+}
+
+// EC2Route represents a single route in a route table.
+type EC2Route struct {
+	// DestinationCIDR is the IPv4 destination CIDR block.
+	DestinationCIDR string `json:"destination_cidr"`
+
+	// GatewayID is the target gateway ID (e.g. "igw-..." or "local").
+	GatewayID string `json:"gateway_id"`
+
+	// State is the route state: "active" or "blackhole".
+	State string `json:"state"`
+}
+
+// EC2RTAssociation represents an association between a route table and a subnet
+// or gateway.
+type EC2RTAssociation struct {
+	// AssociationID is the unique identifier for this association.
+	AssociationID string `json:"association_id"`
+
+	// SubnetID is the subnet associated with the route table (may be empty for
+	// gateway associations).
+	SubnetID string `json:"subnet_id"`
+
+	// Main indicates whether this is the main (default) route table association.
+	Main bool `json:"main"`
+}
+
+// EC2RouteTable represents a VPC route table.
+type EC2RouteTable struct {
+	// RouteTableID is the unique identifier for the route table.
+	RouteTableID string `json:"route_table_id"`
+
+	// VPCID is the VPC this route table is associated with.
+	VPCID string `json:"vpc_id"`
+
+	// Routes holds the routes in this table.
+	Routes []EC2Route `json:"routes,omitempty"`
+
+	// Associations holds subnet and gateway associations.
+	Associations []EC2RTAssociation `json:"associations,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the route table.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the route table resides.
+	Region string `json:"region"`
+}
+
+// generateEC2InstanceID generates a random EC2 instance ID in the format
+// "i-" followed by 17 hex characters.
+func generateEC2InstanceID() string {
+	return "i-" + randomHex(8)
+}
+
+// generateVPCID generates a random VPC ID in the format "vpc-" followed by
+// 8 hex characters.
+func generateVPCID() string {
+	return "vpc-" + randomHex(8)
+}
+
+// generateSubnetID generates a random subnet ID in the format "subnet-"
+// followed by 8 hex characters.
+func generateSubnetID() string {
+	return "subnet-" + randomHex(8)
+}
+
+// generateSGID generates a random security group ID in the format "sg-"
+// followed by 8 hex characters.
+func generateSGID() string {
+	return "sg-" + randomHex(8)
+}
+
+// generateIGWID generates a random internet gateway ID in the format "igw-"
+// followed by 8 hex characters.
+func generateIGWID() string {
+	return "igw-" + randomHex(8)
+}
+
+// generateRTBID generates a random route table ID in the format "rtb-"
+// followed by 8 hex characters.
+func generateRTBID() string {
+	return "rtb-" + randomHex(8)
+}
+
+// generateKeyPairID generates a random EC2 key pair ID in the format "key-"
+// followed by 17 hex characters.
+func generateKeyPairID() string {
+	return "key-" + randomHex(17)
+}
+
+// generateReservationID generates a random reservation ID in the format
+// "r-" followed by 8 hex characters.
+func generateReservationID() string {
+	return "r-" + randomHex(8)
+}
+
+// generateAssociationID generates a random route table association ID.
+func generateAssociationID() string {
+	return "rtbassoc-" + randomHex(8)
+}
+
+// randomHex generates n random bytes returned as a lowercase hex string.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("ec2_types: rand.Read failed: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
+// EC2Image represents an Amazon Machine Image (AMI) registered in Substrate.
+type EC2Image struct {
+	// ImageID is the AMI identifier (e.g. "ami-0123456789abcdef0").
+	ImageID string `json:"image_id"`
+
+	// Name is the user-supplied name for the AMI.
+	Name string `json:"name"`
+
+	// Description is the optional description for the AMI.
+	Description string `json:"description"`
+
+	// InstanceID is the source instance used to create the AMI.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// State is the image state: always "available" in Substrate.
+	State string `json:"state"`
+
+	// CreationDate is the RFC3339 timestamp when the AMI was registered.
+	CreationDate string `json:"creation_date,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the AMI.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the AMI is registered.
+	Region string `json:"region"`
+}
+
+// generateImageID generates a random AMI ID in the format "ami-" followed
+// by 17 hex characters.
+func generateImageID() string {
+	return "ami-" + randomHex(8)
+}
+
+// EC2ElasticIP represents an Amazon EC2 Elastic IP address.
+type EC2ElasticIP struct {
+	// AllocationID is the unique identifier for the Elastic IP allocation.
+	AllocationID string `json:"allocation_id"`
+
+	// PublicIP is the public IPv4 address.
+	PublicIP string `json:"public_ip"`
+
+	// AssociationID is the identifier for the current association, if any.
+	AssociationID string `json:"association_id,omitempty"`
+
+	// InstanceID is the instance associated with this address, if any.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// NetworkInterfaceID is the network interface associated with this address, if any.
+	NetworkInterfaceID string `json:"network_interface_id,omitempty"`
+
+	// PrivateIPAddress is the private IP address associated with the Elastic IP.
+	PrivateIPAddress string `json:"private_ip_address,omitempty"`
+
+	// Domain is the domain of the allocation ("vpc" or "standard").
+	Domain string `json:"domain"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the Elastic IP.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the Elastic IP is allocated.
+	Region string `json:"region"`
+}
+
+// EC2NATGateway represents an Amazon VPC NAT gateway.
+type EC2NATGateway struct {
+	// NatGatewayID is the unique identifier for the NAT gateway.
+	NatGatewayID string `json:"nat_gateway_id"`
+
+	// SubnetID is the subnet in which the NAT gateway resides.
+	SubnetID string `json:"subnet_id"`
+
+	// VPCID is the VPC containing the NAT gateway.
+	VPCID string `json:"vpc_id"`
+
+	// AllocationID is the Elastic IP allocation ID for public NAT gateways.
+	AllocationID string `json:"allocation_id,omitempty"`
+
+	// PublicIP is the public IPv4 address for public NAT gateways.
+	PublicIP string `json:"public_ip,omitempty"`
+
+	// PrivateIP is the private IPv4 address of the NAT gateway.
+	PrivateIP string `json:"private_ip"`
+
+	// State is the NAT gateway state: "pending", "available", "deleting", "deleted".
+	State string `json:"state"`
+
+	// ConnectivityType is "public" or "private".
+	ConnectivityType string `json:"connectivity_type"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// CreateTime is the RFC3339 time at which the NAT gateway was created.
+	CreateTime string `json:"create_time"`
+
+	// AccountID is the AWS account that owns the NAT gateway.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the NAT gateway resides.
+	Region string `json:"region"`
+}
+
+// generateAllocationID generates a random Elastic IP allocation ID.
+func generateAllocationID() string {
+	return "eipalloc-" + randomHex(8)
+}
+
+// generateEIPAssociationID generates a random Elastic IP association ID.
+func generateEIPAssociationID() string {
+	return "eipassoc-" + randomHex(8)
+}
+
+// generateNATGatewayID generates a random NAT gateway ID.
+func generateNATGatewayID() string {
+	return "nat-" + randomHex(8)
+}
+
+// EC2LaunchTemplateData holds the launch parameters stored in an EC2 launch template.
+type EC2LaunchTemplateData struct {
+	// ImageID is the AMI ID to use when launching instances.
+	ImageID string `json:"imageId,omitempty"`
+
+	// InstanceType is the EC2 instance type (e.g. "t3.micro").
+	InstanceType string `json:"instanceType,omitempty"`
+
+	// KeyName is the name of the key pair to use.
+	KeyName string `json:"keyName,omitempty"`
+
+	// SecurityGroupIDs is the list of security group IDs.
+	SecurityGroupIDs []string `json:"securityGroupIds,omitempty"`
+
+	// UserData is the base64-encoded user data script.
+	UserData string `json:"userData,omitempty"`
+}
+
+// EC2LaunchTemplate represents an Amazon EC2 launch template.
+type EC2LaunchTemplate struct {
+	// LaunchTemplateID is the unique identifier (e.g. "lt-0abc1234def56789a").
+	LaunchTemplateID string `json:"launchTemplateId"`
+
+	// LaunchTemplateName is the user-supplied name.
+	LaunchTemplateName string `json:"launchTemplateName"`
+
+	// DefaultVersionNum is the default version number.
+	DefaultVersionNum int64 `json:"defaultVersionNumber"`
+
+	// LatestVersionNum is the latest version number.
+	LatestVersionNum int64 `json:"latestVersionNumber"`
+
+	// CreatedBy is the principal that created the template.
+	CreatedBy string `json:"createdBy"`
+
+	// CreateTime is the RFC3339 timestamp when the template was created.
+	CreateTime string `json:"createTime"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// LatestData holds the launch template parameters for the latest version.
+	LatestData EC2LaunchTemplateData `json:"latestData"`
+
+	// AccountID is the AWS account that owns the launch template.
+	AccountID string `json:"accountID"`
+
+	// Region is the AWS region in which the launch template resides.
+	Region string `json:"region"`
+}
+
+// generateLaunchTemplateID generates a random launch template ID.
+func generateLaunchTemplateID() string {
+	return "lt-" + randomHex(8)
+}
+
+// EC2VolumeAttachment represents the attachment of an EBS volume to an instance.
+type EC2VolumeAttachment struct {
+	// InstanceID is the ID of the attached instance.
+	InstanceID string `json:"instance_id"`
+
+	// Device is the device name on the instance (e.g. "/dev/xvdf").
+	Device string `json:"device"`
+
+	// State is the attachment state: "attaching", "attached", "detaching", "detached".
+	State string `json:"state"`
+
+	// AttachTime is the RFC3339 time the volume was attached.
+	AttachTime string `json:"attach_time"`
+}
+
+// EC2Volume represents an Amazon EBS volume.
+type EC2Volume struct {
+	// VolumeID is the unique identifier (e.g. "vol-0123456789abcdef0").
+	VolumeID string `json:"volume_id"`
+
+	// Size is the volume size in GiB.
+	Size int `json:"size"`
+
+	// VolumeType is the EBS volume type (e.g. "gp2", "gp3", "io1").
+	VolumeType string `json:"volume_type"`
+
+	// AvailabilityZone is the AZ in which the volume resides.
+	AvailabilityZone string `json:"availability_zone"`
+
+	// State is the volume state: "creating", "available", "in-use", "deleting", "deleted".
+	State string `json:"state"`
+
+	// SnapshotID is the ID of the snapshot from which the volume was created, if any.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+
+	// Encrypted indicates whether the volume is encrypted.
+	Encrypted bool `json:"encrypted"`
+
+	// IOPS is the provisioned IOPS (for io1/io2/gp3 volumes).
+	IOPS int `json:"iops,omitempty"`
+
+	// Attachments holds the current instance attachments.
+	Attachments []EC2VolumeAttachment `json:"attachments,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// CreateTime is the RFC3339 timestamp when the volume was created.
+	CreateTime string `json:"create_time"`
+
+	// AccountID is the AWS account that owns the volume.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the volume resides.
+	Region string `json:"region"`
+}
+
+// generateVolumeID generates a random EBS volume ID.
+func generateVolumeID() string {
+	return "vol-" + randomHex(8)
+}
+
+// SecurityGroupAllowed checks if (protocol, port, sourceCIDR) is permitted by
+// any rule in the given set. Protocol "-1" matches all traffic. CIDR
+// "0.0.0.0/0" matches all sources.
+func SecurityGroupAllowed(rules []EC2IPPermission, protocol string, port int, sourceCIDR string) bool {
+	for _, rule := range rules {
+		if !sgProtocolMatches(rule.IPProtocol, protocol) {
+			continue
+		}
+		if rule.IPProtocol != "-1" && (port < rule.FromPort || port > rule.ToPort) {
+			continue
+		}
+		if sgCIDRMatches(rule.IPRanges, sourceCIDR) {
+			return true
+		}
+	}
+	return false
+}
+
+func sgProtocolMatches(ruleProto, queryProto string) bool {
+	if ruleProto == "-1" {
+		return true
+	}
+	return strings.EqualFold(ruleProto, queryProto)
+}
+
+func sgCIDRMatches(ruleCIDRs []string, source string) bool {
+	if len(ruleCIDRs) == 0 {
+		return true // no CIDR restriction
+	}
+	sourceIP := net.ParseIP(source)
+	for _, cidr := range ruleCIDRs {
+		if cidr == "0.0.0.0/0" || cidr == "::/0" {
+			return true
+		}
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			if cidr == source {
+				return true // exact match fallback
+			}
+			continue
+		}
+		if sourceIP != nil && network.Contains(sourceIP) {
+			return true
+		}
+	}
+	return false
+}

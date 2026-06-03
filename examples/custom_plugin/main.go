@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	substrate "github.com/scttfrdmn/substrate"
+	substrate "github.com/scttfrdmn/substrate/emulator"
 )
 
 // WeatherPlugin emulates a fictitious "weather" AWS-style service.
