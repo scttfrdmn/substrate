@@ -3,7 +3,7 @@
 //
 // # Overview
 //
-// Substrate's three core differentiators:
+// Substrate's core differentiators:
 //
 //  1. Deterministic reproducibility: event sourcing + seeded RNG + time control
 //     means the same test inputs always produce the same outputs.
@@ -13,6 +13,75 @@
 //
 //  3. Cost visibility: real AWS pricing is tracked per operation so you know
 //     projected monthly costs before the bill arrives.
+//
+//  4. API-surface scope: substrate models what is observable through an AWS API
+//     call — request/response shapes, resource state and its transitions over
+//     the simulated clock, and seedable outcomes — not what software inside a
+//     resource does. It never executes the workload behind the API (user-data,
+//     Lambda code, an inference, a training job); such inputs are captured as
+//     recorded intent with a seedable result. This is also why replay is
+//     deterministic: API observations are recordable and replayable, whereas
+//     resource internals are not.
+//
+// # What determinism and replay give you
+//
+// Determinism and the event log are not ends in themselves; they unlock
+// capabilities that flaky, stateful test infrastructure cannot offer:
+//
+//   - No flakes: the same inputs always produce the same outputs, so a green
+//     test stays green and a red test is a real signal, not timing noise. CI
+//     does not retry-until-pass.
+//   - Exact reproduction: a failure replays identically from its recorded
+//     events, so "works on my machine" and heisenbugs disappear — you debug the
+//     exact run, not an approximation of it.
+//   - Time-travel inspection: step backward through request history and read
+//     resource state at any point, to see precisely where a sequence of API
+//     calls diverged from what was expected.
+//   - Testable rare paths: seeded outcomes make capacity failures, throttling,
+//     terminal job states, and slow transitions instant and repeatable, so the
+//     retry/poll/wait logic that only runs on the unhappy path is actually
+//     covered (see Seeding, below).
+//   - Fast and free: no network, no real account, no provisioning latency or
+//     spend — suitable for unit tests and tight inner loops, and for validating
+//     AI-generated infrastructure code before it ever touches AWS.
+//   - Regression fixtures: a recorded run can be replayed as a fixture and
+//     exported as a standalone test, turning a once-seen scenario into a
+//     permanent guard.
+//
+// # Seeding: determinism without sacrificing coverage
+//
+// Determinism does not mean every test sees the same result. Seeding is the
+// mechanism that lets a deterministic emulator produce different outcomes on
+// demand. By default an operation returns its nominal success path; a test seeds
+// an alternate outcome through a control-plane endpoint, and the plugin reads
+// that seed at request time. The same launch can therefore be made to return
+// InsufficientInstanceCapacity, a training job to come back Failed with a
+// CapacityError, or a query to return a specific result set — each chosen by the
+// test, each fully reproducible. Crucially, the failure, capacity, and timing
+// paths a consumer's retry/poll/wait loops exist to handle are exactly the paths
+// that are rare, slow, or impossible to trigger on demand against real AWS;
+// seeding makes them first-class, instant, and deterministic.
+//
+// # Why determinism (vs. containers or real infrastructure)
+//
+// The same property is reachable three ways, with very different trade-offs:
+//
+//   - Real AWS / LocalStack-with-containers run actual workloads, so behavior
+//     depends on wall-clock timing, process scheduling, network, and the live
+//     state of a remote account. Failure and edge-case paths are hard to trigger
+//     and rarely reproduce; a flake cannot be replayed.
+//   - Hand-written mocks are deterministic but bespoke per test, drift from the
+//     real API, and cannot model state transitions or be inspected over time.
+//
+// Substrate records every request as an immutable event over a simulated clock,
+// so a run is reproducible by construction: the same inputs (including seeds)
+// always yield the same outputs, a failing run replays exactly for debugging,
+// and you can step backward through history to inspect state at any point — none
+// of which a container-backed or real-infrastructure approach offers. The cost
+// is fidelity to workload internals, which is deliberately out of scope (see
+// differentiator 4): substrate is the fast, deterministic tier for exercising
+// how code drives and reacts to the AWS API, not for validating what runs inside
+// a resource.
 //
 // # Quick Start
 //
