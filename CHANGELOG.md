@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.68.0] - 2026-06-02
+
+This release intentionally skips `v0.67.0` (a void, out-of-order tag — see below
+and `SECURITY.md`) and supersedes it as the highest semver tag, so that
+`go get github.com/scttfrdmn/substrate@latest` once again resolves to current
+code rather than the void tag. No source change versus `v0.66.1`; the entries
+below are the released set.
+
 ### Security
 - **Repository protection rulesets + `v0.67.0` void advisory**: Added GitHub
   rulesets enforcing the release contract server-side — `refs/tags/v*` tags are
@@ -1806,6 +1814,7 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.66.1...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.68.0...HEAD
+[v0.68.0]: https://github.com/scttfrdmn/substrate/compare/v0.66.1...v0.68.0
 [v0.66.1]: https://github.com/scttfrdmn/substrate/compare/v0.66.0...v0.66.1
 [v0.66.0]: https://github.com/scttfrdmn/substrate/compare/v0.65.0...v0.66.0
