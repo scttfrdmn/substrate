@@ -494,8 +494,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 
 func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := extractIndexedParams(req.Params, "InstanceId")
-	filterNames := extractIndexedParams(req.Params, "Filter.1.Value")
-	filterKey := req.Params["Filter.1.Name"]
+	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -552,8 +551,8 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		if len(ids) > 0 && !containsStr(ids, inst.InstanceID) {
 			continue
 		}
-		// Filter by state name.
-		if filterKey == "instance-state-name" && len(filterNames) > 0 && !containsStr(filterNames, inst.State.Name) {
+		// Filter by the request's Filter.N.* parameters (AND-combined).
+		if !matchesEC2InstanceFilters(&inst, filters) {
 			continue
 		}
 
@@ -2316,6 +2315,68 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 		}
 	}
 	return filters
+}
+
+// matchesEC2InstanceFilters reports whether inst satisfies every filter in
+// filters (AND-combined; within a single filter the allowed values are OR'd,
+// matching EC2 semantics). Supported keys cover what real callers use; an
+// unrecognized key matches nothing (safer than silently ignoring it, which is
+// what caused terminated instances to leak through a running-only query).
+func matchesEC2InstanceFilters(inst *EC2Instance, filters map[string][]string) bool {
+	for name, vals := range filters {
+		if len(vals) == 0 {
+			continue
+		}
+		var got string
+		switch {
+		case name == "instance-state-name":
+			got = inst.State.Name
+		case name == "instance-id":
+			got = inst.InstanceID
+		case name == "instance-type":
+			got = inst.InstanceType
+		case name == "vpc-id":
+			got = inst.VPCID
+		case name == "subnet-id":
+			got = inst.SubnetID
+		case name == "key-name":
+			got = inst.KeyName
+		case name == "image-id":
+			got = inst.ImageID
+		case name == "tag-key":
+			matched := false
+			for _, t := range inst.Tags {
+				if containsStr(vals, t.Key) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+			continue
+		case strings.HasPrefix(name, "tag:"):
+			key := strings.TrimPrefix(name, "tag:")
+			matched := false
+			for _, t := range inst.Tags {
+				if t.Key == key && containsStr(vals, t.Value) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+			continue
+		default:
+			// Unknown filter key: match nothing.
+			return false
+		}
+		if !containsStr(vals, got) {
+			return false
+		}
+	}
+	return true
 }
 
 // containsStr reports whether s is in the slice.
