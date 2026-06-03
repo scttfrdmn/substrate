@@ -6,7 +6,7 @@ test in about 15 minutes.
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.26 or later
 - Docker (optional — for running Substrate as a standalone server)
 
 ## Install
@@ -41,7 +41,7 @@ To change configuration, edit `configs/substrate-local.yaml` and run
 `docker compose restart substrate`. To stop and wipe all recorded data:
 `docker compose down -v`.
 
-See [`deploy/README.md`](../deploy/README.md) for ECS Fargate and Kubernetes
+See [`deploy/README.md`](https://github.com/scttfrdmn/substrate/blob/main/deploy/README.md) for ECS Fargate and Kubernetes
 deployment options. The `substratelocal` wrapper binary also provides a
 `localstack`-compatible endpoint for tools that hardcode that name.
 
@@ -55,7 +55,7 @@ Verify:
 
 ```bash
 substrate --version
-# substrate v0.27.2
+# substrate v0.68.0
 ```
 
 ### Docker
@@ -82,7 +82,7 @@ curl http://localhost:4566/health
 # {"status":"ok"}
 
 curl http://localhost:4566/ready
-# {"status":"ready","plugins":35}
+# {"status":"ready","plugins":63}
 ```
 
 ## First 5 minutes: AWS CLI
@@ -152,7 +152,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	substrate "github.com/scttfrdmn/substrate"
+	substrate "github.com/scttfrdmn/substrate/emulator"
 )
 
 func TestCreateS3Bucket(t *testing.T) {
@@ -340,7 +340,7 @@ func TestCostTracking(t *testing.T) {
 
 ## Next steps
 
-- [Service Reference](services.md) — all 37 plugins with full operation lists
+- [Service Reference](services.md) — all 63 plugins with full operation lists
 - [Testing Guide](testing-guide.md) — advanced patterns: fault injection,
   multi-region, time-travel debugging, cost assertions
 - [Endpoint Configuration](endpoint-configuration.md) — configure Terraform,
