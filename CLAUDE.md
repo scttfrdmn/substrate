@@ -3,6 +3,56 @@
 Substrate — event-sourced AWS emulator for deterministic testing of
 AI-generated infrastructure code (CDK/CloudFormation/Terraform).
 
+## Scope (what substrate models — and what it does not)
+
+**Substrate models what is observable through an AWS API call, not what software
+inside a resource does.** A plugin's job is to make every API *observation* a
+caller can make accurate, seedable, and time-ordered — never to execute the
+workload behind the API.
+
+- In scope: request/response shapes, error codes, resource state and its
+  transitions over the simulated clock (e.g. an instance moving
+  `pending → running`, a job reporting `Failed` with a seeded reason, a command
+  invocation going `Pending → InProgress → Success`), and seedable outcomes that
+  let a consumer's poll/retry/wait loop be tested.
+- Out of scope: actually running the work — executing user-data or cloud-init,
+  running a Lambda's code, performing an inference, running a training job,
+  bootstrapping a node. Capture such inputs as recorded intent and expose a
+  **seedable** success/failure/completion signal; do not model the internal
+  semantics of the workload.
+
+This boundary is also *why* deterministic replay works: API observations can be
+recorded as events and replayed identically, whereas resource internals are
+nondeterministic (real time, scheduling, I/O). When a proposed feature would
+require modeling box-internals, it belongs in a different tool or test tier, not
+in substrate. Apply this test before adding behaviour: *is this observable
+through an API call, or is it resource-internal?*
+
+**Seeding is how a deterministic emulator produces different results.** A new
+operation defaults to its nominal success path; alternate outcomes (errors,
+capacity failures, terminal job states, specific result sets, time-ordered
+transitions) are exposed as **seedable** values that a plugin reads from a
+control-plane endpoint at request time — never as nondeterministic behaviour.
+This is what lets a test exercise the rare/slow/failure paths a consumer's
+retry/poll/wait loops exist to handle, instantly and reproducibly. Follow the
+established seed pattern (`POST`/`DELETE /v1/{service}/...`, keyed by an ID or
+`"*"` wildcard; see Bedrock job status, SageMaker training-job status, Athena/
+RedshiftData/Timestream results) when adding a new outcome.
+
+The payoff over container- or real-infrastructure-backed approaches is
+reproducibility by construction: same inputs (including seeds) → same outputs, a
+failing run replays exactly, and state is inspectable at any point in history —
+none of which survive real timing, scheduling, and network. The deliberate cost
+is workload-internal fidelity, which is out of scope per the boundary above.
+
+Why that reproducibility matters in practice: no test flakes (a red test is a
+real signal, not timing noise), exact reproduction of failures from recorded
+events (no heisenbugs), time-travel inspection of state at any point, instant and
+repeatable coverage of rare paths (capacity/throttle/terminal states via seeds),
+and fast, network-free, zero-spend runs suitable for validating IaC before it
+touches AWS. Recorded runs can be exported as standalone regression fixtures. See
+`doc.go` for the fuller articulation.
+
 ## Work tracking
 
 All tasks are GitHub Issues assigned to Milestones. Before starting any

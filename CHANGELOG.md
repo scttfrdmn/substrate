@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Scope & philosophy documentation**: Documented substrate's defining scope
+  boundary — it models what is observable through an AWS API call (request/
+  response shapes, resource state and its transitions over the simulated clock,
+  and seedable outcomes), not what software inside a resource does. Articulated
+  that **seeding** is the mechanism that lets a deterministic emulator produce
+  different results (default nominal path; alternate error/capacity/terminal
+  outcomes seeded via control-plane endpoints and read at request time), and why
+  this determinism is preferable to container- or real-infrastructure-backed
+  approaches (reproducibility by construction, exact replay of failures, history
+  inspection — at the deliberate cost of workload-internal fidelity). Also
+  articulated *why* determinism and replay are useful capabilities (no flakes,
+  exact reproduction, time-travel inspection, testable rare paths, fast/free
+  runs, regression fixtures). Added as a "Scope" section in `CLAUDE.md` and a
+  fourth differentiator plus "What determinism and replay give you", "Seeding",
+  and "Why determinism" sections in `doc.go`.
+
 ## [v0.66.0] - 2026-06-02
 
 ### Added
