@@ -12,6 +12,7 @@ import (
 
 	substrate "github.com/scttfrdmn/substrate"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newEC2TestServer builds a minimal Server with the EC2 plugin registered.
@@ -3264,4 +3265,116 @@ func TestEC2_DefaultVPC_IGWRoute(t *testing.T) {
 	body := readBody(t, desc)
 	assert.Contains(t, body, "0.0.0.0/0")
 	assert.Contains(t, body, "igw-")
+}
+
+// TestEC2_DescribeInstances_MultiFilter is the #305 regression: DescribeInstances
+// must parse every Filter.N (not just Filter.1), AND-combine them, and support
+// tag:/instance-state-name/instance-id filtering regardless of filter order.
+func TestEC2_DescribeInstances_MultiFilter(t *testing.T) {
+	ts := newEC2TestServer(t)
+
+	// Launch a tagged instance.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+		"MinCount": "1", "MaxCount": "1",
+		"TagSpecification.1.ResourceType": "instance",
+		"TagSpecification.1.Tag.1.Key":    "spawn:managed",
+		"TagSpecification.1.Tag.1.Value":  "true",
+	})
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&runResult))
+	resp.Body.Close() //nolint:errcheck
+	require.Len(t, runResult.Instances, 1)
+	id := runResult.Instances[0].InstanceID
+
+	// describeRunning issues the real-client filter order: tag first, state second.
+	describeRunning := func() []string {
+		r := ec2Request(t, ts, map[string]string{
+			"Action":           "DescribeInstances",
+			"Filter.1.Name":    "tag:spawn:managed",
+			"Filter.1.Value.1": "true",
+			"Filter.2.Name":    "instance-state-name",
+			"Filter.2.Value.1": "running",
+		})
+		var res struct {
+			Instances []struct {
+				InstanceID string `xml:"instanceId"`
+			} `xml:"reservationSet>item>instancesSet>item"`
+		}
+		require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+		r.Body.Close() //nolint:errcheck
+		out := make([]string, 0, len(res.Instances))
+		for _, in := range res.Instances {
+			out = append(out, in.InstanceID)
+		}
+		return out
+	}
+
+	// Before terminate: the running, tagged instance is returned.
+	assert.Contains(t, describeRunning(), id, "running tagged instance should match both filters")
+
+	// Terminate it.
+	rt := ec2Request(t, ts, map[string]string{"Action": "TerminateInstances", "InstanceId.1": id})
+	rt.Body.Close() //nolint:errcheck
+
+	// After terminate: excluded by the instance-state-name=running filter
+	// (which is Filter.2 — the bug was that Filter.2 was never read).
+	assert.NotContains(t, describeRunning(), id, "terminated instance must be excluded by the state filter")
+}
+
+// TestEC2_DescribeInstances_FilterOrderIndependent verifies state filtering works
+// whether instance-state-name is Filter.1 or Filter.2.
+func TestEC2_DescribeInstances_FilterOrderIndependent(t *testing.T) {
+	ts := newEC2TestServer(t)
+	run := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-1", "InstanceType": "t3.micro",
+		"MinCount": "1", "MaxCount": "1",
+		"TagSpecification.1.ResourceType": "instance",
+		"TagSpecification.1.Tag.1.Key":    "k", "TagSpecification.1.Tag.1.Value": "v",
+	})
+	var rr struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(run.Body).Decode(&rr))
+	run.Body.Close() //nolint:errcheck
+	id := rr.Instances[0].InstanceID
+
+	count := func(params map[string]string) int {
+		params["Action"] = "DescribeInstances"
+		r := ec2Request(t, ts, params)
+		var res struct {
+			Instances []struct {
+				InstanceID string `xml:"instanceId"`
+			} `xml:"reservationSet>item>instancesSet>item"`
+		}
+		require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+		r.Body.Close() //nolint:errcheck
+		return len(res.Instances)
+	}
+
+	// State filter first.
+	assert.Equal(t, 1, count(map[string]string{
+		"Filter.1.Name": "instance-state-name", "Filter.1.Value.1": "running",
+		"Filter.2.Name": "tag:k", "Filter.2.Value.1": "v",
+	}))
+	// State filter second.
+	assert.Equal(t, 1, count(map[string]string{
+		"Filter.1.Name": "tag:k", "Filter.1.Value.1": "v",
+		"Filter.2.Name": "instance-state-name", "Filter.2.Value.1": "running",
+	}))
+	// Non-matching tag value excludes it.
+	assert.Equal(t, 0, count(map[string]string{
+		"Filter.1.Name": "tag:k", "Filter.1.Value.1": "other",
+	}))
+	// Unknown filter key matches nothing (does not silently pass).
+	assert.Equal(t, 0, count(map[string]string{
+		"Filter.1.Name": "some-unknown-filter", "Filter.1.Value.1": "x",
+	}))
+	_ = id
 }

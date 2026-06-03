@@ -24,6 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fourth differentiator plus "What determinism and replay give you", "Seeding",
   and "Why determinism" sections in `doc.go`.
 
+### Fixed
+- **`DescribeInstances` multi-filter and `tag:` support (#305)**: `describeInstances`
+  only read `Filter.1` and only honoured `instance-state-name`, so any second-or-later
+  filter and all `tag:` filters were silently dropped — returning instances the
+  caller had explicitly filtered out (e.g. a terminated instance for a
+  `running`-only query when a `tag:` filter came first). It now uses the shared
+  `extractEC2Filters` helper and AND-combines every filter via the new
+  `ec2InstanceMatchesFilters`. Supported keys: `instance-state-name`,
+  `instance-state-code`, `instance-id`, `instance-type`, `image-id`, `vpc-id`,
+  `subnet-id`, `key-name`, `tag:<key>`, and `tag-key`. Unknown filter keys match
+  nothing rather than passing silently. Closes #305.
+
+### Security
+- **Go toolchain bumped to 1.26.4 (`go.mod`, `test/e2e/go.mod`)**: pins the
+  patched standard library to clear call-reachable stdlib advisories flagged by
+  `govulncheck` — GO-2026-5039 (`net/textproto` header escaping, reachable via
+  `http.Server.Serve`) and GO-2026-5037 (`crypto/x509` hostname parsing). CI
+  reads the toolchain from `go.mod`, so the vulnerability check now passes with
+  zero call-reachable vulnerabilities.
+
 ## [v0.66.0] - 2026-06-02
 
 ### Added

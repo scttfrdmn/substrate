@@ -492,10 +492,66 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
+// ec2InstanceMatchesFilters reports whether an instance satisfies every supplied
+// DescribeInstances filter (filters are AND-combined; each filter's values are
+// OR-combined). Supported keys cover the filters real callers use; an unknown
+// key matches nothing (returns false) rather than being silently ignored, so a
+// filtered query never returns resources the caller meant to exclude.
+func ec2InstanceMatchesFilters(inst EC2Instance, filters map[string][]string) bool {
+	for name, values := range filters {
+		if !ec2InstanceMatchesFilter(inst, name, values) {
+			return false
+		}
+	}
+	return true
+}
+
+// ec2InstanceMatchesFilter evaluates a single filter against an instance.
+func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bool {
+	// tag:<key> — instance has a tag with that key whose value is in values.
+	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
+		for _, t := range inst.Tags {
+			if t.Key == tagKey && containsStr(values, t.Value) {
+				return true
+			}
+		}
+		return false
+	}
+
+	switch name {
+	case "instance-state-name":
+		return containsStr(values, inst.State.Name)
+	case "instance-state-code":
+		return containsStr(values, strconv.Itoa(inst.State.Code))
+	case "instance-id":
+		return containsStr(values, inst.InstanceID)
+	case "instance-type":
+		return containsStr(values, inst.InstanceType)
+	case "image-id":
+		return containsStr(values, inst.ImageID)
+	case "vpc-id":
+		return containsStr(values, inst.VPCID)
+	case "subnet-id":
+		return containsStr(values, inst.SubnetID)
+	case "key-name":
+		return containsStr(values, inst.KeyName)
+	case "tag-key":
+		// Instance has a tag with any of the requested keys (any value).
+		for _, t := range inst.Tags {
+			if containsStr(values, t.Key) {
+				return true
+			}
+		}
+		return false
+	default:
+		// Unknown filter key: match nothing rather than silently passing.
+		return false
+	}
+}
+
 func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := extractIndexedParams(req.Params, "InstanceId")
-	filterNames := extractIndexedParams(req.Params, "Filter.1.Value")
-	filterKey := req.Params["Filter.1.Name"]
+	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -552,8 +608,8 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		if len(ids) > 0 && !containsStr(ids, inst.InstanceID) {
 			continue
 		}
-		// Filter by state name.
-		if filterKey == "instance-state-name" && len(filterNames) > 0 && !containsStr(filterNames, inst.State.Name) {
+		// Apply all DescribeInstances filters, AND-combined.
+		if !ec2InstanceMatchesFilters(inst, filters) {
 			continue
 		}
 
