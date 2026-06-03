@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://scttfrdmn.github.io/substrate/sitemap.xml
