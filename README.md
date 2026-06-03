@@ -267,6 +267,8 @@ and [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Documentation
 
+📖 **Full documentation: [scttfrdmn.github.io/substrate](https://scttfrdmn.github.io/substrate/)**
+
 - **[Getting Started](docs/getting-started.md)** — install, first test, 15-minute tutorial
 - **[Service Reference](docs/services.md)** — all 63 plugins with operation lists
 - **[Testing Guide](docs/testing-guide.md)** — `StartTestServer`, recording/replay, cost assertions
