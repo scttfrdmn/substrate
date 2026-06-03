@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	substrate "github.com/scttfrdmn/substrate"
+	substrate "github.com/scttfrdmn/substrate/emulator"
 )
 
 // Package-level state shared across all E2E tests.

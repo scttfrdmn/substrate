@@ -1,0 +1,288 @@
+package emulator
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+)
+
+// AWSRequest represents a parsed AWS API request received by the emulator.
+type AWSRequest struct {
+	// Service is the AWS service name (e.g., "s3", "iam", "dynamodb").
+	Service string
+
+	// Operation is the API operation name (e.g., "PutObject", "CreateUser").
+	Operation string
+
+	// Headers contains HTTP request headers, including AWS authentication headers.
+	Headers map[string]string
+
+	// Body contains the raw request body bytes.
+	Body []byte
+
+	// Params contains parsed query-string or form parameters.
+	Params map[string]string
+
+	// Path is the effective URL path of the HTTP request. For S3 virtual-hosted
+	// requests the bucket is prepended so the plugin always sees /bucket[/key].
+	Path string
+}
+
+// AWSResponse represents an AWS API response produced by the emulator.
+type AWSResponse struct {
+	// StatusCode is the HTTP status code of the response.
+	StatusCode int
+
+	// Headers contains HTTP response headers.
+	Headers map[string]string
+
+	// Body contains the raw response body bytes.
+	Body []byte
+}
+
+// AWSError represents a structured AWS-style error response.
+type AWSError struct {
+	// Code is the AWS error code (e.g., "NoSuchBucket", "AccessDenied").
+	Code string
+
+	// Message is the human-readable error description.
+	Message string
+
+	// HTTPStatus is the HTTP status code associated with this error.
+	HTTPStatus int
+}
+
+// Error implements the error interface.
+func (e *AWSError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+// RequestContext holds per-request metadata propagated through the handling chain.
+type RequestContext struct {
+	// RequestID is a unique identifier for this request.
+	RequestID string
+
+	// AccountID is the AWS account ID associated with the request.
+	AccountID string
+
+	// Region is the AWS region targeted by the request.
+	Region string
+
+	// Timestamp is the time at which the request was received.
+	Timestamp time.Time
+
+	// Principal is the authenticated caller, or nil for unauthenticated requests.
+	Principal *Principal
+
+	// Metadata holds arbitrary key-value pairs for cross-cutting concerns
+	// such as stream IDs and replay context.
+	Metadata map[string]interface{}
+}
+
+// Principal represents the authenticated caller of an AWS API request.
+type Principal struct {
+	// ARN is the Amazon Resource Name that identifies the caller.
+	ARN string
+
+	// Type is the principal type: "User", "Role", "Service", or "AssumedRole".
+	Type string
+}
+
+// StateManager defines the interface for reading and writing emulator state.
+// Implementations may store state in memory (for testing) or SQLite (for
+// persistence across runs).
+type StateManager interface {
+	// Get retrieves the value stored at namespace/key.
+	// Returns (nil, nil) if the key does not exist.
+	Get(ctx context.Context, namespace, key string) ([]byte, error)
+
+	// Put stores value at namespace/key, creating or overwriting as needed.
+	Put(ctx context.Context, namespace, key string, value []byte) error
+
+	// Delete removes namespace/key. No error is returned if the key is absent.
+	Delete(ctx context.Context, namespace, key string) error
+
+	// List returns all keys in namespace that share the given prefix.
+	List(ctx context.Context, namespace, prefix string) ([]string, error)
+}
+
+// SnapshotableStateManager extends [StateManager] with the ability to capture
+// and restore its entire contents as opaque bytes, and to wipe all state.
+type SnapshotableStateManager interface {
+	StateManager
+
+	// Snapshot serializes the entire state into opaque bytes.
+	Snapshot(ctx context.Context) ([]byte, error)
+
+	// Restore deserializes previously snapshotted bytes back into the manager,
+	// replacing all existing state.
+	Restore(ctx context.Context, data []byte) error
+
+	// Reset wipes all state, leaving the manager empty.
+	Reset(ctx context.Context) error
+}
+
+// TimeController provides a controllable clock for deterministic testing and
+// time-accelerated simulation.
+//
+// By replacing the system clock, Substrate produces identical event timestamps
+// across replay runs.  When a scale factor greater than 1.0 is set via
+// [TimeController.SetScale], the controlled clock advances faster than wall
+// time: a scale of 3600 makes one real second equal one simulated hour.
+//
+// Implementation: the controller stores a (simulated baseline, wall baseline)
+// pair.  Now() computes:
+//
+//	simulated_baseline + (wall_now - wall_baseline) * scale
+//
+// Calling SetTime or SetScale resets both baselines atomically so the new
+// value takes effect immediately without a discontinuous jump.
+type TimeController struct {
+	mu           sync.RWMutex
+	simBaseline  time.Time // simulated time at last SetTime/SetScale call
+	wallBaseline time.Time // real wall time at last SetTime/SetScale call
+	scale        float64
+}
+
+// NewTimeController creates a TimeController whose simulated clock starts at t
+// with a scale factor of 1.0 (real-time).
+func NewTimeController(t time.Time) *TimeController {
+	return &TimeController{
+		simBaseline:  t,
+		wallBaseline: time.Now(),
+		scale:        1.0,
+	}
+}
+
+// Now returns the current controlled time, advanced from the last SetTime or
+// SetScale call by (wall elapsed) * scale.
+func (c *TimeController) Now() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	elapsed := time.Since(c.wallBaseline)
+	return c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+}
+
+// SetTime sets the simulated clock to ts.  The scale factor is preserved and
+// wall-time tracking restarts from this point, so subsequent Now() calls
+// advance from ts.
+func (c *TimeController) SetTime(ts time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.simBaseline = ts
+	c.wallBaseline = time.Now()
+}
+
+// Scale returns the current time acceleration factor.
+func (c *TimeController) Scale() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.scale
+}
+
+// SetScale sets the time acceleration factor.  A scale of 1.0 is real-time;
+// 3600.0 makes one real second equal one simulated hour; 86400.0 makes one
+// real second equal one simulated day.  The current simulated time is
+// captured atomically so there is no jump at the transition.
+func (c *TimeController) SetScale(scale float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Capture current simulated time before changing scale.
+	elapsed := time.Since(c.wallBaseline)
+	c.simBaseline = c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+	c.wallBaseline = time.Now()
+	c.scale = scale
+}
+
+// Logger is the structured logging interface used throughout Substrate.
+// Arguments follow the key-value convention used by [log/slog].
+type Logger interface {
+	// Debug logs a message at debug level.
+	Debug(msg string, args ...any)
+
+	// Info logs a message at info level.
+	Info(msg string, args ...any)
+
+	// Warn logs a message at warning level.
+	Warn(msg string, args ...any)
+
+	// Error logs a message at error level.
+	Error(msg string, args ...any)
+}
+
+// PluginConfig holds configuration passed to a [Plugin] during initialization.
+type PluginConfig struct {
+	// State is the state manager the plugin should use for persistence.
+	State StateManager
+
+	// Logger is the logger the plugin should use.
+	Logger Logger
+
+	// Options holds plugin-specific configuration values.
+	Options map[string]any
+}
+
+// Plugin is the interface that all AWS service emulation plugins must implement.
+type Plugin interface {
+	// Name returns the AWS service name handled by this plugin (e.g., "s3").
+	Name() string
+
+	// Initialize sets up the plugin with the provided configuration.
+	Initialize(ctx context.Context, config PluginConfig) error
+
+	// HandleRequest processes an AWS API request and returns a response.
+	HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error)
+
+	// Shutdown releases any resources held by the plugin.
+	Shutdown(ctx context.Context) error
+}
+
+// PluginRegistry routes incoming AWS API requests to the appropriate [Plugin].
+type PluginRegistry struct {
+	mu      sync.RWMutex
+	plugins map[string]Plugin
+}
+
+// NewPluginRegistry creates an empty PluginRegistry.
+func NewPluginRegistry() *PluginRegistry {
+	return &PluginRegistry{plugins: make(map[string]Plugin)}
+}
+
+// Register adds p to the registry, keyed by [Plugin.Name].
+// Registering two plugins with the same name replaces the first.
+func (r *PluginRegistry) Register(p Plugin) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.plugins[p.Name()] = p
+}
+
+// RouteRequest dispatches req to the plugin registered for req.Service.
+// Returns an [*AWSError] with code "ServiceNotAvailable" if no matching
+// plugin is registered.
+func (r *PluginRegistry) RouteRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	r.mu.RLock()
+	p, ok := r.plugins[req.Service]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, &AWSError{
+			Code:       "ServiceNotAvailable",
+			Message:    "service not emulated: " + req.Service,
+			HTTPStatus: 501,
+		}
+	}
+	return p.HandleRequest(ctx, req)
+}
+
+// Names returns the sorted list of service names registered in the registry.
+func (r *PluginRegistry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.plugins))
+	for name := range r.plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}

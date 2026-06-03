@@ -7,6 +7,8 @@ bin/
 # Test and coverage
 coverage.out
 coverage.html
+coverage_main.out
+*.coverage.out
 
 # Runtime data
 *.db
