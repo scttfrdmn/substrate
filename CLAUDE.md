@@ -87,14 +87,29 @@ Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections.
 
 ## Releasing
 
-1. Move `## [Unreleased]` entries to a new `## [vX.Y.Z] - YYYY-MM-DD` section.
+**A release tag is cut only by the steps below, never as a side effect of
+merging a feature.** Merging a PR must not create or push a tag. A version tag is
+created only after its `## [vX.Y.Z]` CHANGELOG section exists, and its version
+must be strictly greater than the latest existing tag (`git tag --sort=-v:refname
+| head -1`) — never an ancestor commit or an out-of-order number. (A stray
+out-of-order tag, `v0.67.0`, was created this way once; it is burned and
+documented as void in `SECURITY.md`. The next minor release is **v0.68.0**.)
+
+`main` is protected by a GitHub ruleset: all changes land via PR (no direct
+pushes), and a separate ruleset makes `refs/tags/v*` immutable (no move/delete).
+These enforce the rules below server-side — do not attempt to bypass them.
+
+1. Move `## [Unreleased]` entries to a new `## [vX.Y.Z] - YYYY-MM-DD` section
+   (via a PR — `main` cannot be pushed to directly).
 2. Add the comparison link at the bottom of `CHANGELOG.md`.
-3. Tag: `git tag -s vX.Y.Z -m "vX.Y.Z"` then `git push origin vX.Y.Z`.
+3. After the changelog PR merges, tag the merge commit:
+   `git tag -s vX.Y.Z -m "vX.Y.Z"` then `git push origin vX.Y.Z`.
    **Never move or re-cut a published tag.** Go's checksum database
    (`sum.golang.org`) permanently records a tag's hash on first fetch; moving the
    tag changes the content but not the recorded hash, which breaks `go.sum`
    verification for every consumer (see `SECURITY.md`, #296). Fix any release
-   mistake by cutting a new patch version, never by re-tagging.
+   mistake by cutting a new patch version, never by re-tagging. The tag ruleset
+   will reject a move or delete regardless.
 4. Close the issues the release resolves. A `(#N)` reference in a commit or PR
    **title** only links — it does not auto-close. Use a `Closes #N` / `Fixes #N`
    keyword in the PR **body** (or the merged commit message body), or close the

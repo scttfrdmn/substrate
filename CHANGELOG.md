@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Repository protection rulesets + `v0.67.0` void advisory**: Added GitHub
+  rulesets enforcing the release contract server-side — `refs/tags/v*` tags are
+  immutable (no move/update/delete) and `main` requires changes via pull request
+  (no direct or force pushes), with no bypass actors. Documented `v0.67.0` as a
+  void, out-of-order tag (points to an ancestor of `v0.66.0`/`v0.66.1`; created
+  by a stray manual tag, not the release process; no GitHub release). It is left
+  in place per the tag-immutability rule and **not** re-pointed; the version
+  number is burned and the next minor release is **v0.68.0**. Consumers must use
+  `v0.66.1` or later. See `SECURITY.md`.
+
 ## [v0.66.1] - 2026-06-02
 
 ### Added

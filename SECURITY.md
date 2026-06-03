@@ -51,8 +51,50 @@ tags are an isolated incident, not an ongoing compromise.
   tag can set `GOFLAGS=-insecure` or `GONOSUMCHECK`/`GONOSUMDB` — but the correct
   fix is to move off the poisoned versions.
 
-### Prevention
+## Out-of-order tag advisory
+
+### Void tag: v0.67.0 — do not use; skipped in versioning
+
+`v0.67.0` was tagged out of order: it points at commit `d4a93f2` (the #303
+NetworkInterface/SSM change), which is an **ancestor** of `v0.66.0` and
+`v0.66.1`. As a result the tag's content is *older* than — and a strict subset
+of — the `v0.66.x` releases: it predates the CFN drift-detection work (#290),
+the scope/philosophy documentation, the `DescribeInstances` filter fix (#305),
+and the Go 1.26.4 security toolchain bump. It was created by a stray manual
+`git tag` during the #303 merge, not by the documented release process, and has
+**no GitHub release and no CHANGELOG entry**.
+
+It is **not poisoned** (the content was never mutated; its hash matches the
+transparency log), but it is misleading and must not be depended on:
+
+```
+github.com/scttfrdmn/substrate v0.67.0 h1:p8nwUALuzlN6XDCKfCIQImgY28V17zqgZLi4MKjlPJ8=
+github.com/scttfrdmn/substrate v0.67.0/go.mod h1:0l7emfinozw6VVLToCq2EeEm1iuMJurSws+gHkfEu6Y=
+```
+
+### Resolution
+
+- **Consumers:** do not use `v0.67.0`. Use `v0.66.1` or later. A consumer that
+  accidentally pinned `v0.67.0` should `go get github.com/scttfrdmn/substrate@latest`.
+- The tag is **left in place** (per the immutability rule — `sum.golang.org` has
+  already recorded it and deleting it would break anyone who fetched it). It is
+  **not** re-pointed.
+- **The version number 0.67.0 is burned.** The next minor release skips it and
+  is `v0.68.0`.
+
+## Prevention
 
 Published git tags are immutable by contract. The release process
 (`CLAUDE.md` → Releasing) creates a signed tag and never moves it; any mistake
 in a release is corrected by cutting a new patch version, never by re-tagging.
+
+This is now enforced server-side by GitHub repository rulesets, not just by
+convention:
+
+- **Tag ruleset** on `refs/tags/v*`: blocks tag *deletion*, *update*, and
+  *non-fast-forward* — a published version tag cannot be moved or removed by
+  anyone (including admins and automation).
+- **Branch ruleset** on `main`: requires changes to land via pull request and
+  blocks direct pushes, force-pushes, and branch deletion, with no bypass
+  actors. This prevents unreviewed direct commits and stray tags-on-merge of the
+  kind that produced `v0.67.0`.
