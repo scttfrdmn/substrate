@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.68.1] - 2026-06-04
+
+### Fixed
+- S3: `ListObjectsV2` (and `ListObjects`) no longer surfaces delete markers as live objects on versioning-enabled buckets. `DeleteObjects` correctly inserted delete markers but `loadObjectEntry` did not filter them, causing `aws s3 ls` to show objects that `GetObject` correctly returned 404 for (#316).
+
 ## [v0.68.0] - 2026-06-02
 
 This release intentionally skips `v0.67.0` (a void, out-of-order tag — see below
@@ -1814,7 +1819,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.68.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.68.1...HEAD
+[v0.68.1]: https://github.com/scttfrdmn/substrate/compare/v0.68.0...v0.68.1
 [v0.68.0]: https://github.com/scttfrdmn/substrate/compare/v0.66.1...v0.68.0
 [v0.66.1]: https://github.com/scttfrdmn/substrate/compare/v0.66.0...v0.66.1
 [v0.66.0]: https://github.com/scttfrdmn/substrate/compare/v0.65.0...v0.66.0

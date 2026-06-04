@@ -1437,6 +1437,9 @@ func (p *S3Plugin) loadObjectEntry(ctx context.Context, bucket, key string) (*ob
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, fmt.Errorf("unmarshal object %s/%s: %w", bucket, key, err)
 	}
+	if obj.IsDeleteMarker {
+		return nil, nil
+	}
 	return &objectEntryItem{
 		Key:          key,
 		LastModified: obj.LastModified.UTC().Format(time.RFC3339),
