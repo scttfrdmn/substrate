@@ -74,3 +74,41 @@ The same testing need is reachable three ways, with very different trade-offs:
 The deliberate cost is fidelity to workload internals, which is out of scope:
 Substrate is the fast, deterministic tier for exercising how code *drives and
 reacts to* the AWS API — not for validating what runs inside a resource.
+
+## How it compares
+
+Substrate is a **different tier** from container emulators and real accounts, not
+a drop-in replacement for them. It trades workload-execution fidelity for
+determinism, replayability, and cost insight.
+
+| | **Substrate** | LocalStack | moto | Real AWS |
+|---|:---:|:---:|:---:|:---:|
+| Deterministic replay | ✅ | ❌ | partial | ❌ |
+| Time-travel debugging | ✅ | ❌ | ❌ | ❌ |
+| Cost visibility before deploy | ✅ | ❌ | ❌ | after the bill |
+| Seedable failure / capacity / timing paths | ✅ | partial | partial | ❌ |
+| Runs your actual workload code | ❌ *(by design)* | ✅ | ❌ | ✅ |
+| Language-agnostic (any SDK/CLI over HTTP) | ✅ | ✅ | Python-first | ✅ |
+| No account · offline · free | ✅ | ✅ | ✅ | ❌ |
+
+The single ❌ is the scope boundary above, by design. If you need to **execute**
+your Lambda's code or boot a real container, reach for LocalStack or a real
+account. If you need to test **how your infrastructure code drives and reacts to
+the AWS API** — fast, deterministically, and on every change — that is exactly
+what Substrate is for.
+
+### Why this fits AI-generated infrastructure
+
+AI generates infrastructure code at volume, inside generate → test → fix loops,
+and those loops need what this tier provides:
+
+- **Determinism**, because a flaky failure is a false signal an agent acts on —
+  wasting fix cycles chasing timing noise rather than real bugs.
+- **Free, fast, and offline**, so verification can run on *every* generated
+  candidate without a real account, provisioning latency, or spend.
+- **Cost visibility as a machine-gradeable guardrail** — `Intent{MaxCost}` lets a
+  deploy fail when generated infra would blow a budget, a check an AI has no
+  instinct for.
+- **Seedable failure paths**, so the retry/poll/wait logic generated code claims
+  to have is actually exercised against capacity errors, throttling, and terminal
+  states — not merely assumed.
