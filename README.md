@@ -37,14 +37,54 @@ AI generates infrastructure code → ??? → Deploy to AWS → $$$
                              This is where you find out
 ```
 
-LocalStack and container-backed emulators run real workloads, so behaviour
-depends on wall-clock timing, scheduling, and network — failure and edge-case
-paths are hard to trigger and rarely reproduce. Substrate trades workload-internal
-fidelity for **determinism**: it makes the API surface accurate and every outcome
-seedable, so the rare paths your retry/poll/wait logic exists to handle become
-first-class, instant, and repeatable.
+AI generates infrastructure code *at volume*, inside generate → test → fix loops.
+That changes what a test harness has to do — and it's where most AWS emulators
+fall down.
 
-## Why Substrate
+## Why Substrate for AI-generated infrastructure
+
+A generate-and-verify loop has needs a human-paced workflow doesn't have:
+
+- **Determinism, because flakes mislead the loop.** A non-deterministic failure is
+  a *false signal an agent acts on* — wasting fix cycles chasing timing noise.
+  Substrate records every request as an immutable event over a simulated clock, so
+  a failing run is real and replays identically. No retry-until-green.
+- **Free, fast, offline, so you can run it on every generation.** No real account,
+  no provisioning latency, no spend, no blast radius. Suitable for tight inner
+  loops and CI on every candidate the model produces.
+- **Cost visibility as a machine-gradeable guardrail.** An AI has no instinct for
+  bill shock. Substrate prices each operation, so you get a projected dollar figure
+  *before* deploy — and can gate on it: `betty.Deploy(ctx, tmpl, Intent{MaxCost: 1.0})`
+  fails the run if generated infra would blow a budget.
+- **Seedable failure paths, to verify the error handling the code claims to have.**
+  Generated code is full of retry/poll/wait logic for capacity errors, throttling,
+  and terminal states. Substrate lets you seed exactly those outcomes on demand, so
+  the unhappy paths are actually exercised — not just assumed.
+
+## How it compares
+
+Substrate is a **different tier** from container emulators and real accounts, not a
+drop-in replacement. It trades workload-execution fidelity for determinism,
+replayability, and cost insight — the fast inner-loop tier.
+
+| | **Substrate** | LocalStack | moto | Real AWS |
+|---|:---:|:---:|:---:|:---:|
+| Deterministic replay | ✅ | ❌ | partial | ❌ |
+| Time-travel debugging | ✅ | ❌ | ❌ | ❌ |
+| Cost visibility before deploy | ✅ | ❌ | ❌ | after the bill |
+| Seedable failure / capacity / timing paths | ✅ | partial | partial | ❌ |
+| Runs your actual workload code | ❌ *(by design)* | ✅ | ❌ | ✅ |
+| Language-agnostic (any SDK/CLI over HTTP) | ✅ | ✅ | Python-first | ✅ |
+| No account · offline · free | ✅ | ✅ | ✅ | ❌ |
+
+The one ❌ is deliberate: Substrate models **what is observable through an AWS API
+call**, not what software inside a resource does (see
+[Scope & Philosophy](docs/scope.md)). If you need to execute your Lambda's code or
+boot a real container, reach for LocalStack or a real account; if you need to test
+*how your infrastructure code drives and reacts to the AWS API* — fast,
+deterministically, and on every AI-generated candidate — that's Substrate.
+
+## Core capabilities
 
 ### 1. Deterministic reproducibility
 
