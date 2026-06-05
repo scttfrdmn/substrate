@@ -829,6 +829,41 @@ func TestS3_DeleteObjects_Quiet(t *testing.T) {
 	assert.Empty(t, result.Deleted)
 }
 
+// TestS3_DeleteObjects_Versioned_HiddenFromList is a regression test for #316:
+// DeleteObjects on a versioned bucket inserts delete markers; ListObjectsV2
+// must not surface those markers as live objects.
+func TestS3_DeleteObjects_Versioned_HiddenFromList(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/ver-del-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/ver-del-bucket?versioning",
+		[]byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`), nil)
+	s3Request(t, srv, http.MethodPut, "/ver-del-bucket/key1", []byte("a"), nil)
+	s3Request(t, srv, http.MethodPut, "/ver-del-bucket/key2", []byte("b"), nil)
+
+	deleteXML := []byte(`<Delete><Object><Key>key1</Key></Object><Object><Key>key2</Key></Object></Delete>`)
+	w := s3Request(t, srv, http.MethodPost, "/ver-del-bucket?delete", deleteXML,
+		map[string]string{"Content-Type": "application/xml"})
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// GetObject must return 404 (delete marker present).
+	assert.Equal(t, http.StatusNotFound, s3Request(t, srv, http.MethodGet, "/ver-del-bucket/key1", nil, nil).Code)
+
+	// ListObjectsV2 must show zero live objects — delete markers are not live objects.
+	w = s3Request(t, srv, http.MethodGet, "/ver-del-bucket?list-type=2", nil, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var listResult struct {
+		KeyCount int `xml:"KeyCount"`
+		Contents []struct {
+			Key string `xml:"Key"`
+		} `xml:"Contents"`
+	}
+	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &listResult))
+	assert.Equal(t, 0, listResult.KeyCount, "delete markers must not appear in ListObjectsV2")
+	assert.Empty(t, listResult.Contents)
+}
+
 func TestS3_ListObjectsV2_Delimiter(t *testing.T) {
 	t.Parallel()
 	srv, _ := newS3TestServer(t)
