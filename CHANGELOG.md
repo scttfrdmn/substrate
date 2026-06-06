@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- S3: `GetObject` and `HeadObject` now return the correct error for delete markers
+  instead of surfacing the marker (#318, follow-up to #316). A plain request whose
+  current version is a delete marker returns `404 NoSuchKey`; a request naming the
+  delete-marker version returns `405 MethodNotAllowed`. Both responses carry the
+  `x-amz-delete-marker: true` header so SDKs can distinguish a deleted object from a
+  never-existed key. `HeadObject` is now version-aware and no longer returns `200`
+  with marker metadata for a deleted key.
+
 ## [v0.68.1] - 2026-06-04
 
 ### Fixed
