@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.68.2] - 2026-06-05
+
 ### Fixed
 - S3: `GetObject` and `HeadObject` now return the correct error for delete markers
   instead of surfacing the marker (#318, follow-up to #316). A plain request whose
@@ -1828,7 +1830,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.68.1...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.68.2...HEAD
+[v0.68.2]: https://github.com/scttfrdmn/substrate/compare/v0.68.1...v0.68.2
 [v0.68.1]: https://github.com/scttfrdmn/substrate/compare/v0.68.0...v0.68.1
 [v0.68.0]: https://github.com/scttfrdmn/substrate/compare/v0.66.1...v0.68.0
 [v0.66.1]: https://github.com/scttfrdmn/substrate/compare/v0.66.0...v0.66.1
