@@ -864,6 +864,46 @@ func TestS3_DeleteObjects_Versioned_HiddenFromList(t *testing.T) {
 	assert.Empty(t, listResult.Contents)
 }
 
+// TestS3_GetHeadObject_DeleteMarker is a regression test for #318: after a
+// delete marker is created on a versioned bucket, GetObject/HeadObject must not
+// surface the marker as content. A plain request returns 404 NoSuchKey with the
+// x-amz-delete-marker header; a request naming the marker version returns 405
+// MethodNotAllowed.
+func TestS3_GetHeadObject_DeleteMarker(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/dm-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/dm-bucket?versioning",
+		[]byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`), nil)
+	s3Request(t, srv, http.MethodPut, "/dm-bucket/key", []byte("hello"), nil)
+
+	// Delete → inserts a delete marker; capture its version id.
+	del := s3Request(t, srv, http.MethodDelete, "/dm-bucket/key", nil, nil)
+	assert.Equal(t, http.StatusNoContent, del.Code)
+	assert.Equal(t, "true", del.Header().Get("x-amz-delete-marker"))
+	markerVID := del.Header().Get("x-amz-version-id")
+	require.NotEmpty(t, markerVID)
+
+	// 1) Plain GET → 404 NoSuchKey + x-amz-delete-marker, not the object body.
+	get := s3Request(t, srv, http.MethodGet, "/dm-bucket/key", nil, nil)
+	assert.Equal(t, http.StatusNotFound, get.Code)
+	assert.Equal(t, "true", get.Header().Get("x-amz-delete-marker"))
+	assert.NotContains(t, get.Body.String(), "hello")
+	assert.Contains(t, get.Body.String(), "NoSuchKey")
+
+	// 2) Plain HEAD → 404 (previously returned 200 with marker metadata).
+	head := s3Request(t, srv, http.MethodHead, "/dm-bucket/key", nil, nil)
+	assert.Equal(t, http.StatusNotFound, head.Code)
+	assert.Equal(t, "true", head.Header().Get("x-amz-delete-marker"))
+
+	// 3) GET naming the delete-marker version → 405 MethodNotAllowed.
+	getVer := s3Request(t, srv, http.MethodGet, "/dm-bucket/key?versionId="+markerVID, nil, nil)
+	assert.Equal(t, http.StatusMethodNotAllowed, getVer.Code)
+	assert.Equal(t, "true", getVer.Header().Get("x-amz-delete-marker"))
+	assert.Contains(t, getVer.Body.String(), "MethodNotAllowed")
+}
+
 func TestS3_ListObjectsV2_Delimiter(t *testing.T) {
 	t.Parallel()
 	srv, _ := newS3TestServer(t)

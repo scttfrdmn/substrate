@@ -559,7 +559,10 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	}
 
 	if obj.IsDeleteMarker {
-		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+		// A GET targeting a delete marker directly (explicit versionId) is a 405
+		// MethodNotAllowed in S3; a GET of a key whose current version is a delete
+		// marker is a 404 NoSuchKey. Both carry x-amz-delete-marker: true.
+		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
 	}
 
 	// Directory-marker objects (key ends with "/") are never written to the
@@ -598,10 +601,17 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 }
 
 // headObject handles HEAD /<bucket>/<key>.
-func (p *S3Plugin) headObject(_ *RequestContext, _ *AWSRequest, bucket, key string) (*AWSResponse, error) {
+func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
-	data, err := p.state.Get(ctx, s3Namespace, "object:"+bucket+"/"+key)
+	// If versionId is present, head the specific version; otherwise the current.
+	versionID := req.Params["versionId"]
+	stateKey := "object:" + bucket + "/" + key
+	if versionID != "" {
+		stateKey = "object_version:" + bucket + "/" + key + "/" + versionID
+	}
+
+	data, err := p.state.Get(ctx, s3Namespace, stateKey)
 	if err != nil {
 		return nil, fmt.Errorf("get object metadata: %w", err)
 	}
@@ -612,6 +622,11 @@ func (p *S3Plugin) headObject(_ *RequestContext, _ *AWSRequest, bucket, key stri
 	var obj S3Object
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, fmt.Errorf("unmarshal object metadata: %w", err)
+	}
+
+	if obj.IsDeleteMarker {
+		// Mirror getObject: 405 when a version is named, 404 otherwise.
+		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
 	}
 
 	headers := map[string]string{
@@ -1524,6 +1539,42 @@ func s3ErrorResponse(code, message string, status int, extras ...string) *AWSRes
 	return &AWSResponse{
 		StatusCode: status,
 		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
+		Body:       append([]byte(xml.Header), body...),
+	}
+}
+
+// s3DeleteMarkerResponse builds the [AWSResponse] returned by GetObject/HeadObject
+// when the resolved object is a delete marker. Per the S3 API, a request that
+// names a specific version pointing at a delete marker gets 405 MethodNotAllowed;
+// a request for the (delete-marker) current version gets 404 NoSuchKey. Both
+// carry the x-amz-delete-marker: true header so SDKs can distinguish a deleted
+// object from a never-existed key.
+func s3DeleteMarkerResponse(versionRequested bool, markerVersionID string) *AWSResponse {
+	headers := map[string]string{
+		"Content-Type":        "text/xml; charset=UTF-8",
+		"x-amz-delete-marker": "true",
+	}
+	if markerVersionID != "" {
+		headers["x-amz-version-id"] = markerVersionID
+	}
+
+	code, message, status := "NoSuchKey", "The specified key does not exist.", http.StatusNotFound
+	if versionRequested {
+		// Naming the delete-marker version explicitly: not a retrievable object.
+		code, message, status = "MethodNotAllowed", "The specified method is not allowed against this resource.", http.StatusMethodNotAllowed
+		headers["Allow"] = "DELETE"
+	}
+
+	type errorXML struct {
+		XMLName   xml.Name `xml:"Error"`
+		Code      string   `xml:"Code"`
+		Message   string   `xml:"Message"`
+		RequestID string   `xml:"RequestId"`
+	}
+	body, _ := xml.Marshal(errorXML{Code: code, Message: message, RequestID: "SUBSTRATE"})
+	return &AWSResponse{
+		StatusCode: status,
+		Headers:    headers,
 		Body:       append([]byte(xml.Header), body...),
 	}
 }
