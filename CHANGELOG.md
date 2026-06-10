@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- S3: `PutObject` (and `UploadPart`) now decode SigV4 streaming (`aws-chunked`)
+  request bodies before storing them, instead of persisting the raw encoded
+  stream with its `chunk-signature` framing (#321). Affected SDK clients that send
+  `Content-Encoding: aws-chunked` / `x-amz-content-sha256: STREAMING-*` (e.g. the
+  AWS SDK for .NET with `InputStream`); `GetObject` returned the chunk headers as
+  content. Detection is header-based and decoding is a safe no-op for non-chunked
+  bodies (the AWS CLI, which uses standard HTTP chunking, was already correct).
+
 ## [v0.68.2] - 2026-06-05
 
 ### Fixed

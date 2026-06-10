@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -902,6 +903,43 @@ func TestS3_GetHeadObject_DeleteMarker(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, getVer.Code)
 	assert.Equal(t, "true", getVer.Header().Get("x-amz-delete-marker"))
 	assert.Contains(t, getVer.Body.String(), "MethodNotAllowed")
+}
+
+// TestS3_PutObject_AWSChunked is a regression test for #321: a SigV4 streaming
+// (aws-chunked) PutObject body must be decoded before storage, not stored raw
+// with its chunk-signature framing. The AWS SDK .NET sends bodies this way.
+func TestS3_PutObject_AWSChunked(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	s3Request(t, srv, http.MethodPut, "/chunk-bucket", nil, nil)
+
+	payload := "hello world"
+	// Single-chunk aws-chunked body: "<hexlen>;chunk-signature=...\r\n<data>\r\n0;chunk-signature=...\r\n\r\n"
+	chunked := fmt.Sprintf("%x;chunk-signature=%s\r\n%s\r\n0;chunk-signature=%s\r\n\r\n",
+		len(payload), strings.Repeat("a", 64), payload, strings.Repeat("b", 64))
+
+	hdrs := map[string]string{
+		"Content-Type":                 "text/plain",
+		"Content-Encoding":             "aws-chunked",
+		"X-Amz-Content-Sha256":         "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+		"X-Amz-Decoded-Content-Length": strconv.Itoa(len(payload)),
+	}
+	put := s3Request(t, srv, http.MethodPut, "/chunk-bucket/key", []byte(chunked), hdrs)
+	require.Equal(t, http.StatusOK, put.Code)
+
+	// GetObject must return the decoded payload, not the chunk framing.
+	get := s3Request(t, srv, http.MethodGet, "/chunk-bucket/key", nil, nil)
+	require.Equal(t, http.StatusOK, get.Code)
+	assert.Equal(t, payload, get.Body.String())
+	assert.NotContains(t, get.Body.String(), "chunk-signature")
+	assert.Equal(t, strconv.Itoa(len(payload)), get.Header().Get("Content-Length"))
+
+	// A normal (non-chunked) PutObject is unaffected — body stored verbatim.
+	s3Request(t, srv, http.MethodPut, "/chunk-bucket/plain", []byte("raw bytes"),
+		map[string]string{"Content-Type": "text/plain"})
+	plain := s3Request(t, srv, http.MethodGet, "/chunk-bucket/plain", nil, nil)
+	assert.Equal(t, "raw bytes", plain.Body.String())
 }
 
 func TestS3_ListObjectsV2_Delimiter(t *testing.T) {

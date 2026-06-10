@@ -442,7 +442,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
-	body := req.Body
+	body := decodeAWSChunked(req.Headers, req.Body)
 	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
 
@@ -1172,7 +1172,7 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return s3ErrorResponse("NoSuchUpload", "The specified upload does not exist.", http.StatusNotFound), nil
 	}
 
-	body := req.Body
+	body := decodeAWSChunked(req.Headers, req.Body)
 	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
 
@@ -1461,6 +1461,119 @@ func (p *S3Plugin) loadObjectEntry(ctx context.Context, bucket, key string) (*ob
 		ETag:         obj.ETag,
 		Size:         obj.Size,
 	}, nil
+}
+
+// headerValueFold returns the value of the named header, case-insensitively
+// (req.Headers preserves Go's canonical-MIME casing, but callers send varied
+// cases for x-amz-* headers).
+func headerValueFold(headers map[string]string, name string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
+}
+
+// isAWSChunked reports whether the request body is SigV4 streaming (aws-chunked)
+// encoded, per its headers. The AWS SDKs signal this with Content-Encoding
+// aws-chunked and/or an x-amz-content-sha256 of STREAMING-*, alongside
+// x-amz-decoded-content-length giving the true payload size.
+func isAWSChunked(headers map[string]string) bool {
+	if strings.Contains(strings.ToLower(headerValueFold(headers, "Content-Encoding")), "aws-chunked") {
+		return true
+	}
+	if strings.HasPrefix(headerValueFold(headers, "X-Amz-Content-Sha256"), "STREAMING-") {
+		return true
+	}
+	// A decoded-content-length header is only sent for aws-chunked bodies.
+	return headerValueFold(headers, "X-Amz-Decoded-Content-Length") != ""
+}
+
+// decodeAWSChunked decodes a SigV4 streaming (aws-chunked) request body into the
+// raw object content, stripping the per-chunk "<hex-size>;chunk-signature=...\r\n"
+// framing and trailing checksum trailers. Non-chunked bodies (and anything that
+// fails to parse as aws-chunked) are returned unchanged, so this is a safe no-op
+// for CLI-style standard HTTP chunking, which net/http has already de-framed.
+//
+// Format per chunk: "<hex-len>[;chunk-signature=<sig>]\r\n<len bytes>\r\n",
+// terminated by a zero-length chunk optionally followed by trailer headers.
+func decodeAWSChunked(headers map[string]string, body []byte) []byte {
+	if len(body) == 0 || !isAWSChunked(headers) {
+		return body
+	}
+
+	var out []byte
+	rest := body
+	for {
+		// Each chunk starts with a size line ending in \r\n (tolerate bare \n).
+		nl := indexCRLF(rest)
+		if nl < 0 {
+			// No framing found — not actually aws-chunked; return original.
+			return body
+		}
+		sizeLine := string(rest[:nl])
+		advance := nl + crlfLen(rest, nl)
+
+		// Size is the hex value before any ";chunk-signature=..." extension.
+		hexPart := sizeLine
+		if semi := strings.IndexByte(hexPart, ';'); semi >= 0 {
+			hexPart = hexPart[:semi]
+		}
+		size, err := strconv.ParseInt(strings.TrimSpace(hexPart), 16, 64)
+		if err != nil {
+			return body // malformed → fall back to raw
+		}
+		rest = rest[advance:]
+		if size == 0 {
+			break // final chunk; trailers (if any) follow and are ignored
+		}
+		if int64(len(rest)) < size {
+			return body // truncated → fall back to raw
+		}
+		out = append(out, rest[:size]...)
+		rest = rest[size:]
+		// Skip the trailing CRLF after the chunk payload, if present.
+		if n := crlfLen(rest, 0); n > 0 {
+			rest = rest[n:]
+		}
+	}
+
+	// Honor the declared decoded length when present (defensive bound).
+	if dcl := headerValueFold(headers, "X-Amz-Decoded-Content-Length"); dcl != "" {
+		if n, err := strconv.ParseInt(dcl, 10, 64); err == nil && n >= 0 && n <= int64(len(out)) {
+			out = out[:n]
+		}
+	}
+	return out
+}
+
+// indexCRLF returns the index of the first \r\n or \n in b, or -1 if neither.
+func indexCRLF(b []byte) int {
+	for i := 0; i < len(b); i++ {
+		if b[i] == '\n' {
+			if i > 0 && b[i-1] == '\r' {
+				return i - 1
+			}
+			return i
+		}
+	}
+	return -1
+}
+
+// crlfLen returns the length (1 or 2) of the line terminator at b[i], or 0 if
+// b[i] is not a line terminator.
+func crlfLen(b []byte, i int) int {
+	if i >= len(b) {
+		return 0
+	}
+	if b[i] == '\r' && i+1 < len(b) && b[i+1] == '\n' {
+		return 2
+	}
+	if b[i] == '\r' || b[i] == '\n' {
+		return 1
+	}
+	return 0
 }
 
 // extractUserMetadata extracts X-Amz-Meta-* headers into a map keyed by the
@@ -2457,7 +2570,7 @@ func (p *S3Plugin) putBucketLifecycleConfiguration(_ *RequestContext, req *AWSRe
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
-	body := req.Body
+	body := decodeAWSChunked(req.Headers, req.Body)
 	if len(body) == 0 {
 		body = []byte("<LifecycleConfiguration/>")
 	}
