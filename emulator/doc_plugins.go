@@ -1,4 +1,4 @@
-// Package substrate — plugin developer guide.
+// Package emulator — plugin developer guide.
 //
 // # Building a Substrate Plugin
 //

@@ -1,4 +1,4 @@
-// Package substrate_test contains additional tests for coverage of helper
+// Package emulator_test contains additional tests for coverage of helper
 // functions, snapshot operations, and replay navigation.
 package emulator_test
 

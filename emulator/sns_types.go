@@ -1,4 +1,4 @@
-// Package substrate contains SNS type definitions for the AWS SNS emulator.
+// Package emulator contains SNS type definitions for the AWS SNS emulator.
 package emulator
 
 import "fmt"

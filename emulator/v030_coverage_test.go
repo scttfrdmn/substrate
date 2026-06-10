@@ -1,4 +1,4 @@
-// Package substrate_test contains coverage tests for v0.30.0 new features.
+// Package emulator_test contains coverage tests for v0.30.0 new features.
 package emulator_test
 
 import (
