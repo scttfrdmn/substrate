@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.70.0] - 2026-06-09
+
 ### Added
 - EC2: `RegisterImage` now registers an AMI that can point its root device at an
   existing EBS snapshot via `BlockDeviceMapping.N.Ebs.SnapshotId` (#328, follow-up
@@ -1865,7 +1867,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.69.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.70.0...HEAD
+[v0.70.0]: https://github.com/scttfrdmn/substrate/compare/v0.69.0...v0.70.0
 [v0.69.0]: https://github.com/scttfrdmn/substrate/compare/v0.68.3...v0.69.0
 [v0.68.3]: https://github.com/scttfrdmn/substrate/compare/v0.68.2...v0.68.3
 [v0.68.2]: https://github.com/scttfrdmn/substrate/compare/v0.68.1...v0.68.2
