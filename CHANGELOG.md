@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- EC2: `DescribeSnapshots` now lists EBS snapshots (returning `SnapshotId`,
+  `VolumeSize`, `State`, `StartTime`, `Encrypted`), honoring `SnapshotId.N`
+  parameters and the `snapshot-id` filter. `CreateImage` now materializes a
+  backing snapshot and records it on the AMI, and `DescribeImages` surfaces it in
+  the response `blockDeviceMapping` and honors the
+  `block-device-mapping.snapshot-id` (and `image-id`) filters. `DeleteSnapshot`
+  now removes the snapshot from state (was a no-op stub) so a subsequent
+  `DescribeSnapshots` reflects the deletion. Together these let snapshot-retention
+  logic — retain a snapshot shared by multiple AMIs, delete an unshared one — be
+  tested end-to-end (#322).
+
 ## [v0.68.3] - 2026-06-09
 
 ### Fixed

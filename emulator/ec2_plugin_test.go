@@ -3378,3 +3378,126 @@ func TestEC2_DescribeInstances_FilterOrderIndependent(t *testing.T) {
 	}))
 	_ = id
 }
+
+// TestEC2_CreateImage_SnapshotsAndFilter is a regression test for #322: CreateImage
+// materializes a backing EBS snapshot that is then describable via DescribeSnapshots
+// and discoverable via the DescribeImages block-device-mapping.snapshot-id filter,
+// enabling shared-snapshot retain-vs-delete logic to be tested.
+func TestEC2_CreateImage_SnapshotsAndFilter(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	run := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base",
+		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(run.Body).Decode(&runResult))
+	run.Body.Close() //nolint:errcheck
+	require.NotEmpty(t, runResult.Instances)
+	instanceID := runResult.Instances[0].InstanceID
+
+	// createAMI creates an AMI from the instance and returns its image id.
+	createAMI := func(name string) string {
+		r := ec2Request(t, ts, map[string]string{
+			"Action": "CreateImage", "InstanceId": instanceID, "Name": name,
+		})
+		var res struct {
+			ImageID string `xml:"imageId"`
+		}
+		require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+		r.Body.Close() //nolint:errcheck
+		require.NotEmpty(t, res.ImageID)
+		return res.ImageID
+	}
+	amiA := createAMI("ami-a")
+	amiB := createAMI("ami-b")
+
+	// describeImages returns (imageId -> snapshotId) for the given filters.
+	describeImages := func(params map[string]string) map[string]string {
+		params["Action"] = "DescribeImages"
+		r := ec2Request(t, ts, params)
+		var res struct {
+			Images []struct {
+				ImageID string `xml:"imageId"`
+				BDM     []struct {
+					EBS struct {
+						SnapshotID string `xml:"snapshotId"`
+					} `xml:"ebs"`
+				} `xml:"blockDeviceMapping>item"`
+			} `xml:"imagesSet>item"`
+		}
+		require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+		r.Body.Close() //nolint:errcheck
+		out := map[string]string{}
+		for _, im := range res.Images {
+			snap := ""
+			if len(im.BDM) > 0 {
+				snap = im.BDM[0].EBS.SnapshotID
+			}
+			out[im.ImageID] = snap
+		}
+		return out
+	}
+
+	all := describeImages(map[string]string{})
+	require.Len(t, all, 2)
+	snapA, snapB := all[amiA], all[amiB]
+	require.NotEmpty(t, snapA)
+	require.NotEmpty(t, snapB)
+	require.NotEqual(t, snapA, snapB, "each AMI gets its own backing snapshot")
+
+	// DescribeSnapshots returns both snapshots with the documented detail.
+	descSnaps := func() map[string]struct {
+		Size  int64
+		State string
+	} {
+		r := ec2Request(t, ts, map[string]string{"Action": "DescribeSnapshots"})
+		var res struct {
+			Snapshots []struct {
+				SnapshotID string `xml:"snapshotId"`
+				VolumeSize int64  `xml:"volumeSize"`
+				State      string `xml:"status"`
+				StartTime  string `xml:"startTime"`
+			} `xml:"snapshotSet>item"`
+		}
+		require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+		r.Body.Close() //nolint:errcheck
+		out := map[string]struct {
+			Size  int64
+			State string
+		}{}
+		for _, s := range res.Snapshots {
+			require.NotEmpty(t, s.StartTime)
+			out[s.SnapshotID] = struct {
+				Size  int64
+				State string
+			}{s.VolumeSize, s.State}
+		}
+		return out
+	}
+	snaps := descSnaps()
+	require.Contains(t, snaps, snapA)
+	require.Contains(t, snaps, snapB)
+	assert.Equal(t, "completed", snaps[snapA].State)
+	assert.Equal(t, int64(8), snaps[snapA].Size)
+
+	// DescribeImages filtered by snapshot-id finds only the owning AMI.
+	filtered := describeImages(map[string]string{
+		"Filter.1.Name": "block-device-mapping.snapshot-id", "Filter.1.Value.1": snapA,
+	})
+	require.Len(t, filtered, 1)
+	require.Contains(t, filtered, amiA)
+
+	// Deleting a snapshot removes it from DescribeSnapshots (retention path).
+	del := ec2Request(t, ts, map[string]string{"Action": "DeleteSnapshot", "SnapshotId": snapB})
+	assert.Equal(t, http.StatusOK, del.StatusCode)
+	del.Body.Close() //nolint:errcheck
+	after := descSnaps()
+	assert.Contains(t, after, snapA, "unrelated snapshot retained")
+	assert.NotContains(t, after, snapB, "deleted snapshot gone")
+}

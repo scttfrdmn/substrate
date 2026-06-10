@@ -204,6 +204,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.detachVolume(ctx, req)
 	case "DeleteSnapshot":
 		return p.deleteSnapshot(ctx, req)
+	case "DescribeSnapshots":
+		return p.describeSnapshots(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -2431,6 +2433,27 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		tags = append(tags, EC2Tag{Key: key, Value: req.Params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)]})
 	}
 
+	// Materialize a backing EBS snapshot for the AMI's root device, so that
+	// DescribeSnapshots and the block-device-mapping.snapshot-id filter on
+	// DescribeImages can model snapshot-retention logic (#322).
+	snapshotID := generateEBSSnapshotID()
+	snap := EC2Snapshot{
+		SnapshotID:  snapshotID,
+		VolumeSize:  8,
+		State:       "completed",
+		StartTime:   p.tc.Now().UTC().Format(time.RFC3339),
+		Description: "Created by CreateImage for " + name,
+		AccountID:   reqCtx.AccountID,
+		Region:      reqCtx.Region,
+	}
+	snapData, err := json.Marshal(snap)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createImage snapshot marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, ec2SnapshotStateKey(reqCtx.AccountID, reqCtx.Region, snapshotID), snapData); err != nil {
+		return nil, fmt.Errorf("ec2 createImage snapshot put: %w", err)
+	}
+
 	imageID := generateImageID()
 	img := EC2Image{
 		ImageID:      imageID,
@@ -2439,6 +2462,7 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		InstanceID:   instanceID,
 		State:        "available",
 		CreationDate: p.tc.Now().UTC().Format(time.RFC3339),
+		SnapshotID:   snapshotID,
 		Tags:         tags,
 		AccountID:    reqCtx.AccountID,
 		Region:       reqCtx.Region,
@@ -2496,14 +2520,23 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Key   string `xml:"key"`
 		Value string `xml:"value"`
 	}
+	type ebsBlockDevice struct {
+		SnapshotID string `xml:"snapshotId"`
+		VolumeSize int64  `xml:"volumeSize"`
+	}
+	type blockDeviceItem struct {
+		DeviceName string         `xml:"deviceName"`
+		EBS        ebsBlockDevice `xml:"ebs"`
+	}
 	type imageItem struct {
-		ImageID      string    `xml:"imageId"`
-		Name         string    `xml:"name"`
-		Description  string    `xml:"description,omitempty"`
-		State        string    `xml:"imageState"`
-		OwnerID      string    `xml:"imageOwnerId"`
-		CreationDate string    `xml:"creationDate,omitempty"`
-		Tags         []tagItem `xml:"tagSet>item"`
+		ImageID             string            `xml:"imageId"`
+		Name                string            `xml:"name"`
+		Description         string            `xml:"description,omitempty"`
+		State               string            `xml:"imageState"`
+		OwnerID             string            `xml:"imageOwnerId"`
+		CreationDate        string            `xml:"creationDate,omitempty"`
+		BlockDeviceMappings []blockDeviceItem `xml:"blockDeviceMapping>item,omitempty"`
+		Tags                []tagItem         `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName xml.Name    `xml:"DescribeImagesResponse"`
@@ -2525,7 +2558,8 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		// Apply filters.
 		skip := false
 		for _, f := range filters {
-			if strings.HasPrefix(f.name, "tag:") {
+			switch {
+			case strings.HasPrefix(f.name, "tag:"):
 				tagKey := f.name[4:]
 				found := false
 				for _, t := range img.Tags {
@@ -2536,8 +2570,18 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 				}
 				if !found {
 					skip = true
-					break
 				}
+			case f.name == "block-device-mapping.snapshot-id":
+				if img.SnapshotID == "" || !containsStr(f.values, img.SnapshotID) {
+					skip = true
+				}
+			case f.name == "image-id":
+				if !containsStr(f.values, img.ImageID) {
+					skip = true
+				}
+			}
+			if skip {
+				break
 			}
 		}
 		if skip {
@@ -2551,6 +2595,12 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			State:        img.State,
 			OwnerID:      img.AccountID,
 			CreationDate: img.CreationDate,
+		}
+		if img.SnapshotID != "" {
+			item.BlockDeviceMappings = []blockDeviceItem{{
+				DeviceName: "/dev/sda1",
+				EBS:        ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: 8},
+			}}
 		}
 		for _, t := range img.Tags {
 			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
@@ -3971,10 +4021,16 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // deleteSnapshot is a stub that accepts DeleteSnapshot requests without error.
 // Substratefs does not persist snapshots; the operation succeeds to allow
 // AMI deregistration cleanup workflows to proceed.
-func (p *EC2Plugin) deleteSnapshot(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	snapshotID := req.Params["SnapshotId"]
 	if snapshotID == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "SnapshotId is required", HTTPStatus: http.StatusBadRequest}
+	}
+	// Remove the snapshot from state so a subsequent DescribeSnapshots reflects
+	// the deletion (enables shared-snapshot retain-vs-delete testing). Delete is
+	// idempotent — a missing snapshot still returns success.
+	if err := p.state.Delete(context.Background(), ec2Namespace, ec2SnapshotStateKey(reqCtx.AccountID, reqCtx.Region, snapshotID)); err != nil {
+		return nil, fmt.Errorf("ec2 deleteSnapshot delete: %w", err)
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteSnapshotResponse"`
@@ -3982,4 +4038,71 @@ func (p *EC2Plugin) deleteSnapshot(_ *RequestContext, req *AWSRequest) (*AWSResp
 		Return  bool     `xml:"return"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// describeSnapshots lists EBS snapshots owned by the account, honoring an
+// optional list of SnapshotId.N parameters and the snapshot-id Filter.
+func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	ids := extractIndexedParams(req.Params, "SnapshotId")
+	filters := extractEC2Filters(req.Params)
+
+	allKeys, err := p.state.List(context.Background(), ec2Namespace,
+		"snapshot:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeSnapshots list: %w", err)
+	}
+
+	type tagItem struct {
+		Key   string `xml:"key"`
+		Value string `xml:"value"`
+	}
+	type snapshotItem struct {
+		SnapshotID  string    `xml:"snapshotId"`
+		VolumeID    string    `xml:"volumeId,omitempty"`
+		VolumeSize  int64     `xml:"volumeSize"`
+		State       string    `xml:"status"`
+		StartTime   string    `xml:"startTime"`
+		Encrypted   bool      `xml:"encrypted"`
+		Description string    `xml:"description,omitempty"`
+		OwnerID     string    `xml:"ownerId"`
+		Tags        []tagItem `xml:"tagSet>item"`
+	}
+	type response struct {
+		XMLName   xml.Name       `xml:"DescribeSnapshotsResponse"`
+		XMLNS     string         `xml:"xmlns,attr"`
+		Snapshots []snapshotItem `xml:"snapshotSet>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var snap EC2Snapshot
+		if json.Unmarshal(data, &snap) != nil {
+			continue
+		}
+		if len(ids) > 0 && !containsStr(ids, snap.SnapshotID) {
+			continue
+		}
+		if vals, ok := filters["snapshot-id"]; ok && !containsStr(vals, snap.SnapshotID) {
+			continue
+		}
+		item := snapshotItem{
+			SnapshotID:  snap.SnapshotID,
+			VolumeID:    snap.VolumeID,
+			VolumeSize:  snap.VolumeSize,
+			State:       snap.State,
+			StartTime:   snap.StartTime,
+			Encrypted:   snap.Encrypted,
+			Description: snap.Description,
+			OwnerID:     snap.AccountID,
+		}
+		for _, t := range snap.Tags {
+			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
+		}
+		resp.Snapshots = append(resp.Snapshots, item)
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
 }

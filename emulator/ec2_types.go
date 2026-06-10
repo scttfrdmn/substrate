@@ -390,6 +390,10 @@ type EC2Image struct {
 	// CreationDate is the RFC3339 timestamp when the AMI was registered.
 	CreationDate string `json:"creation_date,omitempty"`
 
+	// SnapshotID is the EBS snapshot backing the root device of this AMI, if any.
+	// CreateImage materializes one so snapshot-retention logic can be tested.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 
@@ -400,10 +404,54 @@ type EC2Image struct {
 	Region string `json:"region"`
 }
 
+// EC2Snapshot represents an Amazon EBS snapshot.
+type EC2Snapshot struct {
+	// SnapshotID is the snapshot identifier (e.g. "snap-0123456789abcdef0").
+	SnapshotID string `json:"snapshot_id"`
+
+	// VolumeID is the source volume, if the snapshot was created from one.
+	VolumeID string `json:"volume_id,omitempty"`
+
+	// VolumeSize is the size of the volume, in GiB.
+	VolumeSize int64 `json:"volume_size"`
+
+	// State is the snapshot state: always "completed" in Substrate.
+	State string `json:"state"`
+
+	// StartTime is the RFC3339 timestamp when the snapshot was started.
+	StartTime string `json:"start_time"`
+
+	// Encrypted reports whether the snapshot is encrypted.
+	Encrypted bool `json:"encrypted"`
+
+	// Description is the optional snapshot description.
+	Description string `json:"description,omitempty"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the snapshot.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the snapshot resides.
+	Region string `json:"region"`
+}
+
 // generateImageID generates a random AMI ID in the format "ami-" followed
 // by 17 hex characters.
 func generateImageID() string {
 	return "ami-" + randomHex(8)
+}
+
+// generateEBSSnapshotID generates a random EBS snapshot ID in the format "snap-"
+// followed by 17 hex characters.
+func generateEBSSnapshotID() string {
+	return "snap-" + randomHex(8)
+}
+
+// ec2SnapshotStateKey returns the state key for an EBS snapshot.
+func ec2SnapshotStateKey(accountID, region, snapshotID string) string {
+	return "snapshot:" + accountID + "/" + region + "/" + snapshotID
 }
 
 // EC2ElasticIP represents an Amazon EC2 Elastic IP address.
