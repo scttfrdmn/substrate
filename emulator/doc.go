@@ -1,4 +1,4 @@
-// Package substrate provides an event-sourced AWS emulation layer for
+// Package emulator provides an event-sourced AWS emulation layer for
 // deterministic testing of AI-generated infrastructure code.
 //
 // # Overview
