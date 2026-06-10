@@ -144,6 +144,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	// AMI operations
 	case "CreateImage":
 		return p.createImage(ctx, req)
+	case "RegisterImage":
+		return p.registerImage(ctx, req)
 	case "DescribeImages":
 		return p.describeImages(ctx, req)
 	case "DeregisterImage":
@@ -2477,6 +2479,58 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 
 	type response struct {
 		XMLName xml.Name `xml:"CreateImageResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		ImageID string   `xml:"imageId"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
+		ImageID: imageID,
+	})
+}
+
+// registerImage registers an AMI, optionally pointing its root device at an
+// existing EBS snapshot supplied via BlockDeviceMapping.N.Ebs.SnapshotId. Unlike
+// CreateImage (which always materializes a fresh snapshot), RegisterImage lets a
+// caller register multiple AMIs that *share* one snapshot — the AWS-faithful way
+// to model snapshot sharing, so retain-shared-snapshot logic is testable (#328).
+func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["Name"]
+	if name == "" {
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Find the first block device mapping that names an EBS snapshot. EC2 sends
+	// these as BlockDeviceMapping.N.Ebs.SnapshotId (1-indexed); scan a bounded
+	// range so a sparse index doesn't cause an early stop.
+	snapshotID := ""
+	for i := 1; i <= 32; i++ {
+		if v := req.Params[fmt.Sprintf("BlockDeviceMapping.%d.Ebs.SnapshotId", i)]; v != "" {
+			snapshotID = v
+			break
+		}
+	}
+
+	imageID := generateImageID()
+	img := EC2Image{
+		ImageID:      imageID,
+		Name:         name,
+		Description:  req.Params["Description"],
+		State:        "available",
+		CreationDate: p.tc.Now().UTC().Format(time.RFC3339),
+		SnapshotID:   snapshotID,
+		AccountID:    reqCtx.AccountID,
+		Region:       reqCtx.Region,
+	}
+	data, err := json.Marshal(img)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 registerImage marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, ec2ImageStateKey(reqCtx.AccountID, reqCtx.Region, imageID), data); err != nil {
+		return nil, fmt.Errorf("ec2 registerImage put: %w", err)
+	}
+
+	type response struct {
+		XMLName xml.Name `xml:"RegisterImageResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
 		ImageID string   `xml:"imageId"`
 	}

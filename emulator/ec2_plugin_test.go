@@ -3501,3 +3501,90 @@ func TestEC2_CreateImage_SnapshotsAndFilter(t *testing.T) {
 	assert.Contains(t, after, snapA, "unrelated snapshot retained")
 	assert.NotContains(t, after, snapB, "deleted snapshot gone")
 }
+
+// TestEC2_RegisterImage_SharedSnapshot is a regression test for #328: an AMI
+// registered (via RegisterImage) against an existing snapshot shares it with the
+// AMI that created it, and the block-device-mapping.snapshot-id filter returns
+// ALL AMIs referencing that snapshot — enabling shared-snapshot retain testing.
+func TestEC2_RegisterImage_SharedSnapshot(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	run := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base",
+		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	var runResult struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(run.Body).Decode(&runResult))
+	run.Body.Close() //nolint:errcheck
+	instanceID := runResult.Instances[0].InstanceID
+
+	// AMI A: CreateImage materializes snap-X.
+	cre := ec2Request(t, ts, map[string]string{
+		"Action": "CreateImage", "InstanceId": instanceID, "Name": "ami-a",
+	})
+	var creRes struct {
+		ImageID string `xml:"imageId"`
+	}
+	require.NoError(t, xml.NewDecoder(cre.Body).Decode(&creRes))
+	cre.Body.Close() //nolint:errcheck
+	amiA := creRes.ImageID
+
+	// Discover snap-X from AMI A's block device mapping.
+	desc := ec2Request(t, ts, map[string]string{"Action": "DescribeImages", "ImageId.1": amiA})
+	var dRes struct {
+		Images []struct {
+			BDM []struct {
+				EBS struct {
+					SnapshotID string `xml:"snapshotId"`
+				} `xml:"ebs"`
+			} `xml:"blockDeviceMapping>item"`
+		} `xml:"imagesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(desc.Body).Decode(&dRes))
+	desc.Body.Close() //nolint:errcheck
+	require.Len(t, dRes.Images, 1)
+	require.NotEmpty(t, dRes.Images[0].BDM)
+	snapX := dRes.Images[0].BDM[0].EBS.SnapshotID
+	require.NotEmpty(t, snapX)
+
+	// AMI B: RegisterImage pointing at the SAME snapshot.
+	reg := ec2Request(t, ts, map[string]string{
+		"Action": "RegisterImage", "Name": "ami-b",
+		"BlockDeviceMapping.1.DeviceName":     "/dev/sda1",
+		"BlockDeviceMapping.1.Ebs.SnapshotId": snapX,
+	})
+	require.Equal(t, http.StatusOK, reg.StatusCode)
+	var regRes struct {
+		ImageID string `xml:"imageId"`
+	}
+	require.NoError(t, xml.NewDecoder(reg.Body).Decode(&regRes))
+	reg.Body.Close() //nolint:errcheck
+	amiB := regRes.ImageID
+	require.NotEmpty(t, amiB)
+	require.NotEqual(t, amiA, amiB)
+
+	// The snapshot-id filter must now return BOTH AMIs.
+	f := ec2Request(t, ts, map[string]string{
+		"Action":        "DescribeImages",
+		"Filter.1.Name": "block-device-mapping.snapshot-id", "Filter.1.Value.1": snapX,
+	})
+	var fRes struct {
+		Images []struct {
+			ImageID string `xml:"imageId"`
+		} `xml:"imagesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(f.Body).Decode(&fRes))
+	f.Body.Close() //nolint:errcheck
+	got := map[string]bool{}
+	for _, im := range fRes.Images {
+		got[im.ImageID] = true
+	}
+	assert.Len(t, fRes.Images, 2, "both AMIs sharing the snapshot must match the filter")
+	assert.True(t, got[amiA], "ami-a should match")
+	assert.True(t, got[amiB], "ami-b should match")
+}
