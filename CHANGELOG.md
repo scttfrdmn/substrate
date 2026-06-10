@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- EC2: `RegisterImage` now registers an AMI that can point its root device at an
+  existing EBS snapshot via `BlockDeviceMapping.N.Ebs.SnapshotId` (#328, follow-up
+  to #322). Unlike `CreateImage` (which always materializes a fresh snapshot, as
+  in real AWS), `RegisterImage` lets multiple AMIs *share* one snapshot, so the
+  `DescribeImages` `block-device-mapping.snapshot-id` filter returns every AMI
+  referencing it — enabling the "retain a shared snapshot" path to be tested
+  end-to-end. (The filter itself already returned all matches; the gap was that
+  distinct `CreateImage` calls never produced a shared snapshot to find.)
+
 ## [v0.69.0] - 2026-06-09
 
 ### Added
