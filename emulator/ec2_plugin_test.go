@@ -1,6 +1,8 @@
 package emulator_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -3587,4 +3589,137 @@ func TestEC2_RegisterImage_SharedSnapshot(t *testing.T) {
 	assert.Len(t, fRes.Images, 2, "both AMIs sharing the snapshot must match the filter")
 	assert.True(t, got[amiA], "ami-a should match")
 	assert.True(t, got[amiB], "ami-b should match")
+}
+
+// newEC2SSMTestServer starts a server with both EC2 and SSM plugins sharing
+// state, for end-to-end RunInstances → DescribeInstanceInformation tests (#331).
+func newEC2SSMTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	registry := emulator.NewPluginRegistry()
+	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
+	state := emulator.NewMemoryStateManager()
+	tc := emulator.NewTimeController(time.Now())
+	logger := emulator.NewDefaultLogger(0, false)
+
+	ec2p := &emulator.EC2Plugin{}
+	require.NoError(t, ec2p.Initialize(t.Context(), emulator.PluginConfig{ //nolint:contextcheck
+		State: state, Logger: logger, Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(ec2p)
+
+	ssmp := &emulator.SSMPlugin{}
+	require.NoError(t, ssmp.Initialize(t.Context(), emulator.PluginConfig{ //nolint:contextcheck
+		State: state, Logger: logger, Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(ssmp)
+
+	cfg := emulator.DefaultConfig()
+	ts := httptest.NewServer(emulator.NewServer(*cfg, registry, store, state, tc, logger))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// runInstanceWithProfile launches one instance, optionally with an IAM instance
+// profile name, and returns its instance id.
+func runInstanceWithProfile(t *testing.T, ts *httptest.Server, profile string) string {
+	t.Helper()
+	params := map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base",
+		"InstanceType": "m7i.xlarge", "MinCount": "1", "MaxCount": "1",
+	}
+	if profile != "" {
+		params["IamInstanceProfile.Name"] = profile
+	}
+	r := ec2Request(t, ts, params)
+	var res struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+	r.Body.Close() //nolint:errcheck
+	require.NotEmpty(t, res.Instances)
+	return res.Instances[0].InstanceID
+}
+
+// TestEC2_DescribeInstances_EchoesIamInstanceProfile is a regression test for
+// #331 gap #2: an instance launched with an IAM instance profile reports it back
+// in DescribeInstances; one launched without reports none.
+func TestEC2_DescribeInstances_EchoesIamInstanceProfile(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	withID := runInstanceWithProfile(t, ts, "spawn-spored-profile")
+	withoutID := runInstanceWithProfile(t, ts, "")
+
+	describe := func(id string) (string, bool) {
+		r := ec2Request(t, ts, map[string]string{"Action": "DescribeInstances", "InstanceId.1": id})
+		var res struct {
+			Instances []struct {
+				IamInstanceProfile *struct {
+					ARN string `xml:"arn"`
+					ID  string `xml:"id"`
+				} `xml:"iamInstanceProfile"`
+			} `xml:"reservationSet>item>instancesSet>item"`
+		}
+		require.NoError(t, xml.NewDecoder(r.Body).Decode(&res))
+		r.Body.Close() //nolint:errcheck
+		require.Len(t, res.Instances, 1)
+		if res.Instances[0].IamInstanceProfile == nil {
+			return "", false
+		}
+		return res.Instances[0].IamInstanceProfile.ARN, true
+	}
+
+	arn, present := describe(withID)
+	assert.True(t, present, "instance launched with a profile must echo it")
+	assert.Contains(t, arn, "instance-profile/spawn-spored-profile")
+
+	_, present = describe(withoutID)
+	assert.False(t, present, "instance with no profile must not report one")
+}
+
+// ssmRequestTo posts an SSM JSON request to an httptest server and returns the
+// response body bytes.
+func ssmRequestTo(t *testing.T, ts *httptest.Server, operation string, body any) []byte {
+	t.Helper()
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/", bytes.NewReader(data))
+	require.NoError(t, err)
+	req.Host = "ssm.us-east-1.amazonaws.com"
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", "AmazonSSM."+operation)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return out
+}
+
+// TestSSM_DescribeInstanceInformation_RequiresProfile is a regression test for
+// #331 gap #1: only an instance with an IAM instance profile registers with SSM
+// (PingStatus Online); one without never appears, modeling the dead path.
+func TestSSM_DescribeInstanceInformation_RequiresProfile(t *testing.T) {
+	t.Parallel()
+	ts := newEC2SSMTestServer(t)
+	managedID := runInstanceWithProfile(t, ts, "spawn-spored-profile")
+	deadID := runInstanceWithProfile(t, ts, "")
+
+	r := ssmRequestTo(t, ts, "DescribeInstanceInformation", map[string]any{})
+	var out struct {
+		InstanceInformationList []struct {
+			InstanceID string `json:"InstanceId"`
+			PingStatus string `json:"PingStatus"`
+		} `json:"InstanceInformationList"`
+	}
+	require.NoError(t, json.Unmarshal(r, &out))
+
+	seen := map[string]string{}
+	for _, i := range out.InstanceInformationList {
+		seen[i.InstanceID] = i.PingStatus
+	}
+	assert.Equal(t, "Online", seen[managedID], "profile-bearing instance is SSM-managed")
+	_, deadPresent := seen[deadID]
+	assert.False(t, deadPresent, "instance with no profile can never register (dead path)")
 }
