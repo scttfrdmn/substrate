@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.71.0] - 2026-06-15
+
 ### Fixed
 - EC2: `DescribeInstances` now echoes the `IamInstanceProfile` set at launch
   (#331). `RunInstances` already accepted and stored it, but the describe response
@@ -1882,7 +1884,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.70.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.71.0...HEAD
+[v0.71.0]: https://github.com/scttfrdmn/substrate/compare/v0.70.0...v0.71.0
 [v0.70.0]: https://github.com/scttfrdmn/substrate/compare/v0.69.0...v0.70.0
 [v0.69.0]: https://github.com/scttfrdmn/substrate/compare/v0.68.3...v0.69.0
 [v0.68.3]: https://github.com/scttfrdmn/substrate/compare/v0.68.2...v0.68.3
