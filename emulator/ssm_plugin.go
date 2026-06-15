@@ -961,6 +961,14 @@ func (p *SSMPlugin) describeInstanceInformation(ctx *RequestContext, _ *AWSReque
 		if inst.State.Name != "running" {
 			continue
 		}
+		// SSM registration requires an attached IAM instance profile (which in
+		// real AWS grants ssm:UpdateInstanceInformation). An instance with no
+		// profile can never register, so it does not appear here — letting
+		// callers distinguish a "dead" instance (no profile) from one that is
+		// SSM-managed. (#331)
+		if inst.IamInstanceProfile == "" {
+			continue
+		}
 		infos = append(infos, instanceInfo{
 			InstanceID:      inst.InstanceID,
 			PingStatus:      "Online",

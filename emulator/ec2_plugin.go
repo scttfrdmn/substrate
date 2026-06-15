@@ -570,20 +570,25 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		Key   string `xml:"key"`
 		Value string `xml:"value"`
 	}
+	type iamProfileItem struct {
+		ARN string `xml:"arn"`
+		ID  string `xml:"id"`
+	}
 	type ec2InstanceItem struct {
-		InstanceID       string       `xml:"instanceId"`
-		ImageID          string       `xml:"imageId"`
-		InstanceType     string       `xml:"instanceType"`
-		LaunchTime       string       `xml:"launchTime"`
-		PrivateIPAddress string       `xml:"privateIpAddress"`
-		PublicIPAddress  string       `xml:"publicIpAddress,omitempty"`
-		PublicDNSName    string       `xml:"dnsName,omitempty"`
-		PrivateDNSName   string       `xml:"privateDnsName,omitempty"`
-		SubnetID         string       `xml:"subnetId"`
-		VpcID            string       `xml:"vpcId"`
-		KeyName          string       `xml:"keyName,omitempty"`
-		State            ec2StateItem `xml:"instanceState"`
-		Tags             []tagItem    `xml:"tagSet>item"`
+		InstanceID         string          `xml:"instanceId"`
+		ImageID            string          `xml:"imageId"`
+		InstanceType       string          `xml:"instanceType"`
+		LaunchTime         string          `xml:"launchTime"`
+		PrivateIPAddress   string          `xml:"privateIpAddress"`
+		PublicIPAddress    string          `xml:"publicIpAddress,omitempty"`
+		PublicDNSName      string          `xml:"dnsName,omitempty"`
+		PrivateDNSName     string          `xml:"privateDnsName,omitempty"`
+		SubnetID           string          `xml:"subnetId"`
+		VpcID              string          `xml:"vpcId"`
+		KeyName            string          `xml:"keyName,omitempty"`
+		IamInstanceProfile *iamProfileItem `xml:"iamInstanceProfile,omitempty"`
+		State              ec2StateItem    `xml:"instanceState"`
+		Tags               []tagItem       `xml:"tagSet>item"`
 	}
 	type reservationItem struct {
 		ReservationID string            `xml:"reservationId"`
@@ -632,6 +637,16 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
+		// Echo the IAM instance profile set at launch (#331). The stored value is
+		// the name or ARN supplied; surface it as the ARN and derive an id so a
+		// caller can read back the profile it attached.
+		if inst.IamInstanceProfile != "" {
+			arn := inst.IamInstanceProfile
+			if !strings.HasPrefix(arn, "arn:") {
+				arn = "arn:aws:iam::" + reqCtx.AccountID + ":instance-profile/" + inst.IamInstanceProfile
+			}
+			item.IamInstanceProfile = &iamProfileItem{ARN: arn, ID: "AIPA" + randomHex(8)}
+		}
 		for _, t := range inst.Tags {
 			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
 		}

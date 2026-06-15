@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- EC2: `DescribeInstances` now echoes the `IamInstanceProfile` set at launch
+  (#331). `RunInstances` already accepted and stored it, but the describe response
+  dropped it; the response now includes `iamInstanceProfile` with `arn` and `id`
+  so callers can read back the profile they attached.
+
+### Changed
+- SSM: `DescribeInstanceInformation` now lists a running instance only if it has
+  an IAM instance profile attached (#331). Previously every running instance
+  reported `PingStatus=Online` regardless of preconditions; in real AWS, SSM
+  registration requires a profile granting `ssm:UpdateInstanceInformation`, and an
+  instance with no profile never registers. This lets callers distinguish a "dead"
+  instance (no profile → can never register) from an SSM-managed one. Eligibility
+  is based on profile presence (substrate does not model profile→policy attachment).
+
 ## [v0.70.0] - 2026-06-09
 
 ### Added
