@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped `golang.org/x/net` v0.52.0 → v0.56.0 (with `x/sys`, `x/text`) in both the
+  root and `test/e2e` modules to clear Trivy-flagged advisories (CVE-2026-27136,
+  -33814, -39821, -42502). The dependency is indirect and the CVEs are not
+  call-reachable (`govulncheck` was already clean), but the bump keeps the
+  dependency tree clean for the manifest-based Trivy scan.
+
+### Changed
+- CI: pinned `aquasecurity/trivy-action` from `@master` to `@v0.36.0`. The
+  floating `master` ref regressed upstream and broke the Trivy/Container-scan jobs
+  on every PR; pinning restores reproducible CI (and the new `github-actions`
+  Dependabot config will surface future bumps).
+
+### Added
+- Enabled Dependabot: vulnerability alerts + automated security fixes (repo
+  settings), plus a `.github/dependabot.yml` for weekly grouped version-update
+  PRs across gomod (root + `test/e2e`), npm (`docs`), pip (`python`), and
+  github-actions.
+
 ## [v0.71.0] - 2026-06-15
 
 ### Fixed
