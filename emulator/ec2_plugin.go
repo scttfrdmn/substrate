@@ -150,6 +150,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeImages(ctx, req)
 	case "DeregisterImage":
 		return p.deregisterImage(ctx, req)
+	// Placement group operations
+	case "CreatePlacementGroup":
+		return p.createPlacementGroup(ctx, req)
+	case "DescribePlacementGroups":
+		return p.describePlacementGroups(ctx, req)
+	case "DeletePlacementGroup":
+		return p.deletePlacementGroup(ctx, req)
 	// Availability Zone operations
 	case "DescribeAvailabilityZones":
 		return p.describeAvailabilityZones(ctx, req)
@@ -245,6 +252,15 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	sgID := req.Params["SecurityGroupId.1"]
 	if sgID == "" {
 		sgID = req.Params["SecurityGroupIds.1"]
+	}
+
+	// If a placement group is named, it must exist — mirrors AWS so a
+	// create → poll(available) → launch ordering is testable (#344).
+	if pgName := req.Params["Placement.GroupName"]; pgName != "" {
+		pgKey := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, pgName)
+		if data, _ := p.state.Get(context.Background(), ec2Namespace, pgKey); data == nil {
+			return nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + pgName + "' is unknown.", HTTPStatus: http.StatusBadRequest}
+		}
 	}
 
 	// Networking can be specified either at the top level (above) or nested in a
@@ -2728,6 +2744,119 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequ
 		})
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// createPlacementGroup creates an EC2 placement group (#344). A repeat create of
+// an existing name returns InvalidPlacementGroup.Duplicate.
+func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["GroupName"]
+	if name == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "GroupName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	strategy := req.Params["Strategy"]
+	if strategy == "" {
+		strategy = "cluster"
+	}
+
+	key := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, name)
+	if existing, _ := p.state.Get(context.Background(), ec2Namespace, key); existing != nil {
+		return nil, &AWSError{Code: "InvalidPlacementGroup.Duplicate", Message: "The placement group '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
+	}
+
+	pg := EC2PlacementGroup{
+		GroupName: name,
+		GroupID:   generatePlacementGroupID(),
+		Strategy:  strategy,
+		State:     "available",
+		AccountID: reqCtx.AccountID,
+		Region:    reqCtx.Region,
+	}
+	data, err := json.Marshal(pg)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createPlacementGroup marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, key, data); err != nil {
+		return nil, fmt.Errorf("ec2 createPlacementGroup put: %w", err)
+	}
+
+	type pgItem struct {
+		GroupName string `xml:"groupName"`
+		GroupID   string `xml:"groupId"`
+		Strategy  string `xml:"strategy"`
+		State     string `xml:"state"`
+	}
+	type response struct {
+		XMLName        xml.Name `xml:"CreatePlacementGroupResponse"`
+		XMLNS          string   `xml:"xmlns,attr"`
+		PlacementGroup pgItem   `xml:"placementGroup"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
+		PlacementGroup: pgItem{GroupName: pg.GroupName, GroupID: pg.GroupID, Strategy: pg.Strategy, State: pg.State},
+	})
+}
+
+// describePlacementGroups lists placement groups, optionally filtered by
+// GroupName.N parameters (#344).
+func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	names := extractIndexedParams(req.Params, "GroupName")
+	allKeys, err := p.state.List(context.Background(), ec2Namespace,
+		"placement_group:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describePlacementGroups list: %w", err)
+	}
+
+	type pgItem struct {
+		GroupName string `xml:"groupName"`
+		GroupID   string `xml:"groupId"`
+		Strategy  string `xml:"strategy"`
+		State     string `xml:"state"`
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DescribePlacementGroupsResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Groups  []pgItem `xml:"placementGroupSet>item"`
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var pg EC2PlacementGroup
+		if json.Unmarshal(data, &pg) != nil {
+			continue
+		}
+		if len(names) > 0 && !containsStr(names, pg.GroupName) {
+			continue
+		}
+		resp.Groups = append(resp.Groups, pgItem{GroupName: pg.GroupName, GroupID: pg.GroupID, Strategy: pg.Strategy, State: pg.State})
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// deletePlacementGroup removes a placement group by name (#344). Deleting an
+// unknown group returns InvalidPlacementGroup.Unknown.
+func (p *EC2Plugin) deletePlacementGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name := req.Params["GroupName"]
+	if name == "" {
+		return nil, &AWSError{Code: "MissingParameter", Message: "GroupName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	key := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, name)
+	data, _ := p.state.Get(context.Background(), ec2Namespace, key)
+	if data == nil {
+		return nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + name + "' is unknown.", HTTPStatus: http.StatusBadRequest}
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deletePlacementGroup delete: %w", err)
+	}
+	type response struct {
+		XMLName xml.Name `xml:"DeletePlacementGroupResponse"`
+		XMLNS   string   `xml:"xmlns,attr"`
+		Return  bool     `xml:"return"`
+	}
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
 // azRegionAbbrev returns a short abbreviation for a region name used in zone IDs

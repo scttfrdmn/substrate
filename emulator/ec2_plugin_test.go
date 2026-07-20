@@ -3723,3 +3723,82 @@ func TestSSM_DescribeInstanceInformation_RequiresProfile(t *testing.T) {
 	_, deadPresent := seen[deadID]
 	assert.False(t, deadPresent, "instance with no profile can never register (dead path)")
 }
+
+// TestEC2_PlacementGroups is a regression test for #344: the create → poll
+// (available) → launch-into → delete lifecycle for cluster placement groups,
+// including duplicate/unknown errors, as spawn's MPI launch path exercises.
+func TestEC2_PlacementGroups(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// Create.
+	c := ec2Request(t, ts, map[string]string{
+		"Action": "CreatePlacementGroup", "GroupName": "mpi-pg", "Strategy": "cluster",
+	})
+	require.Equal(t, http.StatusOK, c.StatusCode)
+	var created struct {
+		PG struct {
+			GroupName string `xml:"groupName"`
+			GroupID   string `xml:"groupId"`
+			State     string `xml:"state"`
+		} `xml:"placementGroup"`
+	}
+	require.NoError(t, xml.NewDecoder(c.Body).Decode(&created))
+	c.Body.Close() //nolint:errcheck
+	assert.Equal(t, "mpi-pg", created.PG.GroupName)
+	assert.NotEmpty(t, created.PG.GroupID)
+	assert.Equal(t, "available", created.PG.State)
+
+	// Duplicate create → InvalidPlacementGroup.Duplicate (400).
+	dup := ec2Request(t, ts, map[string]string{"Action": "CreatePlacementGroup", "GroupName": "mpi-pg"})
+	assert.Equal(t, http.StatusBadRequest, dup.StatusCode)
+	dup.Body.Close() //nolint:errcheck
+
+	// Describe by name → available.
+	d := ec2Request(t, ts, map[string]string{"Action": "DescribePlacementGroups", "GroupName.1": "mpi-pg"})
+	var desc struct {
+		Groups []struct {
+			GroupName string `xml:"groupName"`
+			State     string `xml:"state"`
+		} `xml:"placementGroupSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(d.Body).Decode(&desc))
+	d.Body.Close() //nolint:errcheck
+	require.Len(t, desc.Groups, 1)
+	assert.Equal(t, "available", desc.Groups[0].State)
+
+	// RunInstances into the known group → success.
+	ok := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base", "InstanceType": "c7i.xlarge",
+		"MinCount": "1", "MaxCount": "1", "Placement.GroupName": "mpi-pg",
+	})
+	assert.Equal(t, http.StatusOK, ok.StatusCode)
+	ok.Body.Close() //nolint:errcheck
+
+	// RunInstances into an unknown group → InvalidPlacementGroup.Unknown (400).
+	bad := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-base", "InstanceType": "c7i.xlarge",
+		"MinCount": "1", "MaxCount": "1", "Placement.GroupName": "does-not-exist",
+	})
+	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
+	bad.Body.Close() //nolint:errcheck
+
+	// Delete, then describe → gone; delete again → Unknown.
+	del := ec2Request(t, ts, map[string]string{"Action": "DeletePlacementGroup", "GroupName": "mpi-pg"})
+	assert.Equal(t, http.StatusOK, del.StatusCode)
+	del.Body.Close() //nolint:errcheck
+
+	d2 := ec2Request(t, ts, map[string]string{"Action": "DescribePlacementGroups"})
+	var desc2 struct {
+		Groups []struct {
+			GroupName string `xml:"groupName"`
+		} `xml:"placementGroupSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(d2.Body).Decode(&desc2))
+	d2.Body.Close() //nolint:errcheck
+	assert.Empty(t, desc2.Groups)
+
+	delAgain := ec2Request(t, ts, map[string]string{"Action": "DeletePlacementGroup", "GroupName": "mpi-pg"})
+	assert.Equal(t, http.StatusBadRequest, delAgain.StatusCode)
+	delAgain.Body.Close() //nolint:errcheck
+}

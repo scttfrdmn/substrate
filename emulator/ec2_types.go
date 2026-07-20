@@ -454,6 +454,42 @@ func ec2SnapshotStateKey(accountID, region, snapshotID string) string {
 	return "snapshot:" + accountID + "/" + region + "/" + snapshotID
 }
 
+// EC2PlacementGroup represents an Amazon EC2 placement group.
+type EC2PlacementGroup struct {
+	// GroupName is the user-supplied placement group name.
+	GroupName string `json:"group_name"`
+
+	// GroupID is the AWS-assigned identifier (e.g. "pg-0123456789abcdef0").
+	GroupID string `json:"group_id"`
+
+	// Strategy is the placement strategy: "cluster", "spread", or "partition".
+	Strategy string `json:"strategy"`
+
+	// State is the placement group state: always "available" in Substrate.
+	State string `json:"state"`
+
+	// Tags holds key-value metadata tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// AccountID is the AWS account that owns the placement group.
+	AccountID string `json:"account_id"`
+
+	// Region is the AWS region in which the placement group resides.
+	Region string `json:"region"`
+}
+
+// generatePlacementGroupID generates a random placement group ID in the format
+// "pg-" followed by 17 hex characters.
+func generatePlacementGroupID() string {
+	return "pg-" + randomHex(8)
+}
+
+// ec2PlacementGroupStateKey returns the state key for a placement group (keyed
+// by name, which is unique per account/region).
+func ec2PlacementGroupStateKey(accountID, region, groupName string) string {
+	return "placement_group:" + accountID + "/" + region + "/" + groupName
+}
+
 // EC2ElasticIP represents an Amazon EC2 Elastic IP address.
 type EC2ElasticIP struct {
 	// AllocationID is the unique identifier for the Elastic IP allocation.
