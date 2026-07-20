@@ -507,3 +507,60 @@ func TestServer_EmailsEndpoint(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp3.Body).Decode(&result3))
 	assert.Equal(t, 1, result3.Count)
 }
+
+// TestServer_CORS_Preflight verifies that, with CORS enabled, an OPTIONS
+// preflight from a browser origin gets the Access-Control-Allow-* headers and a
+// 2xx, and exposes the AWS request-id/error-type headers (#346).
+func TestServer_CORS_Preflight(t *testing.T) {
+	cfg := emulator.DefaultConfig()
+	cfg.Server.CORS.Enabled = true
+	// Explicit allowlist → exercises origin reflection (a "*" default returns "*").
+	cfg.Server.CORS.AllowedOrigins = []string{"http://localhost:5173"}
+	registry := emulator.NewPluginRegistry()
+	registry.Register(&serverPlugin{
+		serviceName: "sqs",
+		resp:        &emulator.AWSResponse{StatusCode: http.StatusOK, Body: []byte(`{}`)},
+	})
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	state := emulator.NewMemoryStateManager()
+	tc := emulator.NewTimeController(time.Now())
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	srv := emulator.NewServer(*cfg, registry, store, state, tc, logger)
+
+	// Preflight for an EC2 RunInstances-style call from a Vite dev origin.
+	r := httptest.NewRequest(http.MethodOptions, "/", nil)
+	r.Header.Set("Origin", "http://localhost:5173")
+	r.Header.Set("Access-Control-Request-Method", "POST")
+	r.Header.Set("Access-Control-Request-Headers", "authorization,x-amz-target,amz-sdk-invocation-id")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	assert.Less(t, w.Code, 300, "preflight should be a 2xx (no-content), got %d", w.Code)
+	assert.Equal(t, "http://localhost:5173", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Methods"), "POST")
+
+	// On the ACTUAL (non-preflight) response, the SDK must be able to read the
+	// request-id / error-type headers — Expose-Headers is set here, not on OPTIONS.
+	r2 := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
+	r2.Header.Set("Origin", "http://localhost:5173")
+	r2.Header.Set("X-Amz-Target", "AmazonSQS.SendMessage")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, r2)
+	assert.Equal(t, "http://localhost:5173", w2.Header().Get("Access-Control-Allow-Origin"))
+	expose := strings.ToLower(w2.Header().Get("Access-Control-Expose-Headers"))
+	assert.Contains(t, expose, "x-amzn-requestid")
+	assert.Contains(t, expose, "x-amzn-errortype")
+}
+
+// TestServer_CORS_DisabledByDefault verifies no CORS headers are emitted unless
+// explicitly enabled (non-browser callers are unaffected).
+func TestServer_CORS_DisabledByDefault(t *testing.T) {
+	srv := newTestServer(t)
+	r := httptest.NewRequest(http.MethodOptions, "/", nil)
+	r.Header.Set("Origin", "http://localhost:5173")
+	r.Header.Set("Access-Control-Request-Method", "POST")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"),
+		"CORS must be off by default")
+}

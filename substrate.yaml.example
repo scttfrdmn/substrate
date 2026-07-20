@@ -13,6 +13,14 @@ server:
   health_path: "/health"
   # HTTP path for the readiness endpoint (lists registered plugins).
   ready_path: "/ready"
+  # CORS for browser-based AWS SDK clients (off by default). Enable to let a page
+  # served from another origin (e.g. a Vite dev server) reach the emulator.
+  cors:
+    enabled: false
+    # Permitted origins. Omit or leave empty (with enabled: true) to reflect any
+    # origin ("*") — reasonable for a local dev emulator.
+    allowed_origins:
+      - "http://localhost:5173"
 
 event_store:
   # Set to false to disable the event log (not recommended for testing use cases).

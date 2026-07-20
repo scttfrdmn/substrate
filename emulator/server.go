@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -200,6 +201,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildRouter() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+
+	// CORS for browser-based AWS SDK clients (opt-in). The AWS SDK issues a
+	// preflight OPTIONS before non-simple requests and sends many x-amz-*/
+	// amz-sdk-* headers; reflect them and expose the request-id/error-type
+	// headers the SDK reads. Off by default — non-browser callers need no CORS.
+	if s.config.Server.CORS.Enabled {
+		origins := s.config.Server.CORS.AllowedOrigins
+		if len(origins) == 0 {
+			origins = []string{"*"}
+		}
+		r.Use(cors.Handler(cors.Options{
+			AllowedOrigins:   origins,
+			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"},
+			AllowedHeaders:   []string{"*"},
+			ExposedHeaders:   []string{"x-amzn-RequestId", "x-amz-request-id", "x-amzn-ErrorType", "x-amz-id-2"},
+			AllowCredentials: false,
+			MaxAge:           300,
+		}))
+	}
 
 	healthPath := s.config.Server.HealthPath
 	if healthPath == "" {
