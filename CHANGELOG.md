@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- EC2: cluster placement group actions (#344). `CreatePlacementGroup` (accepts
+  `GroupName` + `Strategy`, defaults `cluster`; duplicate name →
+  `InvalidPlacementGroup.Duplicate`), `DescribePlacementGroups` (with `GroupName.N`
+  filter, `State=available`), and `DeletePlacementGroup` (unknown name →
+  `InvalidPlacementGroup.Unknown`). `RunInstances` now validates a
+  `Placement.GroupName` against known groups (unknown → `InvalidPlacementGroup.Unknown`),
+  so a create → poll(available) → launch ordering (e.g. spawn's per-AZ MPI launch)
+  is testable end-to-end.
+
 ## [v0.72.0] - 2026-07-20
 
 ### Added
