@@ -3802,3 +3802,41 @@ func TestEC2_PlacementGroups(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, delAgain.StatusCode)
 	delAgain.Body.Close() //nolint:errcheck
 }
+
+// TestEC2_RunInstances_ReturnsTagSet is a regression test for #351: launch-time
+// tags (TagSpecification, ResourceType=instance) must appear in the RunInstances
+// response tagSet, matching real EC2 — not only in a later DescribeInstances.
+func TestEC2_RunInstances_ReturnsTagSet(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	run := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "c6a.xlarge",
+		"MinCount": "1", "MaxCount": "1",
+		"TagSpecification.1.ResourceType": "instance",
+		"TagSpecification.1.Tag.1.Key":    "Name",
+		"TagSpecification.1.Tag.1.Value":  "echo-test",
+		"TagSpecification.1.Tag.2.Key":    "spawn:managed",
+		"TagSpecification.1.Tag.2.Value":  "true",
+	})
+	require.Equal(t, http.StatusOK, run.StatusCode)
+	var res struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+			Tags       []struct {
+				Key   string `xml:"key"`
+				Value string `xml:"value"`
+			} `xml:"tagSet>item"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(run.Body).Decode(&res))
+	run.Body.Close() //nolint:errcheck
+	require.Len(t, res.Instances, 1)
+
+	tags := map[string]string{}
+	for _, tg := range res.Instances[0].Tags {
+		tags[tg.Key] = tg.Value
+	}
+	assert.Equal(t, "echo-test", tags["Name"], "RunInstances response must echo launch-time tags")
+	assert.Equal(t, "true", tags["spawn:managed"])
+}
