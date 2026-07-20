@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- EC2: `RunInstances` now returns the instance `tagSet` for launch-time tags
+  applied via `TagSpecifications` (#351), matching real EC2. Previously the tags
+  were stored (and appeared in a later `DescribeInstances`) but omitted from the
+  `RunInstances` response, so SDK callers reading the returned instance's tags got
+  an empty set. (`StartInstances`/`StopInstances` responses correctly omit
+  `tagSet`, matching AWS — no change there.)
+
 ### Added
 - EC2: cluster placement group actions (#344). `CreatePlacementGroup` (accepts
   `GroupName` + `Strategy`, defaults `cluster`; duplicate name →

@@ -460,6 +460,10 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 }
 
 func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID string, reqCtx *RequestContext) (*AWSResponse, error) {
+	type tagItem struct {
+		Key   string `xml:"key"`
+		Value string `xml:"value"`
+	}
 	type ec2InstanceItem struct {
 		InstanceID       string `xml:"instanceId"`
 		ImageID          string `xml:"imageId"`
@@ -476,6 +480,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			Code int    `xml:"code"`
 			Name string `xml:"name"`
 		} `xml:"instanceState"`
+		Tags []tagItem `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName       xml.Name          `xml:"RunInstancesResponse"`
@@ -506,6 +511,11 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
+		// Echo launch-time tags (from TagSpecifications) — real EC2 populates
+		// tagSet in the RunInstances response, not just DescribeInstances (#351).
+		for _, t := range inst.Tags {
+			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck // XML tags differ from EC2Tag's JSON tags.
+		}
 		resp.Instances = append(resp.Instances, item)
 	}
 
