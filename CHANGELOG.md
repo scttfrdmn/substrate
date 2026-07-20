@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- CORS support for browser-based AWS SDK clients (#346). The HTTP server can now
+  emit `Access-Control-Allow-*` headers and answer `OPTIONS` preflight requests,
+  so a page served from another origin (e.g. a Vite dev server) can drive the
+  emulator. Off by default; enable via `server.cors.enabled` (with optional
+  `server.cors.allowed_origins`, default reflect-any `*`). Exposes
+  `x-amzn-RequestId` / `x-amz-request-id` / `x-amzn-ErrorType` / `x-amz-id-2` so
+  the SDK can read request IDs and (seeded) error types from the browser.
+
 ### Security
+- Bumped the Go toolchain to **go1.26.5** (`go.mod`, `test/e2e/go.mod`) to clear
+  a call-reachable `crypto/tls` standard-library advisory (GO-2026-5856); CI
+  reads the toolchain from `go.mod`, so `govulncheck` passes again.
 - Bumped `golang.org/x/net` v0.52.0 → v0.56.0 (with `x/sys`, `x/text`) in both the
   root and `test/e2e` modules to clear Trivy-flagged advisories (CVE-2026-27136,
   -33814, -39821, -42502). The dependency is indirect and the CVEs are not

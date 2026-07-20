@@ -128,6 +128,21 @@ type ServerConfig struct {
 
 	// ReadyPath is the HTTP path for the readiness endpoint. Defaults to "/ready".
 	ReadyPath string `mapstructure:"ready_path"`
+
+	// CORS configures cross-origin resource sharing for browser-based clients.
+	CORS CORSConfig `mapstructure:"cors"`
+}
+
+// CORSConfig configures CORS headers and preflight handling. It is off by
+// default (non-browser use needs no CORS); enable it to let browser-based AWS
+// SDK clients (served from another origin) reach the emulator.
+type CORSConfig struct {
+	// Enabled turns on the CORS middleware and OPTIONS preflight handling.
+	Enabled bool `mapstructure:"enabled"`
+
+	// AllowedOrigins is the list of permitted origins. Empty (with Enabled) means
+	// reflect any origin ("*") — reasonable for a local dev emulator.
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
 // EventStoreCfg is the YAML-friendly configuration for the event store.
