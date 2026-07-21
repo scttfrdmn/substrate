@@ -827,6 +827,9 @@ type SSMCommandInvocation struct {
 	// StandardErrorContent is the captured stderr.
 	StandardErrorContent string `json:"StandardErrorContent"`
 
+	// ResponseCode is the shell exit code of the command (0 on Success).
+	ResponseCode int `json:"ResponseCode"`
+
 	// DocumentName is the SSM document that was executed.
 	DocumentName string `json:"DocumentName"`
 }
@@ -864,14 +867,33 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("ssm sendCommand state.Put: %w", err)
 	}
 
-	// Create per-instance invocation records immediately (Success in test mode).
+	// Resolve any seeded outcome (substrate does not execute the command; a seed
+	// sets the observable result). Unseeded → nominal Success/empty (#345).
+	status, stdout, stderr, exitCode := "Success", "", "", 0
+	seed, seedErr := p.resolveSeededInvocation(input.DocumentName, input.Parameters)
+	if seedErr != nil {
+		return nil, seedErr
+	}
+	if seed != nil {
+		status, stdout, stderr, exitCode = seed.Status, seed.Stdout, seed.Stderr, seed.ExitCode
+	}
+	// The command status reflects the resolved invocation outcome.
+	if status != "Success" {
+		cmd.Status = status
+		if data, mErr := json.Marshal(cmd); mErr == nil {
+			_ = p.state.Put(goCtx, ssmNamespace, ssmCommandKey(ctx.AccountID, ctx.Region, commandID), data)
+		}
+	}
+
+	// Create per-instance invocation records with the resolved outcome.
 	for _, instID := range input.InstanceIDs {
 		inv := SSMCommandInvocation{
 			CommandID:             commandID,
 			InstanceID:            instID,
-			Status:                "Success",
-			StandardOutputContent: "",
-			StandardErrorContent:  "",
+			Status:                status,
+			StandardOutputContent: stdout,
+			StandardErrorContent:  stderr,
+			ResponseCode:          exitCode,
 			DocumentName:          input.DocumentName,
 		}
 		invData, _ := json.Marshal(inv)
@@ -924,6 +946,7 @@ func (p *SSMPlugin) getCommandInvocation(ctx *RequestContext, req *AWSRequest) (
 		"Status":                inv.Status,
 		"StandardOutputContent": inv.StandardOutputContent,
 		"StandardErrorContent":  inv.StandardErrorContent,
+		"ResponseCode":          inv.ResponseCode,
 		"DocumentName":          inv.DocumentName,
 	})
 }

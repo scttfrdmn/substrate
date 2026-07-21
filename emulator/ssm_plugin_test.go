@@ -261,3 +261,62 @@ func TestSSMPlugin_DescribeInstanceInformation(t *testing.T) {
 	list, _ := out["InstanceInformationList"].([]interface{})
 	assert.Empty(t, list)
 }
+
+// ssmSeedInvocation posts a seeded Run Command outcome to the control endpoint.
+func ssmSeedInvocation(t *testing.T, srv *emulator.Server, body map[string]any) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/v1/ssm/command-invocation", bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+}
+
+// TestSSM_SeededCommandInvocation is a regression test for #345: a seeded outcome
+// drives GetCommandInvocation's status/stdout/stderr/exit code (substrate does
+// not execute the command); an unseeded command keeps the nominal Success/empty.
+func TestSSM_SeededCommandInvocation(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	// Seed a Failed outcome for RunShellScript commands mentioning "spored".
+	ssmSeedInvocation(t, srv, map[string]any{
+		"documentName": "AWS-RunShellScript",
+		"paramMatch":   "systemctl status spored",
+		"status":       "Failed",
+		"stdout":       "",
+		"stderr":       "Unit spored.service could not be found.\n",
+		"exitCode":     4,
+	})
+
+	// Send a matching command.
+	sendResp := ssmRequest(t, srv, "SendCommand", map[string]any{
+		"DocumentName": "AWS-RunShellScript",
+		"InstanceIds":  []string{"i-abc123"},
+		"Parameters":   map[string][]string{"commands": {"systemctl status spored"}},
+	})
+	require.Equal(t, http.StatusOK, sendResp.StatusCode)
+	cmdID, _ := readSSMBody(t, sendResp)["Command"].(map[string]any)["CommandId"].(string)
+	require.NotEmpty(t, cmdID)
+
+	// GetCommandInvocation returns the seeded outcome.
+	getResp := ssmRequest(t, srv, "GetCommandInvocation", map[string]any{
+		"CommandId": cmdID, "InstanceId": "i-abc123",
+	})
+	got := readSSMBody(t, getResp)
+	assert.Equal(t, "Failed", got["Status"])
+	assert.Contains(t, got["StandardErrorContent"], "spored.service could not be found")
+	assert.Equal(t, float64(4), got["ResponseCode"])
+
+	// A non-matching command (different params) falls back to nominal Success.
+	send2 := ssmRequest(t, srv, "SendCommand", map[string]any{
+		"DocumentName": "AWS-RunShellScript",
+		"InstanceIds":  []string{"i-abc123"},
+		"Parameters":   map[string][]string{"commands": {"echo hello"}},
+	})
+	cmd2, _ := readSSMBody(t, send2)["Command"].(map[string]any)["CommandId"].(string)
+	get2 := ssmRequest(t, srv, "GetCommandInvocation", map[string]any{
+		"CommandId": cmd2, "InstanceId": "i-abc123",
+	})
+	assert.Equal(t, "Success", readSSMBody(t, get2)["Status"])
+}

@@ -255,6 +255,9 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/sagemaker/training-job-status", s.handleSageMakerSeedTrainingJobStatus)
 	r.Delete("/v1/sagemaker/training-job-status", s.handleSageMakerClearTrainingJobStatus)
 
+	r.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
+	r.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
+
 	// Bedrock Runtime control-plane endpoints.
 	r.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
 	r.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)

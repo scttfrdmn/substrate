@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- SSM: seedable `SendCommand` / `GetCommandInvocation` outcomes (#345). Substrate
+  still does not execute the shell command (that is workload-internal and out of
+  scope), but a test can now seed the **observable result** — `Status`, stdout,
+  stderr, and `ResponseCode` (exit code) — that `GetCommandInvocation` returns,
+  instead of always getting `Success` with empty output. New control-plane
+  endpoints `POST` / `DELETE /v1/ssm/command-invocation` seed by document name
+  (default `*` wildcard) with an optional command-parameter substring match
+  (`paramMatch`), following the Athena/SageMaker/Bedrock seed pattern. Unseeded
+  commands keep the nominal `Success`/empty result. `GetCommandInvocation` now
+  also returns `ResponseCode`.
+
 ## [v0.73.0] - 2026-07-20
 
 ### Fixed
