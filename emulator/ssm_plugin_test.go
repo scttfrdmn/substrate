@@ -261,3 +261,107 @@ func TestSSMPlugin_DescribeInstanceInformation(t *testing.T) {
 	list, _ := out["InstanceInformationList"].([]interface{})
 	assert.Empty(t, list)
 }
+
+// ssmSeedInvocation posts a seeded Run Command outcome to the control endpoint.
+func ssmSeedInvocation(t *testing.T, srv *emulator.Server, body map[string]any) {
+	t.Helper()
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/v1/ssm/command-invocation", bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+}
+
+// TestSSM_SeededCommandInvocation is a regression test for #345: a seeded outcome
+// drives GetCommandInvocation's status/stdout/stderr/exit code (substrate does
+// not execute the command); an unseeded command keeps the nominal Success/empty.
+func TestSSM_SeededCommandInvocation(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	// Seed a Failed outcome for RunShellScript commands mentioning "spored".
+	ssmSeedInvocation(t, srv, map[string]any{
+		"documentName": "AWS-RunShellScript",
+		"paramMatch":   "systemctl status spored",
+		"status":       "Failed",
+		"stdout":       "",
+		"stderr":       "Unit spored.service could not be found.\n",
+		"exitCode":     4,
+	})
+
+	// Send a matching command.
+	sendResp := ssmRequest(t, srv, "SendCommand", map[string]any{
+		"DocumentName": "AWS-RunShellScript",
+		"InstanceIds":  []string{"i-abc123"},
+		"Parameters":   map[string][]string{"commands": {"systemctl status spored"}},
+	})
+	require.Equal(t, http.StatusOK, sendResp.StatusCode)
+	cmdID, _ := readSSMBody(t, sendResp)["Command"].(map[string]any)["CommandId"].(string)
+	require.NotEmpty(t, cmdID)
+
+	// GetCommandInvocation returns the seeded outcome.
+	getResp := ssmRequest(t, srv, "GetCommandInvocation", map[string]any{
+		"CommandId": cmdID, "InstanceId": "i-abc123",
+	})
+	got := readSSMBody(t, getResp)
+	assert.Equal(t, "Failed", got["Status"])
+	assert.Contains(t, got["StandardErrorContent"], "spored.service could not be found")
+	assert.Equal(t, float64(4), got["ResponseCode"])
+
+	// A non-matching command (different params) falls back to nominal Success.
+	send2 := ssmRequest(t, srv, "SendCommand", map[string]any{
+		"DocumentName": "AWS-RunShellScript",
+		"InstanceIds":  []string{"i-abc123"},
+		"Parameters":   map[string][]string{"commands": {"echo hello"}},
+	})
+	cmd2, _ := readSSMBody(t, send2)["Command"].(map[string]any)["CommandId"].(string)
+	get2 := ssmRequest(t, srv, "GetCommandInvocation", map[string]any{
+		"CommandId": cmd2, "InstanceId": "i-abc123",
+	})
+	assert.Equal(t, "Success", readSSMBody(t, get2)["Status"])
+}
+
+// TestSSM_SeedCommandInvocation_WildcardAndClear covers the "*" wildcard seed,
+// the clear endpoints (targeted + all), and seed validation (#345).
+func TestSSM_SeedCommandInvocation_WildcardAndClear(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	postSeed := func(body map[string]any) int {
+		b, _ := json.Marshal(body)
+		r := httptest.NewRequest(http.MethodPost, "/v1/ssm/command-invocation", bytes.NewReader(b))
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w.Result().StatusCode
+	}
+	del := func(query string) int {
+		r := httptest.NewRequest(http.MethodDelete, "/v1/ssm/command-invocation"+query, nil)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w.Result().StatusCode
+	}
+	getStatus := func() string {
+		send := ssmRequest(t, srv, "SendCommand", map[string]any{
+			"DocumentName": "AWS-RunShellScript", "InstanceIds": []string{"i-1"},
+			"Parameters": map[string][]string{"commands": {"whoami"}},
+		})
+		id, _ := readSSMBody(t, send)["Command"].(map[string]any)["CommandId"].(string)
+		g := ssmRequest(t, srv, "GetCommandInvocation", map[string]any{"CommandId": id, "InstanceId": "i-1"})
+		return readSSMBody(t, g)["Status"].(string)
+	}
+
+	// Missing status → 400.
+	assert.Equal(t, http.StatusBadRequest, postSeed(map[string]any{"documentName": "*"}))
+
+	// Wildcard seed applies to any document.
+	assert.Equal(t, http.StatusOK, postSeed(map[string]any{"status": "Failed", "stderr": "boom"}))
+	assert.Equal(t, "Failed", getStatus())
+
+	// Targeted clear (by documentName) removes the wildcard seed → back to Success.
+	assert.Equal(t, http.StatusOK, del("?documentName=*"))
+	assert.Equal(t, "Success", getStatus())
+
+	// Re-seed, then clear-all (no query) → back to Success.
+	assert.Equal(t, http.StatusOK, postSeed(map[string]any{"status": "Failed"}))
+	assert.Equal(t, http.StatusOK, del(""))
+	assert.Equal(t, "Success", getStatus())
+}
