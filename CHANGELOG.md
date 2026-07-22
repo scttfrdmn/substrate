@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped `google.golang.org/grpc` v1.81.1 → v1.82.1 in both the root and
+  `test/e2e` modules to clear a Trivy-flagged HIGH advisory (GHSA-hrxh-6v49-42gf,
+  gRPC-Go xDS RBAC / HTTP/2). The dependency is indirect and the advisory is not
+  call-reachable (`govulncheck` was already clean), but the bump keeps the
+  manifest-based Trivy scan green.
+
 ### Added
 - SSM: seedable `SendCommand` / `GetCommandInvocation` outcomes (#345). Substrate
   still does not execute the shell command (that is workload-internal and out of
