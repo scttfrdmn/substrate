@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.74.0] - 2026-07-22
+
 ### Added
 - SSM: seedable `SendCommand` / `GetCommandInvocation` outcomes (#345). Substrate
   still does not execute the shell command (that is workload-internal and out of
@@ -1949,7 +1951,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.73.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.74.0...HEAD
+[v0.74.0]: https://github.com/scttfrdmn/substrate/compare/v0.73.0...v0.74.0
 [v0.73.0]: https://github.com/scttfrdmn/substrate/compare/v0.72.0...v0.73.0
 [v0.72.0]: https://github.com/scttfrdmn/substrate/compare/v0.71.0...v0.72.0
 [v0.71.0]: https://github.com/scttfrdmn/substrate/compare/v0.70.0...v0.71.0
