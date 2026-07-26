@@ -7,80 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- Docs site organised around **Learn / Start / Test / Reference / Contributing**
-  (#370); dated the LocalStack/moto/AWS comparison tables ("as of early 2026") so
-  they read as positioning rather than a current audit; clarified that Substrate
-  is equally useful for human-written and AI-generated IaC; updated the homepage
-  "use it" section to include the pytest plugin (three ways). Also fixed the
-  doc-version scanner (#365) to skip `node_modules`/VitePress build artifacts.
+## [v0.76.0] - 2026-07-26
+
+A documentation-reliability release driven by an external project review: the
+public docs and service list are now generated from or verified against the
+implementation, validated in CI, and broadened beyond the Go audience.
 
 ### Added
-- Runnable "journey" examples for the core differentiators, exercised in CI via
-  the `test/e2e` module (#367): seeded throttling → SDK retry, record & replay,
-  a cost-budget gate, and a time-travel lifecycle test. Documented in
-  `examples/README.md`. Terraform/CDK/pytest journeys (external toolchains) are
-  tracked as a follow-up (#380).
-- `StartTestServer` now wires a `FaultController` (disabled by default; seed
-  rules via `POST /v1/fault/rules`) and a `CostController`, so fault injection
-  and non-zero cost summaries work against the test server out of the box.
-- Contributor guide (`docs/contributing.md`) covering how to implement and test a
-  new service plugin — the scope test, the `Plugin` interface, state-key and
-  error conventions, the seedable control-plane pattern, registration + the
-  `gen-service-reference` metadata requirement, and the testing/coverage bar —
-  plus a Compatibility & Fidelity policy (`docs/fidelity.md`) defining the
-  Implemented/Partial/Fault-aware/Stateful/CFN/Pricing levels and how fidelity is
-  decided (#368). Both wired into the docs sidebar.
-
-### Changed
-- Refreshed `SECURITY.md` (#369): private vulnerability reporting is now the
-  documented preferred path (public issues only for already-public matters),
-  added acknowledgement/assessment/fix timelines, a supported-versions table with
-  evergreen "upgrade to the latest verified release" guidance, and a release
-  integrity/verification section (`git verify-tag`, checksum database). The
-  existing poisoned-tag (v0.45.1/v0.45.2) and void-tag (v0.67.0) advisories are
-  unchanged.
-
-### Added
-- Documentation is now validated on pull requests (#365). A new `Docs CI`
-  workflow runs the VitePress production build, a Markdown link check, and a
-  stale-pinned-version scan (`scripts/check-doc-versions.sh`, also `make
-  docs-versions`) on any PR touching `docs/` or the README — the deploy workflow
-  only ran on `main`, which was too late to catch drift like the stale `v0.68.0`
-  strings fixed in #363. (Service-reference drift is already guarded by the
-  `docs-reference-check` job added in #364.)
-- Python `pytest-substrate` support is now exercised in primary CI and surfaced
-  in the docs (#366). A new CI job builds the binary and runs `ruff`, `pytest`,
-  and a wheel build for the `python/` package; Getting Started gained a "First
-  Python test" section and README lists pytest as a third usage mode. Added an
-  explicit `[tool.ruff]` config (line-length 120; E/F/I/SIM/BLE/UP) and cleared
-  the pre-existing lint findings it surfaced.
 - Service reference is now generated from the plugin registry (#364).
-  `cmd/gen-service-reference` (invoked via `go generate ./...` or
-  `make docs-reference`) rewrites the coverage matrix in `docs/services.md`
-  between marker comments, listing every registered plugin so the documented
-  count can no longer drift from the implementation (this is the root cause of
-  the 63-vs-37 contradiction fixed in #363). A `make docs-reference-check` CI job
-  fails the build if the matrix is stale or a newly registered plugin has no
-  documentation metadata. Hand-written per-service operation/CFN/cost detail is
-  preserved untouched.
-- `TestServer` now exposes accessors for the underlying components —
-  `Store() *EventStore`, `StateManager()`, `TimeController()`, and `Registry()`
-  — and `StartTestServer` enables the in-memory event store by default, so cost
-  summaries (`ts.Store().GetCostSummary`) and recording/replay work against the
-  test server out of the box (#363).
+  `cmd/gen-service-reference` (via `go generate ./...` or `make docs-reference`)
+  rewrites the coverage matrix in `docs/services.md` between marker comments,
+  listing every registered plugin so the documented count can no longer drift
+  from the implementation (root cause of the 63-vs-37 contradiction). A
+  `make docs-reference-check` CI job fails the build if the matrix is stale or a
+  newly registered plugin has no documentation metadata; hand-written per-service
+  detail is preserved.
+- Documentation is validated on pull requests (#365): a `Docs CI` workflow runs
+  the VitePress production build, a Markdown link check, and a stale-pinned-version
+  scan (`scripts/check-doc-versions.sh` / `make docs-versions`) on any PR touching
+  `docs/` or the README — the deploy workflow only ran on `main`, too late to
+  catch drift.
+- Python `pytest-substrate` is exercised in primary CI and surfaced in the docs
+  (#366): a CI job builds the binary and runs `ruff`, `pytest`, and a wheel build;
+  Getting Started gained a "First Python test" section and the README/homepage
+  list pytest as a third usage mode. Added an explicit `[tool.ruff]` config.
+- Runnable "journey" examples for the core differentiators, exercised in CI via
+  the `test/e2e` module (#367): seeded throttling → SDK retry, record & replay, a
+  cost-budget gate, and a time-travel lifecycle test (documented in
+  `examples/README.md`). Terraform/CDK/pytest journeys are tracked as a follow-up
+  (#380).
+- Contributor guide (`docs/contributing.md`) and a Compatibility & Fidelity
+  policy (`docs/fidelity.md`) defining the Implemented/Partial/Fault-aware/
+  Stateful/CFN/Pricing levels and how fidelity is decided (#368).
+- `TestServer` now exposes `Store() *EventStore`, `StateManager()`,
+  `TimeController()`, and `Registry()` accessors; `StartTestServer` enables the
+  in-memory event store and wires a `FaultController` (disabled; rules seedable
+  via `POST /v1/fault/rules`) and a `CostController`, so cost summaries,
+  recording/replay, and fault injection work against the test server out of the
+  box (#363, #367).
 
-### Fixed
-- Docs: brought the Getting Started and Testing guides back in sync with the
-  implementation (#363). Corrected the documented `TestServer` API (the cost and
+### Changed
+- Brought the Getting Started and Testing guides back in sync with the
+  implementation (#363): corrected the documented `TestServer` API (the cost and
   recording/replay examples referenced accessors that did not exist and queried a
-  detached event store, so a copy-paste user got an empty cost summary); replaced
-  pinned stale version strings (`v0.68.0`) with neutral placeholders; reconciled
-  the service-count contradiction (README advertised 63 plugins while the Service
-  Reference claimed 37 and called itself authoritative) pending generation from
-  the registry (#364); fixed a duplicated `[profile substrate]` block in the
-  endpoint-configuration guide and a README typo. The documented Go snippets now
-  compile against `package emulator`.
+  detached event store), replaced pinned stale `v0.68.0` version strings with
+  neutral placeholders, fixed a duplicated `[profile substrate]` block and a
+  README typo. Documented Go snippets now compile against `package emulator`.
+- Docs site organised around **Learn / Start / Test / Reference / Contributing**
+  (#370); dated the LocalStack/moto/AWS comparison tables ("as of early 2026");
+  clarified that Substrate is equally useful for human-written and AI-generated
+  IaC.
+- Refreshed `SECURITY.md` (#369): private vulnerability reporting is the
+  documented preferred path, added acknowledgement/assessment/fix timelines, a
+  supported-versions table with evergreen remediation guidance, and a release
+  integrity/verification section. The existing tag-integrity advisories are
+  unchanged.
 
 ## [v0.75.0] - 2026-07-26
 
@@ -2051,7 +2032,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.75.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.76.0...HEAD
+[v0.76.0]: https://github.com/scttfrdmn/substrate/compare/v0.75.0...v0.76.0
 [v0.75.0]: https://github.com/scttfrdmn/substrate/compare/v0.74.0...v0.75.0
 [v0.74.0]: https://github.com/scttfrdmn/substrate/compare/v0.73.0...v0.74.0
 [v0.73.0]: https://github.com/scttfrdmn/substrate/compare/v0.72.0...v0.73.0
