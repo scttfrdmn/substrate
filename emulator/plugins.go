@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+//go:generate go run ../cmd/gen-service-reference -out ../docs/services.md
+
 // RegisterDefaultPlugins initializes and registers all built-in service plugins
 // into registry. This function is called by both the server binary and
 // [StartTestServer] so the same plugin set is always available.
@@ -13,6 +15,8 @@ import (
 // test helpers that do not need cost-derived data in the Cost Explorer plugin).
 // cfg is optional; pass nil to disable all Docker-backed features (Lambda
 // Docker execution, RDS container engine).
+// Adding a plugin here also requires a metadata entry in cmd/gen-service-reference
+// (enforced by `make docs-reference-check` in CI).
 func RegisterDefaultPlugins(
 	ctx context.Context,
 	registry *PluginRegistry,

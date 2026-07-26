@@ -84,6 +84,20 @@ jobs:
       - name: Run E2E tests
         run: cd test/e2e && go test -v -race ./...
 
+  docs-reference:
+    name: Service Reference Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check docs/services.md is in sync with the plugin registry
+        run: make docs-reference-check
+
   benchmark:
     name: Benchmarks
     runs-on: ubuntu-latest
