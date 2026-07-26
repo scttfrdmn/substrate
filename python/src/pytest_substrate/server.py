@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
 import subprocess
 import time
-import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -156,7 +156,7 @@ class SubstrateServer:
             try:
                 urllib.request.urlopen(f"{self.url}/health", timeout=1)  # nosemgrep
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - any startup error means "not ready yet"; keep polling
                 last_exc = exc
                 time.sleep(0.05)
         raise RuntimeError(

@@ -98,6 +98,41 @@ jobs:
       - name: Check docs/services.md is in sync with the plugin registry
         run: make docs-reference-check
 
+  python:
+    name: Python (pytest-substrate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build substrate binary
+        run: go build -o bin/substrate ./cmd/substrate
+
+      - name: Install pytest-substrate and tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff build
+          pip install -e ./python
+
+      - name: Lint (ruff)
+        run: ruff check python/src python/tests
+
+      - name: Test (pytest)
+        env:
+          SUBSTRATE_BINARY: ${{ github.workspace }}/bin/substrate
+        run: cd python && pytest tests/ -v
+
+      - name: Build wheel
+        run: cd python && python -m build --wheel --outdir dist/
+
   benchmark:
     name: Benchmarks
     runs-on: ubuntu-latest
