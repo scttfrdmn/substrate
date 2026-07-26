@@ -41,7 +41,7 @@ boundary is what makes every run reproducible: API observations can be recorded
 as events and replayed identically, whereas a real workload's timing, scheduling,
 and I/O cannot. See [Scope & Philosophy](/scope) for the full reasoning.
 
-## Use it two ways
+## Use it three ways
 
 - **As a server** — run `substrate`, point any AWS SDK/CLI at
   `http://localhost:4566`. This is how most consumers use it.
@@ -49,6 +49,13 @@ and I/O cannot. See [Scope & Philosophy](/scope) for the full reasoning.
 - **As a Go test harness** — `import "github.com/scttfrdmn/substrate/emulator"`,
   spin up an in-process server or deploy a CloudFormation template directly.
   See the [Testing Guide](/testing-guide).
+- **As a pytest plugin** — `pip install pytest-substrate` for a server fixture
+  with per-test state reset and boto3 pre-wired. See
+  [Getting Started](/getting-started#first-python-test-pytest).
+
+Substrate is equally at home testing human-written and AI-generated
+infrastructure — the reproducibility, offline speed, and cost visibility matter
+either way.
 
 Substrate ships **63 built-in service plugins** — see the
 [Service Reference](/services).

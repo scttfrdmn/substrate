@@ -6,8 +6,8 @@
     { "pattern": "^https?://.*\\.s3\\.amazonaws\\.com" }
   ],
   "replacementPatterns": [
-    { "comment": "VitePress absolute routes (/foo) map to the sibling foo.md in docs/; links are resolved relative to the source file's directory. The VitePress build validates routing itself.",
-      "pattern": "^/([a-z][a-z0-9-]*)$", "replacement": "$1.md" }
+    { "comment": "VitePress absolute routes (/foo, /foo#anchor) map to the sibling foo.md in docs/; the fragment is dropped so the checker verifies the target file. The VitePress build validates routing and anchors itself.",
+      "pattern": "^/([a-z][a-z0-9-]*)(#[a-z0-9-]+)?$", "replacement": "$1.md" }
   ],
   "httpHeaders": [
     {
