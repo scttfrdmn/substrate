@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Python `pytest-substrate` support is now exercised in primary CI and surfaced
+  in the docs (#366). A new CI job builds the binary and runs `ruff`, `pytest`,
+  and a wheel build for the `python/` package; Getting Started gained a "First
+  Python test" section and README lists pytest as a third usage mode. Added an
+  explicit `[tool.ruff]` config (line-length 120; E/F/I/SIM/BLE/UP) and cleared
+  the pre-existing lint findings it surfaced.
 - Service reference is now generated from the plugin registry (#364).
   `cmd/gen-service-reference` (invoked via `go generate ./...` or
   `make docs-reference`) rewrites the coverage matrix in `docs/services.md`

@@ -22,3 +22,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# E/F (pyflakes+pycodestyle), I (isort), SIM (flake8-simplify),
+# BLE (blind-except), UP (pyupgrade). Keep the set explicit so CI is reproducible.
+select = ["E", "F", "I", "SIM", "BLE", "UP"]

@@ -229,6 +229,41 @@ go test ./... -run TestCreateS3Bucket -v
 The test starts its own Substrate server, runs entirely in-process with no
 network access to real AWS, and shuts down automatically when the test finishes.
 
+> **Not using Go?** Substrate is language-agnostic — anything that speaks the AWS
+> wire protocol works. Point your SDK/CLI at `http://localhost:4566` (see
+> [Endpoint Configuration](endpoint-configuration.md) for boto3, Terraform, CDK,
+> and more), or for Python use the **`pytest-substrate`** plugin below.
+
+## First Python test (pytest)
+
+The [`pytest-substrate`](https://github.com/scttfrdmn/substrate/tree/main/python)
+package provides a session-scoped server fixture with per-test state reset and
+boto3 pre-wired to the emulator. Install it and the substrate binary:
+
+```bash
+pip install pytest-substrate  # or: pip install -e ./python from a checkout
+go install github.com/scttfrdmn/substrate/cmd/substrate@latest
+```
+
+Write `test_s3.py` — the `substrate` fixture resets state and sets the boto3
+endpoint/credentials environment variables for you:
+
+```python
+import boto3
+
+def test_create_bucket(substrate):
+    s3 = boto3.client("s3")  # already pointed at the emulator
+    s3.create_bucket(Bucket="my-test-bucket")
+    s3.put_object(Bucket="my-test-bucket", Key="hello.txt", Body=b"hi")
+
+    objects = s3.list_objects_v2(Bucket="my-test-bucket")
+    assert objects["KeyCount"] == 1
+```
+
+The plugin locates the binary via `SUBSTRATE_BINARY`, `~/src/substrate/bin/substrate`,
+or `substrate` on `PATH`. Use the `substrate_isolated` fixture instead for a fresh
+server per test.
+
 ## Reusing a server across subtests
 
 Create one `TestServer` and call `ts.ResetState(t)` between subtests to avoid
