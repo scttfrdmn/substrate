@@ -60,6 +60,22 @@ func TestSpawn_TaskCompletion_SeededFailure(t *testing.T) {
 	assert.Equal(t, "2026-01-01T11:05:00Z", rec["ended_at"])
 }
 
+func TestSpawn_TaskCompletion_SeedNoEndedAt(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/results", nil, nil)
+
+	// A seed without ended_at (unparseable) is served immediately, and an empty
+	// state defaults to "completed".
+	spawnSeedCompletion(t, srv, map[string]any{"task_id": "task-now", "exit_code": 1})
+
+	w := s3Request(t, srv, http.MethodGet, "/results/tasks/task-now/completion.json", nil, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rec))
+	assert.Equal(t, float64(1), rec["exit_code"])
+	assert.Equal(t, "completed", rec["state"])
+}
+
 func TestSpawn_TaskCompletion_ClockGate(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 	s3Request(t, srv, http.MethodPut, "/results", nil, nil)
@@ -140,6 +156,10 @@ func TestSpawn_TaskCompletion_SeedAndClear(t *testing.T) {
 	// Missing task_id on seed is a 400.
 	bw := s3Request(t, srv, http.MethodPost, "/v1/spawn/task-completion", []byte(`{"exit_code":1}`), nil)
 	assert.Equal(t, http.StatusBadRequest, bw.Code)
+
+	// Malformed JSON body on seed is a 400.
+	mw := s3Request(t, srv, http.MethodPost, "/v1/spawn/task-completion", []byte(`{not json`), nil)
+	assert.Equal(t, http.StatusBadRequest, mw.Code)
 
 	// Clear-all also succeeds.
 	spawnSeedCompletion(t, srv, map[string]any{"task_id": "task-d", "state": "completed", "ended_at": "2026-01-01T11:00:00Z"})
