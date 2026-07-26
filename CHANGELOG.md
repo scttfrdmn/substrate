@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Contributor guide (`docs/contributing.md`) covering how to implement and test a
+  new service plugin — the scope test, the `Plugin` interface, state-key and
+  error conventions, the seedable control-plane pattern, registration + the
+  `gen-service-reference` metadata requirement, and the testing/coverage bar —
+  plus a Compatibility & Fidelity policy (`docs/fidelity.md`) defining the
+  Implemented/Partial/Fault-aware/Stateful/CFN/Pricing levels and how fidelity is
+  decided (#368). Both wired into the docs sidebar.
+
 ### Changed
 - Refreshed `SECURITY.md` (#369): private vulnerability reporting is now the
   documented preferred path (public issues only for already-public matters),
