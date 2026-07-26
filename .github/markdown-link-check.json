@@ -1,0 +1,22 @@
+{
+  "ignorePatterns": [
+    { "pattern": "^http://localhost" },
+    { "pattern": "^http://127\\.0\\.0\\.1" },
+    { "pattern": "^http://s3\\.amazonaws\\.com" },
+    { "pattern": "^https?://.*\\.s3\\.amazonaws\\.com" }
+  ],
+  "replacementPatterns": [
+    { "comment": "VitePress absolute routes (/foo) map to the sibling foo.md in docs/; links are resolved relative to the source file's directory. The VitePress build validates routing itself.",
+      "pattern": "^/([a-z][a-z0-9-]*)$", "replacement": "$1.md" }
+  ],
+  "httpHeaders": [
+    {
+      "urls": ["https://github.com", "https://scttfrdmn.github.io"],
+      "headers": { "Accept": "text/html", "User-Agent": "markdown-link-check" }
+    }
+  ],
+  "retryOn429": true,
+  "retryCount": 3,
+  "fallbackRetryDelay": "30s",
+  "aliveStatusCodes": [200, 206, 429]
+}
