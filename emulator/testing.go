@@ -78,7 +78,16 @@ func StartTestServer(t *testing.T) *TestServer {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	srv := NewServer(*cfg, registry, store, state, tc, logger)
+	// Wire a FaultController (disabled by default) so tests can seed fault rules
+	// via POST /v1/fault/rules without extra setup. A fixed seed keeps
+	// probabilistic rules deterministic.
+	fault := NewFaultController(FaultConfig{Enabled: false}, 1)
+
+	// Wire a CostController so recorded events carry cost data and
+	// ts.Store().GetCostSummary returns non-zero costs out of the box.
+	costs := NewCostController(CostConfig{Enabled: true})
+
+	srv := NewServer(*cfg, registry, store, state, tc, logger, ServerOptions{Fault: fault, Costs: costs})
 
 	srvCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
