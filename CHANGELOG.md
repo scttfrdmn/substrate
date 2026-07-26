@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- S3: seedable spore.host `spawn task run` task-completion outcomes (#360). A GET
+  of `tasks/<task_id>/completion.json` against a bucket now resolves a seedable,
+  clock-aware completion record — `task_id`, `exit_code`, `state`
+  (`completed`/`failed`), `started_at`, `ended_at` — matching
+  `taskproto.CompletionRecord`. New control-plane endpoints `POST` / `DELETE
+  /v1/spawn/task-completion` seed by task id (`DELETE ?taskId=...` clears one,
+  no query clears all). Before a seed's `ended_at` (on the simulated clock) the
+  GET returns `NoSuchKey` ("still running"); at/after it the record is served —
+  so a consumer's real poll loop is exercised deterministically. Absent a seed, a
+  matching key resolves to the nominal `exit_code:0 / completed` success record;
+  a real staged object at the key (the interim `aws s3 cp` path) always wins, and
+  a GET of any non-`tasks/*/completion.json` key stays a normal 404. Substrate
+  does not execute the task — this is the seedable completion observation only,
+  mirroring the SSM (#345) / SageMaker / Bedrock seed pattern.
+
 ## [v0.74.0] - 2026-07-22
 
 ### Security

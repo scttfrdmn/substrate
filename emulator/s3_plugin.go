@@ -550,6 +550,14 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 		return nil, fmt.Errorf("get object metadata: %w", err)
 	}
 	if data == nil {
+		// No real object at this key: a GET of tasks/<task_id>/completion.json may
+		// be a seedable spore.host task-completion observation (#360). A real
+		// staged object always wins, so this only runs when the key is absent.
+		if versionID == "" {
+			if resp, handled := p.resolveTaskCompletion(ctx, bucket, key); handled {
+				return resp, nil
+			}
+		}
 		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
 	}
 
