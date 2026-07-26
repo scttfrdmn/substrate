@@ -23,11 +23,14 @@ makes every run reproducible: API observations can be recorded as events and
 replayed identically, whereas a real workload's timing, scheduling, and I/O
 cannot.
 
-**Use it two ways:**
+**Use it three ways:**
 - **As a server** — run `substrate`, point any AWS SDK/CLI at `http://localhost:4566`.
   This is how most consumers use it.
 - **As a Go test harness** — `import ".../emulator"`, spin up an in-process server
   or deploy a CloudFormation template directly, no HTTP needed.
+- **As a pytest plugin** — `pip install` the `pytest-substrate` package (in
+  [`python/`](python/)) for a session-scoped server fixture with per-test state
+  reset and boto3 wired to the emulator automatically.
 
 ## The Problem
 
@@ -71,6 +74,9 @@ visibility.
 Substrate is a **different tier** from container emulators and real accounts, not a
 drop-in replacement. It trades workload-execution fidelity for determinism,
 replayability, and cost insight — the fast inner-loop tier.
+
+_Comparison reflects these projects as of early 2026; LocalStack and moto evolve —
+treat it as positioning, not a current feature-by-feature audit._
 
 | | **Substrate** | LocalStack | moto | Real AWS |
 |---|:---:|:---:|:---:|:---:|

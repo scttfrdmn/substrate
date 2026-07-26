@@ -5,14 +5,12 @@ from __future__ import annotations
 import subprocess
 import urllib.error
 from http.client import HTTPResponse
-from io import BytesIO
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pytest_substrate.server import SubstrateServer
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,17 +50,21 @@ class TestFindBinary:
     def test_falls_back_to_path(self, tmp_path: Path) -> None:
         import os
         os.environ.pop("SUBSTRATE_BINARY", None)
-        with patch("pathlib.Path.home", return_value=tmp_path):  # no candidate
-            with patch("shutil.which", return_value="/usr/local/bin/substrate"):
-                assert SubstrateServer._find_binary() == "/usr/local/bin/substrate"
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),  # no candidate
+            patch("shutil.which", return_value="/usr/local/bin/substrate"),
+        ):
+            assert SubstrateServer._find_binary() == "/usr/local/bin/substrate"
 
     def test_raises_when_not_found(self, tmp_path: Path) -> None:
         import os
         os.environ.pop("SUBSTRATE_BINARY", None)
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            with patch("shutil.which", return_value=None):
-                with pytest.raises(RuntimeError, match="substrate binary not found"):
-                    SubstrateServer._find_binary()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("shutil.which", return_value=None),
+            pytest.raises(RuntimeError, match="substrate binary not found"),
+        ):
+            SubstrateServer._find_binary()
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +162,9 @@ class TestWaitHealthy:
 
     def test_raises_after_timeout(self) -> None:
         server = SubstrateServer()
-        import time as time_mod
 
         # Simulate time advancing past the deadline after 2 checks.
         call_count = 0
-        original_monotonic = time_mod.monotonic
 
         def fake_monotonic():
             nonlocal call_count
@@ -175,11 +175,13 @@ class TestWaitHealthy:
                 return 0.0
             return 100.0
 
-        with patch("urllib.request.urlopen", side_effect=ConnectionRefusedError("nope")), \
-             patch("time.monotonic", side_effect=fake_monotonic), \
-             patch("time.sleep"):
-            with pytest.raises(RuntimeError, match="did not become healthy"):
-                server._wait_healthy(timeout=1.0)
+        with (
+            patch("urllib.request.urlopen", side_effect=ConnectionRefusedError("nope")),
+            patch("time.monotonic", side_effect=fake_monotonic),
+            patch("time.sleep"),
+            pytest.raises(RuntimeError, match="did not become healthy"),
+        ):
+            server._wait_healthy(timeout=1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -199,16 +201,20 @@ class TestResetState:
 
     def test_raises_on_http_error(self) -> None:
         server = SubstrateServer()
-        with patch("urllib.request.urlopen",
-                   side_effect=urllib.error.HTTPError(
-                       url=f"{server.url}/v1/state/reset",
-                       code=500,
-                       msg="Internal Server Error",
-                       hdrs=None,  # type: ignore[arg-type]
-                       fp=None,    # type: ignore[arg-type]
-                   )):
-            with pytest.raises(RuntimeError, match="state reset failed"):
-                server.reset_state()
+        with (
+            patch(
+                "urllib.request.urlopen",
+                side_effect=urllib.error.HTTPError(
+                    url=f"{server.url}/v1/state/reset",
+                    code=500,
+                    msg="Internal Server Error",
+                    hdrs=None,  # type: ignore[arg-type]
+                    fp=None,    # type: ignore[arg-type]
+                ),
+            ),
+            pytest.raises(RuntimeError, match="state reset failed"),
+        ):
+            server.reset_state()
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Docs site organised around **Learn / Start / Test / Reference / Contributing**
+  (#370); dated the LocalStack/moto/AWS comparison tables ("as of early 2026") so
+  they read as positioning rather than a current audit; clarified that Substrate
+  is equally useful for human-written and AI-generated IaC; updated the homepage
+  "use it" section to include the pytest plugin (three ways). Also fixed the
+  doc-version scanner (#365) to skip `node_modules`/VitePress build artifacts.
+
 ### Added
+- Runnable "journey" examples for the core differentiators, exercised in CI via
+  the `test/e2e` module (#367): seeded throttling → SDK retry, record & replay,
+  a cost-budget gate, and a time-travel lifecycle test. Documented in
+  `examples/README.md`. Terraform/CDK/pytest journeys (external toolchains) are
+  tracked as a follow-up (#380).
+- `StartTestServer` now wires a `FaultController` (disabled by default; seed
+  rules via `POST /v1/fault/rules`) and a `CostController`, so fault injection
+  and non-zero cost summaries work against the test server out of the box.
+- Contributor guide (`docs/contributing.md`) covering how to implement and test a
+  new service plugin — the scope test, the `Plugin` interface, state-key and
+  error conventions, the seedable control-plane pattern, registration + the
+  `gen-service-reference` metadata requirement, and the testing/coverage bar —
+  plus a Compatibility & Fidelity policy (`docs/fidelity.md`) defining the
+  Implemented/Partial/Fault-aware/Stateful/CFN/Pricing levels and how fidelity is
+  decided (#368). Both wired into the docs sidebar.
+
+### Changed
+- Refreshed `SECURITY.md` (#369): private vulnerability reporting is now the
+  documented preferred path (public issues only for already-public matters),
+  added acknowledgement/assessment/fix timelines, a supported-versions table with
+  evergreen "upgrade to the latest verified release" guidance, and a release
+  integrity/verification section (`git verify-tag`, checksum database). The
+  existing poisoned-tag (v0.45.1/v0.45.2) and void-tag (v0.67.0) advisories are
+  unchanged.
+
+### Added
+- Documentation is now validated on pull requests (#365). A new `Docs CI`
+  workflow runs the VitePress production build, a Markdown link check, and a
+  stale-pinned-version scan (`scripts/check-doc-versions.sh`, also `make
+  docs-versions`) on any PR touching `docs/` or the README — the deploy workflow
+  only ran on `main`, which was too late to catch drift like the stale `v0.68.0`
+  strings fixed in #363. (Service-reference drift is already guarded by the
+  `docs-reference-check` job added in #364.)
+- Python `pytest-substrate` support is now exercised in primary CI and surfaced
+  in the docs (#366). A new CI job builds the binary and runs `ruff`, `pytest`,
+  and a wheel build for the `python/` package; Getting Started gained a "First
+  Python test" section and README lists pytest as a third usage mode. Added an
+  explicit `[tool.ruff]` config (line-length 120; E/F/I/SIM/BLE/UP) and cleared
+  the pre-existing lint findings it surfaced.
 - Service reference is now generated from the plugin registry (#364).
   `cmd/gen-service-reference` (invoked via `go generate ./...` or
   `make docs-reference`) rewrites the coverage matrix in `docs/services.md`

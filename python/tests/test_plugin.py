@@ -9,7 +9,6 @@ import pytest
 
 from pytest_substrate.server import SubstrateServer
 
-
 # ---------------------------------------------------------------------------
 # Test that fixtures are registered as pytest plugins
 # ---------------------------------------------------------------------------
@@ -34,7 +33,7 @@ def test_plugin_registers_substrate_fixture(pytestconfig: pytest.Config) -> None
 # ---------------------------------------------------------------------------
 
 def test_substrateserver_importable() -> None:
-    from pytest_substrate import SubstrateServer as SS  # noqa: F401
+    from pytest_substrate import SubstrateServer as SS
     assert SS is SubstrateServer
 
 
