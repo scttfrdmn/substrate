@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Runnable "journey" examples for the core differentiators, exercised in CI via
+  the `test/e2e` module (#367): seeded throttling → SDK retry, record & replay,
+  a cost-budget gate, and a time-travel lifecycle test. Documented in
+  `examples/README.md`. Terraform/CDK/pytest journeys (external toolchains) are
+  tracked as a follow-up (#380).
+- `StartTestServer` now wires a `FaultController` (disabled by default; seed
+  rules via `POST /v1/fault/rules`) and a `CostController`, so fault injection
+  and non-zero cost summaries work against the test server out of the box.
 - Contributor guide (`docs/contributing.md`) covering how to implement and test a
   new service plugin — the scope test, the `Plugin` interface, state-key and
   error conventions, the seedable control-plane pattern, registration + the
