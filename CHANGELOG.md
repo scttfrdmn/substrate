@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Refreshed `SECURITY.md` (#369): private vulnerability reporting is now the
+  documented preferred path (public issues only for already-public matters),
+  added acknowledgement/assessment/fix timelines, a supported-versions table with
+  evergreen "upgrade to the latest verified release" guidance, and a release
+  integrity/verification section (`git verify-tag`, checksum database). The
+  existing poisoned-tag (v0.45.1/v0.45.2) and void-tag (v0.67.0) advisories are
+  unchanged.
+
 ### Added
 - Documentation is now validated on pull requests (#365). A new `Docs CI`
   workflow runs the VitePress production build, a Markdown link check, and a

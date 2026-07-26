@@ -2,9 +2,60 @@
 
 ## Reporting a vulnerability
 
-Open a GitHub issue at https://github.com/scttfrdmn/substrate/issues, or for
-sensitive reports use GitHub's private vulnerability reporting
-("Report a vulnerability" on the Security tab).
+**Preferred:** use GitHub's private vulnerability reporting — the
+**"Report a vulnerability"** button on the repository's
+[Security tab](https://github.com/scttfrdmn/substrate/security). This keeps the
+report confidential until a fix is available.
+
+Only use a public [GitHub issue](https://github.com/scttfrdmn/substrate/issues)
+for security matters that are **already public** (e.g. a disclosed upstream CVE
+in a dependency). Do not open a public issue for an undisclosed vulnerability.
+
+### What to expect
+
+Substrate is a single-maintainer project, so these are good-faith targets rather
+than contractual guarantees:
+
+| Stage | Target |
+|-------|--------|
+| Acknowledgement of your report | within 3 business days |
+| Initial assessment (severity + whether it's in scope) | within 7 business days |
+| Fix or mitigation for a confirmed issue | released as a new patch version as soon as practical, prioritised by severity |
+
+Please allow a reasonable disclosure window before publicising a confirmed
+vulnerability. Credit is given to reporters who want it.
+
+## Supported versions
+
+Fixes are released as new patch versions on top of the latest release; there are
+no long-lived maintenance branches for older minors.
+
+| Version | Supported |
+|---------|-----------|
+| Latest release (see [Releases](https://github.com/scttfrdmn/substrate/releases)) | ✅ |
+| Any earlier version | ❌ — upgrade to the latest release |
+
+Always depend on the **latest verified release**. Because the module checksum
+database pins content on first fetch, the correct response to any release-integrity
+problem is to move forward to a newer version, never to re-fetch an old one (see
+the advisories below).
+
+## Release integrity and verification
+
+Release tags are **signed** and created only through the documented release
+process (`CLAUDE.md` → Releasing); they are never moved once published. To verify
+a release before depending on it:
+
+```bash
+# Verify the signed tag (requires the maintainer's public key in your keyring):
+git verify-tag vX.Y.Z
+
+# Or confirm the GitHub release is attached to the verified tag:
+gh release view vX.Y.Z
+```
+
+Module integrity is additionally enforced by Go's checksum database
+(`sum.golang.org`); a `go.sum` mismatch on fetch is a hard failure by design.
 
 ## Module tag integrity advisory
 
