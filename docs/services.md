@@ -1,58 +1,88 @@
 # Service Reference
 
-Substrate ships **63 built-in service plugins**. The matrix below currently
-documents the operation lists, Betty CloudFormation resource types, and pricing
-notes for a subset of them; the remaining plugins are registered and functional
-but not yet detailed here.
-
-> **Note:** this page is being migrated to generation directly from the plugin
-> registry so the count and per-operation detail can never drift from the
-> implementation again (see
-> [#364](https://github.com/scttfrdmn/substrate/issues/364)). Until then, the
-> authoritative live count is the `/ready` endpoint
-> (`curl http://localhost:4566/ready` → `{"status":"ready","plugins":63}`).
-
 ## Coverage matrix
 
-| # | Service | Plugin | Protocol | CFN Support |
-|---|---------|--------|----------|-------------|
-| 1 | IAM | IAMPlugin | Query | Yes |
-| 2 | STS | STSPlugin | Query | — |
-| 3 | Lambda | LambdaPlugin | REST/JSON | Yes |
-| 4 | SQS | SQSPlugin | Query | Yes |
-| 5 | DynamoDB | DynamoDBPlugin | JSON | Yes |
-| 6 | EC2 | EC2Plugin | Query | Yes |
-| 7 | S3 | S3Plugin | REST/XML | Yes |
-| 8 | ELB v2 | ELBPlugin | Query | Yes |
-| 9 | Route 53 | Route53Plugin | REST/XML | Yes |
-| 10 | Resource Groups Tagging | TaggingPlugin | JSON | — |
-| 11 | SNS | SNSPlugin | Query | Yes |
-| 12 | Secrets Manager | SecretsManagerPlugin | JSON | Yes |
-| 13 | SSM Parameter Store | SSMPlugin | JSON | Yes |
-| 14 | KMS | KMSPlugin | JSON | Yes |
-| 15 | CloudWatch Logs | CloudWatchLogsPlugin | JSON | Yes |
-| 16 | EventBridge | EventBridgePlugin | JSON | Yes |
-| 17 | CloudWatch | CloudWatchPlugin | Query | Yes |
-| 18 | ACM | ACMPlugin | JSON | Yes |
-| 19 | API Gateway (REST) | APIGatewayPlugin | REST/JSON | Yes |
-| 20 | API Gateway v2 (HTTP) | APIGatewayV2Plugin | REST/JSON | Yes |
-| 21 | Step Functions | StepFunctionsPlugin | JSON | Yes |
-| 22 | ECR | ECRPlugin | JSON | Yes |
-| 23 | ECS | ECSPlugin | JSON | Yes |
-| 24 | Cognito User Pools | CognitoIDPPlugin | JSON | Yes |
-| 25 | Cognito Identity | CognitoIdentityPlugin | JSON | Yes |
-| 26 | Kinesis Data Streams | KinesisPlugin | JSON | Yes |
-| 27 | CloudFront | CloudFrontPlugin | REST/XML | Yes |
-| 28 | RDS | RDSPlugin | Query | Yes |
-| 29 | ElastiCache | ElastiCachePlugin | Query | Yes |
-| 30 | EFS | EFSPlugin | REST/JSON | Yes |
-| 31 | Glue | GluePlugin | JSON | Yes |
-| 32 | Cost Explorer | CEPlugin | JSON | — |
-| 33 | Budgets | BudgetsPlugin | JSON | Yes |
-| 34 | Health | HealthPlugin | JSON | — |
-| 35 | Organizations | OrganizationsPlugin | JSON | — |
-| 36 | SES v2 | SESv2Plugin | REST/JSON | Yes |
-| 37 | Kinesis Data Firehose | FirehosePlugin | JSON | Yes |
+<!-- BEGIN GENERATED COVERAGE MATRIX -->
+Substrate ships **63 built-in service plugins**. This section is generated
+from the plugin registry (`make docs-reference`), so the count and plugin list
+cannot drift from the implementation. The live count is also available from the
+`/ready` endpoint (`curl http://localhost:4566/ready`). Per-service operation,
+CloudFormation, and cost detail follows below the matrix.
+
+| # | Service | Plugin name | Protocol |
+|---|---------|-------------|----------|
+| 1 | ACM | `acm` | Query |
+| 2 | API Gateway (REST) | `apigateway` | REST/JSON |
+| 3 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON |
+| 4 | AppSync | `appsync` | REST/JSON |
+| 5 | Athena | `athena` | JSON |
+| 6 | Backup | `backup` | REST/JSON |
+| 7 | Batch | `batch` | REST/JSON |
+| 8 | Bedrock Runtime | `bedrock-runtime` | REST/JSON |
+| 9 | Budgets | `budgets` | JSON |
+| 10 | Cost Explorer | `ce` | JSON |
+| 11 | CloudFront | `cloudfront` | REST/XML |
+| 12 | CloudTrail | `cloudtrail` | JSON |
+| 13 | CodeBuild | `codebuild` | JSON |
+| 14 | CodeDeploy | `codedeploy` | JSON |
+| 15 | CodePipeline | `codepipeline` | JSON |
+| 16 | Cognito Identity | `cognito-identity` | JSON |
+| 17 | Cognito Identity Provider | `cognito-idp` | JSON |
+| 18 | DynamoDB | `dynamodb` | JSON |
+| 19 | EC2 / VPC | `ec2` | Query |
+| 20 | ECR | `ecr` | JSON |
+| 21 | ECS | `ecs` | JSON |
+| 22 | EFS | `efs` | REST/JSON |
+| 23 | ElastiCache | `elasticache` | Query |
+| 24 | ELBv2 | `elasticloadbalancing` | Query |
+| 25 | EMR Serverless | `emrserverless` | REST/JSON |
+| 26 | EventBridge | `eventbridge` | JSON |
+| 27 | API Gateway (execute-api) | `execute-api` | REST/JSON |
+| 28 | Kinesis Data Firehose | `firehose` | JSON |
+| 29 | FSx | `fsx` | JSON |
+| 30 | Glue | `glue` | JSON |
+| 31 | Health | `health` | JSON |
+| 32 | IAM | `iam` | Query |
+| 33 | Kinesis Data Streams | `kinesis` | JSON |
+| 34 | KMS | `kms` | JSON |
+| 35 | Lambda | `lambda` | REST/JSON |
+| 36 | CloudWatch Logs | `logs` | JSON |
+| 37 | CloudWatch | `monitoring` | Query |
+| 38 | MSK | `msk` | REST/JSON |
+| 39 | HealthOmics | `omics` | REST/JSON |
+| 40 | OpenSearch | `opensearch` | REST/JSON |
+| 41 | Organizations | `organizations` | JSON |
+| 42 | QuickSight | `quicksight` | REST/JSON |
+| 43 | RAM | `ram` | JSON |
+| 44 | RDS | `rds` | Query |
+| 45 | Redshift | `redshift` | Query |
+| 46 | Redshift Data API | `redshift-data` | JSON |
+| 47 | Route 53 | `route53` | REST/XML |
+| 48 | S3 | `s3` | REST/XML |
+| 49 | SageMaker | `sagemaker` | JSON |
+| 50 | EventBridge Scheduler | `scheduler` | REST/JSON |
+| 51 | Secrets Manager | `secretsmanager` | JSON |
+| 52 | Service Quotas | `servicequotas` | JSON |
+| 53 | SES v2 | `sesv2` | REST/JSON |
+| 54 | SNS | `sns` | Query |
+| 55 | SQS | `sqs` | JSON |
+| 56 | SSM | `ssm` | JSON |
+| 57 | SSO / Identity Store | `sso` | REST/JSON |
+| 58 | Step Functions | `states` | JSON |
+| 59 | STS | `sts` | Query |
+| 60 | Resource Groups Tagging | `tagging` | JSON |
+| 61 | Timestream | `timestream` | JSON |
+| 62 | Transfer Family | `transfer` | JSON |
+| 63 | WAFv2 | `wafv2` | JSON |
+<!-- END GENERATED COVERAGE MATRIX -->
+
+---
+
+The per-service sections below carry hand-written operation lists, Betty
+CloudFormation resource types, and cost notes for the most heavily used plugins.
+They are maintained by hand and cover a subset of the plugins in the matrix
+above; the remaining plugins are registered and functional but not yet detailed
+here.
 
 ---
 

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Service reference is now generated from the plugin registry (#364).
+  `cmd/gen-service-reference` (invoked via `go generate ./...` or
+  `make docs-reference`) rewrites the coverage matrix in `docs/services.md`
+  between marker comments, listing every registered plugin so the documented
+  count can no longer drift from the implementation (this is the root cause of
+  the 63-vs-37 contradiction fixed in #363). A `make docs-reference-check` CI job
+  fails the build if the matrix is stale or a newly registered plugin has no
+  documentation metadata. Hand-written per-service operation/CFN/cost detail is
+  preserved untouched.
 - `TestServer` now exposes accessors for the underlying components —
   `Store() *EventStore`, `StateManager()`, `TimeController()`, and `Registry()`
   — and `StartTestServer` enables the in-memory event store by default, so cost
