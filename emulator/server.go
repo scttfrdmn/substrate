@@ -258,6 +258,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
 	r.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
 
+	// spore.host spawn task-completion control-plane endpoints (#360).
+	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
+	r.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)
+
 	// Bedrock Runtime control-plane endpoints.
 	r.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
 	r.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
