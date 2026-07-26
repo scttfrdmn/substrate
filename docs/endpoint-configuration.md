@@ -55,8 +55,6 @@ aws --endpoint-url http://localhost:4566 s3 ls
 [profile substrate]
 endpoint_url = http://localhost:4566
 region = us-east-1
-
-[profile substrate]
 aws_access_key_id = test
 aws_secret_access_key = test
 ```
@@ -183,7 +181,7 @@ exposes this endpoint and returns all registered plugins as `"available"`:
     "lambda": "available",
     ...
   },
-  "version": "v0.68.0"
+  "version": "v0.x.y"
 }
 ```
 

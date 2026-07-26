@@ -1,7 +1,16 @@
 # Service Reference
 
-Substrate emulates 37 AWS services. This document lists every supported
-operation, Betty CloudFormation resource type, and pricing note for each plugin.
+Substrate ships **63 built-in service plugins**. The matrix below currently
+documents the operation lists, Betty CloudFormation resource types, and pricing
+notes for a subset of them; the remaining plugins are registered and functional
+but not yet detailed here.
+
+> **Note:** this page is being migrated to generation directly from the plugin
+> registry so the count and per-operation detail can never drift from the
+> implementation again (see
+> [#364](https://github.com/scttfrdmn/substrate/issues/364)). Until then, the
+> authoritative live count is the `/ready` endpoint
+> (`curl http://localhost:4566/ready` → `{"status":"ready","plugins":63}`).
 
 ## Coverage matrix
 

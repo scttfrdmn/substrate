@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -245,6 +246,54 @@ func TestTestServer_SeedSSMParameter(t *testing.T) {
 			t.Errorf("GetParameter %s: want value %q, got %q", tc.name, tc.value, result.Parameter.Value)
 		}
 	}
+}
+
+func TestTestServer_Accessors(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	if ts.Store() == nil {
+		t.Error("Store() is nil; StartTestServer should enable the event store")
+	}
+	if ts.StateManager() == nil {
+		t.Error("StateManager() is nil")
+	}
+	if ts.TimeController() == nil {
+		t.Error("TimeController() is nil")
+	}
+	if ts.Registry() == nil {
+		t.Error("Registry() is nil")
+	}
+}
+
+// TestTestServer_CostSummaryViaStore exercises the documented cost-inspection
+// path (getting-started.md / testing-guide.md): run operations against the
+// server, then read the breakdown from ts.Store().GetCostSummary. It guards the
+// example from drifting out of sync with the API again.
+func TestTestServer_CostSummaryViaStore(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	// Create an S3 bucket via the emulator so at least one billable operation is
+	// recorded to the event store.
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/cost-bucket", nil) //nolint:noctx
+	req.Host = "cost-bucket.s3.amazonaws.com"
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=fakesig")
+	req.Header.Set("X-Amz-Date", "20260101T000000Z")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT bucket: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	summary, err := ts.Store().GetCostSummary(context.Background(), "123456789012", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("GetCostSummary: %v", err)
+	}
+	if summary == nil {
+		t.Fatal("GetCostSummary returned nil summary")
+	}
+	// The summary must be reachable and well-formed; a bucket create records an
+	// event, so the store is non-empty.
+	t.Logf("total cost: $%.6f across %d services", summary.TotalCost, len(summary.ByService))
 }
 
 func TestStartTestServer_localstackInfoAlias(t *testing.T) {

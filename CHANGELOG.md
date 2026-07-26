@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `TestServer` now exposes accessors for the underlying components —
+  `Store() *EventStore`, `StateManager()`, `TimeController()`, and `Registry()`
+  — and `StartTestServer` enables the in-memory event store by default, so cost
+  summaries (`ts.Store().GetCostSummary`) and recording/replay work against the
+  test server out of the box (#363).
+
+### Fixed
+- Docs: brought the Getting Started and Testing guides back in sync with the
+  implementation (#363). Corrected the documented `TestServer` API (the cost and
+  recording/replay examples referenced accessors that did not exist and queried a
+  detached event store, so a copy-paste user got an empty cost summary); replaced
+  pinned stale version strings (`v0.68.0`) with neutral placeholders; reconciled
+  the service-count contradiction (README advertised 63 plugins while the Service
+  Reference claimed 37 and called itself authoritative) pending generation from
+  the registry (#364); fixed a duplicated `[profile substrate]` block in the
+  endpoint-configuration guide and a README typo. The documented Go snippets now
+  compile against `package emulator`.
+
 ## [v0.75.0] - 2026-07-26
 
 ### Added
