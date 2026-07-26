@@ -40,3 +40,6 @@ python/**/*.pyo
 docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+# Local Claude Code settings
+.claude/
