@@ -43,7 +43,7 @@ fall down.
 
 ## Why Substrate for AI-generated infrastructure
 
-A generate-and-verify loop has needs a human-paced workflow doesn't have:
+A generate-and-verify loop has needs a human-paced workflow doesn't:
 
 - **Determinism, because flakes mislead the loop.** A non-deterministic failure is
   a *false signal an agent acts on* — wasting fix cycles chasing timing noise.
@@ -60,6 +60,11 @@ A generate-and-verify loop has needs a human-paced workflow doesn't have:
   Generated code is full of retry/poll/wait logic for capacity errors, throttling,
   and terminal states. Substrate lets you seed exactly those outcomes on demand, so
   the unhappy paths are actually exercised — not just assumed.
+
+AI generation is the *motivating* use case, not a prerequisite: Substrate is
+equally useful for human-written Terraform, CDK, CloudFormation, SDK, and CLI
+integration tests that want the same determinism, offline speed, and cost
+visibility.
 
 ## How it compares
 
@@ -287,7 +292,9 @@ networking, databases, messaging, analytics, ML, security, and management:
 - **Management & cost** — CloudWatch (+ Logs), CloudTrail, Organizations, Budgets, Cost Explorer, Service Quotas, SSM, Health, the CodeSuite, Step Functions, Backup, Transfer
 
 Many integrate with **Betty** for CloudFormation deployment. See the
-[Service Reference](docs/services.md) for the authoritative, per-operation list.
+[Service Reference](docs/services.md) for per-operation detail. The live plugin
+count is always available from the `/ready` endpoint
+(`curl http://localhost:4566/ready`).
 
 ### Known limitations
 
@@ -302,8 +309,8 @@ Many integrate with **Betty** for CloudFormation deployment. See the
 
 ## Status
 
-Current release: **v0.68.0**. See [Releases](https://github.com/scttfrdmn/substrate/releases)
-and [CHANGELOG.md](CHANGELOG.md) for full history.
+Actively developed. See [Releases](https://github.com/scttfrdmn/substrate/releases)
+for the current version and [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Documentation
 

@@ -19,11 +19,29 @@ type TestServer struct {
 	// URL is the base URL of the server, e.g. "http://localhost:54321".
 	URL string
 	// Port is the TCP port the server is listening on.
-	Port  int
-	tc    *TimeController
-	srv   *Server
-	state StateManager
+	Port     int
+	tc       *TimeController
+	srv      *Server
+	state    StateManager
+	store    *EventStore
+	registry *PluginRegistry
 }
+
+// Store returns the [EventStore] backing the server, for cost summaries
+// ([EventStore.GetCostSummary]) and recording/replay. The store is enabled by
+// [StartTestServer], so operations issued against [TestServer.URL] are recorded.
+func (ts *TestServer) Store() *EventStore { return ts.store }
+
+// StateManager returns the [StateManager] backing the server, for tests that
+// need to seed or inspect resource state directly.
+func (ts *TestServer) StateManager() StateManager { return ts.state }
+
+// TimeController returns the [TimeController] driving the server's simulated
+// clock. Prefer [TestServer.AdvanceTime] / [TestServer.SetTime] for common cases.
+func (ts *TestServer) TimeController() *TimeController { return ts.tc }
+
+// Registry returns the [PluginRegistry] of registered service plugins.
+func (ts *TestServer) Registry() *PluginRegistry { return ts.registry }
 
 // StartTestServer starts an in-process Substrate server on a random port,
 // registers all default plugins, and schedules t.Cleanup to shut it down.
@@ -34,7 +52,10 @@ func StartTestServer(t *testing.T) *TestServer {
 
 	cfg := DefaultConfig()
 	cfg.Server.Address = "localhost:0"
-	cfg.EventStore.Enabled = false
+	// Enable the in-memory event store so cost summaries and recording/replay
+	// work against the server out of the box (see TestServer.Store).
+	cfg.EventStore.Enabled = true
+	cfg.EventStore.Backend = "memory"
 	cfg.Log.Level = "error"
 
 	state := NewMemoryStateManager()
@@ -86,7 +107,7 @@ func StartTestServer(t *testing.T) *TestServer {
 		<-done
 	})
 
-	return &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv, state: state}
+	return &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv, state: state, store: store, registry: registry}
 }
 
 // ResetState wipes all server state. Call this between test cases that share

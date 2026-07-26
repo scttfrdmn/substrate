@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(aws ec2 describe-*)",
+      "Bash(aws ec2 get-*)",
+      "Bash(aws ssm get-*)",
+      "Bash(aws ssm list-*)",
+      "Bash(aws ssm describe-*)",
+      "Bash(aws s3 ls*)",
+      "Bash(aws fsx describe-*)",
+      "Bash(aws efs describe-*)",
+      "Bash(aws logs filter-log-events*)",
+      "Bash(aws logs get-log-events*)",
+      "Bash(aws logs describe-*)",
+      "Bash(aws sts get-caller-identity*)",
+      "Bash(aws cloudformation describe-*)",
+      "Bash(aws cloudformation list-*)",
+      "Bash(aws lambda get-*)",
+      "Bash(aws lambda list-*)",
+      "Bash(aws cloudwatch get-*)",
+      "Bash(aws service-quotas list-*)",
+      "Bash(aws service-quotas get-*)",
+      "Bash(aws dynamodb list-*)",
+      "mcp__github__get_pull_request_status",
+      "mcp__github__get_file_contents",
+      "mcp__github__get_pull_request_files",
+      "mcp__github__search_code",
+      "mcp__github__list_pull_requests"
+    ]
+  }
+}

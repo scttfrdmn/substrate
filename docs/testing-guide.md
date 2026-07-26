@@ -59,7 +59,8 @@ func TestMyService(t *testing.T) {
 }
 ```
 
-The `TestServer` type has two fields and one method:
+The `TestServer` type exposes two fields, time and state helpers, and accessors
+for the underlying components:
 
 ```go
 type TestServer struct {
@@ -67,11 +68,24 @@ type TestServer struct {
     Port int    // TCP port
 }
 
-func (ts *TestServer) ResetState(t *testing.T) // wipes all server state
+// State and time helpers
+func (ts *TestServer) ResetState(t *testing.T)          // wipes all server state
+func (ts *TestServer) AdvanceTime(d time.Duration)      // move the simulated clock forward
+func (ts *TestServer) SetTime(t time.Time)              // set the simulated clock
+func (ts *TestServer) SetScale(scale float64)           // set the time-acceleration factor
+func (ts *TestServer) SeedSSMParameter(name, value string)
+func (ts *TestServer) SeedSSMParameters(params map[string]string)
+
+// Accessors for the underlying components
+func (ts *TestServer) Store() *EventStore               // for cost summaries and recording/replay
+func (ts *TestServer) StateManager() StateManager
+func (ts *TestServer) TimeController() *TimeController
+func (ts *TestServer) Registry() *PluginRegistry
 ```
 
 `StartTestServer` returns when the `/health` endpoint responds — the server is
-ready for requests immediately.
+ready for requests immediately. The event store is enabled, so cost summaries
+and recording/replay work against `ts.Store()` out of the box.
 
 ## State Isolation
 
@@ -140,36 +154,29 @@ CI reproduction.
 
 ### Wire up the ReplayEngine
 
-`StartTestServer` does not expose the `ReplayEngine` directly — you construct
-one and pass it the same store as the running server. The simplest approach is
-to build your own test harness:
+`StartTestServer` enables the event store and exposes the server's components
+through accessors, so you build a `ReplayEngine` over the **same** store, state,
+time controller, and registry the server is using — otherwise the engine would
+record from a store the server never writes to:
 
 ```go
+import "log/slog"
+
 func setupTestHarness(t *testing.T) (*substrate.TestServer, *substrate.ReplayEngine) {
     t.Helper()
 
     ts := substrate.StartTestServer(t)
 
-    cfg := substrate.DefaultConfig()
-    cfg.EventStore.Enabled = true // enable event store for recording
-
-    store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
-    state := substrate.NewMemoryStateManager()
-    tc := substrate.NewTimeController(time.Now())
-    registry := substrate.NewPluginRegistry()
-    logger := substrate.NewDefaultLogger(slog.LevelError, false)
-
-    ctx := context.Background()
-    if err := substrate.RegisterDefaultPlugins(ctx, registry, state, tc, logger, store); err != nil {
-        t.Fatalf("register plugins: %v", err)
-    }
-
-    engine := substrate.NewReplayEngine(store, state, tc, registry,
+    engine := substrate.NewReplayEngine(
+        ts.Store(),          // same EventStore the server records to
+        ts.StateManager(),
+        ts.TimeController(),
+        ts.Registry(),
         substrate.ReplayConfig{
             RandomSeed:  42,
             StopOnError: true,
         },
-        logger,
+        substrate.NewDefaultLogger(slog.LevelError, false),
     )
 
     return ts, engine
@@ -307,9 +314,11 @@ func TestCostBudget(t *testing.T) {
     ddb := dynamodb.NewFromConfig(cfg)
     // ... create table and items ...
 
-    // Assert costs stay within $0.01.
-    store := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: true})
-    summary, err := store.GetCostSummary(ctx, "000000000000", time.Time{}, time.Time{})
+    // Assert costs stay within $0.01. Read the summary from the SAME store the
+    // server recorded to — ts.Store() — not a freshly constructed one, or the
+    // summary will be empty. The account ID is the one the built-in test
+    // credentials map to (123456789012).
+    summary, err := ts.Store().GetCostSummary(ctx, "123456789012", time.Time{}, time.Time{})
     if err != nil {
         t.Fatal(err)
     }
@@ -343,7 +352,7 @@ Pass a non-zero `start` and `end` to restrict the summary to a time window:
 ```go
 start := time.Now().Add(-1 * time.Hour)
 end := time.Now()
-summary, _ := store.GetCostSummary(ctx, accountID, start, end)
+summary, _ := ts.Store().GetCostSummary(ctx, accountID, start, end)
 ```
 
 ## Fault Injection

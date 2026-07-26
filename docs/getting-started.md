@@ -55,7 +55,7 @@ Verify:
 
 ```bash
 substrate --version
-# substrate v0.68.0
+# substrate v0.x.y   (your installed version)
 ```
 
 ### Docker
@@ -321,7 +321,7 @@ func TestCostTracking(t *testing.T) {
 
 	summary, err := ts.Store().GetCostSummary(
 		context.Background(),
-		"000000000000", // account ID (use your test account)
+		"123456789012", // account ID the built-in test credentials map to
 		time.Time{},    // start (zero = unbounded)
 		time.Time{},    // end   (zero = unbounded)
 	)
