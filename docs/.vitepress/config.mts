@@ -80,6 +80,14 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: 'Service Reference', link: '/services' },
+          { text: 'Compatibility & Fidelity', link: '/fidelity' },
+        ],
+      },
+      {
+        text: 'Contributing',
+        collapsed: false,
+        items: [
+          { text: 'Adding a Service Plugin', link: '/contributing' },
         ],
       },
     ],
