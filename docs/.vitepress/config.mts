@@ -59,7 +59,7 @@ export default defineConfig({
 
     sidebar: [
       {
-        text: 'Introduction',
+        text: 'Learn',
         collapsed: false,
         items: [
           { text: 'What is Substrate?', link: '/' },
@@ -67,11 +67,17 @@ export default defineConfig({
         ],
       },
       {
-        text: 'Using Substrate',
+        text: 'Start',
         collapsed: false,
         items: [
           { text: 'Getting Started', link: '/getting-started' },
           { text: 'Endpoint Configuration', link: '/endpoint-configuration' },
+        ],
+      },
+      {
+        text: 'Test',
+        collapsed: false,
+        items: [
           { text: 'Testing Guide', link: '/testing-guide' },
         ],
       },

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Docs site organised around **Learn / Start / Test / Reference / Contributing**
+  (#370); dated the LocalStack/moto/AWS comparison tables ("as of early 2026") so
+  they read as positioning rather than a current audit; clarified that Substrate
+  is equally useful for human-written and AI-generated IaC; updated the homepage
+  "use it" section to include the pytest plugin (three ways). Also fixed the
+  doc-version scanner (#365) to skip `node_modules`/VitePress build artifacts.
+
 ### Added
 - Runnable "journey" examples for the core differentiators, exercised in CI via
   the `test/e2e` module (#367): seeded throttling → SDK retry, record & replay,

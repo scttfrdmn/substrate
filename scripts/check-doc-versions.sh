@@ -8,9 +8,16 @@
 # URLs, blob/tree URLs, the CHANGELOG, and module-path references.
 set -euo pipefail
 
-# Files to scan: README plus all Markdown under docs/, excluding the changelog.
+# Files to scan: README plus all Markdown under docs/, excluding the changelog
+# and build artifacts (node_modules, VitePress output).
 mapfile -t files < <(
-  { echo "README.md"; find docs -name '*.md'; } | sort -u
+  {
+    echo "README.md"
+    find docs -name '*.md' \
+      -not -path '*/node_modules/*' \
+      -not -path '*/.vitepress/dist/*' \
+      -not -path '*/.vitepress/cache/*'
+  } | sort -u
 )
 
 status=0

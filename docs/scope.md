@@ -81,6 +81,10 @@ Substrate is a **different tier** from container emulators and real accounts, no
 a drop-in replacement for them. It trades workload-execution fidelity for
 determinism, replayability, and cost insight.
 
+> The comparison below reflects these projects as of early 2026; LocalStack and
+> moto evolve, so treat it as a positioning guide rather than a current
+> feature-by-feature audit.
+
 | | **Substrate** | LocalStack | moto | Real AWS |
 |---|:---:|:---:|:---:|:---:|
 | Deterministic replay | ✅ | ❌ | partial | ❌ |
