@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Documentation is now validated on pull requests (#365). A new `Docs CI`
+  workflow runs the VitePress production build, a Markdown link check, and a
+  stale-pinned-version scan (`scripts/check-doc-versions.sh`, also `make
+  docs-versions`) on any PR touching `docs/` or the README — the deploy workflow
+  only ran on `main`, which was too late to catch drift like the stale `v0.68.0`
+  strings fixed in #363. (Service-reference drift is already guarded by the
+  `docs-reference-check` job added in #364.)
 - Python `pytest-substrate` support is now exercised in primary CI and surfaced
   in the docs (#366). A new CI job builds the binary and runs `ruff`, `pytest`,
   and a wheel build for the `python/` package; Getting Started gained a "First
