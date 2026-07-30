@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped the indirect dependency `golang.org/x/text` from v0.38.0 to v0.39.0 in
+  both the root and `test/e2e` modules to clear CVE-2026-56852 (#394), a HIGH
+  advisory where `unicode/norm.Iter` can enter an infinite loop on certain input.
+  `govulncheck` reports the vulnerable symbol as unreachable from substrate, so
+  this closes a dependency-graph finding rather than an exploitable path, but it
+  had turned the Trivy and container-image scans red on every pull request.
+
 ## [v0.76.0] - 2026-07-26
 
 A documentation-reliability release driven by an external project review: the
