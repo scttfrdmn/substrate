@@ -108,11 +108,14 @@
 // Service emulation is provided by [Plugin] implementations registered with
 // a [PluginRegistry]. State is persisted via the [StateManager] interface.
 //
-// Substrate ships 39 built-in service plugins registered by
+// Substrate ships a large set of built-in service plugins registered by
 // [RegisterDefaultPlugins], covering S3, Lambda, DynamoDB, EC2, IAM, SQS,
-// SNS, SES, Kinesis, Firehose, AppSync, Service Quotas, and many more. [S3Plugin]
-// alone supports 23 REST+XML operations including multipart uploads,
-// versioning, and lifecycle configuration. The [BettyClient]
+// SNS, SES, Kinesis, Firehose, AppSync, Service Quotas, and many more.
+// [S3Plugin] alone supports REST+XML operations including multipart uploads,
+// versioning, and lifecycle configuration. For the authoritative per-service
+// operation list and plugin count, see docs/services.md, which is generated
+// from the plugin registry by cmd/gen-service-reference — counts are
+// deliberately not repeated here so they cannot drift. The [BettyClient]
 // integrates CloudFormation deployment ([StackDeployer]), recording,
 // [ValidateRecording], and [DebugSession] time-travel into a single
 // high-level API for AI-generated infrastructure validation.

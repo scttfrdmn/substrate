@@ -200,6 +200,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeLaunchTemplates(ctx, req)
 	case "DeleteLaunchTemplate":
 		return p.deleteLaunchTemplate(ctx, req)
+	// EC2 Fleet operations
+	case "CreateFleet":
+		return p.createFleet(ctx, req)
+	case "DescribeFleets":
+		return p.describeFleets(ctx, req)
+	case "DeleteFleets":
+		return p.deleteFleets(ctx, req)
 	// EBS volume operations
 	case "CreateVolume":
 		return p.createVolume(ctx, req)
@@ -1179,11 +1186,18 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	type ipRangeItem struct {
 		CidrIP string `xml:"cidrIp"` //nolint:revive
 	}
+	type groupPairItem struct {
+		UserID      string `xml:"userId,omitempty"`
+		GroupID     string `xml:"groupId,omitempty"`
+		GroupName   string `xml:"groupName,omitempty"`
+		Description string `xml:"description,omitempty"`
+	}
 	type permItem struct {
-		IPProtocol string        `xml:"ipProtocol"` //nolint:revive
-		FromPort   int           `xml:"fromPort"`
-		ToPort     int           `xml:"toPort"`
-		IPRanges   []ipRangeItem `xml:"ipRanges>item"` //nolint:revive
+		IPProtocol string          `xml:"ipProtocol"` //nolint:revive
+		FromPort   int             `xml:"fromPort"`
+		ToPort     int             `xml:"toPort"`
+		IPRanges   []ipRangeItem   `xml:"ipRanges>item"` //nolint:revive
+		Groups     []groupPairItem `xml:"groups>item,omitempty"`
 	}
 	type sgItem struct {
 		GroupID        string     `xml:"groupId"`
@@ -1220,20 +1234,27 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if vals, ok := filters["group-id"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupID) {
 			continue
 		}
+		renderPerm := func(rule EC2IPPermission) permItem {
+			pi := permItem{IPProtocol: rule.IPProtocol, FromPort: rule.FromPort, ToPort: rule.ToPort}
+			for _, cidr := range rule.IPRanges {
+				pi.IPRanges = append(pi.IPRanges, ipRangeItem{CidrIP: cidr})
+			}
+			for _, pair := range rule.UserIDGroupPairs {
+				pi.Groups = append(pi.Groups, groupPairItem{
+					UserID:      pair.UserID,
+					GroupID:     pair.GroupID,
+					GroupName:   pair.GroupName,
+					Description: pair.Description,
+				})
+			}
+			return pi
+		}
 		item := sgItem{GroupID: sg.GroupID, GroupName: sg.GroupName, Description: sg.Description, VpcID: sg.VPCID}
 		for _, rule := range sg.IngressRules {
-			pi := permItem{IPProtocol: rule.IPProtocol, FromPort: rule.FromPort, ToPort: rule.ToPort}
-			for _, cidr := range rule.IPRanges {
-				pi.IPRanges = append(pi.IPRanges, ipRangeItem{CidrIP: cidr})
-			}
-			item.IPPermissions = append(item.IPPermissions, pi)
+			item.IPPermissions = append(item.IPPermissions, renderPerm(rule))
 		}
 		for _, rule := range sg.EgressRules {
-			pi := permItem{IPProtocol: rule.IPProtocol, FromPort: rule.FromPort, ToPort: rule.ToPort}
-			for _, cidr := range rule.IPRanges {
-				pi.IPRanges = append(pi.IPRanges, ipRangeItem{CidrIP: cidr})
-			}
-			item.IPPermissionsE = append(item.IPPermissionsE, pi)
+			item.IPPermissionsE = append(item.IPPermissionsE, renderPerm(rule))
 		}
 		resp.Groups = append(resp.Groups, item)
 	}
@@ -1295,44 +1316,28 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 		return nil, fmt.Errorf("ec2 modifySGRules unmarshal: %w", unmarshalErr)
 	}
 
-	// Parse permission from params (simplified: IpPermissions.1.*)
-	proto := req.Params["IpPermissions.1.IpProtocol"]
-	if proto == "" {
-		proto = req.Params["IpProtocol"]
-	}
-	fromPort, _ := strconv.Atoi(req.Params["IpPermissions.1.FromPort"])
-	if fromPort == 0 {
-		fromPort, _ = strconv.Atoi(req.Params["FromPort"])
-	}
-	toPort, _ := strconv.Atoi(req.Params["IpPermissions.1.ToPort"])
-	if toPort == 0 {
-		toPort, _ = strconv.Atoi(req.Params["ToPort"])
-	}
-	cidrRange := req.Params["IpPermissions.1.IpRanges.1.CidrIp"]
-	if cidrRange == "" {
-		cidrRange = req.Params["CidrIp"]
-	}
-
-	perm := EC2IPPermission{
-		IPProtocol: proto,
-		FromPort:   fromPort,
-		ToPort:     toPort,
-	}
-	if cidrRange != "" {
-		perm.IPRanges = []string{cidrRange}
-	}
-
-	if direction == "ingress" {
-		if add {
-			sg.IngressRules = append(sg.IngressRules, perm)
-		} else {
-			sg.IngressRules = removePerm(sg.IngressRules, perm)
+	perms := parseSGPermissions(req.Params, reqCtx.AccountID)
+	if len(perms) == 0 {
+		return nil, &AWSError{
+			Code:       "MissingParameter",
+			Message:    "No permissions specified",
+			HTTPStatus: http.StatusBadRequest,
 		}
-	} else {
-		if add {
-			sg.EgressRules = append(sg.EgressRules, perm)
+	}
+
+	for _, perm := range perms {
+		if direction == "ingress" {
+			if add {
+				sg.IngressRules = append(sg.IngressRules, perm)
+			} else {
+				sg.IngressRules = removePerm(sg.IngressRules, perm)
+			}
 		} else {
-			sg.EgressRules = removePerm(sg.EgressRules, perm)
+			if add {
+				sg.EgressRules = append(sg.EgressRules, perm)
+			} else {
+				sg.EgressRules = removePerm(sg.EgressRules, perm)
+			}
 		}
 	}
 
@@ -2559,13 +2564,130 @@ func filterEmpty(slice []string) []string {
 }
 
 // removePerm removes the first matching permission from the slice.
+// removePerm removes the first permission matching target's protocol, port
+// range, and source. The source must match too: a CIDR rule and a
+// source-security-group rule on the same port are distinct rules, so revoking
+// one must not remove the other.
 func removePerm(perms []EC2IPPermission, target EC2IPPermission) []EC2IPPermission {
 	for i, p := range perms {
-		if p.IPProtocol == target.IPProtocol && p.FromPort == target.FromPort && p.ToPort == target.ToPort {
-			return append(perms[:i], perms[i+1:]...)
+		if p.IPProtocol != target.IPProtocol || p.FromPort != target.FromPort || p.ToPort != target.ToPort {
+			continue
 		}
+		if !sgSourcesMatch(p, target) {
+			continue
+		}
+		return append(perms[:i], perms[i+1:]...)
 	}
 	return perms
+}
+
+// sgSourcesMatch reports whether two permissions have the same source, comparing
+// CIDR ranges and referenced security groups. A target that names no source at
+// all matches any source, preserving the pre-existing revoke-by-ports behavior.
+func sgSourcesMatch(a, target EC2IPPermission) bool {
+	if len(target.IPRanges) == 0 && len(target.UserIDGroupPairs) == 0 {
+		return true
+	}
+	for _, cidr := range target.IPRanges {
+		if containsStr(a.IPRanges, cidr) {
+			return true
+		}
+	}
+	for _, pair := range target.UserIDGroupPairs {
+		for _, existing := range a.UserIDGroupPairs {
+			if pair.GroupID != "" && existing.GroupID == pair.GroupID {
+				return true
+			}
+			if pair.GroupID == "" && pair.GroupName != "" && existing.GroupName == pair.GroupName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseSGPermissions parses security-group rules from the EC2 query protocol,
+// handling both the flattened IpPermissions.N form and the legacy top-level
+// IpProtocol/FromPort/ToPort/CidrIp/SourceSecurityGroupName form.
+//
+// Each permission may carry several IpRanges.M and Groups.M entries. The Groups
+// entries are what make a source-security-group rule — including a
+// self-referencing rule, where a group allows traffic from itself — expressible;
+// such a rule has no CIDR at all (#388).
+func parseSGPermissions(params map[string]string, accountID string) []EC2IPPermission {
+	var perms []EC2IPPermission
+	for n := 1; ; n++ {
+		prefix := fmt.Sprintf("IpPermissions.%d.", n)
+		perm, ok := parseSGPermission(params, prefix, accountID)
+		if !ok {
+			break
+		}
+		perms = append(perms, perm)
+	}
+	if len(perms) > 0 {
+		return perms
+	}
+
+	// Legacy top-level form.
+	perm := EC2IPPermission{IPProtocol: params["IpProtocol"]}
+	perm.FromPort, _ = strconv.Atoi(params["FromPort"])
+	perm.ToPort, _ = strconv.Atoi(params["ToPort"])
+	if cidr := params["CidrIp"]; cidr != "" {
+		perm.IPRanges = []string{cidr}
+	}
+	if name := params["SourceSecurityGroupName"]; name != "" {
+		perm.UserIDGroupPairs = append(perm.UserIDGroupPairs, EC2UserIDGroupPair{
+			GroupName: name,
+			UserID:    sgOwnerOrDefault(params["SourceSecurityGroupOwnerId"], accountID),
+		})
+	}
+	if perm.IPProtocol == "" && len(perm.IPRanges) == 0 && len(perm.UserIDGroupPairs) == 0 {
+		return nil
+	}
+	return []EC2IPPermission{perm}
+}
+
+// parseSGPermission parses a single IpPermissions.N entry. The bool reports
+// whether the entry was present.
+func parseSGPermission(params map[string]string, prefix, accountID string) (EC2IPPermission, bool) {
+	proto, hasProto := params[prefix+"IpProtocol"]
+	perm := EC2IPPermission{IPProtocol: proto}
+	perm.FromPort, _ = strconv.Atoi(params[prefix+"FromPort"])
+	perm.ToPort, _ = strconv.Atoi(params[prefix+"ToPort"])
+
+	for m := 1; ; m++ {
+		cidr, ok := params[fmt.Sprintf("%sIpRanges.%d.CidrIp", prefix, m)]
+		if !ok || cidr == "" {
+			break
+		}
+		perm.IPRanges = append(perm.IPRanges, cidr)
+	}
+	for m := 1; ; m++ {
+		groupPrefix := fmt.Sprintf("%sGroups.%d.", prefix, m)
+		groupID := params[groupPrefix+"GroupId"]
+		groupName := params[groupPrefix+"GroupName"]
+		if groupID == "" && groupName == "" {
+			break
+		}
+		perm.UserIDGroupPairs = append(perm.UserIDGroupPairs, EC2UserIDGroupPair{
+			GroupID:     groupID,
+			GroupName:   groupName,
+			UserID:      sgOwnerOrDefault(params[groupPrefix+"UserId"], accountID),
+			Description: params[groupPrefix+"Description"],
+		})
+	}
+
+	present := hasProto || len(perm.IPRanges) > 0 || len(perm.UserIDGroupPairs) > 0
+	return perm, present
+}
+
+// sgOwnerOrDefault returns owner, or accountID when owner is empty — AWS fills
+// in the requesting account for a same-account group reference.
+func sgOwnerOrDefault(owner, accountID string) string {
+	if owner != "" {
+		return owner
+	}
+	return accountID
 }
 
 // --- AMI operations ----------------------------------------------------------

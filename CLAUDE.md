@@ -133,8 +133,10 @@ service before writing code or tests.
 
 | File | Purpose |
 |------|---------|
-| `doc.go` | Package documentation |
-| `types.go` | Core types (AWSRequest, StateManager, Logger, …) |
-| `eventstore.go` | Immutable event log |
-| `replay.go` | Replay engine and time-travel debugging |
+| `emulator/doc.go` | Package documentation |
+| `emulator/types.go` | Core types (AWSRequest, StateManager, Logger, …) |
+| `emulator/eventstore.go` | Immutable event log |
+| `emulator/replay.go` | Replay engine and time-travel debugging |
+| `emulator/plugins.go` | `RegisterDefaultPlugins` — the plugin registry |
+| `docs/services.md` | Generated service reference (`make docs-reference`) |
 | `cmd/substrate/main.go` | CLI entry point |
