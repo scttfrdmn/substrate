@@ -186,16 +186,16 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers |
-| GetObject | Supports Range header — see [Ranged reads](#ranged-reads) |
-| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads) |
+| PutObject | Supports Content-Type, metadata headers; conditional writes — see [Conditional requests](#conditional-requests) |
+| GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests) |
+| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests) |
 | DeleteObject | Fires S3 notifications if configured |
-| CopyObject | |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests) |
 | ListObjects | |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken |
 | CreateMultipartUpload | |
 | UploadPart | |
-| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation) |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | |
 | GetBucketPolicy | |
@@ -242,6 +242,87 @@ Every range against a zero-byte object is unsatisfiable. A `416` body carries
 without a second round trip. Ranges compose with `versionId`.
 
 Retrieving a specific part by `?partNumber=N` is not implemented.
+
+### Conditional requests
+
+#### Conditional writes
+
+`PutObject`, `CopyObject` and `CompleteMultipartUpload` honor `If-None-Match` and
+`If-Match`, evaluated against the current version of the destination key:
+
+| Header | Destination state | Result |
+|---|---|---|
+| `If-None-Match: *` | Key absent | `200` — the write proceeds |
+| `If-None-Match: *` | Key present | `412 PreconditionFailed` |
+| `If-None-Match: *` | Current version is a delete marker | `200` — a delete marker is not an object |
+| `If-None-Match: <anything but *>` | Any | `412 PreconditionFailed` — S3 expects only `*` on a write |
+| `If-Match: "<etag>"` | ETag matches | `200` — the write proceeds |
+| `If-Match: "<etag>"` | ETag differs | `412 PreconditionFailed` |
+| `If-Match: "<etag>"` | Key absent, or the current version is a delete marker | `404 NoSuchKey` |
+
+A rejected conditional write is a no-op: the stored object is byte-identical
+afterwards — body, ETag, size, `Content-Type` and user metadata all unchanged — and
+a rejected `CompleteMultipartUpload` additionally leaves its upload open to be
+retried or aborted.
+
+**Concurrency.** N concurrent `If-None-Match: *` writes to one key yield exactly one
+`200` and N-1 `412`s; the same holds for N concurrent `If-Match` writes asserting
+the same ETag, which is the compare-and-swap primitive optimistic locking needs.
+This guarantee is **process-local**. Substrate implements it with a per-key mutex
+held across the existence check and the write, because `StateManager` exposes no
+compare-and-swap; it therefore holds for any number of goroutines or HTTP clients
+against one emulator process, but would not hold across two emulator processes
+sharing one state backend.
+
+Two outcomes real S3 documents are deliberately not emulated: the `409
+ConditionalRequestConflict` returned when a concurrent operation interferes, and the
+`404` returned when a concurrent delete lands mid-write. Both are races against
+wall-clock timing rather than states a deterministic emulator can reach, so
+substrate resolves every conditional write to one of the rows above. A consumer
+that must exercise its 409 handler needs a fault-injection tier, not this one.
+
+#### Conditional reads
+
+`GetObject` and `HeadObject` honor all four RFC 9110 preconditions. They are
+evaluated **before** the `Range` header, so a failed precondition is reported rather
+than a partial response served:
+
+| Header | Evaluation | Result |
+|---|---|---|
+| `If-None-Match` | Matches the object's ETag (or is `*`) | `304 Not Modified`, no body, `ETag` echoed |
+| `If-None-Match` | Does not match | `200` |
+| `If-Match` | Matches (or is `*`) | `200` |
+| `If-Match` | Does not match | `412 PreconditionFailed` |
+| `If-Modified-Since` | Object not modified since the date | `304 Not Modified` |
+| `If-Unmodified-Since` | Object modified since the date | `412 PreconditionFailed` |
+
+Two combination rules from the `GetObject` reference are implemented, both of which
+stop a coarse date condition from overriding an exact entity assertion:
+
+- `If-Match` true **and** `If-Unmodified-Since` false → `200`, not `412`.
+- `If-None-Match` false **and** `If-Modified-Since` true → `304`, not `200`.
+
+A precondition against an absent key is still `404 NoSuchKey` — there is no ETag to
+compare. An unparseable date makes its condition inapplicable rather than failed
+(per RFC 9110), so a malformed date never produces a spurious `412`. The three date
+formats RFC 9110 requires a recipient to accept are all parsed. An empty header
+value is a condition that cannot be met, distinct from an absent header.
+
+ETag comparison ignores surrounding quotes, `W/` weak-validator prefixes, hex case
+and whitespace, and a comma-separated list matches if any member does. Header names
+are matched case-insensitively.
+
+#### Conditional copies
+
+`CopyObject` carries two independent sets: the unprefixed headers above gate
+overwriting the destination, while `x-amz-copy-source-if-match`,
+`x-amz-copy-source-if-none-match`, `x-amz-copy-source-if-modified-since` and
+`x-amz-copy-source-if-unmodified-since` gate reading the source. Both are evaluated
+before anything is written, so a rejected copy leaves the destination untouched.
+
+Every failed copy-source condition is a `412`, including the case where the
+equivalent `GetObject` would be a `304`: there is no cached entity for a
+server-side copy to revalidate against.
 
 ### Multipart upload validation
 

@@ -45,6 +45,7 @@ type S3Plugin struct {
 	fs         afero.Fs
 	registry   *PluginRegistry // nil = notifications disabled
 	versionSeq int64           // monotonic counter for unique version IDs
+	keyLocks   s3KeyMutex      // serializes conditional writes per object key
 }
 
 // Name returns the service name "s3".
@@ -452,6 +453,24 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
+	// Conditional writes must not race: the existence check and the write below have
+	// to be one atomic step, or N concurrent If-None-Match: * PUTs would all
+	// observe the key as absent and all succeed. See [s3KeyMutex].
+	if cond := readConditionalHeaders(req.Headers); cond.any() {
+		unlock := p.keyLocks.lock(bucket, key)
+		defer unlock()
+
+		current, condErr := p.loadCurrentObject(ctx, bucket, key)
+		if condErr != nil {
+			return nil, condErr
+		}
+		if resp := evaluateWritePreconditions(cond, current); resp != nil {
+			// Nothing has been written yet, so an unmet precondition leaves the
+			// stored object byte-identical.
+			return resp, nil
+		}
+	}
+
 	body := decodeAWSChunked(req.Headers, req.Body)
 	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
@@ -601,6 +620,13 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 		}
 	}
 
+	// Preconditions are evaluated before the range step: a 412 or 304 supersedes
+	// any range, and RFC 9110 requires a failed precondition to be reported rather
+	// than a partial response served.
+	if resp := evaluateReadPreconditions(readConditionalHeaders(req.Headers), &obj); resp != nil {
+		return resp, nil
+	}
+
 	headers := objectResponseHeaders(&obj)
 
 	rangeHeader := headerValueFold(req.Headers, "Range")
@@ -648,6 +674,11 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 	if obj.IsDeleteMarker {
 		// Mirror getObject: 405 when a version is named, 404 otherwise.
 		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
+	}
+
+	// HEAD evaluates preconditions exactly as GET does.
+	if resp := evaluateReadPreconditions(readConditionalHeaders(req.Headers), &obj); resp != nil {
+		return resp, nil
 	}
 
 	headers := objectResponseHeaders(&obj)
@@ -869,6 +900,31 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	}
 	if dstBucketData == nil {
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
+	}
+
+	// Source preconditions gate whether the copy may read; destination
+	// preconditions gate whether it may overwrite. Both are checked before any
+	// write, so a rejected copy leaves the destination untouched.
+	//
+	// A failed copy-source condition is always a 412, even in the case where the
+	// equivalent GET would be a 304: CopyObject documents PreconditionFailed as its
+	// only conditional outcome, since there is no cached entity for a server-side
+	// copy to revalidate against.
+	if evaluateReadPreconditions(copySourceConditionalHeaders(req.Headers), &srcObj) != nil {
+		return s3PreconditionFailedResponse(), nil
+	}
+
+	if cond := readConditionalHeaders(req.Headers); cond.any() {
+		unlock := p.keyLocks.lock(dstBucket, dstKey)
+		defer unlock()
+
+		current, condErr := p.loadCurrentObject(ctx, dstBucket, dstKey)
+		if condErr != nil {
+			return nil, condErr
+		}
+		if resp := evaluateWritePreconditions(cond, current); resp != nil {
+			return resp, nil
+		}
 	}
 
 	srcBody, readErr := afero.ReadFile(p.fs, "/"+srcBucket+"/"+srcKey)
@@ -1289,6 +1345,28 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		return errResp, nil
 	}
 
+	// Complete is a WRITE, so it honors the same conditional headers as PutObject —
+	// evaluated against the destination key, not against the in-progress upload.
+	// "Conditional writes do not consider any in-progress multipart uploads requests
+	// since those are not yet fully written objects": another writer landing on this
+	// key mid-upload is exactly what makes this Complete fail.
+	//
+	// Checked after the parts list, so a malformed request is reported as malformed
+	// rather than as a lost race, and held under the key lock through the write below.
+	if cond := readConditionalHeaders(req.Headers); cond.any() {
+		unlock := p.keyLocks.lock(bucket, key)
+		defer unlock()
+
+		current, condErr := p.loadCurrentObject(ctx, bucket, key)
+		if condErr != nil {
+			return nil, condErr
+		}
+		if resp := evaluateWritePreconditions(cond, current); resp != nil {
+			// The upload stays open: a caller that lost the race can abort it.
+			return resp, nil
+		}
+	}
+
 	// Concatenate parts and compute multi-part ETag.
 	var combined []byte
 	var partMD5s []byte
@@ -1580,6 +1658,25 @@ func (p *S3Plugin) loadObjectEntry(ctx context.Context, bucket, key string) (*ob
 		ETag:         obj.ETag,
 		Size:         obj.Size,
 	}, nil
+}
+
+// loadCurrentObject returns the current version of an object, or nil when the key
+// has never been written. A delete marker is returned rather than treated as
+// absent: the caller decides what absence means, and conditional writes
+// distinguish "never existed" from "deleted" differently than reads do.
+func (p *S3Plugin) loadCurrentObject(ctx context.Context, bucket, key string) (*S3Object, error) {
+	data, err := p.state.Get(ctx, s3Namespace, "object:"+bucket+"/"+key)
+	if err != nil {
+		return nil, fmt.Errorf("get current object %s/%s: %w", bucket, key, err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var obj S3Object
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, fmt.Errorf("unmarshal current object %s/%s: %w", bucket, key, err)
+	}
+	return &obj, nil
 }
 
 // headerValueFold returns the value of the named header, case-insensitively
