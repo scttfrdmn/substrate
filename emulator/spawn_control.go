@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -61,27 +60,29 @@ func taskCompletionID(key string) (string, bool) {
 	return id, true
 }
 
-// resolveTaskCompletion serves a spore.host task-completion record for a GET of
-// tasks/<task_id>/completion.json when no real object exists at the key. It
-// returns (resp, true) when it handled the request — either a synthesized 200
-// carrying the completion JSON, or a 404 NoSuchKey when a seeded record's
-// EndedAt has not yet been reached on the simulated clock ("still running").
-// It returns (nil, false) when the key is not a completion-record key, so the
-// caller falls through to its normal NoSuchKey response.
+// resolveTaskCompletion synthesizes a spore.host task-completion record for a GET
+// of tasks/<task_id>/completion.json when no real object exists at the key. It
+// returns (obj, body, true) when it handled the request, letting the caller serve
+// the record through its normal object-response path — so conditional and ranged
+// reads apply to it as they do to any other object.
+//
+// It returns handled=false both when the key is not a completion-record key and
+// when a seeded record's EndedAt has not yet been reached on the simulated clock
+// ("still running"); in either case the caller's NoSuchKey response is correct.
 //
 // Absent a seed, a matching key resolves to the nominal success record
 // (exit_code 0, state "completed") so the happy path needs no seeding, matching
 // the seeding philosophy. Substrate does not run the task; this is the seedable
 // completion observation only.
-func (p *S3Plugin) resolveTaskCompletion(ctx context.Context, _ string, key string) (*AWSResponse, bool) {
+func (p *S3Plugin) resolveTaskCompletion(ctx context.Context, key string) (S3Object, []byte, bool) {
 	taskID, ok := taskCompletionID(key)
 	if !ok {
-		return nil, false
+		return S3Object{}, nil, false
 	}
 
 	data, err := p.state.Get(ctx, spawnCtrlNamespace, spawnCompletionKey(taskID))
 	if err != nil {
-		return nil, false
+		return S3Object{}, nil, false
 	}
 
 	var rec spawnTaskCompletion
@@ -91,7 +92,7 @@ func (p *S3Plugin) resolveTaskCompletion(ctx context.Context, _ string, key stri
 		rec = spawnTaskCompletion{TaskID: taskID, ExitCode: 0, State: "completed", StartedAt: now, EndedAt: now}
 	} else {
 		if err := json.Unmarshal(data, &rec); err != nil {
-			return nil, false
+			return S3Object{}, nil, false
 		}
 		rec.TaskID = taskID
 		if rec.State == "" {
@@ -100,23 +101,23 @@ func (p *S3Plugin) resolveTaskCompletion(ctx context.Context, _ string, key stri
 		// Clock gate: before EndedAt the record is not yet present.
 		if ended, perr := time.Parse(time.RFC3339, rec.EndedAt); perr == nil {
 			if p.tc.Now().Before(ended) {
-				return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), true
+				return S3Object{}, nil, false
 			}
 		}
 	}
 
 	body, err := json.Marshal(rec)
 	if err != nil {
-		return nil, false
+		return S3Object{}, nil, false
 	}
 	hash := md5.Sum(body) //nolint:gosec // S3 ETags are MD5 by definition.
-	headers := map[string]string{
-		"Content-Type":   "application/json",
-		"ETag":           fmt.Sprintf("%q", fmt.Sprintf("%x", hash)),
-		"Last-Modified":  p.tc.Now().UTC().Format(http.TimeFormat),
-		"Content-Length": strconv.Itoa(len(body)),
-	}
-	return &AWSResponse{StatusCode: http.StatusOK, Headers: headers, Body: body}, true
+	return S3Object{
+		Key:          key,
+		Size:         int64(len(body)),
+		ContentType:  "application/json",
+		ETag:         fmt.Sprintf("%q", fmt.Sprintf("%x", hash)),
+		LastModified: p.tc.Now().UTC(),
+	}, body, true
 }
 
 // handleSpawnSeedTaskCompletion handles POST /v1/spawn/task-completion. It seeds

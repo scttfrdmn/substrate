@@ -187,8 +187,8 @@ STS operations are free.
 | DeleteBucket | |
 | ListBuckets | |
 | PutObject | Supports Content-Type, metadata headers |
-| GetObject | Supports Range header |
-| HeadObject | |
+| GetObject | Supports Range header — see [Ranged reads](#ranged-reads) |
+| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads) |
 | DeleteObject | Fires S3 notifications if configured |
 | CopyObject | |
 | ListObjects | |
@@ -213,6 +213,35 @@ STS operations are free.
 | PutObjectTagging | |
 | GetObjectTagging | |
 | DeleteObjectTagging | |
+
+### Ranged reads
+
+`GetObject` and `HeadObject` honor a single-range `Range` header, returning `206
+Partial Content` with `Content-Range` and a `Content-Length` equal to the range
+served. Both advertise `Accept-Ranges: bytes`. `HeadObject` returns the same
+status and headers with no body.
+
+The edge cases matter more than the happy path, because S3 does **not** report an
+error for most bad ranges — a caller cannot use a 416 to detect a malformed
+request:
+
+| `Range` (1000-byte object) | Result |
+|---|---|
+| `bytes=0-99` | `206`, `Content-Range: bytes 0-99/1000` |
+| `bytes=900-` | `206`, `bytes 900-999/1000` |
+| `bytes=-100` | `206`, `bytes 900-999/1000` (suffix range) |
+| `bytes=0-99999` | `206`, **clamped** to `bytes 0-999/1000` — past EOF is not an error |
+| `bytes=1000-1099` | `416 InvalidRange` with `Content-Range: bytes */1000` |
+| `bytes=-0` | `416 InvalidRange` — a zero-length suffix is unsatisfiable |
+| `bytes=abc`, `bytes=500-100` | `200` with the whole object — malformed ranges are ignored |
+| `bytes=0-99,200-299` | `200` with the whole object — S3 serves only one range per GET |
+| `items=0-99` | `200` with the whole object — units other than `bytes` are ignored |
+
+Every range against a zero-byte object is unsatisfiable. A `416` body carries
+`<ActualObjectSize>` and `<RangeRequested>` so a caller can correct the request
+without a second round trip. Ranges compose with `versionId`.
+
+Retrieving a specific part by `?partNumber=N` is not implemented.
 
 ### Betty CFN resource types
 

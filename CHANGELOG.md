@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- S3 `GetObject` and `HeadObject` honor a single-range `Range` header (#396),
+  returning `206 Partial Content` with `Content-Range` and a `Content-Length`
+  equal to the range served. `docs/services.md` had claimed "Supports Range
+  header" since the operation was first documented, but the header was never
+  read — a consumer whose every read is a ranged GET (a FUSE filesystem, a
+  columnar reader seeking within a Parquet footer) silently received whole
+  objects, so no test of its read path was verifying anything.
+  Range composes with `versionId`, and the synthesized spore.host
+  task-completion record is rangeable like any other object.
+  The edge cases are the substance of the fix, because S3 does not report an
+  error for most bad ranges: a range extending past the end of the object is
+  clamped rather than rejected, and a malformed range, a multi-range request, or
+  a unit other than `bytes` is *ignored* — the whole object is served with 200.
+  Only a range starting at or beyond the object's end is a `416 InvalidRange`,
+  whose body carries `<ActualObjectSize>` and `<RangeRequested>` alongside the
+  `Content-Range: bytes */<size>` header so a caller can correct the request
+  without a second round trip. Every range against a zero-byte object is
+  unsatisfiable. Retrieving a part by `?partNumber=N` remains unimplemented.
+
+### Fixed
+- S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,
+  so a caller could not learn which version it had just described from a HEAD
+  alone — it had to issue a GET and download the body to find out.
+- S3 `GetObject` and `HeadObject` now advertise `Accept-Ranges: bytes`, as real
+  S3 does on both (#396).
+
+### Changed
+- The S3 error-response builder can now carry error-specific child elements and
+  response headers (#396), which the `InvalidRange` body needs and which
+  `MinSizeAllowed`/`ProposedSize` (#400) and `StorageClass` (#398) will need. Its
+  `extras ...string` parameter had been an unused stub with no call sites; it is
+  replaced by an explicit `s3Error` options struct, and `s3DeleteMarkerResponse`
+  now shares the same builder instead of re-declaring its own XML type.
+- The GET/HEAD object response headers are built in one place, and
+  `resolveTaskCompletion` returns the object and body it synthesized rather than
+  a finished response (#396). The header block had been duplicated three times
+  and had already drifted — the missing `x-amz-version-id` above was a
+  consequence — and the early return meant a synthesized completion record
+  bypassed the shared response path entirely.
+
 ### Security
 - Bumped the indirect dependency `golang.org/x/text` from v0.38.0 to v0.39.0 in
   both the root and `test/e2e` modules to clear CVE-2026-56852 (#394), a HIGH
