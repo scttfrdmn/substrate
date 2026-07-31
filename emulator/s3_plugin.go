@@ -561,6 +561,15 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
+	// A GET against a bucket that does not exist is NoSuchBucket, not NoSuchKey:
+	// the two are distinct conditions and a caller needs to tell "the bucket is
+	// gone" from "this object isn't written yet" (#392).
+	if missing, err := p.bucketMissingResponse(ctx, bucket); err != nil {
+		return nil, err
+	} else if missing != nil {
+		return missing, nil
+	}
+
 	// If versionId query param is present, load from versioned storage.
 	versionID := req.Params["versionId"]
 
@@ -650,6 +659,13 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 // headObject handles HEAD /<bucket>/<key>.
 func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
+
+	// Mirror getObject: a missing bucket is NoSuchBucket, not NoSuchKey (#392).
+	if missing, err := p.bucketMissingResponse(ctx, bucket); err != nil {
+		return nil, err
+	} else if missing != nil {
+		return missing, nil
+	}
 
 	// If versionId is present, head the specific version; otherwise the current.
 	versionID := req.Params["versionId"]
@@ -1914,6 +1930,21 @@ type s3ErrorXML struct {
 // s3ErrorResponse builds an S3-style XML error [AWSResponse].
 func s3ErrorResponse(code, message string, status int) *AWSResponse {
 	return s3ErrorResponseWith(s3Error{Code: code, Message: message, Status: status})
+}
+
+// bucketMissingResponse returns a NoSuchBucket error response when bucket does
+// not exist, or nil when it does. The error return is reserved for a state-store
+// failure, which the caller must propagate rather than report as a missing
+// bucket.
+func (p *S3Plugin) bucketMissingResponse(ctx context.Context, bucket string) (*AWSResponse, error) {
+	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+	if err != nil {
+		return nil, fmt.Errorf("check bucket: %w", err)
+	}
+	if data != nil {
+		return nil, nil
+	}
+	return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 }
 
 // s3ErrorResponseWith builds an S3-style XML error [AWSResponse], including any

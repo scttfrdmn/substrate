@@ -50,7 +50,7 @@ type pluginMeta struct {
 // meta maps each registered plugin name to its documentation metadata. Adding a
 // plugin to the registry without a matching entry here fails generation (and CI).
 var meta = map[string]pluginMeta{
-	"acm":                  {"ACM", "Query"},
+	"acm":                  {"ACM", "JSON"},
 	"apigateway":           {"API Gateway (REST)", "REST/JSON"},
 	"apigatewayv2":         {"API Gateway (HTTP)", "REST/JSON"},
 	"appsync":              {"AppSync", "REST/JSON"},
@@ -92,7 +92,7 @@ var meta = map[string]pluginMeta{
 	"opensearch":           {"OpenSearch", "REST/JSON"},
 	"organizations":        {"Organizations", "JSON"},
 	"quicksight":           {"QuickSight", "REST/JSON"},
-	"ram":                  {"RAM", "JSON"},
+	"ram":                  {"RAM", "REST/JSON"},
 	"rds":                  {"RDS", "Query"},
 	"redshift":             {"Redshift", "Query"},
 	"redshift-data":        {"Redshift Data API", "JSON"},
