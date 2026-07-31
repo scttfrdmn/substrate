@@ -408,6 +408,10 @@ func extractRegion(host, authHeader string) string {
 // extractRegionFromHost parses the region segment from a Host header value
 // such as "s3.us-west-2.amazonaws.com" or
 // "mybucket.s3.us-east-1.amazonaws.com" (virtual-hosted S3).
+//
+// Every candidate is checked against the shape of a region code before being
+// returned, so an unrecognized host layout yields "" rather than a service name
+// masquerading as a region; see regionCandidate.
 func extractRegionFromHost(host string) string {
 	// Strip port if present.
 	if colon := strings.LastIndexByte(host, ':'); colon > 0 {
@@ -426,7 +430,7 @@ func extractRegionFromHost(host string) string {
 	for i, p := range parts {
 		if p == "s3" {
 			if i+1 < len(parts) {
-				return parts[i+1]
+				return regionCandidate(parts[i+1])
 			}
 			return "" // s3 at the end → global, no region
 		}
@@ -434,14 +438,77 @@ func extractRegionFromHost(host string) string {
 
 	// execute-api runtime: "{apiId}.execute-api.{region}".
 	if len(parts) >= 3 && parts[1] == "execute-api" {
-		return parts[2]
+		return regionCandidate(parts[2])
+	}
+
+	// "api.<service>.<region>": the layout the Price List Query API and other
+	// services that front their endpoint with a literal "api" label use, e.g.
+	// "api.pricing.us-east-1.amazonaws.com". Without this the region is read
+	// from the wrong label (#403).
+	if len(parts) >= 3 && parts[0] == "api" {
+		return regionCandidate(parts[2])
 	}
 
 	// Non-S3: "<service>.<region>" or just "<service>".
 	if len(parts) < 2 {
 		return ""
 	}
-	return parts[1]
+	return regionCandidate(parts[1])
+}
+
+// regionCandidate returns s when it has the shape of an AWS region code, and ""
+// otherwise.
+//
+// This is what makes extractRegionFromHost fail closed. Without it, a host
+// layout the parser does not recognize still produced an answer — whichever
+// label happened to sit in the position a region usually occupies, which is
+// typically a service name — and a caller had no way to tell that apart from a
+// real region. Returning "" instead routes the request through the fallbacks
+// extractRegion already has: the SigV4 credential scope, then defaultRegion.
+//
+// The shape is a two-letter geography, one or two lowercase words, and a
+// trailing ordinal: "us-east-1", "ap-southeast-4", "il-central-1",
+// "cn-northwest-1", and the four-segment partition forms "us-gov-west-1" and
+// "us-iso-east-1". Verified against the region table in the AWS General
+// Reference (docs.aws.amazon.com/general/latest/gr/rande.html).
+func regionCandidate(s string) string {
+	segs := strings.Split(s, "-")
+	if len(segs) < 3 || len(segs) > 4 {
+		return ""
+	}
+	// Geography: exactly two lowercase letters — us, ap, eu, af, me, sa, ca,
+	// il, mx, cn.
+	if len(segs[0]) != 2 || !isLowerAlpha(segs[0]) {
+		return ""
+	}
+	// Compass and partition words: east, southeast, central, gov, iso.
+	for _, seg := range segs[1 : len(segs)-1] {
+		if seg == "" || !isLowerAlpha(seg) {
+			return ""
+		}
+	}
+	// Trailing ordinal: digits only.
+	last := segs[len(segs)-1]
+	if last == "" {
+		return ""
+	}
+	for _, c := range last {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return s
+}
+
+// isLowerAlpha reports whether s consists only of the ASCII letters a-z. An
+// empty string satisfies it vacuously; callers that care reject "" themselves.
+func isLowerAlpha(s string) bool {
+	for _, c := range s {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeS3VirtualHost detects an S3 virtual-hosted-style request

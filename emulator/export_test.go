@@ -34,6 +34,9 @@ func NormalizeS3VirtualHostForTest(host, urlPath string) (bucket, normPath strin
 	return normalizeS3VirtualHost(host, urlPath)
 }
 
+// ExtractRegionFromHostForTest wraps extractRegionFromHost for external tests.
+func ExtractRegionFromHostForTest(host string) string { return extractRegionFromHost(host) }
+
 // ExtractAccessKeyFromAuthForTest wraps extractAccessKeyFromAuth for external tests.
 func ExtractAccessKeyFromAuthForTest(authHeader string) string {
 	return extractAccessKeyFromAuth(authHeader)
