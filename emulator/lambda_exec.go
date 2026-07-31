@@ -80,24 +80,28 @@ func (e *LambdaExecutor) isDockerAvailable() bool {
 // Execute invokes the Lambda function. When Docker is unavailable (or not
 // configured) it returns the same stub payload the existing LambdaPlugin uses.
 // When Docker is available it routes through the warm container pool.
-func (e *LambdaExecutor) Execute(ctx context.Context, fn LambdaFunction, zipBytes, payload []byte) ([]byte, error) {
+//
+// functionError is the runtime's X-Amz-Function-Error value ("Handled" or
+// "Unhandled") and is empty when the handler completed normally, which is what
+// lets the caller omit the header entirely on success (#393).
+func (e *LambdaExecutor) Execute(ctx context.Context, fn LambdaFunction, zipBytes, payload []byte) (result []byte, functionError string, err error) {
 	if !e.isDockerAvailable() {
-		return []byte(`{"statusCode":200,"body":"null"}`), nil
+		return []byte(`{"statusCode":200,"body":"null"}`), "", nil
 	}
 	h, err := e.getOrStartContainer(ctx, fn, zipBytes)
 	if err != nil {
 		// Graceful degradation: log and return stub.
 		e.logger.Warn("lambda executor: container start failed, using stub", "function", fn.FunctionName, "err", err)
-		return []byte(`{"statusCode":200,"body":"null"}`), nil
+		return []byte(`{"statusCode":200,"body":"null"}`), "", nil
 	}
-	result, err := e.invokePOST(ctx, h, payload)
+	result, functionError, err = e.invokePOST(ctx, h, payload)
 	if err != nil {
-		return nil, fmt.Errorf("lambda executor invoke: %w", err)
+		return nil, "", fmt.Errorf("lambda executor invoke: %w", err)
 	}
 	e.mu.Lock()
 	h.lastUsed = time.Now()
 	e.mu.Unlock()
-	return result, nil
+	return result, functionError, nil
 }
 
 // getOrStartContainer returns the warm container for fn, starting one if needed.
@@ -237,20 +241,29 @@ func (e *LambdaExecutor) waitReady(h *containerHandle, timeout time.Duration) er
 }
 
 // invokePOST POSTs the payload to the container's RIE invocation endpoint.
-func (e *LambdaExecutor) invokePOST(ctx context.Context, h *containerHandle, payload []byte) ([]byte, error) {
+// invokePOST posts the payload to a warm container's runtime interface and
+// returns its response body along with the X-Amz-Function-Error header the
+// runtime sets when the handler raised. That header is the only signal a handler
+// failed — the RIE answers 200 either way — so dropping it made a failed
+// invocation indistinguishable from a successful one (#393).
+func (e *LambdaExecutor) invokePOST(ctx context.Context, h *containerHandle, payload []byte) (body []byte, functionError string, err error) {
 	url := fmt.Sprintf("http://localhost:%d/2015-03-31/functions/function/invocations", h.port)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http post: %w", err)
+		return nil, "", fmt.Errorf("http post: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("read invoke response: %w", err)
+	}
+	return body, resp.Header.Get("X-Amz-Function-Error"), nil
 }
 
 // evictLoop periodically removes containers that have been idle longer than WarmPoolTTL.
