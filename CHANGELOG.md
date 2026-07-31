@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Lambda function-execution failures are seedable via
+  `POST`/`DELETE /v1/lambda/invoke-error`, keyed by function name or the `"*"`
+  wildcard (#393). Substrate does not run handler code, so an invoke always took
+  the success path and a caller's error branch was unreachable — the seed is what
+  makes it testable. The body accepts `errorType` (`Handled` for an exception the
+  runtime caught, `Unhandled` for a process that died; defaults to `Unhandled`),
+  `errorMessage` and `exceptionType` to populate the synthesized error object in
+  the shape the runtime interface clients emit
+  (`errorMessage`/`errorType`/`requestId`/`stackTrace`), or a verbatim `payload`
+  for a runtime-specific shape substrate does not synthesize. With
+  `X-Amz-Log-Type: Tail`, the returned log reflects the failure.
 - S3 `GetObject` and `HeadObject` honor a single-range `Range` header (#396),
   returning `206 Partial Content` with `Content-Range` and a `Content-Length`
   equal to the range served. `docs/services.md` had claimed "Supports Range
@@ -50,6 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidPart` would send a consumer hunting a data bug that does not exist.
 
 ### Fixed
+- Lambda `Invoke` omits `X-Amz-Function-Error` on a successful invocation, and
+  returns `X-Amz-Log-Result` only when the caller asked for it with
+  `X-Amz-Log-Type: Tail` (#393). Both were sent unconditionally, the former with an
+  empty value. AWS documents `FunctionError` as "if present, indicates that an
+  error occurred", so the SDK maps its absence to the key being absent — meaning
+  the natural `if "FunctionError" in response` check inverted against substrate and
+  every successful invocation looked like a failure. `LogType`'s valid values are
+  `None` and `Tail`, and `None` now behaves like absence; the value is matched
+  case-insensitively, since Go canonicalizes header names but not values.
+  Fixing this exposed a second gap: the executor discarded the runtime's response
+  headers, so `X-Amz-Function-Error` — the *only* signal a handler raised, because
+  the runtime answers 200 either way — could never be set by any path. It is now
+  propagated. Substrate still does not execute handler code, per its scope
+  boundary, so a failure is reached by seeding (below) and the status stays 200:
+  per the `Invoke` reference, "the status code in the API response doesn't reflect
+  function errors".
 - Error responses are serialized in the wire format the target service's protocol
   actually uses, so an SDK can recover the error code (#392). Reported as four
   per-service typos; three were one defect in the server's shared error writer.

@@ -184,6 +184,13 @@ func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, 
 	return p.invoke(ctx, req, name)
 }
 
+// InvokePOSTForTest calls invokePOST against a container handle pointing at the
+// given localhost port, letting a test stand in a fake Lambda runtime interface
+// instead of a real Docker container.
+func InvokePOSTForTest(e *LambdaExecutor, port int, payload []byte) (body []byte, functionError string, err error) {
+	return e.invokePOST(context.Background(), &containerHandle{port: port}, payload)
+}
+
 // CheckPresignedExpiryForTest exposes checkPresignedExpiry for white-box tests.
 func CheckPresignedExpiryForTest(q url.Values, now time.Time) bool {
 	return checkPresignedExpiry(q, now)

@@ -257,6 +257,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
 	r.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
 
+	// Lambda control-plane endpoints (#393).
+	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
+	r.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)
+
 	// spore.host spawn task-completion control-plane endpoints (#360).
 	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
 	r.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)
