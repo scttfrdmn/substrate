@@ -495,28 +495,76 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | Operation | Notes |
 |-----------|-------|
 | RunInstances | Auto-creates default VPC (172.31.0.0/16) |
-| DescribeInstances | |
-| TerminateInstances | |
-| StopInstances | |
-| StartInstances | |
-| DescribeInstanceStatus | |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids) |
+| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids) |
+| StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
+| StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateVpc | |
-| DescribeVpcs | |
-| DeleteVpc | |
+| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSubnet | |
-| DescribeSubnets | |
-| DeleteSubnet | |
+| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSecurityGroup | |
-| DescribeSecurityGroups | |
-| DeleteSecurityGroup | |
+| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
 | AuthorizeSecurityGroupIngress | |
 | AuthorizeSecurityGroupEgress | |
 | CreateInternetGateway | |
 | AttachInternetGateway | |
+| DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAvailabilityZones | |
 | DescribeRegions | |
 | CreateRouteTable | |
 | AssociateRouteTable | |
+| DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
+
+### Explicit resource IDs
+
+Naming a resource ID explicitly is an assertion that the ID exists, and EC2
+answers it with an error rather than an empty result. `DescribeVpcs()` with no
+arguments legitimately returns `[]`; `DescribeVpcs(VpcIds=["vpc-…"])` where that
+VPC is absent fails.
+
+- An ID that resolves to nothing → `Invalid<Type>.NotFound`, HTTP 400.
+- A syntactically invalid ID → `Invalid<Type>.Malformed`, HTTP 400. Syntax is
+  checked before existence, so a request naming both a malformed and an absent ID
+  reports `Malformed`.
+- One present plus one absent ID fails the whole call — EC2 does not return the
+  partial set.
+- An ID excluded by a `Filter` rather than by absence still counts as resolved:
+  an existing ID plus a non-matching filter returns 200 and an empty set.
+- No explicit IDs → every resource matches, and an empty account returns 200 and
+  an empty set.
+
+AWS's casing is inconsistent across these codes and SDK callers match the literal
+string, so substrate mirrors each pair exactly:
+
+| Resource | NotFound | Malformed |
+|----------|----------|-----------|
+| Instance | `InvalidInstanceID.NotFound` | `InvalidInstanceID.Malformed` |
+| VPC | `InvalidVpcID.NotFound` | `InvalidVpcID.Malformed` |
+| Subnet | `InvalidSubnetID.NotFound` | `InvalidSubnetID.Malformed` |
+| Security group | `InvalidGroup.NotFound` | `InvalidGroupId.Malformed` |
+| Internet gateway | `InvalidInternetGatewayID.NotFound` | `InvalidInternetGatewayId.Malformed` |
+| Route table | `InvalidRouteTableID.NotFound` | `InvalidRouteTableId.Malformed` |
+| Snapshot | `InvalidSnapshot.NotFound` | `InvalidSnapshotID.Malformed` |
+| Elastic IP allocation | `InvalidAllocationID.NotFound` | — |
+| NAT gateway | `InvalidNatGatewayID.NotFound` | — |
+
+EC2 publishes no `Malformed` variant for allocation IDs or NAT gateway IDs; a
+malformed ID for those surfaces as the `NotFound` code.
+
+An ID is well formed when it has the resource's prefix followed by at least one
+lowercase hex digit. Length is deliberately not checked: substrate's generators
+emit 16 hex characters where AWS emits 8 or 17, and AWS itself still accepts the
+legacy 8-character form for several resources.
 
 ### Betty CFN resource types
 

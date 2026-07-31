@@ -96,6 +96,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     wall-clock timing rather than states a deterministic emulator can reach.
 
 ### Fixed
+- EC2 `Describe*` calls that name a resource ID explicitly now raise
+  `Invalid<Type>.NotFound` when the ID resolves to nothing, and
+  `Invalid<Type>.Malformed` when it is syntactically invalid, instead of
+  returning `200` with an empty list (#391). Covers `DescribeInstances`,
+  `DescribeInstanceStatus`, `DescribeVpcs`, `DescribeSubnets`,
+  `DescribeSecurityGroups`, `DescribeInternetGateways`, `DescribeRouteTables`,
+  `DescribeSnapshots`, `DescribeAddresses` and `DescribeNatGateways`, plus the
+  mutating operations that took an ID and silently succeeded on a missing one:
+  `TerminateInstances`, `StopInstances`, `StartInstances`, `DeleteVpc`,
+  `DeleteSubnet`, `DeleteSecurityGroup`, `DeleteInternetGateway` and
+  `DeleteRouteTable`.
+  This is the "absent vs. filtered" distinction: `DescribeVpcs()` with no
+  arguments legitimately returns `[]`, but naming a VPC ID is an assertion that
+  the ID exists and EC2 answers it with an error. A consumer whose entire
+  network-precondition check is a `try/except ClientError` on
+  `InvalidVpcID.NotFound` had that branch made unreachable — the call succeeded,
+  the guard was skipped, and a test asserting "a deleted VPC is reported clearly"
+  passed while verifying nothing. Status-polling loops reading
+  `Reservations[0]["Instances"][0]` got an `IndexError` in place of the
+  `InvalidInstanceID.NotFound` they handle.
+  AWS's casing is inconsistent across these codes and SDK callers match the
+  literal string, so each pair is spelled out verbatim from the EC2 error
+  reference rather than derived: `InvalidVpcID.NotFound` but
+  `InvalidGroupId.Malformed`; `InvalidGroup.NotFound` with no `Id` at all;
+  `InvalidSnapshot.NotFound` beside `InvalidSnapshotID.Malformed`. EC2 publishes
+  no `Malformed` variant for allocation IDs or NAT gateway IDs, so a malformed ID
+  for those surfaces as the `NotFound` code.
+  Three orderings match EC2 and are covered by tests: syntax is validated before
+  any lookup, so a request naming both a malformed and an absent ID reports
+  `Malformed`; one present plus one absent ID fails the whole call rather than
+  returning the partial set; and an ID excluded by a `Filter` rather than by
+  absence still counts as resolved, so an existing ID plus a non-matching filter
+  returns 200 and an empty set. ID syntax deliberately does not check length —
+  substrate's generators emit 16 hex characters where AWS emits 8 or 17, and AWS
+  still accepts the legacy 8-character form for several resources.
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
   `MalformedXML` message text rather than abbreviated paraphrases (#400).
 - S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,
