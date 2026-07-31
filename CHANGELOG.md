@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidPart` would send a consumer hunting a data bug that does not exist.
 
 ### Fixed
+- The region parsed from a request's `Host` header is now validated against the
+  shape of a region code, and `api.<service>.<region>` hosts are understood
+  (#403). `api.pricing.us-east-1.amazonaws.com` had yielded `pricing` — the
+  second label of a three-label host, returned by the `<service>.<region>`
+  assumption the parser fell through to. The deeper problem was that the
+  function failed *open*: any host layout it did not recognize still produced a
+  confident answer, so a caller could not distinguish a service name
+  masquerading as a region from a real one. An unrecognized layout now yields
+  no region, which routes the request through the fallbacks that already
+  existed — the SigV4 credential scope, then the default region.
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
   `MalformedXML` message text rather than abbreviated paraphrases (#400).
 - S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,
