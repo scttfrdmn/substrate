@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"net"
@@ -257,6 +256,10 @@ func (s *Server) buildRouter() *chi.Mux {
 
 	r.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
 	r.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
+
+	// Lambda control-plane endpoints (#393).
+	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
+	r.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)
 
 	// spore.host spawn task-completion control-plane endpoints (#360).
 	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
@@ -513,7 +516,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 				Code:       "InvalidClientTokenId",
 				Message:    fmt.Sprintf("region %q is not in the allowed list", reqCtx.Region),
 				HTTPStatus: http.StatusBadRequest,
-			}, r)
+			}, r, req.Service)
 			return
 		}
 	}
@@ -534,7 +537,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// Step 1.6: SigV4 signature verification.
 	if s.opts.Credentials != nil {
 		if sigErr := VerifySigV4(r, rawBody, s.opts.Credentials); sigErr != nil {
-			s.writeError(w, sigErr, r)
+			s.writeError(w, sigErr, r, req.Service)
 			return
 		}
 	}
@@ -543,7 +546,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// Presigned requests carry X-Amz-Algorithm in the query string; verify
 	// X-Amz-Date + X-Amz-Expires have not elapsed.
 	if checkPresignedExpiry(r.URL.Query(), s.tc.Now()) {
-		s.writeError(w, &AWSError{Code: "AccessDenied", Message: "Request has expired.", HTTPStatus: http.StatusForbidden}, r)
+		s.writeError(w, &AWSError{Code: "AccessDenied", Message: "Request has expired.", HTTPStatus: http.StatusForbidden}, r, req.Service)
 		return
 	}
 
@@ -554,7 +557,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, authErr); recordErr != nil {
 				s.logger.Warn("failed to record auth event", "err", recordErr)
 			}
-			s.writeError(w, authErr, r)
+			s.writeError(w, authErr, r, req.Service)
 			return
 		}
 	}
@@ -570,7 +573,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 				s.opts.Metrics.RecordQuotaHit(req.Service, req.Operation)
 				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, "ThrottlingException")
 			}
-			s.writeError(w, quotaErr, r)
+			s.writeError(w, quotaErr, r, req.Service)
 			return
 		}
 	}
@@ -586,7 +589,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 				s.opts.Metrics.RecordConsistencyDelay(req.Service)
 				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, "InconsistentStateException")
 			}
-			s.writeError(w, consErr, r)
+			s.writeError(w, consErr, r, req.Service)
 			return
 		}
 	}
@@ -602,7 +605,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, faultErr); recordErr != nil {
 				s.logger.Warn("failed to record fault event", "err", recordErr)
 			}
-			s.writeError(w, faultErr, r)
+			s.writeError(w, faultErr, r, req.Service)
 			return
 		}
 	}
@@ -651,7 +654,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 
 	if routeErr != nil {
 		RecordSpanError(reqSpan, routeErr)
-		s.writeError(w, routeErr, r)
+		s.writeError(w, routeErr, r, req.Service)
 		return
 	}
 
@@ -677,10 +680,12 @@ func (s *Server) writeResponse(w http.ResponseWriter, resp *AWSResponse) {
 	}
 }
 
-// writeError converts err into an AWS-style error response. For JSON-protocol
-// services (identified by Content-Type application/x-amz-json-1.0 on the
-// incoming request), the error is serialized as JSON; otherwise XML is used.
-func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request) {
+// writeError converts err into an AWS-style error response, serialized in the
+// wire format the target service's protocol uses. The service name selects the
+// protocol (see errorProtocolFor) because the incoming Content-Type cannot
+// distinguish REST-JSON from a plain JSON body, and picking the wrong shape
+// leaves the SDK unable to recover the error code at all (#392).
+func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, service string) {
 	var awsErr *AWSError
 	if asAWSErr, ok := err.(*AWSError); ok {
 		awsErr = asAWSErr
@@ -692,40 +697,21 @@ func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request) {
 		}
 	}
 
-	// JSON protocol: any application/x-amz-json variant (1.0 or 1.1).
 	ct := ""
 	if r != nil {
 		ct = r.Header.Get("Content-Type")
 	}
-	if strings.HasPrefix(ct, "application/x-amz-json") {
-		w.Header().Set("Content-Type", ct) // mirror 1.0 or 1.1 back to caller
-		w.WriteHeader(awsErr.HTTPStatus)
-		body, _ := json.Marshal(map[string]string{"Code": awsErr.Code, "Message": awsErr.Message})
-		_, _ = w.Write(body) // nosemgrep
-		return
-	}
 
-	body, marshalErr := xml.Marshal(struct {
-		XMLName xml.Name `xml:"ErrorResponse"`
-		Error   struct {
-			Code    string `xml:"Code"`
-			Message string `xml:"Message"`
-		} `xml:"Error"`
-	}{
-		Error: struct {
-			Code    string `xml:"Code"`
-			Message string `xml:"Message"`
-		}{
-			Code:    awsErr.Code,
-			Message: awsErr.Message,
-		},
-	})
-	if marshalErr != nil {
+	body, respCT, extraHeaders := marshalAWSError(awsErr, errorProtocolFor(service, ct), ct)
+	if body == nil {
 		http.Error(w, awsErr.Message, awsErr.HTTPStatus)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/xml; charset=UTF-8")
+	w.Header().Set("Content-Type", respCT)
+	for k, v := range extraHeaders {
+		w.Header().Set(k, v)
+	}
 	w.WriteHeader(awsErr.HTTPStatus)
 	if _, writeErr := w.Write(body); writeErr != nil { // nosemgrep
 		s.logger.Warn("failed to write error body", "err", writeErr)

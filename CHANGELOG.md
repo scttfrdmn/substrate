@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Lambda function-execution failures are seedable via
+  `POST`/`DELETE /v1/lambda/invoke-error`, keyed by function name or the `"*"`
+  wildcard (#393). Substrate does not run handler code, so an invoke always took
+  the success path and a caller's error branch was unreachable — the seed is what
+  makes it testable. The body accepts `errorType` (`Handled` for an exception the
+  runtime caught, `Unhandled` for a process that died; defaults to `Unhandled`),
+  `errorMessage` and `exceptionType` to populate the synthesized error object in
+  the shape the runtime interface clients emit
+  (`errorMessage`/`errorType`/`requestId`/`stackTrace`), or a verbatim `payload`
+  for a runtime-specific shape substrate does not synthesize. With
+  `X-Amz-Log-Type: Tail`, the returned log reflects the failure.
 - S3 `GetObject` and `HeadObject` honor a single-range `Range` header (#396),
   returning `206 Partial Content` with `Content-Range` and a `Content-Length`
   equal to the range served. `docs/services.md` had claimed "Supports Range
@@ -180,6 +191,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns 200 and an empty set. ID syntax deliberately does not check length —
   substrate's generators emit 16 hex characters where AWS emits 8 or 17, and AWS
   still accepts the legacy 8-character form for several resources.
+- Lambda `Invoke` omits `X-Amz-Function-Error` on a successful invocation, and
+  returns `X-Amz-Log-Result` only when the caller asked for it with
+  `X-Amz-Log-Type: Tail` (#393). Both were sent unconditionally, the former with an
+  empty value. AWS documents `FunctionError` as "if present, indicates that an
+  error occurred", so the SDK maps its absence to the key being absent — meaning
+  the natural `if "FunctionError" in response` check inverted against substrate and
+  every successful invocation looked like a failure. `LogType`'s valid values are
+  `None` and `Tail`, and `None` now behaves like absence; the value is matched
+  case-insensitively, since Go canonicalizes header names but not values.
+  Fixing this exposed a second gap: the executor discarded the runtime's response
+  headers, so `X-Amz-Function-Error` — the *only* signal a handler raised, because
+  the runtime answers 200 either way — could never be set by any path. It is now
+  propagated. Substrate still does not execute handler code, per its scope
+  boundary, so a failure is reached by seeding (below) and the status stays 200:
+  per the `Invoke` reference, "the status code in the API response doesn't reflect
+  function errors".
+- Error responses are serialized in the wire format the target service's protocol
+  actually uses, so an SDK can recover the error code (#392). Reported as four
+  per-service typos; three were one defect in the server's shared error writer.
+  Substrate emitted a `Code` member for every JSON service, but botocore's JSON-RPC
+  parser reads `__type` and falls back to the *stringified HTTP status* — it never
+  reads `Code`. So SSM's already-correct `ParameterNotFound` was discarded and the
+  caller saw `Error.Code == "404"`, silently defeating every
+  `except ClientError` branch that compares against a symbolic code. This affected
+  all ~30 JSON-RPC services, not just the one reported.
+  Lambda was a second, worse case: it is REST-JSON but sends
+  `Content-Type: application/json`, which failed the `application/x-amz-json`
+  prefix test, so its errors went out as *XML* — a shape its SDK cannot parse at
+  all. The protocol is now selected by service name, since it cannot be sniffed
+  from the request: IAM sends `x-amz-json-1.1` inbound yet answers errors in XML,
+  and Lambda's inbound `application/json` is indistinguishable from a plain JSON
+  body. JSON-RPC errors carry `__type`, REST-JSON errors carry the
+  `x-amzn-errortype` header, and query/REST-XML services keep their
+  `<ErrorResponse><Error><Code>` document; each service's classification is taken
+  from the `protocol` field of its model in botocore, the same value that selects
+  the SDK's parser.
+- IAM error codes now use their documented wire spelling, which drops the
+  `Exception` suffix the API model's shape names carry (#392): `NoSuchEntity`,
+  `EntityAlreadyExists`, `MalformedPolicyDocument`, `DeleteConflict` and
+  `LimitExceeded`. A caller matching the documented `NoSuchEntity` never matched.
+  The suffix is not a blanket rule — `ValidationError` and `AccessDeniedException`
+  were already correct and are unchanged, and Lambda genuinely does use
+  `ResourceNotFoundException` on the wire, so neither service's spelling can be
+  inferred from the other.
+  All 25 renamed branches are now asserted by name, across tagging, inline
+  policies, permissions boundaries and instance profiles. Only three had a test
+  before, and a rename with no test asserting the new string is the same silent
+  failure this fix addresses: the response still looks like an error, so a test
+  that checks only the status stays green while the SDK's typed exception never
+  fires.
+  A state-store failure during S3's bucket lookup is also asserted to surface as
+  a server error rather than as `NoSuchBucket`. The two are opposite signals —
+  `NoSuchBucket` tells a caller to stop retrying, a store failure is transient —
+  so collapsing one into the other would send a consumer down a
+  permanent-failure path over a blip.
+- S3 `GetObject` and `HeadObject` report `NoSuchBucket` when the bucket does not
+  exist, rather than `NoSuchKey` (#392). Both went straight to the object lookup,
+  which conflated two distinct conditions: a caller could not tell "someone
+  deleted my bucket" from "this object isn't written yet", and so could not tell a
+  fatal misconfiguration from an ordinary cache miss.
+- The service reference listed ACM's protocol as Query and RAM's as JSON; both
+  were wrong in the opposite direction (ACM is JSON-RPC, RAM is REST-JSON).
+- The region parsed from a request's `Host` header is now validated against the
+  shape of a region code, and `api.<service>.<region>` hosts are understood
+  (#403). `api.pricing.us-east-1.amazonaws.com` had yielded `pricing` — the
+  second label of a three-label host, returned by the `<service>.<region>`
+  assumption the parser fell through to. The deeper problem was that the
+  function failed *open*: any host layout it did not recognize still produced a
+  confident answer, so a caller could not distinguish a service name
+  masquerading as a region from a real one. An unrecognized layout now yields
+  no region, which routes the request through the fallbacks that already
+  existed — the SigV4 credential scope, then the default region.
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
   `MalformedXML` message text rather than abbreviated paraphrases (#400).
 - S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,

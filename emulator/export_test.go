@@ -34,6 +34,9 @@ func NormalizeS3VirtualHostForTest(host, urlPath string) (bucket, normPath strin
 	return normalizeS3VirtualHost(host, urlPath)
 }
 
+// ExtractRegionFromHostForTest wraps extractRegionFromHost for external tests.
+func ExtractRegionFromHostForTest(host string) string { return extractRegionFromHost(host) }
+
 // ExtractAccessKeyFromAuthForTest wraps extractAccessKeyFromAuth for external tests.
 func ExtractAccessKeyFromAuthForTest(authHeader string) string {
 	return extractAccessKeyFromAuth(authHeader)
@@ -184,7 +187,51 @@ func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, 
 	return p.invoke(ctx, req, name)
 }
 
+// InvokePOSTForTest calls invokePOST against a container handle pointing at the
+// given localhost port, letting a test stand in a fake Lambda runtime interface
+// instead of a real Docker container.
+func InvokePOSTForTest(e *LambdaExecutor, port int, payload []byte) (body []byte, functionError string, err error) {
+	return e.invokePOST(context.Background(), &containerHandle{port: port}, payload)
+}
+
 // CheckPresignedExpiryForTest exposes checkPresignedExpiry for white-box tests.
 func CheckPresignedExpiryForTest(q url.Values, now time.Time) bool {
 	return checkPresignedExpiry(q, now)
+}
+
+// Error-protocol names exposed so external tests can assert the classification
+// without depending on the unexported enum's numeric values.
+const (
+	ErrProtoQueryXMLForTest = "query-xml"
+	ErrProtoJSONRPCForTest  = "json-rpc"
+	ErrProtoRESTJSONForTest = "rest-json"
+	ErrProtoUnknownForTest  = "unknown"
+)
+
+// ErrorProtocolForTest wraps errorProtocolFor, returning one of the
+// ErrProto*ForTest names.
+func ErrorProtocolForTest(service, contentType string) string {
+	switch errorProtocolFor(service, contentType) {
+	case errProtoQueryXML:
+		return ErrProtoQueryXMLForTest
+	case errProtoJSONRPC:
+		return ErrProtoJSONRPCForTest
+	case errProtoRESTJSON:
+		return ErrProtoRESTJSONForTest
+	default:
+		return ErrProtoUnknownForTest
+	}
+}
+
+// MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
+// the ErrProto*ForTest names.
+func MarshalAWSErrorForTest(code, message, proto, jsonContentType string) (body []byte, contentType string, headers map[string]string) {
+	p := errProtoQueryXML
+	switch proto {
+	case ErrProtoJSONRPCForTest:
+		p = errProtoJSONRPC
+	case ErrProtoRESTJSONForTest:
+		p = errProtoRESTJSON
+	}
+	return marshalAWSError(&AWSError{Code: code, Message: message}, p, jsonContentType)
 }

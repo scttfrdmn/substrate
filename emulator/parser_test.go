@@ -190,6 +190,103 @@ func TestParseAWSRequest_Region(t *testing.T) {
 	}
 }
 
+// TestExtractRegionFromHost covers every host layout the parser recognizes, plus
+// the layouts it must refuse to guess at.
+//
+// The refusals are the point of #403. The function used to fall through to a
+// "<service>.<region>" assumption and return the second label of whatever it was
+// given, so "api.pricing.us-east-1.amazonaws.com" yielded "pricing" — a service
+// name presented as a region, indistinguishable to the caller from a real one.
+func TestExtractRegionFromHost(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		// The reported bug: "api.<service>.<region>".
+		{"api-prefixed pricing host", "api.pricing.us-east-1.amazonaws.com", "us-east-1"},
+		{"api-prefixed pricing ap-south-1", "api.pricing.ap-south-1.amazonaws.com", "ap-south-1"},
+
+		// Region shapes that must all be accepted. Codes taken from the region
+		// table in the AWS General Reference.
+		{"four-segment gov partition", "ec2.us-gov-west-1.amazonaws.com", "us-gov-west-1"},
+		{"long compass word", "ec2.ap-southeast-4.amazonaws.com", "ap-southeast-4"},
+		{"il geography", "ec2.il-central-1.amazonaws.com", "il-central-1"},
+		{"mx geography", "ec2.mx-central-1.amazonaws.com", "mx-central-1"},
+		{"cn geography", "ec2.cn-northwest-1.amazonaws.com", "cn-northwest-1"},
+
+		// Pre-existing layouts, which must keep parsing as they did.
+		{"path-style s3 regional", "s3.us-west-2.amazonaws.com", "us-west-2"},
+		{"virtual-hosted s3 regional", "mybucket.s3.us-east-1.amazonaws.com", "us-east-1"},
+		{"dotted bucket virtual-hosted", "my.bucket.s3.us-west-2.amazonaws.com", "us-west-2"},
+		{"execute-api runtime", "abc123.execute-api.us-east-1.amazonaws.com", "us-east-1"},
+		{"plain service regional", "dynamodb.ap-southeast-1.amazonaws.com", "ap-southeast-1"},
+		{"regional host with port", "dynamodb.eu-west-1.amazonaws.com:443", "eu-west-1"},
+
+		// Hosts that carry the region in the second label for reasons of their own
+		// rather than by the "<service>.<region>" convention. The shape check
+		// passes them through, which is the right answer.
+		{"elb dns name", "my-lb-1234.us-east-1.elb.amazonaws.com", "us-east-1"},
+		{"opensearch domain", "my-domain.us-east-1.es.amazonaws.com", "us-east-1"},
+
+		// Layouts with no region to find: the function must yield "" so the
+		// caller falls back rather than acting on a guess.
+		{"global s3", "s3.amazonaws.com", ""},
+		{"bare service host", "iam.amazonaws.com", ""},
+		{"virtual-hosted s3 global", "mybucket.s3.amazonaws.com", ""},
+		{"api-prefixed global host", "api.pricing.amazonaws.com", ""},
+		{"not an aws host", "localhost:4566", ""},
+		{"empty host", "", ""},
+
+		// Near-misses on the region shape, each failing a different check.
+		{"two segments only", "svc.us-east.amazonaws.com", ""},
+		{"five segments", "svc.us-gov-iso-east-1.amazonaws.com", ""},
+		{"three-letter geography", "svc.usa-east-1.amazonaws.com", ""},
+		{"non-numeric ordinal", "svc.us-east-one.amazonaws.com", ""},
+		{"digits in compass word", "svc.us-e4st-1.amazonaws.com", ""},
+		{"uppercase region", "svc.US-EAST-1.amazonaws.com", ""},
+		{"trailing hyphen", "svc.us-east-.amazonaws.com", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, emulator.ExtractRegionFromHostForTest(tt.host))
+		})
+	}
+}
+
+// TestExtractRegion_APIPrefixedHost asserts the fix reaches the RequestContext a
+// plugin actually sees, not just the helper. A pricing client signs for
+// us-east-1, so the SigV4 fallback would mask a parser that still returned
+// "pricing" — this sends no Authorization header so the host is the only signal.
+func TestExtractRegion_APIPrefixedHost(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest(http.MethodPost, "http://localhost/", nil)
+	r.Host = "api.pricing.us-east-1.amazonaws.com"
+
+	_, reqCtx, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-1", reqCtx.Region)
+}
+
+// TestExtractRegion_UnparseableHostFallsBackToAuth is the payoff of failing
+// closed: because the host no longer yields a bogus region, the SigV4 credential
+// scope — which is authoritative — gets its turn.
+func TestExtractRegion_UnparseableHostFallsBackToAuth(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest(http.MethodPost, "http://localhost/", nil)
+	r.Host = "api.pricing.amazonaws.com"
+	r.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/ap-south-1/pricing/aws4_request, "+
+			"SignedHeaders=host, Signature=abc")
+
+	_, reqCtx, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "ap-south-1", reqCtx.Region)
+}
+
 func TestParseAWSRequest_Account(t *testing.T) {
 	tests := []struct {
 		name        string

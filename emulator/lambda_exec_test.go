@@ -24,9 +24,14 @@ func TestLambdaExecutor_StubWhenDockerUnavailable(t *testing.T) {
 		Runtime:      "python3.12",
 		Handler:      "index.handler",
 	}
-	result, err := exec.Execute(t.Context(), fn, nil, []byte(`{"key":"value"}`))
+	result, funcErr, err := exec.Execute(t.Context(), fn, nil, []byte(`{"key":"value"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// The stub path is a successful invocation, so it must report no function
+	// error — that is what lets invoke omit X-Amz-Function-Error (#393).
+	if funcErr != "" {
+		t.Errorf("functionError = %q; want empty", funcErr)
 	}
 	want := `{"statusCode":200,"body":"null"}`
 	if string(result) != want {
