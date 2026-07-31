@@ -47,6 +47,11 @@ type S3Object struct {
 	// x-amz-storage-class header on write. Empty is equivalent to STANDARD.
 	StorageClass string `json:"storage_class,omitempty"`
 
+	// Checksum is the additional checksum recorded for the object, from the
+	// x-amz-checksum-* family. Zero when the object was written without one;
+	// returned on GetObject/HeadObject only under x-amz-checksum-mode: ENABLED.
+	Checksum s3Checksum `json:"checksum,omitzero"`
+
 	// LastModified is the time of the most recent write.
 	LastModified time.Time `json:"last_modified"`
 
@@ -143,6 +148,15 @@ type S3MultipartUpload struct {
 	// the object CompleteMultipartUpload assembles. Empty means STANDARD.
 	StorageClass string `json:"storage_class,omitempty"`
 
+	// ChecksumAlgorithm is the algorithm named in x-amz-checksum-algorithm at
+	// upload creation, applied to every part and to the assembled object. Empty
+	// when the upload was created without one.
+	ChecksumAlgorithm string `json:"checksum_algorithm,omitempty"`
+
+	// ChecksumType is COMPOSITE or FULL_OBJECT, deciding how the part checksums
+	// combine into the object's. Empty when ChecksumAlgorithm is empty.
+	ChecksumType string `json:"checksum_type,omitempty"`
+
 	// Initiated is the time the multipart upload was created.
 	Initiated time.Time `json:"initiated"`
 
@@ -161,6 +175,10 @@ type S3Part struct {
 
 	// Size is the byte length of the part body.
 	Size int64 `json:"size"`
+
+	// Checksum is the additional checksum of this part's body, under the upload's
+	// algorithm. A COMPOSITE object checksum is derived from these.
+	Checksum s3Checksum `json:"checksum,omitzero"`
 
 	// LastModified is the time this part was uploaded.
 	LastModified time.Time `json:"last_modified"`

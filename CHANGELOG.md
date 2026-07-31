@@ -143,6 +143,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `RestoreObject`, the `x-amz-restore` header and Intelligent-Tiering archive
     access tiers are not implemented, so an archived object stays unreadable for
     the run; restoring is modeled by copying to a non-archival class.
+- S3 additional checksums: the `x-amz-checksum-*` family is now computed and
+  **verified** on `PutObject`, `UploadPart`, `CopyObject` and
+  `CompleteMultipartUpload` (#399). Checksum headers were previously ignored
+  altogether, which inverts the guarantee they exist to provide: a consumer
+  computing a checksum client-side and sending it to have S3 reject corrupt data
+  got a `200` whether the value matched the body or not, so a test asserting "a
+  corrupted upload is rejected" passed against substrate and would have passed
+  against a version of the consumer that computed the checksum wrong.
+  - **A mismatch is `400 BadDigest` and nothing is written.** The object does not
+    appear at the key — neither its metadata nor its body — and a rejected write
+    over an existing object leaves the original bytes, ETag and checksum intact
+    rather than truncating them. A rejected `UploadPart` stores no part, so a
+    later `CompleteMultipartUpload` cannot pick up a part that failed its
+    checksum. The error body names the algorithm alongside both the supplied and
+    the computed value, so a failing test says which value was wrong.
+  - **Seven algorithms are verified**: `CRC32`, `CRC32C`, `CRC64NVME`, `SHA1`,
+    `SHA256`, `SHA512` and `MD5`. `CRC-64/NVME` is built from the bit-reversed
+    catalog polynomial and pinned by a test against the published check value, so
+    a transcription error surfaces as a failing assertion rather than as a
+    plausible-looking wrong digest that agrees with itself.
+  - **`XXHASH64`, `XXHASH3` and `XXHASH128` are `501 NotImplemented`**, not
+    silently accepted. Substrate has no implementation to check a caller's value
+    against, and storing an unverified checksum is the precise defect this change
+    removes — it would make a test pass on data real S3 would have rejected. A
+    name outside all ten documented algorithms is `400 InvalidRequest`.
+  - **Trailing checksums are read.** `decodeAWSChunked` previously discarded
+    everything after the `aws-chunked` completion chunk, which is exactly where
+    every AWS SDK puts the checksum of a streamed upload — so header-only
+    verification would have silently never fired for any real SDK write. Trailers
+    are now parsed and honored when `x-amz-trailer` declares them; a trailer whose
+    name differs from what was declared, or a declared trailer that never arrives,
+    is `400 MalformedTrailerError`.
+  - **Reading a checksum back requires `x-amz-checksum-mode: ENABLED`** on
+    `GetObject` or `HeadObject`. Without it neither the `x-amz-checksum-*` header
+    nor `x-amz-checksum-type` is present, so the absence is observable. A ranged
+    `GET` returns the whole object's checksum, not the range's.
+  - **Multipart checksums distinguish `COMPOSITE` from `FULL_OBJECT`.**
+    `CreateMultipartUpload` takes `x-amz-checksum-algorithm` and an optional
+    `x-amz-checksum-type`, echoing both back; an absent type defaults to
+    `COMPOSITE`, except for `CRC64NVME`, which has no composite form and defaults
+    to `FULL_OBJECT`. An unsupported algorithm/type pairing is rejected at
+    *creation*, before any part is uploaded, rather than after a consumer has paid
+    to upload every part. `CompleteMultipartUpload` returns the value as an XML
+    element (`<ChecksumSHA256>`, `<ChecksumType>`), not a header, and verifies a
+    whole-object checksum supplied on the request itself. A `FULL_OBJECT` multipart
+    checksum equals what a single-part `PutObject` of the same bytes produces —
+    the invariant a consumer whose two write paths disagree needs a test to catch.
+  - **`CopyObject` recomputes** as a direct full-object checksum of the copied
+    bytes, under the source's algorithm unless the copy names a new one. Copying a
+    `COMPOSITE` multipart object therefore changes both the value and the type
+    even though the data is identical, matching S3.
+  - **One deliberate divergence:** real S3 attaches a default `CRC64NVME` checksum
+    to every object uploaded without one, so a checksum-mode `GET` always returns
+    something. Substrate records none. Synthesizing one would make a consumer's
+    round-trip assertion pass whether or not their writer actually sends a
+    checksum, which is the failure this work exists to expose; an absent checksum
+    in substrate means "your writer sent none".
 
 ### Fixed
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
