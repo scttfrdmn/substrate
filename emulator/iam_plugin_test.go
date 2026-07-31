@@ -1222,3 +1222,238 @@ func TestIAMPlugin_ListInstanceProfiles_ReflectsCreated(t *testing.T) {
 	profiles, _ := out["InstanceProfiles"].([]any)
 	assert.Len(t, profiles, 2)
 }
+
+// TestIAMPlugin_ErrorCodesAreSymbolic drives every IAM error branch whose Code
+// changed in #392 and asserts the exact string a consumer's catch branch matches
+// on. An untested rename is the failure this issue exists to remove: the
+// response still looks like an error, so a test that only checks the status
+// stays green while the SDK's typed exception never fires.
+func TestIAMPlugin_ErrorCodesAreSymbolic(t *testing.T) {
+	// seedUser, seedRole and friends run before the asserted call so a branch is
+	// reached for the stated reason (entity absent, or entity present but its
+	// subordinate missing) rather than by accident.
+	seedUser := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "u1"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	seedRole := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		resp := iamRequest(t, srv, "CreateRole", map[string]any{"RoleName": "r1"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	seedGroup := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		resp := iamRequest(t, srv, "CreateGroup", map[string]any{"GroupName": "g1"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	seedProfile := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		resp := iamRequest(t, srv, "CreateInstanceProfile", map[string]any{"InstanceProfileName": "p1"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	seedProfileWithRole := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		seedProfile(t, srv)
+		seedRole(t, srv)
+		resp := iamRequest(t, srv, "AddRoleToInstanceProfile", map[string]any{
+			"InstanceProfileName": "p1", "RoleName": "r1",
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	tests := []struct {
+		name      string
+		setup     func(*testing.T, *emulator.Server)
+		operation string
+		body      map[string]any
+		wantCode  string
+		wantHTTP  int
+	}{
+		// NoSuchEntity, 404 — verified against the IAM API reference.
+		{
+			name:      "DeleteUser missing",
+			operation: "DeleteUser",
+			body:      map[string]any{"UserName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "PutUserPolicy missing user",
+			operation: "PutUserPolicy",
+			body: map[string]any{
+				"UserName": "absent", "PolicyName": "inline",
+				"PolicyDocument": `{"Version":"2012-10-17","Statement":[]}`,
+			},
+			wantCode: "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "DeleteUserPolicy missing policy",
+			setup:     seedUser,
+			operation: "DeleteUserPolicy",
+			body:      map[string]any{"UserName": "u1", "PolicyName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "PutUserPermissionsBoundary missing user",
+			operation: "PutUserPermissionsBoundary",
+			body: map[string]any{
+				"UserName":            "absent",
+				"PermissionsBoundary": "arn:aws:iam::aws:policy/ReadOnlyAccess",
+			},
+			wantCode: "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "PutRolePermissionsBoundary missing role",
+			operation: "PutRolePermissionsBoundary",
+			body: map[string]any{
+				"RoleName":            "absent",
+				"PermissionsBoundary": "arn:aws:iam::aws:policy/ReadOnlyAccess",
+			},
+			wantCode: "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "DeleteUserPermissionsBoundary missing user",
+			operation: "DeleteUserPermissionsBoundary",
+			body:      map[string]any{"UserName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "DeleteRolePermissionsBoundary missing role",
+			operation: "DeleteRolePermissionsBoundary",
+			body:      map[string]any{"RoleName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "TagUser missing user",
+			operation: "TagUser",
+			body: map[string]any{
+				"UserName": "absent",
+				"Tags":     []map[string]string{{"Key": "k", "Value": "v"}},
+			},
+			wantCode: "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "UntagUser missing user",
+			operation: "UntagUser",
+			body:      map[string]any{"UserName": "absent", "TagKeys": []string{"k"}},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "ListUserTags missing user",
+			operation: "ListUserTags",
+			body:      map[string]any{"UserName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "TagRole missing role",
+			operation: "TagRole",
+			body: map[string]any{
+				"RoleName": "absent",
+				"Tags":     []map[string]string{{"Key": "k", "Value": "v"}},
+			},
+			wantCode: "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "UntagRole missing role",
+			operation: "UntagRole",
+			body:      map[string]any{"RoleName": "absent", "TagKeys": []string{"k"}},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "ListRoleTags missing role",
+			operation: "ListRoleTags",
+			body:      map[string]any{"RoleName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "DeleteInstanceProfile missing profile",
+			operation: "DeleteInstanceProfile",
+			body:      map[string]any{"InstanceProfileName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "AddRoleToInstanceProfile missing profile",
+			operation: "AddRoleToInstanceProfile",
+			body:      map[string]any{"InstanceProfileName": "absent", "RoleName": "r1"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			// The profile exists, so this reaches the second NoSuchEntity in the
+			// same handler — the one that reports the missing role.
+			name:      "AddRoleToInstanceProfile missing role",
+			setup:     seedProfile,
+			operation: "AddRoleToInstanceProfile",
+			body:      map[string]any{"InstanceProfileName": "p1", "RoleName": "absent"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+		{
+			name:      "RemoveRoleFromInstanceProfile missing profile",
+			operation: "RemoveRoleFromInstanceProfile",
+			body:      map[string]any{"InstanceProfileName": "absent", "RoleName": "r1"},
+			wantCode:  "NoSuchEntity", wantHTTP: http.StatusNotFound,
+		},
+
+		// EntityAlreadyExists, 409.
+		{
+			name:      "CreateGroup duplicate",
+			setup:     seedGroup,
+			operation: "CreateGroup",
+			body:      map[string]any{"GroupName": "g1"},
+			wantCode:  "EntityAlreadyExists", wantHTTP: http.StatusConflict,
+		},
+		{
+			name:      "CreateInstanceProfile duplicate",
+			setup:     seedProfile,
+			operation: "CreateInstanceProfile",
+			body:      map[string]any{"InstanceProfileName": "p1"},
+			wantCode:  "EntityAlreadyExists", wantHTTP: http.StatusConflict,
+		},
+
+		// DeleteConflict, 409.
+		{
+			name:      "DeleteInstanceProfile with attached role",
+			setup:     seedProfileWithRole,
+			operation: "DeleteInstanceProfile",
+			body:      map[string]any{"InstanceProfileName": "p1"},
+			wantCode:  "DeleteConflict", wantHTTP: http.StatusConflict,
+		},
+
+		// MalformedPolicyDocument, 400.
+		{
+			name:      "CreatePolicy invalid JSON",
+			operation: "CreatePolicy",
+			body: map[string]any{
+				"PolicyName": "bad", "PolicyDocument": "{not json",
+			},
+			wantCode: "MalformedPolicyDocument", wantHTTP: http.StatusBadRequest,
+		},
+		{
+			name:      "PutRolePolicy invalid JSON",
+			setup:     seedRole,
+			operation: "PutRolePolicy",
+			body: map[string]any{
+				"RoleName": "r1", "PolicyName": "inline", "PolicyDocument": "{not json",
+			},
+			wantCode: "MalformedPolicyDocument", wantHTTP: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newIAMTestServer(t)
+			if tt.setup != nil {
+				tt.setup(t, srv)
+			}
+
+			resp := iamRequest(t, srv, tt.operation, tt.body)
+			assert.Equal(t, tt.wantHTTP, resp.StatusCode)
+
+			var result map[string]any
+			decodeIAMXML(t, resp, &result)
+			assert.Equal(t, tt.wantCode, result["__type"],
+				"IAM %s must report Code %q — SDKs map the Code string to a typed exception, "+
+					"so any other spelling leaves the caller's catch branch dead",
+				tt.operation, tt.wantCode)
+		})
+	}
+}

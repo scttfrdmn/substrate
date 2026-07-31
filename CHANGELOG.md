@@ -78,6 +78,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were already correct and are unchanged, and Lambda genuinely does use
   `ResourceNotFoundException` on the wire, so neither service's spelling can be
   inferred from the other.
+  All 25 renamed branches are now asserted by name, across tagging, inline
+  policies, permissions boundaries and instance profiles. Only three had a test
+  before, and a rename with no test asserting the new string is the same silent
+  failure this fix addresses: the response still looks like an error, so a test
+  that checks only the status stays green while the SDK's typed exception never
+  fires.
+  A state-store failure during S3's bucket lookup is also asserted to surface as
+  a server error rather than as `NoSuchBucket`. The two are opposite signals —
+  `NoSuchBucket` tells a caller to stop retrying, a store failure is transient —
+  so collapsing one into the other would send a consumer down a
+  permanent-failure path over a blip.
 - S3 `GetObject` and `HeadObject` report `NoSuchBucket` when the bucket does not
   exist, rather than `NoSuchKey` (#392). Both went straight to the object lookup,
   which conflated two distinct conditions: a caller could not tell "someone
