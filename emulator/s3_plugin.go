@@ -549,63 +549,66 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	if err != nil {
 		return nil, fmt.Errorf("get object metadata: %w", err)
 	}
+
+	var obj S3Object
+	var body []byte
 	if data == nil {
 		// No real object at this key: a GET of tasks/<task_id>/completion.json may
 		// be a seedable spore.host task-completion observation (#360). A real
 		// staged object always wins, so this only runs when the key is absent.
+		var handled bool
 		if versionID == "" {
-			if resp, handled := p.resolveTaskCompletion(ctx, bucket, key); handled {
-				return resp, nil
-			}
+			obj, body, handled = p.resolveTaskCompletion(ctx, key)
 		}
-		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
-	}
+		if !handled {
+			return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+		}
+	} else {
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return nil, fmt.Errorf("unmarshal object metadata: %w", err)
+		}
 
-	var obj S3Object
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return nil, fmt.Errorf("unmarshal object metadata: %w", err)
-	}
+		if obj.IsDeleteMarker {
+			// A GET targeting a delete marker directly (explicit versionId) is a 405
+			// MethodNotAllowed in S3; a GET of a key whose current version is a delete
+			// marker is a 404 NoSuchKey. Both carry x-amz-delete-marker: true.
+			return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
+		}
 
-	if obj.IsDeleteMarker {
-		// A GET targeting a delete marker directly (explicit versionId) is a 405
-		// MethodNotAllowed in S3; a GET of a key whose current version is a delete
-		// marker is a 404 NoSuchKey. Both carry x-amz-delete-marker: true.
-		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
-	}
-
-	// Directory-marker objects (key ends with "/") are never written to the
-	// afero filesystem; their body is always empty.
-	var body []byte
-	if !strings.HasSuffix(key, "/") {
-		// Try versioned fs path first, then fallback to main path.
-		var readErr error
-		body, readErr = afero.ReadFile(p.fs, fsPath)
-		if readErr != nil {
-			// Fall back to main path for objects written before versioning was enabled.
-			body, readErr = afero.ReadFile(p.fs, "/"+bucket+"/"+key)
+		// Directory-marker objects (key ends with "/") are never written to the
+		// afero filesystem; their body is always empty.
+		if !strings.HasSuffix(key, "/") {
+			// Try versioned fs path first, then fallback to main path.
+			var readErr error
+			body, readErr = afero.ReadFile(p.fs, fsPath)
 			if readErr != nil {
-				return nil, fmt.Errorf("read object body: %w", readErr)
+				// Fall back to main path for objects written before versioning was enabled.
+				body, readErr = afero.ReadFile(p.fs, "/"+bucket+"/"+key)
+				if readErr != nil {
+					return nil, fmt.Errorf("read object body: %w", readErr)
+				}
 			}
 		}
 	}
 
-	headers := map[string]string{
-		"Content-Type":   obj.ContentType,
-		"ETag":           obj.ETag,
-		"Last-Modified":  obj.LastModified.UTC().Format(http.TimeFormat),
-		"Content-Length": strconv.FormatInt(obj.Size, 10),
+	headers := objectResponseHeaders(&obj)
+
+	rangeHeader := headerValueFold(req.Headers, "Range")
+	spec := parseByteRange(rangeHeader, obj.Size)
+	if spec.Unsatisfiable {
+		return s3InvalidRangeResponse(rangeHeader, obj.Size), nil
 	}
-	if obj.ContentEncoding != "" {
-		headers["Content-Encoding"] = obj.ContentEncoding
-	}
-	if obj.VersionID != "" {
-		headers["x-amz-version-id"] = obj.VersionID
-	}
-	for k, v := range obj.UserMetadata {
-		headers["X-Amz-Meta-"+k] = v
+	status := applyByteRange(spec, obj.Size, headers)
+	if spec.Satisfiable {
+		// Clamp against the body actually read: getObject's fallback path can
+		// return a body shorter than the recorded Size, which would otherwise
+		// panic here.
+		end := min(spec.End+1, int64(len(body)))
+		start := min(spec.Start, end)
+		body = body[start:end]
 	}
 
-	return &AWSResponse{StatusCode: http.StatusOK, Headers: headers, Body: body}, nil
+	return &AWSResponse{StatusCode: status, Headers: headers, Body: body}, nil
 }
 
 // headObject handles HEAD /<bucket>/<key>.
@@ -637,20 +640,17 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
 	}
 
-	headers := map[string]string{
-		"Content-Type":   obj.ContentType,
-		"ETag":           obj.ETag,
-		"Last-Modified":  obj.LastModified.UTC().Format(http.TimeFormat),
-		"Content-Length": strconv.FormatInt(obj.Size, 10),
-	}
-	if obj.ContentEncoding != "" {
-		headers["Content-Encoding"] = obj.ContentEncoding
-	}
-	for k, v := range obj.UserMetadata {
-		headers["X-Amz-Meta-"+k] = v
-	}
+	headers := objectResponseHeaders(&obj)
 
-	return &AWSResponse{StatusCode: http.StatusOK, Headers: headers}, nil
+	// HEAD honors Range exactly as GET does, minus the body.
+	rangeHeader := headerValueFold(req.Headers, "Range")
+	spec := parseByteRange(rangeHeader, obj.Size)
+	if spec.Unsatisfiable {
+		return s3InvalidRangeResponse(rangeHeader, obj.Size), nil
+	}
+	status := applyByteRange(spec, obj.Size, headers)
+
+	return &AWSResponse{StatusCode: status, Headers: headers}, nil
 }
 
 // deleteObject handles DELETE /<bucket>/<key>.
@@ -1645,21 +1645,93 @@ func s3XMLResponse(status int, v any) (*AWSResponse, error) {
 	}, nil
 }
 
-// s3ErrorResponse builds an S3-style XML error [AWSResponse].
-// extras is currently unused and reserved for future extension.
-func s3ErrorResponse(code, message string, status int, extras ...string) *AWSResponse {
-	_ = extras // reserved
-	type errorXML struct {
-		XMLName   xml.Name `xml:"Error"`
-		Code      string   `xml:"Code"`
-		Message   string   `xml:"Message"`
-		RequestID string   `xml:"RequestId"`
+// objectResponseHeaders builds the response headers common to GetObject and
+// HeadObject. Content-Length is the object's recorded size; a ranged read
+// overwrites it with the length of the range actually served.
+func objectResponseHeaders(obj *S3Object) map[string]string {
+	headers := map[string]string{
+		"Content-Type":   obj.ContentType,
+		"ETag":           obj.ETag,
+		"Last-Modified":  obj.LastModified.UTC().Format(http.TimeFormat),
+		"Content-Length": strconv.FormatInt(obj.Size, 10),
+		"Accept-Ranges":  "bytes",
 	}
-	e := errorXML{Code: code, Message: message, RequestID: "SUBSTRATE"}
-	body, _ := xml.Marshal(e)
+	if obj.ContentEncoding != "" {
+		headers["Content-Encoding"] = obj.ContentEncoding
+	}
+	if obj.VersionID != "" {
+		headers["x-amz-version-id"] = obj.VersionID
+	}
+	for k, v := range obj.UserMetadata {
+		headers["X-Amz-Meta-"+k] = v
+	}
+	return headers
+}
+
+// s3ErrorDetail is one error-specific child element of an S3 <Error> document,
+// such as the <ActualObjectSize> that accompanies an InvalidRange.
+type s3ErrorDetail struct {
+	Name  string
+	Value string
+}
+
+// s3Error describes an S3 XML error response. Code, Message and Status are
+// required; Details adds error-specific child elements and Headers adds response
+// headers beyond the XML content type.
+type s3Error struct {
+	Code    string
+	Message string
+	Status  int
+	Details []s3ErrorDetail
+	Headers map[string]string
+}
+
+// s3ErrorDetailXML carries one dynamically named child element. encoding/xml
+// resolves an element's name from the XMLName field's value ahead of the parent
+// struct field's tag, which is what lets each entry emit a different name.
+type s3ErrorDetailXML struct {
+	XMLName xml.Name
+	Value   string `xml:",chardata"`
+}
+
+// s3ErrorXML is the wire form of an S3 <Error> document.
+type s3ErrorXML struct {
+	XMLName   xml.Name           `xml:"Error"`
+	Code      string             `xml:"Code"`
+	Message   string             `xml:"Message"`
+	RequestID string             `xml:"RequestId"`
+	Details   []s3ErrorDetailXML `xml:",any"`
+}
+
+// s3ErrorResponse builds an S3-style XML error [AWSResponse].
+func s3ErrorResponse(code, message string, status int) *AWSResponse {
+	return s3ErrorResponseWith(s3Error{Code: code, Message: message, Status: status})
+}
+
+// s3ErrorResponseWith builds an S3-style XML error [AWSResponse], including any
+// error-specific child elements and response headers described by e. Details
+// with an empty Name are skipped.
+func s3ErrorResponseWith(e s3Error) *AWSResponse {
+	doc := s3ErrorXML{Code: e.Code, Message: e.Message, RequestID: "SUBSTRATE"}
+	for _, d := range e.Details {
+		if d.Name == "" {
+			continue
+		}
+		doc.Details = append(doc.Details, s3ErrorDetailXML{
+			XMLName: xml.Name{Local: d.Name},
+			Value:   d.Value,
+		})
+	}
+
+	headers := map[string]string{"Content-Type": "text/xml; charset=UTF-8"}
+	for k, v := range e.Headers {
+		headers[k] = v
+	}
+
+	body, _ := xml.Marshal(doc)
 	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
+		StatusCode: e.Status,
+		Headers:    headers,
 		Body:       append([]byte(xml.Header), body...),
 	}
 }
@@ -1671,10 +1743,7 @@ func s3ErrorResponse(code, message string, status int, extras ...string) *AWSRes
 // carry the x-amz-delete-marker: true header so SDKs can distinguish a deleted
 // object from a never-existed key.
 func s3DeleteMarkerResponse(versionRequested bool, markerVersionID string) *AWSResponse {
-	headers := map[string]string{
-		"Content-Type":        "text/xml; charset=UTF-8",
-		"x-amz-delete-marker": "true",
-	}
+	headers := map[string]string{"x-amz-delete-marker": "true"}
 	if markerVersionID != "" {
 		headers["x-amz-version-id"] = markerVersionID
 	}
@@ -1686,18 +1755,7 @@ func s3DeleteMarkerResponse(versionRequested bool, markerVersionID string) *AWSR
 		headers["Allow"] = "DELETE"
 	}
 
-	type errorXML struct {
-		XMLName   xml.Name `xml:"Error"`
-		Code      string   `xml:"Code"`
-		Message   string   `xml:"Message"`
-		RequestID string   `xml:"RequestId"`
-	}
-	body, _ := xml.Marshal(errorXML{Code: code, Message: message, RequestID: "SUBSTRATE"})
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    headers,
-		Body:       append([]byte(xml.Header), body...),
-	}
+	return s3ErrorResponseWith(s3Error{Code: code, Message: message, Status: status, Headers: headers})
 }
 
 // --- Bucket policy operations ----------------------------------------------
