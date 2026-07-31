@@ -22,6 +22,16 @@ import (
 // s3Namespace is the state namespace used by S3Plugin.
 const s3Namespace = "s3"
 
+// Error messages S3 returns verbatim from more than one operation.
+const (
+	// s3NoSuchUploadMessage accompanies NoSuchUpload from every multipart operation.
+	s3NoSuchUploadMessage = "The specified multipart upload does not exist. The upload ID might be invalid, " +
+		"or the multipart upload might have been aborted or completed."
+
+	// s3MalformedXMLMessage accompanies MalformedXML.
+	s3MalformedXMLMessage = "The XML you provided was not well-formed or did not validate against our published schema."
+)
+
 // S3Plugin emulates the AWS Simple Storage Service (S3) REST API.
 // It handles CreateBucket, HeadBucket, DeleteBucket, ListBuckets,
 // PutObject, GetObject, HeadObject, DeleteObject, CopyObject,
@@ -759,7 +769,7 @@ func (p *S3Plugin) deleteObjects(reqCtx *RequestContext, req *AWSRequest, bucket
 	var deleteReq deleteRequest
 	if len(req.Body) > 0 {
 		if xmlErr := xml.Unmarshal(req.Body, &deleteReq); xmlErr != nil {
-			return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr
+			return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr
 		}
 	}
 
@@ -1169,7 +1179,7 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return nil, fmt.Errorf("get upload metadata: %w", err)
 	}
 	if uploadData == nil {
-		return s3ErrorResponse("NoSuchUpload", "The specified upload does not exist.", http.StatusNotFound), nil
+		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
 	var upload S3MultipartUpload
@@ -1177,7 +1187,7 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return nil, fmt.Errorf("unmarshal upload metadata: %w", err)
 	}
 	if upload.Bucket != bucket || upload.Key != key {
-		return s3ErrorResponse("NoSuchUpload", "The specified upload does not exist.", http.StatusNotFound), nil
+		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
 	body := decodeAWSChunked(req.Headers, req.Body)
@@ -1212,6 +1222,24 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 	}, nil
 }
 
+// s3MinPartSize is the minimum size in bytes of every part in a multipart upload
+// except the highest-numbered one. S3 rejects a Complete request whose non-final
+// parts are smaller with 400 EntityTooSmall — after the parts have already been
+// uploaded, which is why a consumer needs that failure path to be reachable.
+const s3MinPartSize = 5 * 1024 * 1024
+
+// s3CompletePart is one <Part> entry of a CompleteMultipartUpload request body.
+type s3CompletePart struct {
+	PartNumber int    `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+}
+
+// s3CompleteMultipartUploadRequest is the body of a CompleteMultipartUpload
+// request: the caller's assertion of which parts make up the object.
+type s3CompleteMultipartUploadRequest struct {
+	Parts []s3CompletePart `xml:"Part"`
+}
+
 // completeMultipartUpload handles POST /<bucket>/<key>?uploadId=ID.
 func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
@@ -1223,62 +1251,60 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		return nil, fmt.Errorf("get upload metadata: %w", err)
 	}
 	if uploadData == nil {
-		return s3ErrorResponse("NoSuchUpload", "The specified upload does not exist.", http.StatusNotFound), nil
+		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
 	var upload S3MultipartUpload
 	if err := json.Unmarshal(uploadData, &upload); err != nil {
 		return nil, fmt.Errorf("unmarshal upload metadata: %w", err)
 	}
-
-	type partRef struct {
-		PartNumber int    `xml:"PartNumber"`
-		ETag       string `xml:"ETag"`
-	}
-	type completeReq struct {
-		Parts []partRef `xml:"Part"`
+	if upload.Bucket != bucket || upload.Key != key {
+		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
-	var cReq completeReq
+	var cReq s3CompleteMultipartUploadRequest
 	xmlErr := xml.Unmarshal(req.Body, &cReq)
 	if xmlErr != nil {
-		return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
+		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
 	}
 	if len(cReq.Parts) == 0 {
-		return s3ErrorResponse("InvalidPart", "One or more of the specified parts could not be found.", http.StatusBadRequest), nil
+		// "If you do not supply a valid Part with your request, the service sends
+		// back an HTTP 400 response" — the body parsed, but not into a part list.
+		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil
 	}
 
 	for i := 1; i < len(cReq.Parts); i++ {
 		if cReq.Parts[i].PartNumber <= cReq.Parts[i-1].PartNumber {
-			return s3ErrorResponse("InvalidPartOrder", "The list of parts was not in ascending order.", http.StatusBadRequest), nil
+			return s3ErrorResponse("InvalidPartOrder",
+				"The list of parts was not in ascending order. The parts list must be specified in order by part number.",
+				http.StatusBadRequest), nil
 		}
+	}
+
+	parts, errResp, err := p.validateCompleteParts(ctx, uploadID, cReq.Parts)
+	if err != nil {
+		return nil, err
+	}
+	if errResp != nil {
+		return errResp, nil
 	}
 
 	// Concatenate parts and compute multi-part ETag.
 	var combined []byte
 	var partMD5s []byte
 
-	for _, pr := range cReq.Parts {
-		partKey := fmt.Sprintf("part:%s/%d", uploadID, pr.PartNumber)
-		partData, getErr := p.state.Get(ctx, s3Namespace, partKey)
-		if getErr != nil {
-			return nil, fmt.Errorf("get part %d metadata: %w", pr.PartNumber, getErr)
-		}
-		if partData == nil {
-			return s3ErrorResponse("InvalidPart", fmt.Sprintf("Part %d not found.", pr.PartNumber), http.StatusBadRequest), nil
-		}
-
-		partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, pr.PartNumber)
+	for _, part := range parts {
+		partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, part.PartNumber)
 		partBody, readErr := afero.ReadFile(p.fs, partPath)
 		if readErr != nil {
-			return nil, fmt.Errorf("read part %d body: %w", pr.PartNumber, readErr)
+			return nil, fmt.Errorf("read part %d body: %w", part.PartNumber, readErr)
 		}
 		combined = append(combined, partBody...)
 		h := md5.Sum(partBody) //nolint:gosec // nosemgrep
 		partMD5s = append(partMD5s, h[:]...)
 	}
 
-	numParts := len(cReq.Parts)
+	numParts := len(parts)
 	combinedHash := md5.Sum(partMD5s) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x-%d"`, combinedHash, numParts)
 
@@ -1329,6 +1355,91 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 	})
 }
 
+// validateCompleteParts resolves each part named in a CompleteMultipartUpload
+// request against the parts actually uploaded, and applies the two validations
+// that can only be made once the stored parts are known: the ETag must match, and
+// every part except the highest-numbered one must be at least [s3MinPartSize].
+//
+// It returns the resolved parts in request order on success. A non-nil
+// *AWSResponse is the S3 error to return; a non-nil error is an internal failure.
+// It writes nothing, so a rejected Complete leaves the upload open for the caller
+// to retry or abort — which is the observation a consumer testing its cleanup path
+// depends on.
+//
+// Existence and ETag are checked across all parts before any size check, because
+// the size of a part that was never uploaded is not a meaningful complaint.
+func (p *S3Plugin) validateCompleteParts(ctx context.Context, uploadID string, refs []s3CompletePart) ([]S3Part, *AWSResponse, error) {
+	if len(refs) == 0 {
+		// The caller rejects an empty list as MalformedXML before reaching here;
+		// this keeps the final-part exemption below from indexing an empty slice.
+		return nil, s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil
+	}
+
+	parts := make([]S3Part, 0, len(refs))
+	for _, ref := range refs {
+		partData, err := p.state.Get(ctx, s3Namespace, fmt.Sprintf("part:%s/%d", uploadID, ref.PartNumber))
+		if err != nil {
+			return nil, nil, fmt.Errorf("get part %d metadata: %w", ref.PartNumber, err)
+		}
+		if partData == nil {
+			return nil, s3InvalidPartResponse(), nil
+		}
+		var part S3Part
+		if err := json.Unmarshal(partData, &part); err != nil {
+			return nil, nil, fmt.Errorf("unmarshal part %d metadata: %w", ref.PartNumber, err)
+		}
+		if !s3ETagsEqual(ref.ETag, part.ETag) {
+			return nil, s3InvalidPartResponse(), nil
+		}
+		parts = append(parts, part)
+	}
+
+	// The parts list is already known to be in ascending order, so the final
+	// entry is the highest-numbered part and is exempt from the minimum — as is
+	// a single-part upload, which is nothing but its own final part.
+	for _, part := range parts[:len(parts)-1] {
+		if part.Size >= s3MinPartSize {
+			continue
+		}
+		return nil, s3ErrorResponseWith(s3Error{
+			Code:    "EntityTooSmall",
+			Message: "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
+			Status:  http.StatusBadRequest,
+			Details: []s3ErrorDetail{
+				{Name: "ETag", Value: strings.Trim(part.ETag, `"`)},
+				{Name: "MinSizeAllowed", Value: strconv.Itoa(s3MinPartSize)},
+				{Name: "ProposedSize", Value: strconv.FormatInt(part.Size, 10)},
+				{Name: "PartNumber", Value: strconv.Itoa(part.PartNumber)},
+			},
+		}), nil
+	}
+
+	return parts, nil, nil
+}
+
+// s3InvalidPartResponse builds the 400 InvalidPart response shared by a part that
+// was never uploaded and a part whose supplied ETag does not match the stored
+// one. S3 does not distinguish the two cases, and neither does the message.
+func s3InvalidPartResponse() *AWSResponse {
+	return s3ErrorResponse("InvalidPart",
+		"One or more of the specified parts could not be found. The part might not have been uploaded, "+
+			"or the specified ETag might not have matched the uploaded part's ETag.",
+		http.StatusBadRequest)
+}
+
+// s3ETagsEqual reports whether a client-supplied part ETag matches a stored one,
+// ignoring differences in quoting and hex case. An ETag is an opaque token, but
+// clients vary in whether they echo back the surrounding quotes S3 sends, and
+// rejecting an otherwise-correct ETag over quoting would be a false InvalidPart.
+func s3ETagsEqual(supplied, stored string) bool {
+	normalize := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "W/")
+		return strings.ToLower(strings.Trim(s, `"`))
+	}
+	return normalize(supplied) == normalize(stored)
+}
+
 // abortMultipartUpload handles DELETE /<bucket>/<key>?uploadId=ID.
 func (p *S3Plugin) abortMultipartUpload(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
@@ -1340,7 +1451,7 @@ func (p *S3Plugin) abortMultipartUpload(_ *RequestContext, req *AWSRequest, buck
 		return nil, fmt.Errorf("get upload metadata: %w", err)
 	}
 	if uploadData == nil {
-		return s3ErrorResponse("NoSuchUpload", "The specified upload does not exist.", http.StatusNotFound), nil
+		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
 	var upload S3MultipartUpload
@@ -1348,7 +1459,7 @@ func (p *S3Plugin) abortMultipartUpload(_ *RequestContext, req *AWSRequest, buck
 		return nil, fmt.Errorf("unmarshal upload metadata: %w", err)
 	}
 	if upload.Bucket != bucket || upload.Key != key {
-		return s3ErrorResponse("NoSuchUpload", "The specified upload does not exist.", http.StatusNotFound), nil
+		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
 	_ = p.state.Delete(ctx, s3Namespace, "multipart:"+uploadID)
@@ -2273,7 +2384,7 @@ type s3Tagging struct {
 func (p *S3Plugin) putBucketTagging(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
 	var tagging s3Tagging
 	if err := xml.Unmarshal(req.Body, &tagging); err != nil {
-		return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
+		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
 	}
 	ctx := context.Background()
 	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
@@ -2339,7 +2450,7 @@ func (p *S3Plugin) deleteBucketTagging(_ *RequestContext, _ *AWSRequest, bucket 
 func (p *S3Plugin) putObjectTagging(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	var tagging s3Tagging
 	if err := xml.Unmarshal(req.Body, &tagging); err != nil {
-		return s3ErrorResponse("MalformedXML", "The XML you provided was not well-formed.", http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
+		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
 	}
 	ctx := context.Background()
 	stateKey := "object:" + bucket + "/" + key

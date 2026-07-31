@@ -195,7 +195,7 @@ STS operations are free.
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken |
 | CreateMultipartUpload | |
 | UploadPart | |
-| CompleteMultipartUpload | |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | |
 | GetBucketPolicy | |
@@ -242,6 +242,46 @@ Every range against a zero-byte object is unsatisfiable. A `416` body carries
 without a second round trip. Ranges compose with `versionId`.
 
 Retrieving a specific part by `?partNumber=N` is not implemented.
+
+### Multipart upload validation
+
+`CompleteMultipartUpload` validates the parts list before assembling anything, so
+the failure paths a consumer's retry and cleanup code exists to handle are
+reachable:
+
+| Condition | Result |
+|---|---|
+| A part other than the highest-numbered one is under 5 MB (5,242,880 bytes) | `400 EntityTooSmall` |
+| A referenced part was never uploaded | `400 InvalidPart` |
+| A supplied `ETag` does not match the stored part | `400 InvalidPart` |
+| Part numbers not strictly ascending (including duplicates) | `400 InvalidPartOrder` |
+| No `Part` elements, or a body that does not parse | `400 MalformedXML` |
+| `uploadId` unknown, or already completed or aborted | `404 NoSuchUpload` |
+| `uploadId` valid but for a different bucket or key | `404 NoSuchUpload` |
+
+The final part may be any size, including zero, and a single-part upload is exempt
+from the minimum entirely. Supplied ETags are compared ignoring surrounding quotes,
+hex case, and whitespace, since clients differ on whether they echo back the quotes
+S3 sends.
+
+A rejected `CompleteMultipartUpload` writes nothing: no object appears at the key,
+and the upload stays open — `ListMultipartUploads` still reports it until
+`AbortMultipartUpload` (or a successful Complete) ends it. That makes "no orphan
+upload was left behind" a property a test can assert by observing the emulator.
+
+The `EntityTooSmall` body identifies the offending part:
+
+```xml
+<Error>
+  <Code>EntityTooSmall</Code>
+  <Message>Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.</Message>
+  <RequestId>SUBSTRATE</RequestId>
+  <ETag>b6d81b360a5672d80c27430f39153e2c</ETag>
+  <MinSizeAllowed>5242880</MinSizeAllowed>
+  <ProposedSize>1024</ProposedSize>
+  <PartNumber>1</PartNumber>
+</Error>
+```
 
 ### Betty CFN resource types
 
