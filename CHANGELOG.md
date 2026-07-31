@@ -59,8 +59,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETags are compared ignoring surrounding quotes, hex case, and whitespace, since
   clients differ on whether they echo back the quotes S3 sends and a false
   `InvalidPart` would send a consumer hunting a data bug that does not exist.
+- S3 conditional requests: `If-Match`, `If-None-Match`, `If-Modified-Since` and
+  `If-Unmodified-Since` (#397). All four were previously ignored, which is the worst
+  possible outcome for the pattern they exist to serve: a consumer using
+  `If-None-Match: *` to claim a lock, elect a leader, or refuse to clobber a
+  checkpoint got a `200` every time, so its lost-race branch was unreachable and its
+  tests passed while proving the opposite of the intended invariant.
+  - **Writes.** `PutObject`, `CopyObject` and `CompleteMultipartUpload` evaluate
+    `If-None-Match` and `If-Match` against the current version of the destination
+    key. `If-None-Match: *` is `412 PreconditionFailed` when the key exists;
+    `If-Match` is `412` on an ETag mismatch and `404 NoSuchKey` when the key is
+    absent — not a `412`, since there is no ETag to compare. A delete marker counts
+    as absent for both, per the conditional-writes reference. An `If-None-Match`
+    value other than `*` is rejected rather than ignored, so a header sent to
+    prevent an overwrite can never silently permit one.
+    A rejected write is a no-op: the stored object is byte-identical afterwards, and
+    a rejected `CompleteMultipartUpload` leaves its upload open to be aborted.
+  - **Exactly one winner.** N concurrent `If-None-Match: *` PUTs to one key produce
+    exactly one `200` and N-1 `412`s, as do N concurrent `If-Match` PUTs asserting
+    the same ETag. `StateManager` has no compare-and-swap and `MemoryStateManager`
+    is last-write-wins, so this required a per-key mutex held across the existence
+    check and the write; without it 23 of 32 concurrent writers won. The guarantee
+    is **process-local** — airtight for substrate's single-process topology, but it
+    would not hold across two emulator processes sharing one state backend, and that
+    limit is documented rather than papered over.
+  - **Reads.** `GetObject` and `HeadObject` evaluate all four preconditions
+    *before* the `Range` step, so a failed precondition is reported rather than a
+    partial response served from an entity the caller did not ask for. A matching
+    `If-None-Match` is `304 Not Modified` with no body and the `ETag` echoed; a
+    failed `If-Match` or `If-Unmodified-Since` is `412`. Both combination rules
+    from the `GetObject` reference are implemented: `If-Match` true with
+    `If-Unmodified-Since` false is `200`, and `If-None-Match` false with
+    `If-Modified-Since` true is `304`.
+  - **Copies.** `CopyObject` additionally honors the four `x-amz-copy-source-if-*`
+    headers, which gate reading the source rather than overwriting the destination;
+    both sets may appear on one request and both are checked before anything is
+    written. A failed copy-source condition is always `412`, including where the
+    equivalent GET would be `304`.
+  - ETag comparison ignores quoting, `W/` prefixes, hex case and whitespace, and a
+    comma-separated list matches if any member does. An unparseable date makes its
+    condition inapplicable rather than failed (per RFC 9110), so a client with a
+    broken date formatter never sees a spurious `412`; all three date formats RFC
+    9110 requires a recipient to accept are parsed. An empty header value is a
+    condition that cannot be met, distinct from an absent header.
+  - Not emulated, deliberately: the `409 ConditionalRequestConflict` and the
+    concurrent-delete `404` that real S3 can return, both of which are races against
+    wall-clock timing rather than states a deterministic emulator can reach.
 
 ### Fixed
+- EC2 `Describe*` calls that name a resource ID explicitly now raise
+  `Invalid<Type>.NotFound` when the ID resolves to nothing, and
+  `Invalid<Type>.Malformed` when it is syntactically invalid, instead of
+  returning `200` with an empty list (#391). Covers `DescribeInstances`,
+  `DescribeInstanceStatus`, `DescribeVpcs`, `DescribeSubnets`,
+  `DescribeSecurityGroups`, `DescribeInternetGateways`, `DescribeRouteTables`,
+  `DescribeSnapshots`, `DescribeAddresses` and `DescribeNatGateways`, plus the
+  mutating operations that took an ID and silently succeeded on a missing one:
+  `TerminateInstances`, `StopInstances`, `StartInstances`, `DeleteVpc`,
+  `DeleteSubnet`, `DeleteSecurityGroup`, `DeleteInternetGateway` and
+  `DeleteRouteTable`.
+  This is the "absent vs. filtered" distinction: `DescribeVpcs()` with no
+  arguments legitimately returns `[]`, but naming a VPC ID is an assertion that
+  the ID exists and EC2 answers it with an error. A consumer whose entire
+  network-precondition check is a `try/except ClientError` on
+  `InvalidVpcID.NotFound` had that branch made unreachable — the call succeeded,
+  the guard was skipped, and a test asserting "a deleted VPC is reported clearly"
+  passed while verifying nothing. Status-polling loops reading
+  `Reservations[0]["Instances"][0]` got an `IndexError` in place of the
+  `InvalidInstanceID.NotFound` they handle.
+  AWS's casing is inconsistent across these codes and SDK callers match the
+  literal string, so each pair is spelled out verbatim from the EC2 error
+  reference rather than derived: `InvalidVpcID.NotFound` but
+  `InvalidGroupId.Malformed`; `InvalidGroup.NotFound` with no `Id` at all;
+  `InvalidSnapshot.NotFound` beside `InvalidSnapshotID.Malformed`. EC2 publishes
+  no `Malformed` variant for allocation IDs or NAT gateway IDs, so a malformed ID
+  for those surfaces as the `NotFound` code.
+  Three orderings match EC2 and are covered by tests: syntax is validated before
+  any lookup, so a request naming both a malformed and an absent ID reports
+  `Malformed`; one present plus one absent ID fails the whole call rather than
+  returning the partial set; and an ID excluded by a `Filter` rather than by
+  absence still counts as resolved, so an existing ID plus a non-matching filter
+  returns 200 and an empty set. ID syntax deliberately does not check length —
+  substrate's generators emit 16 hex characters where AWS emits 8 or 17, and AWS
+  still accepts the legacy 8-character form for several resources.
 - Lambda `Invoke` omits `X-Amz-Function-Error` on a successful invocation, and
   returns `X-Amz-Log-Result` only when the caller asked for it with
   `X-Amz-Log-Type: Tail` (#393). Both were sent unconditionally, the former with an
@@ -105,6 +186,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were already correct and are unchanged, and Lambda genuinely does use
   `ResourceNotFoundException` on the wire, so neither service's spelling can be
   inferred from the other.
+  All 25 renamed branches are now asserted by name, across tagging, inline
+  policies, permissions boundaries and instance profiles. Only three had a test
+  before, and a rename with no test asserting the new string is the same silent
+  failure this fix addresses: the response still looks like an error, so a test
+  that checks only the status stays green while the SDK's typed exception never
+  fires.
+  A state-store failure during S3's bucket lookup is also asserted to surface as
+  a server error rather than as `NoSuchBucket`. The two are opposite signals —
+  `NoSuchBucket` tells a caller to stop retrying, a store failure is transient —
+  so collapsing one into the other would send a consumer down a
+  permanent-failure path over a blip.
 - S3 `GetObject` and `HeadObject` report `NoSuchBucket` when the bucket does not
   exist, rather than `NoSuchKey` (#392). Both went straight to the object lookup,
   which conflated two distinct conditions: a caller could not tell "someone

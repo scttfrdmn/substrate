@@ -25,8 +25,22 @@ import (
 // afero filesystem. It returns the server and the filesystem for direct inspection.
 func newS3TestServer(t *testing.T) (*emulator.Server, afero.Fs) {
 	t.Helper()
+	return newS3TestServerWithFS(t, emulator.NewMemoryStateManager())
+}
+
+// newS3TestServerWithState is newS3TestServer with a caller-supplied state
+// store, for tests that need the store to fail. It discards the filesystem,
+// which those tests do not inspect.
+func newS3TestServerWithState(t *testing.T, state emulator.StateManager) *emulator.Server {
+	t.Helper()
+	srv, _ := newS3TestServerWithFS(t, state)
+	return srv
+}
+
+// newS3TestServerWithFS builds the shared S3 test server over state.
+func newS3TestServerWithFS(t *testing.T, state emulator.StateManager) (*emulator.Server, afero.Fs) {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
 	fs := afero.NewMemMapFs()

@@ -1,9 +1,12 @@
 package emulator_test
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"io"
+	"math"
 	"net/http"
 	"testing"
 
@@ -288,4 +291,69 @@ func TestMarshalAWSError_XMLEscapesMessage(t *testing.T) {
 	require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
 	assert.Equal(t, "NoSuchKey", doc.Error.Code)
 	assert.Equal(t, `a<b&c>"d"`, doc.Error.Message)
+}
+
+// errAfterGetsStateManager is a StateManager that serves the first n Get calls
+// normally and then fails every one after. Failing on a later call is what lets
+// a test reach a specific lookup — a store that fails from the first Get never
+// gets past bucket creation.
+type errAfterGetsStateManager struct {
+	inner  emulator.StateManager
+	allow  int
+	getErr error
+	gets   int
+}
+
+func (m *errAfterGetsStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	m.gets++
+	if m.gets > m.allow {
+		return nil, m.getErr
+	}
+	return m.inner.Get(ctx, namespace, key)
+}
+
+func (m *errAfterGetsStateManager) Put(ctx context.Context, namespace, key string, value []byte) error {
+	return m.inner.Put(ctx, namespace, key, value)
+}
+
+func (m *errAfterGetsStateManager) Delete(ctx context.Context, namespace, key string) error {
+	return m.inner.Delete(ctx, namespace, key)
+}
+
+func (m *errAfterGetsStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	return m.inner.List(ctx, namespace, prefix)
+}
+
+// TestS3_StateFailureIsNotReportedAsNoSuchBucket asserts the error return of
+// bucketMissingResponse is propagated rather than collapsed into "the bucket
+// does not exist". The two are opposite signals: NoSuchBucket tells a caller
+// their bucket is gone and to stop retrying, while a store failure is transient
+// and should be retried. Reporting the former for the latter would send a
+// consumer down a permanent-failure path over a blip.
+func TestS3_StateFailureIsNotReportedAsNoSuchBucket(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			state := &errAfterGetsStateManager{
+				inner:  emulator.NewMemoryStateManager(),
+				getErr: errors.New("state store unavailable"),
+				allow:  math.MaxInt, // permissive until the bucket exists
+			}
+			srv := newS3TestServerWithState(t, state)
+
+			w := s3Request(t, srv, http.MethodPut, "/blip-bucket", nil, nil)
+			require.Equal(t, http.StatusOK, w.Code)
+
+			// Every Get from here on fails, so the bucket lookup errors even
+			// though the bucket was written.
+			state.allow = state.gets
+
+			got := s3Request(t, srv, method, "/blip-bucket/some-key", nil, nil)
+			assert.Equal(t, http.StatusInternalServerError, got.Code,
+				"a state-store failure must surface as a server error, not as NoSuchBucket")
+			assert.NotContains(t, got.Body.String(), "NoSuchBucket")
+		})
+	}
 }
