@@ -478,9 +478,21 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		}
 	}
 
-	body := decodeAWSChunked(req.Headers, req.Body)
+	body, trailers := decodeAWSChunkedWithTrailers(req.Headers, req.Body)
 	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
+
+	// The checksum is verified against the decoded body, and before the write
+	// below: a BadDigest must leave the stored object untouched, which is what lets
+	// a consumer assert that a corrupt upload changed nothing.
+	checksumHeaders, trailerErr := checksumHeadersWithTrailers(req.Headers, trailers)
+	if trailerErr != nil {
+		return trailerErr, nil
+	}
+	checksum, cksErr := resolveChecksum(checksumHeaders, body)
+	if cksErr != nil {
+		return cksErr, nil
+	}
 
 	// Directory-marker objects (key ends with "/") must not be written to the
 	// afero filesystem: filepath.Clean inside MemMapFs would strip the trailing
@@ -511,11 +523,15 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		ContentEncoding: req.Headers["Content-Encoding"],
 		Size:            int64(len(body)),
 		StorageClass:    storageClass,
+		Checksum:        checksum,
 		LastModified:    p.tc.Now(),
 		UserMetadata:    userMeta,
 	}
 
 	respHeaders := map[string]string{"ETag": etag}
+	// PutObject echoes the checksum unconditionally — checksum-mode gates the read
+	// path, not the write. A single-part PUT is always a full-object checksum.
+	applyChecksumHeaders(respHeaders, checksum, true)
 
 	// If versioning is enabled, generate a version ID and store the versioned copy.
 	versioningStatus := p.getBucketVersioningStatus(ctx, bucket)
@@ -651,6 +667,7 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	}
 
 	headers := objectResponseHeaders(&obj)
+	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers))
 
 	rangeHeader := headerValueFold(req.Headers, "Range")
 	spec := parseByteRange(rangeHeader, obj.Size)
@@ -715,6 +732,7 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 	}
 
 	headers := objectResponseHeaders(&obj)
+	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers))
 
 	// HEAD honors Range exactly as GET does, minus the body.
 	rangeHeader := headerValueFold(req.Headers, "Range")
@@ -957,6 +975,10 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	if tagErr != nil {
 		return tagErr, nil
 	}
+	copyChecksumAlgorithm, cksErr := resolveCopyChecksumAlgorithm(req.Headers, &srcObj)
+	if cksErr != nil {
+		return cksErr, nil
+	}
 
 	// Source preconditions gate whether the copy may read; destination
 	// preconditions gate whether it may overwrite. Both are checked before any
@@ -1000,6 +1022,13 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	hash := md5.Sum(srcBody) //nolint:gosec // nosemgrep
 	newETag := fmt.Sprintf(`"%x"`, hash)
 
+	// "With a copy command, the checksum of the object is a direct checksum of the
+	// full object. If the object was originally uploaded using a multipart upload,
+	// the checksum value changes even though the data doesn't." So the copy's
+	// checksum is recomputed over the whole body, never carried across — a composite
+	// source yields a full-object destination.
+	dstChecksum := copyChecksum(copyChecksumAlgorithm, srcBody)
+
 	dstObj := S3Object{
 		Bucket:          dstBucket,
 		Key:             dstKey,
@@ -1011,6 +1040,7 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		// x-amz-storage-class header is not used, the copied object will be stored in
 		// the STANDARD Storage Class by default."
 		StorageClass: dstStorageClass,
+		Checksum:     dstChecksum,
 		LastModified: now,
 		UserMetadata: meta.UserMetadata,
 		Tags:         tags,
@@ -1250,6 +1280,13 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		return scErr, nil
 	}
 
+	// The checksum algorithm and type are fixed here too, and validated against the
+	// documented support matrix now rather than after every part has been uploaded.
+	checksumAlgorithm, checksumType, cksErr := resolveUploadChecksum(req.Headers)
+	if cksErr != nil {
+		return cksErr, nil
+	}
+
 	uploadID := generateUploadID()
 
 	contentType := req.Headers["Content-Type"]
@@ -1258,13 +1295,15 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 	}
 
 	upload := S3MultipartUpload{
-		UploadID:     uploadID,
-		Bucket:       bucket,
-		Key:          key,
-		ContentType:  contentType,
-		StorageClass: storageClass,
-		Initiated:    p.tc.Now(),
-		UserMetadata: extractUserMetadata(req.Headers),
+		UploadID:          uploadID,
+		Bucket:            bucket,
+		Key:               key,
+		ContentType:       contentType,
+		StorageClass:      storageClass,
+		ChecksumAlgorithm: checksumAlgorithm,
+		ChecksumType:      checksumType,
+		Initiated:         p.tc.Now(),
+		UserMetadata:      extractUserMetadata(req.Headers),
 	}
 
 	data, err := json.Marshal(upload)
@@ -1281,11 +1320,21 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		Key      string   `xml:"Key"`
 		UploadId string   `xml:"UploadId"` //nolint:revive // matches AWS XML field name
 	}
-	return s3XMLResponse(http.StatusOK, initiateMultipartUploadResult{
+	resp, err := s3XMLResponse(http.StatusOK, initiateMultipartUploadResult{
 		Bucket:   bucket,
 		Key:      key,
 		UploadId: uploadID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Both are echoed as response headers, so a caller can confirm the type it got
+	// is the type it asked for before uploading a single part.
+	if checksumAlgorithm != "" {
+		resp.Headers["x-amz-checksum-algorithm"] = checksumAlgorithm
+		resp.Headers["x-amz-checksum-type"] = checksumType
+	}
+	return resp, nil
 }
 
 // uploadPart handles PUT /<bucket>/<key>?partNumber=N&uploadId=ID.
@@ -1316,9 +1365,20 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
-	body := decodeAWSChunked(req.Headers, req.Body)
+	body, trailers := decodeAWSChunkedWithTrailers(req.Headers, req.Body)
 	hash := md5.Sum(body) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x"`, hash)
+
+	// Verified before the part is written, so a BadDigest part is not left on disk
+	// for a later Complete to pick up.
+	checksumHeaders, trailerErr := checksumHeadersWithTrailers(req.Headers, trailers)
+	if trailerErr != nil {
+		return trailerErr, nil
+	}
+	checksum, cksErr := resolvePartChecksum(checksumHeaders, body, upload.ChecksumAlgorithm)
+	if cksErr != nil {
+		return cksErr, nil
+	}
 
 	partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, partNum)
 	if mkdirErr := p.fs.MkdirAll(filepath.Dir(partPath), 0o755); mkdirErr != nil {
@@ -1332,6 +1392,7 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		PartNumber:   partNum,
 		ETag:         etag,
 		Size:         int64(len(body)),
+		Checksum:     checksum,
 		LastModified: p.tc.Now(),
 	}
 	partData, err := json.Marshal(part)
@@ -1342,9 +1403,16 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return nil, fmt.Errorf("save part metadata: %w", err)
 	}
 
+	respHeaders := map[string]string{"ETag": etag}
+	// UploadPart echoes the part's checksum so the caller can carry it into the
+	// <Part> entries of its Complete request, as the SDKs do.
+	if checksum.present() {
+		respHeaders[s3ChecksumHeaderOf(checksum.Algorithm)] = checksum.Value
+	}
+
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
-		Headers:    map[string]string{"ETag": etag},
+		Headers:    respHeaders,
 	}, nil
 }
 
@@ -1440,6 +1508,7 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 	// Concatenate parts and compute multi-part ETag.
 	var combined []byte
 	var partMD5s []byte
+	partBodies := make([][]byte, 0, len(parts))
 
 	for _, part := range parts {
 		partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, part.PartNumber)
@@ -1448,6 +1517,7 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 			return nil, fmt.Errorf("read part %d body: %w", part.PartNumber, readErr)
 		}
 		combined = append(combined, partBody...)
+		partBodies = append(partBodies, partBody)
 		h := md5.Sum(partBody) //nolint:gosec // nosemgrep
 		partMD5s = append(partMD5s, h[:]...)
 	}
@@ -1455,6 +1525,18 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 	numParts := len(parts)
 	combinedHash := md5.Sum(partMD5s) //nolint:gosec // nosemgrep
 	etag := fmt.Sprintf(`"%x-%d"`, combinedHash, numParts)
+
+	// The object checksum is derived the same way the ETag above is — from the part
+	// digests for a COMPOSITE upload, or from every byte for a FULL_OBJECT one — and
+	// any value the caller supplied is verified against it before anything is
+	// written.
+	checksum, cksErr := assembleObjectChecksum(upload.ChecksumAlgorithm, upload.ChecksumType, combined, partBodies)
+	if cksErr != nil {
+		return cksErr, nil
+	}
+	if resp := verifyCompleteChecksum(req.Headers, checksum); resp != nil {
+		return resp, nil
+	}
 
 	filePath := "/" + bucket + "/" + key
 	if mkdirErr := p.fs.MkdirAll(filepath.Dir(filePath), 0o755); mkdirErr != nil {
@@ -1471,6 +1553,7 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		ContentType:  upload.ContentType,
 		Size:         int64(len(combined)),
 		StorageClass: upload.StorageClass,
+		Checksum:     checksum,
 		LastModified: p.tc.Now(),
 		UserMetadata: upload.UserMetadata,
 	}
@@ -1489,18 +1572,24 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		_ = p.fs.Remove(fmt.Sprintf("/.multipart/%s/%d", uploadID, pr.PartNumber))
 	}
 
+	// Unlike every other checksum-bearing operation, Complete returns the checksum as
+	// XML elements in its result body rather than as response headers.
 	type completeMultipartUploadResult struct {
-		XMLName  xml.Name `xml:"CompleteMultipartUploadResult"`
-		Location string   `xml:"Location"`
-		Bucket   string   `xml:"Bucket"`
-		Key      string   `xml:"Key"`
-		ETag     string   `xml:"ETag"`
+		XMLName      xml.Name        `xml:"CompleteMultipartUploadResult"`
+		Location     string          `xml:"Location"`
+		Bucket       string          `xml:"Bucket"`
+		Key          string          `xml:"Key"`
+		ETag         string          `xml:"ETag"`
+		Checksum     []s3ChecksumXML `xml:",any"`
+		ChecksumType string          `xml:"ChecksumType,omitempty"`
 	}
 	return s3XMLResponse(http.StatusOK, completeMultipartUploadResult{
-		Location: "https://s3.amazonaws.com/" + bucket + "/" + key,
-		Bucket:   bucket,
-		Key:      key,
-		ETag:     etag,
+		Location:     "https://s3.amazonaws.com/" + bucket + "/" + key,
+		Bucket:       bucket,
+		Key:          key,
+		ETag:         etag,
+		Checksum:     checksumXMLElements(checksum),
+		ChecksumType: checksum.Type,
 	})
 }
 
@@ -1788,16 +1877,43 @@ func isAWSChunked(headers map[string]string) bool {
 }
 
 // decodeAWSChunked decodes a SigV4 streaming (aws-chunked) request body into the
-// raw object content, stripping the per-chunk "<hex-size>;chunk-signature=...\r\n"
-// framing and trailing checksum trailers. Non-chunked bodies (and anything that
-// fails to parse as aws-chunked) are returned unchanged, so this is a safe no-op
-// for CLI-style standard HTTP chunking, which net/http has already de-framed.
+// raw object content, discarding any trailers. Callers that need the trailing
+// checksum a real SDK appends must use [decodeAWSChunkedWithTrailers].
+func decodeAWSChunked(headers map[string]string, body []byte) []byte {
+	decoded, _ := decodeAWSChunkedWithTrailers(headers, body)
+	return decoded
+}
+
+// decodeAWSChunkedWithTrailers decodes a SigV4 streaming (aws-chunked) request body
+// into the raw object content, stripping the per-chunk
+// "<hex-size>;chunk-signature=...\r\n" framing, and returns the trailing headers
+// that followed the completion chunk. Non-chunked bodies (and anything that fails
+// to parse as aws-chunked) are returned unchanged with no trailers, so this is a
+// safe no-op for CLI-style standard HTTP chunking, which net/http has already
+// de-framed.
 //
 // Format per chunk: "<hex-len>[;chunk-signature=<sig>]\r\n<len bytes>\r\n",
-// terminated by a zero-length chunk optionally followed by trailer headers.
-func decodeAWSChunked(headers map[string]string, body []byte) []byte {
+// terminated by a zero-length completion chunk optionally followed by trailers.
+//
+// The trailers are where the AWS SDKs put the checksum of a streamed upload:
+// "if trailing checksums exist (where AWS SDKs append checksums to the encoded
+// request bodies), the x-amz-trailer header value includes the x-amz-checksum-
+// prefix and ends with the algorithm name". Discarding them, as this function's
+// predecessor did, would mean checksum verification silently never fired for any
+// real SDK upload — a mock that accepts every checksum, which is worse than one
+// that offers none.
+//
+// Trailer chunk format, per the S3 user guide:
+//
+//	x-amz-checksum-<lowercase-algorithm>:<base64-value>\n\r\n\r\n
+//
+// with a trailer signature line following the value when the payload is
+// SigV4-signed. Header names are returned lowercased; the trailing "\n" the guide
+// notes as optional ("the usage of the linefeed \n at the end of the checksum value
+// might vary across clients") is trimmed from the value.
+func decodeAWSChunkedWithTrailers(headers map[string]string, body []byte) ([]byte, map[string]string) {
 	if len(body) == 0 || !isAWSChunked(headers) {
-		return body
+		return body, nil
 	}
 
 	var out []byte
@@ -1807,7 +1923,7 @@ func decodeAWSChunked(headers map[string]string, body []byte) []byte {
 		nl := indexCRLF(rest)
 		if nl < 0 {
 			// No framing found — not actually aws-chunked; return original.
-			return body
+			return body, nil
 		}
 		sizeLine := string(rest[:nl])
 		advance := nl + crlfLen(rest, nl)
@@ -1819,14 +1935,14 @@ func decodeAWSChunked(headers map[string]string, body []byte) []byte {
 		}
 		size, err := strconv.ParseInt(strings.TrimSpace(hexPart), 16, 64)
 		if err != nil {
-			return body // malformed → fall back to raw
+			return body, nil // malformed → fall back to raw
 		}
 		rest = rest[advance:]
 		if size == 0 {
-			break // final chunk; trailers (if any) follow and are ignored
+			break // completion chunk; whatever follows is trailers
 		}
 		if int64(len(rest)) < size {
-			return body // truncated → fall back to raw
+			return body, nil // truncated → fall back to raw
 		}
 		out = append(out, rest[:size]...)
 		rest = rest[size:]
@@ -1842,7 +1958,83 @@ func decodeAWSChunked(headers map[string]string, body []byte) []byte {
 			out = out[:n]
 		}
 	}
-	return out
+	return out, parseChunkedTrailers(rest)
+}
+
+// parseChunkedTrailers reads the "<name>:<value>" lines that follow an aws-chunked
+// completion chunk, returning them keyed by lowercased name.
+//
+// Lines without a colon are skipped rather than treated as malformed: a
+// SigV4-signed request appends a bare trailer-signature line after the trailer, and
+// the body ends with a final CRLF. Returns nil when there is nothing to report, so
+// callers can distinguish "no trailers" from "an empty trailer".
+func parseChunkedTrailers(rest []byte) map[string]string {
+	var trailers map[string]string
+	for len(rest) > 0 {
+		nl := indexCRLF(rest)
+		var line string
+		if nl < 0 {
+			line, rest = string(rest), nil
+		} else {
+			line, rest = string(rest[:nl]), rest[nl+crlfLen(rest, nl):]
+		}
+
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue // blank line, or a trailer signature
+		}
+		name := strings.ToLower(strings.TrimSpace(line[:colon]))
+		if name == "" {
+			continue
+		}
+		if trailers == nil {
+			trailers = make(map[string]string)
+		}
+		// Trim the optional linefeed the guide documents at the end of the value.
+		trailers[name] = strings.Trim(strings.TrimSpace(line[colon+1:]), "\n")
+	}
+	return trailers
+}
+
+// checksumHeadersWithTrailers returns the header set to resolve a write's checksum
+// from: the request headers, plus any x-amz-checksum-* trailer the streamed body
+// carried.
+//
+// A trailer is only honored when the request's x-amz-trailer header named it:
+// "the header name field for an upload request must match the value passed into the
+// x-amz-trailer request header. For example, if a request contains
+// x-amz-trailer: x-amz-checksum-crc32 and the trailer chunk has the header name
+// x-amz-checksum-sha1, the request fails." A mismatch is reported so the caller
+// does not get a silent success on a checksum nothing agreed on.
+//
+// The returned map is a copy when a trailer applies, so the request's own headers
+// are never mutated.
+func checksumHeadersWithTrailers(headers, trailers map[string]string) (map[string]string, *AWSResponse) {
+	declared := strings.ToLower(strings.TrimSpace(headerValueFold(headers, "x-amz-trailer")))
+	if declared == "" {
+		return headers, nil
+	}
+	if !strings.HasPrefix(declared, s3ChecksumHeaderPrefix) {
+		// Some other trailer (not a checksum) — nothing to verify against.
+		return headers, nil
+	}
+
+	value, ok := trailers[declared]
+	if !ok {
+		return nil, s3ErrorResponseWith(s3Error{
+			Code:    "MalformedTrailerError",
+			Message: "The request contained trailing data that was not well-formed or did not conform to our published schema.",
+			Status:  http.StatusBadRequest,
+			Details: []s3ErrorDetail{{Name: "TrailerHeader", Value: declared}},
+		})
+	}
+
+	merged := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		merged[k] = v
+	}
+	merged[declared] = value
+	return merged, nil
 }
 
 // indexCRLF returns the index of the first \r\n or \n in b, or -1 if neither.
