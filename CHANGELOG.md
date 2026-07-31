@@ -48,6 +48,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETags are compared ignoring surrounding quotes, hex case, and whitespace, since
   clients differ on whether they echo back the quotes S3 sends and a false
   `InvalidPart` would send a consumer hunting a data bug that does not exist.
+- S3 conditional requests: `If-Match`, `If-None-Match`, `If-Modified-Since` and
+  `If-Unmodified-Since` (#397). All four were previously ignored, which is the worst
+  possible outcome for the pattern they exist to serve: a consumer using
+  `If-None-Match: *` to claim a lock, elect a leader, or refuse to clobber a
+  checkpoint got a `200` every time, so its lost-race branch was unreachable and its
+  tests passed while proving the opposite of the intended invariant.
+  - **Writes.** `PutObject`, `CopyObject` and `CompleteMultipartUpload` evaluate
+    `If-None-Match` and `If-Match` against the current version of the destination
+    key. `If-None-Match: *` is `412 PreconditionFailed` when the key exists;
+    `If-Match` is `412` on an ETag mismatch and `404 NoSuchKey` when the key is
+    absent — not a `412`, since there is no ETag to compare. A delete marker counts
+    as absent for both, per the conditional-writes reference. An `If-None-Match`
+    value other than `*` is rejected rather than ignored, so a header sent to
+    prevent an overwrite can never silently permit one.
+    A rejected write is a no-op: the stored object is byte-identical afterwards, and
+    a rejected `CompleteMultipartUpload` leaves its upload open to be aborted.
+  - **Exactly one winner.** N concurrent `If-None-Match: *` PUTs to one key produce
+    exactly one `200` and N-1 `412`s, as do N concurrent `If-Match` PUTs asserting
+    the same ETag. `StateManager` has no compare-and-swap and `MemoryStateManager`
+    is last-write-wins, so this required a per-key mutex held across the existence
+    check and the write; without it 23 of 32 concurrent writers won. The guarantee
+    is **process-local** — airtight for substrate's single-process topology, but it
+    would not hold across two emulator processes sharing one state backend, and that
+    limit is documented rather than papered over.
+  - **Reads.** `GetObject` and `HeadObject` evaluate all four preconditions
+    *before* the `Range` step, so a failed precondition is reported rather than a
+    partial response served from an entity the caller did not ask for. A matching
+    `If-None-Match` is `304 Not Modified` with no body and the `ETag` echoed; a
+    failed `If-Match` or `If-Unmodified-Since` is `412`. Both combination rules
+    from the `GetObject` reference are implemented: `If-Match` true with
+    `If-Unmodified-Since` false is `200`, and `If-None-Match` false with
+    `If-Modified-Since` true is `304`.
+  - **Copies.** `CopyObject` additionally honors the four `x-amz-copy-source-if-*`
+    headers, which gate reading the source rather than overwriting the destination;
+    both sets may appear on one request and both are checked before anything is
+    written. A failed copy-source condition is always `412`, including where the
+    equivalent GET would be `304`.
+  - ETag comparison ignores quoting, `W/` prefixes, hex case and whitespace, and a
+    comma-separated list matches if any member does. An unparseable date makes its
+    condition inapplicable rather than failed (per RFC 9110), so a client with a
+    broken date formatter never sees a spurious `412`; all three date formats RFC
+    9110 requires a recipient to accept are parsed. An empty header value is a
+    condition that cannot be met, distinct from an absent header.
+  - Not emulated, deliberately: the `409 ConditionalRequestConflict` and the
+    concurrent-delete `404` that real S3 can return, both of which are races against
+    wall-clock timing rather than states a deterministic emulator can reach.
 
 ### Fixed
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
