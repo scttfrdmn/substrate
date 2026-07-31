@@ -94,6 +94,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Not emulated, deliberately: the `409 ConditionalRequestConflict` and the
     concurrent-delete `404` that real S3 can return, both of which are races against
     wall-clock timing rather than states a deterministic emulator can reach.
+- S3 storage classes, `InvalidObjectState`, and `CopyObject` metadata directives
+  (#398). `x-amz-storage-class` had been discarded on every write and reported
+  nowhere, so a consumer implementing lifecycle transitions could not observe the
+  one thing a transition changes — and the classes whose objects real S3 refuses to
+  serve looked exactly like the ones it serves instantly.
+  - **Recorded and reported.** `PutObject`, `CopyObject` and
+    `CreateMultipartUpload` accept `x-amz-storage-class`, defaulting to `STANDARD`
+    when absent. All thirteen documented values are accepted, including the
+    Outposts, Snow, Express One Zone and FSx tiers — rejecting a value real S3
+    takes is the same class of defect as accepting one it rejects. Anything else is
+    `400 InvalidStorageClass`, raised before the write, so a rejected class leaves
+    no object behind. The class is reported as `x-amz-storage-class` on
+    `GetObject`/`HeadObject` — **omitted for `STANDARD`**, per the response-header
+    reference — and as `<StorageClass>` in `ListObjects`, `ListObjectsV2`,
+    `ListObjectVersions` and `ListMultipartUploads`, where unlike the header it is
+    emitted for every class including `STANDARD`. A `<DeleteMarker>` carries none,
+    matching S3's response shape. A class set at `CreateMultipartUpload` survives
+    to the object `CompleteMultipartUpload` assembles.
+  - **Archived objects are unreadable.** `GetObject` of a `GLACIER` or
+    `DEEP_ARCHIVE` object is `403 InvalidObjectState`, as is a `CopyObject` naming
+    one as its source. The check precedes the `Range` step, so a ranged read of an
+    archived object is the same `403` rather than a `206`. `GLACIER_IR` reads
+    normally: it is the instant-retrieval tier, and conflating it with the archival
+    classes would make a consumer's restore path fire where real S3 never would.
+  - **`HeadObject` of an archived object is `200`, not `403`** — a deliberate
+    departure from the issue as filed. The `HeadObject` reference documents no
+    `InvalidObjectState` and states that "even if the object is stored in S3
+    Glacier, all object metadata is still available", which is what makes `HEAD`
+    the way a consumer discovers that a `GET` needs a restore first. `GetObject`'s
+    reference does list the error. Emulating a `403` on `HEAD` would have made a
+    test pass against substrate and fail against AWS.
+  - **`CopyObject` metadata directives.** `x-amz-metadata-directive` and
+    `x-amz-tagging-directive` are both honored, both defaulting to `COPY`, and an
+    unrecognized value on either is `400 InvalidArgument` rather than a silent fall
+    back to the default. Under `COPY` the destination takes the source's
+    `Content-Type`, `Content-Encoding`, user metadata and tags, and headers
+    restated on the request are ignored; under `REPLACE` it takes only what the
+    request supplies and drops the rest. `Content-Encoding` had previously been
+    dropped on every copy regardless of directive, so a copy of a gzipped object
+    produced one a client would hand to the application still compressed.
+  - **The storage class is never inherited from the source**, per "if the
+    `x-amz-storage-class` header is not used, the copied object will be stored in
+    the `STANDARD` Storage Class by default" — so an unqualified copy of a
+    `STANDARD_IA` object yields a `STANDARD` one. This is what makes an in-place
+    `CopyObject` with a new class the tier-transition mechanism, and also the trap:
+    a transition using `REPLACE` must restate the metadata it means to keep.
+  - `RestoreObject`, the `x-amz-restore` header and Intelligent-Tiering archive
+    access tiers are not implemented, so an archived object stays unreadable for
+    the run; restoring is modeled by copying to a non-archival class.
 
 ### Fixed
 - EC2 `Describe*` calls that name a resource ID explicitly now raise
@@ -138,11 +187,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone — it had to issue a GET and download the body to find out.
 - S3 `GetObject` and `HeadObject` now advertise `Accept-Ranges: bytes`, as real
   S3 does on both (#396).
+- S3 `CopyObject` no longer discards the source object's `Content-Encoding` and
+  object tags (#398). Both are user-controlled metadata that a default (`COPY`)
+  copy preserves on real S3, so a copy of a gzipped object produced one whose body
+  a client would hand to the application still compressed, and a copy silently lost
+  the tags any cost-allocation or lifecycle rule keyed on. The destination's
+  metadata map is also no longer aliased to the source's, so retagging one object
+  no longer mutates the other.
 
 ### Changed
 - The S3 error-response builder can now carry error-specific child elements and
   response headers (#396), which the `InvalidRange` body needs and which
-  `EntityTooSmall` (#400) now uses and `StorageClass` (#398) will need. Its
+  `EntityTooSmall` (#400) and the `CopyObject` directive errors (#398) now use. Its
   `extras ...string` parameter had been an unused stub with no call sites; it is
   replaced by an explicit `s3Error` options struct, and `s3DeleteMarkerResponse`
   now shares the same builder instead of re-declaring its own XML type.
