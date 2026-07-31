@@ -516,6 +516,57 @@ func (p *LambdaPlugin) listFunctions(_ *RequestContext, req *AWSRequest) (*AWSRe
 	return lambdaJSONResponse(http.StatusOK, response{Functions: functions, NextMarker: nextMarker})
 }
 
+// Valid X-Amz-Function-Error header values. "Handled" is an exception the runtime
+// caught and reported; "Unhandled" is a process that died without responding
+// (timeout, out-of-memory, an early exit).
+const (
+	lambdaFunctionErrorHandled   = "Handled"
+	lambdaFunctionErrorUnhandled = "Unhandled"
+)
+
+// invokeResponse assembles an Invoke response. Per the Invoke API reference,
+// X-Amz-Function-Error is present *only* when the function errored ("If present,
+// indicates that an error occurred"), and X-Amz-Log-Result only when the caller
+// asked for it with X-Amz-Log-Type: Tail. Emitting either unconditionally makes a
+// successful invoke indistinguishable from a failed one for the natural
+// `if "FunctionError" in response` check, which inverts against real AWS (#393).
+func invokeResponse(body []byte, functionError, logTail string) *AWSResponse {
+	headers := map[string]string{
+		"Content-Type":           "application/json",
+		"X-Amz-Executed-Version": "$LATEST",
+	}
+	if functionError != "" {
+		headers["X-Amz-Function-Error"] = functionError
+	}
+	if logTail != "" {
+		headers["X-Amz-Log-Result"] = base64.StdEncoding.EncodeToString([]byte(logTail))
+	}
+	return &AWSResponse{StatusCode: http.StatusOK, Headers: headers, Body: body}
+}
+
+// lambdaLogTail returns the execution log to report, or "" when the caller did
+// not request one. LogType is a header (X-Amz-Log-Type) whose only log-producing
+// value is "Tail"; "None" and absence both mean no log.
+//
+// The log is synthesized from the invocation's observable facts — substrate does
+// not run the handler, so it has no handler output to report. It carries the
+// START/END/REPORT lines the runtime emits, which is what a caller parsing
+// LogResult for a request ID or a duration reads.
+func lambdaLogTail(req *AWSRequest, fn LambdaFunction, requestID string, errored bool) string {
+	if !strings.EqualFold(headerValueFold(req.Headers, "X-Amz-Log-Type"), "Tail") {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "START RequestId: %s Version: $LATEST\n", requestID)
+	if errored {
+		fmt.Fprintf(&b, "[ERROR] Invocation failed\n")
+	}
+	fmt.Fprintf(&b, "END RequestId: %s\n", requestID)
+	fmt.Fprintf(&b, "REPORT RequestId: %s\tDuration: 0.00 ms\tBilled Duration: 1 ms\tMemory Size: %d MB\tMax Memory Used: %d MB\n",
+		requestID, fn.MemorySize, fn.MemorySize)
+	return b.String()
+}
+
 func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
 	fn, err := p.loadFunction(name)
 	if err != nil {
@@ -524,35 +575,30 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 
 	payload := req.Body
 
+	// A seeded failure short-circuits every path below: substrate never runs the
+	// handler, so seeding is the only way a caller's error branch becomes
+	// reachable. The status stays 200 — per the Invoke reference, "the status code
+	// in the API response doesn't reflect function errors".
+	seed, seedErr := p.resolveSeededError(fn.FunctionName)
+	if seedErr != nil {
+		return nil, seedErr
+	}
+	if seed != nil {
+		body := seed.errorPayload(ctx.RequestID)
+		return invokeResponse(body, seed.functionErrorHeader(),
+			lambdaLogTail(req, fn, ctx.RequestID, true)), nil
+	}
+
 	// Stub path: no executor or Docker unavailable.
 	if p.executor == nil || !p.executor.isDockerAvailable() {
-		stubPayload := `{"statusCode":200,"body":"null"}`
-		encoded := base64.StdEncoding.EncodeToString([]byte(stubPayload))
-		return &AWSResponse{
-			StatusCode: http.StatusOK,
-			Headers: map[string]string{
-				"Content-Type":           "application/json",
-				"X-Amz-Function-Error":   "",
-				"X-Amz-Executed-Version": "$LATEST",
-				"X-Amz-Log-Result":       encoded,
-			},
-			Body: []byte(stubPayload),
-		}, nil
+		stubPayload := []byte(`{"statusCode":200,"body":"null"}`)
+		return invokeResponse(stubPayload, "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
 	}
 
 	// Recorded replay: return cached result when available.
 	if p.executor.cfg.ReplayMode == "recorded" {
 		if cached, ok := p.loadReplay(fn.FunctionArn, payload); ok {
-			encoded := base64.StdEncoding.EncodeToString(cached)
-			return &AWSResponse{
-				StatusCode: http.StatusOK,
-				Headers: map[string]string{
-					"Content-Type":           "application/json",
-					"X-Amz-Executed-Version": "$LATEST",
-					"X-Amz-Log-Result":       encoded,
-				},
-				Body: cached,
-			}, nil
+			return invokeResponse(cached, "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
 		}
 	}
 
@@ -562,7 +608,7 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 		zipBytes, _ = p.state.Get(context.Background(), lambdaNamespace, "function_zip:"+name)
 	}
 
-	result, execErr := p.executor.Execute(context.Background(), fn, zipBytes, payload)
+	result, funcErr, execErr := p.executor.Execute(context.Background(), fn, zipBytes, payload)
 	if execErr != nil {
 		return nil, fmt.Errorf("lambda invoke execute: %w", execErr)
 	}
@@ -570,17 +616,7 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 	// Cache result for future "recorded" replays.
 	p.saveReplay(fn.FunctionArn, payload, result)
 
-	encoded := base64.StdEncoding.EncodeToString(result)
-	return &AWSResponse{
-		StatusCode: http.StatusOK,
-		Headers: map[string]string{
-			"Content-Type":           "application/json",
-			"X-Amz-Function-Error":   "",
-			"X-Amz-Executed-Version": "$LATEST",
-			"X-Amz-Log-Result":       encoded,
-		},
-		Body: result,
-	}, nil
+	return invokeResponse(result, funcErr, lambdaLogTail(req, fn, ctx.RequestID, funcErr != "")), nil
 }
 
 func (p *LambdaPlugin) invokeAsync(_ string) (*AWSResponse, error) {

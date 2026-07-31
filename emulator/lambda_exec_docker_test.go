@@ -35,10 +35,15 @@ func TestLambdaExecutor_GracefulDegradation_WithDocker(t *testing.T) {
 		ImageURI:     "substrate-test-nonexistent-image-abc123:latest",
 	}
 
-	result, err := exec.Execute(t.Context(), fn, nil, []byte(`{}`))
+	result, funcErr, err := exec.Execute(t.Context(), fn, nil, []byte(`{}`))
 	// Execute must not return an error; it degrades gracefully to the stub.
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
+	}
+	// A container that failed to start is an infrastructure failure, not a
+	// handler error, so it must not be reported as one.
+	if funcErr != "" {
+		t.Errorf("functionError = %q; want empty", funcErr)
 	}
 	want := `{"statusCode":200,"body":"null"}`
 	if string(result) != want {
