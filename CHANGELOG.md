@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New `pricing` plugin emulating the AWS Price List Query API — `GetProducts`,
+  `DescribeServices` and `GetAttributeValues` — over `api.pricing.{region}` and
+  `X-Amz-Target: AWSPriceListService.{Op}` (#401). This is the *server* side of
+  pricing, for consumers that query AWS rates at runtime; it is the inverse of
+  Substrate's existing cost-tracking provider, which consumes the public offer
+  index to price simulated usage.
+  The offer corpus is seven Amazon S3 SKUs copied verbatim from the live
+  `AmazonS3/current/us-east-1` offer file, kept small on purpose: each SKU
+  reproduces a response shape callers get wrong. `PriceList` elements are JSON
+  documents encoded as *strings*, not objects. `pricePerUnit`, `beginRange` and
+  `endRange` are strings with trailing zeros, never numbers. `productFamily` is
+  absent from most products — 315 of the 381 in the real file omit it — so a
+  filter on it misses the majority of SKUs, while `usagetype` reaches every one.
+  `TimedStorage-ByteHrs` carries three `priceDimensions`, the last with
+  `"endRange": "Inf"`, so a parser reading only the first reports the
+  first-50 TB rate as the only rate.
+  Two of those shapes are the reporter's own bugs, now reproducible: their static
+  table had `Requests-Tier1` 10× low (it is `"0.0000050000"` per request — $0.005
+  per 1,000, with `unit: Requests`, so dividing by 1,000 again is a 1,000× error),
+  and filtering `productFamily=Storage` with `volumeType="Glacier Deep Archive"`
+  returns *only* `TimedStorage-GDA-Staging` at $0.021/GB-Mo — 21× the $0.00099
+  archive rate. No `TimedStorage-GDA-ByteHrs` SKU exists in the S3 offer file at
+  all, so that filter cannot return the rate a caller expects; the nearest
+  $0.00099 SKU is Intelligent-Tiering's `TimedStorage-INT-DAA-ByteHrs`.
+  `Filter.Type` supports the full documented enum — `TERM_MATCH`, `EQUALS`,
+  `CONTAINS`, `ANY_OF`, `NONE_OF` — not just `TERM_MATCH`. `MaxResults` bounds are
+  per-operation (1–100 for `GetProducts`/`DescribeServices`, 1–**10000** for
+  `GetAttributeValues`), out-of-range values are `InvalidParameterException`
+  rather than a silent clamp, and an unknown `ServiceCode` is `NotFoundException`
+  rather than an empty `PriceList` that would read as "AWS has no such price".
+- Price List failures are seedable via `POST`/`DELETE
+  /v1/pricing/query-failures`, keyed by operation or the `"*"` wildcard (#401).
+  Pricing is the kind of dependency whose failure should degrade a caller rather
+  than stop it, and that property is only testable if the failure can be produced
+  on demand — otherwise the fallback branch is unreachable and a green suite says
+  nothing about it. The seed endpoint rejects any code outside the seven the Price
+  List API documents, because a typo'd code would seed an error no SDK catch
+  branch matches: the fallback path would go untested while the seed appeared to
+  work.
 - S3 `GetObject` and `HeadObject` honor a single-range `Range` header (#396),
   returning `206 Partial Content` with `Content-Range` and a `Content-Length`
   equal to the range served. `docs/services.md` had claimed "Supports Range
@@ -60,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   masquerading as a region from a real one. An unrecognized layout now yields
   no region, which routes the request through the fallbacks that already
   existed — the SigV4 credential scope, then the default region.
+- The *service* parsed from a `Host` header now handles the `api.<service>.<region>`
+  layout too (#401). `api.pricing.us-east-1.amazonaws.com` had resolved to a
+  service literally named `api`, so the request could not route to any plugin; the
+  same was true of `api.ecr.*` and `api.sagemaker.*`, which had been reachable
+  only via their `X-Amz-Target` namespace.
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
   `MalformedXML` message text rather than abbreviated paraphrases (#400).
 - S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,

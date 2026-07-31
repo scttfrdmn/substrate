@@ -283,6 +283,8 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/pricing/credits", s.handlePricingAddCredit)
 	r.Get("/v1/pricing/credits", s.handlePricingListCredits)
 	r.Delete("/v1/pricing/credits/{id}", s.handlePricingRemoveCredit)
+	r.Post("/v1/pricing/query-failures", s.handlePricingSeedQueryFailure)
+	r.Delete("/v1/pricing/query-failures", s.handlePricingClearQueryFailures)
 
 	// Health control-plane endpoints.
 	r.Post("/v1/health/events", s.handleHealthSeedEvents)

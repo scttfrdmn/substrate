@@ -420,6 +420,15 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(healthPlugin)
 
+	priceListPlugin := &PriceListPlugin{}
+	if err := priceListPlugin.Initialize(ctx, PluginConfig{
+		State:  state,
+		Logger: logger,
+	}); err != nil {
+		return fmt.Errorf("initialize pricing plugin: %w", err)
+	}
+	registry.Register(priceListPlugin)
+
 	orgsPlugin := &OrganizationsPlugin{}
 	if err := orgsPlugin.Initialize(ctx, PluginConfig{
 		State:   state,
