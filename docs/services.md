@@ -187,18 +187,18 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; conditional writes — see [Conditional requests](#conditional-requests) |
-| GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests) |
-| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests) |
+| PutObject | Supports Content-Type, metadata headers; `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests) |
+| GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes) |
+| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes) |
 | DeleteObject | Fires S3 notifications if configured |
-| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests) |
-| ListObjects | |
-| ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken |
-| CreateMultipartUpload | |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects) |
+| ListObjects | Emits `<StorageClass>` per object |
+| ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
+| CreateMultipartUpload | Accepts `x-amz-storage-class`, applied to the assembled object |
 | UploadPart | |
 | CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests) |
 | AbortMultipartUpload | |
-| ListMultipartUploads | |
+| ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
 | PutBucketPolicy | |
 | DeleteBucketPolicy | |
@@ -214,6 +214,96 @@ STS operations are free.
 | PutObjectTagging | |
 | GetObjectTagging | |
 | DeleteObjectTagging | |
+
+### Storage classes
+
+`PutObject`, `CopyObject` and `CreateMultipartUpload` accept `x-amz-storage-class`
+and record it on the object. An absent header means `STANDARD`, S3's documented
+default for a newly created object. All thirteen documented values are accepted:
+
+```
+STANDARD  REDUCED_REDUNDANCY  STANDARD_IA  ONEZONE_IA  INTELLIGENT_TIERING
+GLACIER  DEEP_ARCHIVE  OUTPOSTS  GLACIER_IR  SNOW  EXPRESS_ONEZONE
+FSX_OPENZFS  FSX_ONTAP
+```
+
+Any other value — including a lowercase or whitespace-padded one — is `400
+InvalidStorageClass`, rejected before anything is written, so the key does not
+appear. The classes reachable only through Outposts, Snow, Express One Zone and the
+FSx-backed tiers are accepted but carry no distinct behaviour beyond being recorded.
+
+How the class is reported back differs between the header and the XML, which is easy
+to get wrong in both directions:
+
+| Surface | STANDARD | Every other class |
+|---|---|---|
+| `x-amz-storage-class` response header on `GetObject`/`HeadObject` | **Omitted** | Present |
+| `<StorageClass>` in `ListObjects`, `ListObjectsV2`, `ListObjectVersions`, `ListMultipartUploads` | `STANDARD` | The class |
+
+An absent header therefore means `STANDARD`, not "unknown". A `<DeleteMarker>` entry
+in `ListObjectVersions` carries no `<StorageClass>`, matching S3's response shape.
+
+**Archived objects.** A `GetObject` of a `GLACIER` or `DEEP_ARCHIVE` object is `403
+InvalidObjectState` with the message `The action is not valid for the object's
+storage class`, and so is a `CopyObject` that names one as its source — S3 requires
+a restore first. The check precedes the `Range` step, so a ranged read of an
+archived object is the same `403`, not a `206`.
+
+`GLACIER_IR` is **not** archival. It is the instant-retrieval tier and reads
+normally; so do `STANDARD_IA`, `ONEZONE_IA` and `INTELLIGENT_TIERING`.
+
+`HeadObject` of an archived object is a **`200`**, not a `403`. The `HeadObject`
+reference documents no `InvalidObjectState` and states that "even if the object is
+stored in S3 Glacier, all object metadata is still available" — which is what makes
+`HEAD` the way a consumer discovers that a `GET` would need a restore first. A test
+asserting `403` on `HEAD` is asserting behaviour real S3 does not have.
+
+`RestoreObject` and the `x-amz-restore` response header are not implemented, so an
+archived object stays unreadable for the lifetime of the emulator run. Restoring is
+modeled by copying the object to a non-archival class.
+
+Intelligent-Tiering archive access tiers are not modeled, so the `InvalidObjectState`
+variant carrying `<StorageClass>` and `<AccessTier>` children is never returned.
+
+### Copying objects
+
+`CopyObject`'s metadata behaviour is governed by two independent directives, both
+defaulting to `COPY` when absent. An unrecognized value on either is `400
+InvalidArgument` rather than a silent fall back to the default — a typo that quietly
+preserved metadata is the kind of false success this emulator exists to surface.
+
+| `x-amz-metadata-directive` | Destination `Content-Type`, `Content-Encoding`, `x-amz-meta-*` |
+|---|---|
+| `COPY` (default) | Taken from the **source**; headers restated on the request are ignored |
+| `REPLACE` | Taken from the **request**; anything not restated is dropped |
+
+`COPY` preserving `Content-Encoding` is the documented behaviour: "when you copy an
+object, user-controlled system metadata and user-defined metadata are also copied",
+and `Content-Type`, `Content-Encoding`, `Content-Disposition` and `Cache-Control` are
+all user-controlled. Only `x-amz-website-redirect-location` is documented as not
+copied, and substrate does not model it.
+
+The loss case is `REPLACE`: "you must explicitly specify all of the user-configurable
+metadata present on the source object in your request, even if you are changing only
+one of the metadata values". A `REPLACE` that omits `Content-Encoding` drops it, and
+`Content-Type` falls back to `application/octet-stream`.
+
+`x-amz-tagging-directive` works the same way for the tag-set: `COPY` (the default)
+carries the source's tags, `REPLACE` takes them from `x-amz-tagging` as URL query
+parameters (`stage=prod&owner=alice`), defaulting to an empty tag-set when that
+header is absent.
+
+**Storage class is never inherited.** "If the `x-amz-storage-class` header is not
+used, the copied object will be stored in the `STANDARD` Storage Class by default" —
+so an unqualified copy of a `STANDARD_IA` object yields a `STANDARD` one. This is
+what makes an in-place `CopyObject` onto an object's own key with a new
+`x-amz-storage-class` the tier-transition mechanism, and it is also the trap: a
+transition that means to change only the class must restate the metadata it wants to
+keep if it uses `REPLACE`.
+
+Every request-derived value — storage class, both directives, both precondition sets
+— is resolved before the first write, so a rejected copy leaves the destination
+untouched.
 
 ### Ranged reads
 

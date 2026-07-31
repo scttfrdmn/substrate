@@ -453,6 +453,13 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
+	// Validated before anything is written, so a rejected storage class leaves no
+	// partial object behind.
+	storageClass, scErr := resolveStorageClass(req.Headers)
+	if scErr != nil {
+		return scErr, nil
+	}
+
 	// Conditional writes must not race: the existence check and the write below have
 	// to be one atomic step, or N concurrent If-None-Match: * PUTs would all
 	// observe the key as absent and all succeed. See [s3KeyMutex].
@@ -503,6 +510,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		ContentType:     contentType,
 		ContentEncoding: req.Headers["Content-Encoding"],
 		Size:            int64(len(body)),
+		StorageClass:    storageClass,
 		LastModified:    p.tc.Now(),
 		UserMetadata:    userMeta,
 	}
@@ -629,6 +637,12 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 		}
 	}
 
+	// An archived object has no readable body, so its storage class is checked
+	// before the preconditions that would compare against one.
+	if resp := evaluateStorageClassRead(&obj); resp != nil {
+		return resp, nil
+	}
+
 	// Preconditions are evaluated before the range step: a 412 or 304 supersedes
 	// any range, and RFC 9110 requires a failed precondition to be reported rather
 	// than a partial response served.
@@ -692,7 +706,10 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
 	}
 
-	// HEAD evaluates preconditions exactly as GET does.
+	// HEAD evaluates preconditions exactly as GET does. It deliberately does *not*
+	// check the storage class the way getObject does: HeadObject documents no
+	// InvalidObjectState, because "even if the object is stored in S3 Glacier, all
+	// object metadata is still available". See [evaluateStorageClassRead].
 	if resp := evaluateReadPreconditions(readConditionalHeaders(req.Headers), &obj); resp != nil {
 		return resp, nil
 	}
@@ -918,6 +935,29 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
+	// An archived source must be restored before it can be copied: "if the source
+	// object is in the S3 Glacier Flexible Retrieval or S3 Glacier Deep Archive
+	// storage class, you must restore a copy of this object before you can use it as
+	// a source object for the copy operation."
+	if resp := evaluateStorageClassRead(&srcObj); resp != nil {
+		return resp, nil
+	}
+
+	// Every request-derived value is resolved before the first write, so a malformed
+	// directive or storage class leaves the destination untouched.
+	dstStorageClass, scErr := resolveStorageClass(req.Headers)
+	if scErr != nil {
+		return scErr, nil
+	}
+	meta, metaErr := resolveCopyMetadata(req.Headers, &srcObj)
+	if metaErr != nil {
+		return metaErr, nil
+	}
+	tags, tagErr := resolveCopyTags(req.Headers, &srcObj)
+	if tagErr != nil {
+		return tagErr, nil
+	}
+
 	// Source preconditions gate whether the copy may read; destination
 	// preconditions gate whether it may overwrite. Both are checked before any
 	// write, so a rejected copy leaves the destination untouched.
@@ -961,13 +1001,19 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	newETag := fmt.Sprintf(`"%x"`, hash)
 
 	dstObj := S3Object{
-		Bucket:       dstBucket,
-		Key:          dstKey,
-		ETag:         newETag,
-		ContentType:  srcObj.ContentType,
-		Size:         srcObj.Size,
+		Bucket:          dstBucket,
+		Key:             dstKey,
+		ETag:            newETag,
+		ContentType:     meta.ContentType,
+		ContentEncoding: meta.ContentEncoding,
+		Size:            srcObj.Size,
+		// The copy's class comes from the request, never from the source: "if the
+		// x-amz-storage-class header is not used, the copied object will be stored in
+		// the STANDARD Storage Class by default."
+		StorageClass: dstStorageClass,
 		LastModified: now,
-		UserMetadata: srcObj.UserMetadata,
+		UserMetadata: meta.UserMetadata,
+		Tags:         tags,
 	}
 
 	dstMeta, err := json.Marshal(dstObj)
@@ -1197,6 +1243,13 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
+	// The storage class is supplied here, at creation, not on Complete — so it is
+	// validated here and carried on the upload until the object is assembled.
+	storageClass, scErr := resolveStorageClass(req.Headers)
+	if scErr != nil {
+		return scErr, nil
+	}
+
 	uploadID := generateUploadID()
 
 	contentType := req.Headers["Content-Type"]
@@ -1209,6 +1262,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		Bucket:       bucket,
 		Key:          key,
 		ContentType:  contentType,
+		StorageClass: storageClass,
 		Initiated:    p.tc.Now(),
 		UserMetadata: extractUserMetadata(req.Headers),
 	}
@@ -1416,6 +1470,7 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		ETag:         etag,
 		ContentType:  upload.ContentType,
 		Size:         int64(len(combined)),
+		StorageClass: upload.StorageClass,
 		LastModified: p.tc.Now(),
 		UserMetadata: upload.UserMetadata,
 	}
@@ -1588,9 +1643,10 @@ func (p *S3Plugin) listMultipartUploads(_ *RequestContext, _ *AWSRequest, bucket
 	}
 
 	type uploadEntry struct {
-		Key       string `xml:"Key"`
-		UploadId  string `xml:"UploadId"` //nolint:revive // matches AWS XML field name
-		Initiated string `xml:"Initiated"`
+		Key          string `xml:"Key"`
+		UploadId     string `xml:"UploadId"` //nolint:revive // matches AWS XML field name
+		StorageClass string `xml:"StorageClass"`
+		Initiated    string `xml:"Initiated"`
 	}
 	type listMultipartUploadsResult struct {
 		XMLName xml.Name      `xml:"ListMultipartUploadsResult"`
@@ -1612,10 +1668,15 @@ func (p *S3Plugin) listMultipartUploads(_ *RequestContext, _ *AWSRequest, bucket
 		if upload.Bucket != bucket {
 			continue
 		}
+		storageClass := upload.StorageClass
+		if storageClass == "" {
+			storageClass = S3StorageClassStandard
+		}
 		result.Uploads = append(result.Uploads, uploadEntry{
-			Key:       upload.Key,
-			UploadId:  upload.UploadID,
-			Initiated: upload.Initiated.UTC().Format(time.RFC3339),
+			Key:          upload.Key,
+			UploadId:     upload.UploadID,
+			StorageClass: storageClass,
+			Initiated:    upload.Initiated.UTC().Format(time.RFC3339),
 		})
 	}
 
@@ -1649,6 +1710,7 @@ type objectEntryItem struct {
 	LastModified string `xml:"LastModified"`
 	ETag         string `xml:"ETag"`
 	Size         int64  `xml:"Size"`
+	StorageClass string `xml:"StorageClass"`
 }
 
 // loadObjectEntry loads and returns the XML entry for a single object.
@@ -1673,6 +1735,9 @@ func (p *S3Plugin) loadObjectEntry(ctx context.Context, bucket, key string) (*ob
 		LastModified: obj.LastModified.UTC().Format(time.RFC3339),
 		ETag:         obj.ETag,
 		Size:         obj.Size,
+		// Unlike the x-amz-storage-class response header, <StorageClass> is emitted
+		// for every listed object, STANDARD included.
+		StorageClass: storageClassOf(&obj),
 	}, nil
 }
 
@@ -1885,6 +1950,11 @@ func objectResponseHeaders(obj *S3Object) map[string]string {
 	}
 	if obj.VersionID != "" {
 		headers["x-amz-version-id"] = obj.VersionID
+	}
+	// "Amazon S3 returns this header for all objects except for S3 Standard storage
+	// class objects" — so an absent header means STANDARD, not unknown.
+	if sc := storageClassOf(obj); sc != S3StorageClassStandard {
+		headers["x-amz-storage-class"] = sc
 	}
 	for k, v := range obj.UserMetadata {
 		headers["X-Amz-Meta-"+k] = v
@@ -2823,6 +2893,7 @@ func (p *S3Plugin) listObjectVersions(_ *RequestContext, req *AWSRequest, bucket
 				LastModified: obj.LastModified.UTC().Format(time.RFC3339Nano),
 				ETag:         obj.ETag,
 				Size:         obj.Size,
+				StorageClass: storageClassOf(&obj),
 			})
 			continue
 		}
@@ -2852,6 +2923,7 @@ func (p *S3Plugin) listObjectVersions(_ *RequestContext, req *AWSRequest, bucket
 					LastModified: obj.LastModified.UTC().Format(time.RFC3339Nano),
 					ETag:         obj.ETag,
 					Size:         obj.Size,
+					StorageClass: storageClassOf(&obj),
 				})
 			}
 		}

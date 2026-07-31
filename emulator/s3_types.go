@@ -43,6 +43,10 @@ type S3Object struct {
 	// Size is the byte length of the object body.
 	Size int64 `json:"size"`
 
+	// StorageClass is the S3 storage class of the object, set via the
+	// x-amz-storage-class header on write. Empty is equivalent to STANDARD.
+	StorageClass string `json:"storage_class,omitempty"`
+
 	// LastModified is the time of the most recent write.
 	LastModified time.Time `json:"last_modified"`
 
@@ -88,6 +92,9 @@ type S3ObjectVersion struct {
 
 	// Size is the byte length of the object body.
 	Size int64 `xml:"Size"`
+
+	// StorageClass is the S3 storage class of this version.
+	StorageClass string `xml:"StorageClass"`
 }
 
 // S3DeleteMarker holds metadata for one delete marker in a ListObjectVersions
@@ -131,6 +138,10 @@ type S3MultipartUpload struct {
 
 	// ContentType is the MIME type supplied at upload creation.
 	ContentType string `json:"content_type"`
+
+	// StorageClass is the storage class supplied at upload creation, applied to
+	// the object CompleteMultipartUpload assembles. Empty means STANDARD.
+	StorageClass string `json:"storage_class,omitempty"`
 
 	// Initiated is the time the multipart upload was created.
 	Initiated time.Time `json:"initiated"`
