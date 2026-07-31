@@ -342,12 +342,18 @@ func TestS3_MultipartUpload_Complete(t *testing.T) {
 
 	uploadID := ir.UploadId
 
-	// Upload two parts.
-	for i, part := range [][]byte{[]byte("part one data"), []byte("part two data")} {
+	// Upload two parts. The first is non-final and so must reach the 5 MB
+	// minimum; the last may be any size.
+	first := bytes.Repeat([]byte("a"), s3MinPartSize)
+	second := []byte("part two data")
+	etags := make([]string, 0, 2)
+	for i, part := range [][]byte{first, second} {
 		uw := s3Request(t, srv, http.MethodPut,
 			fmt.Sprintf("/my-bucket/bigfile.bin?partNumber=%d&uploadId=%s", i+1, uploadID),
 			part, nil)
 		require.Equal(t, http.StatusOK, uw.Code)
+		etags = append(etags, uw.Header().Get("ETag"))
+		require.NotEmpty(t, etags[i], "UploadPart must return an ETag")
 	}
 
 	// List multipart uploads.
@@ -356,20 +362,16 @@ func TestS3_MultipartUpload_Complete(t *testing.T) {
 	assert.Contains(t, lw.Body.String(), uploadID)
 
 	// Complete.
-	completeBody := `<CompleteMultipartUpload>` +
-		`<Part><PartNumber>1</PartNumber><ETag>e1</ETag></Part>` +
-		`<Part><PartNumber>2</PartNumber><ETag>e2</ETag></Part>` +
-		`</CompleteMultipartUpload>`
 	cw := s3Request(t, srv, http.MethodPost,
 		"/my-bucket/bigfile.bin?uploadId="+uploadID,
-		[]byte(completeBody), nil)
+		completeBody(etags...), nil)
 	require.Equal(t, http.StatusOK, cw.Code)
 	assert.Contains(t, cw.Body.String(), "CompleteMultipartUploadResult")
 
 	// Verify assembled object is readable.
 	gw := s3Request(t, srv, http.MethodGet, "/my-bucket/bigfile.bin", nil, nil)
 	require.Equal(t, http.StatusOK, gw.Code)
-	assert.Equal(t, []byte("part one datapart two data"), gw.Body.Bytes())
+	assert.Equal(t, append(first, second...), gw.Body.Bytes())
 }
 
 func TestS3_MultipartUpload_Abort(t *testing.T) {
@@ -1126,10 +1128,9 @@ func TestS3_MultipartUpload_UserMetadata(t *testing.T) {
 	require.Equal(t, http.StatusOK, uw.Code)
 
 	// Complete the upload.
-	completeBody := `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>e1</ETag></Part></CompleteMultipartUpload>`
 	cw := s3Request(t, srv, http.MethodPost,
 		"/meta-bucket/upload.bin?uploadId="+ir.UploadId,
-		[]byte(completeBody), nil)
+		completeBody(uw.Header().Get("ETag")), nil)
 	require.Equal(t, http.StatusOK, cw.Code)
 
 	// HEAD the object — metadata must be present.

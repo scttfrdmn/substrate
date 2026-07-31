@@ -26,8 +26,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Content-Range: bytes */<size>` header so a caller can correct the request
   without a second round trip. Every range against a zero-byte object is
   unsatisfiable. Retrieving a part by `?partNumber=N` remains unimplemented.
+- S3 `CompleteMultipartUpload` validates the parts list before assembling
+  anything (#400). A non-final part below S3's 5 MB minimum is now
+  `400 EntityTooSmall`, carrying the offending `<PartNumber>`, its `<ETag>`,
+  `<ProposedSize>` and `<MinSizeAllowed>`; a part that was never uploaded or whose
+  supplied `ETag` does not match the stored one is `400 InvalidPart`; a body naming
+  no parts is `400 MalformedXML` rather than `InvalidPart`; and an upload ID
+  presented against a different bucket or key is `404 NoSuchUpload`, matching the
+  guard `UploadPart` and `AbortMultipartUpload` already applied.
+  A consumer computing chunk sizes from a file size can land under 5 MB and have
+  every upload in that band fail at Complete on real S3 — after every part has
+  been uploaded and paid for. Substrate accepted those uploads, so the only thing
+  holding the size floor correct was a unit test asserting the consumer's own
+  arithmetic against itself.
+  Equally important is what a rejected Complete does *not* do: it writes no
+  object, and it leaves the upload open, so `ListMultipartUploads` still reports it
+  until `AbortMultipartUpload` ends it. "No orphan upload was left behind after a
+  failed Complete" is thereby a property a test can assert by observing the
+  emulator, rather than by asserting the consumer called Abort — orphaned parts
+  bill indefinitely.
+  ETags are compared ignoring surrounding quotes, hex case, and whitespace, since
+  clients differ on whether they echo back the quotes S3 sends and a false
+  `InvalidPart` would send a consumer hunting a data bug that does not exist.
 
 ### Fixed
+- S3 multipart operations now return S3's documented `NoSuchUpload` and
+  `MalformedXML` message text rather than abbreviated paraphrases (#400).
 - S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,
   so a caller could not learn which version it had just described from a HEAD
   alone — it had to issue a GET and download the body to find out.
@@ -37,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The S3 error-response builder can now carry error-specific child elements and
   response headers (#396), which the `InvalidRange` body needs and which
-  `MinSizeAllowed`/`ProposedSize` (#400) and `StorageClass` (#398) will need. Its
+  `EntityTooSmall` (#400) now uses and `StorageClass` (#398) will need. Its
   `extras ...string` parameter had been an unused stub with no call sites; it is
   replaced by an explicit `s3Error` options struct, and `s3DeleteMarkerResponse`
   now shares the same builder instead of re-declaring its own XML type.
