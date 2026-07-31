@@ -580,7 +580,10 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 }
 
 func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "InstanceId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InstanceId"), ec2InstanceIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
@@ -640,7 +643,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			continue
 		}
 		// Filter by IDs.
-		if len(ids) > 0 && !containsStr(ids, inst.InstanceID) {
+		if !ids.match(inst.InstanceID) {
 			continue
 		}
 		// Apply all DescribeInstances filters, AND-combined.
@@ -686,6 +689,10 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		resMap[inst.ReservationID].Instances = append(resMap[inst.ReservationID].Instances, item)
 	}
 
+	if err := ids.unresolved(); err != nil {
+		return nil, err
+	}
+
 	for _, res := range resMap {
 		resp.Reservations = append(resp.Reservations, *res)
 	}
@@ -715,12 +722,15 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 	for _, id := range ids {
 		key := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
 		data, err := p.state.Get(context.Background(), ec2Namespace, key)
-		if err != nil || data == nil {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("ec2 terminateInstances get: %w", err)
+		}
+		if lookupErr := ec2RequireResource(ec2InstanceIDKind, id, data != nil); lookupErr != nil {
+			return nil, lookupErr
 		}
 		var inst EC2Instance
-		if json.Unmarshal(data, &inst) != nil {
-			continue
+		if err := json.Unmarshal(data, &inst); err != nil {
+			return nil, fmt.Errorf("ec2 terminateInstances unmarshal: %w", err)
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 48, Name: "terminated"}
@@ -760,12 +770,15 @@ func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	for _, id := range ids {
 		key := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
 		data, err := p.state.Get(context.Background(), ec2Namespace, key)
-		if err != nil || data == nil {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("ec2 stopInstances get: %w", err)
+		}
+		if lookupErr := ec2RequireResource(ec2InstanceIDKind, id, data != nil); lookupErr != nil {
+			return nil, lookupErr
 		}
 		var inst EC2Instance
-		if json.Unmarshal(data, &inst) != nil {
-			continue
+		if err := json.Unmarshal(data, &inst); err != nil {
+			return nil, fmt.Errorf("ec2 stopInstances unmarshal: %w", err)
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 80, Name: "stopped"}
@@ -803,12 +816,15 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 	for _, id := range ids {
 		key := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
 		data, err := p.state.Get(context.Background(), ec2Namespace, key)
-		if err != nil || data == nil {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("ec2 startInstances get: %w", err)
+		}
+		if lookupErr := ec2RequireResource(ec2InstanceIDKind, id, data != nil); lookupErr != nil {
+			return nil, lookupErr
 		}
 		var inst EC2Instance
-		if json.Unmarshal(data, &inst) != nil {
-			continue
+		if err := json.Unmarshal(data, &inst); err != nil {
+			return nil, fmt.Errorf("ec2 startInstances unmarshal: %w", err)
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 16, Name: "running"}
@@ -825,7 +841,10 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 }
 
 func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "InstanceId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InstanceId"), ec2InstanceIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	type statusItem struct {
 		InstanceID    string `xml:"instanceId"`
 		InstanceState struct {
@@ -853,13 +872,16 @@ func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSReque
 		if json.Unmarshal(data, &inst) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, inst.InstanceID) {
+		if !ids.match(inst.InstanceID) {
 			continue
 		}
 		si := statusItem{InstanceID: inst.InstanceID}
 		si.InstanceState.Code = inst.State.Code
 		si.InstanceState.Name = inst.State.Name
 		resp.Items = append(resp.Items, si)
+	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -915,7 +937,10 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 }
 
 func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "VpcId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "VpcId"), ec2VPCIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeVpcs: %w", err)
@@ -941,10 +966,13 @@ func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		if json.Unmarshal(data, &vpc) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, vpc.VPCID) {
+		if !ids.match(vpc.VPCID) {
 			continue
 		}
 		resp.Vpcs = append(resp.Vpcs, vpcItem{VpcID: vpc.VPCID, CIDRBlock: vpc.CIDRBlock, IsDefault: vpc.IsDefault, State: vpc.State})
+	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -955,6 +983,13 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VpcId is required", HTTPStatus: http.StatusBadRequest}
 	}
 	key := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
+	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteVpc get: %w", err)
+	}
+	if lookupErr := ec2RequireResource(ec2VPCIDKind, vpcID, existing != nil); lookupErr != nil {
+		return nil, lookupErr
+	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteVpc: %w", err)
 	}
@@ -1013,7 +1048,10 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 }
 
 func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "SubnetId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SubnetId"), ec2SubnetIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSubnets: %w", err)
@@ -1041,7 +1079,7 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		if json.Unmarshal(data, &subnet) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, subnet.SubnetID) {
+		if !ids.match(subnet.SubnetID) {
 			continue
 		}
 		resp.Subnets = append(resp.Subnets, subnetItem{
@@ -1053,13 +1091,28 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 			MapPublicIPOnLaunch: subnet.MapPublicIPOnLaunch,
 		})
 	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
+	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
 func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	subnetID := req.Params["SubnetId"]
+	if subnetID == "" {
+		return nil, ec2MissingParameter("SubnetId")
+	}
 	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
-	_ = p.state.Delete(context.Background(), ec2Namespace, key)
+	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteSubnet get: %w", err)
+	}
+	if lookupErr := ec2RequireResource(ec2SubnetIDKind, subnetID, existing != nil); lookupErr != nil {
+		return nil, lookupErr
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deleteSubnet: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteSubnetResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -1103,7 +1156,10 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 }
 
 func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "GroupId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "GroupId"), ec2SecurityGroupIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -1141,7 +1197,7 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if json.Unmarshal(data, &sg) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, sg.GroupID) {
+		if !ids.match(sg.GroupID) {
 			continue
 		}
 		if vals, ok := filters["group-name"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupName) {
@@ -1170,13 +1226,28 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		}
 		resp.Groups = append(resp.Groups, item)
 	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
+	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
 func (p *EC2Plugin) deleteSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	sgID := req.Params["GroupId"]
+	if sgID == "" {
+		return nil, ec2MissingParameter("GroupId")
+	}
 	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
-	_ = p.state.Delete(context.Background(), ec2Namespace, key)
+	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteSecurityGroup get: %w", err)
+	}
+	if lookupErr := ec2RequireResource(ec2SecurityGroupIDKind, sgID, existing != nil); lookupErr != nil {
+		return nil, lookupErr
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deleteSecurityGroup: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteSecurityGroupResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -1304,7 +1375,10 @@ func (p *EC2Plugin) createInternetGateway(reqCtx *RequestContext, _ *AWSRequest)
 }
 
 func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "InternetGatewayId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InternetGatewayId"), ec2InternetGatewayIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "igw:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeInternetGateways: %w", err)
@@ -1327,10 +1401,13 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 		if json.Unmarshal(data, &igw) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, igw.InternetGatewayID) {
+		if !ids.match(igw.InternetGatewayID) {
 			continue
 		}
 		resp.IGWs = append(resp.IGWs, igwItem{igw.InternetGatewayID})
+	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -1389,8 +1466,20 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 
 func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	igwID := req.Params["InternetGatewayId"]
+	if igwID == "" {
+		return nil, ec2MissingParameter("InternetGatewayId")
+	}
 	key := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
-	_ = p.state.Delete(context.Background(), ec2Namespace, key)
+	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteInternetGateway get: %w", err)
+	}
+	if lookupErr := ec2RequireResource(ec2InternetGatewayIDKind, igwID, existing != nil); lookupErr != nil {
+		return nil, lookupErr
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deleteInternetGateway: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteInternetGatewayResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -1459,7 +1548,10 @@ func routeTableHasSubnet(rtb EC2RouteTable, subnetIDs []string) bool {
 }
 
 func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "RouteTableId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "RouteTableId"), ec2RouteTableIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "rtb:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -1496,7 +1588,7 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 		if json.Unmarshal(data, &rtb) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, rtb.RouteTableID) {
+		if !ids.match(rtb.RouteTableID) {
 			continue
 		}
 		if vals, ok := filters["vpc-id"]; ok && !containsStr(vals, rtb.VPCID) {
@@ -1516,6 +1608,9 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 			item.Associations = append(item.Associations, assocItem{AssociationID: a.AssociationID, SubnetID: a.SubnetID, Main: a.Main}) //nolint:staticcheck // XML tags differ from JSON tags.
 		}
 		resp.RouteTables = append(resp.RouteTables, item)
+	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -1761,8 +1856,20 @@ func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 
 func (p *EC2Plugin) deleteRouteTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
+	if rtbID == "" {
+		return nil, ec2MissingParameter("RouteTableId")
+	}
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
-	_ = p.state.Delete(context.Background(), ec2Namespace, key)
+	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteRouteTable get: %w", err)
+	}
+	if lookupErr := ec2RequireResource(ec2RouteTableIDKind, rtbID, existing != nil); lookupErr != nil {
+		return nil, lookupErr
+	}
+	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
+		return nil, fmt.Errorf("ec2 deleteRouteTable: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteRouteTableResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -3116,7 +3223,10 @@ func (p *EC2Plugin) releaseAddress(reqCtx *RequestContext, req *AWSRequest) (*AW
 }
 
 func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	filterIDs := extractIndexedParams(req.Params, "AllocationId")
+	filterIDs := newEC2IDFilter(extractIndexedParams(req.Params, "AllocationId"), ec2AllocationIDKind)
+	if err := filterIDs.validate(); err != nil {
+		return nil, err
+	}
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "eip:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeAddresses list: %w", err)
@@ -3145,7 +3255,7 @@ func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (
 		if json.Unmarshal(data, &eip) != nil {
 			continue
 		}
-		if len(filterIDs) > 0 && !containsStr(filterIDs, eip.AllocationID) {
+		if !filterIDs.match(eip.AllocationID) {
 			continue
 		}
 		resp.Addresses = append(resp.Addresses, addressItem{
@@ -3157,6 +3267,9 @@ func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (
 			PrivateIPAddress:   eip.PrivateIPAddress,
 			Domain:             eip.Domain,
 		})
+	}
+	if err := filterIDs.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -3287,7 +3400,10 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 }
 
 func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	filterIDs := extractIndexedParams(req.Params, "NatGatewayId")
+	filterIDs := newEC2IDFilter(extractIndexedParams(req.Params, "NatGatewayId"), ec2NatGatewayIDKind)
+	if err := filterIDs.validate(); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "nat:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
@@ -3324,7 +3440,7 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 		if json.Unmarshal(data, &gw) != nil {
 			continue
 		}
-		if len(filterIDs) > 0 && !containsStr(filterIDs, gw.NatGatewayID) {
+		if !filterIDs.match(gw.NatGatewayID) {
 			continue
 		}
 		// Apply filters.
@@ -3347,6 +3463,9 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 				PrivateIP:    gw.PrivateIP,
 			}},
 		})
+	}
+	if err := filterIDs.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -4251,7 +4370,10 @@ func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 // describeSnapshots lists EBS snapshots owned by the account, honoring an
 // optional list of SnapshotId.N parameters and the snapshot-id Filter.
 func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "SnapshotId")
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SnapshotId"), ec2SnapshotIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace,
@@ -4291,7 +4413,7 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		if json.Unmarshal(data, &snap) != nil {
 			continue
 		}
-		if len(ids) > 0 && !containsStr(ids, snap.SnapshotID) {
+		if !ids.match(snap.SnapshotID) {
 			continue
 		}
 		if vals, ok := filters["snapshot-id"]; ok && !containsStr(vals, snap.SnapshotID) {
@@ -4311,6 +4433,9 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
 		}
 		resp.Snapshots = append(resp.Snapshots, item)
+	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
