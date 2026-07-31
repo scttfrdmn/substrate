@@ -197,7 +197,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("get user: %w", err)
 	}
 	if existing != nil {
-		return iamErrorResponse("EntityAlreadyExistsException",
+		return iamErrorResponse("EntityAlreadyExists",
 			fmt.Sprintf("User with name %s already exists.", params.UserName),
 			http.StatusConflict), nil
 	}
@@ -255,7 +255,7 @@ func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", userName),
 			http.StatusNotFound), nil
 	}
@@ -285,7 +285,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
 			http.StatusNotFound), nil
 	}
@@ -296,7 +296,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 	if len(arns) > 0 {
-		return iamErrorResponse("DeleteConflictException",
+		return iamErrorResponse("DeleteConflict",
 			"Cannot delete entity, must detach all policies first.",
 			http.StatusConflict), nil
 	}
@@ -384,7 +384,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("get role: %w", err)
 	}
 	if existing != nil {
-		return iamErrorResponse("EntityAlreadyExistsException",
+		return iamErrorResponse("EntityAlreadyExists",
 			fmt.Sprintf("Role with name %s already exists.", params.RoleName),
 			http.StatusConflict), nil
 	}
@@ -392,7 +392,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	var trustPolicy PolicyDocument
 	if params.AssumeRolePolicyDocument != "" {
 		if err := json.Unmarshal([]byte(params.AssumeRolePolicyDocument), &trustPolicy); err != nil {
-			return iamErrorResponse("MalformedPolicyDocumentException", //nolint:nilerr
+			return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 				"AssumeRolePolicyDocument is not valid JSON.", http.StatusBadRequest), nil
 		}
 	}
@@ -448,7 +448,7 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 	if role == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -478,7 +478,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 	if role == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -488,7 +488,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 	if len(arns) > 0 {
-		return iamErrorResponse("DeleteConflictException",
+		return iamErrorResponse("DeleteConflict",
 			"Cannot delete entity, must detach all policies first.",
 			http.StatusConflict), nil
 	}
@@ -572,7 +572,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("get group: %w", err)
 	}
 	if existing != nil {
-		return iamErrorResponse("EntityAlreadyExistsException",
+		return iamErrorResponse("EntityAlreadyExists",
 			fmt.Sprintf("Group with name %s already exists.", params.GroupName),
 			http.StatusConflict), nil
 	}
@@ -623,7 +623,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, fmt.Errorf("get group: %w", err)
 	}
 	if raw == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The group with name %s cannot be found.", params.GroupName),
 			http.StatusNotFound), nil
 	}
@@ -657,7 +657,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("get group: %w", err)
 	}
 	if existing == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The group with name %s cannot be found.", params.GroupName),
 			http.StatusNotFound), nil
 	}
@@ -737,7 +737,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
 			http.StatusNotFound), nil
 	}
@@ -794,7 +794,7 @@ func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		newARNs = append(newARNs, a)
 	}
 	if !found {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			"The policy is not attached to the specified entity.",
 			http.StatusNotFound), nil
 	}
@@ -863,7 +863,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 	if role == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -920,7 +920,7 @@ func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		newARNs = append(newARNs, a)
 	}
 	if !found {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			"The policy is not attached to the specified entity.",
 			http.StatusNotFound), nil
 	}
@@ -996,7 +996,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("get policy: %w", err)
 	}
 	if existing != nil {
-		return iamErrorResponse("EntityAlreadyExistsException",
+		return iamErrorResponse("EntityAlreadyExists",
 			fmt.Sprintf("A policy called %s already exists.", params.PolicyName),
 			http.StatusConflict), nil
 	}
@@ -1004,7 +1004,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	var doc PolicyDocument
 	if params.PolicyDocument != "" {
 		if err := json.Unmarshal([]byte(params.PolicyDocument), &doc); err != nil {
-			return iamErrorResponse("MalformedPolicyDocumentException", //nolint:nilerr
+			return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 				"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
 		}
 	}
@@ -1061,7 +1061,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("get policy: %w", err)
 	}
 	if raw == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Policy %s was not found.", params.PolicyArn),
 			http.StatusNotFound), nil
 	}
@@ -1095,7 +1095,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("get policy: %w", err)
 	}
 	if raw == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Policy %s was not found.", params.PolicyArn),
 			http.StatusNotFound), nil
 	}
@@ -1182,7 +1182,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", userName),
 			http.StatusNotFound), nil
 	}
@@ -1240,7 +1240,7 @@ func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("get access key: %w", err)
 	}
 	if raw == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The Access Key with id %s cannot be found.", params.AccessKeyID),
 			http.StatusNotFound), nil
 	}
@@ -1525,7 +1525,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		return nil, fmt.Errorf("get %s: %w", entityType, getErr)
 	}
 	if entityRaw == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The %s with name %s cannot be found.", entityType, entityName),
 			http.StatusNotFound), nil
 	}
@@ -1533,7 +1533,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	// Parse and validate the policy document.
 	var doc PolicyDocument
 	if err := json.Unmarshal([]byte(params.PolicyDocument), &doc); err != nil {
-		return iamErrorResponse("MalformedPolicyDocumentException", //nolint:nilerr
+		return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 			"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
 	}
 
@@ -1602,7 +1602,7 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		return nil, fmt.Errorf("get inline policy: %w", err)
 	}
 	if raw == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The policy %s was not found.", params.PolicyName),
 			http.StatusNotFound), nil
 	}
@@ -1647,7 +1647,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 		return nil, fmt.Errorf("check inline policy: %w", err)
 	}
 	if existing == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The policy %s was not found.", params.PolicyName),
 			http.StatusNotFound), nil
 	}
@@ -1773,7 +1773,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 			return nil, err
 		}
 		if user == nil {
-			return iamErrorResponse("NoSuchEntityException",
+			return iamErrorResponse("NoSuchEntity",
 				fmt.Sprintf("The user with name %s cannot be found.", entityName),
 				http.StatusNotFound), nil
 		}
@@ -1791,7 +1791,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 			return nil, err
 		}
 		if role == nil {
-			return iamErrorResponse("NoSuchEntityException",
+			return iamErrorResponse("NoSuchEntity",
 				fmt.Sprintf("The role with name %s cannot be found.", entityName),
 				http.StatusNotFound), nil
 		}
@@ -1841,7 +1841,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 			return nil, err
 		}
 		if user == nil {
-			return iamErrorResponse("NoSuchEntityException",
+			return iamErrorResponse("NoSuchEntity",
 				fmt.Sprintf("The user with name %s cannot be found.", entityName),
 				http.StatusNotFound), nil
 		}
@@ -1859,7 +1859,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 			return nil, err
 		}
 		if role == nil {
-			return iamErrorResponse("NoSuchEntityException",
+			return iamErrorResponse("NoSuchEntity",
 				fmt.Sprintf("The role with name %s cannot be found.", entityName),
 				http.StatusNotFound), nil
 		}
@@ -1901,7 +1901,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
 			http.StatusNotFound), nil
 	}
@@ -1955,7 +1955,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
 			http.StatusNotFound), nil
 	}
@@ -2007,7 +2007,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, err
 	}
 	if user == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
 			http.StatusNotFound), nil
 	}
@@ -2072,7 +2072,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 	if role == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -2126,7 +2126,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, err
 	}
 	if role == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -2178,7 +2178,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, err
 	}
 	if role == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -2429,7 +2429,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
 	if existing != nil {
-		return iamErrorResponse("EntityAlreadyExistsException",
+		return iamErrorResponse("EntityAlreadyExists",
 			fmt.Sprintf("Instance Profile %s already exists.", params.InstanceProfileName),
 			http.StatusConflict), nil
 	}
@@ -2470,7 +2470,7 @@ func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
 	if data == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
 			http.StatusNotFound), nil
 	}
@@ -2498,7 +2498,7 @@ func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
 	if data == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
 			http.StatusNotFound), nil
 	}
@@ -2507,7 +2507,7 @@ func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
 	}
 	if len(profile.Roles) > 0 {
-		return iamErrorResponse("DeleteConflictException",
+		return iamErrorResponse("DeleteConflict",
 			"Cannot delete entity, must detach all roles first.",
 			http.StatusConflict), nil
 	}
@@ -2535,7 +2535,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
 	if profData == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
 			http.StatusNotFound), nil
 	}
@@ -2544,7 +2544,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
 	}
 	if len(profile.Roles) > 0 {
-		return iamErrorResponse("LimitExceededException",
+		return iamErrorResponse("LimitExceeded",
 			"Instance profile "+params.InstanceProfileName+" already has a role.",
 			http.StatusConflict), nil
 	}
@@ -2554,7 +2554,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("get role: %w", err)
 	}
 	if roleData == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Role %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
@@ -2592,7 +2592,7 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
 	if profData == nil {
-		return iamErrorResponse("NoSuchEntityException",
+		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Instance Profile %s cannot be found.", params.InstanceProfileName),
 			http.StatusNotFound), nil
 	}

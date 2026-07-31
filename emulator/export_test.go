@@ -188,3 +188,40 @@ func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, 
 func CheckPresignedExpiryForTest(q url.Values, now time.Time) bool {
 	return checkPresignedExpiry(q, now)
 }
+
+// Error-protocol names exposed so external tests can assert the classification
+// without depending on the unexported enum's numeric values.
+const (
+	ErrProtoQueryXMLForTest = "query-xml"
+	ErrProtoJSONRPCForTest  = "json-rpc"
+	ErrProtoRESTJSONForTest = "rest-json"
+	ErrProtoUnknownForTest  = "unknown"
+)
+
+// ErrorProtocolForTest wraps errorProtocolFor, returning one of the
+// ErrProto*ForTest names.
+func ErrorProtocolForTest(service, contentType string) string {
+	switch errorProtocolFor(service, contentType) {
+	case errProtoQueryXML:
+		return ErrProtoQueryXMLForTest
+	case errProtoJSONRPC:
+		return ErrProtoJSONRPCForTest
+	case errProtoRESTJSON:
+		return ErrProtoRESTJSONForTest
+	default:
+		return ErrProtoUnknownForTest
+	}
+}
+
+// MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
+// the ErrProto*ForTest names.
+func MarshalAWSErrorForTest(code, message, proto, jsonContentType string) (body []byte, contentType string, headers map[string]string) {
+	p := errProtoQueryXML
+	switch proto {
+	case ErrProtoJSONRPCForTest:
+		p = errProtoJSONRPC
+	case ErrProtoRESTJSONForTest:
+		p = errProtoRESTJSON
+	}
+	return marshalAWSError(&AWSError{Code: code, Message: message}, p, jsonContentType)
+}

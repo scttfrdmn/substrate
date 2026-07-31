@@ -50,6 +50,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidPart` would send a consumer hunting a data bug that does not exist.
 
 ### Fixed
+- Error responses are serialized in the wire format the target service's protocol
+  actually uses, so an SDK can recover the error code (#392). Reported as four
+  per-service typos; three were one defect in the server's shared error writer.
+  Substrate emitted a `Code` member for every JSON service, but botocore's JSON-RPC
+  parser reads `__type` and falls back to the *stringified HTTP status* — it never
+  reads `Code`. So SSM's already-correct `ParameterNotFound` was discarded and the
+  caller saw `Error.Code == "404"`, silently defeating every
+  `except ClientError` branch that compares against a symbolic code. This affected
+  all ~30 JSON-RPC services, not just the one reported.
+  Lambda was a second, worse case: it is REST-JSON but sends
+  `Content-Type: application/json`, which failed the `application/x-amz-json`
+  prefix test, so its errors went out as *XML* — a shape its SDK cannot parse at
+  all. The protocol is now selected by service name, since it cannot be sniffed
+  from the request: IAM sends `x-amz-json-1.1` inbound yet answers errors in XML,
+  and Lambda's inbound `application/json` is indistinguishable from a plain JSON
+  body. JSON-RPC errors carry `__type`, REST-JSON errors carry the
+  `x-amzn-errortype` header, and query/REST-XML services keep their
+  `<ErrorResponse><Error><Code>` document; each service's classification is taken
+  from the `protocol` field of its model in botocore, the same value that selects
+  the SDK's parser.
+- IAM error codes now use their documented wire spelling, which drops the
+  `Exception` suffix the API model's shape names carry (#392): `NoSuchEntity`,
+  `EntityAlreadyExists`, `MalformedPolicyDocument`, `DeleteConflict` and
+  `LimitExceeded`. A caller matching the documented `NoSuchEntity` never matched.
+  The suffix is not a blanket rule — `ValidationError` and `AccessDeniedException`
+  were already correct and are unchanged, and Lambda genuinely does use
+  `ResourceNotFoundException` on the wire, so neither service's spelling can be
+  inferred from the other.
+- S3 `GetObject` and `HeadObject` report `NoSuchBucket` when the bucket does not
+  exist, rather than `NoSuchKey` (#392). Both went straight to the object lookup,
+  which conflated two distinct conditions: a caller could not tell "someone
+  deleted my bucket" from "this object isn't written yet", and so could not tell a
+  fatal misconfiguration from an ordinary cache miss.
+- The service reference listed ACM's protocol as Query and RAM's as JSON; both
+  were wrong in the opposite direction (ACM is JSON-RPC, RAM is REST-JSON).
 - S3 multipart operations now return S3's documented `NoSuchUpload` and
   `MalformedXML` message text rather than abbreviated paraphrases (#400).
 - S3 `HeadObject` now reports `x-amz-version-id` (#396). `GetObject` always did,

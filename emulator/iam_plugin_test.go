@@ -208,7 +208,7 @@ func TestIAMPlugin_CreateUser_Duplicate(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 	var result map[string]any
 	decodeIAMXML(t, resp, &result)
-	assert.Equal(t, "EntityAlreadyExistsException", result["__type"])
+	assert.Equal(t, "EntityAlreadyExists", result["__type"])
 }
 
 func TestIAMPlugin_CreateUser_MissingName(t *testing.T) {
@@ -239,7 +239,7 @@ func TestIAMPlugin_GetUser_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	var result map[string]any
 	decodeIAMXML(t, resp, &result)
-	assert.Equal(t, "NoSuchEntityException", result["__type"])
+	assert.Equal(t, "NoSuchEntity", result["__type"])
 }
 
 func TestIAMPlugin_DeleteUser_Success(t *testing.T) {
@@ -266,7 +266,7 @@ func TestIAMPlugin_DeleteUser_WithAttachedPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 	var result map[string]any
 	decodeIAMXML(t, resp, &result)
-	assert.Equal(t, "DeleteConflictException", result["__type"])
+	assert.Equal(t, "DeleteConflict", result["__type"])
 }
 
 func TestIAMPlugin_ListUsers_Empty(t *testing.T) {

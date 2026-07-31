@@ -11,7 +11,7 @@ CloudFormation, and cost detail follows below the matrix.
 
 | # | Service | Plugin name | Protocol |
 |---|---------|-------------|----------|
-| 1 | ACM | `acm` | Query |
+| 1 | ACM | `acm` | JSON |
 | 2 | API Gateway (REST) | `apigateway` | REST/JSON |
 | 3 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON |
 | 4 | AppSync | `appsync` | REST/JSON |
@@ -53,7 +53,7 @@ CloudFormation, and cost detail follows below the matrix.
 | 40 | OpenSearch | `opensearch` | REST/JSON |
 | 41 | Organizations | `organizations` | JSON |
 | 42 | QuickSight | `quicksight` | REST/JSON |
-| 43 | RAM | `ram` | JSON |
+| 43 | RAM | `ram` | REST/JSON |
 | 44 | RDS | `rds` | Query |
 | 45 | Redshift | `redshift` | Query |
 | 46 | Redshift Data API | `redshift-data` | JSON |
