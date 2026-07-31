@@ -245,6 +245,10 @@ var targetServiceAliases = map[string]string{
 	// "RedshiftData_20191217" → strip version → "RedshiftData" → lowercase → "redshiftdata".
 	// Both aws-sdk-go-v2 and boto3 use this X-Amz-Target namespace for the Data API.
 	"redshiftdata": "redshift-data",
+	// "AWSPriceListService" → no strip → "awspricelistservice" → "pricing".
+	// Both aws-sdk-go-v2 and boto3 use X-Amz-Target: AWSPriceListService.{Op}
+	// for the Price List Query API, whose SigV4 signing name is "pricing".
+	"awspricelistservice": "pricing",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
@@ -304,6 +308,15 @@ func extractServiceFromHost(host string) string {
 	// API Gateway runtime endpoint: {apiId}.execute-api.{region}
 	if strings.Contains(host, ".execute-api.") {
 		return "execute-api"
+	}
+
+	// "api.<service>.<region>": several services front their endpoint with a
+	// literal "api" label — the Price List Query API
+	// (api.pricing.us-east-1.amazonaws.com), ECR (api.ecr.*), SageMaker
+	// (api.sagemaker.*). Taking the first label would route all of them to a
+	// service named "api" (#401).
+	if rest, ok := strings.CutPrefix(host, "api."); ok && rest != "" {
+		host = rest
 	}
 
 	// "<service>.<region>" or just "<service>".

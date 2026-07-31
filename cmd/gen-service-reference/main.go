@@ -91,6 +91,7 @@ var meta = map[string]pluginMeta{
 	"omics":                {"HealthOmics", "REST/JSON"},
 	"opensearch":           {"OpenSearch", "REST/JSON"},
 	"organizations":        {"Organizations", "JSON"},
+	"pricing":              {"Price List Query API", "JSON"},
 	"quicksight":           {"QuickSight", "REST/JSON"},
 	"ram":                  {"RAM", "REST/JSON"},
 	"rds":                  {"RDS", "Query"},

@@ -287,6 +287,58 @@ func TestExtractRegion_UnparseableHostFallsBackToAuth(t *testing.T) {
 	assert.Equal(t, "ap-south-1", reqCtx.Region)
 }
 
+// TestExtractService_APIPrefixedHost covers the service half of the same host
+// layout (#401). Taking the first label of "api.pricing.us-east-1" yielded a
+// service literally named "api", which routes to no plugin at all — so these
+// endpoints were reachable only via their X-Amz-Target namespace. No
+// Authorization header is sent, because the credential scope also names the
+// service and would mask a parser that still returned "api".
+func TestExtractService_APIPrefixedHost(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"pricing regional", "api.pricing.us-east-1.amazonaws.com", "pricing"},
+		{"pricing global", "api.pricing.amazonaws.com", "pricing"},
+		// Two other services that front their endpoint with a literal "api"
+		// label, both previously reachable only by X-Amz-Target.
+		{"ecr regional", "api.ecr.us-west-2.amazonaws.com", "ecr"},
+		{"sagemaker regional", "api.sagemaker.eu-west-1.amazonaws.com", "sagemaker"},
+		// A service whose own name merely begins with "api" must not be
+		// truncated: the prefix stripped is the label "api.", not the letters.
+		{"apigateway is not api-prefixed", "apigateway.us-east-1.amazonaws.com", "apigateway"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodPost, "http://localhost/", nil)
+			r.Host = tt.host
+
+			req, _, err := emulator.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, req.Service)
+		})
+	}
+}
+
+// TestExtractService_PriceListTarget pins the X-Amz-Target namespace both
+// aws-sdk-go-v2 and boto3 use for the Price List Query API. Its SigV4 signing
+// name is "pricing", which is the plugin's own name, so the alias is what closes
+// the gap between the two spellings.
+func TestExtractService_PriceListTarget(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest(http.MethodPost, "http://localhost/", nil)
+	r.Host = "localhost:4566"
+	r.Header.Set("X-Amz-Target", "AWSPriceListService.GetProducts")
+
+	req, _, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "pricing", req.Service)
+	assert.Equal(t, "GetProducts", req.Operation)
+}
+
 func TestParseAWSRequest_Account(t *testing.T) {
 	tests := []struct {
 		name        string

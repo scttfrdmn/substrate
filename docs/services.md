@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **63 built-in service plugins**. This section is generated
+Substrate ships **64 built-in service plugins**. This section is generated
 from the plugin registry (`make docs-reference`), so the count and plugin list
 cannot drift from the implementation. The live count is also available from the
 `/ready` endpoint (`curl http://localhost:4566/ready`). Per-service operation,
@@ -52,28 +52,29 @@ CloudFormation, and cost detail follows below the matrix.
 | 39 | HealthOmics | `omics` | REST/JSON |
 | 40 | OpenSearch | `opensearch` | REST/JSON |
 | 41 | Organizations | `organizations` | JSON |
-| 42 | QuickSight | `quicksight` | REST/JSON |
-| 43 | RAM | `ram` | REST/JSON |
-| 44 | RDS | `rds` | Query |
-| 45 | Redshift | `redshift` | Query |
-| 46 | Redshift Data API | `redshift-data` | JSON |
-| 47 | Route 53 | `route53` | REST/XML |
-| 48 | S3 | `s3` | REST/XML |
-| 49 | SageMaker | `sagemaker` | JSON |
-| 50 | EventBridge Scheduler | `scheduler` | REST/JSON |
-| 51 | Secrets Manager | `secretsmanager` | JSON |
-| 52 | Service Quotas | `servicequotas` | JSON |
-| 53 | SES v2 | `sesv2` | REST/JSON |
-| 54 | SNS | `sns` | Query |
-| 55 | SQS | `sqs` | JSON |
-| 56 | SSM | `ssm` | JSON |
-| 57 | SSO / Identity Store | `sso` | REST/JSON |
-| 58 | Step Functions | `states` | JSON |
-| 59 | STS | `sts` | Query |
-| 60 | Resource Groups Tagging | `tagging` | JSON |
-| 61 | Timestream | `timestream` | JSON |
-| 62 | Transfer Family | `transfer` | JSON |
-| 63 | WAFv2 | `wafv2` | JSON |
+| 42 | Price List Query API | `pricing` | JSON |
+| 43 | QuickSight | `quicksight` | REST/JSON |
+| 44 | RAM | `ram` | REST/JSON |
+| 45 | RDS | `rds` | Query |
+| 46 | Redshift | `redshift` | Query |
+| 47 | Redshift Data API | `redshift-data` | JSON |
+| 48 | Route 53 | `route53` | REST/XML |
+| 49 | S3 | `s3` | REST/XML |
+| 50 | SageMaker | `sagemaker` | JSON |
+| 51 | EventBridge Scheduler | `scheduler` | REST/JSON |
+| 52 | Secrets Manager | `secretsmanager` | JSON |
+| 53 | Service Quotas | `servicequotas` | JSON |
+| 54 | SES v2 | `sesv2` | REST/JSON |
+| 55 | SNS | `sns` | Query |
+| 56 | SQS | `sqs` | JSON |
+| 57 | SSM | `ssm` | JSON |
+| 58 | SSO / Identity Store | `sso` | REST/JSON |
+| 59 | Step Functions | `states` | JSON |
+| 60 | STS | `sts` | Query |
+| 61 | Resource Groups Tagging | `tagging` | JSON |
+| 62 | Timestream | `timestream` | JSON |
+| 63 | Transfer Family | `transfer` | JSON |
+| 64 | WAFv2 | `wafv2` | JSON |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---
@@ -1412,6 +1413,121 @@ allow infrastructure code that calls the Health API to run without errors.
 ### Cost
 
 Health API calls are free.
+
+---
+
+## Price List Query API
+
+**Endpoints:** `api.pricing.us-east-1.amazonaws.com`,
+`api.pricing.ap-south-1.amazonaws.com`, `api.pricing.eu-central-1.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: AWSPriceListService.{Op}`)
+
+This is the *server* side of pricing — for code that queries AWS rates at
+runtime. It is the inverse of Substrate's own cost-tracking pricing provider,
+which consumes the public offer index to cost simulated usage (the
+`/v1/pricing/refresh`, `/v1/pricing/lookup`, `/v1/pricing/discounts` and
+`/v1/pricing/credits` control endpoints, and the `substrate pricing` command).
+
+The offer corpus is seven Amazon S3 SKUs copied verbatim from the live
+`AmazonS3/current/us-east-1/index.json` offer file (version `20260728131000`).
+It is small on purpose: each SKU exists to reproduce a response shape that
+callers get wrong, so a consumer's parser is tested against real awkwardness
+rather than a tidied-up fixture.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| GetProducts | `ServiceCode` required; `Filters` 0–50; `MaxResults` 1–100 |
+| DescribeServices | All fields optional; `MaxResults` 1–100 |
+| GetAttributeValues | `AttributeName` **and** `ServiceCode` required; `MaxResults` 1–**10000** |
+
+`FormatVersion` accepts only `aws_v1`, the sole documented value. Pagination
+uses an opaque `NextToken`; a token that does not decode, or that points past the
+end of the result set, is an `InvalidNextTokenException`.
+
+`Filter.Type` supports the full documented enum — `TERM_MATCH`, `EQUALS`,
+`CONTAINS`, `ANY_OF`, `NONE_OF` — not just `TERM_MATCH`. `ANY_OF` and `NONE_OF`
+take a comma-separated `Value`. Filters are conjunctive, and a filter naming a
+field a product does not carry never matches it, including `NONE_OF`.
+
+### Response shapes worth knowing about
+
+These are the traps the corpus deliberately preserves. Each is verified against
+the live offer file.
+
+- **`PriceList` elements are JSON documents encoded as strings**, not objects.
+  Decoding requires a second unmarshal per element.
+- **`pricePerUnit` values are strings** with trailing zeros (`"0.0230000000"`),
+  never numbers. So are `beginRange` and `endRange`.
+- **`productFamily` is absent from most products** — 315 of the 381 in the real
+  S3 offer file omit it. A filter on `productFamily` therefore misses the
+  majority of SKUs. `usagetype` is the attribute that is reliably present and
+  1:1 with a SKU.
+- **`TimedStorage-ByteHrs` carries three `priceDimensions`**, the last with
+  `"endRange": "Inf"`. Reading only the first reports the first-50 TB rate as if
+  it were the only rate.
+- **`Requests-Tier1` is `"0.0000050000"` per request**, and its `unit` is
+  `Requests` — that is $0.005 per 1,000. Dividing by 1,000 again is a 1,000×
+  error.
+- **Filtering `productFamily=Storage` with `volumeType="Glacier Deep Archive"`
+  returns only `TimedStorage-GDA-Staging` at $0.021/GB-Mo** — the staging rate,
+  21× the $0.00099 archive rate. No `TimedStorage-GDA-ByteHrs` SKU exists in the
+  S3 offer file at all, so that filter cannot return the rate a caller expects;
+  the nearest $0.00099 SKU is Intelligent-Tiering's
+  `TimedStorage-INT-DAA-ByteHrs`.
+
+An unknown `ServiceCode` is a `NotFoundException` rather than an empty
+`PriceList`. Substrate's corpus is far smaller than AWS's catalog, and a loud
+error is better than an empty result that reads as "AWS has no such price".
+
+### Endpoint regions — a deliberate divergence
+
+AWS hosts the Price List Query API in exactly three regions: `us-east-1`,
+`ap-south-1` and `eu-central-1`. There is no `api.pricing.eu-west-1.amazonaws.com`
+to resolve.
+
+Substrate serves every region from one endpoint, so it cannot reproduce a name
+that fails to resolve. Instead, a request signed for any other region is rejected
+with **`SubstrateInvalidPricingEndpoint`** (HTTP 400). The code is deliberately
+not an AWS code — this is Substrate reporting a condition AWS surfaces at the
+transport layer, and naming it as such is better than silently pricing a request
+against an endpoint that does not exist.
+
+### Seeding failures
+
+Pricing is the kind of dependency whose failure should degrade a caller, not stop
+it. That property is only testable if the failure can be produced on demand:
+
+```bash
+# Fail one operation.
+curl -X POST http://localhost:4566/v1/pricing/query-failures \
+  -d '{"operation":"GetProducts","code":"ThrottlingException","message":"Rate exceeded"}'
+
+# Fail every operation (wildcard).
+curl -X POST http://localhost:4566/v1/pricing/query-failures \
+  -d '{"code":"InternalErrorException"}'
+
+# Clear one, or all.
+curl -X DELETE 'http://localhost:4566/v1/pricing/query-failures?operation=GetProducts'
+curl -X DELETE http://localhost:4566/v1/pricing/query-failures
+```
+
+An operation-specific seed takes precedence over the wildcard. `statusCode`
+defaults to the status the Price List API documents for the code — 400 for every
+documented code except `InternalErrorException`, which is 500 — and may be
+overridden explicitly.
+
+`code` must be one of the seven codes the Price List API documents:
+`AccessDeniedException`, `ExpiredNextTokenException`, `InvalidNextTokenException`,
+`InvalidParameterException`, `NotFoundException`, `ThrottlingException`,
+`InternalErrorException`. Anything else is rejected with a 400, because a typo'd
+code would seed an error no SDK catch branch matches — the fallback path would go
+untested while the seed itself appeared to work.
+
+### Cost
+
+Price List API calls are free.
 
 ---
 
