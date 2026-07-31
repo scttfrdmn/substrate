@@ -54,7 +54,7 @@ CloudFormation, and cost detail follows below the matrix.
 | 41 | Organizations | `organizations` | JSON |
 | 42 | Price List Query API | `pricing` | JSON |
 | 43 | QuickSight | `quicksight` | REST/JSON |
-| 44 | RAM | `ram` | JSON |
+| 44 | RAM | `ram` | REST/JSON |
 | 45 | RDS | `rds` | Query |
 | 46 | Redshift | `redshift` | Query |
 | 47 | Redshift Data API | `redshift-data` | JSON |
