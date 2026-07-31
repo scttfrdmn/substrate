@@ -187,16 +187,16 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests) |
-| GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes) |
-| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes) |
+| PutObject | Supports Content-Type, metadata headers; `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
+| GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
+| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
 | DeleteObject | Fires S3 notifications if configured |
-| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects) |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
-| CreateMultipartUpload | Accepts `x-amz-storage-class`, applied to the assembled object |
-| UploadPart | |
-| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests) |
+| CreateMultipartUpload | Accepts `x-amz-storage-class`, applied to the assembled object; `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums) |
+| UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
@@ -454,6 +454,94 @@ The `EntityTooSmall` body identifies the offending part:
   <PartNumber>1</PartNumber>
 </Error>
 ```
+
+### Additional checksums
+
+`PutObject`, `UploadPart`, `CopyObject`, `CreateMultipartUpload` and
+`CompleteMultipartUpload` honor the `x-amz-checksum-*` family, and **verify** any
+value the caller supplies. A wrong value is `400 BadDigest` and nothing is written —
+the object does not appear at the key, and a rejected `UploadPart` leaves no part for
+a later Complete to pick up.
+
+All ten documented algorithms are recognized. Seven are computed and verified:
+
+| Algorithm | Header | `FULL_OBJECT` | `COMPOSITE` |
+|---|---|---|---|
+| `CRC32` | `x-amz-checksum-crc32` | yes | yes |
+| `CRC32C` | `x-amz-checksum-crc32c` | yes | yes |
+| `CRC64NVME` | `x-amz-checksum-crc64nvme` | yes | **no** |
+| `SHA1` | `x-amz-checksum-sha1` | no | yes |
+| `SHA256` | `x-amz-checksum-sha256` | no | yes |
+| `SHA512` | `x-amz-checksum-sha512` | no | yes |
+| `MD5` | `x-amz-checksum-md5` | no | yes |
+
+`XXHASH64`, `XXHASH3` and `XXHASH128` are recognized but answered with `501
+NotImplemented`, because substrate has no implementation to check a supplied value
+against. That is deliberate: storing a checksum nobody verified would make a
+consumer's test pass on data real S3 would have rejected, which is the failure this
+section exists to prevent. An algorithm name outside all ten is `400 InvalidRequest`.
+
+Three request shapes are honored on a write:
+
+| Request | Behavior |
+|---|---|
+| `x-amz-checksum-<alg>: <base64>` | Verified against the body; mismatch is `400 BadDigest` |
+| `x-amz-sdk-checksum-algorithm: <NAME>` alone | Substrate computes and records the digest |
+| Both, naming different algorithms | `400 BadDigest` |
+| Two different `x-amz-checksum-*` headers | `400 InvalidRequest`, "Multiple checksum Types are not allowed" |
+| A base64 value of the wrong width for the algorithm | `400 InvalidRequest`, distinct from `BadDigest` |
+
+**Trailing checksums are read.** When the body is `aws-chunked` and `x-amz-trailer`
+names a checksum header, the value is taken from the trailer that follows the
+completion chunk — which is where every AWS SDK puts the checksum of a streamed
+upload. A trailer whose name differs from what `x-amz-trailer` declared is `400
+MalformedTrailerError`; so is a declared trailer that never arrives.
+
+**Reading a checksum back** requires `x-amz-checksum-mode: ENABLED` on `GetObject` or
+`HeadObject`. Without it the response carries no `x-amz-checksum-*` header and no
+`x-amz-checksum-type`, so the absence is observable. A ranged `GET` returns the
+whole object's checksum, not the range's.
+
+**Multipart.** `CreateMultipartUpload` takes `x-amz-checksum-algorithm` (not the
+`x-amz-sdk-` form) and an optional `x-amz-checksum-type`, echoing both back. An
+absent type defaults to `COMPOSITE`, except for `CRC64NVME`, which has no composite
+form and defaults to `FULL_OBJECT`. An unsupported algorithm/type pairing is `400
+InvalidRequest` at **creation**, before any part is uploaded. A part supplying a
+checksum under a different algorithm than the upload's is `400 InvalidRequest`.
+
+`CompleteMultipartUpload` returns the object checksum as an XML **element**, not a
+header:
+
+```xml
+<CompleteMultipartUploadResult>
+  <Location>/bucket/key</Location>
+  <Bucket>bucket</Bucket>
+  <Key>key</Key>
+  <ETag>"b6d81b360a5672d80c27430f39153e2c-2"</ETag>
+  <ChecksumCRC32>Zm9vYmFy-2</ChecksumCRC32>
+  <ChecksumType>COMPOSITE</ChecksumType>
+</CompleteMultipartUploadResult>
+```
+
+A `COMPOSITE` value is the digest of the concatenated raw part digests with a
+`-<part count>` suffix; a `FULL_OBJECT` value is the digest of every byte of the
+assembled object, with no suffix. For the same bytes the two differ, which is the
+point of distinguishing them. A `FULL_OBJECT` multipart checksum equals what a
+single-part `PutObject` of the same bytes produces — a property a test can assert.
+Complete also verifies a whole-object checksum supplied on the request itself, and
+rejects an `x-amz-checksum-type` that disagrees with the upload's.
+
+**`CopyObject` recomputes.** The destination's checksum is always a direct
+full-object checksum of the copied bytes, under the source's algorithm unless the
+copy names a new one. Copying a `COMPOSITE` multipart object therefore changes both
+the value and the type even though the data is identical, matching S3.
+
+**One deliberate divergence.** Real S3 attaches a default `CRC64NVME` checksum to
+every object uploaded without one, so a checksum-mode `GET` always returns something.
+Substrate records **no** checksum in that case. Synthesizing one would make a
+round-trip assertion pass whether or not the consumer's writer actually sends a
+checksum — the exact defect this support was added to expose. An absent checksum in
+substrate means "your writer sent none".
 
 ### Betty CFN resource types
 
