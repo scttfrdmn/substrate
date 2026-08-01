@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The SQS create-then-lookup eventual-consistency window is now seedable via
+  `POST`/`DELETE /v1/sqs/consistency`, keyed by queue name or the `"*"` wildcard
+  (#413). AWS documents that a caller "must wait at least one second after the queue
+  is created to be able to use the queue", so a real
+  `CreateQueue` → `GetQueueUrl` → retry loop can see `QueueDoesNotExist` for a queue
+  that exists. Substrate resolved a new queue instantly, which made that retry path
+  unreachable — the consumer could not exercise it offline at all, so their suite
+  reported green on a loop it never ran.
+  `GetQueueUrl` and `GetQueueAttributes` have independent counters, both defaulting
+  to 0, so unseeded behaviour is unchanged. The window is counted in **misses rather
+  than measured as a duration**: the simulated clock advances with wall time from
+  its baseline, so a duration seed would expire partway through a test and make
+  "still missing" assertions wall-clock dependent, which no test here may be. A miss
+  counter is exactly reproducible.
+  Two ordering rules make it usable from a harness: a miss is consumed only when the
+  queue actually exists, so seeding before `CreateQueue` does not silently burn
+  budget on lookups against a genuinely absent queue; and a seed counts down the
+  next N misses rather than re-arming on `CreateQueue`, which would otherwise be
+  ambiguous given that `CreateQueue` is idempotent, and would make the data path
+  write control-plane state.
+  A state-store failure during the seed lookup propagates as an error rather than
+  collapsing into `QueueDoesNotExist`: the two are opposite signals, since a 400
+  tells a caller to stop retrying while a store failure is transient — and this
+  seed exists so that retry loops can be tested, so conflating them would undercut
+  the feature.
+
 ### Fixed
 - SQS now raises `QueueDoesNotExist` rather than the legacy
   `AWS.SimpleQueueService.NonExistentQueue` for an operation naming a queue that

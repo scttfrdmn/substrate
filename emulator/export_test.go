@@ -2,6 +2,8 @@ package emulator
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -192,6 +194,36 @@ func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, 
 // instead of a real Docker container.
 func InvokePOSTForTest(e *LambdaExecutor, port int, payload []byte) (body []byte, functionError string, err error) {
 	return e.invokePOST(context.Background(), &containerHandle{port: port}, payload)
+}
+
+// SQSQueueNameFromURLForTest wraps sqsQueueNameFromURL for external tests.
+func SQSQueueNameFromURLForTest(queueURL string) string { return sqsQueueNameFromURL(queueURL) }
+
+// SQSSeedForTest writes an SQS consistency seed directly into state, bypassing
+// the control-plane handler. It lets a test arrange a seed behind a state manager
+// whose Put or Delete is rigged to fail.
+func SQSSeedForTest(state StateManager, queueName string, getURLMisses, getAttributesMisses int) error {
+	data, err := json.Marshal(sqsConsistencySeed{
+		QueueName:           queueName,
+		GetURLMisses:        getURLMisses,
+		GetAttributesMisses: getAttributesMisses,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal sqs seed: %w", err)
+	}
+	if err := state.Put(context.Background(), sqsCtrlNamespace, sqsCtrlKey(queueName), data); err != nil {
+		return fmt.Errorf("put sqs seed: %w", err)
+	}
+	return nil
+}
+
+// SQSPutRawSeedForTest stores raw bytes at a consistency seed's key, so a test
+// can exercise the unmarshal-failure path with a corrupt stored value.
+func SQSPutRawSeedForTest(state StateManager, queueName string, raw []byte) error {
+	if err := state.Put(context.Background(), sqsCtrlNamespace, sqsCtrlKey(queueName), raw); err != nil {
+		return fmt.Errorf("put raw sqs seed: %w", err)
+	}
+	return nil
 }
 
 // CheckPresignedExpiryForTest exposes checkPresignedExpiry for white-box tests.

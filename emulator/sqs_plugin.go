@@ -26,6 +26,11 @@ type SQSPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// queueMu serializes consumption of a seeded consistency window per queue,
+	// since decrementing the miss counter is a read-modify-write and StateManager
+	// offers no compare-and-swap. See [sqsQueueMutex].
+	queueMu sqsQueueMutex
 }
 
 // Name returns the service name "sqs".
@@ -354,6 +359,14 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if q == nil {
 		return nil, sqsQueueDoesNotExist()
 	}
+	// The queue exists, so a seeded create→lookup window may still hide it (#413).
+	// Checked only after the existence test: consuming a miss for a genuinely
+	// absent queue would burn budget the test meant to spend on the window.
+	if miss, err := p.consumeQueueMiss(name, sqsConsistencyGetURL); err != nil {
+		return nil, err
+	} else if miss {
+		return nil, sqsQueueDoesNotExist()
+	}
 
 	if sqsIsJSONProtocol(req) {
 		return sqsJSONResponse(http.StatusOK, map[string]string{"QueueUrl": q.QueueURL})
@@ -381,6 +394,13 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 	if q == nil {
+		return nil, sqsQueueDoesNotExist()
+	}
+	// As in getQueueURL: only after the queue is known to exist. Seeds are keyed by
+	// name, so the name is recovered from the URL this operation identifies it by.
+	if miss, err := p.consumeQueueMiss(sqsQueueNameFromURL(queueURL), sqsConsistencyGetAttributes); err != nil {
+		return nil, err
+	} else if miss {
 		return nil, sqsQueueDoesNotExist()
 	}
 
