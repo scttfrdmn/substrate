@@ -2,6 +2,20 @@ package emulator
 
 import "sort"
 
+// sqsDefaultMaximumMessageSize is the MaximumMessageSize a queue reports when it was
+// created without naming one: 1,048,576 bytes (1 MiB), per the CreateQueue reference.
+//
+// 256 KiB was the historical limit and is what substrate reported until #439. It is a
+// named constant because the value must be identical in sqsAttributeDefaults and in
+// getQueueAttributes' inline fallback — a divergence would make GetQueueAttributes
+// report one number while a re-create request naming that same number was rejected as
+// a conflict.
+//
+// Substrate does not enforce this limit on SendMessage; no length check exists against
+// it or any other constant. That absence is deliberate here — enforcement is a new
+// error path with its own scope, tracked separately from correcting the default.
+const sqsDefaultMaximumMessageSize = "1048576"
+
 // sqsAttributeDefaults are the values GetQueueAttributes reports for a queue that
 // was created without naming them, used to resolve an existing queue's unset
 // attributes before comparing them against a CreateQueue request (#429).
@@ -16,15 +30,13 @@ import "sort"
 // The values deliberately mirror getQueueAttributes' inline fallbacks rather than
 // the AWS reference, so the two cannot disagree about what a queue's effective
 // attributes are — a comparison that used different defaults than the read path
-// would reject requests matching what a caller had just read back. That does carry
-// one known staleness through: MaximumMessageSize is 262144 (256 KiB) here, while
-// the current CreateQueue reference documents 1,048,576 (1 MiB). Correcting it
-// changes GetQueueAttributes output, so it is tracked separately rather than
-// smuggled into this change.
-// TODO(#439): reconcile MaximumMessageSize with the documented 1 MiB default.
+// would reject requests matching what a caller had just read back. Any change to a
+// default must therefore move both sites at once; MaximumMessageSize (#439) is the
+// worked example, and TestSQS_CreateQueue_MaximumMessageSizeDefault's idempotent
+// re-create case is what fails if only one moves.
 var sqsAttributeDefaults = map[string]string{
 	"VisibilityTimeout":             "30",
-	"MaximumMessageSize":            "262144",
+	"MaximumMessageSize":            sqsDefaultMaximumMessageSize,
 	"MessageRetentionPeriod":        "345600",
 	"DelaySeconds":                  "0",
 	"ReceiveMessageWaitTimeSeconds": "0",

@@ -47,6 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model gives the `Groups` member the `locationName` `SecurityGroupId`), with
   `Groups.N` accepted as a secondary spelling. Only interface index 1 is modeled,
   matching `RunInstances`.
+- SQS: `GetQueueAttributes` reports the documented `MaximumMessageSize` default of
+  1,048,576 bytes (1 MiB) rather than 262,144 (256 KiB) (#439). 256 KiB is the
+  historical limit; the current CreateQueue reference documents 1 MiB as the
+  default, so a consumer sizing a payload against what substrate reported was
+  working from a number a real queue would not give it. An explicitly requested
+  value is still honored — 256 KiB remains a legal size, it is simply no longer the
+  default.
+
+  Both sites moved together and now share one constant: `GetQueueAttributes`'
+  inline fallback, and the defaults `CreateQueue`'s conflict check (#429) resolves
+  an existing queue's unset attributes through. They can no longer diverge, which
+  matters because a divergence would report one number and then reject a re-create
+  naming exactly that number as `QueueNameExists`.
+
+  Substrate still does **not** enforce `MaximumMessageSize` on `SendMessage` — no
+  length check exists against the attribute or any constant, so an oversized body is
+  accepted. That absence is deliberate here: enforcement is a new error path with
+  its own scope, and is tracked separately.
 
 ### Added
 - EC2: `CreateFleet` stamps the reserved `aws:ec2:fleet-id` tag on every instance

@@ -699,11 +699,11 @@ Lambda invocations: $0.0000002 per request.
 |-----------|-------|
 | CreateQueue | Supports FifoQueue, VisibilityTimeout attributes; [`QueueNameExists`](#queuenameexists) when a name is reused with differing attributes; [seedable `QueueDeletedRecently`](#seeding-queuedeletedrecently) |
 | GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
-| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
+| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window); [attribute defaults](#queue-attribute-defaults) |
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | |
-| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; does **not** enforce [`MaximumMessageSize`](#queue-attribute-defaults) |
 | SendMessageBatch | |
 | ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessage | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
@@ -782,6 +782,31 @@ All three counters — including [`deletedRecentlyMisses`](#seeding-queuedeleted
 — default to 0, so an unseeded queue behaves exactly as before: instantly
 resolvable. Seeds live in the state store, so `POST /v1/state/reset` clears them
 along with everything else.
+
+### Queue attribute defaults
+
+`GetQueueAttributes` reports these for a queue created without naming them:
+
+| Attribute | Default |
+|---|---|
+| `VisibilityTimeout` | `30` |
+| `MaximumMessageSize` | `1048576` — 1 MiB, per the CreateQueue reference |
+| `MessageRetentionPeriod` | `345600` |
+| `DelaySeconds` | `0` |
+| `ReceiveMessageWaitTimeSeconds` | `0` |
+
+`262144` (256 KiB) is the historical limit rather than the current default, and is
+what substrate reported until #439. An explicitly requested value is always honored
+— 256 KiB is still a legal size.
+
+**Substrate does not enforce `MaximumMessageSize` on `SendMessage`.** No length
+check exists against the attribute or any constant, so an oversized body is
+accepted rather than rejected. A consumer's too-large-payload branch is therefore
+not reachable here; enforcement is tracked separately.
+
+These defaults also decide what counts as a
+[`QueueNameExists`](#queuenameexists) conflict, since an existing queue's unset
+attributes are resolved through them before comparing.
 
 ### QueueNameExists
 

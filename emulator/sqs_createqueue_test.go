@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -505,4 +506,89 @@ func TestSQS_CreateQueue_DeletedRecentlyStateFailure(t *testing.T) {
 	status, code := createQueueWithAttrs(t, srv, "corrupt-create-q", nil, false)
 	assert.Equal(t, http.StatusInternalServerError, status)
 	assert.NotEqual(t, "QueueDeletedRecently", code)
+}
+
+// sqsQueueAttribute reads one attribute from GetQueueAttributes under either
+// protocol, so a default can be asserted against the exact value rather than mere
+// presence.
+func sqsQueueAttribute(t *testing.T, srv *emulator.Server, name, attr string, jsonProto bool) string {
+	t.Helper()
+	queueURL := "http://sqs.us-east-1.localhost/000000000000/" + name
+	if jsonProto {
+		resp := sqsJSONRequest(t, srv, "GetQueueAttributes", map[string]interface{}{
+			"QueueUrl":       queueURL,
+			"AttributeNames": []string{"All"},
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		attrs, ok := readJSONBody(t, resp)["Attributes"].(map[string]interface{})
+		require.True(t, ok, "response carries an Attributes object")
+		v, _ := attrs[attr].(string)
+		return v
+	}
+
+	resp := sqsRequest(t, srv, map[string]string{"Action": "GetQueueAttributes", "QueueUrl": queueURL})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var out struct {
+		Attributes []struct {
+			Name  string `xml:"Name"`
+			Value string `xml:"Value"`
+		} `xml:"GetQueueAttributesResult>Attribute"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(readBody(t, resp)), &out))
+	for _, a := range out.Attributes {
+		if a.Name == attr {
+			return a.Value
+		}
+	}
+	return ""
+}
+
+// TestSQS_CreateQueue_MaximumMessageSizeDefault is #439. GetQueueAttributes reported
+// 262144 (256 KiB) for a queue created without the attribute; the current CreateQueue
+// reference documents 1,048,576 bytes (1 MiB) as the default, and 256 KiB is the
+// historical limit. A consumer sizing a payload against what substrate reported was
+// working from a number a real queue would not give it.
+//
+// Note that substrate does not enforce this on SendMessage — no length check exists
+// against the attribute or any constant. This corrects the reported default only.
+func TestSQS_CreateQueue_MaximumMessageSizeDefault(t *testing.T) {
+	bothProtocols(t, func(t *testing.T, jsonProto bool) {
+		t.Run("a bare queue reports 1 MiB", func(t *testing.T) {
+			srv, _ := newSQSTestServer(t)
+			status, _ := createQueueWithAttrs(t, srv, "mms-default", nil, jsonProto)
+			require.Equal(t, http.StatusOK, status)
+
+			assert.Equal(t, "1048576", sqsQueueAttribute(t, srv, "mms-default", "MaximumMessageSize", jsonProto),
+				"the documented CreateQueue default")
+		})
+
+		t.Run("an explicit value is still honored", func(t *testing.T) {
+			srv, _ := newSQSTestServer(t)
+			status, _ := createQueueWithAttrs(t, srv, "mms-explicit",
+				map[string]string{"MaximumMessageSize": "262144"}, jsonProto)
+			require.Equal(t, http.StatusOK, status)
+
+			// Correcting the default must not start overriding a caller's own value —
+			// 256 KiB is still a legal size, it is simply no longer the default.
+			assert.Equal(t, "262144", sqsQueueAttribute(t, srv, "mms-explicit", "MaximumMessageSize", jsonProto))
+		})
+
+		// This is the case that fails if only one of the two default sites moves.
+		// CreateQueue's conflict check (#429) resolves an existing queue's unset
+		// attributes through sqsAttributeDefaults, while GetQueueAttributes reads its
+		// own inline fallback. If they disagree, a request naming exactly the value a
+		// caller just read back is rejected as QueueNameExists.
+		t.Run("re-creating with the reported default stays idempotent", func(t *testing.T) {
+			srv, _ := newSQSTestServer(t)
+			status, _ := createQueueWithAttrs(t, srv, "mms-idem", nil, jsonProto)
+			require.Equal(t, http.StatusOK, status)
+
+			reported := sqsQueueAttribute(t, srv, "mms-idem", "MaximumMessageSize", jsonProto)
+			status, code := createQueueWithAttrs(t, srv, "mms-idem",
+				map[string]string{"MaximumMessageSize": reported}, jsonProto)
+			assert.Equal(t, http.StatusOK, status,
+				"re-creating with the value GetQueueAttributes reported must be idempotent")
+			assert.Empty(t, code)
+		})
+	})
 }
