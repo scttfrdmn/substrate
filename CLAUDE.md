@@ -93,7 +93,10 @@ created only after its `## [vX.Y.Z]` CHANGELOG section exists, and its version
 must be strictly greater than the latest existing tag (`git tag --sort=-v:refname
 | head -1`) — never an ancestor commit or an out-of-order number. (A stray
 out-of-order tag, `v0.67.0`, was created this way once; it is burned and
-documented as void in `SECURITY.md`. The next minor release is **v0.68.0**.)
+documented as void in `SECURITY.md`.) Derive the next version from the latest tag
+at release time rather than trusting a number written here — a pinned number goes
+stale silently, which is exactly what `scripts/check-doc-versions.sh` exists to
+catch in the docs.
 
 `main` is protected by a GitHub ruleset: all changes land via PR (no direct
 pushes), and a separate ruleset makes `refs/tags/v*` immutable (no move/delete).
