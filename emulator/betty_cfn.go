@@ -214,16 +214,22 @@ type CFNDriftDetectionStatus struct {
 // typePriority determines deployment order for CloudFormation resources.
 // Lower numbers deploy first.
 var typePriority = map[string]int{
-	"AWS::IAM::Policy":                            0,
-	"AWS::IAM::Role":                              1,
-	"AWS::EC2::VPC":                               1,
-	"AWS::Route53::HostedZone":                    1,
-	"AWS::KMS::Key":                               1,
-	"AWS::DynamoDB::Table":                        2,
-	"AWS::S3::Bucket":                             2,
-	"AWS::EC2::Subnet":                            2,
-	"AWS::EC2::SecurityGroup":                     2,
-	"AWS::EC2::InternetGateway":                   2,
+	"AWS::IAM::Policy":          0,
+	"AWS::IAM::Role":            1,
+	"AWS::EC2::VPC":             1,
+	"AWS::Route53::HostedZone":  1,
+	"AWS::KMS::Key":             1,
+	"AWS::DynamoDB::Table":      2,
+	"AWS::S3::Bucket":           2,
+	"AWS::EC2::Subnet":          2,
+	"AWS::EC2::SecurityGroup":   2,
+	"AWS::EC2::InternetGateway": 2,
+	"AWS::IAM::InstanceProfile": 2,
+	"AWS::EC2::LaunchTemplate":  3,
+	// Standalone security-group rules must follow every group they reference, so
+	// a self-referencing or mutually-referencing pair resolves (#388).
+	"AWS::EC2::SecurityGroupIngress":              3,
+	"AWS::EC2::SecurityGroupEgress":               3,
 	"AWS::KMS::Alias":                             2,
 	"AWS::KMS::ReplicaKey":                        2,
 	"AWS::SecretsManager::Secret":                 2,
@@ -1490,10 +1496,24 @@ func (d *StackDeployer) deployResource(
 		return d.deployTransferServer(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Athena::WorkGroup":
 		return d.deployAthenaWorkGroup(ctx, logicalID, res.Properties, streamID, cctx)
+	// v0.77.0 — resource types whose API handlers already existed but which fell
+	// through to the generic stub (#388).
+	case "AWS::EC2::LaunchTemplate":
+		return d.deployEC2LaunchTemplate(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::IAM::InstanceProfile":
+		return d.deployIAMInstanceProfile(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::EC2::SecurityGroupIngress":
+		return d.deployEC2SecurityGroupIngress(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::EC2::SecurityGroupEgress":
+		return d.deployEC2SecurityGroupEgress(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; using generic stub",
 			"logical_id", logicalID,
 			"type", res.Type,
+			// A loaded plugin means the API handler may exist and the type merely
+			// needs wiring, which is a different problem from an unsupported
+			// service (#388).
+			"service_plugin_loaded", d.servicePluginLoaded(res.Type),
 		)
 		return d.deployGenericStub(ctx, logicalID, res.Type, res.Properties, cctx)
 	}
@@ -1943,10 +1963,23 @@ func (d *StackDeployer) deployEC2SecurityGroup(
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::EC2::SecurityGroup"}
 	if routeErr != nil {
+		// A failed resource is recorded on the DeployedResource, not returned — a
+		// returned error aborts the whole stack.
 		dr.Error = routeErr.Error()
-	} else if resp != nil {
+		return dr, cost, nil //nolint:nilerr
+	}
+	if resp != nil {
 		dr.PhysicalID = extractXMLField(resp.Body, "groupId")
 		dr.ARN = dr.PhysicalID
+	}
+	// Apply the rules declared inline on the group. Without this the group is
+	// created with no rules at all (#388).
+	if dr.PhysicalID != "" {
+		ruleCost, ruleErr := d.authorizeInlineSGRules(ctx, dr.PhysicalID, props, streamID, cctx)
+		cost += ruleCost
+		if ruleErr != "" {
+			dr.Error = ruleErr
+		}
 	}
 	return dr, cost, nil
 }
@@ -2014,18 +2047,30 @@ func (d *StackDeployer) deployEC2Instance(
 	imageID := resolveStringProp(props, "ImageId", "ami-00000000", cctx)
 	instanceType := resolveStringProp(props, "InstanceType", "t3.micro", cctx)
 	subnetID := resolveStringProp(props, "SubnetId", "", cctx)
+	params := map[string]string{
+		"Action":       "RunInstances",
+		"ImageId":      imageID,
+		"InstanceType": instanceType,
+		"MinCount":     "1",
+		"MaxCount":     "1",
+		"SubnetId":     subnetID,
+	}
+	// An instance profile reference is only resolvable now that
+	// AWS::IAM::InstanceProfile creates a real profile (#388).
+	if profile := resolveStringProp(props, "IamInstanceProfile", "", cctx); profile != "" {
+		params["IamInstanceProfile.Name"] = profile
+	}
+	if keyName := resolveStringProp(props, "KeyName", "", cctx); keyName != "" {
+		params["KeyName"] = keyName
+	}
+	for i, sg := range resolveStringList(props["SecurityGroupIds"], cctx) {
+		params[fmt.Sprintf("SecurityGroupId.%d", i+1)] = sg
+	}
 	req := &AWSRequest{
 		Service:   "ec2",
 		Operation: "RunInstances",
-		Params: map[string]string{
-			"Action":       "RunInstances",
-			"ImageId":      imageID,
-			"InstanceType": instanceType,
-			"MinCount":     "1",
-			"MaxCount":     "1",
-			"SubnetId":     subnetID,
-		},
-		Headers: map[string]string{},
+		Params:    params,
+		Headers:   map[string]string{},
 	}
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::EC2::Instance"}

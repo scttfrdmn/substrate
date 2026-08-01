@@ -265,6 +265,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/sqs/consistency", s.handleSQSSeedConsistency)
 	r.Delete("/v1/sqs/consistency", s.handleSQSClearConsistency)
 
+	// EC2 Fleet partial-fulfillment control-plane endpoints (#387).
+	r.Post("/v1/ec2/fleet-shortfall", s.handleEC2SeedFleetShortfall)
+	r.Delete("/v1/ec2/fleet-shortfall", s.handleEC2ClearFleetShortfall)
+
 	// spore.host spawn task-completion control-plane endpoints (#360).
 	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
 	r.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)

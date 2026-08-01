@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- EC2 Fleet: `CreateFleet`, `DescribeFleets`, and `DeleteFleets` (#387).
+  Instances launch through the same `RunInstances` path as a direct launch, so
+  they are visible to `DescribeInstances` with subnet/security-group validation,
+  placement groups, and launch-time tag propagation intact.
+  `LaunchTemplateConfigs[]` × `Overrides[]` are flattened into ordered capacity
+  pools (sorted by `Priority` under a `prioritized` allocation strategy) and
+  fulfilled round-robin, so `fleetInstanceSet` carries one item per pool each
+  with a *list* of instance IDs. An `instant` fleet returns instances and errors
+  synchronously; `request`/`maintain` fleets return only the fleet ID, matching
+  AWS. `DescribeFleets` returns an `instant` fleet only when its ID is named
+  explicitly; `DeleteFleets` terminates the fleet's instances when
+  `TerminateInstances=true` or the fleet is `instant`.
+- Seedable EC2 Fleet partial fulfillment via
+  `POST`/`DELETE /v1/ec2/fleet-shortfall`, keyed by launch-template ID/name or
+  `"*"` (#387). A fleet that asks for 12 and receives 8 still returns a fleet ID
+  and echoes the *request* in `TotalTargetCapacity`, so this path — rare and
+  hard to trigger against real AWS — is where callers most often go wrong;
+  seeding makes it instant and reproducible. The unfulfilled capacity is
+  reported per pool in `errorSet` with a configurable error code and lifecycle.
+- Source and destination security groups in security-group rules
+  (`IpPermissions.N.Groups.M.GroupId`), rendered by `DescribeSecurityGroups` as
+  `groups>item` (#388). A rule whose source is another security group — the
+  self-referencing rule in particular — has no CIDR at all and previously could
+  not be represented.
+- CloudFormation wiring for four resource types whose API handlers already
+  existed but which fell through to `deployGenericStub`, so a stack deployed
+  "successfully" while the resource was never created (#388):
+  `AWS::EC2::LaunchTemplate` (Ref is the real `lt-…` ID, usable by
+  `CreateFleet`), `AWS::IAM::InstanceProfile` (creates the profile and attaches
+  each entry in `Roles`), and the standalone `AWS::EC2::SecurityGroupIngress` /
+  `AWS::EC2::SecurityGroupEgress` rules, which resolve
+  `SourceSecurityGroupId`/`DestinationSecurityGroupId` through `Ref`/`GetAtt` so
+  self- and mutually-referencing groups work.
+
+### Changed
+- `AWS::EC2::SecurityGroup` now authorizes the rules declared inline in its
+  `SecurityGroupIngress`/`SecurityGroupEgress` properties (#388). They were
+  parsed but never applied, so `DescribeSecurityGroups` reported a group with no
+  rules regardless of how the template was written.
+- `AWS::EC2::Instance` passes through `IamInstanceProfile`, `KeyName`, and
+  `SecurityGroupIds` (#388) — the profile reference is only resolvable now that
+  `AWS::IAM::InstanceProfile` creates a real profile.
+- `AuthorizeSecurityGroup{Ingress,Egress}` parse every `IpPermissions.N` entry
+  and all of each entry's `IpRanges.M`, rather than only the first rule and
+  first CIDR (#388). `RevokeSecurityGroup{Ingress,Egress}` match on source as
+  well as protocol and ports, so revoking a CIDR rule no longer removes a
+  source-group rule on the same port.
+- The generic-stub warning now reports whether the unhandled type's service
+  plugin is loaded (#388). It previously read as "substrate doesn't model this",
+  which is misleading when the API actions exist and only the wiring is missing.
+
+### Fixed
+- Package documentation no longer states a plugin count or per-plugin operation
+  count (#389). `emulator/doc.go` claimed 39 plugins and 23 S3 operations while
+  the registry had 63 and `s3_plugin.go` 53 — the counts that #364 made
+  generated elsewhere had drifted here. It now points at the generated
+  `docs/services.md` instead of repeating a number that can drift.
+- `CLAUDE.md`'s key-files table pointed at four paths that moved to `emulator/`
+  in the #310 reorg (#389). The stale next-release pin flagged in the same issue
+  was already removed in v0.81.0.
+
 ## [v0.81.0] - 2026-08-01
 
 A fidelity release driven by three consumer-filed issues (`objectfs`,

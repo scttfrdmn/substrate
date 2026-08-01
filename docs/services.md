@@ -139,6 +139,9 @@ here.
 | TagRole | |
 | UntagRole | |
 | ListRoleTags | |
+| CreateInstanceProfile | |
+| GetInstanceProfile | |
+| AddRoleToInstanceProfile | |
 
 ### Betty CFN resource types
 
@@ -147,6 +150,7 @@ here.
 | AWS::IAM::Role | RoleName | Supports AssumeRolePolicyDocument, ManagedPolicyArns |
 | AWS::IAM::Policy | PolicyName | |
 | AWS::IAM::User | UserName | |
+| AWS::IAM::InstanceProfile | InstanceProfileName | Attaches each entry in `Roles`; resolvable by an `AWS::EC2::Instance`'s `IamInstanceProfile` |
 | AWS::IAM::Group | GroupName | |
 
 ### Cost
@@ -779,8 +783,10 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateSecurityGroup | |
 | DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids) |
 | DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
-| AuthorizeSecurityGroupIngress | |
-| AuthorizeSecurityGroupEgress | |
+| AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules |
+| AuthorizeSecurityGroupEgress | Supports destination security groups |
+| RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source |
+| RevokeSecurityGroupEgress | |
 | CreateInternetGateway | |
 | AttachInternetGateway | |
 | DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids) |
@@ -794,6 +800,12 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
+| CreateLaunchTemplate | |
+| DescribeLaunchTemplates | |
+| DeleteLaunchTemplate | |
+| CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`. Partial fulfillment is seedable — see below |
+| DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
+| DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances |
 
 ### RunInstances requires a resolvable AMI
 
@@ -859,15 +871,41 @@ lowercase hex digit. Length is deliberately not checked: substrate's generators
 emit 16 hex characters where AWS emits 8 or 17, and AWS itself still accepts the
 legacy 8-character form for several resources.
 
+### Seeding EC2 Fleet partial fulfillment
+
+`CreateFleet` fulfills its whole `TotalTargetCapacity` by default. Partial
+fulfillment — the case callers most often get wrong, since a fleet that asks for
+12 and receives 8 still returns a fleet ID and echoes the *request* in
+`TotalTargetCapacity` — is reachable by seeding a shortfall:
+
+```bash
+# Fulfill 8 instances and report the remainder as a capacity failure.
+curl -X POST http://localhost:4566/v1/ec2/fleet-shortfall \
+  -d '{"launchTemplate":"lt-0abc123","fulfill":8,
+       "errorCode":"InsufficientInstanceCapacity","lifecycle":"spot"}'
+
+# Clear one seed, or all of them.
+curl -X DELETE 'http://localhost:4566/v1/ec2/fleet-shortfall?launchTemplate=lt-0abc123'
+curl -X DELETE http://localhost:4566/v1/ec2/fleet-shortfall
+```
+
+`launchTemplate` matches a launch template ID or name, or `*` (the default) for
+any. The shortfall is spread across the request's capacity pools, so `errorSet`
+reports one item per pool that came up short, and `DescribeFleets` reports the
+result in `fulfilledCapacity`.
+
 ### Betty CFN resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::EC2::VPC | VpcId | |
 | AWS::EC2::Subnet | SubnetId | |
-| AWS::EC2::SecurityGroup | GroupId | |
-| AWS::EC2::Instance | InstanceId | |
+| AWS::EC2::SecurityGroup | GroupId | Inline `SecurityGroupIngress`/`SecurityGroupEgress` rules are authorized |
+| AWS::EC2::SecurityGroupIngress | GroupId | Standalone rule; resolves `SourceSecurityGroupId` through `Ref`/`GetAtt`, so self- and mutually-referencing groups work |
+| AWS::EC2::SecurityGroupEgress | GroupId | Standalone rule; supports `DestinationSecurityGroupId` |
+| AWS::EC2::Instance | InstanceId | Passes through `IamInstanceProfile`, `KeyName`, and `SecurityGroupIds` |
 | AWS::EC2::InternetGateway | InternetGatewayId | |
+| AWS::EC2::LaunchTemplate | LaunchTemplateId | Ref is the real `lt-…` ID, usable by `CreateFleet` |
 
 ### Cost
 

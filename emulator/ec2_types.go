@@ -199,6 +199,29 @@ type EC2IPPermission struct {
 
 	// IPRanges holds the IPv4 CIDR ranges for this permission.
 	IPRanges []string `json:"ip_ranges,omitempty"`
+
+	// UserIDGroupPairs holds the source/destination security groups for this
+	// permission. A rule whose source is another security group (including the
+	// group itself) has no CIDR at all, so it cannot be represented by IPRanges
+	// alone (#388).
+	UserIDGroupPairs []EC2UserIDGroupPair `json:"user_id_group_pairs,omitempty"`
+}
+
+// EC2UserIDGroupPair identifies a security group referenced as the source or
+// destination of a rule.
+type EC2UserIDGroupPair struct {
+	// GroupID is the referenced security group's ID.
+	GroupID string `json:"group_id"`
+
+	// GroupName is the referenced security group's name, used for EC2-Classic
+	// style and default-VPC references.
+	GroupName string `json:"group_name,omitempty"`
+
+	// UserID is the AWS account that owns the referenced group.
+	UserID string `json:"user_id,omitempty"`
+
+	// Description is the optional rule description.
+	Description string `json:"description,omitempty"`
 }
 
 // EC2SecurityGroup represents a VPC security group.
