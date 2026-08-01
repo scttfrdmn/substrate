@@ -206,6 +206,9 @@ STS operations are free.
 | GetBucketPolicy | |
 | PutBucketPolicy | |
 | DeleteBucketPolicy | |
+| PutPublicAccessBlock | Records the configuration; a partial body reports omitted settings as `false` — see [Block Public Access](#block-public-access) |
+| GetPublicAccessBlock | `404 NoSuchPublicAccessBlockConfiguration` when the bucket has none — see [Block Public Access](#block-public-access) |
+| DeletePublicAccessBlock | Idempotent; removes only the configuration, never the bucket — see [Block Public Access](#block-public-access) |
 | GetBucketAcl | |
 | PutBucketAcl | |
 | GetObjectAcl | |
@@ -638,6 +641,49 @@ Substrate records **no** checksum in that case. Synthesizing one would make a
 round-trip assertion pass whether or not the consumer's writer actually sends a
 checksum — the exact defect this support was added to expose. An absent checksum in
 substrate means "your writer sent none".
+
+### Block Public Access
+
+The `?publicAccessBlock` subresource is addressed as a bare query key on the bucket,
+which is why it needs explicit routing: an unrouted `DELETE
+/bucket?publicAccessBlock` is indistinguishable from `DeleteBucket`.
+
+```
+PUT    /bucket?publicAccessBlock   → 200, empty body
+GET    /bucket?publicAccessBlock   → 200 + PublicAccessBlockConfiguration, or 404
+DELETE /bucket?publicAccessBlock   → 204
+```
+
+**All four settings are always reported.** `BlockPublicAcls`, `IgnorePublicAcls`,
+`BlockPublicPolicy` and `RestrictPublicBuckets` are each optional on the request, and
+every one a `PUT` omits is recorded — and reported back — as `false`, matching S3.
+`PutPublicAccessBlock` replaces the whole document rather than merging into it, so a
+second call naming fewer settings clears the rest.
+
+**An unconfigured bucket is a 404, not an all-false 200.** A bucket that has never
+been the subject of a `PutPublicAccessBlock` returns `404
+NoSuchPublicAccessBlockConfiguration`. The two states are deliberately
+distinguishable: an all-false configuration a consumer wrote on purpose is a `200`
+carrying four `false` elements. Reporting the unset case as all-false would tell a
+caller "public access is not blocked" where AWS says "nothing is configured".
+
+**Substrate does not apply S3's April 2023 default.** Real S3 enables all four
+settings on buckets newly created through the API, CLI, SDKs or CloudFormation. In
+substrate a new bucket has no configuration at all. That default is a property of
+AWS-managed account and organization state substrate does not model, and seeding
+every bucket with a configuration would make the `NoSuchPublicAccessBlockConfiguration`
+path — the branch a consumer's error handling exists for — unreachable through the
+public API. Call `PutPublicAccessBlock` to get a configured bucket, which is what the
+SDKs and CloudFormation both do.
+
+**`DeletePublicAccessBlock` is idempotent** and touches nothing but the
+configuration. Deleting one that was never written is a `204`, which is what a
+teardown path that deletes unconditionally relies on.
+
+**The settings are recorded, not enforced.** Nothing rejects a public ACL or a public
+bucket policy on a bucket with `BlockPublicAcls` or `BlockPublicPolicy` set. Those are
+the resource-internal consequences of the setting rather than the setting itself;
+enforcement is tracked separately.
 
 ### Betty CFN resource types
 
