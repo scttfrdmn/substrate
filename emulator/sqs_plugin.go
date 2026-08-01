@@ -352,7 +352,7 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	if sqsIsJSONProtocol(req) {
@@ -381,7 +381,7 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	// Build standard attributes.
@@ -437,7 +437,7 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	var attrs map[string]string
@@ -483,7 +483,7 @@ func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	urlKey := sqsURLKey(queueURL)
@@ -587,7 +587,7 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	if q.Tags == nil {
@@ -638,7 +638,7 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	if sqsIsJSONProtocol(req) {
@@ -684,7 +684,7 @@ func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	type tagEntry struct {
@@ -731,7 +731,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	// Extract parameters supporting both protocols.
@@ -923,7 +923,7 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	urlKey := sqsURLKey(queueURL)
@@ -1057,7 +1057,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	var maxNum int
@@ -1221,7 +1221,7 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	var receiptHandle string
@@ -1288,7 +1288,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	urlKey := sqsURLKey(queueURL)
@@ -1400,7 +1400,7 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	var receiptHandle string
@@ -1460,7 +1460,7 @@ func (p *SQSPlugin) purgeQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 	if q == nil {
-		return nil, &AWSError{Code: "AWS.SimpleQueueService.NonExistentQueue", Message: "The specified queue does not exist", HTTPStatus: http.StatusBadRequest}
+		return nil, sqsQueueDoesNotExist()
 	}
 
 	urlKey := sqsURLKey(queueURL)

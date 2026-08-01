@@ -905,6 +905,81 @@ func TestSQSPlugin_JSON_Error_NonExistentQueue(t *testing.T) {
 		"MessageBody": "test",
 	})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	// Assert the code, not just the status. Checking only StatusCode is why the
+	// wrong code survived: AWS documents QueueDoesNotExist, and the legacy
+	// "AWS.SimpleQueueService.NonExistentQueue" resolves to a bare ClientError in
+	// botocore while aws-sdk-go-v2 dispatches on EqualFold("QueueDoesNotExist",…)
+	// and never mentions the dotted form — so a consumer could not catch it as the
+	// modeled exception type at all (#413).
+	body := readJSONBody(t, resp)
+	assert.Equal(t, "QueueDoesNotExist", body["__type"])
+	assert.Equal(t, "QueueDoesNotExist", body["Code"])
+	assert.Equal(t, "The specified queue does not exist", body["message"])
+	assert.Equal(t, "QueueDoesNotExist", resp.Header.Get("X-Amzn-ErrorType"),
+		"writeError derives x-amzn-ErrorType from Code; SDKs read it in preference to the body")
+}
+
+// TestSQS_QueueDoesNotExist_AllOperations pins the not-exist code across every
+// operation that can raise it, under both protocols. The code was duplicated
+// verbatim at 14 sites before #413 and is now a single helper, so this is the
+// regression guard that any future queue operation inherits the right code — and
+// that no site was missed by the dedup.
+//
+// SQS errors are always JSON here regardless of request protocol:
+// errorProtocolFor consults the service map before the Content-Type, and sqs is
+// registered as errProtoJSONRPC. Both protocol rows therefore assert the same JSON
+// shape; that is deliberate, not an oversight.
+func TestSQS_QueueDoesNotExist_AllOperations(t *testing.T) {
+	const missingURL = "http://sqs.us-east-1.localhost/000000000000/no-such-queue"
+
+	// Each case names an operation and the minimum extra parameters it needs to
+	// reach the queue lookup.
+	tests := []struct {
+		op     string
+		params map[string]string
+	}{
+		{op: "GetQueueUrl", params: map[string]string{"QueueName": "no-such-queue"}},
+		{op: "GetQueueAttributes"},
+		{op: "SetQueueAttributes", params: map[string]string{"Attribute.1.Name": "VisibilityTimeout", "Attribute.1.Value": "60"}},
+		{op: "DeleteQueue"},
+		{op: "TagQueue", params: map[string]string{"Tag.1.Key": "k", "Tag.1.Value": "v"}},
+		{op: "UntagQueue", params: map[string]string{"TagKey.1": "k"}},
+		{op: "ListQueueTags"},
+		{op: "SendMessage", params: map[string]string{"MessageBody": "x"}},
+		{op: "ReceiveMessage"},
+		{op: "DeleteMessage", params: map[string]string{"ReceiptHandle": "rh"}},
+		{op: "ChangeMessageVisibility", params: map[string]string{"ReceiptHandle": "rh", "VisibilityTimeout": "30"}},
+		{op: "PurgeQueue"},
+	}
+
+	assertCode := func(t *testing.T, resp *http.Response) {
+		t.Helper()
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		body := readJSONBody(t, resp)
+		assert.Equal(t, "QueueDoesNotExist", body["__type"])
+		assert.Equal(t, "QueueDoesNotExist", resp.Header.Get("X-Amzn-ErrorType"))
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.op+"/query", func(t *testing.T) {
+			srv, _ := newSQSTestServer(t)
+			params := map[string]string{"Action": tt.op, "QueueUrl": missingURL}
+			for k, v := range tt.params {
+				params[k] = v
+			}
+			assertCode(t, sqsRequest(t, srv, params))
+		})
+
+		t.Run(tt.op+"/json", func(t *testing.T) {
+			srv, _ := newSQSTestServer(t)
+			body := map[string]interface{}{"QueueUrl": missingURL}
+			for k, v := range tt.params {
+				body[k] = v
+			}
+			assertCode(t, sqsJSONRequest(t, srv, tt.op, body))
+		})
+	}
 }
 
 func TestSQSPlugin_CrossProtocol(t *testing.T) {
