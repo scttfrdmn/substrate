@@ -795,8 +795,8 @@ Lambda invocations: $0.0000002 per request.
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | |
-| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; does **not** enforce [`MaximumMessageSize`](#queue-attribute-defaults) |
-| SendMessageBatch | |
+| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement) |
+| SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement) |
 | ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessage | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessageBatch | |
@@ -891,14 +891,72 @@ along with everything else.
 what substrate reported until #439. An explicitly requested value is always honored
 — 256 KiB is still a legal size.
 
-**Substrate does not enforce `MaximumMessageSize` on `SendMessage`.** No length
-check exists against the attribute or any constant, so an oversized body is
-accepted rather than rejected. A consumer's too-large-payload branch is therefore
-not reachable here; enforcement is tracked separately.
-
 These defaults also decide what counts as a
 [`QueueNameExists`](#queuenameexists) conflict, since an existing queue's unset
 attributes are resolved through them before comparing.
+
+### Message size enforcement
+
+`SendMessage` rejects a message larger than the queue's **effective**
+`MaximumMessageSize` with `InvalidParameterValue`, HTTP 400:
+
+```
+One or more parameters are invalid. Reason: Message must be shorter than 1048576 bytes.
+```
+
+"Effective" means resolved through the [default](#queue-attribute-defaults) when the
+attribute is unset, so a queue created with no attributes enforces 1 MiB. The limit is
+read through the same default `GetQueueAttributes` reports, so the number a caller
+reads back is by construction the number that is enforced. The limit named in the
+message is the one that actually applied — a queue configured at 1 KiB says 1024.
+
+The boundary is **inclusive**: a message of exactly the limit is accepted. AWS's
+wording is "must be shorter than N bytes", but N is the documented maximum *size*, so
+the largest legal message is N bytes.
+
+**Message attributes count toward the size.** The measured total is the body plus, for
+every attribute, its name, its data type, and its value — a binary value counted as
+its raw (decoded) byte length. The developer guide is explicit that "all components of
+a message attribute are included in the 1 MiB message size restriction", and the
+per-component breakdown is the one AWS's own Extended Client Library uses to decide
+whether a payload needs offloading to S3. Message *system* attributes are excluded,
+per the `SendMessage` reference.
+
+Attributes are parsed for measurement only; substrate does not yet store them or
+return them from `ReceiveMessage` (tracked separately).
+
+`SendMessageBatch` enforces two limits, both 1 MiB, as the reference states: "the
+maximum allowed individual message size and the maximum total payload size (the sum of
+the individual lengths of all of the batched messages) are both 1 MiB".
+
+| Condition | Error |
+|---|---|
+| Combined payload of all entries over 1 MiB | `BatchRequestTooLong` |
+| One entry over the queue's per-message limit | `InvalidParameterValue` |
+
+Because the two limits are equal on a default queue, a batch carrying a single
+oversized entry breaches the total as well — and real AWS reports
+`BatchRequestTooLong` for that case, not the per-message error, so the total is checked
+first. The queue's `MaximumMessageSize` is a *per-message* cap and does not lower the
+request payload cap: ten legal 1 KiB entries on a queue configured at 1 KiB are
+accepted.
+
+A rejected send or batch enqueues **nothing** — a partially applied batch would leave a
+retry to re-send the entries that already landed. On a FIFO queue the size check runs
+before the deduplication ID is recorded, so a corrected retry reusing the same
+`MessageDeduplicationId` is delivered rather than swallowed as a duplicate.
+
+An unparseable or non-positive `MaximumMessageSize` falls back to the default rather
+than to zero, which would make the queue reject every message including an empty one.
+
+**Provenance.** `SendMessage` declares no oversized-message error in the API model:
+its `InvalidMessageContents` is documented as a character-set error, and
+`BatchRequestTooLong` is declared only on `SendMessageBatch`. The per-message code and
+both message wordings therefore come from **observed real-AWS responses** rather than
+a doc citation — captured SDK errors carrying `code: 'InvalidParameterValue'` with
+HTTP 400, and `BatchRequestTooLong: Batch requests cannot be longer than N bytes. You
+have sent M bytes.` The same strings appear in independent reimplementations, which
+corroborates them as transcribed AWS text.
 
 ### QueueNameExists
 

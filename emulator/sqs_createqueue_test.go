@@ -549,8 +549,9 @@ func sqsQueueAttribute(t *testing.T, srv *emulator.Server, name, attr string, js
 // historical limit. A consumer sizing a payload against what substrate reported was
 // working from a number a real queue would not give it.
 //
-// Note that substrate does not enforce this on SendMessage — no length check exists
-// against the attribute or any constant. This corrects the reported default only.
+// This covers the reported default only. Enforcement of it on SendMessage came later
+// (#454) and is covered by TestSQS_SendMessage_EffectiveLimitResolvesThroughDefault,
+// which asserts the enforced limit is the value this test pins.
 func TestSQS_CreateQueue_MaximumMessageSizeDefault(t *testing.T) {
 	bothProtocols(t, func(t *testing.T, jsonProto bool) {
 		t.Run("a bare queue reports 1 MiB", func(t *testing.T) {
