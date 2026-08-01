@@ -78,8 +78,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Tidy e2e module
-        run: cd test/e2e && go mod tidy
+      # Verify rather than repair: `go mod tidy` here would fix a stale go.mod
+      # in-flight and report green, leaving the committed file broken for anyone
+      # running the suite locally.
+      - name: Check e2e module is tidy
+        run: |
+          cd test/e2e
+          cp go.mod go.mod.orig && cp go.sum go.sum.orig
+          go mod tidy
+          diff go.mod go.mod.orig && diff go.sum go.sum.orig || {
+            echo "::error::test/e2e go.mod/go.sum are stale — run 'cd test/e2e && go mod tidy' and commit"
+            exit 1
+          }
 
       - name: Run E2E tests
         run: cd test/e2e && go test -v -race ./...
