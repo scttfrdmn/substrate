@@ -76,6 +76,22 @@ type sqsConsistencySeed struct {
 
 	// GetAttributesMisses is the same count for GetQueueAttributes.
 	GetAttributesMisses int `json:"getAttributesMisses"`
+
+	// DeletedRecentlyMisses is the number of subsequent CreateQueue calls that
+	// report QueueDeletedRecently rather than creating the queue (#429).
+	//
+	// It rides on this seed rather than on a separate endpoint because it is the
+	// same kind of value: a count of API observations that deviate from the nominal
+	// path for one queue, cleared by the same DELETE and the same state reset. AWS
+	// documents the real condition as a 60-second wall-clock window after
+	// DeleteQueue, which is a duration — and counted for exactly the reason the
+	// misses above are, since a wall-clock window would make the assertion depend
+	// on how long the rest of the test took.
+	//
+	// Unlike the lookup counters this one is *not* gated on the queue existing:
+	// QueueDeletedRecently is precisely the case where the queue is absent, so
+	// gating it on existence would make it unreachable.
+	DeletedRecentlyMisses int `json:"deletedRecentlyMisses"`
 }
 
 // sqsCtrlKey returns the state key for a consistency seed. Queue-scoped seeds use
@@ -110,16 +126,35 @@ const (
 
 	// sqsConsistencyGetAttributes selects the GetQueueAttributes counter.
 	sqsConsistencyGetAttributes
+
+	// sqsConsistencyDeletedRecently selects the CreateQueue QueueDeletedRecently
+	// counter.
+	sqsConsistencyDeletedRecently
 )
 
-// consumeQueueMiss reports whether the current call should answer
-// QueueDoesNotExist for a queue that exists, decrementing the seeded budget when
-// it does. It matches the queue name exactly first, then the "*" wildcard, and
-// returns false when no seed applies so the caller takes the nominal path.
+// counter returns a pointer to the seed field this operation consumes, so
+// consumeQueueMiss decrements the right one without duplicating the switch.
+func (op sqsConsistencyOp) counter(seed *sqsConsistencySeed) *int {
+	switch op {
+	case sqsConsistencyGetAttributes:
+		return &seed.GetAttributesMisses
+	case sqsConsistencyDeletedRecently:
+		return &seed.DeletedRecentlyMisses
+	default:
+		return &seed.GetURLMisses
+	}
+}
+
+// consumeQueueMiss reports whether the current call should take a seeded deviation
+// instead of its nominal path, decrementing the budget when it does. It matches the
+// queue name exactly first, then the "*" wildcard, and returns false when no seed
+// applies.
 //
-// Callers must consult this only *after* establishing that the queue exists. A
-// miss consumed on a genuinely absent queue would silently burn budget the test
-// meant to spend on the window, leaving the later retry assertion meaningless.
+// For the two lookup counters, callers must consult this only *after* establishing
+// that the queue exists. A miss consumed on a genuinely absent queue would silently
+// burn budget the test meant to spend on the window, leaving the later retry
+// assertion meaningless. [sqsConsistencyDeletedRecently] is the deliberate
+// exception — the queue is absent by definition in that case.
 func (p *SQSPlugin) consumeQueueMiss(queueName string, op sqsConsistencyOp) (bool, error) {
 	unlock := p.queueMu.lock(queueName)
 	defer unlock()
@@ -138,10 +173,7 @@ func (p *SQSPlugin) consumeQueueMiss(queueName string, op sqsConsistencyOp) (boo
 			return false, fmt.Errorf("sqs consumeQueueMiss unmarshal: %w", err)
 		}
 
-		counter := &seed.GetURLMisses
-		if op == sqsConsistencyGetAttributes {
-			counter = &seed.GetAttributesMisses
-		}
+		counter := op.counter(&seed)
 		if *counter <= 0 {
 			// This seed exists but has nothing left for this operation. Fall
 			// through to the wildcard: an exhausted name-scoped seed must not mask
@@ -164,17 +196,18 @@ func (p *SQSPlugin) consumeQueueMiss(queueName string, op sqsConsistencyOp) (boo
 
 // handleSQSSeedConsistency handles POST /v1/sqs/consistency. It seeds how many
 // subsequent lookups report QueueDoesNotExist for a queue that exists, modeling
-// the create→lookup window AWS documents. Body:
-// {"queueName","getUrlMisses","getAttributesMisses"}; an empty queueName seeds the
-// "*" wildcard.
+// the create→lookup window AWS documents, and how many CreateQueue calls report
+// QueueDeletedRecently. Body:
+// {"queueName","getUrlMisses","getAttributesMisses","deletedRecentlyMisses"}; an
+// empty queueName seeds the "*" wildcard.
 func (s *Server) handleSQSSeedConsistency(w http.ResponseWriter, r *http.Request) {
 	var seed sqsConsistencySeed
 	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 		return
 	}
-	if seed.GetURLMisses < 0 || seed.GetAttributesMisses < 0 {
-		http.Error(w, `{"error":"getUrlMisses and getAttributesMisses must not be negative"}`, http.StatusBadRequest)
+	if seed.GetURLMisses < 0 || seed.GetAttributesMisses < 0 || seed.DeletedRecentlyMisses < 0 {
+		http.Error(w, `{"error":"miss counts must not be negative"}`, http.StatusBadRequest)
 		return
 	}
 	data, err := json.Marshal(seed)

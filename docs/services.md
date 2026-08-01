@@ -660,7 +660,7 @@ Lambda invocations: $0.0000002 per request.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateQueue | Supports FifoQueue, VisibilityTimeout attributes |
+| CreateQueue | Supports FifoQueue, VisibilityTimeout attributes; [`QueueNameExists`](#queuenameexists) when a name is reused with differing attributes; [seedable `QueueDeletedRecently`](#seeding-queuedeletedrecently) |
 | GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
 | GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
@@ -732,17 +732,89 @@ reproducible.
 
 Two ordering rules make the seed usable from a harness:
 
-- A miss is consumed **only when the queue actually exists**. Seeding before
+- A lookup miss is consumed **only when the queue actually exists**. Seeding before
   `CreateQueue` is safe: lookups against the genuinely absent queue still fail, but
-  they do not spend the budget.
+  they do not spend the budget. (`deletedRecentlyMisses` is the deliberate
+  exception — see [below](#seeding-queuedeletedrecently).)
 - A seed counts down the next N misses and **does not re-arm on `CreateQueue`**.
   `CreateQueue` is idempotent here (it returns the existing URL), so "after its
   CreateQueue" would be ambiguous when create runs twice, and re-arming would mean
   the data path writes control-plane state.
 
-Both counters default to 0, so an unseeded queue behaves exactly as before —
-instantly resolvable. Seeds live in the state store, so `POST /v1/state/reset`
-clears them along with everything else.
+All three counters — including [`deletedRecentlyMisses`](#seeding-queuedeletedrecently)
+— default to 0, so an unseeded queue behaves exactly as before: instantly
+resolvable. Seeds live in the state store, so `POST /v1/state/reset` clears them
+along with everything else.
+
+### QueueNameExists
+
+`CreateQueue` fails with `QueueNameExists`, HTTP 400, when the named queue already
+exists **with attribute values differing from the ones requested**. Same name with
+the same values stays idempotent and returns the existing URL, as AWS documents.
+
+This needs no seed: the condition is entirely determined by state, so it fires on the
+real mistake — two stacks or two test cases claiming one queue name with different
+settings — rather than only when a harness remembers to arm it.
+
+**Only attributes present in the request are compared.** An omitted attribute is
+treated as "no opinion", not as an assertion of its default. That reading comes from
+the error's own definition — "Amazon SQS returns this error only if the request
+includes attributes whose values differ from those of the existing queue" — which
+scopes the comparison to what the request includes. It is also what keeps
+CloudFormation re-deploys working, since a template forwards only the properties it
+declares.
+
+An existing queue's unset attributes are resolved through their defaults before
+comparing, so these are all idempotent:
+
+| First create | Re-create | Result |
+|---|---|---|
+| no attributes | no attributes | idempotent |
+| no attributes | `VisibilityTimeout=30` | idempotent — 30 is what the queue already reports |
+| `VisibilityTimeout=30` | no attributes | idempotent |
+| `VisibilityTimeout=45`, `DelaySeconds=5` | `VisibilityTimeout=45` | idempotent — subset |
+| `VisibilityTimeout=45` | `VisibilityTimeout=90` | `QueueNameExists` |
+| no attributes | `DelaySeconds=10` | `QueueNameExists` — effective value is 0 |
+| `orders.fifo`, no attributes | `FifoQueue=true` | idempotent — derived from the `.fifo` suffix |
+| `orders.fifo`, no attributes | `FifoQueue=false` | `QueueNameExists` |
+
+Comparison is **exact string equality** on resolved values, so `5` and `05` differ,
+and two semantically identical `Policy` documents differing in whitespace or key
+order read as a conflict. Any SDK or template re-sending its own serialization
+matches, which is the case that has to work; semantic JSON comparison is not
+attempted.
+
+The message carries AWS's documented wording plus the name of the offending
+attribute, which AWS's own text omits — without it the error is nearly
+undiagnosable for a caller holding a large attribute set. When several attributes
+differ, the alphabetically first is named, so the message is reproducible across
+runs.
+
+### Seeding QueueDeletedRecently
+
+AWS requires a **60-second wait after `DeleteQueue`** before a queue of the same name
+can be created, raising `QueueDeletedRecently`, HTTP 400, in the meantime. Substrate
+keeps no memory of a delete, so a consumer's delete → recreate → retry loop had no
+reachable error branch.
+
+```bash
+# The next 2 CreateQueue calls naming run-q report QueueDeletedRecently.
+curl -X POST http://localhost:4566/v1/sqs/consistency \
+  -d '{"queueName":"run-q","deletedRecentlyMisses":2}'
+```
+
+It shares the `/v1/sqs/consistency` endpoint, the name-over-wildcard precedence, and
+the `DELETE` clearing described above, and it is counted rather than timed for the
+same reason: the real condition is a wall-clock window, and a wall-clock window would
+make the assertion depend on how long the rest of the test took.
+
+Unlike the two lookup counters, this one applies **only while the name is free**.
+`QueueDeletedRecently` describes a name too recently freed, so an existing queue is
+the one case it cannot describe — a `CreateQueue` that hits an existing queue is an
+idempotent success and does not spend the budget. Substrate cannot know whether a
+name was "recently deleted", which is why the condition is seeded rather than
+inferred: a seeded name is refused on its next create whether or not a delete
+preceded it.
 
 ### Betty CFN resource types
 
