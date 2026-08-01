@@ -270,7 +270,28 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
+
+	// A seeded QueueDeletedRecently is checked before the existence branch, unlike
+	// the lookup windows, which require the queue to exist. AWS raises this only
+	// when the name is free but too recently freed, so the absent case is the only
+	// one where it can apply — the seed is consulted here, and only here, for that
+	// reason. It is unseeded by default, so nothing changes without a seed.
+	if existing == nil {
+		if miss, missErr := p.consumeQueueMiss(name, sqsConsistencyDeletedRecently); missErr != nil {
+			return nil, missErr
+		} else if miss {
+			return nil, sqsQueueDeletedRecently()
+		}
+	}
 	if existing != nil {
+		// Same name with differing attribute values is an error, not an idempotent
+		// hit (#429). AWS scopes this to "attributes whose values differ from those
+		// of the existing queue", so only what the request names is compared and the
+		// same-name-same-attributes case stays idempotent below.
+		if conflict := sqsConflictingAttribute(existing, attrs); conflict != "" {
+			return nil, sqsQueueNameExists(conflict)
+		}
+
 		// Idempotent — return existing URL.
 		if sqsIsJSONProtocol(req) {
 			return sqsJSONResponse(http.StatusOK, map[string]string{"QueueUrl": existing.QueueURL})
