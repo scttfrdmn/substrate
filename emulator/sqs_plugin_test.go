@@ -23,9 +23,15 @@ import (
 
 func newSQSTestServer(t *testing.T) (*emulator.Server, *emulator.TimeController) {
 	t.Helper()
+	return newSQSTestServerWithState(t, emulator.NewMemoryStateManager())
+}
+
+// newSQSTestServerWithState builds the SQS test server over a caller-supplied
+// state manager, so a test can substitute a store that fails.
+func newSQSTestServerWithState(t *testing.T, state emulator.StateManager) (*emulator.Server, *emulator.TimeController) {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelInfo, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))

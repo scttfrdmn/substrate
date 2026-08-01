@@ -2,9 +2,13 @@ package emulator_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -383,4 +387,234 @@ func TestSQS_Consistency_ResetClearsSeeds(t *testing.T) {
 	createSQSQueue(t, srv, "reset-q")
 	status, _ := getQueueURL(t, srv, "reset-q", false)
 	assert.Equal(t, http.StatusOK, status)
+}
+
+// sqsFailAfterGetsState is a StateManager that serves the first allow Get calls
+// normally and fails every one after, mirroring errAfterGetsStateManager in
+// error_protocol_test.go. Failing from the first Get is useless here: the test
+// needs CreateQueue and the seed write to succeed so the failure lands on the
+// seed lookup specifically.
+type sqsFailAfterGetsState struct {
+	inner  emulator.StateManager
+	allow  int
+	getErr error
+
+	mu   sync.Mutex
+	gets int
+}
+
+func (m *sqsFailAfterGetsState) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	m.mu.Lock()
+	m.gets++
+	over := m.gets > m.allow
+	m.mu.Unlock()
+	if over {
+		return nil, m.getErr
+	}
+	return m.inner.Get(ctx, namespace, key)
+}
+
+func (m *sqsFailAfterGetsState) Put(ctx context.Context, namespace, key string, value []byte) error {
+	return m.inner.Put(ctx, namespace, key, value)
+}
+
+func (m *sqsFailAfterGetsState) Delete(ctx context.Context, namespace, key string) error {
+	return m.inner.Delete(ctx, namespace, key)
+}
+
+func (m *sqsFailAfterGetsState) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	return m.inner.List(ctx, namespace, prefix)
+}
+
+// sqsAlwaysFailState fails whichever single operation the test names, so the
+// control-plane handlers' error paths can be reached individually.
+type sqsAlwaysFailState struct {
+	emulator.StateManager
+	putErr    error
+	deleteErr error
+	listErr   error
+}
+
+func (m *sqsAlwaysFailState) Put(ctx context.Context, namespace, key string, value []byte) error {
+	if m.putErr != nil {
+		return m.putErr
+	}
+	return m.StateManager.Put(ctx, namespace, key, value)
+}
+
+func (m *sqsAlwaysFailState) Delete(ctx context.Context, namespace, key string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	return m.StateManager.Delete(ctx, namespace, key)
+}
+
+func (m *sqsAlwaysFailState) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.StateManager.List(ctx, namespace, prefix)
+}
+
+// TestSQS_Consistency_StateFailureIsNotQueueDoesNotExist asserts a store failure
+// during the seed lookup propagates rather than collapsing into
+// QueueDoesNotExist. The two are opposite signals: QueueDoesNotExist is a 400
+// telling a caller the queue is gone and to stop retrying, while a store failure
+// is transient and should be retried. Reporting the former for the latter would
+// send a consumer down a permanent-failure path over a blip — and this seed
+// exists precisely so consumers can test their retry loops, so getting the
+// distinction wrong here would undercut the feature.
+func TestSQS_Consistency_StateFailureIsNotQueueDoesNotExist(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(t *testing.T, srv *emulator.Server, queueURL string) (int, string)
+	}{
+		{"GetQueueUrl", func(t *testing.T, srv *emulator.Server, _ string) (int, string) {
+			return getQueueURL(t, srv, "fail-q", false)
+		}},
+		{"GetQueueAttributes", func(t *testing.T, srv *emulator.Server, queueURL string) (int, string) {
+			return getQueueAttributes(t, srv, queueURL, false)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &sqsFailAfterGetsState{
+				inner:  emulator.NewMemoryStateManager(),
+				getErr: errors.New("state store unavailable"),
+				allow:  math.MaxInt, // permissive through setup
+			}
+			srv, _ := newSQSTestServerWithState(t, state)
+			queueURL := createSQSQueue(t, srv, "fail-q")
+			seedSQSConsistency(t, srv, map[string]any{"queueName": "fail-q", "getUrlMisses": 1, "getAttributesMisses": 1})
+
+			// Let the queue lookup succeed, then fail the seed lookup that
+			// follows it.
+			state.mu.Lock()
+			state.allow = state.gets + 1
+			state.mu.Unlock()
+
+			status, code := tt.call(t, srv, queueURL)
+			assert.Equal(t, http.StatusInternalServerError, status,
+				"a store failure must not be reported as a 400")
+			assert.NotEqual(t, "QueueDoesNotExist", code,
+				"a store failure must not be indistinguishable from an absent queue")
+		})
+	}
+}
+
+// TestSQS_Consistency_ControlPlaneStateFailures covers the control plane's own
+// error paths. A seed that silently fails to persist is worse than no seed at
+// all: the harness proceeds believing the window is armed, the lookups all
+// succeed, and the retry assertion passes vacuously — the exact failure mode
+// #413 was filed about.
+func TestSQS_Consistency_ControlPlaneStateFailures(t *testing.T) {
+	boom := errors.New("state store unavailable")
+
+	tests := []struct {
+		name  string
+		state func() emulator.StateManager
+		req   func() *http.Request
+	}{
+		{
+			name: "seed put fails",
+			state: func() emulator.StateManager {
+				return &sqsAlwaysFailState{StateManager: emulator.NewMemoryStateManager(), putErr: boom}
+			},
+			req: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/v1/sqs/consistency",
+					strings.NewReader(`{"queueName":"put-q","getUrlMisses":1}`))
+			},
+		},
+		{
+			name: "clear one delete fails",
+			state: func() emulator.StateManager {
+				return &sqsAlwaysFailState{StateManager: emulator.NewMemoryStateManager(), deleteErr: boom}
+			},
+			req: func() *http.Request {
+				return httptest.NewRequest(http.MethodDelete, "/v1/sqs/consistency?queueName=del-q", nil)
+			},
+		},
+		{
+			name: "clear all list fails",
+			state: func() emulator.StateManager {
+				return &sqsAlwaysFailState{StateManager: emulator.NewMemoryStateManager(), listErr: boom}
+			},
+			req: func() *http.Request {
+				return httptest.NewRequest(http.MethodDelete, "/v1/sqs/consistency", nil)
+			},
+		},
+		{
+			name: "clear all delete fails",
+			state: func() emulator.StateManager {
+				return &sqsAlwaysFailState{StateManager: emulator.NewMemoryStateManager(), deleteErr: boom}
+			},
+			req: func() *http.Request {
+				return httptest.NewRequest(http.MethodDelete, "/v1/sqs/consistency", nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := tt.state()
+			srv, _ := newSQSTestServerWithState(t, state)
+
+			// "clear all delete fails" needs a seed present for List to return a
+			// key to delete, so write one behind the failing wrapper.
+			if tt.name == "clear all delete fails" {
+				require.NoError(t, emulator.SQSSeedForTest(state, "seeded-q", 1, 0))
+			}
+
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, tt.req())
+			assert.Equal(t, http.StatusInternalServerError, w.Code, "body was %s", w.Body.String())
+		})
+	}
+}
+
+// TestSQS_Consistency_MalformedSeedBody covers a body the control plane cannot
+// decode, which must be rejected rather than silently stored as a zero seed.
+func TestSQS_Consistency_MalformedSeedBody(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/sqs/consistency", strings.NewReader(`{"queueName":`))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// TestSQS_Consistency_CorruptStoredSeed covers a seed value in the store that is
+// not valid JSON. It must surface as an error rather than being read as "no
+// misses left", which would look like a seed that silently did nothing.
+func TestSQS_Consistency_CorruptStoredSeed(t *testing.T) {
+	state := emulator.NewMemoryStateManager()
+	srv, _ := newSQSTestServerWithState(t, state)
+	createSQSQueue(t, srv, "corrupt-q")
+	require.NoError(t, emulator.SQSPutRawSeedForTest(state, "corrupt-q", []byte("{not json")))
+
+	status, code := getQueueURL(t, srv, "corrupt-q", false)
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.NotEqual(t, "QueueDoesNotExist", code)
+}
+
+// TestSQS_QueueNameFromURL covers the derivation GetQueueAttributes depends on,
+// including the degenerate forms an operation can be handed.
+func TestSQS_QueueNameFromURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"standard", "http://sqs.us-east-1.localhost/000000000000/my-q", "my-q"},
+		{"trailing slash", "http://sqs.us-east-1.localhost/000000000000/my-q/", "my-q"},
+		{"bare name, no separator", "my-q", "my-q"},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, emulator.SQSQueueNameFromURLForTest(tt.url))
+		})
+	}
 }
