@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- SQS now raises `QueueDoesNotExist` rather than the legacy
+  `AWS.SimpleQueueService.NonExistentQueue` for an operation naming a queue that
+  does not exist, across all 14 sites that produced it (#413). The code decides
+  whether a consumer can catch the error as a typed exception at all: botocore
+  derives the exception class from the resolved error code, so the legacy string
+  resolved to a bare `ClientError` and `except sqs.exceptions.QueueDoesNotExist`
+  never matched, while `aws-sdk-go-v2` dispatches on
+  `strings.EqualFold("QueueDoesNotExist", …)` and does not mention the dotted form
+  anywhere in its `sqs` module, so `errors.As(err, &types.QueueDoesNotExist{})`
+  never matched either. SQS is an `awsQueryCompatible` JSON service and the dotted
+  form is the query-compatibility alias AWS sends in an `x-amzn-query-error`
+  header, not in `__type`. Because `writeError` derives `x-amzn-ErrorType` from the
+  code, correcting the code fixes both SDKs with no additional plumbing. The 14
+  verbatim duplicates are now a single `sqsQueueDoesNotExist` helper, so future
+  queue operations inherit the right code.
 - `CreateMultipartUpload` now records `Content-Encoding` and
   `CompleteMultipartUpload` applies it to the assembled object, so `GetObject` and
   `HeadObject` report the codec a multipart object was uploaded with (#406).

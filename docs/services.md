@@ -623,18 +623,39 @@ Lambda invocations: $0.0000002 per request.
 | Operation | Notes |
 |-----------|-------|
 | CreateQueue | Supports FifoQueue, VisibilityTimeout attributes |
-| GetQueueUrl | |
-| GetQueueAttributes | |
-| SetQueueAttributes | |
-| DeleteQueue | |
+| GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | |
-| SendMessage | Returns MessageId |
+| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | SendMessageBatch | |
-| ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds |
-| DeleteMessage | |
+| ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| DeleteMessage | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessageBatch | |
-| ChangeMessageVisibility | |
-| PurgeQueue | |
+| ChangeMessageVisibility | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| PurgeQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+
+### QueueDoesNotExist
+
+Every operation that names a queue fails with `QueueDoesNotExist`, HTTP 400, when
+that queue is absent — not the legacy `AWS.SimpleQueueService.NonExistentQueue`.
+
+The distinction decides whether a consumer can catch the error as a typed
+exception. SQS is an `awsQueryCompatible` JSON service, and the dotted form is the
+query-compatibility alias AWS sends in an `x-amzn-query-error` header, not in
+`__type`:
+
+- **botocore** derives the exception class from the resolved error code, so the
+  legacy string resolves to a bare `ClientError` and
+  `except sqs.exceptions.QueueDoesNotExist` never matches.
+- **aws-sdk-go-v2** dispatches on `strings.EqualFold("QueueDoesNotExist", …)`; the
+  legacy string appears nowhere in the `sqs` module, so
+  `errors.As(err, &types.QueueDoesNotExist{})` never matched either.
+
+SQS errors are emitted as JSON regardless of the request protocol, since substrate
+resolves the error protocol per service and SQS is JSON-RPC. A query-protocol
+request therefore gets a JSON error document rather than the XML `<Error>` shape.
 
 ### Betty CFN resource types
 
