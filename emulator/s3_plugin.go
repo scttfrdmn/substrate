@@ -730,18 +730,35 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 	if err != nil {
 		return nil, fmt.Errorf("get object metadata: %w", err)
 	}
-	if data == nil {
-		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
-	}
 
 	var obj S3Object
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return nil, fmt.Errorf("unmarshal object metadata: %w", err)
-	}
+	if data == nil {
+		// Mirror getObject: no real object at this key, so a HEAD of
+		// tasks/<task_id>/completion.json may be a seedable spore.host
+		// task-completion observation (#360). HEAD has to consult the same resolver
+		// GET does, because HEAD and GET disagreeing about whether a key exists is
+		// something real S3 never does — and `aws s3 cp` HEADs before it GETs, so a
+		// HEAD-only 404 made a synthesized record unreadable through the CLI (#457).
+		//
+		// The body is discarded: the resolver returns a fully-populated S3Object, so
+		// Content-Length, ETag and Content-Type below match what GET reports, and the
+		// clock gate that makes a not-yet-complete record absent applies identically.
+		var handled bool
+		if versionID == "" {
+			obj, _, handled = p.resolveTaskCompletion(ctx, key)
+		}
+		if !handled {
+			return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+		}
+	} else {
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return nil, fmt.Errorf("unmarshal object metadata: %w", err)
+		}
 
-	if obj.IsDeleteMarker {
-		// Mirror getObject: 405 when a version is named, 404 otherwise.
-		return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
+		if obj.IsDeleteMarker {
+			// Mirror getObject: 405 when a version is named, 404 otherwise.
+			return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
+		}
 	}
 
 	// HEAD evaluates preconditions exactly as GET does. It deliberately does *not*

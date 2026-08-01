@@ -3,6 +3,8 @@ package emulator_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -125,6 +127,191 @@ func TestSpawn_TaskCompletion_NonMatchingKeyStays404(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code, key)
 		assert.Contains(t, w.Body.String(), "NoSuchKey", key)
 	}
+}
+
+// spawnCompletionHeadGet issues a HEAD and a GET of the same completion key and
+// returns both recorders, so a test can assert the pair agrees rather than
+// asserting each in isolation. The disagreement in #457 was invisible to any test
+// that only exercised one verb.
+func spawnCompletionHeadGet(t *testing.T, srv *emulator.Server, path string) (head, get *httptest.ResponseRecorder) {
+	t.Helper()
+	return s3Request(t, srv, http.MethodHead, path, nil, nil),
+		s3Request(t, srv, http.MethodGet, path, nil, nil)
+}
+
+// TestSpawn_TaskCompletion_HeadMatchesGet is #457: getObject consulted the
+// completion resolver and headObject did not, so HEAD reported NoSuchKey for a key
+// GET served with a 200 body. Real S3 never disagrees with itself that way.
+//
+// The practical failure was that `aws s3 cp` — the command spawn prints for users —
+// could not read a synthesized record at all, because the CLI HEADs before it GETs
+// and never reached the working GET. An SDK HeadObject existence poll had the same
+// problem, and in the worse direction: absence reads as "still running", so the
+// loop never terminates rather than failing visibly.
+//
+// Every resolver behavior is asserted through both verbs together, since the whole
+// defect was one verb's view of the resolver drifting from the other's.
+func TestSpawn_TaskCompletion_HeadMatchesGet(t *testing.T) {
+	tests := []struct {
+		name     string
+		seed     map[string]any
+		stage    string
+		key      string
+		wantCode int
+	}{
+		{
+			name:     "nominal success, no seed",
+			key:      "task-h1",
+			wantCode: http.StatusOK,
+		},
+		{
+			name: "seeded failure",
+			seed: map[string]any{
+				"task_id": "task-h2", "exit_code": 9, "state": "failed",
+				"started_at": "2026-01-01T11:00:00Z", "ended_at": "2026-01-01T11:05:00Z",
+			},
+			key:      "task-h2",
+			wantCode: http.StatusOK,
+		},
+		{
+			// The clock gate has to gate both verbs identically: a HEAD before the
+			// simulated completion time is the "still running" observation a poll
+			// loop depends on, and a HEAD that answered 200 early would report a
+			// task complete that GET still reports as absent.
+			name: "clock-gated, not yet complete",
+			seed: map[string]any{
+				"task_id": "task-h3", "exit_code": 0, "state": "completed",
+				"started_at": "2026-01-01T11:59:00Z", "ended_at": "2030-01-01T00:00:00Z",
+			},
+			key:      "task-h3",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name:     "real staged object wins",
+			stage:    `{"task_id":"task-h4","exit_code":7,"state":"failed","started_at":"x","ended_at":"y"}`,
+			key:      "task-h4",
+			wantCode: http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := newS3TestServer(t)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+
+			if tt.seed != nil {
+				spawnSeedCompletion(t, srv, tt.seed)
+			}
+			path := "/results/tasks/" + tt.key + "/completion.json"
+			if tt.stage != "" {
+				require.Equal(t, http.StatusOK,
+					s3Request(t, srv, http.MethodPut, path, []byte(tt.stage), nil).Code)
+			}
+
+			head, get := spawnCompletionHeadGet(t, srv, path)
+
+			assert.Equal(t, tt.wantCode, get.Code, "GET: %s", get.Body.String())
+			assert.Equal(t, tt.wantCode, head.Code, "HEAD: %s", head.Body.String())
+			assert.Equal(t, get.Code, head.Code, "HEAD and GET disagree about the same key")
+
+			if tt.wantCode != http.StatusOK {
+				assert.Contains(t, head.Body.String(), "NoSuchKey")
+				return
+			}
+
+			// The metadata a HEAD exists to report has to describe the body a GET
+			// would actually return — a HEAD promising a different length or ETag is
+			// its own wrong answer, and Content-Length is what `aws s3 cp` sizes its
+			// download from.
+			assert.Empty(t, head.Body.String(), "HEAD returns no body")
+			for _, h := range []string{"Content-Length", "ETag", "Content-Type", "Last-Modified", "Accept-Ranges"} {
+				assert.Equal(t, get.Header().Get(h), head.Header().Get(h), h)
+			}
+			assert.Equal(t, strconv.Itoa(get.Body.Len()), head.Header().Get("Content-Length"),
+				"HEAD's Content-Length must match the bytes GET returns")
+		})
+	}
+}
+
+// TestSpawn_TaskCompletion_HeadNonMatchingKeyStays404 is the counterpart to
+// [TestSpawn_TaskCompletion_NonMatchingKeyStays404] for HEAD. Routing the resolver
+// into headObject must not make HEAD answer for keys the resolver does not own; a
+// HEAD of any absent key outside the tasks/*/completion.json shape is still
+// NoSuchKey.
+func TestSpawn_TaskCompletion_HeadNonMatchingKeyStays404(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+
+	for _, key := range []string{
+		"/results/tasks/task-1/other.json",
+		"/results/some/other/object.txt",
+		"/results/tasks//completion.json",
+		"/results/tasks/task-1/completion.json.bak",
+	} {
+		w := s3Request(t, srv, http.MethodHead, key, nil, nil)
+		assert.Equal(t, http.StatusNotFound, w.Code, key)
+		assert.Contains(t, w.Body.String(), "NoSuchKey", key)
+	}
+}
+
+// TestSpawn_TaskCompletion_HeadVersionedIsNot404Synthesized pins that a HEAD naming
+// an explicit versionId does not reach the resolver, matching getObject: a
+// synthesized record has no version history, so answering for a named version would
+// invent one.
+func TestSpawn_TaskCompletion_HeadVersionedIsNot404Synthesized(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+
+	const path = "/results/tasks/task-v/completion.json"
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodHead, path, nil, nil).Code)
+
+	for _, verb := range []string{http.MethodHead, http.MethodGet} {
+		w := s3Request(t, srv, verb, path+"?versionId=null", nil, nil)
+		assert.Equal(t, http.StatusNotFound, w.Code, verb)
+		assert.Contains(t, w.Body.String(), "NoSuchKey", verb)
+	}
+}
+
+// TestSpawn_TaskCompletion_HeadRange covers HEAD's Range handling on a synthesized
+// record. headObject honors Range as GET does, and now that it serves the resolver's
+// object the two must agree on both the satisfiable and unsatisfiable cases.
+func TestSpawn_TaskCompletion_HeadRange(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+
+	const path = "/results/tasks/task-hr/completion.json"
+	full := s3Request(t, srv, http.MethodGet, path, nil, nil)
+	require.Equal(t, http.StatusOK, full.Code)
+
+	part := s3Request(t, srv, http.MethodHead, path, nil, map[string]string{"Range": "bytes=0-3"})
+	require.Equal(t, http.StatusPartialContent, part.Code)
+	assert.Equal(t, "4", part.Header().Get("Content-Length"))
+	assert.Equal(t, "bytes 0-3/"+strconv.Itoa(full.Body.Len()), part.Header().Get("Content-Range"))
+	assert.Empty(t, part.Body.String(), "HEAD returns no body even for a range")
+
+	bad := s3Request(t, srv, http.MethodHead, path, nil,
+		map[string]string{"Range": "bytes=" + strconv.Itoa(full.Body.Len()+10) + "-"})
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, bad.Code)
+}
+
+// TestSpawn_TaskCompletion_HeadPreconditions covers conditional HEADs against a
+// synthesized record. The resolver supplies a real ETag, so If-None-Match must
+// produce a 304 — which is what makes a cheap "has it changed?" poll work — and a
+// non-matching If-Match a 412.
+func TestSpawn_TaskCompletion_HeadPreconditions(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+
+	const path = "/results/tasks/task-hp/completion.json"
+	first := s3Request(t, srv, http.MethodHead, path, nil, nil)
+	require.Equal(t, http.StatusOK, first.Code)
+	etag := first.Header().Get("ETag")
+	require.NotEmpty(t, etag, "the resolver must supply an ETag for conditionals to work")
+
+	same := s3Request(t, srv, http.MethodHead, path, nil, map[string]string{"If-None-Match": etag})
+	assert.Equal(t, http.StatusNotModified, same.Code)
+
+	mismatch := s3Request(t, srv, http.MethodHead, path, nil, map[string]string{"If-Match": `"deadbeef"`})
+	assert.Equal(t, http.StatusPreconditionFailed, mismatch.Code)
 }
 
 func TestSpawn_TaskCompletion_SeedAndClear(t *testing.T) {
