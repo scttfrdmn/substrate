@@ -455,6 +455,27 @@ The `EntityTooSmall` body identifies the offending part:
 </Error>
 ```
 
+#### Metadata carried from CreateMultipartUpload
+
+`CompleteMultipartUpload` accepts no object-metadata headers — per the AWS API
+reference it takes only the checksum family, `x-amz-mp-object-size`, request-payer,
+SSE-C and the conditional headers. So anything describing the finished object must
+be supplied at `CreateMultipartUpload` and is carried on the upload until the object
+is assembled:
+
+| Supplied at Create | Applied to the assembled object |
+|---|---|
+| `Content-Type` | yes (defaults to `application/octet-stream`) |
+| `Content-Encoding` | yes |
+| `x-amz-storage-class` | yes (empty means `STANDARD`) |
+| `x-amz-checksum-algorithm` | yes — see [Additional checksums](#additional-checksums) |
+| `x-amz-meta-*` | yes |
+
+`Cache-Control`, `Content-Disposition` and `Content-Language` are **not modeled** on
+either upload path: substrate records no field for them, so they are accepted and
+discarded rather than echoed on a later `GetObject`/`HeadObject`. A test asserting
+one of those survives a write will pass against real S3 and fail here.
+
 ### Additional checksums
 
 `PutObject`, `UploadPart`, `CopyObject`, `CreateMultipartUpload` and

@@ -36,8 +36,10 @@ type S3Object struct {
 	// ContentType is the MIME type of the object body.
 	ContentType string `json:"content_type"`
 
-	// ContentEncoding is the encoding of the object body (e.g. "gzip"),
-	// set via the Content-Encoding header on PutObject.
+	// ContentEncoding is the encoding of the object body (e.g. "gzip"), set via
+	// the Content-Encoding header on PutObject or on CreateMultipartUpload —
+	// Complete accepts no metadata headers, so a multipart object's encoding is
+	// carried on the upload record from creation.
 	ContentEncoding string `json:"content_encoding,omitempty"`
 
 	// Size is the byte length of the object body.
@@ -143,6 +145,12 @@ type S3MultipartUpload struct {
 
 	// ContentType is the MIME type supplied at upload creation.
 	ContentType string `json:"content_type"`
+
+	// ContentEncoding is the Content-Encoding supplied at upload creation (e.g.
+	// "gzip"), applied to the object CompleteMultipartUpload assembles. Create is
+	// the only place it can be supplied: Complete accepts no object-metadata
+	// headers, so an encoding not carried here is lost for good.
+	ContentEncoding string `json:"content_encoding,omitempty"`
 
 	// StorageClass is the storage class supplied at upload creation, applied to
 	// the object CompleteMultipartUpload assembles. Empty means STANDARD.
