@@ -7,7 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- SQS: `QueueDeletedRecently` is seedable on `CreateQueue` (#429). AWS requires a
+  60-second wait after `DeleteQueue` before the same name can be reused, so a
+  consumer's delete → recreate → retry loop has a documented error to handle;
+  substrate keeps no memory of a delete, so that branch could never be exercised
+  offline. `POST /v1/sqs/consistency` now accepts `deletedRecentlyMisses`
+  alongside the existing lookup counters, keyed by queue name or the `"*"`
+  wildcard and cleared by the same `DELETE`. It is counted rather than timed for
+  the reason the lookup windows are: the real condition is a wall-clock window,
+  and a wall-clock window makes the assertion depend on how long the rest of the
+  test took. Unlike the lookup counters it applies only while the name is free —
+  `QueueDeletedRecently` describes a name too recently freed, so a create that
+  hits an existing queue is an idempotent success and does not spend the budget.
+  Unseeded behaviour is unchanged: the counter defaults to 0, so a recreate is
+  still instant.
+
 ### Fixed
+- SQS: `CreateQueue` returns `QueueNameExists` when a name is reused with
+  differing attribute values, instead of treating every repeat as idempotent
+  (#429). `createQueue` returned the existing queue's URL regardless of what the
+  request asked for, so two stacks or two test cases claiming one queue name with
+  different settings both "succeeded" and the second silently got the first one's
+  configuration — a confidently wrong answer, not a missing error, and the
+  consumer's error branch was unreachable. Only attributes **present in the
+  request** are compared, per the error's own definition ("only if the request
+  includes attributes whose values differ from those of the existing queue"); an
+  omitted attribute is no opinion, which is also what keeps a CloudFormation
+  re-deploy working, since a template forwards only the properties it declares.
+  An existing queue's unset attributes resolve through the values
+  `GetQueueAttributes` reports before comparing, so `VisibilityTimeout=30` against
+  a bare queue is not a conflict, and `FifoQueue=true` against a `.fifo` queue —
+  what every SDK and template sends — stays idempotent. The message names the
+  offending attribute, which AWS's own wording omits.
 - S3: `PutObject` and `CreateMultipartUpload` no longer record the `aws-chunked`
   transfer encoding as the object's `Content-Encoding` (#428). A SigV4 streaming
   upload — what every AWS SDK sends for a body it does not buffer — arrives with
