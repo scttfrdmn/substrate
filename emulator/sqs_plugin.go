@@ -431,7 +431,7 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		"CreatedTimestamp":              strconv.FormatInt(q.CreatedTimestamp, 10),
 		"LastModifiedTimestamp":         strconv.FormatInt(q.LastModifiedTimestamp, 10),
 		"VisibilityTimeout":             getAttrOrDefault(q.Attributes, "VisibilityTimeout", "30"),
-		"MaximumMessageSize":            getAttrOrDefault(q.Attributes, "MaximumMessageSize", "262144"),
+		"MaximumMessageSize":            getAttrOrDefault(q.Attributes, "MaximumMessageSize", sqsDefaultMaximumMessageSize),
 		"MessageRetentionPeriod":        getAttrOrDefault(q.Attributes, "MessageRetentionPeriod", "345600"),
 		"DelaySeconds":                  getAttrOrDefault(q.Attributes, "DelaySeconds", "0"),
 		"ReceiveMessageWaitTimeSeconds": getAttrOrDefault(q.Attributes, "ReceiveMessageWaitTimeSeconds", "0"),
