@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.80.0] - 2026-07-31
+
+A fidelity release driven by two downstream consumers (`parsl-ephemeral-aws` and
+`objectfs`), who filed ten issues sharing one defect: **substrate returned success,
+or a confident wrong answer, where real AWS signals failure.** That makes a
+consumer's error branch unreachable, so their suite reports green while verifying
+nothing — worse than an incomplete emulator, and directly against this project's
+premise that a red test is a real signal.
+
+Ranged and conditional S3 reads, checksum verification, storage classes, symbolic
+error codes across five services, EC2 `Invalid*.NotFound`, Lambda invoke metadata,
+and a new `pricing` plugin. Closes #391, #392, #393, #396, #397, #398, #399, #400,
+#401 and #403.
+
 ### Added
 - New `pricing` plugin emulating the AWS Price List Query API — `GetProducts`,
   `DescribeServices` and `GetAttributeValues` — over `api.pricing.{region}` and
@@ -2436,7 +2450,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.76.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.80.0...HEAD
+[v0.80.0]: https://github.com/scttfrdmn/substrate/compare/v0.76.0...v0.80.0
 [v0.76.0]: https://github.com/scttfrdmn/substrate/compare/v0.75.0...v0.76.0
 [v0.75.0]: https://github.com/scttfrdmn/substrate/compare/v0.74.0...v0.75.0
 [v0.74.0]: https://github.com/scttfrdmn/substrate/compare/v0.73.0...v0.74.0
