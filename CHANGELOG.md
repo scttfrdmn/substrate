@@ -252,6 +252,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in substrate means "your writer sent none".
 
 ### Fixed
+- The `test/e2e` module's recorded indirect dependency versions are back in sync
+  with the root module, so `cd test/e2e && go test ./...` runs as documented
+  rather than stopping at `go: updates to go.mod needed`. The e2e module consumes
+  the root through `replace github.com/scttfrdmn/substrate => ../../`, so bumping
+  a root dependency makes its `go.mod` stale too — and the CI job runs
+  `go mod tidy` immediately before the tests, repairing the inconsistency
+  in-flight and reporting green while the committed file stayed stale. The gap was
+  only visible to someone running the suite locally. That step now *verifies*
+  tidiness and fails with the command to run, so the same drift cannot pass CI
+  again.
 - EC2 `Describe*` calls that name a resource ID explicitly now raise
   `Invalid<Type>.NotFound` when the ID resolves to nothing, and
   `Invalid<Type>.Malformed` when it is syntactically invalid, instead of
