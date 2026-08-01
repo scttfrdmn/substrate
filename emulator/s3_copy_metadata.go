@@ -20,6 +20,12 @@ type s3CopyMetadata struct {
 	ContentType     string
 	ContentEncoding string
 	UserMetadata    map[string]string
+
+	// System is the Cache-Control/Content-Disposition/Content-Language/Expires
+	// family, resolved under the same directive as the fields above. Embedding
+	// [S3SystemMetadata] here rather than restating its members means a header added
+	// to the family is carried by CopyObject without editing this file (#430).
+	System S3SystemMetadata
 }
 
 // resolveDirective returns the COPY/REPLACE value of a directive header, or the
@@ -66,6 +72,15 @@ func resolveDirective(headers map[string]string, name string) (string, *AWSRespo
 // on the source object in your request, even if you are changing only one of the
 // metadata values". This is the asymmetry a consumer's in-place CopyObject tier
 // transition trips over — a REPLACE that omits Content-Encoding loses it.
+//
+// Cache-Control, Content-Disposition, Content-Language and Expires follow exactly
+// the same rule, and deliberately share the one directive rather than getting
+// per-header treatment (#430). S3 documents a single x-amz-metadata-directive
+// governing "the metadata", with no per-header variant, and all four are
+// user-controlled system metadata by the same definition Content-Type and
+// Content-Encoding are. So a REPLACE that restates only Content-Type drops the
+// download name a consumer set — which is the failure this models, not an
+// implementation shortcut.
 func resolveCopyMetadata(headers map[string]string, src *S3Object) (s3CopyMetadata, *AWSResponse) {
 	directive, errResp := resolveDirective(headers, "x-amz-metadata-directive")
 	if errResp != nil {
@@ -77,6 +92,7 @@ func resolveCopyMetadata(headers map[string]string, src *S3Object) (s3CopyMetada
 			ContentType:     src.ContentType,
 			ContentEncoding: src.ContentEncoding,
 			UserMetadata:    copyStringMap(src.UserMetadata),
+			System:          src.S3SystemMetadata,
 		}, nil
 	}
 
@@ -88,6 +104,7 @@ func resolveCopyMetadata(headers map[string]string, src *S3Object) (s3CopyMetada
 		ContentType:     contentType,
 		ContentEncoding: headerValueFold(headers, "Content-Encoding"),
 		UserMetadata:    extractUserMetadata(headers),
+		System:          resolveSystemMetadata(headers),
 	}, nil
 }
 

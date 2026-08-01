@@ -191,14 +191,14 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
-| GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
-| HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
+| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
+| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
+| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
 | DeleteObject | Fires S3 notifications if configured |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
-| CreateMultipartUpload | Accepts `x-amz-storage-class`, applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums) |
+| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
 | CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums) |
 | AbortMultipartUpload | |
@@ -299,6 +299,35 @@ codec that *is* applied to the stored object.
 
 The header name is matched case-insensitively on both paths.
 
+### Object system metadata
+
+`Cache-Control`, `Content-Disposition`, `Content-Language` and `Expires` are recorded
+on write and returned on every read, on all three write paths — `PutObject`,
+`CreateMultipartUpload` → `CompleteMultipartUpload`, and `CopyObject`. Substrate
+previously accepted them and discarded them, so a test asserting "the download
+filename survives an upload" passed while verifying nothing.
+
+They are stored verbatim and never interpreted: substrate does not evaluate a
+`Cache-Control` lifetime, parse a `Content-Disposition` filename, or apply an
+`Expires` date to anything. What is modeled is the observation — that a read reports
+what the write set.
+
+An absent header is **absent on the response, not empty**. `Cache-Control: ` and no
+`Cache-Control` are different observations, and an SDK distinguishing nil from `""`
+would otherwise report the wrong one.
+
+**`Expires` is a string, never a parsed date.** A malformed value round-trips
+unchanged rather than being normalized or dropped. Real S3 stores and returns what the
+caller sent, and the Go SDK's own `GetObject` output deprecates its `time.Time`
+`Expires` in favour of `ExpiresString` — "the unparsed value of the `Expires` field
+from the service response". Parsing here would be lower fidelity, and would make a
+consumer's parse-failure branch unreachable.
+
+`Content-Type`, `Content-Encoding` and the storage class are user-controlled system
+metadata too, but each has resolution rules of its own — a default of
+`application/octet-stream`, `aws-chunked` filtering, and a `STANDARD`-means-absent
+read rule — so they are documented in their own sections above.
+
 ### Copying objects
 
 `CopyObject`'s metadata behaviour is governed by two independent directives, both
@@ -306,7 +335,7 @@ defaulting to `COPY` when absent. An unrecognized value on either is `400
 InvalidArgument` rather than a silent fall back to the default — a typo that quietly
 preserved metadata is the kind of false success this emulator exists to surface.
 
-| `x-amz-metadata-directive` | Destination `Content-Type`, `Content-Encoding`, `x-amz-meta-*` |
+| `x-amz-metadata-directive` | Destination `Content-Type`, `Content-Encoding`, `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires`, `x-amz-meta-*` |
 |---|---|
 | `COPY` (default) | Taken from the **source**; headers restated on the request are ignored |
 | `REPLACE` | Taken from the **request**; anything not restated is dropped |
@@ -321,6 +350,11 @@ The loss case is `REPLACE`: "you must explicitly specify all of the user-configu
 metadata present on the source object in your request, even if you are changing only
 one of the metadata values". A `REPLACE` that omits `Content-Encoding` drops it, and
 `Content-Type` falls back to `application/octet-stream`.
+
+**The one directive governs the whole family.** S3 documents no per-header variant of
+`x-amz-metadata-directive`, so a `REPLACE` restating only `Content-Type` also drops
+the `Content-Disposition` download name and the `Cache-Control` lifetime the source
+carried. Each header is independently restatable, but each must actually be restated.
 
 `CopyObject` applies no `aws-chunked` filtering of its own and does not need to:
 under `COPY` it inherits the source object's already-filtered value, and a copy
@@ -505,14 +539,17 @@ is assembled:
 |---|---|
 | `Content-Type` | yes (defaults to `application/octet-stream`) |
 | `Content-Encoding` | yes, less any `aws-chunked` token — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked) |
+| `Cache-Control` | yes — see [Object system metadata](#object-system-metadata) |
+| `Content-Disposition` | yes |
+| `Content-Language` | yes |
+| `Expires` | yes, stored verbatim |
 | `x-amz-storage-class` | yes (empty means `STANDARD`) |
 | `x-amz-checksum-algorithm` | yes — see [Additional checksums](#additional-checksums) |
 | `x-amz-meta-*` | yes |
 
-`Cache-Control`, `Content-Disposition` and `Content-Language` are **not modeled** on
-either upload path: substrate records no field for them, so they are accepted and
-discarded rather than echoed on a later `GetObject`/`HeadObject`. A test asserting
-one of those survives a write will pass against real S3 and fail here.
+Setting one of these at `Complete` instead has no effect — the reference lists no
+object-metadata header there, so substrate ignores them rather than applying them
+late.
 
 ### Additional checksums
 

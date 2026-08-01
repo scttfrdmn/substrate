@@ -43,6 +43,12 @@ type S3Object struct {
 	// encoding is never recorded here; see [s3PersistedContentEncoding].
 	ContentEncoding string `json:"content_encoding,omitempty"`
 
+	// S3SystemMetadata carries Cache-Control, Content-Disposition,
+	// Content-Language and Expires. Embedded so it is declared once and shared
+	// with [S3MultipartUpload], which is what keeps the two write paths from
+	// drifting on the family.
+	S3SystemMetadata
+
 	// Size is the byte length of the object body.
 	Size int64 `json:"size"`
 
@@ -153,6 +159,14 @@ type S3MultipartUpload struct {
 	// headers, so an encoding not carried here is lost for good. The aws-chunked
 	// transfer encoding is never recorded here; see [s3PersistedContentEncoding].
 	ContentEncoding string `json:"content_encoding,omitempty"`
+
+	// S3SystemMetadata carries the Cache-Control, Content-Disposition,
+	// Content-Language and Expires headers supplied at upload creation, applied to
+	// the object CompleteMultipartUpload assembles. Create is the only place they
+	// can be supplied, for the reason ContentEncoding is. Embedded so the field set
+	// is literally the same declaration [S3Object] uses and Complete can carry the
+	// family across in one assignment.
+	S3SystemMetadata
 
 	// StorageClass is the storage class supplied at upload creation, applied to
 	// the object CompleteMultipartUpload assembles. Empty means STANDARD.
