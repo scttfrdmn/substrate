@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.82.0] - 2026-08-01
+
+EC2 Fleet support, four CloudFormation resource types that silently deployed
+nothing, and the reason every published container image reported its version as
+`"dev"`.
+
+The theme is the same one that drove v0.80.0 and v0.81.0 — **substrate reporting
+success while doing nothing observable** — but reached from a different
+direction. Here it was not a wrong response shape: the four CFN types had working
+API handlers and were simply never dispatched, so a stack deployed
+"successfully" with the resource absent, and a security group came back with no
+rules however the template was written. The `-X` linker flag that fell silently
+on the wrong package path is the same failure in the build: it linked cleanly and
+left every release image reporting `"dev"`.
+
+**If you pin a container image tag**, this is the release where `/health` starts
+reporting the version that is actually answering. Existing tags keep reporting
+`"dev"` — published tags are immutable, so the fix cannot be applied
+retroactively.
+
 ### Added
 - EC2 Fleet: `CreateFleet`, `DescribeFleets`, and `DeleteFleets` (#387).
   Instances launch through the same `RunInstances` path as a direct launch, so
@@ -2621,7 +2641,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.81.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.82.0...HEAD
+[v0.82.0]: https://github.com/scttfrdmn/substrate/compare/v0.81.0...v0.82.0
 [v0.81.0]: https://github.com/scttfrdmn/substrate/compare/v0.80.0...v0.81.0
 [v0.80.0]: https://github.com/scttfrdmn/substrate/compare/v0.76.0...v0.80.0
 [v0.76.0]: https://github.com/scttfrdmn/substrate/compare/v0.75.0...v0.76.0
