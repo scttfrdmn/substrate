@@ -39,7 +39,8 @@ type S3Object struct {
 	// ContentEncoding is the encoding of the object body (e.g. "gzip"), set via
 	// the Content-Encoding header on PutObject or on CreateMultipartUpload —
 	// Complete accepts no metadata headers, so a multipart object's encoding is
-	// carried on the upload record from creation.
+	// carried on the upload record from creation. The aws-chunked transfer
+	// encoding is never recorded here; see [s3PersistedContentEncoding].
 	ContentEncoding string `json:"content_encoding,omitempty"`
 
 	// Size is the byte length of the object body.
@@ -149,7 +150,8 @@ type S3MultipartUpload struct {
 	// ContentEncoding is the Content-Encoding supplied at upload creation (e.g.
 	// "gzip"), applied to the object CompleteMultipartUpload assembles. Create is
 	// the only place it can be supplied: Complete accepts no object-metadata
-	// headers, so an encoding not carried here is lost for good.
+	// headers, so an encoding not carried here is lost for good. The aws-chunked
+	// transfer encoding is never recorded here; see [s3PersistedContentEncoding].
 	ContentEncoding string `json:"content_encoding,omitempty"`
 
 	// StorageClass is the storage class supplied at upload creation, applied to

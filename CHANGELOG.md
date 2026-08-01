@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- S3: `PutObject` and `CreateMultipartUpload` no longer record the `aws-chunked`
+  transfer encoding as the object's `Content-Encoding` (#428). A SigV4 streaming
+  upload — what every AWS SDK sends for a body it does not buffer — arrives with
+  `Content-Encoding: aws-chunked`; substrate decoded the chunk framing but stored
+  that token verbatim, so `GetObject`/`HeadObject` reported the object as
+  `aws-chunked`-encoded when the stored bytes were plain. A consumer that
+  dispatches decompression on `Content-Encoding` was handed a name that is not a
+  content codec, for content needing no decoding — and against real AWS the
+  header is absent entirely, so nothing revealed the difference until a
+  round-trip failed. A genuine codec sent alongside it (`aws-chunked, gzip`, as
+  an SDK streaming a compressed body sends) is kept, in order: dropping the
+  header wholesale would lose the codec that *is* applied, which is the #406
+  failure. Both write paths now resolve the header through one helper, so they
+  cannot drift apart on it again the way #406 did.
+
 ## [v0.82.0] - 2026-08-01
 
 EC2 Fleet support, four CloudFormation resource types that silently deployed

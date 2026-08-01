@@ -921,9 +921,23 @@ func TestS3_GetHeadObject_DeleteMarker(t *testing.T) {
 	assert.Contains(t, getVer.Body.String(), "MethodNotAllowed")
 }
 
+// awsChunkedSignedBody wraps payload in single-chunk aws-chunked framing with
+// per-chunk signatures:
+// "<hexlen>;chunk-signature=...\r\n<data>\r\n0;chunk-signature=...\r\n\r\n".
+//
+// awsChunkedBody in s3_checksum_test.go frames the unsigned, trailer-carrying
+// variant; both wire shapes are real, and this is the one a SigV4 SDK upload sends.
+func awsChunkedSignedBody(payload string) []byte {
+	return []byte(fmt.Sprintf("%x;chunk-signature=%s\r\n%s\r\n0;chunk-signature=%s\r\n\r\n",
+		len(payload), strings.Repeat("a", 64), payload, strings.Repeat("b", 64)))
+}
+
 // TestS3_PutObject_AWSChunked is a regression test for #321: a SigV4 streaming
 // (aws-chunked) PutObject body must be decoded before storage, not stored raw
 // with its chunk-signature framing. The AWS SDK .NET sends bodies this way.
+//
+// It also pins the other half of that decode (#428): having stripped the framing,
+// the object must not go on advertising the transfer encoding that carried it.
 func TestS3_PutObject_AWSChunked(t *testing.T) {
 	t.Parallel()
 	srv, _ := newS3TestServer(t)
@@ -931,9 +945,7 @@ func TestS3_PutObject_AWSChunked(t *testing.T) {
 	s3Request(t, srv, http.MethodPut, "/chunk-bucket", nil, nil)
 
 	payload := "hello world"
-	// Single-chunk aws-chunked body: "<hexlen>;chunk-signature=...\r\n<data>\r\n0;chunk-signature=...\r\n\r\n"
-	chunked := fmt.Sprintf("%x;chunk-signature=%s\r\n%s\r\n0;chunk-signature=%s\r\n\r\n",
-		len(payload), strings.Repeat("a", 64), payload, strings.Repeat("b", 64))
+	chunked := awsChunkedSignedBody(payload)
 
 	hdrs := map[string]string{
 		"Content-Type":                 "text/plain",
@@ -941,7 +953,7 @@ func TestS3_PutObject_AWSChunked(t *testing.T) {
 		"X-Amz-Content-Sha256":         "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
 		"X-Amz-Decoded-Content-Length": strconv.Itoa(len(payload)),
 	}
-	put := s3Request(t, srv, http.MethodPut, "/chunk-bucket/key", []byte(chunked), hdrs)
+	put := s3Request(t, srv, http.MethodPut, "/chunk-bucket/key", chunked, hdrs)
 	require.Equal(t, http.StatusOK, put.Code)
 
 	// GetObject must return the decoded payload, not the chunk framing.
@@ -951,11 +963,96 @@ func TestS3_PutObject_AWSChunked(t *testing.T) {
 	assert.NotContains(t, get.Body.String(), "chunk-signature")
 	assert.Equal(t, strconv.Itoa(len(payload)), get.Header().Get("Content-Length"))
 
+	// The body is plaintext at rest, so nothing may claim it is encoded. A consumer
+	// that dispatches decompression on Content-Encoding would otherwise be handed
+	// "aws-chunked" — not a content codec — for bytes needing no decoding at all.
+	head := s3Request(t, srv, http.MethodHead, "/chunk-bucket/key", nil, nil)
+	require.Equal(t, http.StatusOK, head.Code)
+	assert.Empty(t, get.Header().Get("Content-Encoding"), "GET Content-Encoding")
+	assert.Empty(t, head.Header().Get("Content-Encoding"), "HEAD Content-Encoding")
+
 	// A normal (non-chunked) PutObject is unaffected — body stored verbatim.
 	s3Request(t, srv, http.MethodPut, "/chunk-bucket/plain", []byte("raw bytes"),
 		map[string]string{"Content-Type": "text/plain"})
 	plain := s3Request(t, srv, http.MethodGet, "/chunk-bucket/plain", nil, nil)
 	assert.Equal(t, "raw bytes", plain.Body.String())
+}
+
+// TestS3_PutObject_PersistedContentEncoding asserts which Content-Encoding a
+// PutObject records: aws-chunked is dropped as a transfer encoding, any genuine
+// codec beside it is kept (#428).
+//
+// SDKs streaming a compressed body send both tokens, so dropping the header
+// wholesale would lose the codec — the #406 failure — while keeping it whole
+// reports a codec that was never applied to the stored bytes. Both are asserted
+// on HEAD and GET, the two reads a consumer dispatches decompression from.
+func TestS3_PutObject_PersistedContentEncoding(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		sent string // Content-Encoding on the request; "" means absent.
+		want string // Content-Encoding on the stored object; "" means not emitted.
+	}{
+		{"plain codec kept", "gzip", "gzip"},
+		{"absent stays absent", "", ""},
+		{"aws-chunked alone dropped", "aws-chunked", ""},
+		{"aws-chunked before codec", "aws-chunked, gzip", "gzip"},
+		{"aws-chunked after codec", "gzip, aws-chunked", "gzip"},
+		{"aws-chunked unspaced list", "aws-chunked,zstd", "zstd"},
+		{"aws-chunked mixed case", "AWS-Chunked, br", "br"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv, _ := newS3TestServer(t)
+			require.Equal(t, http.StatusOK,
+				s3Request(t, srv, http.MethodPut, "/pce", nil, nil).Code, "create bucket")
+
+			payload := "compressible payload"
+			hdrs := map[string]string{"Content-Type": "application/octet-stream"}
+			body := []byte(payload)
+			if tc.sent != "" {
+				hdrs["Content-Encoding"] = tc.sent
+			}
+			// A request naming aws-chunked really is chunk-framed, so the body has to
+			// match or the decode under test would be fed the wrong bytes.
+			if strings.Contains(strings.ToLower(tc.sent), "aws-chunked") {
+				body = awsChunkedSignedBody(payload)
+				hdrs["X-Amz-Content-Sha256"] = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+				hdrs["X-Amz-Decoded-Content-Length"] = strconv.Itoa(len(payload))
+			}
+
+			require.Equal(t, http.StatusOK,
+				s3Request(t, srv, http.MethodPut, "/pce/obj", body, hdrs).Code, "put object")
+
+			for _, method := range []string{http.MethodHead, http.MethodGet} {
+				w := s3Request(t, srv, method, "/pce/obj", nil, nil)
+				require.Equal(t, http.StatusOK, w.Code, method)
+				assert.Equal(t, tc.want, w.Header().Get("Content-Encoding"),
+					"%s Content-Encoding", method)
+			}
+		})
+	}
+}
+
+// TestS3PersistedContentEncoding_HeaderCasing asserts the header name itself is
+// matched case-insensitively.
+//
+// This cannot be driven through s3Request: net/http canonicalizes header names on
+// the way in, so a lowercase key never reaches the plugin from an HTTP test and an
+// apparent test of it would assert nothing. It matters because substrate builds
+// AWSRequest values in-process too (see betty_cfn.go), where no canonicalization
+// has happened.
+func TestS3PersistedContentEncoding_HeaderCasing(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"Content-Encoding", "content-encoding", "CONTENT-ENCODING"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := emulator.S3PersistedContentEncodingForTest(map[string]string{
+				name: "aws-chunked, gzip",
+			})
+			assert.Equal(t, "gzip", got)
+		})
+	}
 }
 
 func TestS3_ListObjectsV2_Delimiter(t *testing.T) {

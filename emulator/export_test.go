@@ -36,6 +36,14 @@ func NormalizeS3VirtualHostForTest(host, urlPath string) (bucket, normPath strin
 	return normalizeS3VirtualHost(host, urlPath)
 }
 
+// S3PersistedContentEncodingForTest wraps s3PersistedContentEncoding for external
+// tests. Header casing cannot be varied through the HTTP test helpers — net/http
+// canonicalizes on the way in — so the case-insensitive resolution is only
+// observable from here.
+func S3PersistedContentEncodingForTest(headers map[string]string) string {
+	return s3PersistedContentEncoding(headers)
+}
+
 // ExtractRegionFromHostForTest wraps extractRegionFromHost for external tests.
 func ExtractRegionFromHostForTest(host string) string { return extractRegionFromHost(host) }
 
