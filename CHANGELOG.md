@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.81.0] - 2026-08-01
+
+A fidelity release driven by three consumer-filed issues (`objectfs`,
+`spore-host/spawn`) that share one defect with v0.80.0: **substrate returned
+success, or a confident wrong answer, where real AWS signals failure** — so the
+consumer's error branch was unreachable and their suite reported green while
+verifying nothing. Each was found the expensive way: one as a false
+`DATA_CORRUPTION` against correct application code, one as a bug that shipped and
+was caught only by a paid smoke test against real AWS, one as a retry path that
+could not be exercised offline at all.
+
 ### Added
 - The SQS create-then-lookup eventual-consistency window is now seedable via
   `POST`/`DELETE /v1/sqs/consistency`, keyed by queue name or the `"*"` wildcard
@@ -2528,7 +2539,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.80.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.81.0...HEAD
+[v0.81.0]: https://github.com/scttfrdmn/substrate/compare/v0.80.0...v0.81.0
 [v0.80.0]: https://github.com/scttfrdmn/substrate/compare/v0.76.0...v0.80.0
 [v0.76.0]: https://github.com/scttfrdmn/substrate/compare/v0.75.0...v0.76.0
 [v0.75.0]: https://github.com/scttfrdmn/substrate/compare/v0.74.0...v0.75.0
