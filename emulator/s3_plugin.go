@@ -22,6 +22,9 @@ import (
 // s3Namespace is the state namespace used by S3Plugin.
 const s3Namespace = "s3"
 
+// s3XMLNamespace is the xmlns attribute S3 puts on its XML response bodies.
+const s3XMLNamespace = "http://s3.amazonaws.com/doc/2006-03-01/"
+
 // Error messages S3 returns verbatim from more than one operation.
 const (
 	// s3NoSuchUploadMessage accompanies NoSuchUpload from every multipart operation.
@@ -163,6 +166,12 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getBucketLifecycleConfiguration(ctx, req, bucket)
 	case "DeleteBucketLifecycle":
 		return p.deleteBucketLifecycle(ctx, req, bucket)
+	case "PutPublicAccessBlock":
+		return p.putPublicAccessBlock(ctx, req, bucket)
+	case "GetPublicAccessBlock":
+		return p.getPublicAccessBlock(ctx, req, bucket)
+	case "DeletePublicAccessBlock":
+		return p.deletePublicAccessBlock(ctx, req, bucket)
 	case "SelectObjectContent":
 		return p.selectObjectContent(ctx, req, bucket, key)
 	default:
@@ -223,6 +232,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["lifecycle"]; ok {
 				return bucket, "", "PutBucketLifecycleConfiguration"
 			}
+			if _, ok := req.Params["publicAccessBlock"]; ok {
+				return bucket, "", "PutPublicAccessBlock"
+			}
 			return bucket, "", "CreateBucket"
 		case "HEAD":
 			return bucket, "", "HeadBucket"
@@ -235,6 +247,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["lifecycle"]; ok {
 				return bucket, "", "DeleteBucketLifecycle"
+			}
+			// Before the DeleteBucket fall-through: an unrouted ?publicAccessBlock
+			// reached it and destroyed the bucket (#446).
+			if _, ok := req.Params["publicAccessBlock"]; ok {
+				return bucket, "", "DeletePublicAccessBlock"
 			}
 			return bucket, "", "DeleteBucket"
 		case "GET":
@@ -261,6 +278,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["lifecycle"]; ok {
 				return bucket, "", "GetBucketLifecycleConfiguration"
+			}
+			if _, ok := req.Params["publicAccessBlock"]; ok {
+				return bucket, "", "GetPublicAccessBlock"
 			}
 			if req.Params["list-type"] == "2" {
 				return bucket, "", "ListObjectsV2"

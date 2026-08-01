@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- S3: `DELETE /bucket?publicAccessBlock` no longer destroys the bucket (#446). The
+  `?publicAccessBlock` subresource was unrouted on all three verbs, and because it is
+  addressed as a bare query key on the bucket itself, each request fell through to the
+  bucket-level operation for its method — so a `DeletePublicAccessBlock` reached
+  `DeleteBucket` and deleted the bucket and its contents. On an empty bucket that
+  returned `204`, exactly as a successful `DeletePublicAccessBlock` does, so the caller
+  had no signal at all: the next operation on that bucket failed with `NoSuchBucket`
+  for no visible reason. On a non-empty bucket it returned `409 BucketNotEmpty`, naming
+  an operation the caller never issued.
+
+  The other two verbs were wrong in the same way. `PUT` fell through to `CreateBucket`
+  and answered `409 BucketAlreadyExists` — the shape SDKs and CloudFormation send
+  immediately after creating a bucket, so locking a bucket down failed on the
+  already-owned bucket it was meant to configure. `GET` fell through to `ListObjects`
+  and returned `200` with a `ListBucketResult` body, which an SDK parses into an empty
+  `PublicAccessBlockConfiguration` — reporting "public access is not blocked" for a
+  bucket whose settings substrate had never stored.
+
+  All three are now routed and modeled. `PutPublicAccessBlock` records the
+  configuration and replaces it wholesale; settings the body omits are reported back as
+  `false`, as S3 does. `GetPublicAccessBlock` returns `404
+  NoSuchPublicAccessBlockConfiguration` for a bucket with no configuration, which keeps
+  it distinguishable from the all-false configuration a consumer may have written on
+  purpose. `DeletePublicAccessBlock` returns `204`, is idempotent, and touches nothing
+  but the configuration.
+
+  Two deliberate limits, both documented in `docs/services.md`: substrate does not
+  apply S3's April 2023 default of enabling all four settings on a newly created
+  bucket, because that default comes from AWS-managed account state substrate does not
+  model and seeding it would make the `NoSuchPublicAccessBlockConfiguration` path
+  unreachable; and the settings are recorded but not enforced, so nothing yet rejects a
+  public ACL or bucket policy.
+
 ## [v0.84.0] - 2026-08-01
 
 ### Fixed

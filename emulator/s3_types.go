@@ -214,6 +214,41 @@ type S3BucketPolicy struct {
 	Policy string `json:"Policy"`
 }
 
+// S3PublicAccessBlockConfiguration is a bucket's Block Public Access settings,
+// the body of PutPublicAccessBlock and GetPublicAccessBlock (#446).
+//
+// The four members are each `Required: No` on PutPublicAccessBlock, so a caller
+// may name a subset. They are plain bools rather than pointers because S3 reports
+// an omitted member as `false` rather than omitting it from the GET response —
+// "absent" and "explicitly false" are the same observation, so a third state
+// would be one substrate could produce but real S3 never returns.
+//
+// Substrate records the configuration and reports it back; it does not enforce
+// it. Nothing here rejects a public ACL or a public bucket policy, because those
+// are the resource-internal consequences of the setting rather than the setting
+// itself — see the scope boundary in CLAUDE.md. Enforcement is tracked
+// separately (#458).
+type S3PublicAccessBlockConfiguration struct {
+	XMLName xml.Name `xml:"PublicAccessBlockConfiguration" json:"-"`
+
+	// Xmlns is echoed on the GET response to match S3's wire shape. It is
+	// ignored on input.
+	Xmlns string `xml:"xmlns,attr,omitempty" json:"-"`
+
+	// BlockPublicAcls rejects PutBucketAcl/PutObjectAcl calls carrying a public ACL.
+	BlockPublicAcls bool `xml:"BlockPublicAcls" json:"block_public_acls"`
+
+	// IgnorePublicAcls causes existing public ACLs to be disregarded.
+	IgnorePublicAcls bool `xml:"IgnorePublicAcls" json:"ignore_public_acls"`
+
+	// BlockPublicPolicy rejects a PutBucketPolicy that would allow public access.
+	BlockPublicPolicy bool `xml:"BlockPublicPolicy" json:"block_public_policy"`
+
+	// RestrictPublicBuckets limits a publicly-policied bucket to AWS service
+	// principals and authorized users in the owning account.
+	RestrictPublicBuckets bool `xml:"RestrictPublicBuckets" json:"restrict_public_buckets"`
+}
+
 // S3AccessControlList is the S3 access control list XML structure.
 type S3AccessControlList struct {
 	XMLName xml.Name  `xml:"AccessControlPolicy" json:"-"`
