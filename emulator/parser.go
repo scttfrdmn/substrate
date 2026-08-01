@@ -34,21 +34,24 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	}
 
 	// Build flat params map from query string and form values.
-	// Bare keys (e.g. ?uploads, ?versions) have no "=" in the raw query and
-	// are stored as "1" so callers can detect their presence with a map lookup.
-	// Keys with an explicit empty value (e.g. ?prefix=) must be preserved as ""
-	// to avoid corrupting parameters such as ListObjectsV2 Prefix.
+	// Bare keys (e.g. ?uploads, ?versions) have no "=" at all and are stored as
+	// "1" so callers can detect their presence with a map lookup. Keys with an
+	// explicit empty value (e.g. ?prefix=, or ImageId= in a query-protocol form
+	// body) must be preserved as "", so that a caller distinguishing "absent"
+	// from "present but empty" — and any required-parameter check — sees the
+	// truth rather than the sentinel.
 	params := make(map[string]string)
-	// Build a set of keys that appear with an explicit "=" in the raw query so
-	// we can distinguish them from true bare keys.
-	rawQuery := r.URL.RawQuery
-	explicitEmpty := make(map[string]bool)
-	for _, part := range strings.Split(rawQuery, "&") {
-		if idx := strings.IndexByte(part, '='); idx >= 0 {
-			key := part[:idx]
-			if val := part[idx+1:]; val == "" {
-				explicitEmpty[key] = true
-			}
+	// Only the URL's raw query can contain bare keys: r.Form merges the query
+	// string with the form body, and the sentinel must not be applied to a body
+	// parameter that was legitimately sent empty. Deriving the bare set from the
+	// query alone is why this is a positive test rather than the inverse: an
+	// "explicitly empty" set built from the query cannot say anything about body
+	// keys, so empty body parameters were silently promoted to "1" — an empty
+	// ImageId on RunInstances launched an instance from an AMI named "1" (#412).
+	bareKeys := make(map[string]bool)
+	for _, part := range strings.Split(r.URL.RawQuery, "&") {
+		if part != "" && !strings.Contains(part, "=") {
+			bareKeys[part] = true
 		}
 	}
 	if err := r.ParseForm(); err == nil {
@@ -57,7 +60,7 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 			if len(vs) > 0 {
 				v = vs[0]
 			}
-			if v == "" && !explicitEmpty[k] {
+			if v == "" && bareKeys[k] {
 				v = "1" // bare key (e.g. ?uploads, ?versions)
 			}
 			params[k] = v

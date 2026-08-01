@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -405,6 +406,41 @@ func TestParseAWSRequest_BareQueryKey(t *testing.T) {
 	req, _, err := emulator.ParseAWSRequest(r)
 	require.NoError(t, err)
 	assert.Equal(t, "1", req.Params["uploads"])
+}
+
+func TestParseAWSRequest_EmptyValueFormBodyParam(t *testing.T) {
+	// The companion to TestParseAWSRequest_EmptyValueQueryParam (#200), for the
+	// form body rather than the query string — the gap that let #412 through.
+	// r.Form merges query and body, but the bare-key set can only be derived from
+	// the query, so a body parameter sent explicitly empty was promoted to the
+	// "1" sentinel. RunInstances then launched an instance from an AMI named "1"
+	// instead of rejecting the request, which is how an empty ImageId "succeeded"
+	// against substrate and failed against real AWS.
+	body := "Action=RunInstances&MinCount=1&MaxCount=1&ImageId=&KeyName="
+	r := httptest.NewRequest(http.MethodPost, "http://ec2.us-east-1.amazonaws.com/",
+		strings.NewReader(body))
+	r.Host = "ec2.us-east-1.amazonaws.com"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	req, _, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "", req.Params["ImageId"], "empty form-body param must not become the bare-key sentinel")
+	assert.Equal(t, "", req.Params["KeyName"])
+	assert.Equal(t, "RunInstances", req.Params["Action"])
+	assert.Equal(t, "1", req.Params["MinCount"], "a value that is genuinely \"1\" must survive")
+}
+
+func TestParseAWSRequest_BareQueryKeyWithFormBody(t *testing.T) {
+	// A bare key in the query string must still map to "1" when a form body is
+	// also present — S3 POST operations (e.g. ?delete, ?uploads) rely on it, so
+	// restricting the sentinel to query-string keys must not break them.
+	r := httptest.NewRequest(http.MethodPost, "http://s3.amazonaws.com/mybucket?delete",
+		strings.NewReader("<Delete></Delete>"))
+	r.Host = "s3.amazonaws.com"
+
+	req, _, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "1", req.Params["delete"])
 }
 
 func TestParseAWSRequest_EmptyValueQueryParam(t *testing.T) {
