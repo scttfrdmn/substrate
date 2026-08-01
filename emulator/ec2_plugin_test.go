@@ -3983,3 +3983,208 @@ func TestEC2_RunInstances_MissingImageId(t *testing.T) {
 		})
 	}
 }
+
+// ec2RunInstanceIDs sends a RunInstances request expected to succeed and returns
+// the instance IDs it launched, so a test can assert how many the counts asked for.
+func ec2RunInstanceIDs(t *testing.T, ts *httptest.Server, params map[string]string) []string {
+	t.Helper()
+	resp := ec2Request(t, ts, params)
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances must succeed")
+
+	var doc struct {
+		XMLName   xml.Name `xml:"RunInstancesResponse"`
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&doc))
+
+	ids := make([]string, 0, len(doc.Instances))
+	for _, inst := range doc.Instances {
+		require.NotEmpty(t, inst.InstanceID)
+		ids = append(ids, inst.InstanceID)
+	}
+	return ids
+}
+
+// ec2DescribeInstanceIDs returns every instance ID DescribeInstances reports,
+// flattened across reservations, so a test can check what a launch actually created
+// rather than trusting the launch response alone.
+func ec2DescribeInstanceIDs(t *testing.T, ts *httptest.Server) []string {
+	t.Helper()
+	resp := ec2Request(t, ts, map[string]string{"Action": "DescribeInstances"})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeInstances must succeed")
+
+	var doc struct {
+		XMLName      xml.Name `xml:"DescribeInstancesResponse"`
+		Reservations []struct {
+			Instances []struct {
+				InstanceID string `xml:"instanceId"`
+			} `xml:"instancesSet>item"`
+		} `xml:"reservationSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&doc))
+
+	var ids []string
+	for _, res := range doc.Reservations {
+		for _, inst := range res.Instances {
+			ids = append(ids, inst.InstanceID)
+		}
+	}
+	return ids
+}
+
+// TestEC2_RunInstances_InstanceCounts covers #431: MinCount and MaxCount were
+// parsed with the error discarded and anything <= 0 clamped up to 1, so MinCount=0
+// launched an instance where AWS fails the request. That is worse than a missing
+// error — it is a confidently wrong answer, and a consumer asserting on the launched
+// count got a green run for a request real EC2 rejects.
+//
+// The bug class is reachable from ordinary typed SDK code, which is why these are
+// validated where presence is not: the query protocol carries both as strings and
+// neither SDK range-checks them. botocore's ParamValidator accepts MinCount=0 and
+// MinCount=3/MaxCount=1 unchanged, and aws-sdk-go-v2's validateOpRunInstancesInput
+// checks only for nil.
+//
+// The codes and messages are asserted, not just the status. They were verified
+// against the RunInstances reference, which documents no action-specific error for
+// these and defers to the common errors — see resolveInstanceCounts for why that
+// resolves to InvalidParameterValue rather than the plausible-looking
+// InvalidParameterCombination, and #413 for why a plausible guess about an AWS
+// error code is not good enough to ship.
+func TestEC2_RunInstances_InstanceCounts(t *testing.T) {
+	t.Run("rejected", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			params      map[string]string
+			wantMessage string
+		}{
+			{
+				// The row the fix exists for: this used to clamp to 1 and launch.
+				name:        "MinCount zero",
+				params:      map[string]string{"MinCount": "0", "MaxCount": "1"},
+				wantMessage: "Invalid value '0' for parameter minCount. It must be at least 1.",
+			},
+			{
+				name:        "MaxCount zero",
+				params:      map[string]string{"MinCount": "1", "MaxCount": "0"},
+				wantMessage: "Invalid value '0' for parameter maxCount. It must be at least 1.",
+			},
+			{
+				name:        "MinCount negative",
+				params:      map[string]string{"MinCount": "-1", "MaxCount": "1"},
+				wantMessage: "Invalid value '-1' for parameter minCount. It must be at least 1.",
+			},
+			{
+				name:        "MaxCount negative",
+				params:      map[string]string{"MinCount": "1", "MaxCount": "-2"},
+				wantMessage: "Invalid value '-2' for parameter maxCount. It must be at least 1.",
+			},
+			{
+				name:        "MinCount not an integer",
+				params:      map[string]string{"MinCount": "abc", "MaxCount": "1"},
+				wantMessage: "Invalid value 'abc' for parameter minCount. It must be an integer.",
+			},
+			{
+				name:        "MaxCount not an integer",
+				params:      map[string]string{"MinCount": "1", "MaxCount": "2.5"},
+				wantMessage: "Invalid value '2.5' for parameter maxCount. It must be an integer.",
+			},
+			{
+				name:        "MinCount above MaxCount",
+				params:      map[string]string{"MinCount": "3", "MaxCount": "1"},
+				wantMessage: "Invalid value '1' for parameter maxCount. The maxCount must be equal to or greater than the minCount '3'.",
+			},
+			{
+				// MinCount is validated even though only MaxCount reaches the launch
+				// loop, so an out-of-range minimum cannot pass silently.
+				name:        "MinCount invalid with MaxCount absent",
+				params:      map[string]string{"MinCount": "0"},
+				wantMessage: "Invalid value '0' for parameter minCount. It must be at least 1.",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				ts := newEC2TestServer(t)
+				params := map[string]string{"Action": "RunInstances", "ImageId": "ami-counts"}
+				for k, v := range tt.params {
+					params[k] = v
+				}
+
+				status, code, message := ec2ErrorDetail(t, ts, params)
+				assert.Equal(t, http.StatusBadRequest, status)
+				assert.Equal(t, "InvalidParameterValue", code)
+				assert.Equal(t, tt.wantMessage, message)
+
+				// A rejected launch must create nothing: the failure a consumer sees
+				// has to mean no instance exists, or their cleanup path is wrong.
+				assert.Empty(t, ec2DescribeInstanceIDs(t, ts),
+					"a rejected RunInstances must not launch an instance")
+			})
+		}
+	})
+
+	t.Run("accepted", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			params map[string]string
+			want   int
+		}{
+			{
+				// The "absence still defaults" regression guard: nothing relying on
+				// today's behavior may break, and no SDK can omit these anyway.
+				name:   "both absent defaults to one",
+				params: map[string]string{},
+				want:   1,
+			},
+			{
+				name:   "both empty strings default to one",
+				params: map[string]string{"MinCount": "", "MaxCount": ""},
+				want:   1,
+			},
+			{
+				// An absent MaxCount defaults to MinCount, not to 1: a request asking
+				// for three must not silently launch one.
+				name:   "MaxCount absent defaults to MinCount",
+				params: map[string]string{"MinCount": "2"},
+				want:   2,
+			},
+			{
+				name:   "MinCount absent defaults to one",
+				params: map[string]string{"MaxCount": "4"},
+				want:   4,
+			},
+			{
+				// AWS "launches the largest possible number of instances above the
+				// specified minimum count"; substrate models no capacity ceiling, so
+				// that is always MaxCount.
+				name:   "range launches MaxCount",
+				params: map[string]string{"MinCount": "1", "MaxCount": "3"},
+				want:   3,
+			},
+			{
+				name:   "equal counts",
+				params: map[string]string{"MinCount": "2", "MaxCount": "2"},
+				want:   2,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				ts := newEC2TestServer(t)
+				params := map[string]string{"Action": "RunInstances", "ImageId": "ami-counts"}
+				for k, v := range tt.params {
+					params[k] = v
+				}
+
+				ids := ec2RunInstanceIDs(t, ts, params)
+				assert.Len(t, ids, tt.want, "instances in the RunInstances response")
+				assert.Len(t, ec2DescribeInstanceIDs(t, ts), tt.want,
+					"DescribeInstances must agree with the launch response")
+			})
+		}
+	})
+}

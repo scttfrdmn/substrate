@@ -802,7 +802,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [validates MinCount/MaxCount](#mincount-and-maxcount) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -863,6 +863,42 @@ Note that `ImageId` is an optional `*string` in the typed SDKs, so
 service rather than being caught client-side. That is the shape this check exists
 for. The AMI value itself is not format-validated — substrate accepts any
 non-empty string, so fixtures like `ami-test` work.
+
+### MinCount and MaxCount
+
+A count that is **present but invalid** fails with `InvalidParameterValue`,
+HTTP 400. A count that is **absent** still defaults.
+
+| Request | Result |
+|---|---|
+| Neither given | 1 instance |
+| `MinCount=2` alone | 2 instances — an absent `MaxCount` defaults to `MinCount`, not to 1 |
+| `MaxCount=4` alone | 4 instances |
+| `MinCount=1&MaxCount=3` | 3 instances |
+| `MinCount=0`, or either count `< 1` | `Invalid value '0' for parameter minCount. It must be at least 1.` |
+| Either count unparseable | `Invalid value 'abc' for parameter minCount. It must be an integer.` |
+| `MinCount=3&MaxCount=1` | `Invalid value '1' for parameter maxCount. The maxCount must be equal to or greater than the minCount '3'.` |
+
+A successful launch always creates `MaxCount` instances. AWS "launches the largest
+possible number of instances above the specified minimum count", and substrate
+models no capacity ceiling, so the largest possible number is always the maximum
+asked for and `MinCount` can only ever be satisfied.
+
+Absence defaults rather than erroring even though AWS marks both **Required: Yes**,
+because in every typed SDK they are required members that fail client-side — so a
+consumer bug there cannot reach the wire, while requiring presence here would break
+hand-built form-encoded requests. A value that is present and invalid *is*
+reachable: the query protocol carries these as strings, and neither botocore's
+`ParamValidator` nor `aws-sdk-go-v2` range-checks them.
+
+The error code is the common-error `InvalidParameterValue` because the RunInstances
+reference documents no action-specific error for these. `MinCount > MaxCount` uses
+it too, rather than `InvalidParameterCombination` — that code is defined as
+"Parameters that must not be used together were used together", which cannot
+describe two parameters AWS documents as used together; the defect is the *value*.
+
+The upper bound is a per-account, per-instance-type quota substrate does not model,
+so it is not enforced: any count at or above 1 is accepted.
 
 ### Explicit resource IDs
 
