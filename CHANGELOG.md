@@ -8,7 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-
 - `CreateMultipartUpload` now records `Content-Encoding` and
   `CompleteMultipartUpload` applies it to the assembled object, so `GetObject` and
   `HeadObject` report the codec a multipart object was uploaded with (#406).
@@ -22,6 +21,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upload" passed vacuously. `Complete` accepts no object-metadata headers at all, so
   carrying the value on the upload record from creation is the only place it can come
   from.
+- `RunInstances` now rejects a launch that resolves no AMI, with
+  `MissingParameter` / "The request must contain the parameter ImageId", HTTP 400
+  (#412). It previously accepted an empty `ImageId` and launched an instance, so a
+  consumer's error branch was unreachable: the bug reported here shipped and was
+  caught only by a paid smoke test against real AWS. The check runs *after* launch
+  template resolution, because AWS documents `ImageId` as "Required: No" precisely
+  so that a template can supply it — a launch naming a template that carries an
+  AMI is still valid, and one that resolves to nothing is not. `ImageId` is an
+  optional `*string` in the typed SDKs, so `aws.String("")` serializes as absent
+  from the wire and reaches the service rather than failing client-side, which is
+  the shape that shipped the bug.
+- The request parser no longer coerces an explicitly-empty form-body parameter to
+  the bare-key sentinel `"1"` (#412). Bare keys such as `?uploads` and `?delete`
+  map to `"1"` so a caller can detect their presence, but the set of bare keys was
+  derived from the URL's raw query while the value was applied to `r.Form`, which
+  merges query *and* body — the entire AWS Query protocol (EC2, IAM, STS, SQS,
+  SNS, CloudWatch) travels in the body. So `ImageId=` did not arrive as empty; it
+  arrived as `"1"`, and `RunInstances` launched an instance from an AMI named `1`.
+  Any query-protocol parameter sent explicitly empty was affected the same way,
+  which also made emptiness unverifiable by the plugin above it. The query-string
+  case was already correct (#200); this is the body-side companion.
 
 ## [v0.80.0] - 2026-07-31
 

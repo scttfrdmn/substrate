@@ -3840,3 +3840,146 @@ func TestEC2_RunInstances_ReturnsTagSet(t *testing.T) {
 	assert.Equal(t, "echo-test", tags["Name"], "RunInstances response must echo launch-time tags")
 	assert.Equal(t, "true", tags["spawn:managed"])
 }
+
+// ec2ErrorDetail sends params and returns the HTTP status plus the Error/Code and
+// Error/Message from the EC2 query-protocol error document. It differs from
+// ec2ErrorCode in also returning the message, so a test can pin AWS's exact
+// wording and catch a silent drift in it.
+func ec2ErrorDetail(t *testing.T, ts *httptest.Server, params map[string]string) (int, string, string) {
+	t.Helper()
+	resp := ec2Request(t, ts, params)
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	var doc struct {
+		XMLName xml.Name `xml:"ErrorResponse"`
+		Error   struct {
+			Code    string `xml:"Code"`
+			Message string `xml:"Message"`
+		} `xml:"Error"`
+	}
+	if xml.Unmarshal(body, &doc) != nil {
+		return resp.StatusCode, "", ""
+	}
+	return resp.StatusCode, doc.Error.Code, doc.Error.Message
+}
+
+// TestEC2_RunInstances_MissingImageId covers #412: RunInstances never validated
+// that an AMI resolved, so a launch with no ImageId "succeeded" against substrate
+// and failed against real AWS. A consumer's error branch was unreachable, so the
+// bug shipped and was caught only by a paid smoke test.
+//
+// The check runs *after* launch-template resolution, which the table pins from
+// both directions: a template that carries an AMI still launches (200), and a
+// template that resolves but carries no AMI does not. AWS documents ImageId as
+// "Required: No" precisely because a template may supply it, so an up-front check
+// would be wrong — the rule is "no AMI resolved from any source".
+func TestEC2_RunInstances_MissingImageId(t *testing.T) {
+	// createTemplate returns the ID of a launch template whose data carries
+	// imageID (empty for a template with no AMI of its own).
+	createTemplate := func(t *testing.T, ts *httptest.Server, name, imageID string) string {
+		t.Helper()
+		resp := ec2Request(t, ts, map[string]string{
+			"Action":                     "CreateLaunchTemplate",
+			"LaunchTemplateName":         name,
+			"LaunchTemplateData.ImageId": imageID,
+		})
+		defer resp.Body.Close() //nolint:errcheck
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create launch template")
+		var cr struct {
+			LaunchTemplate struct {
+				LaunchTemplateID string `xml:"launchTemplateId"`
+			} `xml:"launchTemplate"`
+		}
+		require.NoError(t, xml.NewDecoder(resp.Body).Decode(&cr))
+		require.NotEmpty(t, cr.LaunchTemplate.LaunchTemplateID)
+		return cr.LaunchTemplate.LaunchTemplateID
+	}
+
+	tests := []struct {
+		name string
+		// params builds the RunInstances params, given a fresh server so a case
+		// can create a launch template first.
+		params     func(t *testing.T, ts *httptest.Server) map[string]string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name: "no ImageId and no launch template",
+			params: func(*testing.T, *httptest.Server) map[string]string {
+				return map[string]string{"MinCount": "1", "MaxCount": "1"}
+			},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MissingParameter",
+		},
+		{
+			// How aws.String("") on an optional *string reaches the wire, and the
+			// exact shape that shipped the spawn#70 bug.
+			name: "ImageId explicitly empty",
+			params: func(*testing.T, *httptest.Server) map[string]string {
+				return map[string]string{"MinCount": "1", "MaxCount": "1", "ImageId": ""}
+			},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MissingParameter",
+		},
+		{
+			name: "launch template resolves but carries no ImageId",
+			params: func(t *testing.T, ts *httptest.Server) map[string]string {
+				ltID := createTemplate(t, ts, "no-ami-tmpl", "")
+				return map[string]string{
+					"MinCount": "1", "MaxCount": "1",
+					"LaunchTemplate.LaunchTemplateId": ltID,
+				}
+			},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MissingParameter",
+		},
+		{
+			name: "launch template name that does not exist",
+			params: func(*testing.T, *httptest.Server) map[string]string {
+				return map[string]string{
+					"MinCount": "1", "MaxCount": "1",
+					"LaunchTemplate.LaunchTemplateName": "no-such-template",
+				}
+			},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MissingParameter",
+		},
+		{
+			name: "explicit ImageId still launches",
+			params: func(*testing.T, *httptest.Server) map[string]string {
+				return map[string]string{"MinCount": "1", "MaxCount": "1", "ImageId": "ami-regression-guard"}
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// The reason the check sits after template resolution rather than at
+			// the top of runInstances.
+			name: "launch template supplies the ImageId",
+			params: func(t *testing.T, ts *httptest.Server) map[string]string {
+				ltID := createTemplate(t, ts, "ami-tmpl", "ami-from-template")
+				return map[string]string{
+					"MinCount": "1", "MaxCount": "1",
+					"LaunchTemplate.LaunchTemplateId": ltID,
+				}
+			},
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			params := tt.params(t, ts)
+			params["Action"] = "RunInstances"
+
+			status, code, message := ec2ErrorDetail(t, ts, params)
+			assert.Equal(t, tt.wantStatus, status)
+			assert.Equal(t, tt.wantCode, code)
+			if tt.wantCode != "" {
+				// Pin AWS's wording so it cannot silently drift.
+				assert.Equal(t, "The request must contain the parameter ImageId", message)
+			}
+		})
+	}
+}

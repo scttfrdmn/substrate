@@ -293,6 +293,17 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
+	// An AMI must have resolved from *some* source by this point. AWS documents
+	// ImageId as "Required: No" only because a launch template may supply it, so
+	// the check belongs here rather than at the top: a launch that names a
+	// template carrying an AMI is valid, and one that resolves to nothing is not.
+	// Without this, an empty ImageId — how aws.String("") on an optional *string
+	// serializes, i.e. absent from the wire — launched successfully here and
+	// failed on real AWS (#412).
+	if imageID == "" {
+		return nil, ec2MissingParameter("ImageId")
+	}
+
 	// Auto-create default VPC/subnet if none specified.
 	if subnetID == "" {
 		vpc, subnet, err := p.ensureDefaultVPC(context.Background(), reqCtx)

@@ -694,7 +694,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -724,6 +724,29 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
+
+### RunInstances requires a resolvable AMI
+
+`RunInstances` must end up with an AMI from *some* source, or it fails with
+`MissingParameter` / "The request must contain the parameter ImageId", HTTP 400.
+
+AWS documents `ImageId` as **Required: No** only because a launch template may
+supply it, so substrate checks *after* template resolution rather than on the way
+in. Both of these are valid:
+
+- `ImageId` given directly.
+- `LaunchTemplate.LaunchTemplateId` (or `…Name`) naming a template whose data
+  carries an `ImageId`.
+
+The request fails when neither applies — including when the named template
+resolves but carries no AMI of its own, and when the template name does not exist
+at all.
+
+Note that `ImageId` is an optional `*string` in the typed SDKs, so
+`aws.String("")` serializes as **absent from the wire**: an empty AMI reaches the
+service rather than being caught client-side. That is the shape this check exists
+for. The AMI value itself is not format-validated — substrate accepts any
+non-empty string, so fixtures like `ami-test` work.
 
 ### Explicit resource IDs
 
