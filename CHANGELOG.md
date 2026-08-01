@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- EC2: a launch template's network interface is no longer discarded, so a template
+  that names a subnet, security groups or a public-IP preference is honored on
+  launch (#444). `CreateLaunchTemplate` accepted
+  `LaunchTemplateData.NetworkInterface.1.*` and stored none of it, so an instance
+  launched from such a template landed in a substrate-chosen subnet — a wrong
+  answer returned confidently, with a 200 and a plausible-looking instance.
+
+  This hit exactly the templates configured the way AWS requires: AWS's
+  `RequestLaunchTemplateData` has **no top-level `SubnetId`** member, so a network
+  interface is the only place a template can name a subnet, and the only place
+  `AssociatePublicIpAddress` exists at all. It also produced a confusing
+  asymmetry, since a `CreateFleet` override's subnet *was* honored while the same
+  subnet named in the template was not.
+
+  Precedence follows AWS: a value named in the request wins over the template's,
+  and a fleet override wins over both (it reaches `RunInstances` as a
+  request-level value). `AssociatePublicIpAddress` is stored as a string because
+  three states are observable — absent (use the subnet default), `true` (force one
+  even on a non-default subnet) and `false` (suppress one). The interface's group
+  list is read from `SecurityGroupId.N`, which is what real SDKs send (the AWS
+  model gives the `Groups` member the `locationName` `SecurityGroupId`), with
+  `Groups.N` accepted as a secondary spelling. Only interface index 1 is modeled,
+  matching `RunInstances`.
+
 ### Added
 - EC2: `CreateFleet` stamps the reserved `aws:ec2:fleet-id` tag on every instance
   it launches, so a fleet's instances are reachable with a `DescribeInstances`

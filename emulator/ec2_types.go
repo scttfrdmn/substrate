@@ -611,11 +611,50 @@ type EC2LaunchTemplateData struct {
 	// KeyName is the name of the key pair to use.
 	KeyName string `json:"keyName,omitempty"`
 
-	// SecurityGroupIDs is the list of security group IDs.
+	// SecurityGroupIDs is the list of security group IDs, from the template's
+	// top-level SecurityGroupId.N.
 	SecurityGroupIDs []string `json:"securityGroupIds,omitempty"`
 
 	// UserData is the base64-encoded user data script.
 	UserData string `json:"userData,omitempty"`
+
+	// SubnetID is the subnet named in the template's first network interface
+	// (LaunchTemplateData.NetworkInterface.1.SubnetId).
+	//
+	// This is not a mirror of RunInstances' top-level SubnetId: AWS's
+	// RequestLaunchTemplateData has no top-level SubnetId member at all, so a
+	// network interface is the only place a template can name a subnet — and the
+	// only place AssociatePublicIpAddress exists (#444).
+	SubnetID string `json:"subnetId,omitempty"`
+
+	// AssociatePublicIPAddress is the first network interface's public-IP
+	// preference, stored verbatim as a string rather than a bool because three
+	// states are observable: absent (use the subnet's own default), "true" (force
+	// a public IP even on a non-default subnet), and "false" (suppress one). A
+	// bool would collapse the first two.
+	AssociatePublicIPAddress string `json:"associatePublicIpAddress,omitempty"`
+
+	// NetworkInterfaceGroups is the security groups named in the template's first
+	// network interface, kept separate from SecurityGroupIDs so a template
+	// carrying both is not silently merged. AWS rejects that combination; see
+	// [EC2LaunchTemplateData.NetworkSecurityGroupIDs] for how substrate resolves
+	// which list applies.
+	NetworkInterfaceGroups []string `json:"networkInterfaceGroups,omitempty"`
+}
+
+// NetworkSecurityGroupIDs returns the security groups a launch from this template
+// should use: the top-level list when present, otherwise the first network
+// interface's.
+//
+// The precedence only matters for a template AWS would have rejected — it refuses
+// a template that sets both — so substrate prefers the top-level list rather than
+// erroring, which keeps a hand-built template working while still honoring the
+// interface-scoped form the SDK emits.
+func (d EC2LaunchTemplateData) NetworkSecurityGroupIDs() []string {
+	if len(d.SecurityGroupIDs) > 0 {
+		return d.SecurityGroupIDs
+	}
+	return d.NetworkInterfaceGroups
 }
 
 // EC2LaunchTemplate represents an Amazon EC2 launch template.

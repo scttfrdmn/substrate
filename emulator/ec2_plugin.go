@@ -285,10 +285,27 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		subnetID = req.Params["NetworkInterface.1.SubnetId"]
 	}
 	// AssociatePublicIpAddress=true forces a public IP even on a non-default
-	// subnet; "" means "use the subnet default".
-	associatePublicIP := strings.EqualFold(req.Params["NetworkInterface.1.AssociatePublicIpAddress"], "true")
+	// subnet; "" means "use the subnet default". A launch template can also carry
+	// this preference, so the call-level value is kept as the raw string and only
+	// resolved to a bool once the template has had its chance to supply one.
+	publicIPPref := req.Params["NetworkInterface.1.AssociatePublicIpAddress"]
+
+	// Security groups named at call level, from either the top-level params or the
+	// nested NetworkInterface.1.* form (SecurityGroupId.M or Groups.M).
+	securityGroupIDs := indexedParams(req.Params, "SecurityGroupId.%d", "SecurityGroupIds.%d")
+	if len(securityGroupIDs) == 0 {
+		securityGroupIDs = indexedParams(req.Params,
+			"NetworkInterface.1.SecurityGroupId.%d", "NetworkInterface.1.Groups.%d")
+	}
 
 	// Resolve launch template parameters when no ImageId is provided directly.
+	//
+	// Every fallback below is guarded on the call-level value being absent, which is
+	// AWS's precedence: a value named in the request wins over the template's. The
+	// networking fallbacks in particular must run *after* the call-level
+	// NetworkInterface.1.* reads above rather than before them (#444) — the subnet
+	// fallback used to sit ahead of this block, where there was nothing yet to fall
+	// back to.
 	if imageID == "" {
 		ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
 		ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
@@ -300,11 +317,22 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			if keyName == "" {
 				keyName = lt.LatestData.KeyName
 			}
-			if sgID == "" && len(lt.LatestData.SecurityGroupIDs) > 0 {
-				sgID = lt.LatestData.SecurityGroupIDs[0]
+			if subnetID == "" {
+				subnetID = lt.LatestData.SubnetID
+			}
+			if publicIPPref == "" {
+				publicIPPref = lt.LatestData.AssociatePublicIPAddress
+			}
+			if len(securityGroupIDs) == 0 {
+				securityGroupIDs = lt.LatestData.NetworkSecurityGroupIDs()
+			}
+			if sgID == "" && len(securityGroupIDs) > 0 {
+				sgID = securityGroupIDs[0]
 			}
 		}
 	}
+
+	associatePublicIP := strings.EqualFold(publicIPPref, "true")
 
 	// An AMI must have resolved from *some* source by this point. AWS documents
 	// ImageId as "Required: No" only because a launch template may supply it, so
@@ -339,31 +367,8 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
-	// Collect all specified security group IDs, from top-level params or the
-	// nested NetworkInterface.1.* form (SecurityGroupId.M or Groups.M).
-	var securityGroupIDs []string
-	for n := 1; ; n++ {
-		id := req.Params[fmt.Sprintf("SecurityGroupId.%d", n)]
-		if id == "" {
-			id = req.Params[fmt.Sprintf("SecurityGroupIds.%d", n)]
-		}
-		if id == "" {
-			break
-		}
-		securityGroupIDs = append(securityGroupIDs, id)
-	}
-	if len(securityGroupIDs) == 0 {
-		for n := 1; ; n++ {
-			id := req.Params[fmt.Sprintf("NetworkInterface.1.SecurityGroupId.%d", n)]
-			if id == "" {
-				id = req.Params[fmt.Sprintf("NetworkInterface.1.Groups.%d", n)]
-			}
-			if id == "" {
-				break
-			}
-			securityGroupIDs = append(securityGroupIDs, id)
-		}
-	}
+	// sgID may have been filled from the default VPC above, after the call-level and
+	// template lists were resolved.
 	if len(securityGroupIDs) == 0 && sgID != "" {
 		securityGroupIDs = []string{sgID}
 	}
@@ -2558,6 +2563,27 @@ func containsStr(slice []string, s string) bool {
 	return false
 }
 
+// indexedParams collects a 1-based indexed query-parameter list, stopping at the
+// first missing index. Each format is a fmt pattern taking the index; they are
+// tried in order per index, so a caller can accept several spellings of the same
+// list (e.g. AWS's SecurityGroupId.N alongside the SecurityGroupIds.N form some
+// hand-built requests use).
+func indexedParams(params map[string]string, formats ...string) []string {
+	var out []string
+	for n := 1; ; n++ {
+		var value string
+		for _, format := range formats {
+			if value = params[fmt.Sprintf(format, n)]; value != "" {
+				break
+			}
+		}
+		if value == "" {
+			return out
+		}
+		out = append(out, value)
+	}
+}
+
 // filterEmpty removes empty strings from slice.
 func filterEmpty(slice []string) []string {
 	var result []string
@@ -3941,6 +3967,42 @@ func (p *EC2Plugin) resolveLaunchTemplate(goCtx context.Context, ctx *RequestCon
 	return &lt
 }
 
+// parseLaunchTemplateData parses the LaunchTemplateData.* params of a
+// CreateLaunchTemplate request.
+//
+// Networking comes from the first network interface, because AWS's
+// RequestLaunchTemplateData has no top-level SubnetId member — a network interface
+// is the only place a template can name a subnet, and the only place
+// AssociatePublicIpAddress exists at all. Substrate previously accepted those
+// params and stored none of them, so an instance launched from a template
+// configured the way AWS requires landed in a substrate-chosen subnet (#444).
+//
+// Only interface index 1 is modeled, matching runInstances' own NetworkInterface.1
+// handling: a template declaring a second interface silently loses it.
+//
+// The interface's security groups are read from SecurityGroupId.N first, which is
+// what real SDKs send — the AWS model gives that member the locationName
+// "SecurityGroupId" — with Groups.N accepted as a secondary spelling for
+// hand-built requests, mirroring runInstances.
+func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
+	const niPrefix = "LaunchTemplateData.NetworkInterface.1."
+
+	data := EC2LaunchTemplateData{
+		ImageID:                  params["LaunchTemplateData.ImageId"],
+		InstanceType:             params["LaunchTemplateData.InstanceType"],
+		KeyName:                  params["LaunchTemplateData.KeyName"],
+		UserData:                 params["LaunchTemplateData.UserData"],
+		SubnetID:                 params[niPrefix+"SubnetId"],
+		AssociatePublicIPAddress: params[niPrefix+"AssociatePublicIpAddress"],
+	}
+	if sg1 := params["LaunchTemplateData.SecurityGroupId.1"]; sg1 != "" {
+		data.SecurityGroupIDs = []string{sg1}
+	}
+	data.NetworkInterfaceGroups = indexedParams(params,
+		niPrefix+"SecurityGroupId.%d", niPrefix+"Groups.%d")
+	return data
+}
+
 func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["LaunchTemplateName"]
 	if name == "" {
@@ -3962,18 +4024,7 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	ltID := generateLaunchTemplateID()
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 
-	// Parse launch template data params.
-	ltData := EC2LaunchTemplateData{
-		ImageID:      req.Params["LaunchTemplateData.ImageId"],
-		InstanceType: req.Params["LaunchTemplateData.InstanceType"],
-		KeyName:      req.Params["LaunchTemplateData.KeyName"],
-	}
-	if sg1 := req.Params["LaunchTemplateData.SecurityGroupId.1"]; sg1 != "" {
-		ltData.SecurityGroupIDs = []string{sg1}
-	}
-	if ud := req.Params["LaunchTemplateData.UserData"]; ud != "" {
-		ltData.UserData = ud
-	}
+	ltData := parseLaunchTemplateData(req.Params)
 
 	lt := EC2LaunchTemplate{
 		LaunchTemplateID:   ltID,

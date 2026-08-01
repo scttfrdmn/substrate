@@ -943,7 +943,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateLaunchTemplate | |
+| CreateLaunchTemplate | Networking is read from `NetworkInterface.1.*` — see [Launch template networking](#launch-template-networking) |
 | DescribeLaunchTemplates | |
 | DeleteLaunchTemplate | |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
@@ -972,6 +972,43 @@ Note that `ImageId` is an optional `*string` in the typed SDKs, so
 service rather than being caught client-side. That is the shape this check exists
 for. The AMI value itself is not format-validated — substrate accepts any
 non-empty string, so fixtures like `ami-test` work.
+
+### Launch template networking
+
+A launch template's subnet, security groups and public-IP preference are read from
+its **first network interface**:
+
+```
+LaunchTemplateData.NetworkInterface.1.SubnetId
+LaunchTemplateData.NetworkInterface.1.SecurityGroupId.N
+LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress
+```
+
+That is not a stylistic choice. AWS's `RequestLaunchTemplateData` has **no
+top-level `SubnetId` member** — a network interface is the only place a template
+can name a subnet, and the only place `AssociatePublicIpAddress` exists at all. So
+a template configured the way AWS requires is precisely the one whose networking
+substrate used to discard.
+
+Note the group parameter name: the AWS model calls that member `Groups` but gives
+it the `locationName` `SecurityGroupId`, so real SDKs send `SecurityGroupId.N`.
+Substrate accepts `Groups.N` as well, for hand-built requests.
+
+Precedence when the same value is available from several sources, matching AWS:
+
+| Source | Wins over |
+|---|---|
+| The request itself — `SubnetId`, or `NetworkInterface.1.SubnetId` | everything below |
+| A `CreateFleet` override's `SubnetId` | the template (it reaches `RunInstances` as a request-level value) |
+| The launch template's network interface | the default VPC |
+| The auto-created default VPC | — |
+
+`AssociatePublicIpAddress` is three-valued, and only a non-default subnet without
+`MapPublicIPOnLaunch` distinguishes them: **absent** uses the subnet's own
+behavior, **`true`** forces a public IP anyway, and **`false`** suppresses one.
+
+Only interface index **1** is modeled, on both `RunInstances` and launch templates.
+A template declaring a second interface loses it silently.
 
 ### MinCount and MaxCount
 
