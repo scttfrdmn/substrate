@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- EC2: `RunInstances` and `DescribeInstances` now report an instance's security
+  groups as `groupSet` (#444). The groups a launch named were parsed, validated
+  against the subnet's VPC and stored — and then absent from every read, so a
+  consumer that had just launched an instance with an explicit security group read
+  back an instance with no groups at all. Nothing errored; the fact was simply
+  missing, which reads as "this instance has no security groups" rather than
+  "substrate didn't report them".
+
+  Both responses emit `groupId` and `groupName`, matching AWS's `GroupIdentifier`,
+  for groups from any source: the request, the launch template's network interface,
+  or the default VPC's `default` group. `groupName` is **omitted** when the group
+  cannot be resolved — a group deleted after the launch keeps reporting its
+  `groupId`, since that is what the launch recorded, rather than being given an
+  invented name. The two response builders had each declared their own instance
+  item type, which is how a field could go missing from both; they now share the
+  group item, so they cannot disagree about its shape.
 - EC2: a launch template's network interface is no longer discarded, so a template
   that names a subnet, security groups or a public-IP preference is honored on
   launch (#444). `CreateLaunchTemplate` accepted

@@ -488,6 +488,46 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	return p.runInstancesResponse(instances, reservationID, reqCtx)
 }
 
+// ec2GroupItem is one groupSet>item entry, mirroring AWS's GroupIdentifier.
+//
+// It is declared once at package level rather than inside each response builder
+// because RunInstances and DescribeInstances each declared their own instance item
+// type, and the family of fields they emit had already drifted — neither carried a
+// groupSet at all, so security groups accepted on a launch were invisible to every
+// read (#444). One shared type means the two responses cannot disagree about the
+// shape.
+type ec2GroupItem struct {
+	// GroupID is the security group's ID.
+	GroupID string `xml:"groupId"`
+
+	// GroupName is the group's name, omitted when it cannot be resolved.
+	GroupName string `xml:"groupName,omitempty"`
+}
+
+// ec2GroupItems builds the groupSet entries for an instance's security groups.
+//
+// A group whose stored record cannot be read contributes its ID with no name
+// rather than a fabricated one: a caller comparing groupName against what it
+// created would rather see the field absent than see a plausible wrong value.
+func (p *EC2Plugin) ec2GroupItems(reqCtx *RequestContext, groupIDs []string) []ec2GroupItem {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	items := make([]ec2GroupItem, 0, len(groupIDs))
+	for _, id := range groupIDs {
+		item := ec2GroupItem{GroupID: id}
+		key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
+		if data, err := p.state.Get(context.Background(), ec2Namespace, key); err == nil && data != nil {
+			var sg EC2SecurityGroup
+			if json.Unmarshal(data, &sg) == nil {
+				item.GroupName = sg.GroupName
+			}
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID string, reqCtx *RequestContext) (*AWSResponse, error) {
 	type tagItem struct {
 		Key   string `xml:"key"`
@@ -509,7 +549,8 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			Code int    `xml:"code"`
 			Name string `xml:"name"`
 		} `xml:"instanceState"`
-		Tags []tagItem `xml:"tagSet>item"`
+		Groups []ec2GroupItem `xml:"groupSet>item"`
+		Tags   []tagItem      `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName       xml.Name          `xml:"RunInstancesResponse"`
@@ -540,6 +581,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
+		item.Groups = p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)
 		// Echo launch-time tags (from TagSpecifications) — real EC2 populates
 		// tagSet in the RunInstances response, not just DescribeInstances (#351).
 		for _, t := range inst.Tags {
@@ -646,6 +688,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		KeyName            string          `xml:"keyName,omitempty"`
 		IamInstanceProfile *iamProfileItem `xml:"iamInstanceProfile,omitempty"`
 		State              ec2StateItem    `xml:"instanceState"`
+		Groups             []ec2GroupItem  `xml:"groupSet>item"`
 		Tags               []tagItem       `xml:"tagSet>item"`
 	}
 	type reservationItem struct {
@@ -695,6 +738,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
+		item.Groups = p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)
 		// Echo the IAM instance profile set at launch (#331). The stored value is
 		// the name or ARN supplied; surface it as the ARN and derive an id so a
 		// caller can read back the profile it attached.
