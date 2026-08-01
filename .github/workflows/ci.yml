@@ -65,7 +65,26 @@ jobs:
           cache: true
 
       - name: Build binary
-        run: go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" ./cmd/substrate
+        run: |
+          VERSION="$(git describe --tags --always --dirty)"
+          go build -ldflags "-X main.version=${VERSION} -X github.com/scttfrdmn/substrate/emulator.Version=${VERSION}" ./cmd/substrate
+
+  version-stamping:
+    name: Version Stamping
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A -X flag naming a symbol that does not exist links cleanly and leaves the
+      # variable at its default, so a wrong path is invisible until someone curls
+      # /health on a released image (#402). Assert the observable outcome.
+      - name: Check the build stamps the version the server reports
+        run: make version-check
 
   e2e:
     name: E2E Tests

@@ -130,5 +130,13 @@
 // See examples/custom_plugin/main.go for a minimal self-contained example.
 package emulator
 
-// Version is the Substrate release version, set at build time via ldflags.
+// Version is the Substrate release version, set at build time via ldflags. It is
+// what /health and /_localstack/{health,info} report, so any build recipe that
+// stamps a version must name this symbol exactly:
+//
+//	-X github.com/scttfrdmn/substrate/emulator.Version=vX.Y.Z
+//
+// The linker silently ignores -X against a symbol that does not exist, so a wrong
+// path leaves this at "dev" with no build error (#402). scripts/check-version-stamping.sh
+// guards the recipes against that.
 var Version = "dev"

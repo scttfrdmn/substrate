@@ -25,7 +25,7 @@ docker compose up -d
 
 # Verify — healthy after ~15 s while SQLite initialises
 curl http://localhost:4566/health
-# {"status":"ok"}
+# {"status":"ok","version":"v0.x.y"}
 ```
 
 Point any application at `http://localhost:4566`:
@@ -79,11 +79,17 @@ Start the server (binary or Docker), then confirm it's healthy:
 
 ```bash
 curl http://localhost:4566/health
-# {"status":"ok"}
+# {"status":"ok","version":"v0.x.y"}
 
 curl http://localhost:4566/ready
 # {"status":"ready","plugins":63}
 ```
+
+`version` reports the build that is actually answering, so a pinned image tag can
+be verified at runtime — useful in CI, where a stale cached image otherwise looks
+identical to a fresh pull. Builds from source without ldflags (a plain
+`go build ./cmd/substrate`) report `dev`; `make build` and the published images
+report the release version.
 
 ## First 5 minutes: AWS CLI
 

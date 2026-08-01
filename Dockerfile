@@ -5,9 +5,13 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# The emulator path segment is load-bearing: emulator.Version is what /health and
+# /_localstack/{health,info} serve. -X against a package with no Go files (the root
+# module path) is silently ignored by the linker, so a typo here fails at runtime,
+# not at build time (#402). Keep in sync with LDFLAGS in the Makefile.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build \
-    -ldflags "-X main.version=${VERSION} -X github.com/scttfrdmn/substrate.Version=${VERSION}" \
+    -ldflags "-X main.version=${VERSION} -X github.com/scttfrdmn/substrate/emulator.Version=${VERSION}" \
     -o /substrate ./cmd/substrate
 
 # Stage 2: runtime

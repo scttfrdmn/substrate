@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions version-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -51,6 +51,9 @@ docs-reference-check: ## Fail if docs/services.md is out of date with the regist
 
 docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh
+
+version-check: ## Fail if the build's -ldflags do not reach the version the server reports
+	./scripts/check-version-stamping.sh
 
 bench: ## Run benchmarks
 	go test -bench=. -benchmem -benchtime=5s ./...
