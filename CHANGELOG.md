@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   header wholesale would lose the codec that *is* applied, which is the #406
   failure. Both write paths now resolve the header through one helper, so they
   cannot drift apart on it again the way #406 did.
+- EC2: `RunInstances` validates `MinCount` and `MaxCount` instead of silently
+  clamping them (#431). Both were parsed with `strconv.Atoi`'s error discarded and
+  anything `<= 0` raised to 1, so `MinCount=0` launched an instance where real EC2
+  fails the request, and a non-numeric value launched one too. That is worse than
+  a missing error: it is a confidently wrong answer, so a consumer asserting on
+  the launched count got a green run for a request AWS rejects. A count that is
+  present but unparseable or below 1, or a `MinCount` above `MaxCount`, is now
+  `InvalidParameterValue` / HTTP 400 with the parameter named in the message.
+  **Absence still defaults**, so nothing relying on today's behaviour changes: no
+  counts means one instance, and an absent `MaxCount` defaults to `MinCount`
+  rather than to 1 — a request asking for three no longer risks launching one.
+  Validating presence would catch an unreachable bug class, since both are
+  required members that fail client-side in every typed SDK; validating *values*
+  catches a reachable one, because the query protocol carries them as strings and
+  neither botocore nor `aws-sdk-go-v2` range-checks them.
 
 ## [v0.82.0] - 2026-08-01
 

@@ -239,13 +239,19 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if instanceType == "" {
 		instanceType = "t3.micro"
 	}
-	minCount, _ := strconv.Atoi(req.Params["MinCount"])
-	if minCount <= 0 {
-		minCount = 1
-	}
-	maxCount, _ := strconv.Atoi(req.Params["MaxCount"])
-	if maxCount <= 0 {
-		maxCount = minCount
+	// Absent counts still default; a count that is present and invalid is rejected
+	// rather than clamped, because clamping MinCount=0 up to 1 launched an instance
+	// where AWS fails the request (#431). See resolveInstanceCounts for why the
+	// codes are the common-error ones and why presence is not required.
+	//
+	// Only MaxCount reaches the launch loop. AWS "launches the largest possible
+	// number of instances above the specified minimum count", and substrate models
+	// no capacity ceiling, so the largest possible number is always MaxCount and
+	// MinCount can only ever be satisfied. It is still validated, and still sets
+	// MaxCount's default, which is all it can affect here.
+	_, maxCount, countErr := resolveInstanceCounts(req.Params)
+	if countErr != nil {
+		return nil, countErr
 	}
 
 	keyName := req.Params["KeyName"]
