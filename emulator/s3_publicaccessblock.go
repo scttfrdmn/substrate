@@ -75,6 +75,9 @@ func (p *S3Plugin) putPublicAccessBlock(_ *RequestContext, req *AWSRequest, buck
 		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to an S3 XML error response
 	}
 
+	// The error is unreachable for the current field set — four bools and two
+	// skipped members — but checked rather than discarded, so adding a field that
+	// can fail to marshal does not silently store nothing.
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal public access block: %w", err)

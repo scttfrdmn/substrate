@@ -1,7 +1,9 @@
 package emulator_test
 
 import (
+	"context"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -333,6 +335,167 @@ func TestS3_PublicAccessBlock_VirtualHostStyle(t *testing.T) {
 	del := s3VirtualHostRequest(t, srv, http.MethodDelete, bucket, "/?publicAccessBlock", nil, nil)
 	assert.Equal(t, http.StatusNoContent, del.Code)
 	assert.True(t, bucketExists(t, srv, bucket), "the bucket was destroyed")
+}
+
+// pabFaultState fails one named key's operations once armed, leaving every other
+// key working. It is armed after setup rather than from construction because
+// CreateBucket reads and writes the same `bucket:` key the fault targets — a store
+// that fails from the first call never gets a bucket to test against.
+//
+// [errAfterGetsStateManager] in error_protocol_test.go counts calls instead, which
+// suits a test that only needs "fail from here on". Targeting a key is what lets
+// these tests distinguish the bucket lookup from the configuration lookup, since a
+// single request does both.
+type pabFaultState struct {
+	inner   emulator.StateManager
+	key     string
+	err     error
+	armed   bool
+	onGet   bool
+	onPut   bool
+	onDelet bool
+}
+
+func (m *pabFaultState) fails(key string, op bool) bool {
+	return m.armed && op && key == m.key
+}
+
+func (m *pabFaultState) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	if m.fails(key, m.onGet) {
+		return nil, m.err
+	}
+	return m.inner.Get(ctx, namespace, key)
+}
+
+func (m *pabFaultState) Put(ctx context.Context, namespace, key string, value []byte) error {
+	if m.fails(key, m.onPut) {
+		return m.err
+	}
+	return m.inner.Put(ctx, namespace, key, value)
+}
+
+func (m *pabFaultState) Delete(ctx context.Context, namespace, key string) error {
+	if m.fails(key, m.onDelet) {
+		return m.err
+	}
+	return m.inner.Delete(ctx, namespace, key)
+}
+
+func (m *pabFaultState) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	return m.inner.List(ctx, namespace, prefix)
+}
+
+// TestS3_PublicAccessBlock_StateFailure asserts a store failure surfaces as a 500
+// rather than as one of this subresource's own 404s. The distinction matters
+// exactly as it does for [TestS3_StateFailureIsNotReportedAsNoSuchBucket]: a
+// NoSuchBucket or NoSuchPublicAccessBlockConfiguration tells a caller the answer is
+// settled and to stop retrying, while a store failure is transient. Reporting
+// "there is no configuration" for "I could not read the configuration" would send a
+// consumer down a permanent-failure path over a blip — and, for the DELETE case,
+// would report a successful teardown that did not happen.
+func TestS3_PublicAccessBlock_StateFailure(t *testing.T) {
+	const bucket = "pab-fault"
+
+	tests := []struct {
+		name    string
+		method  string
+		body    []byte
+		key     string
+		onGet   bool
+		onPut   bool
+		onDelet bool
+		seedCfg bool
+		notWant string
+	}{
+		{
+			name:    "PUT bucket lookup fails",
+			method:  http.MethodPut,
+			body:    []byte(pabAllTrue),
+			key:     "bucket:" + bucket,
+			onGet:   true,
+			notWant: "NoSuchBucket",
+		},
+		{
+			name:   "PUT store write fails",
+			method: http.MethodPut,
+			body:   []byte(pabAllTrue),
+			key:    "bucket_public_access_block:" + bucket,
+			onPut:  true,
+		},
+		{
+			name:    "GET bucket lookup fails",
+			method:  http.MethodGet,
+			key:     "bucket:" + bucket,
+			onGet:   true,
+			notWant: "NoSuchBucket",
+		},
+		{
+			name:    "GET configuration lookup fails",
+			method:  http.MethodGet,
+			key:     "bucket_public_access_block:" + bucket,
+			onGet:   true,
+			notWant: "NoSuchPublicAccessBlockConfiguration",
+		},
+		{
+			name:    "DELETE bucket lookup fails",
+			method:  http.MethodDelete,
+			key:     "bucket:" + bucket,
+			onGet:   true,
+			notWant: "NoSuchBucket",
+		},
+		{
+			name:    "DELETE store delete fails",
+			method:  http.MethodDelete,
+			key:     "bucket_public_access_block:" + bucket,
+			onDelet: true,
+			seedCfg: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &pabFaultState{
+				inner:   emulator.NewMemoryStateManager(),
+				key:     tt.key,
+				err:     errors.New("state store unavailable"),
+				onGet:   tt.onGet,
+				onPut:   tt.onPut,
+				onDelet: tt.onDelet,
+			}
+			srv := newS3TestServerWithState(t, state)
+			newPABBucket(t, srv, bucket)
+
+			if tt.seedCfg {
+				require.Equal(t, http.StatusOK, putPAB(t, srv, bucket, pabAllTrue).Code)
+			}
+
+			state.armed = true
+
+			w := s3Request(t, srv, tt.method, "/"+bucket+"?publicAccessBlock", tt.body, nil)
+			assert.Equal(t, http.StatusInternalServerError, w.Code,
+				"a state-store failure must surface as a server error: %s", w.Body.String())
+			if tt.notWant != "" {
+				assert.NotContains(t, w.Body.String(), tt.notWant,
+					"a transient store failure was reported as a settled answer")
+			}
+		})
+	}
+}
+
+// TestS3_PublicAccessBlock_CorruptState covers a stored configuration that will not
+// decode. It is a 500 rather than the unset 404 for the same reason as above: a
+// configuration substrate cannot read is not a configuration the caller never
+// wrote.
+func TestS3_PublicAccessBlock_CorruptState(t *testing.T) {
+	state := emulator.NewMemoryStateManager()
+	srv := newS3TestServerWithState(t, state)
+	bucket := newPABBucket(t, srv, "pab-corrupt")
+
+	require.NoError(t, state.Put(context.Background(), "s3",
+		"bucket_public_access_block:"+bucket, []byte("{not json")))
+
+	w := s3Request(t, srv, http.MethodGet, "/"+bucket+"?publicAccessBlock", nil, nil)
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+	assert.NotContains(t, w.Body.String(), "NoSuchPublicAccessBlockConfiguration")
 }
 
 // TestS3_PublicAccessBlock_SiblingSubresourcesUnaffected is the regression guard
