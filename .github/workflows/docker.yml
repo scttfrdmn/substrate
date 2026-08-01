@@ -44,3 +44,27 @@ jobs:
           build-args: VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # CI's version-stamping job checks the -ldflags paths against the source
+      # tree; this checks the wiring only a real image can exercise — that the
+      # VERSION build-arg above actually reaches the binary. Every released image
+      # reported "dev" for five releases because nothing asserted this (#402).
+      - name: Smoke-test the published image reports its version
+        run: |
+          set -euo pipefail
+          image=$(head -1 <<<"${{ steps.meta.outputs.tags }}")
+          echo "smoke-testing $image"
+          docker run -d --name substrate-smoke -p 4566:4566 "$image"
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:4566/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          body=$(curl -fsS http://127.0.0.1:4566/health)
+          echo "GET /health -> $body"
+          got=$(jq -r .version <<<"$body")
+          if [ "$got" != "${{ github.ref_name }}" ]; then
+            echo "::error::image reports version \"$got\", expected \"${{ github.ref_name }}\" — the VERSION build-arg is not reaching emulator.Version"
+            docker logs substrate-smoke
+            exit 1
+          fi
+          docker rm -f substrate-smoke

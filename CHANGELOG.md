@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AWS::EC2::SecurityGroupEgress` rules, which resolve
   `SourceSecurityGroupId`/`DestinationSecurityGroupId` through `Ref`/`GetAtt` so
   self- and mutually-referencing groups work.
+- `make version-check` (`scripts/check-version-stamping.sh`), run by CI, builds
+  with the Dockerfile's own `-ldflags` and asserts the running server reports
+  that version (#402). It also fails if the Dockerfile and Makefile stamp
+  different symbols, or if any `-X` names a symbol that does not exist. A silent
+  `-X` is invisible at build time, so the guard asserts the observable outcome
+  rather than the spelling of the flag.
+- The Docker release workflow smoke-tests the image it just pushed, asserting
+  `/health` reports the tag being released (#402) — the build-arg wiring that
+  only a real image can exercise.
 
 ### Changed
 - `AWS::EC2::SecurityGroup` now authorizes the rules declared inline in its
@@ -60,6 +69,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is misleading when the API actions exist and only the wiring is missing.
 
 ### Fixed
+- Published container images report their release version from `/health` and
+  `/_localstack/{health,info}` instead of `"dev"` (#402). The Dockerfile stamped
+  `github.com/scttfrdmn/substrate.Version` — the root module path, which contains
+  no Go files — while the variable those endpoints serve is
+  `github.com/scttfrdmn/substrate/emulator.Version`. The linker silently ignores
+  `-X` against a symbol that does not exist, so the build succeeded with no
+  diagnostic and every image since the endpoint was added reported `"dev"`.
+  Consumers pinning an image tag for reproducible CI had no way to confirm at
+  runtime which build answered, so a silently-wrong tag or a stale cached image
+  went unnoticed. `substrate --version` was unaffected, which is why this
+  survived so long.
 - Package documentation no longer states a plugin count or per-plugin operation
   count (#389). `emulator/doc.go` claimed 39 plugins and 23 S3 operations while
   the registry had 63 and `s3_plugin.go` 53 — the counts that #364 made
