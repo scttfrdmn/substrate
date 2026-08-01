@@ -623,8 +623,8 @@ Lambda invocations: $0.0000002 per request.
 | Operation | Notes |
 |-----------|-------|
 | CreateQueue | Supports FifoQueue, VisibilityTimeout attributes |
-| GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
-| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
+| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | |
@@ -656,6 +656,55 @@ query-compatibility alias AWS sends in an `x-amzn-query-error` header, not in
 SQS errors are emitted as JSON regardless of the request protocol, since substrate
 resolves the error protocol per service and SQS is JSON-RPC. A query-protocol
 request therefore gets a JSON error document rather than the XML `<Error>` shape.
+
+### Seeding the create-then-lookup consistency window
+
+AWS documents that you "must wait at least one second after the queue is created
+to be able to use the queue", so a real `CreateQueue` → `GetQueueUrl` → retry loop
+can legitimately see `QueueDoesNotExist` for a queue that exists. Substrate
+resolves a new queue instantly, which makes that retry path unreachable and any
+test of it vacuous. Seeding is what makes the window observable:
+
+```bash
+# The next 2 GetQueueUrl calls on run-q report QueueDoesNotExist.
+curl -X POST http://localhost:4566/v1/sqs/consistency \
+  -d '{"queueName":"run-q","getUrlMisses":2}'
+
+# GetQueueAttributes has its own independent counter.
+curl -X POST http://localhost:4566/v1/sqs/consistency \
+  -d '{"queueName":"run-q","getAttributesMisses":1}'
+
+# Apply to any queue (wildcard).
+curl -X POST http://localhost:4566/v1/sqs/consistency -d '{"getUrlMisses":3}'
+
+# Clear one, or all.
+curl -X DELETE 'http://localhost:4566/v1/sqs/consistency?queueName=run-q'
+curl -X DELETE http://localhost:4566/v1/sqs/consistency
+```
+
+A name-scoped seed is consulted before the wildcard. When a name-scoped seed is
+exhausted the lookup falls through to the wildcard, so an empty named seed does not
+mask a wildcard that still has budget.
+
+**The window is counted in misses, not measured as a duration.** Substrate's
+simulated clock advances with wall time from its baseline, so a duration-based
+window would expire partway through a test and make "still missing" assertions
+wall-clock dependent — which no test here may be. A miss counter is exactly
+reproducible.
+
+Two ordering rules make the seed usable from a harness:
+
+- A miss is consumed **only when the queue actually exists**. Seeding before
+  `CreateQueue` is safe: lookups against the genuinely absent queue still fail, but
+  they do not spend the budget.
+- A seed counts down the next N misses and **does not re-arm on `CreateQueue`**.
+  `CreateQueue` is idempotent here (it returns the existing URL), so "after its
+  CreateQueue" would be ambiguous when create runs twice, and re-arming would mean
+  the data path writes control-plane state.
+
+Both counters default to 0, so an unseeded queue behaves exactly as before —
+instantly resolvable. Seeds live in the state store, so `POST /v1/state/reset`
+clears them along with everything else.
 
 ### Betty CFN resource types
 
