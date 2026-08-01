@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- S3: `Cache-Control`, `Content-Disposition`, `Content-Language` and `Expires`
+  persist on an object and are returned on every read (#430). `S3Object` had no
+  fields for them at all, so substrate accepted the headers on write and silently
+  discarded them — a consumer asserting that an `attachment; filename=` download
+  name or a cache lifetime survives an upload got a green test verifying nothing,
+  because the write appeared to succeed. All three write paths record them now:
+  `PutObject`, `CreateMultipartUpload` → `CompleteMultipartUpload` (Complete
+  accepts no object-metadata headers, so the family is carried on the upload
+  record from creation), and `CopyObject` under the same
+  `x-amz-metadata-directive` that already governed `Content-Type` and
+  `Content-Encoding` — S3 documents no per-header variant, so a `REPLACE`
+  restating only `Content-Type` drops the rest. The four share one embedded
+  struct declaration used by both `S3Object` and `S3MultipartUpload`, so the two
+  write paths cannot drift apart on a member the way they did on
+  `Content-Encoding` in #406. An absent header stays **absent** on the response
+  rather than becoming empty, since an SDK distinguishing nil from `""` would
+  otherwise report the wrong one. `Expires` is stored as a string and never
+  parsed: real S3 returns what the caller sent, the Go SDK deprecates its
+  `time.Time` `Expires` in favour of the unparsed `ExpiresString`, and parsing
+  here would make a consumer's parse-failure branch unreachable.
 - SQS: `QueueDeletedRecently` is seedable on `CreateQueue` (#429). AWS requires a
   60-second wait after `DeleteQueue` before the same name can be reused, so a
   consumer's delete → recreate → retry loop has a documented error to handle;

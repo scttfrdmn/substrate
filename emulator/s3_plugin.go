@@ -516,16 +516,17 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	}
 
 	obj := S3Object{
-		Bucket:          bucket,
-		Key:             key,
-		ETag:            etag,
-		ContentType:     contentType,
-		ContentEncoding: s3PersistedContentEncoding(req.Headers),
-		Size:            int64(len(body)),
-		StorageClass:    storageClass,
-		Checksum:        checksum,
-		LastModified:    p.tc.Now(),
-		UserMetadata:    userMeta,
+		Bucket:           bucket,
+		Key:              key,
+		ETag:             etag,
+		ContentType:      contentType,
+		ContentEncoding:  s3PersistedContentEncoding(req.Headers),
+		S3SystemMetadata: resolveSystemMetadata(req.Headers),
+		Size:             int64(len(body)),
+		StorageClass:     storageClass,
+		Checksum:         checksum,
+		LastModified:     p.tc.Now(),
+		UserMetadata:     userMeta,
 	}
 
 	respHeaders := map[string]string{"ETag": etag}
@@ -1030,12 +1031,13 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	dstChecksum := copyChecksum(copyChecksumAlgorithm, srcBody)
 
 	dstObj := S3Object{
-		Bucket:          dstBucket,
-		Key:             dstKey,
-		ETag:            newETag,
-		ContentType:     meta.ContentType,
-		ContentEncoding: meta.ContentEncoding,
-		Size:            srcObj.Size,
+		Bucket:           dstBucket,
+		Key:              dstKey,
+		ETag:             newETag,
+		ContentType:      meta.ContentType,
+		ContentEncoding:  meta.ContentEncoding,
+		S3SystemMetadata: meta.System,
+		Size:             srcObj.Size,
 		// The copy's class comes from the request, never from the source: "if the
 		// x-amz-storage-class header is not used, the copied object will be stored in
 		// the STANDARD Storage Class by default."
@@ -1304,6 +1306,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		Key:               key,
 		ContentType:       contentType,
 		ContentEncoding:   s3PersistedContentEncoding(req.Headers),
+		S3SystemMetadata:  resolveSystemMetadata(req.Headers),
 		StorageClass:      storageClass,
 		ChecksumAlgorithm: checksumAlgorithm,
 		ChecksumType:      checksumType,
@@ -1557,11 +1560,15 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		ETag:            etag,
 		ContentType:     upload.ContentType,
 		ContentEncoding: upload.ContentEncoding,
-		Size:            int64(len(combined)),
-		StorageClass:    upload.StorageClass,
-		Checksum:        checksum,
-		LastModified:    p.tc.Now(),
-		UserMetadata:    upload.UserMetadata,
+		// The whole metadata family crosses in one assignment, because both structs
+		// embed the same declaration. A header added to S3SystemMetadata is carried
+		// here without touching this line — which is the point of embedding it.
+		S3SystemMetadata: upload.S3SystemMetadata,
+		Size:             int64(len(combined)),
+		StorageClass:     upload.StorageClass,
+		Checksum:         checksum,
+		LastModified:     p.tc.Now(),
+		UserMetadata:     upload.UserMetadata,
 	}
 	objData, err := json.Marshal(obj)
 	if err != nil {
@@ -2190,6 +2197,10 @@ func objectResponseHeaders(obj *S3Object) map[string]string {
 	if obj.ContentEncoding != "" {
 		headers["Content-Encoding"] = obj.ContentEncoding
 	}
+	// Cache-Control, Content-Disposition, Content-Language and Expires, each emitted
+	// only when the object carries it: S3 returns no header for metadata that was
+	// never set, and an empty value is a different observation from an absent one.
+	obj.emit(headers)
 	if obj.VersionID != "" {
 		headers["x-amz-version-id"] = obj.VersionID
 	}
