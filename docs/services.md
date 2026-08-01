@@ -946,7 +946,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateLaunchTemplate | |
 | DescribeLaunchTemplates | |
 | DeleteLaunchTemplate | |
-| CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`. Partial fulfillment is seedable — see below |
+| CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances |
 
@@ -1049,6 +1049,33 @@ An ID is well formed when it has the resource's prefix followed by at least one
 lowercase hex digit. Length is deliberately not checked: substrate's generators
 emit 16 hex characters where AWS emits 8 or 17, and AWS itself still accepts the
 legacy 8-character form for several resources.
+
+### Finding a fleet's instances
+
+Every instance `CreateFleet` launches is tagged `aws:ec2:fleet-id` with the fleet
+that created it, so the fleet's instances are reachable with an ordinary
+`DescribeInstances` tag filter:
+
+```bash
+aws ec2 describe-instances \
+  --filters "Name=tag:aws:ec2:fleet-id,Values=fleet-12a34b56-7890-1cde-2f34-abcdef567890"
+```
+
+For an `instant` fleet this is the only route from a fleet back to its live
+instances. `DescribeFleetInstances` rejects instant fleets outright, and the
+`fleetInstanceSet` in a `CreateFleet`/`DescribeFleets` response is a record of what
+was launched — it never drops instances that have since terminated. Without the tag
+a fully-running fleet is indistinguishable from an empty one.
+
+This tag is modelled from observed behaviour on real AWS rather than from a
+documented API contract: it appears in neither the EC2 API reference nor the fleet
+tagging and describe pages. It is applied to every fleet type, and — unlike a
+caller's own `TagSpecification` entries — it is not scoped by `ResourceType`.
+
+Note that substrate does not yet enforce the two rules AWS attaches to the
+reserved `aws:` prefix: such a tag cannot be edited or deleted by a caller, and
+does not count against the 50-tag limit. `CreateTags` currently accepts an
+`aws:`-prefixed key that real EC2 would reject with `InvalidParameterValue`.
 
 ### Seeding EC2 Fleet partial fulfillment
 

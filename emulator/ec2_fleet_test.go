@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -776,4 +777,235 @@ func TestEC2_SeedFleetShortfall_Validation(t *testing.T) {
 	seedFleetShortfall(t, ts, `{"launchTemplate":"lt-scoped","fulfill":0}`)
 	clearFleetShortfall(t, ts, "lt-scoped")
 	clearFleetShortfall(t, ts, "")
+}
+
+// fleetIDTagKey is the reserved tag CreateFleet stamps on its instances (#443).
+const fleetIDTagKey = "aws:ec2:fleet-id"
+
+// describedInstances mirrors the DescribeInstances fields the fleet-id tag tests
+// assert on.
+type describedInstances struct {
+	Instances []struct {
+		InstanceID string `xml:"instanceId"`
+		Tags       []struct {
+			Key   string `xml:"key"`
+			Value string `xml:"value"`
+		} `xml:"tagSet>item"`
+	} `xml:"reservationSet>item>instancesSet>item"`
+}
+
+// instanceTag returns the value of key on the i-th described instance, and
+// whether it was present at all — an absent tag and an empty value are different
+// observations.
+func (d describedInstances) instanceTag(i int, key string) (string, bool) {
+	for _, tag := range d.Instances[i].Tags {
+		if tag.Key == key {
+			return tag.Value, true
+		}
+	}
+	return "", false
+}
+
+// instanceIDs flattens every instance ID across a CreateFleet response's pools.
+func (r createFleetResp) instanceIDs() []string {
+	var ids []string
+	for _, pool := range r.Instances {
+		ids = append(ids, pool.InstanceIDs...)
+	}
+	return ids
+}
+
+func TestEC2_CreateFleet_AppliesFleetIDTag(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-id-tag")
+
+	var got createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "2",
+	}, &got)
+	if got.FleetID == "" {
+		t.Fatal("CreateFleet returned no fleetId")
+	}
+	if len(got.instanceIDs()) != 2 {
+		t.Fatalf("launched %d instances, want 2", len(got.instanceIDs()))
+	}
+
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{"Action": "DescribeInstances"}, &desc)
+	if len(desc.Instances) != 2 {
+		t.Fatalf("DescribeInstances returned %d instances, want 2", len(desc.Instances))
+	}
+	for i := range desc.Instances {
+		value, ok := desc.instanceTag(i, fleetIDTagKey)
+		if !ok {
+			t.Errorf("instance %s has no %s tag; tags = %+v",
+				desc.Instances[i].InstanceID, fleetIDTagKey, desc.Instances[i].Tags)
+			continue
+		}
+		if value != got.FleetID {
+			t.Errorf("instance %s %s = %q, want %q",
+				desc.Instances[i].InstanceID, fleetIDTagKey, value, got.FleetID)
+		}
+	}
+}
+
+// TestEC2_CreateFleet_FleetIDTagIsFilterable is the assertion that actually
+// matters: the tag is only useful if DescribeInstances can filter on it. The key
+// contains colons, so this also pins that the tag:<key> filter cuts only its own
+// prefix rather than splitting on every colon.
+func TestEC2_CreateFleet_FleetIDTagIsFilterable(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-id-filter")
+
+	newFleet := func(capacity string) createFleetResp {
+		var got createFleetResp
+		ec2FleetXML(t, ts, map[string]string{
+			"Action": "CreateFleet",
+			"Type":   "instant",
+			"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+			"TargetCapacitySpecification.TotalTargetCapacity":                      capacity,
+		}, &got)
+		return got
+	}
+
+	first := newFleet("2")
+	second := newFleet("1")
+	if first.FleetID == second.FleetID {
+		t.Fatalf("both fleets share id %q", first.FleetID)
+	}
+
+	// Each fleet's filter must return exactly its own instances, never the other's.
+	for _, fleet := range []createFleetResp{first, second} {
+		var desc describedInstances
+		ec2FleetXML(t, ts, map[string]string{
+			"Action":           "DescribeInstances",
+			"Filter.1.Name":    "tag:" + fleetIDTagKey,
+			"Filter.1.Value.1": fleet.FleetID,
+		}, &desc)
+
+		want := fleet.instanceIDs()
+		if len(desc.Instances) != len(want) {
+			t.Fatalf("filter on %s returned %d instances, want %d",
+				fleet.FleetID, len(desc.Instances), len(want))
+		}
+		for i := range desc.Instances {
+			if !slices.Contains(want, desc.Instances[i].InstanceID) {
+				t.Errorf("filter on %s returned %s, which belongs to another fleet",
+					fleet.FleetID, desc.Instances[i].InstanceID)
+			}
+		}
+	}
+}
+
+// TestEC2_CreateFleet_FleetIDTagCoexistsWithCallerTags guards the index
+// arithmetic in fleetIDTagSpec: the reserved tag is appended past the
+// passthrough tags, so reusing an occupied TagSpecification index would silently
+// overwrite a caller's own launch-time tag.
+func TestEC2_CreateFleet_FleetIDTagCoexistsWithCallerTags(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-id-coexist")
+
+	var got createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+		"TagSpecification.1.ResourceType":                                      "instance",
+		"TagSpecification.1.Tag.1.Key":                                         "Name",
+		"TagSpecification.1.Tag.1.Value":                                       "worker",
+		"TagSpecification.1.Tag.2.Key":                                         "Project",
+		"TagSpecification.1.Tag.2.Value":                                       "parsl",
+		"TagSpecification.2.ResourceType":                                      "fleet",
+		"TagSpecification.2.Tag.1.Key":                                         "Owner",
+		"TagSpecification.2.Tag.1.Value":                                       "research",
+	}, &got)
+
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{"Action": "DescribeInstances"}, &desc)
+	if len(desc.Instances) != 1 {
+		t.Fatalf("DescribeInstances returned %d instances, want 1", len(desc.Instances))
+	}
+
+	for key, want := range map[string]string{
+		"Name":        "worker",
+		"Project":     "parsl",
+		fleetIDTagKey: got.FleetID,
+	} {
+		value, ok := desc.instanceTag(0, key)
+		if !ok {
+			t.Errorf("instance is missing tag %q; tags = %+v", key, desc.Instances[0].Tags)
+			continue
+		}
+		if value != want {
+			t.Errorf("instance tag %q = %q, want %q", key, value, want)
+		}
+	}
+	if _, ok := desc.instanceTag(0, "Owner"); ok {
+		t.Error("fleet-scoped tag leaked onto the instance")
+	}
+}
+
+// TestEC2_CreateFleet_FleetIDTagAcrossPools pins that the tag is stamped per
+// pool, not once per fleet: launchFleetPool runs for each pool, so a fleet with
+// several overrides has several chances to drop it.
+func TestEC2_CreateFleet_FleetIDTagAcrossPools(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-id-pools")
+
+	var got createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"LaunchTemplateConfigs.1.Overrides.1.InstanceType":                     "t3.small",
+		"LaunchTemplateConfigs.1.Overrides.2.InstanceType":                     "c5.large",
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "2",
+	}, &got)
+	if len(got.Instances) != 2 {
+		t.Fatalf("fleetInstanceSet items = %d, want 2 pools", len(got.Instances))
+	}
+
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{
+		"Action":           "DescribeInstances",
+		"Filter.1.Name":    "tag:" + fleetIDTagKey,
+		"Filter.1.Value.1": got.FleetID,
+	}, &desc)
+	if len(desc.Instances) != 2 {
+		t.Errorf("filter returned %d instances, want 2 (one per pool)", len(desc.Instances))
+	}
+}
+
+// TestEC2_CreateFleet_FleetIDTagZeroCapacity covers the pool that launches
+// nothing: a fully-unfulfilled fleet must still succeed rather than erroring in
+// the tag path.
+func TestEC2_CreateFleet_FleetIDTagZeroCapacity(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-id-zero")
+	seedFleetShortfall(t, ts, `{"fulfill":0}`)
+
+	var got createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "2",
+	}, &got)
+	if len(got.instanceIDs()) != 0 {
+		t.Errorf("launched %v, want no instances", got.instanceIDs())
+	}
+
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{
+		"Action":           "DescribeInstances",
+		"Filter.1.Name":    "tag:" + fleetIDTagKey,
+		"Filter.1.Value.1": got.FleetID,
+	}, &desc)
+	if len(desc.Instances) != 0 {
+		t.Errorf("filter returned %d instances, want 0", len(desc.Instances))
+	}
 }
