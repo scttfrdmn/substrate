@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- S3: `HeadObject` now resolves a synthesized task-completion record, so `HEAD` and
+  `GET` agree about whether the key exists (#457). `getObject` consulted the
+  completion resolver when no real object was staged at
+  `tasks/<task_id>/completion.json`; `headObject` did not, and answered `NoSuchKey`
+  for a key `GET` served with a 200 and a full body. Real S3 never contradicts itself
+  that way.
+
+  The practical consequence was that `aws s3 cp` could not read a synthesized record
+  at all — the CLI HEADs before it GETs, so it failed on the 404 and never reached
+  the working GET. That is the exact command spawn prints for users. An SDK
+  `HeadObject` existence poll broke in the worse direction: absence reads as "still
+  running", so a wait loop spun forever rather than failing visibly.
+
+  `HeadObject` now reports the same `Content-Length`, `ETag`, `Content-Type` and
+  `Last-Modified` a `GET` of the same key returns, and the `ended_at` clock gate that
+  makes a not-yet-complete record absent applies identically to both verbs — so a HEAD
+  before the simulated completion time is still the `404` a poll loop depends on. A
+  real staged object still wins, and a read naming an explicit `versionId` still does
+  not resolve, since a synthesized record has no version history.
+
+  `ListObjectsV2` deliberately continues not to enumerate synthesized records, and
+  that asymmetry is now recorded in `docs/services.md` rather than left to be
+  rediscovered: a keyed read works because the caller names the task, whereas a list
+  is unkeyed and substrate cannot enumerate the task IDs a consumer might ask about.
+  The task-completion resolver and its seeding endpoints are documented there for the
+  first time.
 - S3: `DELETE /bucket?publicAccessBlock` no longer destroys the bucket (#446). The
   `?publicAccessBlock` subresource was unrouted on all three verbs, and because it is
   addressed as a bare query key on the bucket itself, each request fell through to the

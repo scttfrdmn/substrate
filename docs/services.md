@@ -192,8 +192,8 @@ STS operations are free.
 | DeleteBucket | |
 | ListBuckets | |
 | PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
-| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
-| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
+| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records) |
+| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records) |
 | DeleteObject | Fires S3 notifications if configured |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums) |
 | ListObjects | Emits `<StorageClass>` per object |
@@ -641,6 +641,52 @@ Substrate records **no** checksum in that case. Synthesizing one would make a
 round-trip assertion pass whether or not the consumer's writer actually sends a
 checksum — the exact defect this support was added to expose. An absent checksum in
 substrate means "your writer sent none".
+
+### Task-completion records
+
+A read of `tasks/<task_id>/completion.json` on any bucket resolves to a synthesized
+spore.host task-completion record when no real object exists at that key. Substrate
+does not run the task — this is the seedable completion *observation* only, so a
+consumer's poll-until-done loop can be exercised instantly and reproducibly.
+
+Absent a seed the key resolves to the nominal success record, so the happy path needs
+no setup:
+
+```console
+$ aws s3api get-object --bucket results --key tasks/t1/completion.json /dev/stdout
+{"task_id":"t1","exit_code":0,"state":"completed","started_at":"…","ended_at":"…"}
+```
+
+Seed an alternate outcome — a non-zero exit, a `failed` state, or a completion time in
+the simulated future:
+
+```
+POST   /v1/spawn/task-completion   {"task_id","exit_code","state","started_at","ended_at"}
+DELETE /v1/spawn/task-completion?taskId=<id>   (or with no query, clear all)
+```
+
+**`ended_at` gates presence on the simulated clock.** Before that time the record
+reads as absent — `404 NoSuchKey` — which is the "still running" observation a poll
+loop needs in order to loop at all. After it, the record is served.
+
+**`HeadObject` resolves the record exactly as `GetObject` does**, reporting the same
+`Content-Length`, `ETag`, `Content-Type` and `Last-Modified`, and honoring the same
+clock gate. This matters because `aws s3 cp` and `aws s3 sync` HEAD before they GET,
+so a HEAD that 404'd made the record unreadable through the CLI even though the GET
+worked; an SDK `HeadObject` existence poll had the same problem in the worse
+direction, since absence reads as "still running" and the loop never terminates.
+
+**A real object always wins.** Staging an actual object at the completion key serves
+it verbatim; the resolver only runs when the key is absent. A read naming an explicit
+`versionId` never resolves either, since a synthesized record has no version history.
+Both reads and the resolver's response path are otherwise ordinary, so ranged and
+conditional reads apply to a synthesized record as to any other object.
+
+**`ListObjectsV2` deliberately does not enumerate synthesized records.** A keyed read
+works because the caller names the task, so the resolver has something to answer
+about. A list is unkeyed, and substrate cannot enumerate the set of task IDs a
+consumer might ask about — a list that invented entries would be a wrong answer, not a
+more complete one. This asymmetry is a decision, not an oversight.
 
 ### Block Public Access
 
