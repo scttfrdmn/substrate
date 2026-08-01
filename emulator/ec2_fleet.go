@@ -308,7 +308,7 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 
 		if gotPerPool[i] > 0 {
-			ids, launchErr := p.launchFleetPool(reqCtx, pool, gotPerPool[i], instanceTags)
+			ids, launchErr := p.launchFleetPool(reqCtx, pool, gotPerPool[i], instanceTags, fleet.FleetID)
 			if launchErr != nil {
 				return nil, launchErr
 			}
@@ -426,11 +426,15 @@ func distributeAcrossPools(n, pools int) []int {
 // runInstances, and returns the resulting instance IDs. Going through
 // runInstances (rather than writing instance state directly) is what makes fleet
 // instances indistinguishable from directly-launched ones to DescribeInstances.
+//
+// fleetID is stamped on every instance as [ec2FleetIDTagKey], which is what lets a
+// caller get from a fleet back to its instances at all (#443).
 func (p *EC2Plugin) launchFleetPool(
 	reqCtx *RequestContext,
 	pool fleetPool,
 	count int,
 	instanceTags map[string]string,
+	fleetID string,
 ) ([]string, error) {
 	params := map[string]string{
 		"Action":   "RunInstances",
@@ -457,6 +461,9 @@ func (p *EC2Plugin) launchFleetPool(
 		params["Placement.GroupName"] = pool.override.PlacementGroupName
 	}
 	for k, v := range instanceTags {
+		params[k] = v
+	}
+	for k, v := range fleetIDTagSpec(instanceTags, fleetID) {
 		params[k] = v
 	}
 
@@ -571,6 +578,50 @@ func passthroughFleetTagSpecs(params map[string]string, resourceType string) map
 		}
 	}
 	return out
+}
+
+// ec2FleetIDTagKey is the reserved tag EC2 stamps on every instance a fleet
+// launches, naming the fleet that created it.
+//
+// Source note: this tag is not described in the EC2 API reference or the fleet
+// tagging/describe pages — the authority is observed real-AWS behavior, reported
+// by the parsl-aws-provider consumer in #443, whose fleet-to-instance lookup is
+// built on it. Substrate models it because for an "instant" fleet it is the only
+// route from a fleet back to its live instances: DescribeFleetInstances rejects
+// instant fleets outright, and DescribeFleets' instance list never drops
+// terminated instances, so a fully-running fleet is indistinguishable from an
+// empty one without this tag. It is deliberately not gated on the fleet type,
+// since real EC2 applies it to every fleet.
+//
+// The "aws:" prefix is reserved: per the EC2 tagging documentation such a tag
+// cannot be edited or deleted by a caller and does not count against the 50-tag
+// per-resource limit. Substrate does not yet enforce either rule on CreateTags.
+const ec2FleetIDTagKey = "aws:ec2:fleet-id"
+
+// fleetIDTagSpec returns the RunInstances TagSpecification params that stamp
+// ec2FleetIDTagKey on a pool's instances.
+//
+// The index is chosen past whatever passthroughFleetTagSpecs already emitted:
+// that function renumbers its output from 1, so reusing an occupied index would
+// silently overwrite a caller's own launch-time tag. existing is the map it
+// returned; an empty fleetID yields no params, so a caller that somehow has no
+// fleet ID launches unchanged rather than stamping an empty tag.
+func fleetIDTagSpec(existing map[string]string, fleetID string) map[string]string {
+	if fleetID == "" {
+		return nil
+	}
+	idx := 1
+	for {
+		if _, taken := existing[fmt.Sprintf("TagSpecification.%d.ResourceType", idx)]; !taken {
+			break
+		}
+		idx++
+	}
+	return map[string]string{
+		fmt.Sprintf("TagSpecification.%d.ResourceType", idx): "instance",
+		fmt.Sprintf("TagSpecification.%d.Tag.1.Key", idx):    ec2FleetIDTagKey,
+		fmt.Sprintf("TagSpecification.%d.Tag.1.Value", idx):  fleetID,
+	}
 }
 
 // fleetTagsFor collects TagSpecification.N tags for resourceType as EC2Tags.

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- EC2: `CreateFleet` stamps the reserved `aws:ec2:fleet-id` tag on every instance
+  it launches, so a fleet's instances are reachable with a `DescribeInstances`
+  `tag:aws:ec2:fleet-id` filter (#443). Without it there was no route from a fleet
+  ID back to its instances at all: `DescribeFleetInstances` rejects `instant`
+  fleets outright, and the `fleetInstanceSet` a fleet response echoes is a record
+  of what was launched rather than what is running — it never drops terminated
+  instances. A consumer enumerating an instant fleet therefore saw a
+  fully-provisioned fleet as empty, which reads as "the instances are gone" rather
+  than "substrate didn't record this". The tag survives alongside a caller's own
+  launch-time `TagSpecification` entries and is applied per capacity pool, so a
+  multi-pool fleet tags all of its instances.
+
+  Source note: this tag is documented in neither the EC2 API reference nor the
+  fleet tagging and describe pages. Substrate models it on observed real-AWS
+  behaviour reported by the parsl-aws-provider consumer, whose fleet-to-instance
+  lookup is built on it — not on a documented API contract. Substrate also does
+  not yet enforce the rules AWS attaches to the reserved `aws:` prefix
+  (`CreateTags` still accepts an `aws:`-prefixed key that real EC2 rejects); that
+  is tracked separately.
+
 ## [v0.83.0] - 2026-08-01
 
 ### Added
