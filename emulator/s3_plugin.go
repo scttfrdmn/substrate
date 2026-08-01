@@ -520,7 +520,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		Key:             key,
 		ETag:            etag,
 		ContentType:     contentType,
-		ContentEncoding: req.Headers["Content-Encoding"],
+		ContentEncoding: s3PersistedContentEncoding(req.Headers),
 		Size:            int64(len(body)),
 		StorageClass:    storageClass,
 		Checksum:        checksum,
@@ -1303,7 +1303,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		Bucket:            bucket,
 		Key:               key,
 		ContentType:       contentType,
-		ContentEncoding:   headerValueFold(req.Headers, "Content-Encoding"),
+		ContentEncoding:   s3PersistedContentEncoding(req.Headers),
 		StorageClass:      storageClass,
 		ChecksumAlgorithm: checksumAlgorithm,
 		ChecksumType:      checksumType,
@@ -1867,12 +1867,17 @@ func headerValueFold(headers map[string]string, name string) string {
 	return ""
 }
 
+// s3AWSChunkedEncoding is the Content-Encoding token the AWS SDKs use to mark a
+// SigV4 streaming request body. It is lowercase so it can be compared against a
+// lowercased header value directly.
+const s3AWSChunkedEncoding = "aws-chunked"
+
 // isAWSChunked reports whether the request body is SigV4 streaming (aws-chunked)
 // encoded, per its headers. The AWS SDKs signal this with Content-Encoding
 // aws-chunked and/or an x-amz-content-sha256 of STREAMING-*, alongside
 // x-amz-decoded-content-length giving the true payload size.
 func isAWSChunked(headers map[string]string) bool {
-	if strings.Contains(strings.ToLower(headerValueFold(headers, "Content-Encoding")), "aws-chunked") {
+	if strings.Contains(strings.ToLower(headerValueFold(headers, "Content-Encoding")), s3AWSChunkedEncoding) {
 		return true
 	}
 	if strings.HasPrefix(headerValueFold(headers, "X-Amz-Content-Sha256"), "STREAMING-") {
@@ -1880,6 +1885,45 @@ func isAWSChunked(headers map[string]string) bool {
 	}
 	// A decoded-content-length header is only sent for aws-chunked bodies.
 	return headerValueFold(headers, "X-Amz-Decoded-Content-Length") != ""
+}
+
+// s3PersistedContentEncoding returns the Content-Encoding to record on an object,
+// resolved case-insensitively from the request headers with any aws-chunked token
+// removed.
+//
+// aws-chunked is a transfer encoding, not a content encoding: it describes the
+// chunk-signature framing the body arrived in, which substrate has already stripped
+// by the time an object is written (see [decodeAWSChunked]). AWS documents
+// Content-Encoding as "what content encodings have been applied to the object and
+// thus what decoding mechanisms must be applied" — the object at rest is plain
+// bytes, so persisting aws-chunked would hand a consumer a codec name for content
+// that is not encoded (#428). PutObject's reference never lists aws-chunked as
+// persisted metadata, and CreateMultipartUpload scopes that value to directory
+// buckets.
+//
+// SDKs may send it alongside a genuine codec ("aws-chunked, gzip" when a compressed
+// body is streamed), so the remaining codecs are kept in order. A value with nothing
+// to strip is returned verbatim, spacing included.
+//
+// Both write paths that capture the header — putObject and createMultipartUpload —
+// use this, deliberately: the two having drifted apart on this exact header is what
+// #406 was. CopyObject is not a caller. Its COPY branch inherits the source
+// object's already-filtered value, and its REPLACE branch takes headers from a
+// request that carries no body, so no SDK sends a transfer encoding there.
+func s3PersistedContentEncoding(headers map[string]string) string {
+	value := headerValueFold(headers, "Content-Encoding")
+	if !strings.Contains(strings.ToLower(value), s3AWSChunkedEncoding) {
+		return value
+	}
+	kept := make([]string, 0, 2)
+	for _, token := range strings.Split(value, ",") {
+		token = strings.TrimSpace(token)
+		if token == "" || strings.EqualFold(token, s3AWSChunkedEncoding) {
+			continue
+		}
+		kept = append(kept, token)
+	}
+	return strings.Join(kept, ", ")
 }
 
 // decodeAWSChunked decodes a SigV4 streaming (aws-chunked) request body into the

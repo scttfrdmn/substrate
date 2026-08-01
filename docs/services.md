@@ -191,14 +191,14 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
+| PutObject | Supports Content-Type, metadata headers; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
 | GetObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
 | HeadObject | Supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums) |
 | DeleteObject | Fires S3 notifications if configured |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
-| CreateMultipartUpload | Accepts `x-amz-storage-class`, applied to the assembled object; `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums) |
+| CreateMultipartUpload | Accepts `x-amz-storage-class`, applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
 | CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums) |
 | AbortMultipartUpload | |
@@ -269,6 +269,36 @@ modeled by copying the object to a non-archival class.
 Intelligent-Tiering archive access tiers are not modeled, so the `InvalidObjectState`
 variant carrying `<StorageClass>` and `<AccessTier>` children is never returned.
 
+### Content-Encoding and aws-chunked
+
+`PutObject` and `CreateMultipartUpload` record `Content-Encoding` on the object and
+`GetObject`/`HeadObject` echo it back. **The `aws-chunked` token is stripped before
+the value is recorded**, on both write paths:
+
+| Request `Content-Encoding` | Recorded, and returned on a read |
+|---|---|
+| `gzip` | `gzip` |
+| absent | absent — no header on the response |
+| `aws-chunked` | absent |
+| `aws-chunked, gzip` | `gzip` |
+| `gzip, aws-chunked` | `gzip` |
+
+`aws-chunked` is a *transfer* encoding: it describes the chunk-signature framing a
+SigV4 streaming upload arrived in, which substrate decodes before storing the body
+(see [Additional checksums](#additional-checksums) for the trailer that framing
+carries). The bytes at rest are plain, and the API reference defines
+`Content-Encoding` as "what content encodings have been applied to the object and
+thus what decoding mechanisms must be applied" — so persisting `aws-chunked` would
+hand a consumer a codec name for content that needs no decoding. `PutObject` does
+not document it as persisted metadata, and `CreateMultipartUpload` scopes that value
+to directory buckets.
+
+A genuine codec alongside it is kept, in order, because an SDK streaming a
+compressed body sends both tokens and dropping the header wholesale would lose the
+codec that *is* applied to the stored object.
+
+The header name is matched case-insensitively on both paths.
+
 ### Copying objects
 
 `CopyObject`'s metadata behaviour is governed by two independent directives, both
@@ -291,6 +321,10 @@ The loss case is `REPLACE`: "you must explicitly specify all of the user-configu
 metadata present on the source object in your request, even if you are changing only
 one of the metadata values". A `REPLACE` that omits `Content-Encoding` drops it, and
 `Content-Type` falls back to `application/octet-stream`.
+
+`CopyObject` applies no `aws-chunked` filtering of its own and does not need to:
+under `COPY` it inherits the source object's already-filtered value, and a copy
+request carries no body, so no SDK sends a transfer encoding on it.
 
 `x-amz-tagging-directive` works the same way for the tag-set: `COPY` (the default)
 carries the source's tags, `REPLACE` takes them from `x-amz-tagging` as URL query
@@ -470,7 +504,7 @@ is assembled:
 | Supplied at Create | Applied to the assembled object |
 |---|---|
 | `Content-Type` | yes (defaults to `application/octet-stream`) |
-| `Content-Encoding` | yes |
+| `Content-Encoding` | yes, less any `aws-chunked` token — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked) |
 | `x-amz-storage-class` | yes (empty means `STANDARD`) |
 | `x-amz-checksum-algorithm` | yes — see [Additional checksums](#additional-checksums) |
 | `x-amz-meta-*` | yes |

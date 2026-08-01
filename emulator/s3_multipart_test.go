@@ -401,16 +401,26 @@ func TestS3_CompleteMultipartUpload_WrongBucketOrKey(t *testing.T) {
 // net/http, which canonicalizes on the way in, so a lowercase-header case would
 // assert nothing about the plugin. createMultipartUpload resolves the header
 // case-insensitively for the benefit of in-process callers that build an
-// AWSRequest directly.
+// AWSRequest directly; TestS3PersistedContentEncoding_HeaderCasing covers that
+// directly.
+//
+// The aws-chunked rows pin #428 on this path too. Both write paths share
+// s3PersistedContentEncoding precisely so they cannot disagree about this header
+// again — which is what #406 was — so both are asserted rather than trusting the
+// shared call.
 func TestS3_Multipart_ContentEncoding(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		encoding string
+		name string
+		sent string // Content-Encoding on CreateMultipartUpload; "" means absent.
+		want string // Content-Encoding on the assembled object; "" means not emitted.
 	}{
-		{"gzip", "gzip"},
-		{"zstd", "zstd"},
-		{"brotli", "br"},
-		{"absent", ""},
+		{"gzip", "gzip", "gzip"},
+		{"zstd", "zstd", "zstd"},
+		{"brotli", "br", "br"},
+		{"absent", "", ""},
+		{"aws-chunked alone dropped", "aws-chunked", ""},
+		{"aws-chunked before codec", "aws-chunked, gzip", "gzip"},
+		{"aws-chunked after codec", "gzip, aws-chunked", "gzip"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := newS3TestServer(t)
@@ -421,8 +431,8 @@ func TestS3_Multipart_ContentEncoding(t *testing.T) {
 			// encoding was not, and that asymmetry is what made the bug look like an
 			// application fault rather than an emulator gap.
 			headers := map[string]string{"x-amz-meta-original-size": "999"}
-			if tc.encoding != "" {
-				headers["Content-Encoding"] = tc.encoding
+			if tc.sent != "" {
+				headers["Content-Encoding"] = tc.sent
 			}
 			iw := s3Request(t, srv, http.MethodPost, "/mpu-enc/big?uploads", nil, headers)
 			require.Equal(t, http.StatusOK, iw.Code, "initiate multipart upload")
@@ -447,7 +457,7 @@ func TestS3_Multipart_ContentEncoding(t *testing.T) {
 			for _, method := range []string{http.MethodHead, http.MethodGet} {
 				w := s3Request(t, srv, method, "/mpu-enc/big", nil, nil)
 				require.Equal(t, http.StatusOK, w.Code, method)
-				assert.Equal(t, tc.encoding, w.Header().Get("Content-Encoding"),
+				assert.Equal(t, tc.want, w.Header().Get("Content-Encoding"),
 					"%s Content-Encoding", method)
 				assert.Equal(t, "999", w.Header().Get("X-Amz-Meta-Original-Size"),
 					"%s user metadata must survive alongside the encoding", method)
