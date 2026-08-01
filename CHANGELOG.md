@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `CreateMultipartUpload` now records `Content-Encoding` and
+  `CompleteMultipartUpload` applies it to the assembled object, so `GetObject` and
+  `HeadObject` report the codec a multipart object was uploaded with (#406).
+  `PutObject` already did this, so the two upload paths disagreed about the same
+  object property, and an object compressed above the multipart threshold
+  round-tripped as uncompressed. That makes a *correct* application look broken — one
+  that dispatches decompression on `Content-Encoding` fails closed on a read it wrote
+  properly — and, symmetrically, an application that forgot to set the header on the
+  multipart path (a separate input struct from `PutObjectInput`) was indistinguishable
+  from one that set it, so any test asserting "the encoding survives a multipart
+  upload" passed vacuously. `Complete` accepts no object-metadata headers at all, so
+  carrying the value on the upload record from creation is the only place it can come
+  from.
+
 ## [v0.80.0] - 2026-07-31
 
 A fidelity release driven by two downstream consumers (`parsl-ephemeral-aws` and

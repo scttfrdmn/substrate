@@ -388,3 +388,70 @@ func TestS3_CompleteMultipartUpload_WrongBucketOrKey(t *testing.T) {
 	assert.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPost,
 		"/mpu-owner/right.bin?uploadId="+uploadID, completeBody(etag), nil).Code)
 }
+
+// TestS3_Multipart_ContentEncoding asserts the Content-Encoding supplied at
+// CreateMultipartUpload survives to the assembled object on both GET and HEAD.
+//
+// The header is accepted at creation, not on Complete, so an encoding the upload
+// record does not carry is lost — which made a compressed object large enough to
+// cross the multipart threshold round-trip as uncompressed, and made an
+// application that never set the header indistinguishable from one that did (#406).
+//
+// Only the canonical header casing is exercised: s3Request goes through
+// net/http, which canonicalizes on the way in, so a lowercase-header case would
+// assert nothing about the plugin. createMultipartUpload resolves the header
+// case-insensitively for the benefit of in-process callers that build an
+// AWSRequest directly.
+func TestS3_Multipart_ContentEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		encoding string
+	}{
+		{"gzip", "gzip"},
+		{"zstd", "zstd"},
+		{"brotli", "br"},
+		{"absent", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newS3TestServer(t)
+			require.Equal(t, http.StatusOK,
+				s3Request(t, srv, http.MethodPut, "/mpu-enc", nil, nil).Code, "create bucket")
+
+			// User metadata rides alongside: it was already carried through when the
+			// encoding was not, and that asymmetry is what made the bug look like an
+			// application fault rather than an emulator gap.
+			headers := map[string]string{"x-amz-meta-original-size": "999"}
+			if tc.encoding != "" {
+				headers["Content-Encoding"] = tc.encoding
+			}
+			iw := s3Request(t, srv, http.MethodPost, "/mpu-enc/big?uploads", nil, headers)
+			require.Equal(t, http.StatusOK, iw.Code, "initiate multipart upload")
+
+			var ir struct {
+				UploadID string `xml:"UploadId"`
+			}
+			require.NoError(t, xml.Unmarshal(iw.Body.Bytes(), &ir))
+
+			// Two parts, so this exercises the assembly path a real compressed upload
+			// takes rather than the single-part shortcut.
+			body1 := bytes.Repeat([]byte("a"), s3MinPartSize)
+			body2 := []byte("tail")
+			etag1 := uploadPart(t, srv, "mpu-enc", "big", ir.UploadID, 1, body1)
+			etag2 := uploadPart(t, srv, "mpu-enc", "big", ir.UploadID, 2, body2)
+
+			cw := s3Request(t, srv, http.MethodPost, "/mpu-enc/big?uploadId="+ir.UploadID,
+				completeBody(etag1, etag2), nil)
+			require.Equal(t, http.StatusOK, cw.Code, "complete multipart upload")
+
+			// Both read paths must agree; the reporter saw an empty value on each.
+			for _, method := range []string{http.MethodHead, http.MethodGet} {
+				w := s3Request(t, srv, method, "/mpu-enc/big", nil, nil)
+				require.Equal(t, http.StatusOK, w.Code, method)
+				assert.Equal(t, tc.encoding, w.Header().Get("Content-Encoding"),
+					"%s Content-Encoding", method)
+				assert.Equal(t, "999", w.Header().Get("X-Amz-Meta-Original-Size"),
+					"%s user metadata must survive alongside the encoding", method)
+			}
+		})
+	}
+}

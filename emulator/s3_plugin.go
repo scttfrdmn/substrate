@@ -1289,7 +1289,11 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 
 	uploadID := generateUploadID()
 
-	contentType := req.Headers["Content-Type"]
+	// Resolved case-insensitively, like every other header this function reads
+	// (cf. resolveStorageClass, resolveUploadChecksum): an AWSRequest reaching a
+	// plugin has not always been through net/http's canonicalization, since
+	// substrate builds requests in-process too (see betty_cfn.go).
+	contentType := headerValueFold(req.Headers, "Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -1299,6 +1303,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		Bucket:            bucket,
 		Key:               key,
 		ContentType:       contentType,
+		ContentEncoding:   headerValueFold(req.Headers, "Content-Encoding"),
 		StorageClass:      storageClass,
 		ChecksumAlgorithm: checksumAlgorithm,
 		ChecksumType:      checksumType,
@@ -1547,15 +1552,16 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 	}
 
 	obj := S3Object{
-		Bucket:       bucket,
-		Key:          key,
-		ETag:         etag,
-		ContentType:  upload.ContentType,
-		Size:         int64(len(combined)),
-		StorageClass: upload.StorageClass,
-		Checksum:     checksum,
-		LastModified: p.tc.Now(),
-		UserMetadata: upload.UserMetadata,
+		Bucket:          bucket,
+		Key:             key,
+		ETag:            etag,
+		ContentType:     upload.ContentType,
+		ContentEncoding: upload.ContentEncoding,
+		Size:            int64(len(combined)),
+		StorageClass:    upload.StorageClass,
+		Checksum:        checksum,
+		LastModified:    p.tc.Now(),
+		UserMetadata:    upload.UserMetadata,
 	}
 	objData, err := json.Marshal(obj)
 	if err != nil {
