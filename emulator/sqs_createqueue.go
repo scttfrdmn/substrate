@@ -11,9 +11,10 @@ import "sort"
 // report one number while a re-create request naming that same number was rejected as
 // a conflict.
 //
-// Substrate does not enforce this limit on SendMessage; no length check exists against
-// it or any other constant. That absence is deliberate here — enforcement is a new
-// error path with its own scope, tracked separately from correcting the default.
+// SendMessage and SendMessageBatch enforce it, resolved through this default when the
+// attribute is unset (#454) — see [sqsEffectiveMaximumMessageSize], which reads it via
+// the same getAttrOrDefault call the read path uses so the reported and enforced
+// numbers cannot diverge.
 const sqsDefaultMaximumMessageSize = "1048576"
 
 // sqsAttributeDefaults are the values GetQueueAttributes reports for a queue that

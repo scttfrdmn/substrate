@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- SQS: `SendMessage` and `SendMessageBatch` now enforce `MaximumMessageSize` (#454).
+  No length check existed anywhere in the send path — against the queue's attribute or
+  against any constant — so a body of any size was accepted and delivered. Real SQS
+  rejects an oversized message, which meant a consumer's too-large-payload branch
+  (chunk, compress, spill to S3) was unreachable and any test of it passed while
+  verifying nothing. This is the enforcement half of #439, which deliberately
+  corrected only the reported default.
+
+  `SendMessage` fails with `InvalidParameterValue`, HTTP 400, and a message naming the
+  limit that applied. The limit is the queue's **effective** `MaximumMessageSize`,
+  resolved through the 1 MiB default when the attribute is unset and read via the same
+  call `GetQueueAttributes` uses — so the number a caller reads back is by construction
+  the number enforced. A queue created with an explicit smaller value enforces that
+  value. The boundary is inclusive: a message of exactly the limit is accepted, since
+  AWS's "must be shorter than N bytes" wording describes N as the maximum size.
+
+  **Message attributes count toward the measured size**, as AWS measures it: the body
+  plus each attribute's name, data type and value, with a binary value counted at its
+  raw decoded length. The developer guide states that "all components of a message
+  attribute are included in the 1 MiB message size restriction", and the per-component
+  breakdown is the one AWS's own Extended Client Library uses to decide whether a
+  payload needs offloading to S3. Measuring the body alone would be wrong in the
+  direction that matters — a caller packing most of the budget into metadata is over
+  the limit in AWS and under it here, so the payload shape that motivates a chunking
+  branch is precisely the one substrate would have accepted. Attributes are parsed for
+  measurement only; storing and returning them is tracked separately (#461).
+
+  `SendMessageBatch` enforces both documented limits: `BatchRequestTooLong` when the
+  combined payload exceeds 1 MiB, and `InvalidParameterValue` when a single entry
+  exceeds the queue's per-message limit. Because the two limits are equal on a default
+  queue, a batch carrying one oversized entry breaches the total as well — and real AWS
+  reports `BatchRequestTooLong` for that case rather than the per-message error, so the
+  total is checked first. The queue attribute is a per-message cap and does not lower
+  the request payload cap, so ten legal 1 KiB entries on a 1 KiB queue are accepted.
+
+  A rejected send or batch enqueues nothing, rather than a prefix of the batch that a
+  retry would then duplicate. On a FIFO queue the check runs before the deduplication
+  ID is recorded, so a corrected retry reusing the same `MessageDeduplicationId` is
+  delivered instead of being swallowed as a duplicate — which would have been a worse
+  failure than the original, because it looks like success.
+
+  **Provenance, stated plainly:** the per-message error code is not derivable from the
+  API model. `SendMessage` declares no oversized-message error at all, its
+  `InvalidMessageContents` is documented as a character-set error, and
+  `BatchRequestTooLong` is declared only on `SendMessageBatch`. The code and both
+  message wordings come from observed real-AWS responses — captured SDK errors carrying
+  `code: 'InvalidParameterValue'` with HTTP 400, and `BatchRequestTooLong: Batch
+  requests cannot be longer than N bytes. You have sent M bytes.` — corroborated by
+  independent reimplementations emitting the same strings. `docs/services.md` records
+  this rather than implying a doc citation.
+
 ### Fixed
 - S3: `HeadObject` now resolves a synthesized task-completion record, so `HEAD` and
   `GET` agree about whether the key exists (#457). `getObject` consulted the

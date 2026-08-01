@@ -777,12 +777,14 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 	// Extract parameters supporting both protocols.
 	var msgBody, delayStr, msgGroupID, dedupIDParam string
+	var msgAttrs map[string]SQSMessageAttribute
 	if sqsIsJSONProtocol(req) {
 		var input struct {
-			MessageBody            string `json:"MessageBody"`
-			DelaySeconds           int    `json:"DelaySeconds"`
-			MessageGroupID         string `json:"MessageGroupId"`
-			MessageDeduplicationID string `json:"MessageDeduplicationId"`
+			MessageBody            string                         `json:"MessageBody"`
+			DelaySeconds           int                            `json:"DelaySeconds"`
+			MessageGroupID         string                         `json:"MessageGroupId"`
+			MessageDeduplicationID string                         `json:"MessageDeduplicationId"`
+			MessageAttributes      map[string]SQSMessageAttribute `json:"MessageAttributes"`
 		}
 		_ = json.Unmarshal(req.Body, &input)
 		msgBody = input.MessageBody
@@ -791,11 +793,21 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		}
 		msgGroupID = input.MessageGroupID
 		dedupIDParam = input.MessageDeduplicationID
+		msgAttrs = input.MessageAttributes
 	} else {
 		msgBody = req.Params["MessageBody"]
 		delayStr = req.Params["DelaySeconds"]
 		msgGroupID = req.Params["MessageGroupId"]
 		dedupIDParam = req.Params["MessageDeduplicationId"]
+		msgAttrs = sqsQueryMessageAttributes(req.Params, "")
+	}
+
+	// Enforce MaximumMessageSize before anything else observable happens (#454).
+	// Ahead of the FIFO branch deliberately: both queue types enforce it, and a FIFO
+	// send that recorded a deduplication ID before failing would poison the dedup
+	// window for the corrected retry that follows.
+	if limit := sqsEffectiveMaximumMessageSize(q); sqsMessageSize(msgBody, msgAttrs) > limit {
+		return nil, sqsMessageTooLong(limit)
 	}
 
 	if delayStr == "" {
@@ -984,15 +996,29 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	var successesXML []successEntryXML
 	var successesJSON []successEntryJSON
 
+	// The per-message limit is the queue's effective MaximumMessageSize; the batch
+	// total has its own cap. Both are checked before any entry is stored, so a
+	// rejected batch enqueues nothing — a partially-applied batch would leave a
+	// consumer's retry to re-send the entries that already landed (#454).
+	perMessageLimit := sqsEffectiveMaximumMessageSize(q)
+
 	if sqsIsJSONProtocol(req) {
 		var input struct {
 			Entries []struct {
-				ID           string `json:"Id"`
-				MessageBody  string `json:"MessageBody"`
-				DelaySeconds int    `json:"DelaySeconds"`
+				ID                string                         `json:"Id"`
+				MessageBody       string                         `json:"MessageBody"`
+				DelaySeconds      int                            `json:"DelaySeconds"`
+				MessageAttributes map[string]SQSMessageAttribute `json:"MessageAttributes"`
 			} `json:"Entries"`
 		}
 		_ = json.Unmarshal(req.Body, &input)
+		sizes := make([]int, 0, len(input.Entries))
+		for _, entry := range input.Entries {
+			sizes = append(sizes, sqsMessageSize(entry.MessageBody, entry.MessageAttributes))
+		}
+		if sizeErr := sqsCheckBatchSizes(perMessageLimit, sizes); sizeErr != nil {
+			return nil, sizeErr
+		}
 		for _, entry := range input.Entries {
 			msgID := generateSQSMessageID()
 			md5Body := computeMD5(entry.MessageBody)
@@ -1030,6 +1056,25 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			"Successful": successesJSON,
 			"Failed":     []struct{}{},
 		})
+	}
+
+	// Size every entry before storing any, for the reason above. This walks the
+	// entries a second time rather than checking inside the storing loop, because a
+	// mid-loop rejection is exactly the partial application the check exists to
+	// prevent.
+	var querySizes []int
+	for i := 1; ; i++ {
+		entryPrefix := fmt.Sprintf("SendMessageBatchRequestEntry.%d.", i)
+		if req.Params[entryPrefix+"Id"] == "" {
+			break
+		}
+		querySizes = append(querySizes, sqsMessageSize(
+			req.Params[entryPrefix+"MessageBody"],
+			sqsQueryMessageAttributes(req.Params, entryPrefix),
+		))
+	}
+	if sizeErr := sqsCheckBatchSizes(perMessageLimit, querySizes); sizeErr != nil {
+		return nil, sizeErr
 	}
 
 	for i := 1; ; i++ {
