@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next N misses rather than re-arming on `CreateQueue`, which would otherwise be
   ambiguous given that `CreateQueue` is idempotent, and would make the data path
   write control-plane state.
+  A state-store failure during the seed lookup propagates as an error rather than
+  collapsing into `QueueDoesNotExist`: the two are opposite signals, since a 400
+  tells a caller to stop retrying while a store failure is transient — and this
+  seed exists so that retry loops can be tested, so conflating them would undercut
+  the feature.
 
 ### Fixed
 - SQS now raises `QueueDoesNotExist` rather than the legacy
