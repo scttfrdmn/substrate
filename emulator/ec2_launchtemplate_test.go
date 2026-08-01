@@ -270,11 +270,11 @@ func TestEC2_LaunchTemplate_SubnetPrecedence(t *testing.T) {
 // that member the locationName "SecurityGroupId" — while #444 suggested Groups.N;
 // substrate accepts either, so a hand-built request works too.
 //
-// The group is asserted through RunInstances' own cross-VPC validation rather than
-// a read of the instance: a group that does not belong to the subnet's VPC is
-// rejected with InvalidGroup.NotFound, which can only happen if the template's
-// list was actually read. Instances do not yet echo a groupSet at all — that is
-// the other half of #444, and its tests assert the template's groups directly.
+// Each spelling is asserted twice over: the group lands in the launched
+// instance's groupSet, and a group from a different VPC than the template's
+// subnet is rejected with InvalidGroup.NotFound. The rejection matters
+// independently — it can only happen if the list reached validation, so it holds
+// even if the groupSet emission were to regress.
 func TestEC2_LaunchTemplate_SecurityGroups(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -297,8 +297,12 @@ func TestEC2_LaunchTemplate_SecurityGroups(t *testing.T) {
 				tt.param: net.sgID,
 			})
 			id := runInstance(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": sameVPC})
-			if got := describeInstance(t, ts, id); got.SubnetID != net.subnetID {
+			got := describeInstance(t, ts, id)
+			if got.SubnetID != net.subnetID {
 				t.Errorf("subnetId = %q, want %q", got.SubnetID, net.subnetID)
+			}
+			if len(got.Groups) != 1 || got.Groups[0].GroupID != net.sgID {
+				t.Errorf("groupSet = %+v, want the template's group %s", got.Groups, net.sgID)
 			}
 
 			// A group from a different VPC than the template's subnet must be
@@ -427,6 +431,9 @@ func TestEC2_LaunchTemplate_DescribeEchoesNetworking(t *testing.T) {
 		}
 		if got.PublicIPAddress == "" {
 			t.Errorf("launch %d: no public IP, want one from the template", i+1)
+		}
+		if len(got.Groups) != 1 || got.Groups[0].GroupID != net.sgID {
+			t.Errorf("launch %d: groupSet = %+v, want the template's group %s", i+1, got.Groups, net.sgID)
 		}
 	}
 }

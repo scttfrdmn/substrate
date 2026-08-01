@@ -911,8 +911,8 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [validates MinCount/MaxCount](#mincount-and-maxcount) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -1009,6 +1009,23 @@ behavior, **`true`** forces a public IP anyway, and **`false`** suppresses one.
 
 Only interface index **1** is modeled, on both `RunInstances` and launch templates.
 A template declaring a second interface loses it silently.
+
+### Security groups on an instance
+
+Both `RunInstances` and `DescribeInstances` report an instance's security groups as
+`groupSet>item`, with `groupId` and `groupName` — the same shape as AWS's
+`GroupIdentifier`. Groups appear in the order the launch resolved them, whichever
+source supplied them:
+
+- `SecurityGroupId.N` (or `SecurityGroupIds.N`) on the request, or the nested
+  `NetworkInterface.1.SecurityGroupId.N` / `NetworkInterface.1.Groups.N`.
+- The launch template's [network interface](#launch-template-networking).
+- The auto-created default VPC's `default` group, when the launch names none.
+
+`groupName` is **omitted when the group cannot be resolved** — for example after
+the group is deleted while the instance it was launched with still exists. The
+`groupId` is still reported, because that is what the launch actually recorded; a
+name is not invented to fill the field.
 
 ### MinCount and MaxCount
 

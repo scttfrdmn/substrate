@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -4186,5 +4187,174 @@ func TestEC2_RunInstances_InstanceCounts(t *testing.T) {
 					"DescribeInstances must agree with the launch response")
 			})
 		}
+	})
+}
+
+// runInstancesLaunched sends RunInstances and decodes the launched instances.
+//
+// It decodes into launchedInstance, the same type the DescribeInstances helper
+// uses, because the point of these tests is that the two responses agree: a
+// groupSet in one and not the other is exactly the state #444 reported.
+func runInstancesLaunched(t *testing.T, ts *httptest.Server, params map[string]string) []launchedInstance {
+	t.Helper()
+	full := map[string]string{"Action": "RunInstances", "MinCount": "1", "MaxCount": "1"}
+	for k, v := range params {
+		full[k] = v
+	}
+	resp := ec2Request(t, ts, full)
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: status = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Instances []launchedInstance `xml:"instancesSet>item"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode RunInstances: %v", err)
+	}
+	return out.Instances
+}
+
+// instanceView is one instance as reported by one API call, so an assertion can
+// name which response disagreed.
+type instanceView struct {
+	from string
+	inst launchedInstance
+}
+
+// bothViews launches one instance and returns it as RunInstances reported it and
+// as a following DescribeInstances reports it. Both are always checked: one
+// populated and the other empty is the drift that produced #444's gap, since the
+// two builders declare their instance item type separately.
+func bothViews(t *testing.T, ts *httptest.Server, params map[string]string) []instanceView {
+	t.Helper()
+	launched := runInstancesLaunched(t, ts, params)
+	if len(launched) != 1 {
+		t.Fatalf("RunInstances launched %d instances, want 1", len(launched))
+	}
+	return []instanceView{
+		{from: "RunInstances", inst: launched[0]},
+		{from: "DescribeInstances", inst: describeInstance(t, ts, launched[0].InstanceID)},
+	}
+}
+
+// groupIDs lists the instance's reported security group IDs.
+func groupIDs(inst launchedInstance) []string {
+	ids := make([]string, 0, len(inst.Groups))
+	for _, g := range inst.Groups {
+		ids = append(ids, g.GroupID)
+	}
+	return ids
+}
+
+// wantGroups asserts the instance reports exactly these group IDs, and — when a
+// name is expected — that each carries it.
+func wantGroups(t *testing.T, v instanceView, ids []string, names ...string) {
+	t.Helper()
+	if got := groupIDs(v.inst); !slices.Equal(got, ids) {
+		t.Errorf("%s: groupSet ids = %v, want %v", v.from, got, ids)
+		return
+	}
+	for i, name := range names {
+		if v.inst.Groups[i].GroupName != name {
+			t.Errorf("%s: groups[%d].groupName = %q, want %q", v.from, i, v.inst.Groups[i].GroupName, name)
+		}
+	}
+}
+
+// TestEC2_Instances_GroupSet covers the second half of #444: security groups were
+// accepted on a launch and stored, but neither RunInstances nor DescribeInstances
+// emitted a groupSet, so a caller reading back the instance it had just launched
+// saw no groups at all. Nothing errored — the fact was simply missing, which reads
+// as "this instance has no security groups" rather than "substrate did not report
+// them".
+func TestEC2_Instances_GroupSet(t *testing.T) {
+	t.Run("call-level SecurityGroupId", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		net := newLTNetwork(t, ts, "10.20.0.0/16", "gs-call")
+
+		for _, v := range bothViews(t, ts, map[string]string{
+			"ImageId":           "ami-0gs000000000001",
+			"SubnetId":          net.subnetID,
+			"SecurityGroupId.1": net.sgID,
+		}) {
+			wantGroups(t, v, []string{net.sgID}, "gs-call")
+		}
+	})
+
+	t.Run("multiple groups keep their order", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		net := newLTNetwork(t, ts, "10.21.0.0/16", "gs-multi-a")
+		second := createSecurityGroup(t, ts, net.vpcID, "gs-multi-b")
+
+		for _, v := range bothViews(t, ts, map[string]string{
+			"ImageId":           "ami-0gs000000000002",
+			"SubnetId":          net.subnetID,
+			"SecurityGroupId.1": net.sgID,
+			"SecurityGroupId.2": second,
+		}) {
+			wantGroups(t, v, []string{net.sgID, second}, "gs-multi-a", "gs-multi-b")
+		}
+	})
+
+	t.Run("default VPC group is reported", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+
+		// No SubnetId and no group: the launch falls through to the auto-created
+		// default VPC and resolves its "default" group. That resolution happened
+		// before this fix too — it was simply invisible.
+		for _, v := range bothViews(t, ts, map[string]string{"ImageId": "ami-0gs000000000003"}) {
+			if len(v.inst.Groups) != 1 {
+				t.Fatalf("%s: groupSet has %d items, want the default VPC group", v.from, len(v.inst.Groups))
+			}
+			if v.inst.Groups[0].GroupID == "" {
+				t.Errorf("%s: groupId is empty", v.from)
+			}
+			if v.inst.Groups[0].GroupName != "default" {
+				t.Errorf("%s: groupName = %q, want %q", v.from, v.inst.Groups[0].GroupName, "default")
+			}
+		}
+	})
+
+	t.Run("launch template groups surface", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		net := newLTNetwork(t, ts, "10.22.0.0/16", "gs-template")
+		ltID := createLaunchTemplate(t, ts, "gs-template", map[string]string{
+			"LaunchTemplateData.ImageId":                              "ami-0gs000000000004",
+			"LaunchTemplateData.NetworkInterface.1.DeviceIndex":       "0",
+			"LaunchTemplateData.NetworkInterface.1.SubnetId":          net.subnetID,
+			"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1": net.sgID,
+		})
+
+		for _, v := range bothViews(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": ltID}) {
+			wantGroups(t, v, []string{net.sgID}, "gs-template")
+		}
+	})
+
+	t.Run("groupName is omitted when the group is gone", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		net := newLTNetwork(t, ts, "10.23.0.0/16", "gs-deleted")
+
+		launched := runInstancesLaunched(t, ts, map[string]string{
+			"ImageId":           "ami-0gs000000000005",
+			"SubnetId":          net.subnetID,
+			"SecurityGroupId.1": net.sgID,
+		})
+		if len(launched) != 1 {
+			t.Fatalf("RunInstances launched %d instances, want 1", len(launched))
+		}
+
+		del := ec2Request(t, ts, map[string]string{"Action": "DeleteSecurityGroup", "GroupId": net.sgID})
+		defer del.Body.Close() //nolint:errcheck
+		if del.StatusCode != http.StatusOK {
+			t.Fatalf("DeleteSecurityGroup: status = %d, want 200", del.StatusCode)
+		}
+
+		// The ID the instance was launched with is still a fact; the name is no
+		// longer resolvable. Reporting the ID with no name is the honest answer —
+		// inventing a name would be the same class of confident-wrong-answer as
+		// omitting the groupSet entirely.
+		v := instanceView{from: "DescribeInstances", inst: describeInstance(t, ts, launched[0].InstanceID)}
+		wantGroups(t, v, []string{net.sgID}, "")
 	})
 }
