@@ -113,13 +113,31 @@ These enforce the rules below server-side — do not attempt to bypass them.
    verification for every consumer (see `SECURITY.md`, #296). Fix any release
    mistake by cutting a new patch version, never by re-tagging. The tag ruleset
    will reject a move or delete regardless.
-4. Close the issues the release resolves. A `(#N)` reference in a commit or PR
+4. Publish a GitHub Release against the tag — the tag alone does not create one,
+   and v0.84.0/v0.85.0 shipped without one because this step was unwritten:
+   `gh release create vX.Y.Z --verify-tag --latest --title vX.Y.Z --notes-file <file>`.
+   Always pass `--verify-tag`, so the command fails rather than creating a tag if
+   the tag is missing — `gh release create` will otherwise tag the current branch
+   tip, producing an unsigned tag at whatever commit happens to be checked out.
+   Create releases in ascending version order, and pass `--latest` on the newest.
+   Notes follow the house style: a prose lede naming the release's theme, the
+   CHANGELOG entries condensed one bullet per issue (**not** verbatim — the
+   CHANGELOG carries the full reasoning and the release links to it), a
+   `## Provenance` section when any error code comes from observed behaviour
+   rather than the API model, and a `## Compatibility` section stating what a
+   consumer must know before upgrading. Close with the CHANGELOG anchor and the
+   compare link. A release body is editable after publication (`gh release edit`),
+   unlike the tag it points at.
+5. Close the issues the release resolves. A `(#N)` reference in a commit or PR
    **title** only links — it does not auto-close. Use a `Closes #N` / `Fixes #N`
    keyword in the PR **body** (or the merged commit message body), or close the
    issue manually. Only close an issue when every acceptance-criteria checkbox
    is met; if a release ships part of an issue, comment with what shipped vs.
    what remains and leave it open.
-5. Close the release's milestone once all its issues are closed.
+6. Close the release's milestone once all its issues are closed. Issues
+   deliberately deferred out of the release must be **moved to the next
+   milestone**, not closed — comment on each saying why it moved and whether
+   anything in the shipped release changed its analysis.
 
 ## AWS service emulation
 

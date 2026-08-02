@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `CLAUDE.md`'s release procedure now includes publishing the GitHub Release. The
+  step was absent, so v0.84.0 and v0.85.0 were tagged and their tags pushed with no
+  Release entry behind them — the tag alone does not create one, and v0.83.0 was
+  the last version to appear on the releases page. Both have since been published
+  retroactively against their existing signed tags. The step records the house
+  style for the notes and requires `--verify-tag`, because `gh release create`
+  otherwise tags the current branch tip when the named tag is missing, which would
+  produce an unsigned tag at whatever commit happened to be checked out — the one
+  way this step could damage a release rather than merely omit one. Deferred issues
+  are also now explicitly moved to the next milestone rather than closed with the
+  release.
+
 ## [v0.85.0] - 2026-08-02
 
 ### Added
