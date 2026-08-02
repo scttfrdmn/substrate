@@ -536,23 +536,28 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	}
 
 	obj := S3Object{
-		Bucket:           bucket,
-		Key:              key,
-		ETag:             etag,
-		ContentType:      contentType,
-		ContentEncoding:  s3PersistedContentEncoding(req.Headers),
-		S3SystemMetadata: resolveSystemMetadata(req.Headers),
-		Size:             int64(len(body)),
-		StorageClass:     storageClass,
-		Checksum:         checksum,
-		LastModified:     p.tc.Now(),
-		UserMetadata:     userMeta,
+		Bucket:                 bucket,
+		Key:                    key,
+		ETag:                   etag,
+		ContentType:            contentType,
+		ContentEncoding:        s3PersistedContentEncoding(req.Headers),
+		S3SystemMetadata:       resolveSystemMetadata(req.Headers),
+		S3ServerSideEncryption: resolveServerSideEncryption(req.Headers),
+		Size:                   int64(len(body)),
+		StorageClass:           storageClass,
+		Checksum:               checksum,
+		LastModified:           p.tc.Now(),
+		UserMetadata:           userMeta,
 	}
 
 	respHeaders := map[string]string{"ETag": etag}
 	// PutObject echoes the checksum unconditionally — checksum-mode gates the read
 	// path, not the write. A single-part PUT is always a full-object checksum.
 	applyChecksumHeaders(respHeaders, checksum, true)
+	// PutObject reports the encryption it recorded, the same values GetObject and
+	// HeadObject will echo — S3 documents all three headers in this response too, and a
+	// consumer that asserts on the PUT rather than a follow-up read must see them.
+	obj.emitSSE(respHeaders)
 
 	// If versioning is enabled, generate a version ID and store the versioned copy.
 	versioningStatus := p.getBucketVersioningStatus(ctx, bucket)
@@ -1074,7 +1079,14 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		ContentType:      meta.ContentType,
 		ContentEncoding:  meta.ContentEncoding,
 		S3SystemMetadata: meta.System,
-		Size:             srcObj.Size,
+		// S3ServerSideEncryption is deliberately left zero, and the omission is named
+		// rather than silent: a copy's encryption comes from the request and, failing
+		// that, from the bucket default — never from the source (#493). Recording the
+		// request's headers here without that default would decide half of a resolution
+		// order whose other half does not exist yet, so a copy records no encryption at
+		// all for now, and the emulator reports none rather than guessing. There is a
+		// test pinning this, so #493 changes it deliberately.
+		Size: srcObj.Size,
 		// The copy's class comes from the request, never from the source: "if the
 		// x-amz-storage-class header is not used, the copied object will be stored in
 		// the STANDARD Storage Class by default."
@@ -1338,17 +1350,18 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 	}
 
 	upload := S3MultipartUpload{
-		UploadID:          uploadID,
-		Bucket:            bucket,
-		Key:               key,
-		ContentType:       contentType,
-		ContentEncoding:   s3PersistedContentEncoding(req.Headers),
-		S3SystemMetadata:  resolveSystemMetadata(req.Headers),
-		StorageClass:      storageClass,
-		ChecksumAlgorithm: checksumAlgorithm,
-		ChecksumType:      checksumType,
-		Initiated:         p.tc.Now(),
-		UserMetadata:      extractUserMetadata(req.Headers),
+		UploadID:               uploadID,
+		Bucket:                 bucket,
+		Key:                    key,
+		ContentType:            contentType,
+		ContentEncoding:        s3PersistedContentEncoding(req.Headers),
+		S3SystemMetadata:       resolveSystemMetadata(req.Headers),
+		S3ServerSideEncryption: resolveServerSideEncryption(req.Headers),
+		StorageClass:           storageClass,
+		ChecksumAlgorithm:      checksumAlgorithm,
+		ChecksumType:           checksumType,
+		Initiated:              p.tc.Now(),
+		UserMetadata:           extractUserMetadata(req.Headers),
 	}
 
 	data, err := json.Marshal(upload)
@@ -1379,6 +1392,10 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		resp.Headers["x-amz-checksum-algorithm"] = checksumAlgorithm
 		resp.Headers["x-amz-checksum-type"] = checksumType
 	}
+	// The encryption family is echoed for the same reason, and it matters more here:
+	// Complete's request accepts no SSE-S3/KMS header, so this response is the caller's
+	// only chance to confirm the encryption every part will be stored under.
+	upload.emitSSE(resp.Headers)
 	return resp, nil
 }
 
@@ -1601,11 +1618,15 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		// embed the same declaration. A header added to S3SystemMetadata is carried
 		// here without touching this line — which is the point of embedding it.
 		S3SystemMetadata: upload.S3SystemMetadata,
-		Size:             int64(len(combined)),
-		StorageClass:     upload.StorageClass,
-		Checksum:         checksum,
-		LastModified:     p.tc.Now(),
-		UserMetadata:     upload.UserMetadata,
+		// The encryption family crosses the same way, for the same reason. Complete's
+		// request carries no SSE-S3/KMS header to read, so what the create recorded is
+		// the only thing the assembled object can be encrypted under.
+		S3ServerSideEncryption: upload.S3ServerSideEncryption,
+		Size:                   int64(len(combined)),
+		StorageClass:           upload.StorageClass,
+		Checksum:               checksum,
+		LastModified:           p.tc.Now(),
+		UserMetadata:           upload.UserMetadata,
 	}
 	objData, err := json.Marshal(obj)
 	if err != nil {
@@ -1633,7 +1654,7 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		Checksum     []s3ChecksumXML `xml:",any"`
 		ChecksumType string          `xml:"ChecksumType,omitempty"`
 	}
-	return s3XMLResponse(http.StatusOK, completeMultipartUploadResult{
+	resp, err := s3XMLResponse(http.StatusOK, completeMultipartUploadResult{
 		Location:     "https://s3.amazonaws.com/" + bucket + "/" + key,
 		Bucket:       bucket,
 		Key:          key,
@@ -1641,6 +1662,14 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		Checksum:     checksumXMLElements(checksum),
 		ChecksumType: checksum.Type,
 	})
+	if err != nil {
+		return nil, err
+	}
+	// The encryption family *is* returned as headers here, unlike the checksum on the
+	// line above: S3 documents all three SSE headers in Complete's response syntax, and
+	// only the checksum moved into the body.
+	obj.emitSSE(resp.Headers)
+	return resp, nil
 }
 
 // validateCompleteParts resolves each part named in a CompleteMultipartUpload
@@ -2238,6 +2267,10 @@ func objectResponseHeaders(obj *S3Object) map[string]string {
 	// only when the object carries it: S3 returns no header for metadata that was
 	// never set, and an empty value is a different observation from an absent one.
 	obj.emit(headers)
+	// The server-side-encryption family, on the same terms. Emitted here rather than in
+	// the two handlers because this function is the single place both GetObject and
+	// HeadObject build their headers, and S3 reports encryption identically on each.
+	obj.emitSSE(headers)
 	if obj.VersionID != "" {
 		headers["x-amz-version-id"] = obj.VersionID
 	}
