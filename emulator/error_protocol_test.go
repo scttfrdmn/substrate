@@ -222,6 +222,10 @@ func TestErrorProtocolFor_Classification(t *testing.T) {
 	}{
 		{"s3 is xml", "s3", "", emulator.ErrProtoQueryXMLForTest},
 		{"iam is xml", "iam", "application/x-amz-json-1.1", emulator.ErrProtoQueryXMLForTest},
+		// CloudFormation is a Query service whose errors are XML. The unknown-service
+		// fallback below happens to answer XML for a form-encoded body too, so only a
+		// direct assertion pins the table entry rather than the fallback.
+		{"cloudformation is xml", "cloudformation", "application/x-amz-json-1.1", emulator.ErrProtoQueryXMLForTest},
 		{"ssm is json rpc", "ssm", "application/x-amz-json-1.1", emulator.ErrProtoJSONRPCForTest},
 		{"dynamodb is json rpc", "dynamodb", "application/x-amz-json-1.0", emulator.ErrProtoJSONRPCForTest},
 		{"lambda is rest json", "lambda", "application/json", emulator.ErrProtoRESTJSONForTest},

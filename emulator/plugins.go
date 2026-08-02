@@ -122,6 +122,28 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(s3Plugin)
 
+	// The CloudFormation plugin adapts the StackDeployer that BettyClient already
+	// drives in process, so it needs the registry to deploy each template resource
+	// into. It is registered after S3/IAM/Lambda only for readability: the registry
+	// is captured as a pointer and read at request time, so ordering does not
+	// affect which resource types a template can create.
+	cfnPlugin := &CloudFormationPlugin{}
+	cfnOpts := map[string]any{
+		"time_controller": tc,
+		"registry":        registry,
+	}
+	if store != nil {
+		cfnOpts["event_store"] = store
+	}
+	if err := cfnPlugin.Initialize(ctx, PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: cfnOpts,
+	}); err != nil {
+		return fmt.Errorf("initialize cloudformation plugin: %w", err)
+	}
+	registry.Register(cfnPlugin)
+
 	elbPlugin := &ELBPlugin{}
 	if err := elbPlugin.Initialize(ctx, PluginConfig{
 		State:   state,

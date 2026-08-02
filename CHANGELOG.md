@@ -122,6 +122,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bundled policies (#497), and `GetPolicyVersion` is unimplemented, so no policy
   document is observable over the wire at all (#498).
 
+- **CloudFormation is now reachable over the wire** (#483). Every CloudFormation
+  call returned `ServiceNotAvailable` at HTTP 501 — no plugin served the service —
+  even though the stack model behind it was complete and had been for many releases.
+  It was simply reachable only from Go, through `emulator.BettyClient`. A consumer
+  driving substrate the way CDK, CloudFormation and Terraform users actually do,
+  with the AWS CLI or an SDK, could not create a stack at all, while `README.md` and
+  the docs advertised CloudFormation as a first-class target. The advertisement is
+  now true at both layers.
+
+  Fifteen operations: `CreateStack`, `UpdateStack`, `DeleteStack`,
+  `DescribeStacks`, `ListStacks`, `DescribeStackResources`, `GetTemplate`, the five
+  change-set operations (`CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`,
+  `ListChangeSets`, `DeleteChangeSet`) and the three drift operations
+  (`DetectStackDrift`, `DescribeStackResourceDrifts`,
+  `DescribeStackDriftDetectionStatus`). 113 resource types and the `Ref`/`Fn::*`
+  intrinsics the deployer already resolved are available unchanged, which is why
+  this is a wire adapter of about 1,000 lines rather than a new service.
+
+  **A stack's resources are real resources in the other plugins**, because the
+  adapter deploys through the same plugin registry the server routes with. A
+  template declaring an `AWS::S3::Bucket` produces a bucket `s3api head-bucket`
+  finds and `s3api put-object` writes to; a stack created over the wire is visible
+  to the in-process API and vice versa. There is one set of stacks and one set of
+  resources, not a CloudFormation-shaped world beside the emulator.
+
+  `DescribeStackEvents` is deliberately **not** supported and returns
+  `UnsupportedOperation` — substrate's own signal, not a CloudFormation code, since
+  real CloudFormation has no error for an operation it implements. A stack carries
+  one status string and there is no per-resource event model behind it, so
+  answering the call would mean fabricating a `CREATE_IN_PROGRESS →
+  CREATE_COMPLETE` pair per resource with invented timestamps. A consumer polling
+  for completion should poll `DescribeStacks`. What a real event model needs is
+  filed as #501. `ChangeSetType=CREATE` is refused for the same class of reason: it
+  requires a stack in `REVIEW_IN_PROGRESS`, a state the model cannot represent.
+
+  `TemplateURL` is refused with `ValidationError` rather than ignored — fetching a
+  template is a network read substrate does not perform, and accepting the
+  parameter silently deployed an empty stack. Template transforms are not applied,
+  so a SAM template reaches the deployer unexpanded and `GetTemplate` reports
+  `StagesAvailable: [Original]`.
+
+  Stack and change-set ARNs derive their UUID from the account, region and name
+  rather than a clock or a PRNG, so a recorded response replays byte-identically.
+  `CreateStack` returns with the stack already `CREATE_COMPLETE` — there is no
+  `*_IN_PROGRESS` window, so `wait stack-create-complete` returns at once instead of
+  polling.
+
+  CloudFormation was also missing from the error-protocol table, which would have
+  left its error-document shape to Content-Type sniffing; it is now explicitly
+  Query/XML. `StackDeployer` reports its failures as `fmt.Errorf` strings, so the
+  adapter maps them to AWS codes by matching sentinel prefixes — typed errors
+  behind the model would remove the string matching and are filed as #502.
+
 ## [v0.86.0] - 2026-08-02
 
 ### Added
