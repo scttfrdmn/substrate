@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `make tag-releases-check` (`scripts/check-tag-releases.sh`) fails if a published
+  `vX.Y.Z` tag has no GitHub Release behind it, run daily by the new `Release Audit`
+  workflow. Pushing a tag does not create a Release and nothing asserted otherwise,
+  so v0.84.0 and v0.85.0 were both cut correctly and neither appeared on the
+  releases page — anything watching releases rather than tags saw nothing ship. The
+  previous commit documented the step; this asserts it, because a documented step is
+  one a human has to remember.
+
+  Two design points, both about not crying wolf. The check grants a **grace window**
+  after a tag's commit, because the documented procedure pushes the tag before
+  publishing the Release, so a tag legitimately has neither for as long as writing
+  the notes takes. And it is **not part of CI**: it audits repository state rather
+  than the contents of a change, so on `pull_request` it would fail a contributor's
+  unrelated PR for a missing release they cannot publish. The schedule is what
+  catches this class of omission anyway, since it is invisible at push time.
+
+  Tags below v0.68.0 are exempt — 77 of them predate the convention and auditing the
+  whole history would report a wall of unactionable failures. The floor's premise is
+  asserted rather than trusted: the tag just below it must still lack a Release,
+  which also guards the void `v0.67.0` (see `SECURITY.md`) against ever acquiring
+  one.
+
 ### Changed
 - `CLAUDE.md`'s release procedure now includes publishing the GitHub Release. The
   step was absent, so v0.84.0 and v0.85.0 were tagged and their tags pushed with no

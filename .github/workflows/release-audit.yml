@@ -1,0 +1,45 @@
+name: Release Audit
+
+# Asserts that every published version tag has a GitHub Release behind it.
+#
+# Deliberately not part of CI. This checks repository state rather than the
+# contents of a change, so running it on pull_request would fail a contributor's
+# unrelated PR for a missing release they cannot publish — and a check that fails
+# for reasons the author cannot act on is one people learn to click past.
+#
+# The schedule is what actually catches the failure this exists for. A tag pushed
+# without a Release looks fine at push time (CLAUDE.md publishes the Release after
+# pushing the tag, so the script grants a grace window), and the omission only
+# becomes visible once that window closes. v0.84.0 and v0.85.0 went unnoticed for
+# a day for exactly this reason.
+on:
+  schedule:
+    # 06:00 UTC daily. Any missing Release surfaces within a day of its tag.
+    - cron: '0 6 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/check-tag-releases.sh'
+      - '.github/workflows/release-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tag-releases:
+    name: Tags have Releases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Tags are required locally: the script reads each tag's commit date to
+          # decide whether a just-pushed tag is still inside its publish grace
+          # window. checkout's default shallow clone has no tags, which would make
+          # every fresh tag look like a missed release.
+          fetch-depth: 0
+
+      - name: Check every version tag has a GitHub Release
+        run: make tag-releases-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
