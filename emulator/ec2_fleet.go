@@ -282,8 +282,14 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if awsErr := ec2CheckReservedTagKeys(instanceTags); awsErr != nil {
 		return nil, awsErr
 	}
+	if awsErr := ec2CheckTagLimit(nil, instanceTags); awsErr != nil {
+		return nil, awsErr
+	}
 	fleetTags := ec2LaunchTagsForResource(req.Params, "fleet")
 	if awsErr := ec2CheckReservedTagKeys(fleetTags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, fleetTags); awsErr != nil {
 		return nil, awsErr
 	}
 
@@ -588,7 +594,10 @@ func parseFleetOverride(params map[string]string, prefix string) (EC2FleetOverri
 // The "aws:" prefix is reserved: per the EC2 tagging documentation such a tag
 // cannot be edited or deleted by a caller and does not count against the 50-tag
 // per-resource limit. CreateTags and DeleteTags enforce the first rule (#452), and
-// every tag-on-create path now enforces it too (#468).
+// every tag-on-create path now enforces it too (#468). The second rule is why
+// [ec2CheckTagLimit] excludes reserved keys from its count (#469): this tag is stamped
+// on every fleet instance, so counting it would reject a fleet instance carrying the
+// full 50 user tags, which real EC2 accepts.
 //
 // Substrate stamps this tag without tripping its own check because
 // [EC2Plugin.launchFleetPool] appends it to the already-parsed, already-checked tag

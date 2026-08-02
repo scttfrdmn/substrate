@@ -1610,14 +1610,56 @@ So a caller naming `aws:` anything in a `CreateFleet` request is rejected —
 instance- and fleet-scoped alike — while the fleet's own stamp is still applied, and
 both coexist with the caller's legal tags on the same instance.
 
-Two limits of the current scope, stated rather than implied:
+One limit of the current scope, stated rather than implied: only tags scoped to a
+resource substrate models are checked. A `TagSpecification` naming `volume` or
+`network-interface` on `RunInstances` is skipped, because substrate does not tag those
+resources at all; real EC2 would reject a reserved key there too.
 
-- Only tags scoped to a resource substrate models are checked. A
-  `TagSpecification` naming `volume` or `network-interface` on `RunInstances` is
-  skipped, because substrate does not tag those resources at all; real EC2 would
-  reject a reserved key there too.
-- The 50-tag-per-resource limit is not modelled, so the companion rule that
-  reserved tags are exempt from it has nothing to exempt them from yet.
+### The 50-tag-per-resource limit
+
+A resource carrying more than 50 user tags is refused, on `CreateTags` and on every
+tag-on-create path:
+
+```
+TagLimitExceeded: The maximum number of Tags for a resource has been reached.
+```
+
+The status is `400`. From the tagging documentation's restrictions: "Maximum number of
+tags per resource – 50".
+
+Two rules make this less arithmetic than it looks, and both are modelled.
+
+**Tags with the `aws:` prefix do not count.** The documentation says so directly:
+"Tags with the `aws:` prefix do not count against your tags per resource limit." This
+is load-bearing rather than pedantry, because substrate stamps
+[`aws:ec2:fleet-id`](#finding-a-fleets-instances) on every fleet instance — a counter
+that included reserved keys would refuse a fleet launch whose template names the full
+50 user tags, which real EC2 accepts. A fleet instance therefore holds 51 tags legally:
+50 of the caller's and one of substrate's.
+
+**Overwriting an existing key at the limit succeeds.** The count is over the
+*post-merge key set*, so a key already on the resource adds nothing. `CreateTags` on a
+50-tag instance changing the value of `key7` is accepted and the value changes; adding
+a new `key51` to the same instance is refused. Written as
+`len(existing) + len(incoming)` both would fail, and real AWS permits the first —
+[getmoto/moto#8151](https://github.com/getmoto/moto/issues/8151) reports exactly that
+case.
+
+As with reserved keys, the whole request is refused before anything is modified.
+`CreateTags` naming two instances — one with room, one at the limit — tags neither.
+A resource ID that names nothing is not counted against, because the apply step ignores
+it: checking it would refuse a request real EC2 accepts as a no-op.
+
+Provenance is split, and the weaker half is the message. The **code** is documented:
+EC2's client-error table lists `TagLimitExceeded` as "You've reached the limit on the
+number of tags that you can assign to the specified resource." The wire **message** is
+published nowhere, so the wording above is [moto](https://github.com/getmoto/moto)'s,
+from a reimplementation rather than a captured response. That is a weaker claim than the
+code's, and is a distinction worth stating: SDKs dispatch on `Error.Code`, so the code
+is the part a consumer's error branch turns on.
+
+Two documented restrictions substrate does **not** enforce: a tag key's maximum length
+of 128 Unicode characters, and a value's maximum of 256. Both are tracked separately.
 
 #### Tag scoping on `CreateImage`
 

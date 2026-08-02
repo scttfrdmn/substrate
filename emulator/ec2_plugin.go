@@ -258,6 +258,13 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if awsErr := ec2CheckReservedTagKeys(launchTags); awsErr != nil {
 		return nil, awsErr
 	}
+	// A new instance starts with no tags, so the request's own tags are the whole count
+	// (#469). The fleet-ID tag substrate may add afterwards is reserved, and reserved
+	// keys are excluded from the count — so a fleet instance launched from a template
+	// carrying the full 50 user tags is still legal, exactly as on real EC2.
+	if awsErr := ec2CheckTagLimit(nil, launchTags); awsErr != nil {
+		return nil, awsErr
+	}
 	return p.runInstancesWithTags(reqCtx, req, launchTags)
 }
 
@@ -2010,15 +2017,31 @@ func (p *EC2Plugin) rebootInstances(_ *RequestContext, _ *AWSRequest) (*AWSRespo
 // createTags handles CreateTags — applies key-value tags to one or more EC2 resources.
 //
 // Keys using the reserved "aws:" prefix are rejected before anything is applied, so a
-// mixed request leaves every named resource untouched (#452). Note that this covers
-// CreateTags only: RunInstances tag-on-create parses its TagSpecification.N params
-// separately, and substrate's own fleet tagging stamps aws:ec2:fleet-id through that
-// path — see [ec2FleetIDTagKey].
+// mixed request leaves every named resource untouched (#452), and every resource named
+// is checked against the per-resource tag limit before any of them is modified (#469).
+// Both checks run over the whole request for the same reason: CreateTags accepts up to
+// 1000 resource IDs, and a rejection partway through the apply loop would leave a
+// partially-tagged state real EC2 never produces.
 func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
 	tags := extractEC2Tags(req.Params)
 	if err := ec2CheckReservedTagKeys(tags); err != nil {
 		return nil, err
+	}
+	for _, id := range resourceIDs {
+		existing, found, err := p.resourceTags(reqCtx, id)
+		if err != nil {
+			return nil, err
+		}
+		// An unknown or absent resource is ignored by the apply loop below, so there is
+		// nothing to count against — checking it would reject a request real EC2 accepts
+		// as a no-op.
+		if !found {
+			continue
+		}
+		if awsErr := ec2CheckTagLimit(existing, tags); awsErr != nil {
+			return nil, awsErr
+		}
 	}
 	for _, id := range resourceIDs {
 		if err := p.applyTagsToResource(reqCtx, id, tags, false); err != nil {
@@ -2103,30 +2126,69 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// ec2TaggableStateKey returns the state key for a taggable resource ID, and whether
+// the ID's prefix names a resource type substrate can tag at all.
+//
+// Shared by [EC2Plugin.applyTagsToResource] and [EC2Plugin.resourceTags] so the tag
+// limit is counted against exactly the resources the apply step will modify: if the two
+// disagreed about which IDs resolve, CreateTags would either check a resource it does
+// not tag or tag one it did not check.
+func ec2TaggableStateKey(reqCtx *RequestContext, id string) (string, bool) {
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	switch {
+	case strings.HasPrefix(id, "i-"):
+		return "instance:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "vpc-"):
+		return "vpc:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "subnet-"):
+		return "subnet:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "sg-"):
+		return "sg:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "igw-"):
+		return "igw:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "rtb-"):
+		return "rtb:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "eipalloc-"):
+		return "eip:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "nat-"):
+		return "nat:" + scope + "/" + id, true
+	default:
+		return "", false
+	}
+}
+
+// resourceTags returns the tags currently on the resource named by id, and whether the
+// resource was found at all.
+//
+// A missing resource reports found=false rather than an error, matching
+// [EC2Plugin.applyTagsToResource]: CreateTags on an absent resource is a no-op in
+// substrate rather than a rejection, so the tag-limit check has nothing to count.
+func (p *EC2Plugin) resourceTags(reqCtx *RequestContext, id string) ([]EC2Tag, bool, error) {
+	stateKey, ok := ec2TaggableStateKey(reqCtx, id)
+	if !ok {
+		return nil, false, nil
+	}
+	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
+	if err != nil || data == nil {
+		return nil, false, nil //nolint:nilerr // Absent resource — ignored, as by applyTagsToResource.
+	}
+	var resource map[string]json.RawMessage
+	if err := json.Unmarshal(data, &resource); err != nil {
+		return nil, false, fmt.Errorf("ec2 resourceTags unmarshal %s: %w", id, err)
+	}
+	var existing []EC2Tag
+	if raw, ok := resource["tags"]; ok {
+		_ = json.Unmarshal(raw, &existing)
+	}
+	return existing, true, nil
+}
+
 // applyTagsToResource loads the EC2 resource identified by id, merges or
 // removes the provided tags, and saves the updated resource back to state.
 // When remove is true, matching tag keys are deleted; otherwise tags are upserted.
 func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags []EC2Tag, remove bool) error {
-	scope := reqCtx.AccountID + "/" + reqCtx.Region
-	var stateKey string
-	switch {
-	case strings.HasPrefix(id, "i-"):
-		stateKey = "instance:" + scope + "/" + id
-	case strings.HasPrefix(id, "vpc-"):
-		stateKey = "vpc:" + scope + "/" + id
-	case strings.HasPrefix(id, "subnet-"):
-		stateKey = "subnet:" + scope + "/" + id
-	case strings.HasPrefix(id, "sg-"):
-		stateKey = "sg:" + scope + "/" + id
-	case strings.HasPrefix(id, "igw-"):
-		stateKey = "igw:" + scope + "/" + id
-	case strings.HasPrefix(id, "rtb-"):
-		stateKey = "rtb:" + scope + "/" + id
-	case strings.HasPrefix(id, "eipalloc-"):
-		stateKey = "eip:" + scope + "/" + id
-	case strings.HasPrefix(id, "nat-"):
-		stateKey = "nat:" + scope + "/" + id
-	default:
+	stateKey, ok := ec2TaggableStateKey(reqCtx, id)
+	if !ok {
 		// Unknown resource type — silently ignore (matches AWS behavior).
 		return nil
 	}
@@ -2863,6 +2925,12 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, awsErr
 	}
 	if awsErr := ec2CheckReservedTagKeys(snapshotTags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, snapshotTags); awsErr != nil {
 		return nil, awsErr
 	}
 
@@ -3614,6 +3682,9 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 
 	gw.Tags = ec2LaunchTagsForResource(req.Params, "natgateway")
 	if awsErr := ec2CheckReservedTagKeys(gw.Tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, gw.Tags); awsErr != nil {
 		return nil, awsErr
 	}
 

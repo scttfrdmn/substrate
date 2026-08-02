@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -615,4 +616,338 @@ func TestEC2_CreateFleet_CallerTagsAndFleetIDTagCoexist(t *testing.T) {
 		assert.True(t, ok, "instance %s lost its %s tag", id, fleetIDTagKey)
 		assert.Equal(t, fleet.FleetID, fleetID)
 	}
+}
+
+// ec2TagLimit is the number of user tags EC2 allows on one resource, restated here
+// because an external test package cannot see ec2MaxTagsPerResource. That is a feature:
+// the tests assert the documented number rather than whatever the constant happens to
+// hold, so editing the constant alone cannot make them pass.
+//
+// "Maximum number of tags per resource – 50", from the EC2 tagging documentation.
+const ec2TagLimit = 50
+
+// ec2TagLimitMessage is the wording substrate emits when a resource is at its tag
+// limit, pinned so it cannot drift silently.
+//
+// Provenance is split, and the weaker half is the message. The *code*
+// TagLimitExceeded is documented in EC2's client-error table ("You've reached the
+// limit on the number of tags that you can assign to the specified resource"); the
+// wire *message* is published nowhere, so this string is moto's rather than a
+// captured response.
+const ec2TagLimitMessage = "The maximum number of Tags for a resource has been reached."
+
+// ec2NumberedTags returns count tags named key1..keyN, for filling a resource up to
+// its limit.
+func ec2NumberedTags(prefix string, count int) map[string]string {
+	params := map[string]string{}
+	for i := 1; i <= count; i++ {
+		params[fmt.Sprintf("Tag.%d.Key", i)] = fmt.Sprintf("%s%d", prefix, i)
+		params[fmt.Sprintf("Tag.%d.Value", i)] = "v"
+	}
+	return params
+}
+
+// ec2CreateTags issues a CreateTags request adding the given tags to id and returns
+// the HTTP status, error code and message.
+func ec2CreateTags(t *testing.T, ts *httptest.Server, id string, tags map[string]string) (int, string, string) {
+	t.Helper()
+	params := map[string]string{"Action": "CreateTags", "ResourceId.1": id}
+	for k, v := range tags {
+		params[k] = v
+	}
+	return ec2ErrorDetail(t, ts, params)
+}
+
+// ec2InstanceTagCount returns how many tags DescribeInstances reports on instID.
+func ec2InstanceTagCount(t *testing.T, ts *httptest.Server, instID string) int {
+	t.Helper()
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{
+		"Action":       "DescribeInstances",
+		"InstanceId.1": instID,
+	}, &desc)
+	require.Len(t, desc.Instances, 1)
+	return len(desc.Instances[0].Tags)
+}
+
+// TestEC2_CreateTags_EnforcesTagLimit covers #469: substrate accepted any number of
+// tags, so a consumer that hit real EC2's 50-tag ceiling had no way to test the
+// TagLimitExceeded branch — and, worse, a test asserting the rejection passed against
+// substrate while the same code failed against AWS.
+//
+// "Maximum number of tags per resource – 50", from the tagging documentation.
+func TestEC2_CreateTags_EnforcesTagLimit(t *testing.T) {
+	ts := newEC2TestServer(t)
+	instID := ec2TagTestInstance(t, ts)
+
+	// Exactly 50 is legal.
+	status, _, _ := ec2CreateTags(t, ts, instID, ec2NumberedTags("key", ec2TagLimit))
+	require.Equal(t, http.StatusOK, status, "50 tags must be accepted")
+	require.Equal(t, ec2TagLimit, ec2InstanceTagCount(t, ts, instID))
+
+	// The 51st is not.
+	status, code, message := ec2CreateTags(t, ts, instID, map[string]string{
+		"Tag.1.Key":   "one-too-many",
+		"Tag.1.Value": "v",
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "TagLimitExceeded", code)
+	assert.Equal(t, ec2TagLimitMessage, message)
+	assert.Equal(t, ec2TagLimit, ec2InstanceTagCount(t, ts, instID),
+		"the rejected tag must not have been applied")
+}
+
+// TestEC2_CreateTags_OverwriteAtLimitSucceeds is the subtle half of the counting rule,
+// and the one a naive implementation gets wrong.
+//
+// The count is over the post-merge key *set*, so a key already present adds nothing
+// and overwriting it on a resource already at 50 succeeds. Written as
+// len(existing)+len(incoming) > 50 this would fail — real AWS permits it, as
+// getmoto/moto#8151 reports.
+func TestEC2_CreateTags_OverwriteAtLimitSucceeds(t *testing.T) {
+	ts := newEC2TestServer(t)
+	instID := ec2TagTestInstance(t, ts)
+
+	status, _, _ := ec2CreateTags(t, ts, instID, ec2NumberedTags("key", ec2TagLimit))
+	require.Equal(t, http.StatusOK, status)
+
+	tests := []struct {
+		name       string
+		tagKey     string
+		wantReject bool
+	}{
+		{name: "overwriting an existing key is allowed at the limit", tagKey: "key7"},
+		{name: "adding a new key is not", tagKey: "key51", wantReject: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, _ := ec2CreateTags(t, ts, instID, map[string]string{
+				"Tag.1.Key":   tc.tagKey,
+				"Tag.1.Value": "changed",
+			})
+
+			if tc.wantReject {
+				assert.Equal(t, http.StatusBadRequest, status)
+				assert.Equal(t, "TagLimitExceeded", code)
+				return
+			}
+
+			require.Equal(t, http.StatusOK, status)
+			value, ok := ec2InstanceTagValue(t, ts, instID, tc.tagKey)
+			assert.True(t, ok)
+			assert.Equal(t, "changed", value, "the overwrite must take effect")
+			assert.Equal(t, ec2TagLimit, ec2InstanceTagCount(t, ts, instID),
+				"an overwrite must not grow the tag count")
+		})
+	}
+}
+
+// TestEC2_CreateTags_LimitRejectionIsAllOrNothing pins that the limit is checked across
+// every resource the request names before any of them is modified, matching the
+// reserved-key check's ordering. CreateTags accepts up to 1000 IDs and a partial apply
+// is a state real EC2 never produces.
+func TestEC2_CreateTags_LimitRejectionIsAllOrNothing(t *testing.T) {
+	ts := newEC2TestServer(t)
+	roomy := ec2TagTestInstance(t, ts)
+	full := ec2TagTestInstance(t, ts)
+
+	// Only the second instance is at the limit.
+	status, _, _ := ec2CreateTags(t, ts, full, ec2NumberedTags("key", ec2TagLimit))
+	require.Equal(t, http.StatusOK, status)
+
+	params := map[string]string{
+		"Action":       "CreateTags",
+		"ResourceId.1": roomy,
+		"ResourceId.2": full,
+		"Tag.1.Key":    "pushes-over",
+		"Tag.1.Value":  "v",
+	}
+	status, code, _ := ec2ErrorDetail(t, ts, params)
+	require.Equal(t, http.StatusBadRequest, status)
+	require.Equal(t, "TagLimitExceeded", code)
+
+	// Neither resource is modified — including the one that had room.
+	_, ok := ec2InstanceTagValue(t, ts, roomy, "pushes-over")
+	assert.False(t, ok,
+		"the resource with room must not be tagged when another named resource is over")
+	assert.Equal(t, ec2TagLimit, ec2InstanceTagCount(t, ts, full))
+}
+
+// TestEC2_TagLimit_ExemptsReservedKeys is #469's own acceptance criterion, asserted on a
+// real fleet instance rather than a synthetic resource.
+//
+// "Tags with the aws: prefix do not count against your tags per resource limit." This is
+// load-bearing rather than pedantic: substrate stamps aws:ec2:fleet-id on every fleet
+// instance, so a counter that included reserved keys would reject a fleet instance
+// carrying 50 user tags — a launch real EC2 accepts.
+func TestEC2_TagLimit_ExemptsReservedKeys(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "tag-limit-exempt")
+
+	var fleet createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+	}, &fleet)
+	ids := fleet.instanceIDs()
+	require.Len(t, ids, 1)
+	instID := ids[0]
+
+	// The instance already carries the reserved fleet-ID tag...
+	_, ok := ec2InstanceTagValue(t, ts, instID, fleetIDTagKey)
+	require.True(t, ok, "fleet instance should carry %s", fleetIDTagKey)
+
+	// ...and can still take a full complement of 50 user tags on top of it.
+	status, _, _ := ec2CreateTags(t, ts, instID, ec2NumberedTags("user", ec2TagLimit))
+	require.Equal(t, http.StatusOK, status,
+		"a reserved tag must not consume room from the user tag limit")
+
+	// 50 user tags plus the reserved one: 51 tags on the resource, all legal.
+	assert.Equal(t, ec2TagLimit+1, ec2InstanceTagCount(t, ts, instID))
+
+	// The 51st *user* tag is still refused, so the exemption did not raise the ceiling.
+	status, code, _ := ec2CreateTags(t, ts, instID, map[string]string{
+		"Tag.1.Key":   "user51",
+		"Tag.1.Value": "v",
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "TagLimitExceeded", code)
+}
+
+// TestEC2_TagOnCreate_EnforcesTagLimit covers the limit on the tag-on-create paths,
+// where a new resource's tag count is just the request's own.
+func TestEC2_TagOnCreate_EnforcesTagLimit(t *testing.T) {
+	// launchTagParams builds count instance-scoped launch tags.
+	launchTagParams := func(count int) map[string]string {
+		params := map[string]string{"TagSpecification.1.ResourceType": "instance"}
+		for i := 1; i <= count; i++ {
+			params[fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)] = fmt.Sprintf("key%d", i)
+			params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)] = "v"
+		}
+		return params
+	}
+
+	t.Run("50 launch tags are accepted", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		params := map[string]string{
+			"Action":   "RunInstances",
+			"ImageId":  "ami-0taglimit0000001",
+			"MinCount": "1",
+			"MaxCount": "1",
+		}
+		for k, v := range launchTagParams(ec2TagLimit) {
+			params[k] = v
+		}
+		ids := ec2RunInstanceIDs(t, ts, params)
+		require.Len(t, ids, 1)
+		assert.Equal(t, ec2TagLimit, ec2InstanceTagCount(t, ts, ids[0]))
+	})
+
+	t.Run("51 launch tags are rejected and nothing is created", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		params := map[string]string{
+			"Action":   "RunInstances",
+			"ImageId":  "ami-0taglimit0000002",
+			"MinCount": "1",
+			"MaxCount": "1",
+		}
+		for k, v := range launchTagParams(ec2TagLimit + 1) {
+			params[k] = v
+		}
+		status, code, message := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "TagLimitExceeded", code)
+		assert.Equal(t, ec2TagLimitMessage, message)
+		assert.Zero(t, ec2InstanceCount(t, ts),
+			"a launch rejected for the tag limit must not create an instance")
+	})
+
+	t.Run("51 tags on CreateNatGateway are rejected", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		subnetID := ec2TagTestSubnet(t, ts)
+		params := map[string]string{
+			"Action":                          "CreateNatGateway",
+			"SubnetId":                        subnetID,
+			"ConnectivityType":                "private",
+			"TagSpecification.1.ResourceType": "natgateway",
+		}
+		for i := 1; i <= ec2TagLimit+1; i++ {
+			params[fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)] = fmt.Sprintf("key%d", i)
+			params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)] = "v"
+		}
+		status, code, _ := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "TagLimitExceeded", code)
+
+		var gws struct {
+			Gateways []struct {
+				NatGatewayID string `xml:"natGatewayId"`
+			} `xml:"natGatewaySet>item"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "DescribeNatGateways"}, &gws)
+		assert.Empty(t, gws.Gateways)
+	})
+
+	t.Run("51 tags on CreateImage are rejected", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		instID := ec2TagTestInstance(t, ts)
+		params := map[string]string{
+			"Action":                          "CreateImage",
+			"InstanceId":                      instID,
+			"Name":                            "over-limit-ami",
+			"TagSpecification.1.ResourceType": "image",
+		}
+		for i := 1; i <= ec2TagLimit+1; i++ {
+			params[fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)] = fmt.Sprintf("key%d", i)
+			params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)] = "v"
+		}
+		status, code, _ := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "TagLimitExceeded", code)
+
+		var images struct {
+			Images []struct {
+				ImageID string `xml:"imageId"`
+			} `xml:"imagesSet>item"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "DescribeImages"}, &images)
+		assert.Empty(t, images.Images)
+	})
+}
+
+// TestEC2_Fleet_TagLimitWithStampedTag is the fleet half of the exemption: a fleet whose
+// caller names the full 50 instance tags still launches, because the fleet-ID tag
+// substrate adds on top is reserved and excluded from the count.
+//
+// Under a counter that included reserved keys this launch fails at 51 — the exact
+// failure #469 calls out, and one real EC2 does not produce.
+func TestEC2_Fleet_TagLimitWithStampedTag(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-tag-limit")
+
+	params := map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+		"TagSpecification.1.ResourceType":                                      "instance",
+	}
+	for i := 1; i <= ec2TagLimit; i++ {
+		params[fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)] = fmt.Sprintf("key%d", i)
+		params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)] = "v"
+	}
+
+	var fleet createFleetResp
+	ec2FleetXML(t, ts, params, &fleet)
+	ids := fleet.instanceIDs()
+	require.Len(t, ids, 1, "a fleet with 50 caller tags must still launch")
+
+	// 50 caller tags plus the reserved stamp.
+	assert.Equal(t, ec2TagLimit+1, ec2InstanceTagCount(t, ts, ids[0]))
+	fleetID, ok := ec2InstanceTagValue(t, ts, ids[0], fleetIDTagKey)
+	assert.True(t, ok, "the stamp must survive a fully-tagged launch")
+	assert.Equal(t, fleet.FleetID, fleetID)
 }

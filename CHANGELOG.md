@@ -37,6 +37,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The match remains **case-sensitive**, so `AWS:foo` is still an ordinary user tag.
   Note that #472's SQS attribute prefix rule is case-*insensitive*; the two services
   document different rules and the checks are deliberately not shared.
+- **The 50-tag-per-resource limit is now enforced** (#469).
+  Substrate accepted any number of tags, so a consumer that hit real EC2's ceiling had
+  no way to reach the `TagLimitExceeded` branch — and a test asserting the rejection
+  passed against substrate while the same code failed against AWS. `CreateTags` and
+  every tag-on-create path now refuse a resource that would carry more than 50 user
+  tags with `TagLimitExceeded`, HTTP 400, per the tagging documentation's "Maximum
+  number of tags per resource – 50".
+
+  Two rules make this less like arithmetic than it looks, and both are modelled.
+  **Tags with the `aws:` prefix do not count** ("Tags with the `aws:` prefix do not
+  count against your tags per resource limit"), which matters beyond pedantry: since
+  substrate stamps `aws:ec2:fleet-id` on every fleet instance (#443), a counter that
+  included reserved keys would refuse a fleet launch whose template names the full 50
+  user tags — a launch real EC2 accepts. A fleet instance therefore holds 51 tags
+  legally. And **overwriting an existing key at the limit succeeds**, because the count
+  is over the post-merge key *set* rather than the sum of both sides: changing `key7`'s
+  value on a 50-tag instance is accepted while adding a new `key51` is refused.
+  [getmoto/moto#8151](https://github.com/getmoto/moto/issues/8151) reports real AWS
+  permitting the first. This also closes the companion gap v0.85.0 recorded as vacuous:
+  the reserved-tag exemption now has a limit to be exempt from.
+
+  As with reserved keys, the whole request is refused before anything is modified — a
+  `CreateTags` naming one instance with room and one at the limit tags neither.
+
+  Provenance is split, and the weaker half is named. The **code** is a doc citation:
+  EC2's client-error table lists `TagLimitExceeded` as "You've reached the limit on the
+  number of tags that you can assign to the specified resource." The wire **message**
+  is published nowhere, so the wording comes from moto — a reimplementation, not a
+  capture. Stronger than #452's provenance on the code, weaker on the message; SDKs
+  dispatch on `Error.Code`, so the documented half is the one a consumer's error branch
+  turns on. The documented tag key/value *length* limits (128 and 256 Unicode
+  characters) remain unenforced and are tracked separately.
 - **EC2 launch templates are now versioned** (#456).
   `CreateLaunchTemplateVersion`, `ModifyLaunchTemplate`,
   `DescribeLaunchTemplateVersions` and `DeleteLaunchTemplateVersions` were all
