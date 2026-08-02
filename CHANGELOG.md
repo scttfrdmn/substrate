@@ -284,6 +284,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   following the `SendMessage` size-limit message's precedent, because the message is
   the only place a caller learns which limit they hit. Dispatch on the code.
 
+- **S3 records the server-side-encryption headers and echoes them on every read**
+  (#492). `x-amz-server-side-encryption`,
+  `x-amz-server-side-encryption-aws-kms-key-id` and
+  `x-amz-server-side-encryption-bucket-key-enabled` are recorded on `PutObject` and
+  `CreateMultipartUpload`, and returned on those responses plus `GetObject`,
+  `HeadObject` and `CompleteMultipartUpload`. Substrate previously accepted them and
+  discarded them, so an object written with encryption read back byte-identical to one
+  written without it: a consumer could only assert on what their own request carried,
+  which verifies the line that filled in the request and nothing about the stored
+  object. Every such request assertion is now a stored-object assertion.
+
+  **No cryptography is performed** — the body is stored exactly as it arrived.
+  Encryption at rest is not observable through an API call, but the encryption S3
+  *reports* for an object is, and that report is the assertion a consumer is making.
+
+  An absent header stays **absent on the response, not `false` or empty**, so "no
+  encryption named" remains distinguishable from "encryption named" — the property
+  that makes recording worth anything. That is also why bucket default encryption is
+  deliberately not modelled here: real S3 has applied SSE-S3 unconditionally since
+  January 2023, so adding the default would erase the distinction, and it belongs with
+  the rest of the resolution rules in #493.
+
+  **The KMS key ID round-trips verbatim, as a stated divergence.** Real S3 resolves any
+  of the four accepted forms — a bare UUID, `alias/name`, a key ARN, an alias ARN — to
+  the key ARN before reporting it. Substrate returns the string that was sent, because
+  that is the string the consumer's configuration produced and therefore the assertion
+  they are trying to make; #475's reporter confirms their tests assert the sent form.
+  The difference is observable and documented, so modelling key resolution later has to
+  revisit it rather than silently overtake it.
+
+  Encryption on a multipart upload is fixed at `CreateMultipartUpload` and carried onto
+  the assembled object, because Complete's request accepts only the SSE-C headers.
+  The family is one embedded declaration shared by the object and upload records, so
+  the two write paths cannot drift the way #406's did.
+
+  Nothing is validated, and `CopyObject` records no encryption at all rather than
+  inheriting the source's — both deliberate, both pinned by tests so #493 changes them
+  on purpose. #493 carries the four `InvalidArgument` rejections, bucket defaults, and
+  the copy resolution order. SSE-C is out of scope entirely.
+
 ## [v0.86.0] - 2026-08-02
 
 ### Added

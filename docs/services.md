@@ -369,16 +369,16 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums) |
-| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records) |
-| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records) |
+| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption) |
+| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
+| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | DeleteObject | Fires S3 notifications if configured |
-| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums) |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
-| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums) |
+| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
-| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums) |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
@@ -508,6 +508,67 @@ consumer's parse-failure branch unreachable.
 metadata too, but each has resolution rules of its own — a default of
 `application/octet-stream`, `aws-chunked` filtering, and a `STANDARD`-means-absent
 read rule — so they are documented in their own sections above.
+
+### Server-side encryption
+
+Three headers are recorded on write and returned on every read:
+
+| Header | Recorded | Echoed |
+|---|---|---|
+| `x-amz-server-side-encryption` | Verbatim — `AES256`, `aws:fsx`, `aws:kms`, `aws:kms:dsse`, or any other token | Whenever set |
+| `x-amz-server-side-encryption-aws-kms-key-id` | Verbatim, in whichever form was sent | Only alongside an algorithm, and only when a key was named |
+| `x-amz-server-side-encryption-bucket-key-enabled` | As a boolean; only `true` (any case) enables it | Only when enabled |
+
+**No cryptography is performed.** The object body is stored exactly as it arrived.
+Encryption at rest is not observable through an API call, but *the encryption S3
+reports for an object* is — and that report is the assertion a consumer is making.
+Substrate previously accepted these headers and discarded them, so an object written
+with encryption read back byte-identical to one written without it: a test could only
+assert on what its own request carried, which proves the line that filled in the
+request and nothing about the stored object.
+
+They are recorded on `PutObject` and on `CreateMultipartUpload`, and echoed on those
+two responses plus `GetObject`, `HeadObject` and `CompleteMultipartUpload`.
+`CreateMultipartUpload` is the only place a multipart upload's encryption can be
+supplied — Complete's request accepts only the SSE-C headers — so it is fixed for the
+whole upload at creation and carried onto the assembled object.
+
+An absent header is **absent on the response, not `false` or empty**. A write that
+never mentioned the bucket-key header produces no bucket-key header, since an SDK
+distinguishing a nil `*bool` from a `false` one would otherwise report the wrong
+answer. The same rule keeps "no encryption named" distinguishable from "encryption
+named", which is the observation that makes recording worth anything.
+
+**The KMS key ID round-trips verbatim, which is a deliberate divergence.** KMS accepts
+four forms — a bare UUID, `alias/name`, a key ARN and an alias ARN — and real S3
+resolves any of them to the key ARN before reporting it. Substrate returns the string
+the caller sent, because that is the string the consumer's configuration produced and
+therefore the assertion they are trying to make. Resolving it would mean modeling KMS
+aliases and cross-account ARNs to answer a question no consumer has asked. The
+difference is observable: if key resolution is ever modeled, this decision has to be
+revisited rather than silently overtaken.
+
+Nothing is validated. A key ID sent with `AES256`, a bucket-key flag without
+`aws:kms`, and an unrecognized algorithm token are all accepted and recorded, where
+real S3 answers `400 InvalidArgument`; `UploadPart` restating an encryption header is
+likewise accepted rather than refused. Those four rejections are
+[#493](https://github.com/scttfrdmn/substrate/issues/493).
+
+Also out of scope there, and worth knowing before relying on this:
+
+- **Bucket default encryption.** `PutBucketEncryption` and its siblings are not
+  modeled, so a write naming no encryption records none. Real S3 has applied SSE-S3 to
+  every new object unconditionally since January 2023, so a real bucket never stores an
+  unencrypted object — modeling that default would remove the absent-versus-set
+  distinction above, which is why it is a deliberate decision rather than a side effect.
+- **`CopyObject` records no encryption at all.** A copy's encryption comes from the
+  request and, failing that, from the bucket default — never from the source. Neither
+  exists yet, so substrate reports none for a copy rather than inheriting the source's.
+  That is a stated gap, not a wrong answer: silently inheriting would hide exactly the
+  bug this half exists to expose, where an in-place metadata copy or a storage-tier
+  transition moves an SSE-KMS object off its customer managed key.
+- **SSE-C** (`x-amz-server-side-encryption-customer-*`) is out of scope entirely; its
+  key material would have to be discarded rather than recorded.
 
 ### Copying objects
 

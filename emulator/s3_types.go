@@ -49,6 +49,12 @@ type S3Object struct {
 	// drifting on the family.
 	S3SystemMetadata
 
+	// S3ServerSideEncryption carries the x-amz-server-side-encryption family
+	// recorded on write and echoed on every read. Embedded and shared with
+	// [S3MultipartUpload] for the same reason S3SystemMetadata is; no cryptography
+	// is performed, and the type's own doc says why that is the right boundary.
+	S3ServerSideEncryption
+
 	// Size is the byte length of the object body.
 	Size int64 `json:"size"`
 
@@ -167,6 +173,16 @@ type S3MultipartUpload struct {
 	// is literally the same declaration [S3Object] uses and Complete can carry the
 	// family across in one assignment.
 	S3SystemMetadata
+
+	// S3ServerSideEncryption carries the encryption family supplied at upload
+	// creation, applied to the object CompleteMultipartUpload assembles. Create is
+	// the only place it can be supplied — Complete's request accepts only the SSE-C
+	// headers, so encryption is fixed for the whole upload at creation.
+	//
+	// Embedded here as well as on [S3Object] so the family is one declaration and
+	// Complete carries it across in a single assignment. Resolving a bucket default
+	// onto an upload is #493's; recording what the create named is this release's.
+	S3ServerSideEncryption
 
 	// StorageClass is the storage class supplied at upload creation, applied to
 	// the object CompleteMultipartUpload assembles. Empty means STANDARD.
