@@ -21,9 +21,16 @@ import (
 // newEC2TestServer builds a minimal Server with the EC2 plugin registered.
 func newEC2TestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newEC2TestServerWithState(t, emulator.NewMemoryStateManager())
+}
+
+// newEC2TestServerWithState is [newEC2TestServer] with the caller's StateManager, so
+// a test can write a stored shape no request produces — a pre-migration record, or an
+// instance with no security groups — and read it back through the API.
+func newEC2TestServerWithState(t *testing.T, state emulator.StateManager) *httptest.Server {
+	t.Helper()
 	registry := emulator.NewPluginRegistry()
 	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
-	state := emulator.NewMemoryStateManager()
 	tc := emulator.NewTimeController(time.Now())
 	logger := emulator.NewDefaultLogger(0, false)
 
@@ -1081,6 +1088,19 @@ func TestEC2_ModifyInstanceAttribute(t *testing.T) {
 	}
 	runResp.Body.Close() //nolint:errcheck
 	id := runResult.Instances[0].InstanceID
+
+	// The instance must be stopped first: instanceType is one of the attributes real
+	// EC2 only modifies on a stopped instance, and substrate now enforces that
+	// (#473). This test asserted the old behavior — a running instance changing type
+	// — which was the defect, so the stop is the assertion's correction rather than
+	// setup noise. TestEC2_InstanceAttribute_ModifyRequiresStopped owns the rejection.
+	stopResp := ec2Request(t, ts, map[string]string{
+		"Action": "StopInstances", "InstanceId.1": id,
+	})
+	if stopResp.StatusCode != http.StatusOK {
+		t.Fatalf("StopInstances: expected 200, got %d", stopResp.StatusCode)
+	}
+	stopResp.Body.Close() //nolint:errcheck
 
 	// Modify to t3.medium.
 	modResp := ec2Request(t, ts, map[string]string{

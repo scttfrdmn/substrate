@@ -1308,6 +1308,8 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeInstanceAttribute | Four attributes, `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
+| ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | CreateVpc | |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids) |
 | DeleteVpc | [Explicit resource IDs](#explicit-resource-ids) |
@@ -1572,6 +1574,121 @@ source supplied them:
 the group is deleted while the instance it was launched with still exists. The
 `groupId` is still reported, because that is what the launch actually recorded; a
 name is not invented to fill the field.
+
+### Instance attributes
+
+`DescribeInstanceAttribute` reads one attribute off an instance. It is the only way
+to read an instance's **user data** back: `RunInstances` recorded `UserData` and
+nothing could observe it, so a consumer could not assert that the user data their IaC
+intended reached the instance — including the value a
+[launch template supplied](#a-launch-template-merges-with-the-request-field-by-field).
+
+Four attributes are readable, being the ones that correspond to state substrate holds:
+
+| `Attribute` | Reports |
+|---|---|
+| `userData` | The value as stored, still base64-encoded |
+| `instanceType` | |
+| `disableApiTermination` | `true` or `false`; recorded at launch and by `ModifyInstanceAttribute` |
+| `groupSet` | `groupSet>item` with `groupId`/`groupName`, the same shape [`DescribeInstances` reports](#security-groups-on-an-instance) |
+
+Scalar values are **wrapped in a `<value>` element**, which all three of the
+reference's worked examples show and which matches the `AttributeValue` type the
+response elements carry:
+
+```xml
+<DescribeInstanceAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <instanceId>i-0123456789abcdef0</instanceId>
+  <instanceType><value>t3.micro</value></instanceType>
+</DescribeInstanceAttributeResponse>
+```
+
+Exactly one attribute appears per response — the one asked for. `groupSet` is the
+exception to the wrapper: it is an array of `GroupIdentifier`, not an `AttributeValue`.
+
+`Attribute` is **Required: Yes**, so an absent one fails with `MissingParameter`
+(`The request must contain the parameter Attribute`). An unknown instance ID fails
+with `InvalidInstanceID.NotFound`, and a malformed one with `InvalidInstanceID.Malformed`,
+as [everywhere else](#explicit-resource-ids).
+
+#### Unmodelled attributes are refused, not defaulted
+
+Every other name in the documented valid-values list — `kernel`, `ramdisk`,
+`sourceDestCheck`, `blockDeviceMapping`, `productCodes`, `ebsOptimized`,
+`rootDeviceName`, `sriovNetSupport`, `enaSupport`, `enclaveOptions`,
+`instanceInitiatedShutdownBehavior`, `disableApiStop` — is rejected:
+
+```
+InvalidParameterValue: Value (enaSupport) for parameter attribute is invalid. Unknown attribute.
+```
+
+The status is `400`, and the offending value is interpolated. Refusing is deliberate
+rather than a gap: answering `sourceDestCheck` with a default `false` would be
+indistinguishable from a real instance that has it disabled, and a consumer asserting
+on it would get a green test built on a value substrate invented.
+
+This message has the strongest provenance of any in the EC2 plugin. It is **captured
+from real AWS** in [aws/aws-cli#4273](https://github.com/aws/aws-cli/issues/4273),
+where `aws ec2 describe-instance-attribute --attribute enaSupport` returns exactly it,
+and it is byte-identical to [moto](https://github.com/getmoto/moto)'s string — a
+capture and an independent reimplementation agreeing. The reference could not have
+supplied it: `DescribeInstanceAttribute`'s Errors section is empty.
+
+`enaSupport` is the case that makes the boundary concrete. It is *in* AWS's own valid-values
+list, and the same reference says "Note that the `enaSupport` attribute is not supported."
+Real AWS rejects a value its documentation lists, and #4273 is the capture of that
+rejection — so substrate rejecting it is fidelity rather than a shortfall.
+
+Attribute names are matched **case-sensitively**, as AWS's valid values are: `InstanceType`
+is rejected, `instanceType` is not.
+
+#### An attribute that was never set
+
+An unset attribute is reported as a **present but empty element** — `<userData></userData>`
+— rather than an omitted one. An empty `groupSet` likewise appears, empty.
+
+This is the one shape here the reference cannot settle: all three of its worked examples
+show an attribute that *has* a value. It ships from moto's `test_describe_instance_attribute`,
+which asserts `response["UserData"] == {}` — an empty mapping, which is what an SDK
+produces from a present element with no children. That is **weaker provenance than a
+capture**, and worth stating, because the two shapes are not interchangeable to a caller:
+an SDK maps a present-but-empty element to an empty struct and an omitted one to nil, so
+`resp.UserData.Value` panics under one and not the other.
+
+#### Modifying an attribute requires a stopped instance
+
+`ModifyInstanceAttribute` writes `InstanceType.Value`, `UserData.Value` and
+`DisableApiTermination.Value`. The first two require the instance to be `stopped`:
+
+```
+IncorrectInstanceState: The instance 'userData' attribute cannot be modified while the
+instance is in the 'running' state; stop the instance first
+```
+
+The status is `400`. The **code** is documented — EC2's client-error table lists
+`IncorrectInstanceState` as "some instance attributes, such as user data, can only be
+modified if the instance is in a 'stopped' state" — while the **message text is
+substrate's own**, since the table describes the condition rather than quoting the
+string AWS sends, and no capture of this rejection was found.
+
+This is a behaviour change for `instanceType`, which substrate previously changed on a
+running instance. `ModifyInstanceAttribute`'s Example 1 states the requirement plainly:
+"The instance must be in the `stopped` state." A test that asserted the old behaviour
+will now see a `400`.
+
+`disableApiTermination` is deliberately **exempt** from the gate, because `RunInstances`'
+reference says so: "You can enable termination protection when you launch an instance,
+while the instance is running, or while the instance is stopped." Gating it would refuse
+a call real EC2 accepts — the same class of defect as accepting one real EC2 refuses,
+just harder to notice, since it looks like extra rigor.
+
+`UserData.Value` is read with a presence check rather than a non-empty one, so clearing
+an instance's user data is expressible: `UserData.Value=` on a stopped instance empties
+it, and the attribute then reads back as the empty element above.
+
+Termination protection is **recorded and reported but not acted on**: `TerminateInstances`
+still terminates a protected instance, where real EC2 refuses with `OperationNotPermitted`.
+That is tracked separately.
 
 ### MinCount and MaxCount
 
