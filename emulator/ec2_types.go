@@ -640,6 +640,28 @@ type EC2LaunchTemplateData struct {
 	// [EC2LaunchTemplateData.NetworkSecurityGroupIDs] for how substrate resolves
 	// which list applies.
 	NetworkInterfaceGroups []string `json:"networkInterfaceGroups,omitempty"`
+
+	// TagSpecifications is the template's instance-scoped tag-on-create tags, from
+	// LaunchTemplateData.TagSpecification.N with ResourceType=instance.
+	//
+	// Instance-scoped only. A template may also scope tags to volume,
+	// network-interface or spot-instances-request; substrate models none of those
+	// resources, so those scopes are recorded nowhere rather than misapplied to the
+	// instance. Note that these tags land on the *instance*, not on the template
+	// itself — the reference is explicit: "These tags are not applied to the launch
+	// template."
+	TagSpecifications []EC2Tag `json:"tagSpecifications,omitempty"`
+
+	// IamInstanceProfile is the instance profile the template names, stored as
+	// whichever of Name or Arn the request supplied — the same single-string shape
+	// [EC2Instance.IamInstanceProfile] holds, so the merge is a plain fallback.
+	//
+	// Name is preferred when both are given, mirroring RunInstances' own
+	// precedence. AWS's LaunchTemplateIamInstanceProfileSpecificationRequest has
+	// exactly those two members and documents neither as authoritative over the
+	// other, so the choice is substrate's, made for consistency with the call-level
+	// path rather than from the reference.
+	IamInstanceProfile string `json:"iamInstanceProfile,omitempty"`
 }
 
 // NetworkSecurityGroupIDs returns the security groups a launch from this template

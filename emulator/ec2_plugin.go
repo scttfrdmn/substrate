@@ -399,6 +399,34 @@ func (p *EC2Plugin) runInstancesWithTags(
 		if sgID == "" && len(securityGroupIDs) > 0 {
 			sgID = securityGroupIDs[0]
 		}
+		if iamInstanceProfile == "" {
+			iamInstanceProfile = ltData.IamInstanceProfile
+		}
+		// A template's tags fill the gap only when the caller named none, so they
+		// *replace* rather than merge: a request naming Env=req and a template naming
+		// Env=tmpl,Team=x yields Env=req alone. The reference gives no
+		// TagSpecifications-specific merge semantics, only the general rule quoted
+		// above, and this is that rule applied — not a per-field citation.
+		//
+		// Substrate's own fleet stamp does not count as the caller naming tags. It is
+		// a reserved key, and a fleet launched from a tagging template must still get
+		// the template's tags alongside the stamp, exactly as on real EC2 — the same
+		// exclusion that keeps the stamp out of the tag count (#469).
+		if !ec2HasUserTags(tags) {
+			// Tags arriving from a template are subject to both tag rules here as well
+			// as at CreateLaunchTemplate, so a template is not a second unrestricted
+			// path (#471). The check is not redundant: a template stored before those
+			// checks existed, or one written straight into state by a replayed event
+			// log, can still carry a reserved key or more than the limit, and this is
+			// the launch that would otherwise apply them.
+			if awsErr := ec2CheckReservedTagKeys(ltData.TagSpecifications); awsErr != nil {
+				return nil, awsErr
+			}
+			if awsErr := ec2CheckTagLimit(nil, ltData.TagSpecifications); awsErr != nil {
+				return nil, awsErr
+			}
+			tags = append(append([]EC2Tag{}, ltData.TagSpecifications...), tags...)
+		}
 	}
 
 	// The instance-type default is resolved last, so it applies only when neither the
@@ -4158,18 +4186,31 @@ func (p *EC2Plugin) resolveLaunchTemplate(goCtx context.Context, ctx *RequestCon
 // what real SDKs send — the AWS model gives that member the locationName
 // "SecurityGroupId" — with Groups.N accepted as a secondary spelling for
 // hand-built requests, mirroring runInstances.
+//
+// TagSpecification.N and IamInstanceProfile were likewise accepted and stored
+// nowhere, so a template that tagged its instances produced untagged ones and a
+// template naming a role produced an instance with none — with nothing failing to
+// say so, and a tag: filter simply returning nothing (#471).
 func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
-	const niPrefix = "LaunchTemplateData.NetworkInterface.1."
+	const ltPrefix = "LaunchTemplateData."
+	const niPrefix = ltPrefix + "NetworkInterface.1."
 
 	data := EC2LaunchTemplateData{
-		ImageID:                  params["LaunchTemplateData.ImageId"],
-		InstanceType:             params["LaunchTemplateData.InstanceType"],
-		KeyName:                  params["LaunchTemplateData.KeyName"],
-		UserData:                 params["LaunchTemplateData.UserData"],
+		ImageID:                  params[ltPrefix+"ImageId"],
+		InstanceType:             params[ltPrefix+"InstanceType"],
+		KeyName:                  params[ltPrefix+"KeyName"],
+		UserData:                 params[ltPrefix+"UserData"],
 		SubnetID:                 params[niPrefix+"SubnetId"],
 		AssociatePublicIPAddress: params[niPrefix+"AssociatePublicIpAddress"],
+		TagSpecifications:        ec2TagSpecificationTags(params, ltPrefix, "instance"),
 	}
-	if sg1 := params["LaunchTemplateData.SecurityGroupId.1"]; sg1 != "" {
+	// Name before Arn, mirroring runInstances' own precedence for the call-level
+	// pair; see [EC2LaunchTemplateData.IamInstanceProfile].
+	data.IamInstanceProfile = params[ltPrefix+"IamInstanceProfile.Name"]
+	if data.IamInstanceProfile == "" {
+		data.IamInstanceProfile = params[ltPrefix+"IamInstanceProfile.Arn"]
+	}
+	if sg1 := params[ltPrefix+"SecurityGroupId.1"]; sg1 != "" {
 		data.SecurityGroupIDs = []string{sg1}
 	}
 	data.NetworkInterfaceGroups = indexedParams(params,
@@ -4199,6 +4240,9 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 
 	ltData := parseLaunchTemplateData(req.Params)
+	if awsErr := ec2CheckTemplateTags(ltData); awsErr != nil {
+		return nil, awsErr
+	}
 
 	lt := EC2LaunchTemplate{
 		LaunchTemplateID:   ltID,

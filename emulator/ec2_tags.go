@@ -105,18 +105,29 @@ func ec2CheckTagLimit(existing, incoming []EC2Tag) *AWSError {
 // drifted apart, and only the RunInstances one was reachable by
 // [ec2CheckReservedTagKeys] (#468).
 //
-// A specification whose ResourceType names a different resource is skipped rather
-// than ending the walk, so TagSpecification.1=volume followed by
-// TagSpecification.2=instance still yields the instance's tags. An absent or empty
-// ResourceType ends it, which is how the query protocol terminates an indexed list.
-//
 // Note that authz.go builds aws:RequestTag condition keys from the same params with
 // its own walk, deliberately: it evaluates a policy against the request rather than
 // producing resource state, and the two must not share a filter on resourceType.
 func ec2LaunchTagsForResource(params map[string]string, resourceType string) []EC2Tag {
+	return ec2TagSpecificationTags(params, "", resourceType)
+}
+
+// ec2TagSpecificationTags collects the tags a TagSpecification.N list scopes to
+// resourceType, under an optional param-name prefix.
+//
+// prefix serves the nested form a launch template uses:
+// "LaunchTemplateData.TagSpecification.1.Tag.1.Key" is the same list one level in
+// (#471). It is a parameter rather than a fifth copy of this loop because the whole
+// point of [ec2LaunchTagsForResource] is that there is exactly one walk to check.
+//
+// A specification whose ResourceType names a different resource is skipped rather
+// than ending the walk, so TagSpecification.1=volume followed by
+// TagSpecification.2=instance still yields the instance's tags. An absent or empty
+// ResourceType ends it, which is how the query protocol terminates an indexed list.
+func ec2TagSpecificationTags(params map[string]string, prefix, resourceType string) []EC2Tag {
 	var tags []EC2Tag
 	for n := 1; ; n++ {
-		rt, ok := params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
+		rt, ok := params[fmt.Sprintf("%sTagSpecification.%d.ResourceType", prefix, n)]
 		if !ok || rt == "" {
 			break
 		}
@@ -124,17 +135,50 @@ func ec2LaunchTagsForResource(params map[string]string, resourceType string) []E
 			continue
 		}
 		for m := 1; ; m++ {
-			key, keyOK := params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
+			key, keyOK := params[fmt.Sprintf("%sTagSpecification.%d.Tag.%d.Key", prefix, n, m)]
 			if !keyOK || key == "" {
 				break
 			}
 			tags = append(tags, EC2Tag{
 				Key:   key,
-				Value: params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)],
+				Value: params[fmt.Sprintf("%sTagSpecification.%d.Tag.%d.Value", prefix, n, m)],
 			})
 		}
 	}
 	return tags
+}
+
+// ec2CheckTemplateTags returns an error if a launch template's instance-scoped tags
+// break either tag rule, or nil.
+//
+// Run when a template or a version of one is created, so a template carrying a
+// reserved key or more than [ec2MaxTagsPerResource] is refused up front rather than
+// at every launch that names it. Real EC2 rejects at creation too: both rules are on
+// the key and the count, not on the operation.
+//
+// The launch path checks again, deliberately — see the fallback in
+// [EC2Plugin.runInstancesWithTags] for why a stored template can still carry one.
+func ec2CheckTemplateTags(d EC2LaunchTemplateData) *AWSError {
+	if awsErr := ec2CheckReservedTagKeys(d.TagSpecifications); awsErr != nil {
+		return awsErr
+	}
+	return ec2CheckTagLimit(nil, d.TagSpecifications)
+}
+
+// ec2HasUserTags reports whether tags holds any key that is not reserved.
+//
+// It is how the launch-template tag fallback decides whether the caller named tags
+// of their own (#471). A plain len(tags) == 0 would answer "yes" for every fleet
+// instance, because substrate has already appended [ec2FleetIDTagKey] by then — so a
+// fleet launched from a tagging template would silently lose the template's tags,
+// which is the very defect #471 exists to close.
+func ec2HasUserTags(tags []EC2Tag) bool {
+	for _, t := range tags {
+		if !strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ec2CheckReservedTagKeys returns an error if any tag uses a reserved key, or nil.

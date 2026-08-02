@@ -120,13 +120,20 @@ type ec2LTVersionItem struct {
 // ResponseLaunchTemplateData has no top-level SubnetId member — a template can only
 // name a subnet, or a public-IP preference, inside a network interface. That is the
 // same asymmetry [EC2LaunchTemplateData.SubnetID] documents on the storage side.
+//
+// Note that the tag member is named tagSpecificationSet on the way out and
+// TagSpecification.N on the way in: ResponseLaunchTemplateData and
+// RequestLaunchTemplateData spell it differently, so a round-trip test has to use
+// both names.
 type ec2LTVersionDataXML struct {
-	ImageID           string                  `xml:"imageId,omitempty"`
-	InstanceType      string                  `xml:"instanceType,omitempty"`
-	KeyName           string                  `xml:"keyName,omitempty"`
-	UserData          string                  `xml:"userData,omitempty"`
-	SecurityGroupIDs  []string                `xml:"securityGroupIdSet>item,omitempty"`
-	NetworkInterfaces []ec2LTVersionNetIfcXML `xml:"networkInterfaceSet>item,omitempty"`
+	IamInstanceProfile *ec2LTVersionProfileXML  `xml:"iamInstanceProfile,omitempty"`
+	ImageID            string                   `xml:"imageId,omitempty"`
+	InstanceType       string                   `xml:"instanceType,omitempty"`
+	KeyName            string                   `xml:"keyName,omitempty"`
+	UserData           string                   `xml:"userData,omitempty"`
+	SecurityGroupIDs   []string                 `xml:"securityGroupIdSet>item,omitempty"`
+	NetworkInterfaces  []ec2LTVersionNetIfcXML  `xml:"networkInterfaceSet>item,omitempty"`
+	TagSpecifications  []ec2LTVersionTagSpecXML `xml:"tagSpecificationSet>item,omitempty"`
 }
 
 // ec2LTVersionNetIfcXML is one network interface within a version's data.
@@ -137,6 +144,20 @@ type ec2LTVersionNetIfcXML struct {
 	Groups                   []string `xml:"groupSet>item,omitempty"`
 }
 
+// ec2LTVersionProfileXML is a version's LaunchTemplateIamInstanceProfileSpecification,
+// whose two members are arn and name.
+type ec2LTVersionProfileXML struct {
+	ARN  string `xml:"arn,omitempty"`
+	Name string `xml:"name,omitempty"`
+}
+
+// ec2LTVersionTagSpecXML is one LaunchTemplateTagSpecification: a resource type and
+// the tags scoped to it.
+type ec2LTVersionTagSpecXML struct {
+	ResourceType string       `xml:"resourceType"`
+	Tags         []ec2TagItem `xml:"tagSet>item"`
+}
+
 // ec2LTVersionData renders stored template data for the wire.
 func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 	out := ec2LTVersionDataXML{
@@ -145,6 +166,27 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 		KeyName:          d.KeyName,
 		UserData:         d.UserData,
 		SecurityGroupIDs: d.SecurityGroupIDs,
+	}
+	// The profile is stored as one string, so it is echoed back in whichever member
+	// it arrived in: an "arn:"-prefixed value is an arn and anything else is a name.
+	// Synthesizing the other member — as DescribeInstances does, where AWS's response
+	// shape requires an ARN — would report a template as naming something the caller
+	// never wrote.
+	if d.IamInstanceProfile != "" {
+		if strings.HasPrefix(d.IamInstanceProfile, "arn:") {
+			out.IamInstanceProfile = &ec2LTVersionProfileXML{ARN: d.IamInstanceProfile}
+		} else {
+			out.IamInstanceProfile = &ec2LTVersionProfileXML{Name: d.IamInstanceProfile}
+		}
+	}
+	// Only the instance scope is stored, so only the instance scope reads back; see
+	// [EC2LaunchTemplateData.TagSpecifications].
+	if len(d.TagSpecifications) > 0 {
+		spec := ec2LTVersionTagSpecXML{ResourceType: "instance"}
+		for _, t := range d.TagSpecifications {
+			spec.Tags = append(spec.Tags, ec2TagItem(t))
+		}
+		out.TagSpecifications = []ec2LTVersionTagSpecXML{spec}
 	}
 	// Emit an interface only when the template actually named one, so a template
 	// carrying no networking does not read back with a phantom eth0.
@@ -214,6 +256,13 @@ func (p *EC2Plugin) createLaunchTemplateVersion(ctx *RequestContext, req *AWSReq
 		data = ec2OverlayTemplateData(srcVersion.Data, data)
 	}
 
+	// Checked after the overlay so an inherited tag set is checked too — a source
+	// version predating this check can carry a reserved key that the new version
+	// would otherwise inherit silently (#471).
+	if awsErr := ec2CheckTemplateTags(data); awsErr != nil {
+		return nil, awsErr
+	}
+
 	versions := lt.TemplateVersions()
 	newVersion := EC2LaunchTemplateVersion{
 		VersionNumber:      lt.LatestVersionNum + 1,
@@ -273,6 +322,12 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	}
 	if len(overlay.NetworkInterfaceGroups) > 0 {
 		out.NetworkInterfaceGroups = overlay.NetworkInterfaceGroups
+	}
+	if len(overlay.TagSpecifications) > 0 {
+		out.TagSpecifications = overlay.TagSpecifications
+	}
+	if overlay.IamInstanceProfile != "" {
+		out.IamInstanceProfile = overlay.IamInstanceProfile
 	}
 	return out
 }
