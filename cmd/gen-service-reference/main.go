@@ -60,6 +60,7 @@ var meta = map[string]pluginMeta{
 	"bedrock-runtime":      {"Bedrock Runtime", "REST/JSON"},
 	"budgets":              {"Budgets", "JSON"},
 	"ce":                   {"Cost Explorer", "JSON"},
+	"cloudformation":       {"CloudFormation", "Query"},
 	"cloudfront":           {"CloudFront", "REST/XML"},
 	"cloudtrail":           {"CloudTrail", "JSON"},
 	"codebuild":            {"CodeBuild", "JSON"},

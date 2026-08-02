@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **64 built-in service plugins**. This section is generated
+Substrate ships **65 built-in service plugins**. This section is generated
 from the plugin registry (`make docs-reference`), so the count and plugin list
 cannot drift from the implementation. The live count is also available from the
 `/ready` endpoint (`curl http://localhost:4566/ready`). Per-service operation,
@@ -21,60 +21,61 @@ CloudFormation, and cost detail follows below the matrix.
 | 8 | Bedrock Runtime | `bedrock-runtime` | REST/JSON |
 | 9 | Budgets | `budgets` | JSON |
 | 10 | Cost Explorer | `ce` | JSON |
-| 11 | CloudFront | `cloudfront` | REST/XML |
-| 12 | CloudTrail | `cloudtrail` | JSON |
-| 13 | CodeBuild | `codebuild` | JSON |
-| 14 | CodeDeploy | `codedeploy` | JSON |
-| 15 | CodePipeline | `codepipeline` | JSON |
-| 16 | Cognito Identity | `cognito-identity` | JSON |
-| 17 | Cognito Identity Provider | `cognito-idp` | JSON |
-| 18 | DynamoDB | `dynamodb` | JSON |
-| 19 | EC2 / VPC | `ec2` | Query |
-| 20 | ECR | `ecr` | JSON |
-| 21 | ECS | `ecs` | JSON |
-| 22 | EFS | `efs` | REST/JSON |
-| 23 | ElastiCache | `elasticache` | Query |
-| 24 | ELBv2 | `elasticloadbalancing` | Query |
-| 25 | EMR Serverless | `emrserverless` | REST/JSON |
-| 26 | EventBridge | `eventbridge` | JSON |
-| 27 | API Gateway (execute-api) | `execute-api` | REST/JSON |
-| 28 | Kinesis Data Firehose | `firehose` | JSON |
-| 29 | FSx | `fsx` | JSON |
-| 30 | Glue | `glue` | JSON |
-| 31 | Health | `health` | JSON |
-| 32 | IAM | `iam` | Query |
-| 33 | Kinesis Data Streams | `kinesis` | JSON |
-| 34 | KMS | `kms` | JSON |
-| 35 | Lambda | `lambda` | REST/JSON |
-| 36 | CloudWatch Logs | `logs` | JSON |
-| 37 | CloudWatch | `monitoring` | Query |
-| 38 | MSK | `msk` | REST/JSON |
-| 39 | HealthOmics | `omics` | REST/JSON |
-| 40 | OpenSearch | `opensearch` | REST/JSON |
-| 41 | Organizations | `organizations` | JSON |
-| 42 | Price List Query API | `pricing` | JSON |
-| 43 | QuickSight | `quicksight` | REST/JSON |
-| 44 | RAM | `ram` | REST/JSON |
-| 45 | RDS | `rds` | Query |
-| 46 | Redshift | `redshift` | Query |
-| 47 | Redshift Data API | `redshift-data` | JSON |
-| 48 | Route 53 | `route53` | REST/XML |
-| 49 | S3 | `s3` | REST/XML |
-| 50 | SageMaker | `sagemaker` | JSON |
-| 51 | EventBridge Scheduler | `scheduler` | REST/JSON |
-| 52 | Secrets Manager | `secretsmanager` | JSON |
-| 53 | Service Quotas | `servicequotas` | JSON |
-| 54 | SES v2 | `sesv2` | REST/JSON |
-| 55 | SNS | `sns` | Query |
-| 56 | SQS | `sqs` | JSON |
-| 57 | SSM | `ssm` | JSON |
-| 58 | SSO / Identity Store | `sso` | REST/JSON |
-| 59 | Step Functions | `states` | JSON |
-| 60 | STS | `sts` | Query |
-| 61 | Resource Groups Tagging | `tagging` | JSON |
-| 62 | Timestream | `timestream` | JSON |
-| 63 | Transfer Family | `transfer` | JSON |
-| 64 | WAFv2 | `wafv2` | JSON |
+| 11 | CloudFormation | `cloudformation` | Query |
+| 12 | CloudFront | `cloudfront` | REST/XML |
+| 13 | CloudTrail | `cloudtrail` | JSON |
+| 14 | CodeBuild | `codebuild` | JSON |
+| 15 | CodeDeploy | `codedeploy` | JSON |
+| 16 | CodePipeline | `codepipeline` | JSON |
+| 17 | Cognito Identity | `cognito-identity` | JSON |
+| 18 | Cognito Identity Provider | `cognito-idp` | JSON |
+| 19 | DynamoDB | `dynamodb` | JSON |
+| 20 | EC2 / VPC | `ec2` | Query |
+| 21 | ECR | `ecr` | JSON |
+| 22 | ECS | `ecs` | JSON |
+| 23 | EFS | `efs` | REST/JSON |
+| 24 | ElastiCache | `elasticache` | Query |
+| 25 | ELBv2 | `elasticloadbalancing` | Query |
+| 26 | EMR Serverless | `emrserverless` | REST/JSON |
+| 27 | EventBridge | `eventbridge` | JSON |
+| 28 | API Gateway (execute-api) | `execute-api` | REST/JSON |
+| 29 | Kinesis Data Firehose | `firehose` | JSON |
+| 30 | FSx | `fsx` | JSON |
+| 31 | Glue | `glue` | JSON |
+| 32 | Health | `health` | JSON |
+| 33 | IAM | `iam` | Query |
+| 34 | Kinesis Data Streams | `kinesis` | JSON |
+| 35 | KMS | `kms` | JSON |
+| 36 | Lambda | `lambda` | REST/JSON |
+| 37 | CloudWatch Logs | `logs` | JSON |
+| 38 | CloudWatch | `monitoring` | Query |
+| 39 | MSK | `msk` | REST/JSON |
+| 40 | HealthOmics | `omics` | REST/JSON |
+| 41 | OpenSearch | `opensearch` | REST/JSON |
+| 42 | Organizations | `organizations` | JSON |
+| 43 | Price List Query API | `pricing` | JSON |
+| 44 | QuickSight | `quicksight` | REST/JSON |
+| 45 | RAM | `ram` | REST/JSON |
+| 46 | RDS | `rds` | Query |
+| 47 | Redshift | `redshift` | Query |
+| 48 | Redshift Data API | `redshift-data` | JSON |
+| 49 | Route 53 | `route53` | REST/XML |
+| 50 | S3 | `s3` | REST/XML |
+| 51 | SageMaker | `sagemaker` | JSON |
+| 52 | EventBridge Scheduler | `scheduler` | REST/JSON |
+| 53 | Secrets Manager | `secretsmanager` | JSON |
+| 54 | Service Quotas | `servicequotas` | JSON |
+| 55 | SES v2 | `sesv2` | REST/JSON |
+| 56 | SNS | `sns` | Query |
+| 57 | SQS | `sqs` | JSON |
+| 58 | SSM | `ssm` | JSON |
+| 59 | SSO / Identity Store | `sso` | REST/JSON |
+| 60 | Step Functions | `states` | JSON |
+| 61 | STS | `sts` | Query |
+| 62 | Resource Groups Tagging | `tagging` | JSON |
+| 63 | Timestream | `timestream` | JSON |
+| 64 | Transfer Family | `transfer` | JSON |
+| 65 | WAFv2 | `wafv2` | JSON |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---
@@ -84,6 +85,137 @@ CloudFormation resource types, and cost notes for the most heavily used plugins.
 They are maintained by hand and cover a subset of the plugins in the matrix
 above; the remaining plugins are registered and functional but not yet detailed
 here.
+
+---
+
+## CloudFormation
+
+**Endpoint:** `cloudformation.{region}.amazonaws.com`
+**Protocol:** AWS Query (form-encoded, `Action=` parameter)
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateStack | Deploys every resource in `TemplateBody` and returns the stack ARN |
+| UpdateStack | Re-deploys the template; an omitted `TemplateBody` re-uses the stored one |
+| DeleteStack | Deletes the stack's resources; deleting an absent stack succeeds |
+| DescribeStacks | One stack by `StackName`, or every stack when omitted |
+| ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
+| DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
+| GetTemplate | Returns the stored `TemplateBody` byte-for-byte |
+| CreateChangeSet | `ChangeSetType=UPDATE` only; see below |
+| DescribeChangeSet | Accepts a bare change-set name or its ARN |
+| ExecuteChangeSet | Applies the change and consumes the set |
+| ListChangeSets | Pending change sets for a stack |
+| DeleteChangeSet | Discards a pending set; deleting an absent set succeeds |
+| DetectStackDrift | Returns a `StackDriftDetectionId` |
+| DescribeStackDriftDetectionStatus | Resolves that ID to a completed detection |
+| DescribeStackResourceDrifts | Per-resource drift; honours `StackResourceDriftStatusFilters.member.N` |
+
+`TemplateURL` is refused with `ValidationError` rather than ignored: fetching a
+template is a network read substrate does not perform, and silently accepting the
+parameter deployed a stack with no resources in it.
+
+### Stacks share state with every other plugin
+
+The plugin is a thin adapter over the same stack model substrate has always
+exposed to in-process Go callers, and it deploys through the same plugin registry
+the server routes with. A resource a template declares is therefore a **real**
+resource in the corresponding plugin:
+
+```
+aws cloudformation create-stack --stack-name probe \
+  --template-body '{"Resources":{"B":{"Type":"AWS::S3::Bucket",
+                    "Properties":{"BucketName":"probe-data"}}}}'
+aws s3api head-bucket --bucket probe-data      # 200 — a real bucket
+aws s3api put-object --bucket probe-data --key k --body f
+```
+
+The reverse also holds: a stack created in process through `emulator.BettyClient`
+is visible to `DescribeStacks` over the wire, and a wire-created stack is visible
+to the in-process API. There is one set of stacks.
+
+Deleting a stack's resource outside CloudFormation is the drift substrate models
+— `DescribeStackResourceDrifts` reports it as `DELETED`.
+
+### Templates
+
+113 resource types are supported; each service section below lists the types it
+backs under **Betty CFN resource types**. A template body may be JSON or YAML.
+
+`Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`, `Fn::Select`, `Fn::Split`,
+`Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or` and `Fn::Not` resolve,
+as do the `AWS::Region`, `AWS::AccountId`, `AWS::StackName` and `AWS::NoValue`
+pseudo-parameters. `Fn::FindInMap`, `Fn::ImportValue`, `Fn::Cidr`,
+`Fn::GetAZs` and the remaining pseudo-parameters (`AWS::Partition`,
+`AWS::URLSuffix`, `AWS::StackId`, `AWS::NotificationARNs`) are **not** resolved —
+an unrecognized intrinsic falls back to its JSON encoding and an unrecognized
+`Ref` to the reference string itself, so a template using one deploys with a
+literal where a value should be rather than failing.
+
+Parameters use the Query protocol's list encoding, which is what every SDK and
+the CLI send:
+
+```
+Parameters.member.1.ParameterKey=Env
+Parameters.member.1.ParameterValue=staging
+Parameters.member.2.ParameterKey=Size
+Parameters.member.2.UsePreviousValue=true
+```
+
+`UsePreviousValue=true` resolves against the stack's stored parameters, so an
+`UpdateStack` need not repeat every value.
+
+Template **transforms** are not applied — `GetTemplate` reports
+`StagesAvailable: [Original]` only, and a SAM or macro template reaches the
+deployer unexpanded.
+
+### Change sets describe, they do not stage
+
+A change set records the template that would be applied and reports the
+resource-level changes it implies. `ExecuteChangeSet` applies it and deletes the
+set, so `DescribeChangeSet` afterwards reports `ChangeSetNotFound` (404 — unlike
+the stack family, which reports `ValidationError` at 400).
+
+`ChangeSetType=CREATE` is refused: it would have to produce a stack in
+`REVIEW_IN_PROGRESS`, a state the stack model has no representation for. Create
+the stack, then change-set the update.
+
+### DescribeStackEvents is not supported
+
+`DescribeStackEvents` returns `UnsupportedOperation` (400). This is deliberate,
+and `UnsupportedOperation` is substrate's own signal rather than a documented
+CloudFormation code — real CloudFormation has no error for an operation it
+implements.
+
+A stack carries one status string; there is no per-resource event model behind
+it. Answering the call would mean synthesizing a plausible
+`CREATE_IN_PROGRESS → CREATE_COMPLETE` pair per resource with invented
+timestamps, which is inventing observations — the opposite of what an emulator
+that exists to be trusted should do. A consumer polling events for completion
+should poll `DescribeStacks` for `StackStatus` instead. Tracked in
+[#501](https://github.com/scttfrdmn/substrate/issues/501).
+
+### Stack status is terminal on return
+
+`CreateStack` deploys synchronously and returns with the stack already
+`CREATE_COMPLETE`; `UpdateStack` returns `UPDATE_COMPLETE`. There is no
+`*_IN_PROGRESS` window, so a `wait stack-create-complete` succeeds immediately
+rather than polling. That is the deterministic-clock trade: a stack's observable
+state does not depend on how long a test waited.
+
+### Stack and change-set ARNs are deterministic
+
+The UUID in a stack or change-set ARN is derived from the account, region and
+name, not from a clock or a PRNG, so the same call produces the same ARN on a
+replay. `StackId` is stable across `CreateStack`, `DescribeStacks` and
+`ListStacks`.
+
+### Cost
+
+CloudFormation operations are free. The resources a template deploys are costed
+by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 
 ---
 

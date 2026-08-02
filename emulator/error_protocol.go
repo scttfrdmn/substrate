@@ -50,6 +50,7 @@ const (
 //     answers successes in query XML, so its errors match that.
 var serviceErrorProtocols = map[string]awsErrorProtocol{
 	// Query, ec2 and REST-XML.
+	"cloudformation":       errProtoQueryXML,
 	"cloudfront":           errProtoQueryXML,
 	"ec2":                  errProtoQueryXML,
 	"elasticache":          errProtoQueryXML,
