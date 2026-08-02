@@ -55,6 +55,9 @@ docs-versions: ## Fail if docs/README pin a stale version in prose
 version-check: ## Fail if the build's -ldflags do not reach the version the server reports
 	./scripts/check-version-stamping.sh
 
+tag-releases-check: ## Fail if a published version tag has no GitHub Release behind it
+	./scripts/check-tag-releases.sh
+
 bench: ## Run benchmarks
 	go test -bench=. -benchmem -benchtime=5s ./...
 

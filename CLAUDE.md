@@ -127,7 +127,9 @@ These enforce the rules below server-side — do not attempt to bypass them.
    rather than the API model, and a `## Compatibility` section stating what a
    consumer must know before upgrading. Close with the CHANGELOG anchor and the
    compare link. A release body is editable after publication (`gh release edit`),
-   unlike the tag it points at.
+   unlike the tag it points at. `make tag-releases-check` asserts this step
+   happened; the `Release Audit` workflow runs it daily, so a forgotten Release
+   surfaces within a day rather than at the next release.
 5. Close the issues the release resolves. A `(#N)` reference in a commit or PR
    **title** only links — it does not auto-close. Use a `Closes #N` / `Fixes #N`
    keyword in the PR **body** (or the merged commit message body), or close the
