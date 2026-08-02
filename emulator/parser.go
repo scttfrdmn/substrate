@@ -118,6 +118,21 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 		Path:      effectivePath,
 	}
 
+	// S3 supplies none of extractOperation's first three signals, so it fell
+	// through to the HTTP-method fallback and every S3 request entered the
+	// pipeline named "PUT"/"GET"/"POST"/"DELETE"/"HEAD". The plugin resolved the
+	// semantic name, but not until it handled the request — one step after fault
+	// injection, cost and consistency had already read req.Operation. A fault
+	// rule naming PutObject therefore matched nothing while a rule naming PUT
+	// took out UploadPart too (#480). parseS3Operation is pure and depends only
+	// on fields already populated above, so resolving here makes the canonical
+	// name available to every step.
+	if service == "s3" {
+		if _, _, op := parseS3Operation(req); op != "" {
+			req.Operation = op
+		}
+	}
+
 	reqCtx := &RequestContext{
 		RequestID: generateRequestID(),
 		AccountID: account,

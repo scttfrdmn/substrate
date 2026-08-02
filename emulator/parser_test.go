@@ -146,6 +146,85 @@ func TestParseAWSRequest_Operation(t *testing.T) {
 	}
 }
 
+// TestParseAWSRequest_S3SemanticOperation covers #480 finding 1. S3 supplies none
+// of extractOperation's first three signals, so every S3 request used to enter the
+// pipeline named after its HTTP method and only acquired a semantic name inside the
+// plugin — one step after fault injection, cost and consistency had already read it.
+// A fault rule naming PutObject matched nothing while one naming PUT also took out
+// UploadPart, and the two cannot be told apart from the caller's side.
+func TestParseAWSRequest_S3SemanticOperation(t *testing.T) {
+	tests := []struct {
+		name    string
+		method  string
+		url     string
+		headers map[string]string
+		want    string
+	}{
+		{"put object", http.MethodPut, "http://s3.amazonaws.com/b/k", nil, "PutObject"},
+		{"get object", http.MethodGet, "http://s3.amazonaws.com/b/k", nil, "GetObject"},
+		{"head object", http.MethodHead, "http://s3.amazonaws.com/b/k", nil, "HeadObject"},
+		{"delete object", http.MethodDelete, "http://s3.amazonaws.com/b/k", nil, "DeleteObject"},
+		{"create bucket", http.MethodPut, "http://s3.amazonaws.com/b", nil, "CreateBucket"},
+		{"head bucket", http.MethodHead, "http://s3.amazonaws.com/b", nil, "HeadBucket"},
+		{"list buckets", http.MethodGet, "http://s3.amazonaws.com/", nil, "ListBuckets"},
+		{"list objects v2", http.MethodGet, "http://s3.amazonaws.com/b?list-type=2", nil, "ListObjectsV2"},
+		// The multipart family: three sub-operations sharing a method and a path,
+		// separated only by a query parameter. These are what a rule on the bare
+		// method could not distinguish.
+		{"create multipart upload", http.MethodPost, "http://s3.amazonaws.com/b/k?uploads", nil, "CreateMultipartUpload"},
+		{"upload part", http.MethodPut, "http://s3.amazonaws.com/b/k?partNumber=1&uploadId=u", nil, "UploadPart"},
+		{"complete multipart upload", http.MethodPost, "http://s3.amazonaws.com/b/k?uploadId=u", nil, "CompleteMultipartUpload"},
+		{"abort multipart upload", http.MethodDelete, "http://s3.amazonaws.com/b/k?uploadId=u", nil, "AbortMultipartUpload"},
+		{
+			name:    "copy object",
+			method:  http.MethodPut,
+			url:     "http://s3.amazonaws.com/b/k",
+			headers: map[string]string{"X-Amz-Copy-Source": "/src/k"},
+			want:    "CopyObject",
+		},
+		{"put object acl", http.MethodPut, "http://s3.amazonaws.com/b/k?acl", nil, "PutObjectAcl"},
+		{"get bucket acl", http.MethodGet, "http://s3.amazonaws.com/b?acl", nil, "GetBucketAcl"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(tt.method, tt.url, nil)
+			r.Host = "s3.amazonaws.com"
+			for k, v := range tt.headers {
+				r.Header.Set(k, v)
+			}
+			req, _, err := emulator.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, "s3", req.Service)
+			assert.Equal(t, tt.want, req.Operation)
+		})
+	}
+}
+
+// TestParseAWSRequest_S3VirtualHostSemanticOperation asserts the resolution reads
+// the normalized path, not the raw one: virtual-hosted addressing puts the bucket in
+// the Host, so a request whose URL path is "/k" is still a PutObject rather than a
+// CreateBucket for a bucket named "k". Getting this backwards would arm a rule on
+// the wrong operation for every SDK using the default addressing style.
+func TestParseAWSRequest_S3VirtualHostSemanticOperation(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "http://mybucket.s3.amazonaws.com/k", nil)
+	r.Host = "mybucket.s3.amazonaws.com"
+	req, _, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.Equal(t, "s3", req.Service)
+	assert.Equal(t, "PutObject", req.Operation)
+}
+
+// TestParseAWSRequest_NonS3KeepsMethodFallback guards the other side: only S3 is
+// resolved here, so a service without an Action or an X-Amz-Target still reports its
+// HTTP method and no existing fault fixture on a bare method regresses.
+func TestParseAWSRequest_NonS3KeepsMethodFallback(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "http://localhost/anything", nil)
+	req, _, err := emulator.ParseAWSRequest(r)
+	require.NoError(t, err)
+	assert.NotEqual(t, "s3", req.Service)
+	assert.Equal(t, http.MethodGet, req.Operation)
+}
+
 func TestParseAWSRequest_Region(t *testing.T) {
 	tests := []struct {
 		name       string

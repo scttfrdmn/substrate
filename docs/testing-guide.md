@@ -406,15 +406,47 @@ func TestRetryOnS3Error(t *testing.T) {
 | Field | Description |
 |-------|-------------|
 | `Service` | AWS service name (`"s3"`, `"lambda"`, …). Empty = all services. |
-| `Operation` | Operation name (`"PutObject"`, …). Empty = all operations. |
+| `Operation` | Operation name (`"PutObject"`, …). Empty = all operations. Always the semantic operation, S3 included. |
+| `PathSuffix` | Request path must end with this (`".parquet"`, `"/big.bin"`). Empty = any path. |
+| `QueryKey` | Request must carry this query parameter (`"uploads"`, `"uploadId"`, `"partNumber"`). The value is not compared. Empty = any request. |
+| `HeaderPrefix` | Request must carry a header whose name starts with this, compared case-insensitively. Empty = any request. |
 | `FaultType` | `"error"` or `"latency"`. |
 | `ErrorCode` | AWS error code returned on `"error"` faults. |
 | `HTTPStatus` | HTTP status code (default 500). |
 | `ErrorMsg` | Human-readable error message. |
 | `LatencyMs` | Artificial delay in milliseconds for `"latency"` faults. |
 | `Probability` | Fraction of matching requests that fire [0.0, 1.0]. |
+| `Times` | How many matching requests the rule fires on. **Zero means one**, not unlimited; a negative value is unlimited. |
+| `Fired` | Read-only: how many faults this rule has injected. Reported by `GET /v1/fault/rules` and summed by `FaultsFired()`. |
 
-Rules are evaluated in order; the first matching rule fires.
+Rules are evaluated in order; the first matching rule that has not reached its
+`Times` bound fires. Every non-empty matcher must hold, so a rule naming both an
+operation and a `QueryKey` fires only where both apply.
+
+Four things are worth knowing before writing a fixture (all four are #480):
+
+- **`Operation` is the semantic name for S3 too.** A rule naming `PutObject` fires
+  on `PutObject` and not on `UploadPart`, which is also a `PUT`. A rule naming a
+  bare HTTP method no longer matches an S3 request at all.
+- **`Times` is what makes retry assertable.** Fail twice, then succeed, is the
+  outcome that distinguishes working retry from no retry; an unbounded rule can
+  only ever produce failure. Set `Times: -1` when a fixture deliberately wants the
+  old unbounded behavior — for instance when the test itself clears the rule and
+  asserts the retry succeeds, which passes vacuously against a spent rule.
+- **Assert `Fired`.** A rule that matches nothing produces exactly the same passing
+  test as a consumer's retry working. `FaultsFired()` in process, or the per-rule
+  `fired` member of `GET /v1/fault/rules` over the wire, is what tells them apart.
+  Arming rules again resets the counts, so a fixture that re-arms between phases
+  gets its full budget back.
+- **`Probability` depends on request ordering.** The PRNG is shared by every rule in
+  a `FaultConfig` and is rolled once per matching rule per request, so a fixed seed
+  reproduces a run only while the sequence of requests is unchanged — adding a
+  request upstream, or a retry, shifts every later roll. Prefer `Times` for a
+  bounded outcome: it needs no roll at all. See #510.
+
+An injected error is serialized in the same wire shape the target service's own
+errors use, so an SDK recovers the code rather than falling back to the HTTP status
+(an injected S3 `SlowDown` used to arrive as `ServiceUnavailable`).
 
 <!-- TODO(#178): document server.WithFaultController option once stabilised -->
 

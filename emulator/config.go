@@ -337,7 +337,21 @@ type FaultRuleCfg struct {
 	Service string `mapstructure:"service"`
 
 	// Operation restricts the rule to a specific AWS operation. Empty matches all.
+	// The name is the semantic operation for every service, S3 included; see
+	// [FaultRule.Operation].
 	Operation string `mapstructure:"operation"`
+
+	// PathSuffix restricts the rule to requests whose path ends with this string.
+	// Empty matches all. See [FaultRule.PathSuffix].
+	PathSuffix string `mapstructure:"path_suffix"`
+
+	// QueryKey restricts the rule to requests carrying this query parameter.
+	// Empty matches all. See [FaultRule.QueryKey].
+	QueryKey string `mapstructure:"query_key"`
+
+	// HeaderPrefix restricts the rule to requests carrying a header whose name
+	// begins with this prefix. Empty matches all. See [FaultRule.HeaderPrefix].
+	HeaderPrefix string `mapstructure:"header_prefix"`
 
 	// FaultType selects the fault kind: "error" or "latency".
 	FaultType string `mapstructure:"fault_type"`
@@ -357,14 +371,36 @@ type FaultRuleCfg struct {
 	// Probability is the fraction of matching requests that trigger the fault.
 	// Range [0.0, 1.0]; default 1.0.
 	Probability float64 `mapstructure:"probability"`
+
+	// Times bounds how many matching requests the rule fires on. Zero means one
+	// and a negative value means unlimited; see [FaultRule.Times] for why zero is
+	// not unlimited.
+	Times int `mapstructure:"times"`
 }
 
 // ToFaultConfig converts FaultCfg to the [FaultConfig] type used by
 // [NewFaultController].
+//
+// The fields are copied one by one rather than converted wholesale: [FaultRule]
+// carries a Fired count the controller maintains, which has no place in a
+// configuration file, so the two structs are deliberately not identical.
 func (c FaultCfg) ToFaultConfig() FaultConfig {
 	rules := make([]FaultRule, len(c.Rules))
 	for i, r := range c.Rules {
-		rules[i] = FaultRule(r)
+		rules[i] = FaultRule{
+			Service:      r.Service,
+			Operation:    r.Operation,
+			PathSuffix:   r.PathSuffix,
+			QueryKey:     r.QueryKey,
+			HeaderPrefix: r.HeaderPrefix,
+			FaultType:    r.FaultType,
+			ErrorCode:    r.ErrorCode,
+			HTTPStatus:   r.HTTPStatus,
+			ErrorMsg:     r.ErrorMsg,
+			LatencyMs:    r.LatencyMs,
+			Probability:  r.Probability,
+			Times:        r.Times,
+		}
 	}
 	return FaultConfig{
 		Enabled: c.Enabled,

@@ -245,6 +245,7 @@ const (
 	ErrProtoQueryXMLForTest = "query-xml"
 	ErrProtoJSONRPCForTest  = "json-rpc"
 	ErrProtoRESTJSONForTest = "rest-json"
+	ErrProtoS3XMLForTest    = "s3-xml"
 	ErrProtoUnknownForTest  = "unknown"
 )
 
@@ -258,20 +259,31 @@ func ErrorProtocolForTest(service, contentType string) string {
 		return ErrProtoJSONRPCForTest
 	case errProtoRESTJSON:
 		return ErrProtoRESTJSONForTest
+	case errProtoS3XML:
+		return ErrProtoS3XMLForTest
 	default:
 		return ErrProtoUnknownForTest
 	}
 }
 
 // MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
-// the ErrProto*ForTest names.
-func MarshalAWSErrorForTest(code, message, proto, jsonContentType string) (body []byte, contentType string, headers map[string]string) {
+// the ErrProto*ForTest names. status is the HTTP status the error carries, which
+// the S3 arm needs because it builds a whole response rather than a body alone.
+func MarshalAWSErrorForTest(code, message, proto, jsonContentType string, status int) (body []byte, contentType string, headers map[string]string) {
 	p := errProtoQueryXML
 	switch proto {
 	case ErrProtoJSONRPCForTest:
 		p = errProtoJSONRPC
 	case ErrProtoRESTJSONForTest:
 		p = errProtoRESTJSON
+	case ErrProtoS3XMLForTest:
+		p = errProtoS3XML
 	}
-	return marshalAWSError(&AWSError{Code: code, Message: message}, p, jsonContentType)
+	return marshalAWSError(&AWSError{Code: code, Message: message, HTTPStatus: status}, p, jsonContentType)
+}
+
+// S3ErrorResponseForTest wraps s3ErrorResponseWith so a test can compare an
+// error the S3 plugin builds against one the pipeline builds, byte for byte.
+func S3ErrorResponseForTest(code, message string, status int) []byte {
+	return s3ErrorResponseWith(s3Error{Code: code, Message: message, Status: status}).Body
 }
