@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.85.0] - 2026-08-02
+
 ### Added
 - EC2: `CreateTags` and `DeleteTags` now reject tag keys using the reserved `aws:`
   prefix (#452). Substrate accepted them, so a consumer could tag a resource in a way
@@ -312,12 +314,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   purpose. `DeletePublicAccessBlock` returns `204`, is idempotent, and touches nothing
   but the configuration.
 
-  Two deliberate limits, both documented in `docs/services.md`: substrate does not
-  apply S3's April 2023 default of enabling all four settings on a newly created
-  bucket, because that default comes from AWS-managed account state substrate does not
-  model and seeding it would make the `NoSuchPublicAccessBlockConfiguration` path
-  unreachable; and the settings are recorded but not enforced, so nothing yet rejects a
-  public ACL or bucket policy.
+  One deliberate limit, documented in `docs/services.md`: substrate does not apply
+  S3's April 2023 default of enabling all four settings on a newly created bucket,
+  because that default comes from AWS-managed account state substrate does not model
+  and seeding it would make the `NoSuchPublicAccessBlockConfiguration` path
+  unreachable. Enforcement of `BlockPublicAcls` and `BlockPublicPolicy` landed in this
+  same release — see the `### Fixed` entry for #458.
 
 ## [v0.84.0] - 2026-08-01
 
@@ -3120,7 +3122,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.84.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.85.0...HEAD
+[v0.85.0]: https://github.com/scttfrdmn/substrate/compare/v0.84.0...v0.85.0
 [v0.84.0]: https://github.com/scttfrdmn/substrate/compare/v0.83.0...v0.84.0
 [v0.83.0]: https://github.com/scttfrdmn/substrate/compare/v0.82.0...v0.83.0
 [v0.82.0]: https://github.com/scttfrdmn/substrate/compare/v0.81.0...v0.82.0
