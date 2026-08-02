@@ -78,6 +78,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeSpotPriceHistory` now derive their zone names from one list, so filtering
   an offerings query by a zone you just enumerated cannot return empty.
 
+- **Five service-role AWS managed policies are now bundled** (#484), taking the
+  catalog from 47 policies to 52: `AmazonSSMManagedInstanceCore`,
+  `AmazonEC2ContainerRegistryReadOnly`,
+  `service-role/AmazonECSTaskExecutionRolePolicy`,
+  `service-role/AWSLambdaBasicExecutionRole` and
+  `service-role/AWSLambdaVPCAccessExecutionRole`. `GetPolicy` on any of them returned
+  `NoSuchEntity` before, so the sequence every consumer provisioning an SSM-managed
+  instance profile performs — `CreateRole`, `AttachRolePolicy`, `GetPolicy` — failed
+  at the last step on an ARN the attach had just accepted.
+
+  The gap was a population gap rather than an oversight about any one policy. All 47
+  bundled policies were human-operator policies: `AdministratorAccess`,
+  `PowerUserAccess`, and per-service `FullAccess`/`ReadOnlyAccess` pairs, which are
+  attached to users and groups. None was a service-role policy — what an *instance
+  profile* or *execution role* carries, and therefore what IaC actually provisions.
+  `AmazonSSMFullAccess` was present; `AmazonSSMManagedInstanceCore`, the policy an
+  SSM-managed instance needs, was not.
+
+  Each document is verbatim from the policy's page in the AWS managed policy
+  reference, and each policy ID is real, from a recorded `get-policy` snapshot rather
+  than synthesised — so a consumer asserting on an `ANPA…` ID sees the value AWS
+  reports. Default versions likewise follow AWS (`v2` for
+  `AmazonSSMManagedInstanceCore`, `v3` for `AmazonEC2ContainerRegistryReadOnly` and
+  `AWSLambdaVPCAccessExecutionRole`) instead of a blanket `v1`. The documents are read
+  by the IAM policy evaluator, so they are behaviour and not decoration.
+
+  The catalog can now express a **path**, which three of the five need. A policy under
+  a path reports it in `Path` (`/service-role/`) and keeps it out of `PolicyName`,
+  matching AWS — the distinction `ListPolicies --path-prefix` reads, and getting it
+  wrong would make a policy findable by ARN and invisible to a path query. Bundled
+  policies are constructed through one function so the ARN and the path cannot
+  disagree.
+
+  `AttachRolePolicy` still accepts a policy ARN that no `GetPolicy` can resolve, which
+  is the general asymmetry #484 also offered to fix. Not taken, deliberately:
+  substrate bundles 52 of roughly 1,200 AWS managed policies, so refusing an
+  unresolvable ARN would fail every attach of the other ~1,150 — breaking working
+  consumer code, where the current behaviour merely fails to catch a typo. Seeding the
+  catalog fixes the reported case; the asymmetry is tracked in #499 so the decision is
+  recorded rather than implied. Two further gaps found while verifying this one are
+  filed: `ListPolicies` applies neither `Scope` nor `PathPrefix` and never lists
+  bundled policies (#497), and `GetPolicyVersion` is unimplemented, so no policy
+  document is observable over the wire at all (#498).
+
 ## [v0.86.0] - 2026-08-02
 
 ### Added
