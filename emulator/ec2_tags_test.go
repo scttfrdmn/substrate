@@ -959,7 +959,7 @@ func TestEC2_Fleet_TagLimitWithStampedTag(t *testing.T) {
 // The check and the apply step read the same state key through one function, so a
 // resource type the apply step tags but the check could not resolve would be tagged
 // past the limit. This table is what makes that impossible to introduce quietly: it
-// walks all eight ID prefixes substrate recognises.
+// walks all eight ID prefixes substrate recognizes.
 //
 // It asserts on the rejection rather than a tag read-back because, apart from
 // instances and NAT gateways, substrate's Describe operations for these resources do
