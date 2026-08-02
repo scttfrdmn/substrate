@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -950,4 +951,161 @@ func TestEC2_Fleet_TagLimitWithStampedTag(t *testing.T) {
 	fleetID, ok := ec2InstanceTagValue(t, ts, ids[0], fleetIDTagKey)
 	assert.True(t, ok, "the stamp must survive a fully-tagged launch")
 	assert.Equal(t, fleet.FleetID, fleetID)
+}
+
+// TestEC2_CreateTags_TagLimitAppliesToEveryTaggableResource pins that the limit is
+// counted for every resource type substrate can tag, not just instances.
+//
+// The check and the apply step read the same state key through one function, so a
+// resource type the apply step tags but the check could not resolve would be tagged
+// past the limit. This table is what makes that impossible to introduce quietly: it
+// walks all eight ID prefixes substrate recognises.
+//
+// It asserts on the rejection rather than a tag read-back because, apart from
+// instances and NAT gateways, substrate's Describe operations for these resources do
+// not emit a tagSet at all — the rejection is the observation available.
+func TestEC2_CreateTags_TagLimitAppliesToEveryTaggableResource(t *testing.T) {
+	// eipAllocationID allocates an Elastic IP and returns its allocation ID.
+	eipAllocationID := func(t *testing.T, ts *httptest.Server) string {
+		t.Helper()
+		var addr struct {
+			AllocationID string `xml:"allocationId"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "AllocateAddress", "Domain": "vpc"}, &addr)
+		require.NotEmpty(t, addr.AllocationID)
+		return addr.AllocationID
+	}
+
+	// vpcID creates a VPC and returns its ID, for the resources that need a parent.
+	vpcID := func(t *testing.T, ts *httptest.Server) string {
+		t.Helper()
+		var vpc struct {
+			VPCID string `xml:"vpc>vpcId"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.7.0.0/16"}, &vpc)
+		require.NotEmpty(t, vpc.VPCID)
+		return vpc.VPCID
+	}
+
+	tests := []struct {
+		name   string
+		prefix string
+		create func(t *testing.T, ts *httptest.Server) string
+	}{
+		{name: "instance", prefix: "i-", create: ec2TagTestInstance},
+		{name: "subnet", prefix: "subnet-", create: ec2TagTestSubnet},
+		{name: "vpc", prefix: "vpc-", create: vpcID},
+		{name: "elastic ip", prefix: "eipalloc-", create: eipAllocationID},
+		{
+			name:   "security group",
+			prefix: "sg-",
+			create: func(t *testing.T, ts *httptest.Server) string {
+				t.Helper()
+				var sg struct {
+					GroupID string `xml:"groupId"`
+				}
+				ec2FleetXML(t, ts, map[string]string{
+					"Action":           "CreateSecurityGroup",
+					"GroupName":        "tag-limit-sg",
+					"GroupDescription": "tag limit",
+					"VpcId":            vpcID(t, ts),
+				}, &sg)
+				require.NotEmpty(t, sg.GroupID)
+				return sg.GroupID
+			},
+		},
+		{
+			name:   "internet gateway",
+			prefix: "igw-",
+			create: func(t *testing.T, ts *httptest.Server) string {
+				t.Helper()
+				var igw struct {
+					ID string `xml:"internetGateway>internetGatewayId"`
+				}
+				ec2FleetXML(t, ts, map[string]string{"Action": "CreateInternetGateway"}, &igw)
+				require.NotEmpty(t, igw.ID)
+				return igw.ID
+			},
+		},
+		{
+			name:   "route table",
+			prefix: "rtb-",
+			create: func(t *testing.T, ts *httptest.Server) string {
+				t.Helper()
+				var rtb struct {
+					ID string `xml:"routeTable>routeTableId"`
+				}
+				ec2FleetXML(t, ts, map[string]string{
+					"Action": "CreateRouteTable",
+					"VpcId":  vpcID(t, ts),
+				}, &rtb)
+				require.NotEmpty(t, rtb.ID)
+				return rtb.ID
+			},
+		},
+		{
+			name:   "nat gateway",
+			prefix: "nat-",
+			create: func(t *testing.T, ts *httptest.Server) string {
+				t.Helper()
+				var gw struct {
+					ID string `xml:"natGateway>natGatewayId"`
+				}
+				ec2FleetXML(t, ts, map[string]string{
+					"Action":           "CreateNatGateway",
+					"SubnetId":         ec2TagTestSubnet(t, ts),
+					"ConnectivityType": "private",
+				}, &gw)
+				require.NotEmpty(t, gw.ID)
+				return gw.ID
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			id := tc.create(t, ts)
+			require.True(t, strings.HasPrefix(id, tc.prefix),
+				"%s should have the %q prefix, got %s", tc.name, tc.prefix, id)
+
+			status, _, _ := ec2CreateTags(t, ts, id, ec2NumberedTags("key", ec2TagLimit))
+			require.Equal(t, http.StatusOK, status, "50 tags must be accepted on a %s", tc.name)
+
+			status, code, message := ec2CreateTags(t, ts, id, map[string]string{
+				"Tag.1.Key":   "one-too-many",
+				"Tag.1.Value": "v",
+			})
+			assert.Equal(t, http.StatusBadRequest, status, "the 51st tag on a %s", tc.name)
+			assert.Equal(t, "TagLimitExceeded", code)
+			assert.Equal(t, ec2TagLimitMessage, message)
+		})
+	}
+}
+
+// TestEC2_CreateTags_UncountedResourceIDs pins that an ID the apply step will not touch
+// is not counted against either.
+//
+// Substrate's CreateTags ignores an ID it cannot resolve rather than rejecting it, so
+// counting one would refuse a request real EC2 accepts as a no-op — turning a
+// silent-success infidelity into a spurious-rejection one. The two rows are the two
+// ways an ID goes unresolved: a prefix substrate does not tag, and a well-formed prefix
+// naming nothing.
+func TestEC2_CreateTags_UncountedResourceIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{name: "a prefix substrate does not tag", id: "ami-0notaggable000001"},
+		{name: "a taggable prefix naming nothing", id: "i-0doesnotexist00001"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			status, _, _ := ec2CreateTags(t, ts, tc.id, ec2NumberedTags("key", ec2TagLimit+1))
+			assert.Equal(t, http.StatusOK, status,
+				"an ID the apply step ignores must not be counted against")
+		})
+	}
 }
