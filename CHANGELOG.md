@@ -168,6 +168,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The rules apply on send, not on receive: a message written into state before they
   existed is still returned as stored, because withholding it would make a recorded run
   unreplayable. Tracked separately.
+- **`DescribeInstanceAttribute`** (#473), which is the only way to read an instance's
+  user data back. `RunInstances` recorded `UserData` and nothing could observe it, so a
+  consumer could not assert that the user data their IaC intended reached the instance —
+  and #453's launch-template `UserData` fallback could only ever be tested indirectly,
+  meaning it could regress with nothing observable changing. Four attributes are
+  readable, being the ones backed by state substrate holds: `userData` (returned as
+  stored, still base64), `instanceType`, `disableApiTermination`, and `groupSet` (the
+  same `groupSet>item` shape `DescribeInstances` reports, per #444). Scalars are wrapped
+  in a `<value>` element, as all three of the reference's worked examples show, and
+  exactly one attribute appears per response.
+
+  Every other name in AWS's valid-values list is **refused rather than defaulted**, with
+  `InvalidParameterValue`, HTTP 400, and `Value (enaSupport) for parameter attribute is
+  invalid. Unknown attribute.` Answering `sourceDestCheck` with a default `false` would
+  be indistinguishable from a real instance that has it disabled, and a consumer
+  asserting on it would get a green test built on a value substrate invented. This
+  message has the strongest provenance in the release: it is captured from real AWS in
+  [aws/aws-cli#4273](https://github.com/aws/aws-cli/issues/4273) and is byte-identical
+  to moto's string — a capture and an independent reimplementation agreeing. The
+  reference could not have supplied it, its Errors section being empty. `enaSupport` is
+  in AWS's own valid-values list while the same page says the attribute "is not
+  supported", and #4273 captures exactly that rejection, so refusing it is fidelity.
+
+  An attribute that was never set is reported as a **present but empty element**
+  (`<userData></userData>`), not an omitted one. This is the one shape the reference
+  cannot settle — all three examples show an attribute that has a value — so it ships
+  from moto's `test_describe_instance_attribute` asserting `response["UserData"] == {}`.
+  That is weaker provenance than a capture and is labelled as such in the code and the
+  docs, because the two shapes are not interchangeable: an SDK maps a present-but-empty
+  element to an empty struct and an omitted one to nil, so `resp.UserData.Value` panics
+  under one and not the other.
+
+  `ModifyInstanceAttribute` gained `UserData.Value` and `DisableApiTermination.Value`
+  alongside the existing `InstanceType.Value`, and its errors now match the reference's
+  wording for a missing or unknown instance instead of substrate's own. `UserData.Value`
+  is presence-checked rather than non-empty-checked, so clearing an instance's user data
+  is expressible.
+
+  **`ModifyInstanceAttribute` now requires a `stopped` instance for `userData` and
+  `instanceType`, where changing a running instance's type previously succeeded** — a new
+  rejection on a path that worked before, so a test asserting the old behavior will now
+  see `IncorrectInstanceState`, HTTP 400. The reference's Example 1 states it plainly
+  ("The instance must be in the `stopped` state"), and the client-error table names user
+  data as the same rule's worked example; the code is documented while the message text
+  is substrate's own. `disableApiTermination` is deliberately exempt, because
+  `RunInstances` documents that termination protection can be enabled "when you launch an
+  instance, while the instance is running, or while the instance is stopped" — gating it
+  would refuse a call real EC2 accepts, which is the same defect in the other direction.
+  Termination protection is recorded and reported but not acted on: `TerminateInstances`
+  still terminates a protected instance, which is tracked separately.
 - `make tag-releases-check` (`scripts/check-tag-releases.sh`) fails if a published
   `vX.Y.Z` tag has no GitHub Release behind it, run daily by the new `Release Audit`
   workflow. Pushing a tag does not create a Release and nothing asserted otherwise,

@@ -132,6 +132,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteTags(ctx, req)
 	case "ModifyInstanceAttribute":
 		return p.modifyInstanceAttribute(ctx, req)
+	case "DescribeInstanceAttribute":
+		return p.describeInstanceAttribute(ctx, req)
 	// Key pair operations
 	case "CreateKeyPair":
 		return p.createKeyPair(ctx, req)
@@ -309,6 +311,9 @@ func (p *EC2Plugin) runInstancesWithTags(
 		iamInstanceProfile = req.Params["IamInstanceProfile.Arn"]
 	}
 	userData := req.Params["UserData"]
+	// Recorded so DescribeInstanceAttribute can report it (#473). AWS documents the
+	// default as false, so an absent parameter and an explicit "false" agree.
+	disableAPITermination := strings.EqualFold(req.Params["DisableApiTermination"], "true")
 
 	subnetID := req.Params["SubnetId"]
 	sgID := req.Params["SecurityGroupId.1"]
@@ -531,6 +536,8 @@ func (p *EC2Plugin) runInstancesWithTags(
 			IamInstanceProfile: iamInstanceProfile,
 			UserData:           userData,
 			Tags:               tags,
+
+			DisableAPITermination: disableAPITermination,
 		}
 
 		// Look up VPCID from subnet and decide whether to assign a public IP.
@@ -2112,30 +2119,47 @@ func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
-// modifyInstanceAttribute handles ModifyInstanceAttribute — supports InstanceType changes.
+// modifyInstanceAttribute handles ModifyInstanceAttribute — supports InstanceType,
+// UserData and DisableApiTermination changes.
+//
+// Attribute is Required: No on this operation, unlike on DescribeInstanceAttribute:
+// the .Value suffix on the parameter carries the selection, so a request setting
+// UserData.Value needs no Attribute at all.
 func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	instID := req.Params["InstanceId"]
 	if instID == "" {
-		return nil, &AWSError{Code: "MissingParameter", Message: "InstanceId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ec2MissingParameter("InstanceId")
 	}
 
 	stateKey := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + instID
-	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 modifyInstanceAttribute get: %w", err)
-	}
-	if data == nil {
-		return nil, &AWSError{Code: "InvalidInstanceID.NotFound", Message: "Instance not found: " + instID, HTTPStatus: http.StatusBadRequest}
+	inst, awsErr, err := p.loadInstance(reqCtx, instID, "modifyInstanceAttribute")
+	if err != nil || awsErr != nil {
+		return nil, errOrAWS(err, awsErr)
 	}
 
-	var inst EC2Instance
-	if err := json.Unmarshal(data, &inst); err != nil {
-		return nil, fmt.Errorf("ec2 modifyInstanceAttribute unmarshal: %w", err)
+	// Some attributes can only be modified while the instance is stopped, and the
+	// check runs before anything is written so a refused call leaves the value
+	// untouched (#473). This is a new rejection on a path that used to succeed:
+	// substrate previously changed the type of a running instance, which real EC2
+	// refuses — see [ec2ModifiableWhenStopped] for which attributes are gated and
+	// why disableApiTermination is not among them.
+	if attr := ec2AttributeModificationState(req.Params); attr != "" && !ec2InstanceStopped(inst) {
+		return nil, ec2IncorrectInstanceState(attr, inst.State.Name)
 	}
 
 	// Apply supported attribute modifications.
 	if v := req.Params["InstanceType.Value"]; v != "" {
 		inst.InstanceType = v
+	}
+	// UserData.Value is read with a presence check rather than a non-empty one, so
+	// clearing an instance's user data is expressible: AWS's SecureBlobAttributeValue
+	// carries whatever the caller sends, including nothing, and treating "" as
+	// "unchanged" would make the clear silently a no-op.
+	if v, ok := req.Params["UserData.Value"]; ok {
+		inst.UserData = v
+	}
+	if v, ok := req.Params["DisableApiTermination.Value"]; ok {
+		inst.DisableAPITermination = strings.EqualFold(v, "true")
 	}
 
 	updated, err := json.Marshal(inst)

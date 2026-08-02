@@ -94,6 +94,15 @@ type EC2Instance struct {
 	// UserData is the base64-encoded user-data supplied at launch (stored so
 	// callers can verify it was accepted; not executed).
 	UserData string `json:"user_data,omitempty"`
+
+	// DisableAPITermination reports whether termination protection is enabled.
+	// AWS documents the default as false, which is the zero value, so an instance
+	// unmarshalled from an event log predating this field reads back correctly.
+	//
+	// Substrate records and reports it but does not act on it: TerminateInstances
+	// still terminates a protected instance. Real EC2 refuses with
+	// OperationNotPermitted, which is tracked separately.
+	DisableAPITermination bool `json:"disable_api_termination,omitempty"`
 }
 
 // EC2KeyPair represents an EC2 key pair (public/private key used for SSH access).
