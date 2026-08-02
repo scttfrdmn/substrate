@@ -540,6 +540,84 @@ func TestIAMPlugin_GetPolicy_Managed(t *testing.T) {
 	assert.Equal(t, "AdministratorAccess", pol["PolicyName"])
 }
 
+// TestIAMPlugin_AttachThenGetServiceRolePolicy is #484's reported sequence end to end:
+// AttachRolePolicy accepted the ARN and GetPolicy then reported NoSuchEntity, so a
+// consumer provisioning an SSM-managed instance profile could attach a policy that did
+// not exist. GetPolicy was always correct — it checks the managed catalog first — and the
+// catalog was the gap.
+func TestIAMPlugin_AttachThenGetServiceRolePolicy(t *testing.T) {
+	arns := []string{
+		"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+		"arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+		"arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+		"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+		"arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+	}
+
+	for _, arn := range arns {
+		t.Run(arn, func(t *testing.T) {
+			srv := newIAMTestServer(t)
+			iamRequest(t, srv, "CreateRole", map[string]any{"RoleName": "myrole"})
+
+			attachResp := iamRequest(t, srv, "AttachRolePolicy", map[string]any{
+				"RoleName":  "myrole",
+				"PolicyArn": arn,
+			})
+			assert.Equal(t, http.StatusOK, attachResp.StatusCode)
+
+			resp := iamRequest(t, srv, "GetPolicy", map[string]any{"PolicyArn": arn})
+			require.Equal(t, http.StatusOK, resp.StatusCode,
+				"GetPolicy should resolve an ARN AttachRolePolicy accepted")
+
+			var result map[string]any
+			decodeIAMXML(t, resp, &result)
+			pol := result["Policy"].(map[string]any)
+			assert.Equal(t, arn, pol["Arn"])
+			assert.NotEmpty(t, pol["PolicyId"])
+		})
+	}
+}
+
+// TestIAMPlugin_GetPolicy_ServiceRolePathReported asserts the wire response separates the
+// path from the name. A consumer reading PolicyName must not get "service-role/…" back,
+// and Path is what carries it.
+func TestIAMPlugin_GetPolicy_ServiceRolePathReported(t *testing.T) {
+	srv := newIAMTestServer(t)
+	resp := iamRequest(t, srv, "GetPolicy", map[string]any{
+		"PolicyArn": "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
+	pol := result["Policy"].(map[string]any)
+
+	assert.Equal(t, "AWSLambdaVPCAccessExecutionRole", pol["PolicyName"])
+	assert.Equal(t, "/service-role/", pol["Path"])
+	assert.Equal(t, "v3", pol["DefaultVersionId"])
+}
+
+// TestIAMPlugin_GetPolicy_UnbundledManagedPolicy pins the decision #484 offered an
+// alternative to. AttachRolePolicy deliberately still accepts a managed ARN the catalog
+// does not bundle: rejecting would refuse every attach of the ~1,200 AWS managed policies
+// substrate does not carry, trading a confusing success for a wrong failure. The
+// asymmetry is tracked in #499 rather than closed here.
+func TestIAMPlugin_GetPolicy_UnbundledManagedPolicy(t *testing.T) {
+	srv := newIAMTestServer(t)
+	arn := "arn:aws:iam::aws:policy/service-role/AWSNotBundledBySubstrate"
+
+	iamRequest(t, srv, "CreateRole", map[string]any{"RoleName": "myrole"})
+	attachResp := iamRequest(t, srv, "AttachRolePolicy", map[string]any{
+		"RoleName":  "myrole",
+		"PolicyArn": arn,
+	})
+	assert.Equal(t, http.StatusOK, attachResp.StatusCode,
+		"an unbundled managed ARN is still accepted on attach")
+
+	resp := iamRequest(t, srv, "GetPolicy", map[string]any{"PolicyArn": arn})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
 func TestIAMPlugin_DeletePolicy(t *testing.T) {
 	srv := newIAMTestServer(t)
 	iamRequest(t, srv, "CreatePolicy", map[string]any{"PolicyName": "tmp-policy"})

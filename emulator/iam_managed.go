@@ -9,7 +9,9 @@ import (
 // AWS managed policies.
 var managedPolicyDate = time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// managedPolicies holds the 47 bundled AWS managed policies.
+// managedPolicies holds the 52 bundled AWS managed policies — 47 human-operator policies
+// and, at the end of the slice, the five service-role policies an instance profile or
+// execution role carries.
 // Policy documents sourced from https://docs.aws.amazon.com/aws-managed-policy/latest/reference/
 // The slice itself is never mutated after package initialisation.
 var managedPolicies = []*IAMPolicy{
@@ -2031,15 +2033,184 @@ var managedPolicies = []*IAMPolicy{
 				Resource: StringOrSlice{"*"},
 			},
 		}}),
+
+	// --- Service-role policies -------------------------------------------------
+	//
+	// The 47 policies above are all human-operator policies — AdministratorAccess,
+	// PowerUserAccess and per-service FullAccess/ReadOnlyAccess pairs. The five below are
+	// the ones an *instance profile* or *execution role* is given, which is a different
+	// population and the gap #484 reported: AmazonSSMFullAccess was seeded while
+	// AmazonSSMManagedInstanceCore, the policy an SSM-managed instance actually carries,
+	// was not.
+	//
+	// Documents are verbatim from each policy's page under
+	// https://docs.aws.amazon.com/aws-managed-policy/latest/reference/. Statement order
+	// follows the page. PolicyId values are real, from a recorded get-policy snapshot
+	// (github.com/glassechidna/trackiam), and DefaultVersionID is the page's current
+	// default version rather than [mp]'s v1 — a consumer that pins a version would
+	// otherwise see v1 for a policy AWS reports as v2 or v3.
+
+	withVersion("v2", mp("AmazonSSMManagedInstanceCore", "ANPAIXSHM2BNB2D3AXXRU",
+		"The policy for Amazon EC2 Role to enable AWS Systems Manager service core functionality.",
+		PolicyDocument{Version: "2012-10-17", Statement: []PolicyStatement{
+			{
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"ssm:DescribeAssociation",
+					"ssm:GetDeployablePatchSnapshotForInstance",
+					"ssm:GetDocument",
+					"ssm:DescribeDocument",
+					"ssm:GetManifest",
+					"ssm:GetParameter",
+					"ssm:GetParameters",
+					"ssm:ListAssociations",
+					"ssm:ListInstanceAssociations",
+					"ssm:PutInventory",
+					"ssm:PutComplianceItems",
+					"ssm:PutConfigurePackageResult",
+					"ssm:UpdateAssociationStatus",
+					"ssm:UpdateInstanceAssociationStatus",
+					"ssm:UpdateInstanceInformation",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+			{
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"ssmmessages:CreateControlChannel",
+					"ssmmessages:CreateDataChannel",
+					"ssmmessages:OpenControlChannel",
+					"ssmmessages:OpenDataChannel",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+			{
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"ec2messages:AcknowledgeMessage",
+					"ec2messages:DeleteMessage",
+					"ec2messages:FailMessage",
+					"ec2messages:GetEndpoint",
+					"ec2messages:GetMessages",
+					"ec2messages:SendReply",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+		}})),
+
+	withVersion("v3", mp("AmazonEC2ContainerRegistryReadOnly", "ANPAIFYZPA37OOHVIH7KQ",
+		"Provides read-only access to Amazon EC2 Container Registry repositories.",
+		PolicyDocument{Version: "2012-10-17", Statement: []PolicyStatement{
+			{
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"ecr:GetAuthorizationToken",
+					"ecr:BatchCheckLayerAvailability",
+					"ecr:GetDownloadUrlForLayer",
+					"ecr:GetRepositoryPolicy",
+					"ecr:DescribeRepositories",
+					"ecr:ListImages",
+					"ecr:DescribeImages",
+					"ecr:BatchGetImage",
+					"ecr:GetLifecyclePolicy",
+					"ecr:GetLifecyclePolicyPreview",
+					"ecr:ListTagsForResource",
+					"ecr:DescribeImageScanFindings",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+		}})),
+
+	mpAt("service-role", "AmazonECSTaskExecutionRolePolicy", "ANPAJG4T4G4PV56DE72PY",
+		"Provides access to other AWS service resources that are required to run Amazon ECS tasks",
+		PolicyDocument{Version: "2012-10-17", Statement: []PolicyStatement{
+			{
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"ecr:GetAuthorizationToken",
+					"ecr:BatchCheckLayerAvailability",
+					"ecr:GetDownloadUrlForLayer",
+					"ecr:BatchGetImage",
+					"logs:CreateLogStream",
+					"logs:PutLogEvents",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+		}}),
+
+	mpAt("service-role", "AWSLambdaBasicExecutionRole", "ANPAJNCQGXC42545SKXIK",
+		"Provides write permissions to CloudWatch Logs.",
+		PolicyDocument{Version: "2012-10-17", Statement: []PolicyStatement{
+			{
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"logs:CreateLogGroup",
+					"logs:CreateLogStream",
+					"logs:PutLogEvents",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+		}}),
+
+	withVersion("v3", mpAt("service-role", "AWSLambdaVPCAccessExecutionRole", "ANPAJVTME3YLVNL72YR2K",
+		"Provides minimum permissions for a Lambda function to execute while accessing a resource within a VPC - create, describe, delete network interfaces and write permissions to CloudWatch Logs.",
+		PolicyDocument{Version: "2012-10-17", Statement: []PolicyStatement{
+			{
+				Sid:    "AWSLambdaVPCAccessExecutionPermissions",
+				Effect: IAMEffectAllow,
+				Action: StringOrSlice{
+					"logs:CreateLogGroup",
+					"logs:CreateLogStream",
+					"logs:PutLogEvents",
+					"ec2:CreateNetworkInterface",
+					"ec2:DescribeNetworkInterfaces",
+					"ec2:DescribeSubnets",
+					"ec2:DeleteNetworkInterface",
+					"ec2:AssignPrivateIpAddresses",
+					"ec2:UnassignPrivateIpAddresses",
+				},
+				Resource: StringOrSlice{"*"},
+			},
+		}})),
 }
 
-// mp is a helper for constructing a bundled managed IAMPolicy.
+// withVersion overrides a bundled policy's default version ID.
+//
+// [mp] and [mpAt] stamp "v1", which is right for most of the catalog. AWS has since
+// edited some policies, and its reference page reports the current default version — a
+// consumer reading DefaultVersionId back would otherwise see v1 for a policy AWS reports
+// as v2 or v3. Only the policies whose pages say so carry an override.
+func withVersion(version string, p *IAMPolicy) *IAMPolicy {
+	p.DefaultVersionID = version
+	return p
+}
+
+// mp is a helper for constructing a bundled managed IAMPolicy at the root path.
 func mp(name, id, description string, doc PolicyDocument) *IAMPolicy {
+	return mpAt("", name, id, description, doc)
+}
+
+// mpAt is a helper for constructing a bundled managed IAMPolicy under a path.
+//
+// path is the component between the ARN's "policy/" and the policy name, without
+// surrounding slashes — "service-role" yields
+// arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole and Path
+// "/service-role/". An empty path is the root, which is what [mp] passes.
+//
+// PolicyName stays the bare name; the path is a separate field. That distinction is what
+// ListPolicies --path-prefix reads, and conflating them would make a policy findable by
+// ARN while invisible to a path query. [GetManagedPolicy] needs no change either way: it
+// is an exact-ARN map lookup, and the ARN built here is the real one.
+func mpAt(path, name, id, description string, doc PolicyDocument) *IAMPolicy {
+	arnPath, policyPath := "", "/"
+	if path != "" {
+		arnPath, policyPath = path+"/", "/"+path+"/"
+	}
 	return &IAMPolicy{
 		PolicyName:       name,
 		PolicyID:         id,
-		ARN:              "arn:aws:iam::aws:policy/" + name,
-		Path:             "/",
+		ARN:              "arn:aws:iam::aws:policy/" + arnPath + name,
+		Path:             policyPath,
 		Description:      description,
 		DefaultVersionID: "v1",
 		IsAttachable:     true,
@@ -2061,7 +2232,7 @@ func initManagedPolicyMap() {
 	}
 }
 
-// ListManagedPolicies returns all 47 bundled AWS managed policies.
+// ListManagedPolicies returns all 52 bundled AWS managed policies.
 func ListManagedPolicies() []*IAMPolicy {
 	return managedPolicies
 }

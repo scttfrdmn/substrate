@@ -108,16 +108,16 @@ here.
 | GetGroup | |
 | DeleteGroup | |
 | ListGroups | |
-| AttachUserPolicy | |
+| AttachUserPolicy | Does not verify the policy ARN resolves ([#499](https://github.com/scttfrdmn/substrate/issues/499)) |
 | DetachUserPolicy | |
 | ListAttachedUserPolicies | |
-| AttachRolePolicy | |
+| AttachRolePolicy | Does not verify the policy ARN resolves ([#499](https://github.com/scttfrdmn/substrate/issues/499)) |
 | DetachRolePolicy | |
 | ListAttachedRolePolicies | |
 | CreatePolicy | |
-| GetPolicy | |
+| GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
 | DeletePolicy | |
-| ListPolicies | |
+| ListPolicies | Lists `CreatePolicy` policies only; `Scope` and `PathPrefix` are accepted and not applied ([#497](https://github.com/scttfrdmn/substrate/issues/497)) |
 | CreateAccessKey | |
 | DeleteAccessKey | |
 | ListAccessKeys | |
@@ -142,6 +142,52 @@ here.
 | CreateInstanceProfile | |
 | GetInstanceProfile | |
 | AddRoleToInstanceProfile | |
+
+### AWS managed policies are a seeded catalog
+
+Substrate bundles **52** AWS managed policies, not the ~1,200 AWS publishes. Each carries
+its real ARN, policy ID, path and default version, and a policy document copied verbatim
+from its page in the [AWS managed policy
+reference](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/). `GetPolicy`
+resolves a bundled ARN exactly as it resolves one from `CreatePolicy`.
+
+The catalog covers two populations:
+
+| Population | Examples |
+|---|---|
+| Human-operator policies (47) | `AdministratorAccess`, `PowerUserAccess`, `ReadOnlyAccess`, and per-service `…FullAccess` / `…ReadOnlyAccess` pairs |
+| Service-role policies (5) | `AmazonSSMManagedInstanceCore`, `AmazonEC2ContainerRegistryReadOnly`, `service-role/AmazonECSTaskExecutionRolePolicy`, `service-role/AWSLambdaBasicExecutionRole`, `service-role/AWSLambdaVPCAccessExecutionRole` |
+
+The distinction matters because they are attached by different callers. A human-operator
+policy is attached to a user or group; a service-role policy is what an **instance profile
+or execution role** carries, and those are the ones IaC provisions. Substrate bundled
+`AmazonSSMFullAccess` — the operator policy — but not `AmazonSSMManagedInstanceCore`, which
+is the policy an SSM-managed instance actually needs.
+
+A policy under a path reports the path in `Path` and keeps it out of `PolicyName`:
+`service-role/AWSLambdaBasicExecutionRole` has `Path: /service-role/` and `PolicyName:
+AWSLambdaBasicExecutionRole`, matching AWS. The full ARN includes the path component.
+
+#### Attaching a policy substrate does not bundle
+
+`AttachRolePolicy` and `AttachUserPolicy` accept **any** policy ARN without checking that
+it resolves, so attaching one of the ~1,150 unbundled managed policies succeeds and
+`GetPolicy` on the same ARN then returns `NoSuchEntity`. Real IAM refuses the attach.
+
+This asymmetry is deliberate for now: refusing an ARN substrate cannot resolve would fail
+every attach of an unbundled managed policy — breaking working consumer code — where the
+current behaviour merely fails to catch a typo. Tracked in
+[#499](https://github.com/scttfrdmn/substrate/issues/499). A consumer who needs the attach
+verified should follow it with `GetPolicy`, which is exact.
+
+#### Policy documents are not observable over the wire
+
+`GetPolicy` returns metadata only — policy ID, name, ARN, path, default version,
+attachment count and dates — which is what AWS returns. On AWS the document comes from
+`GetPolicyVersion`, which substrate does not implement
+([#498](https://github.com/scttfrdmn/substrate/issues/498)). The seeded documents are
+readable in process through `emulator.GetManagedPolicy` and are what the IAM policy
+evaluator reads.
 
 ### Betty CFN resource types
 
