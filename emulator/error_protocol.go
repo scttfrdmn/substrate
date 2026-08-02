@@ -26,6 +26,15 @@ const (
 	// x-amzn-errortype response header, which botocore's RestJSONParser prefers
 	// over the body.
 	errProtoRESTJSON
+
+	// errProtoS3XML is S3's own REST-XML error document: a bare <Error> element
+	// with an XML declaration and a <RequestId>, not the <ErrorResponse> wrapper
+	// the Query protocol uses. S3's parser does not recover a code from the
+	// wrapped form and falls back to the HTTP status, so an error raised outside
+	// the S3 plugin — an injected fault, evaluated before any plugin runs — was
+	// distinguishable from a genuine S3 error by the client, which is the one
+	// property a fault injector must not have (#480).
+	errProtoS3XML
 )
 
 // serviceErrorProtocols maps a service name (as reported by Plugin.Name) to the
@@ -43,13 +52,20 @@ const (
 //     on-the-wire error documents differ in the root element (ErrorResponse,
 //     Response/Errors and Error respectively), but every one of their parsers
 //     recovers the code from an <ErrorResponse><Error><Code> document, so a
-//     single shape serves all three. Plugins that need a byte-exact document
-//     build it themselves (see s3ErrorResponse).
+//     single shape serves all three. S3 is the exception and has its own arm:
+//     its parser does not read a code out of the wrapped form at all, so an
+//     error leaving the pipeline before the plugin runs lost its code (#480).
+//     errProtoS3XML delegates to s3ErrorResponseWith, which stays the single
+//     source of truth for the byte shape.
 //   - "monitoring" (CloudWatch) models as smithy-rpc-v2-cbor today, but query
 //     remains in its supported protocol list and substrate's CloudWatch plugin
 //     answers successes in query XML, so its errors match that.
 var serviceErrorProtocols = map[string]awsErrorProtocol{
 	// Query, ec2 and REST-XML.
+	//
+	// cloudfront and route53 are REST-XML like S3 but stay here deliberately:
+	// their real error documents are <ErrorResponse>, so the Query shape is
+	// already byte-correct for them. Only S3 returns a bare <Error>.
 	"cloudformation":       errProtoQueryXML,
 	"cloudfront":           errProtoQueryXML,
 	"ec2":                  errProtoQueryXML,
@@ -60,9 +76,11 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"rds":                  errProtoQueryXML,
 	"redshift":             errProtoQueryXML,
 	"route53":              errProtoQueryXML,
-	"s3":                   errProtoQueryXML,
 	"sns":                  errProtoQueryXML,
 	"sts":                  errProtoQueryXML,
+
+	// S3's own REST-XML error document.
+	"s3": errProtoS3XML,
 
 	// JSON RPC (x-amz-json-1.0 / 1.1).
 	"acm":              errProtoJSONRPC,
@@ -140,6 +158,9 @@ func errorProtocolFor(service, contentType string) awsErrorProtocol {
 // The shapes are what the AWS SDKs actually parse:
 //
 //   - Query/REST-XML: <ErrorResponse><Error><Code>…</Code></Error></ErrorResponse>
+//   - S3: a bare <Error><Code>…</Code><RequestId>…</RequestId></Error> document
+//     with an XML declaration, built by the same function the S3 plugin uses so
+//     an error the pipeline raises is byte-identical to one the plugin raises.
 //   - JSON RPC: {"__type":"Code","message":"…"} — "__type" is the member
 //     botocore reads; a body carrying only "Code" leaves the SDK to fall back to
 //     the stringified HTTP status.
@@ -151,6 +172,10 @@ func errorProtocolFor(service, contentType string) awsErrorProtocol {
 // that member keep working.
 func marshalAWSError(e *AWSError, proto awsErrorProtocol, jsonContentType string) (body []byte, contentType string, headers map[string]string) {
 	switch proto {
+	case errProtoS3XML:
+		resp := s3ErrorResponseWith(s3Error{Code: e.Code, Message: e.Message, Status: e.HTTPStatus})
+		return resp.Body, resp.Headers["Content-Type"], nil
+
 	case errProtoJSONRPC:
 		ct := jsonContentType
 		if !strings.HasPrefix(ct, "application/x-amz-json") {

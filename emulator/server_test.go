@@ -111,16 +111,21 @@ func TestServer_PluginError_ReturnsAWSError(t *testing.T) {
 	resp := w.Result()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
+	// S3's error document is a bare <Error> with a <RequestId>, not the Query
+	// protocol's <ErrorResponse> wrapper (#480). The pipeline serializes an error the
+	// S3 plugin returned in the same shape the plugin's own errors use, which is what
+	// keeps an error raised before routing indistinguishable from one raised after it.
 	body, _ := io.ReadAll(resp.Body)
 	var errResp struct {
-		XMLName xml.Name `xml:"ErrorResponse"`
-		Error   struct {
-			Code    string `xml:"Code"`
-			Message string `xml:"Message"`
-		} `xml:"Error"`
+		XMLName   xml.Name `xml:"Error"`
+		Code      string   `xml:"Code"`
+		Message   string   `xml:"Message"`
+		RequestID string   `xml:"RequestId"`
 	}
 	require.NoError(t, xml.Unmarshal(body, &errResp))
-	assert.Equal(t, "NoSuchBucket", errResp.Error.Code)
+	assert.Equal(t, "NoSuchBucket", errResp.Code)
+	assert.Equal(t, "the specified bucket does not exist", errResp.Message)
+	assert.NotEmpty(t, errResp.RequestID)
 }
 
 func TestServer_EventsAreRecorded(t *testing.T) {

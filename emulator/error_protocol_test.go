@@ -220,7 +220,12 @@ func TestErrorProtocolFor_Classification(t *testing.T) {
 		contentType string
 		want        string
 	}{
-		{"s3 is xml", "s3", "", emulator.ErrProtoQueryXMLForTest},
+		// S3 is REST-XML like cloudfront and route53 but has its own arm: its real
+		// error document is a bare <Error>, not the <ErrorResponse> wrapper, and its
+		// parser recovers no code from the wrapped form (#480).
+		{"s3 is s3 xml", "s3", "", emulator.ErrProtoS3XMLForTest},
+		{"cloudfront stays query xml", "cloudfront", "", emulator.ErrProtoQueryXMLForTest},
+		{"route53 stays query xml", "route53", "", emulator.ErrProtoQueryXMLForTest},
 		{"iam is xml", "iam", "application/x-amz-json-1.1", emulator.ErrProtoQueryXMLForTest},
 		// CloudFormation is a Query service whose errors are XML. The unknown-service
 		// fallback below happens to answer XML for a form-encoded body too, so only a
@@ -267,7 +272,7 @@ func TestErrorProtocolFor_Classification(t *testing.T) {
 func TestMarshalAWSError_JSONRPCDefaultsContentType(t *testing.T) {
 	t.Parallel()
 	body, ct, headers := emulator.MarshalAWSErrorForTest(
-		"ParameterNotFound", "nope", emulator.ErrProtoJSONRPCForTest, "text/plain")
+		"ParameterNotFound", "nope", emulator.ErrProtoJSONRPCForTest, "text/plain", http.StatusNotFound)
 	assert.Equal(t, "application/x-amz-json-1.1", ct)
 	assert.Equal(t, "ParameterNotFound", headers["x-amzn-ErrorType"])
 
@@ -281,7 +286,7 @@ func TestMarshalAWSError_JSONRPCDefaultsContentType(t *testing.T) {
 func TestMarshalAWSError_XMLEscapesMessage(t *testing.T) {
 	t.Parallel()
 	body, ct, headers := emulator.MarshalAWSErrorForTest(
-		"NoSuchKey", `a<b&c>"d"`, emulator.ErrProtoQueryXMLForTest, "")
+		"NoSuchKey", `a<b&c>"d"`, emulator.ErrProtoQueryXMLForTest, "", http.StatusNotFound)
 	assert.Equal(t, "text/xml; charset=UTF-8", ct)
 	assert.Empty(t, headers)
 
@@ -295,6 +300,35 @@ func TestMarshalAWSError_XMLEscapesMessage(t *testing.T) {
 	require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
 	assert.Equal(t, "NoSuchKey", doc.Error.Code)
 	assert.Equal(t, `a<b&c>"d"`, doc.Error.Message)
+}
+
+// TestMarshalAWSError_S3IsByteIdenticalToThePlugin is the #480 finding-4 gate at
+// the unit level: the pipeline's S3 arm must produce the same bytes the S3 plugin
+// produces for the same error, because a caller that can tell an injected error
+// from a genuine one can tell a fault fixture from production.
+func TestMarshalAWSError_S3IsByteIdenticalToThePlugin(t *testing.T) {
+	t.Parallel()
+	body, ct, headers := emulator.MarshalAWSErrorForTest(
+		"SlowDown", "injected fault", emulator.ErrProtoS3XMLForTest, "", http.StatusServiceUnavailable)
+
+	want := emulator.S3ErrorResponseForTest("SlowDown", "injected fault", http.StatusServiceUnavailable)
+	assert.Equal(t, string(want), string(body))
+	assert.Equal(t, "text/xml; charset=UTF-8", ct)
+	assert.Empty(t, headers)
+
+	// The shape itself, asserted independently of the plugin so a change to both
+	// at once cannot slip through: a bare <Error>, not the <ErrorResponse> wrapper.
+	var doc struct {
+		XMLName   xml.Name `xml:"Error"`
+		Code      string   `xml:"Code"`
+		Message   string   `xml:"Message"`
+		RequestID string   `xml:"RequestId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
+	assert.Equal(t, "SlowDown", doc.Code)
+	assert.Equal(t, "injected fault", doc.Message)
+	assert.NotEmpty(t, doc.RequestID)
+	assert.NotContains(t, string(body), "<ErrorResponse")
 }
 
 // errAfterGetsStateManager is a StateManager that serves the first n Get calls

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 
 	emulator "github.com/scttfrdmn/substrate/emulator"
 )
@@ -38,25 +40,33 @@ func TestJourney_SeededThrottling(t *testing.T) {
 		t.Fatalf("CreateBucket: %v", err)
 	}
 
-	// Seed a throttling fault on S3 writes via the control plane. Fault rules are
-	// evaluated before the S3 plugin resolves the semantic operation name, so for
-	// S3's REST protocol the operation at match time is the HTTP method ("PUT");
-	// an empty Operation (match all S3 ops) works too. JSON-protocol services
-	// (e.g. DynamoDB "PutItem") match on the semantic name directly.
+	// Seed a throttling fault on S3 writes via the control plane. The operation is
+	// the semantic name for every service, S3 included: the request parser resolves
+	// an S3 REST request before faults are evaluated (#480), so "PutObject" fires on
+	// PutObject alone and not on UploadPart, which is also a PUT. An empty Operation
+	// (match all S3 ops) works too.
+	//
+	// Times is -1 (unlimited) deliberately: the default of one would make the
+	// "clear the fault and retry" step below succeed whether or not clearing worked,
+	// since the rule would already be spent.
 	seedFaultRules(t, ts, emulator.FaultConfig{
 		Enabled: true,
 		Rules: []emulator.FaultRule{{
 			Service:     "s3",
-			Operation:   "PUT",
+			Operation:   "PutObject",
 			FaultType:   "error",
 			ErrorCode:   "SlowDown",
 			HTTPStatus:  503,
 			ErrorMsg:    "Please reduce your request rate.",
 			Probability: 1.0,
+			Times:       -1,
 		}},
 	})
 
-	// PutObject now fails with the seeded throttling error.
+	// PutObject now fails with the seeded throttling error, and the SDK surfaces the
+	// code that was armed. Before #480 the injected error used the wrapped
+	// <ErrorResponse> document S3's parser reads no code out of, so this arrived as
+	// ServiceUnavailable and a consumer matching on SlowDown never saw their fault.
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("k"),
@@ -64,6 +74,20 @@ func TestJourney_SeededThrottling(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected seeded throttling error, got nil")
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected a smithy.APIError, got %T: %v", err, err)
+	}
+	if apiErr.ErrorCode() != "SlowDown" {
+		t.Fatalf("ErrorCode() = %q, want SlowDown", apiErr.ErrorCode())
+	}
+
+	// The rule reports having fired. A rule that matched nothing produces exactly the
+	// same passing test as a consumer's retry working, so the count is what tells
+	// those two apart.
+	if fired := faultsFired(t, ts); fired != 1 {
+		t.Fatalf("fired = %d, want 1", fired)
 	}
 
 	// Clear the fault; the same call now succeeds.
@@ -92,6 +116,30 @@ func seedFaultRules(t *testing.T, ts *emulator.TestServer, cfg emulator.FaultCon
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /v1/fault/rules: status %d", resp.StatusCode)
 	}
+}
+
+// faultsFired GETs the control plane's rule list and totals each rule's fired
+// count, which is the assertion that separates a fault that fired from a rule
+// that matched nothing.
+func faultsFired(t *testing.T, ts *emulator.TestServer) int {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/v1/fault/rules") //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET /v1/fault/rules: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/fault/rules: status %d", resp.StatusCode)
+	}
+	var cfg emulator.FaultConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		t.Fatalf("decode fault config: %v", err)
+	}
+	total := 0
+	for _, rule := range cfg.Rules {
+		total += rule.Fired
+	}
+	return total
 }
 
 // clearFaultRules DELETEs all active fault rules.

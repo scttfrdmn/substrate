@@ -82,12 +82,16 @@ func (p *S3Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 func (p *S3Plugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches the S3 REST operation to the appropriate handler.
-// It derives the semantic operation from the HTTP method, URL path, and query
-// parameters, then mutates req.Operation so the server pipeline's cost and
-// consistency tracking see the canonical name.
+// It derives the semantic operation, bucket and key from the HTTP method, URL
+// path and query parameters.
+//
+// For a request off the wire ParseAWSRequest has already resolved the operation
+// name, so that call returns it unchanged; the assignment stays because an
+// in-process caller can build an AWSRequest carrying a bare HTTP method, and
+// the pipeline's cost, consistency and metrics steps read req.Operation.
 func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	bucket, key, op := parseS3Operation(req)
-	req.Operation = op // mutate so server pipeline sees semantic name
+	req.Operation = op
 
 	switch op {
 	case "ListBuckets":
@@ -183,12 +187,30 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 }
 
-// parseS3Operation derives the semantic S3 operation name, bucket, and key
-// from an AWSRequest whose Operation field still holds the raw HTTP method.
+// s3HTTPMethods is the set of raw HTTP methods parseS3Operation can be handed in
+// place of a resolved operation name. It is what makes the function idempotent:
+// ParseAWSRequest resolves the name before the request enters the pipeline
+// (#480), while an in-process caller building an AWSRequest by hand still passes
+// a bare verb, and both must reach the same answer.
+var s3HTTPMethods = map[string]bool{
+	http.MethodGet:    true,
+	http.MethodPut:    true,
+	http.MethodPost:   true,
+	http.MethodDelete: true,
+	http.MethodHead:   true,
+}
+
+// parseS3Operation derives the semantic S3 operation name, bucket, and key from
+// an AWSRequest. Operation may hold either the raw HTTP method or an already
+// resolved operation name; a resolved name is returned unchanged, so calling
+// this twice on the same request is safe.
 func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 	// Strip leading slash and split on the first "/" to get bucket and key.
 	path := strings.TrimPrefix(req.Path, "/")
 	if path == "" || path == "/" {
+		if !s3HTTPMethods[req.Operation] {
+			return "", "", req.Operation
+		}
 		return "", "", "ListBuckets"
 	}
 
@@ -208,7 +230,14 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		key = ""
 	}
 
-	method := req.Operation // still the HTTP verb at this point
+	// A resolved operation name arrives when ParseAWSRequest already named it,
+	// which is every request off the wire. Returning it as-is keeps the bucket
+	// and key derivation available to the plugin without re-deriving a name that
+	// the switch below would not recognize anyway.
+	method := req.Operation
+	if !s3HTTPMethods[method] {
+		return bucket, key, method
+	}
 
 	if key == "" {
 		// Bucket-level operations.

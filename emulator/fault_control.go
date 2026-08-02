@@ -15,7 +15,11 @@ import (
 //
 //	{"enabled": true, "rules": [{"service":"s3","operation":"GetObject",
 //	  "fault_type":"error","error_code":"NoSuchKey","http_status":404,
-//	  "probability":1.0}]}
+//	  "times":2}]}
+//
+// Posting rules replaces the whole configuration, which resets every rule's
+// fired count. See [FaultRule] for the matcher fields and for why "times"
+// defaults to one rather than to unlimited.
 func (s *Server) handleFaultSetRules(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Fault == nil {
 		http.Error(w, `{"error":"fault injection not enabled on this server"}`, http.StatusNotImplemented)
@@ -47,8 +51,13 @@ func (s *Server) handleFaultClearRules(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFaultGetRules handles GET /v1/fault/rules.
-// It returns the current FaultConfig as JSON. Returns 501 when the server was
-// started without a FaultController.
+// It returns the current FaultConfig as JSON, each rule carrying the "fired"
+// count of requests it has injected a fault into. Returns 501 when the server
+// was started without a FaultController.
+//
+// The count is the assertion that separates "my retry worked" from "the rule
+// matched nothing": a rule that never fired produces the same passing test as a
+// consumer's retry handling the failure.
 func (s *Server) handleFaultGetRules(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Fault == nil {
 		http.Error(w, `{"error":"fault injection not enabled on this server"}`, http.StatusNotImplemented)

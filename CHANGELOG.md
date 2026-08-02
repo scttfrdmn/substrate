@@ -154,6 +154,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-operation Valid Values lists differ (four names on `CreateBucket`, seven on
   `PutObject`) and no error code is documented for a name outside them.
 
+- **An injected S3 fault is no longer distinguishable from a real S3 error** (#480).
+  This is the one property a fault injector must not have, and it had it. Faults are
+  evaluated before any plugin runs, so an injected error was serialized by the
+  pipeline's generic Query arm as `<ErrorResponse><Error><Type>Sender</Type>…`, while
+  a genuine S3 error is a bare `<Error>` document with an XML declaration and a
+  `<RequestId>`. S3's parser recovers no code from the wrapped form and falls back to
+  the HTTP status, so a fault armed as `SlowDown` arrived at the client as
+  `ServiceUnavailable`: a consumer whose retry policy matches on `SlowDown` never saw
+  their own fault fire, and a caller able to tell an injected error from a real one can
+  tell a fixture from production. The bytes now come from the same function the S3
+  plugin uses, so the two documents are byte-identical — asserted both at the
+  marshaller and over the wire against a genuine `NoSuchKey`, since only comparing two
+  independently produced documents proves it.
+
+  `cloudfront` and `route53` are REST-XML like S3 and keep the `<ErrorResponse>` shape
+  deliberately: their real error documents genuinely are wrapped, so they were already
+  correct and are pinned by tests against being swept along. EC2's Query XML and SQS's
+  JSON RPC are likewise unchanged.
+
+- **A fault rule can now name an S3 operation, and be bounded to N occurrences**
+  (#480). Three defects that compounded into fixtures that were silently wrong rather
+  than merely limited:
+
+  **An S3 rule could not name a semantic operation.** Faults are evaluated one pipeline
+  step before the S3 plugin resolves a REST request to its operation name, so
+  `req.Operation` was still the bare HTTP verb: `operation: PutObject` matched
+  **nothing at all**, and `operation: PUT` took out `UploadPart` and every other
+  object-path `PUT` alongside it. A fixture arming a `PutObject` fault therefore either
+  did nothing or failed a part upload somewhere the test was not looking. The parser
+  now resolves an S3 request's operation up front, so the name is canonical before
+  faults, quotas, cost attribution and consistency tracking all see it — the S3 cost
+  entries keyed on `s3/PutObject` and `s3/GetObject` were unreachable for any request
+  that errored before reaching the plugin, and the event log recorded `PUT` where it
+  now records the operation.
+
+  **A rule could not be bounded, so recovery was unobservable.** `Times` bounds how
+  many matching requests a rule fires on. Fail twice, then succeed, is the outcome that
+  distinguishes working retry from no retry, and an unbounded rule can only ever
+  produce failure — so the one thing a retry test needs to observe could not be
+  produced. Zero means **one**, not unlimited: reading a missing field as unlimited
+  turns a typo into a fixture that consumes a consumer's whole retry budget. A negative
+  value is unlimited and has to be asked for. The match, the probability roll and the
+  increment happen under one lock, so `Times: 1` with N concurrent requests yields
+  exactly one failure — atomicity a client-side counter cannot arrange, and the reason
+  the controller's locking was restructured rather than a counter bolted on.
+
+  **A rule that matched nothing looked exactly like a consumer's retry working.** Each
+  rule now reports a `fired` count through `GET /v1/fault/rules`, with `FaultsFired()`
+  summing them in process. A fixture that arms a fault and observes success has proven
+  nothing without asserting the count — and the first of these three defects would have
+  been caught immediately by any test that did. Arming rules again replaces the
+  configuration and resets the counts, so a fixture re-arming between phases gets its
+  full budget rather than a spent one.
+
+  Three wire matchers are added for distinctions an operation name does not carry:
+  `PathSuffix`, `QueryKey` and `HeaderPrefix`, AND-ed with `Service` and `Operation`.
+  `QueryKey` is what separates the multipart sub-operations, which share a path and
+  differ by a sub-resource parameter — so #480's own previously unwritable test, "fail
+  `CompleteMultipartUpload` after every part has uploaded and assert no orphaned
+  upload", is now writable and is written. Presence is what those parameters signal, so
+  the value is not compared.
+
+  Fixed along the way: `NewFaultController` and `UpdateConfig` stored the caller's rule
+  slice, so incrementing a fired count reached into the caller's own `FaultConfig` —
+  arming the same value twice found the second arming already spent.
+
 ### Added
 - **EC2 instances now carry and report an Availability Zone** (#489), which is what
   makes the zone-scoped rule above observable rather than merely internally
@@ -385,6 +451,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inheriting the source's — both deliberate, both pinned by tests so #493 changes them
   on purpose. #493 carries the four `InvalidArgument` rejections, bucket defaults, and
   the copy resolution order. SSE-C is out of scope entirely.
+
+### Changed
+- **A fault rule naming a bare HTTP method no longer matches an S3 request** (#480).
+  This is the one compatibility consequence of resolving an S3 request's semantic
+  operation before faults are evaluated. A rule written as `{"service": "s3",
+  "operation": "PUT"}` matched every object-path `PUT` and now matches nothing; write
+  the operation it meant — `PutObject`, `UploadPart`, `CopyObject` — or leave
+  `operation` empty to match every S3 operation. A bare-method rule still fires for a
+  service whose operation genuinely is its HTTP method, such as `execute-api`. Rules
+  naming a semantic S3 operation were matching nothing before this release, so no rule
+  that worked stops working; a rule that appeared to work by naming a verb was firing
+  on requests it did not mean.
+
+- **`FaultRule.Probability`'s shared PRNG is now documented rather than implied**
+  (#480). One PRNG serves every rule in a `FaultConfig` and is rolled once per
+  *matching* rule per request, so a fixed seed reproduces a run only while the whole
+  sequence of requests is unchanged — adding a request upstream, or a retry, shifts
+  every later roll, including for rules that request never touched. No behaviour
+  changed; the coupling was real and undocumented, and `Times` is the bounded outcome
+  to prefer since it needs no roll at all. Per-rule PRNGs would fix it and would move
+  the outcome of every existing seeded run, so it is filed as #510 rather than changed
+  inside a fix for something else.
 
 ## [v0.86.0] - 2026-08-02
 
