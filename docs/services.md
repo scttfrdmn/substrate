@@ -795,9 +795,9 @@ Lambda invocations: $0.0000002 per request.
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | |
-| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement) |
-| SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement) |
-| ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement); stores [message attributes](#message-attributes) and returns `MD5OfMessageAttributes` |
+| SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement); stores [message attributes](#message-attributes) per entry |
+| ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; returns [message attributes](#message-attributes) for the names requested |
 | DeleteMessage | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessageBatch | |
 | ChangeMessageVisibility | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
@@ -922,8 +922,8 @@ per-component breakdown is the one AWS's own Extended Client Library uses to dec
 whether a payload needs offloading to S3. Message *system* attributes are excluded,
 per the `SendMessage` reference.
 
-Attributes are parsed for measurement only; substrate does not yet store them or
-return them from `ReceiveMessage` (tracked separately).
+Attributes are also stored and returned — see [Message
+attributes](#message-attributes).
 
 `SendMessageBatch` enforces two limits, both 1 MiB, as the reference states: "the
 maximum allowed individual message size and the maximum total payload size (the sum of
@@ -957,6 +957,68 @@ a doc citation — captured SDK errors carrying `code: 'InvalidParameterValue'` 
 HTTP 400, and `BatchRequestTooLong: Batch requests cannot be longer than N bytes. You
 have sent M bytes.` The same strings appear in independent reimplementations, which
 corroborates them as transcribed AWS text.
+
+### Message attributes
+
+User-defined message attributes are stored on send and returned on receive, for both
+`SendMessage` and `SendMessageBatch`, under both protocols. A consumer routing on an
+attribute — a `messageType` discriminator, a trace ID, a tenant key — reads back what
+it sent.
+
+**Attributes are returned only when the receive asks for them.** This is the part that
+is easy to get wrong in the permissive direction: a consumer whose production caller
+never sets `MessageAttributeNames` would pass a test against an emulator that
+volunteered them, then read none from real SQS.
+
+| `MessageAttributeName` | Returned |
+|---|---|
+| omitted | nothing |
+| `All` | every attribute |
+| `.*` | every attribute |
+| `messageType` | that attribute, if the message carries it |
+| `trace.*` | every attribute whose name starts with `trace.` |
+
+A named attribute the message does not carry is simply absent, not an error — the
+selector says what to return, not that it must exist. The query protocol numbers the
+selectors `MessageAttributeName.1`, `.2`, …; the JSON protocol sends a
+`MessageAttributeNames` array.
+
+`MD5OfMessageAttributes` is returned on `SendMessage`, on each `SendMessageBatch`
+result entry, and on each received message. It is computed with the algorithm published
+in the developer guide under "Calculating the MD5 message digest for message
+attributes": sort by name, then per attribute append a 4-byte big-endian length and the
+UTF-8 name, the same for the data type, one transport byte (`1` for String and Number,
+`2` for Binary), then the value's length and bytes.
+
+Two details of that algorithm are load-bearing, and substrate's implementation is
+pinned against three real-AWS digests that fail if either is wrong:
+
+- **A binary value is hashed raw, not base64.** Base64 is the wire form, so hashing
+  what travels is the natural mistake; it produces `5ff413c9dc7bd18abea88ca05643f902`
+  where AWS produces `049075255ebc53fb95f7f9f3cedf3c50` for the same input. This is
+  the same raw-versus-encoded distinction [message size
+  enforcement](#message-size-enforcement) makes, now with a hash to settle it.
+- **A custom data-type suffix is included in full.** `Number.java.lang.Long` hashes as
+  the whole 21-byte string, not as its `Number` base type.
+
+`MD5OfMessageAttributes` is **omitted entirely** from a response for a message with no
+attributes, rather than reported as the MD5 of zero bytes. A digest of nothing is a
+value a caller could compare against and "successfully" verify, which is worse than no
+value at all.
+
+On a receive, the digest covers **what is being returned**, not what was sent: a
+request naming a subset gets that subset's digest, since the digest exists so a caller
+can checksum the attributes in hand. Attributes come back in name order, which real SQS
+does not promise but determinism here does.
+
+A deduplicated FIFO send reports the digest of *that request's* attributes rather than
+the stored original's, for the same reason: the digest is a checksum of what the caller
+sent.
+
+Two limits are **not** enforced (tracked separately): the documented maximum of 10
+attributes per message, and the attribute-name character rules (no `AWS.` or `Amazon.`
+prefix, no leading, trailing or sequential periods). A 10-attribute message is accepted,
+which is the boundary rather than a rejection.
 
 ### QueueNameExists
 
