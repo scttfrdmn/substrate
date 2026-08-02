@@ -365,20 +365,20 @@ STS operations are free.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateBucket | |
+| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption) |
+| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | DeleteObject | Fires S3 notifications if configured |
-| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption) |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
-| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption) |
+| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
-| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption) |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
@@ -387,10 +387,10 @@ STS operations are free.
 | PutPublicAccessBlock | Records the configuration and enforces `BlockPublicAcls` / `BlockPublicPolicy`; a partial body reports omitted settings as `false` — see [Block Public Access](#block-public-access) |
 | GetPublicAccessBlock | `404 NoSuchPublicAccessBlockConfiguration` when the bucket has none — see [Block Public Access](#block-public-access) |
 | DeletePublicAccessBlock | Idempotent; removes only the configuration, never the bucket — see [Block Public Access](#block-public-access) |
-| GetBucketAcl | |
-| PutBucketAcl | Accepts a canned `x-amz-acl` or an XML body; `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
-| GetObjectAcl | |
-| PutObjectAcl | `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
+| GetBucketAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
+| PutBucketAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
+| GetObjectAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
+| PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
 | GetBucketNotificationConfiguration | |
 | PutBucketNotificationConfiguration | Triggers Lambda/SQS on PutObject/DeleteObject |
 | PutBucketTagging | |
@@ -971,7 +971,19 @@ carrying either setting refuses the call that would make it public:
 | Setting | Refuses | Response |
 |---------|---------|----------|
 | `BlockPublicAcls` | `PutBucketAcl`, `PutObjectAcl` with a public ACL | `403 AccessDenied` / `Access Denied` |
+| `BlockPublicAcls` | `PutObject`, `CopyObject`, `CreateMultipartUpload` whose request includes a public ACL | `403 AccessDenied` / `Access Denied` |
 | `BlockPublicPolicy` | `PutBucketPolicy` with a public policy | `403 AccessDenied` / `Access Denied` |
+
+The three create operations are their own bullet on the setting — "PUT Object calls
+fail if the request includes a public ACL" — and were unenforceable until substrate
+read an ACL from a create at all. **The refusal precedes every write**, so a refused
+`PutObject` stores no object, a refused `CopyObject` stores no destination object, and
+a refused `CreateMultipartUpload` leaves no upload ID behind; an overwrite refused this
+way leaves the object that was already at the key untouched, body and ACL both. The
+configuration consulted on a copy is the **destination** bucket's, since that is where
+the object lands.
+
+`CreateBucket` is the documented case substrate does **not** refuse; see below.
 
 A rejection stores nothing: the bucket or object keeps the ACL or policy it already
 had, matching "existing policies and ACLs for buckets and objects aren't modified".
@@ -994,10 +1006,18 @@ groups". `AuthenticatedUsers` is every AWS account, not every account in yours, 
 is why it counts despite the name. The permission itself is not inspected — `READ`,
 `WRITE`, `READ_ACP`, `WRITE_ACP` and `FULL_CONTROL` all count. All three ways a public
 ACL arrives are covered: the `x-amz-acl` canned header (`public-read`,
-`public-read-write`), an XML `Grant` naming a public group URI, and an
-`x-amz-grant-*` header whose grantee list contains one. The grant headers are read for
-this check only; substrate does not otherwise model them, so an ACL set through them
-is still not stored.
+`public-read-write`, `authenticated-read`), an XML `Grant` naming a public group URI,
+and an `x-amz-grant-*` header whose grantee list contains one. See
+[Access control lists](#access-control-lists) for how each form resolves.
+
+**`CreateBucket` with a public ACL is accepted, and that is a stated gap.** The
+setting's third bullet says "PUT Bucket calls fail if the request includes a public
+ACL", but the configuration that refuses such a call is the **account-level** one — a
+bucket-level configuration cannot exist before the bucket does. Substrate models no
+account-level Block Public Access, so gating this one operation would mean modeling a
+control the emulator does not otherwise have. A bucket created with `--acl public-read`
+therefore succeeds and reports the public grant, and the next `PutBucketAcl` on it is
+subject to whatever configuration has since been written.
 
 **A public policy is decided by assuming public and then trying to disqualify —
 not by looking for `Principal: "*"`.** This is stronger than wildcard-detection and is
@@ -1046,9 +1066,110 @@ does not model the guide's unsupported-action clause (S3 treats a statement gran
 action S3 does not support as potentially public), which would need an authoritative
 list of every supported `s3:` action.
 
-**`PutObject` and `CreateBucket` with a public ACL are not yet refused.** Real
-`BlockPublicAcls` rejects those too, but neither handler reads `x-amz-acl` at all, so
-covering them means first modelling ACL-on-create. Tracked separately.
+### Access control lists
+
+An ACL named on a write is **stored**, and reported by `GetBucketAcl` /
+`GetObjectAcl`. Six operations resolve one:
+
+| Operation | ACL source | On no ACL header |
+|-----------|-----------|-----------------|
+| `CreateBucket` | `x-amz-acl`, `x-amz-grant-*` | nothing stored; the default owner-only ACL is reported |
+| `PutObject` | `x-amz-acl`, `x-amz-grant-*` | nothing stored, and any ACL the key already had is **cleared** |
+| `CopyObject` | the copy request's own headers only | as `PutObject` — a copy never inherits the source's ACL |
+| `CreateMultipartUpload` | `x-amz-acl`, `x-amz-grant-*`, carried to the object `CompleteMultipartUpload` assembles | as `PutObject` |
+| `PutBucketAcl` | an XML body, else the headers | an empty request resolves to `private` |
+| `PutObjectAcl` | an XML body, else the headers | an empty request resolves to `private` |
+
+Before this, `PutObject` and `CreateBucket` read no ACL header at all, so the ACL
+`GetObjectAcl` reported was never the one the write set — and an ACL expressed through
+`x-amz-grant-*` was stored by **no** operation, `PutBucketAcl` and `PutObjectAcl`
+included: the grant headers were parsed only to decide whether Block Public Access
+should refuse.
+
+**A write replaces the whole ACL, not part of it.** "You cannot use `PutObject` to only
+update a single piece of metadata for an existing object. You must put the entire object
+with updated metadata" — so an overwrite naming no ACL reports owner-only afterwards
+even if the key previously carried a public grant, whether that grant arrived through
+the original `PutObject` or through a later `PutObjectAcl`. `CompleteMultipartUpload`
+and `CopyObject` replace it the same way, and `CreateBucket` clears any ACL a
+same-named bucket left behind when it was deleted.
+
+**A copy takes its ACL from the request and nowhere else**: "When you copy an object,
+the ACL metadata is not preserved and is set to `private` by default. Only the owner has
+full access control. To override the default ACL setting, specify a new ACL when you
+generate a copy request." That is the opposite of the metadata families, where `COPY` is
+the default directive — see [Copying objects](#copying-objects).
+
+**A multipart upload's ACL is fixed at create.** `CompleteMultipartUpload`'s request
+accepts no ACL header, exactly as it accepts no encryption header, so an ACL not named
+at `CreateMultipartUpload` cannot be supplied later.
+
+**The canned names resolve from the user guide's Canned ACL table**, and three of them
+mean different things on a bucket than on an object:
+
+| `x-amz-acl` | Bucket | Object |
+|-------------|--------|--------|
+| `private` | owner `FULL_CONTROL` | owner `FULL_CONTROL` |
+| `public-read` | + `AllUsers` `READ` | + `AllUsers` `READ` |
+| `public-read-write` | + `AllUsers` `READ`, `WRITE` | + `AllUsers` `READ`, `WRITE` |
+| `authenticated-read` | + `AuthenticatedUsers` `READ` | + `AuthenticatedUsers` `READ` |
+| `log-delivery-write` | + `LogDelivery` `WRITE`, `READ_ACP` | owner-only — "Applies to: Bucket" |
+| `aws-exec-read` | owner-only | owner-only |
+| `bucket-owner-read` | owner-only — S3 "ignores it" on a bucket | owner-only |
+| `bucket-owner-full-control` | owner-only | owner-only |
+
+The owner grant is present in every row because a canned ACL is applied on top of the
+ACL the resource already has: "When Amazon S3 receives a request with a canned ACL in
+the request, it adds the predefined grants to the ACL of the resource". `aws-exec-read`
+resolves to owner-only because it grants Amazon EC2 `READ` and AWS does not publish that
+canonical user ID; the two `bucket-owner-*` names collapse because substrate has one
+owner identity per bucket, so the object owner and the bucket owner are the same
+principal. **`authenticated-read` is public** by Block Public Access's own definition,
+which is the row that matters most: substrate resolved it to owner-only before, so the
+block could be walked straight through.
+
+A canned name substrate does not recognize resolves to owner-only rather than being
+refused. The per-operation Valid Values lists differ — `CreateBucket` and `PutBucketAcl`
+document four names, `PutObject`, `PutObjectAcl`, `CopyObject` and
+`CreateMultipartUpload` seven — and no error code is documented for a name outside them,
+so refusing would mean rejecting a request real S3 may accept.
+
+**The five `x-amz-grant-*` headers add to the default ACL**, they do not replace it:
+"you specify explicit access permissions and grantees … These permissions are then added
+to the ACL on the object", so the owner keeps `FULL_CONTROL`.
+
+| Header | Permission |
+|--------|-----------|
+| `x-amz-grant-full-control` | `FULL_CONTROL` |
+| `x-amz-grant-read` | `READ` |
+| `x-amz-grant-read-acp` | `READ_ACP` |
+| `x-amz-grant-write` | `WRITE` |
+| `x-amz-grant-write-acp` | `WRITE_ACP` |
+
+Each value is a comma-separated list of `type=value` pairs — `id="abc123",
+uri="http://acs.amazonaws.com/groups/global/AllUsers"` — with the quotes optional and
+the type read case-insensitively. Only `id` and `uri` produce a grantee, which is the
+pair the user guide's "Who is a grantee?" section lists. `PutObject`'s request syntax
+omits `x-amz-grant-write` (the permissions table gives `WRITE` no object meaning);
+substrate records it there anyway rather than inventing a rejection no error code is
+documented for.
+
+**An `emailAddress` grantee is skipped, not refused.** S3 ended support for it — "As of
+October 1, 2025, Amazon S3 has discontinued support for Email Grantee Access Control
+Lists (ACLs) … the request will receive an `HTTP 405` (Method Not Allowed) error" — and
+substrate's clock is past that date, but the 405 is Region-conditional and applies to the
+XML body form too, so returning it is tracked separately rather than guessed at.
+
+**The two forms are documented mutually exclusive** — "If you use these ACL-specific
+headers, you cannot use the `x-amz-acl` header to set a canned ACL" — but no error code
+is documented for sending both, so substrate resolves rather than refuses and the grant
+headers win, being the more specific expression. On `PutBucketAcl` and `PutObjectAcl` an
+XML body wins over both.
+
+**The owner identity is derived from the bucket name** (`<bucket>-owner`), because
+substrate has no canonical user IDs: there is one owner per bucket and it owns everything
+in it. An ACL's `Owner` and its `CanonicalUser` `FULL_CONTROL` grantee are therefore
+always the same ID, and an object's owner is its bucket's.
 
 ### Betty CFN resource types
 

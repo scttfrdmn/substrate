@@ -211,6 +211,18 @@ func publicACLCases() []aclCase {
 			},
 			public: true,
 		},
+		{
+			// A body and a grant header together: the body wins as the ACL, so the
+			// resolved ACL is owner-only and only the separate grant-header check sees
+			// the public grantee. Since #470 resolved every other route through the
+			// ACL itself, this is the one case that check still uniquely catches — and
+			// a public grant reaching the wire alongside a private body is exactly the
+			// request Block Public Access exists to refuse.
+			name:    "private xml body with a public grant header",
+			body:    aclXML("", ""),
+			headers: map[string]string{"x-amz-grant-read": `uri="` + testGroupAllUsers + `"`},
+			public:  true,
+		},
 		{name: "canned private", headers: map[string]string{"x-amz-acl": "private"}, public: false},
 		{name: "owner-only xml", body: aclXML("", ""), public: false},
 		{
@@ -714,4 +726,188 @@ func nilIfEmptyBody(body string) []byte {
 		return nil
 	}
 	return []byte(body)
+}
+
+// headerACLCases are the publicACLCases that arrive through headers alone.
+//
+// The three create operations accept no ACL body, so the XML rows are not
+// expressible against them. Filtering rather than writing a second table keeps the
+// definition of "public" in one place: a case added to publicACLCases is picked up
+// here automatically.
+func headerACLCases() []aclCase {
+	var cases []aclCase
+	for _, tc := range publicACLCases() {
+		if tc.body == "" {
+			cases = append(cases, tc)
+		}
+	}
+	return cases
+}
+
+// TestS3_BlockPublicAcls_PutObject asserts BlockPublicAcls refuses a PutObject
+// carrying a public ACL, and that the object is not stored.
+//
+// This is the operation #458 could not cover: putObject read no ACL header at all,
+// so there was nothing for the check to examine — a consumer could upload a
+// public-read object to a bucket that blocks public ACLs and get a 200. The rule is
+// its own bullet on the setting: "PUT Object calls fail if the request includes a
+// public ACL."
+//
+// The not-stored half is the assertion that matters. Refusing after the body reached
+// the filesystem would leave a key behind that GetObject serves and GetObjectAcl
+// reports as private, which is worse than either accepting or refusing cleanly.
+func TestS3_BlockPublicAcls_PutObject(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range headerACLCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv, _ := newS3TestServer(t)
+			bucket := newPABBucket(t, srv, "put-object-acl")
+			require.Equal(t, http.StatusOK, putPAB(t, srv, bucket, pabBlockACLsOnly).Code)
+
+			w := s3Request(t, srv, http.MethodPut, "/"+bucket+"/k.txt", []byte("hi"), tc.headers)
+			if !tc.public {
+				require.Equal(t, http.StatusOK, w.Code, "PutObject should be accepted: %s", w.Body.String())
+				return
+			}
+
+			require.Equal(t, http.StatusForbidden, w.Code, "PutObject should be refused: %s", w.Body.String())
+			assert.Equal(t, "AccessDenied", s3ErrorCode(t, w.Body.Bytes()))
+			assert.Equal(t, "Access Denied", s3ErrorMessage(t, w.Body.Bytes()))
+
+			assert.Equal(t, http.StatusNotFound,
+				s3Request(t, srv, http.MethodGet, "/"+bucket+"/k.txt", nil, nil).Code,
+				"a refused PutObject must not store the object")
+		})
+	}
+}
+
+// TestS3_BlockPublicAcls_PutObjectDoesNotClobber is the overwrite case: a refused
+// PutObject must leave the object that was already at the key exactly as it was,
+// body and ACL both.
+//
+// "Enabling this setting doesn't affect existing policies or ACLs" — and a check
+// that ran after the write would satisfy the status code while destroying the
+// object, which no assertion on the response alone would catch.
+func TestS3_BlockPublicAcls_PutObjectDoesNotClobber(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+	bucket := newPABBucket(t, srv, "no-clobber")
+	require.Equal(t, http.StatusOK,
+		s3Request(t, srv, http.MethodPut, "/"+bucket+"/k.txt", []byte("original"), nil).Code)
+	require.Equal(t, http.StatusOK, putPAB(t, srv, bucket, pabBlockACLsOnly).Code)
+
+	before := getObjectACLGrants(t, srv, bucket, "k.txt")
+
+	w := s3Request(t, srv, http.MethodPut, "/"+bucket+"/k.txt", []byte("replacement"),
+		map[string]string{"x-amz-acl": "public-read"})
+	require.Equal(t, http.StatusForbidden, w.Code, "%s", w.Body.String())
+
+	gw := s3Request(t, srv, http.MethodGet, "/"+bucket+"/k.txt", nil, nil)
+	require.Equal(t, http.StatusOK, gw.Code)
+	assert.Equal(t, "original", gw.Body.String(), "a refused overwrite must not replace the body")
+	assert.Equal(t, before, getObjectACLGrants(t, srv, bucket, "k.txt"))
+}
+
+// TestS3_BlockPublicAcls_CopyObject asserts the check applies to a copy, against the
+// *destination* bucket's configuration.
+//
+// A copy is a PutObject that names its body by reference, so the same rule reaches
+// it — and the bucket whose setting decides is the one the object lands in. Reading
+// the source's instead would let a consumer launder a public ACL into a blocked
+// bucket by copying rather than uploading.
+func TestS3_BlockPublicAcls_CopyObject(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+	src := newPABBucket(t, srv, "copy-src")
+	dst := newPABBucket(t, srv, "copy-dst")
+	require.Equal(t, http.StatusOK,
+		s3Request(t, srv, http.MethodPut, "/"+src+"/k.txt", []byte("hi"), nil).Code)
+	require.Equal(t, http.StatusOK, putPAB(t, srv, dst, pabBlockACLsOnly).Code)
+
+	w := s3Request(t, srv, http.MethodPut, "/"+dst+"/k.txt", nil, map[string]string{
+		"X-Amz-Copy-Source": "/" + src + "/k.txt",
+		"x-amz-acl":         "public-read",
+	})
+	require.Equal(t, http.StatusForbidden, w.Code, "%s", w.Body.String())
+	assert.Equal(t, "AccessDenied", s3ErrorCode(t, w.Body.Bytes()))
+	assert.Equal(t, http.StatusNotFound,
+		s3Request(t, srv, http.MethodGet, "/"+dst+"/k.txt", nil, nil).Code,
+		"a refused CopyObject must not store the destination object")
+
+	// The mirror image: the source blocks public ACLs, the destination does not, and
+	// the copy is allowed. It is the destination's setting that governs.
+	require.Equal(t, http.StatusOK, putPAB(t, srv, src, pabBlockACLsOnly).Code)
+	require.Equal(t, http.StatusNoContent,
+		s3Request(t, srv, http.MethodDelete, "/"+dst+"?publicAccessBlock", nil, nil).Code)
+
+	allowed := s3Request(t, srv, http.MethodPut, "/"+dst+"/k.txt", nil, map[string]string{
+		"X-Amz-Copy-Source": "/" + src + "/k.txt",
+		"x-amz-acl":         "public-read",
+	})
+	assert.Equal(t, http.StatusOK, allowed.Code, "%s", allowed.Body.String())
+	assert.Contains(t, getObjectACLGrants(t, srv, dst, "k.txt"), testGroupAllUsers+"/READ")
+}
+
+// TestS3_BlockPublicAcls_CreateMultipartUpload asserts the refusal lands at create
+// rather than at complete, and that no upload is left behind.
+//
+// Create is the only place a multipart upload's ACL can be named — Complete's request
+// accepts no ACL header — so it is also the only place the check can run. Deferring
+// it to Complete would let a consumer upload every part of a large object before
+// discovering the write was always going to be refused, and would leave an upload ID
+// behind that only AbortMultipartUpload could clean up.
+func TestS3_BlockPublicAcls_CreateMultipartUpload(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+	bucket := newPABBucket(t, srv, "mpu-blocked")
+	require.Equal(t, http.StatusOK, putPAB(t, srv, bucket, pabBlockACLsOnly).Code)
+
+	w := s3Request(t, srv, http.MethodPost, "/"+bucket+"/big.bin?uploads", nil,
+		map[string]string{"x-amz-acl": "public-read"})
+	require.Equal(t, http.StatusForbidden, w.Code, "%s", w.Body.String())
+	assert.Equal(t, "AccessDenied", s3ErrorCode(t, w.Body.Bytes()))
+
+	lw := s3Request(t, srv, http.MethodGet, "/"+bucket+"?uploads", nil, nil)
+	require.Equal(t, http.StatusOK, lw.Code)
+	assert.NotContains(t, lw.Body.String(), "big.bin",
+		"a refused CreateMultipartUpload must leave no upload behind")
+
+	// The positive control, without which the assertion above would pass even if
+	// ListMultipartUploads reported nothing at all: an accepted create is listed.
+	require.Equal(t, http.StatusOK,
+		s3Request(t, srv, http.MethodPost, "/"+bucket+"/allowed.bin?uploads", nil,
+			map[string]string{"x-amz-acl": "private"}).Code)
+	lw2 := s3Request(t, srv, http.MethodGet, "/"+bucket+"?uploads", nil, nil)
+	require.Equal(t, http.StatusOK, lw2.Code)
+	assert.Contains(t, lw2.Body.String(), "allowed.bin")
+}
+
+// TestS3_BlockPublicAcls_CreateBucket pins the account-level scope decision: a
+// CreateBucket naming a public ACL is **accepted**.
+//
+// The setting's own bullet says such a call fails — "PUT Bucket calls fail if the
+// request includes a public ACL" — but the configuration that would refuse it is the
+// *account-level* one, since a bucket-level configuration cannot exist before the
+// bucket does. Substrate models no account-level Block Public Access, so gating this
+// one operation would be modeling a control the emulator does not otherwise have.
+//
+// This test asserts the gap deliberately rather than leaving it untested, so that
+// adding account-level support later changes a failing test rather than passing
+// silently in whichever direction the new code happens to take.
+func TestS3_BlockPublicAcls_CreateBucket(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+
+	// An existing bucket's configuration cannot reach a different bucket's creation,
+	// which is the near-miss worth ruling out: the block is per-bucket.
+	blocked := newPABBucket(t, srv, "already-blocked")
+	require.Equal(t, http.StatusOK, putPAB(t, srv, blocked, pabAllTrue).Code)
+
+	w := s3Request(t, srv, http.MethodPut, "/fresh-public", nil,
+		map[string]string{"x-amz-acl": "public-read"})
+	require.Equal(t, http.StatusOK, w.Code,
+		"substrate models no account-level Block Public Access: %s", w.Body.String())
+	assert.Contains(t, getBucketACLGrants(t, srv, "fresh-public"), testGroupAllUsers+"/READ")
 }

@@ -381,7 +381,7 @@ func (p *S3Plugin) listBuckets(_ *RequestContext, _ *AWSRequest) (*AWSResponse, 
 }
 
 // createBucket handles PUT /<bucket>.
-func (p *S3Plugin) createBucket(reqCtx *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
+func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
 	if !validateBucketName(bucket) {
 		return s3ErrorResponse("InvalidBucketName", "The specified bucket is not valid.", http.StatusBadRequest), nil
 	}
@@ -416,10 +416,101 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, _ *AWSRequest, bucket st
 		return nil, fmt.Errorf("save bucket: %w", err)
 	}
 
+	// The ACL is stored after the bucket, not before: a bucket_acl: entry for a
+	// bucket that does not exist would be readable through no operation and would
+	// outlive a DeleteBucket. Nothing between the two writes can fail, so there is
+	// no window in which one lands without the other.
+	//
+	// Block Public Access is not consulted here, and deliberately: substrate models
+	// no account-level configuration, and a bucket-level one cannot exist before the
+	// bucket does. See [S3Plugin.s3CreateBucketACL].
+	if err := p.s3CreateBucketACL(ctx, req, bucket); err != nil {
+		return nil, err
+	}
+
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
 		Headers:    map[string]string{"Location": "/" + bucket},
 	}, nil
+}
+
+// s3StoreObjectACL persists the ACL a write named, or clears any stored ACL when
+// it named none.
+//
+// The delete is the part that is easy to leave out and wrong to: every operation
+// that reaches here writes a whole object, so a write that names no ACL must report
+// the default owner-only ACL afterwards even if the key previously carried a public
+// one — "You cannot use PutObject to only update a single piece of metadata for an
+// existing object. You must put the entire object with updated metadata." Not
+// clearing would leave a grant the caller's last write did not ask for, which is
+// the same silent-carry-across the copy path is documented to avoid.
+func (p *S3Plugin) s3StoreObjectACL(ctx context.Context, bucket, key string, acl *S3AccessControlList) error {
+	stateKey := "object_acl:" + bucket + "/" + key
+	if acl == nil {
+		if err := p.state.Delete(ctx, s3Namespace, stateKey); err != nil {
+			return fmt.Errorf("clear object acl: %w", err)
+		}
+		return nil
+	}
+	raw, err := json.Marshal(acl)
+	if err != nil {
+		return fmt.Errorf("marshal object acl: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, stateKey, raw); err != nil {
+		return fmt.Errorf("put object acl: %w", err)
+	}
+	return nil
+}
+
+// s3CreateBucketACL stores the ACL a CreateBucket request named, or clears any
+// bucket_acl: entry left behind by a previous bucket of the same name.
+//
+// A request with no ACL header stores nothing, so an unconfigured bucket keeps
+// reporting the default ACL [s3DefaultACL] synthesizes on read rather than a stored
+// copy of it. The two are identical in content; storing nothing keeps the state
+// store's contents a record of what the caller actually asked for.
+//
+// The clear is not hypothetical tidiness: DeleteBucket removes the bucket: entry and
+// leaves its sub-resources behind, so without it a bucket created, given a public
+// ACL, deleted and created again would report the deleted bucket's ACL. That the
+// create is authoritative either way is the same whole-resource-replacement rule
+// [S3Plugin.s3StoreObjectACL] follows. Other bucket sub-resources — the policy, the
+// Block Public Access configuration, tagging — still outlive a DeleteBucket; that is
+// pre-existing and wider than this fix (#508).
+//
+// **Block Public Access cannot refuse a CreateBucket in substrate, and that is a
+// stated scope boundary rather than an oversight** (#470). Real S3 refuses one:
+// "if your desired bucket ACL grants public access, you must first create the
+// bucket (without the bucket ACL) and then explicitly disable Block Public Access
+// on the bucket before using PutBucketAcl to set the ACL. If you try to create a
+// bucket with a public ACL, the request will fail." But the configuration that
+// refuses it is the *account-level* one — a bucket-level configuration cannot
+// exist before the bucket — and substrate models no account-level Block Public
+// Access at all. Inventing one to gate this single operation would be modeling a
+// control the emulator does not otherwise have, and would refuse a create that
+// every consumer's current fixtures expect to succeed. The bucket ACL a create
+// stores is enforced from then on: PutObject, PutObjectAcl and PutBucketAcl all
+// consult the bucket's configuration.
+func (p *S3Plugin) s3CreateBucketACL(ctx context.Context, req *AWSRequest, bucket string) error {
+	if req == nil {
+		return nil
+	}
+	stateKey := "bucket_acl:" + bucket
+	acl := s3RequestACL(req.Headers, bucket, s3ACLBucket)
+	if acl == nil {
+		if err := p.state.Delete(ctx, s3Namespace, stateKey); err != nil {
+			return fmt.Errorf("clear bucket acl: %w", err)
+		}
+		return nil
+	}
+	raw, err := json.Marshal(acl)
+	if err != nil {
+		return fmt.Errorf("marshal bucket acl: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, stateKey, raw); err != nil {
+		return fmt.Errorf("put bucket acl: %w", err)
+	}
+	return nil
 }
 
 // headBucket handles HEAD /<bucket>.
@@ -478,6 +569,20 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	storageClass, scErr := resolveStorageClass(req.Headers)
 	if scErr != nil {
 		return scErr, nil
+	}
+
+	// BlockPublicAcls rejects a PutObject carrying a public ACL — "PUT Object calls
+	// fail if the request includes a public ACL" — and rejects it here, before the
+	// body reaches the filesystem and before any metadata is stored, so a refused
+	// upload leaves the key exactly as it was. That all-or-nothing property is what
+	// lets a consumer assert the object is absent afterwards (#470). Substrate
+	// accepted such an upload with a 200 until this fix, which meant a bucket real S3
+	// would have refused took the object.
+	objectACL := s3RequestACL(req.Headers, bucket, s3ACLObject)
+	if denied, dErr := p.s3RequestACLDenied(ctx, bucket, objectACL, req.Headers); dErr != nil {
+		return nil, dErr
+	} else if denied != nil {
+		return denied, nil
 	}
 
 	// Conditional writes must not race: the existence check and the write below have
@@ -597,6 +702,13 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 
 	if err := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, data); err != nil {
 		return nil, fmt.Errorf("save object metadata: %w", err)
+	}
+
+	// A PUT replaces the whole object, its ACL included, so an overwrite that names no
+	// ACL resets one a previous PutObjectAcl had set rather than inheriting it. See
+	// [S3Plugin.s3StoreObjectACL], where the reasoning and the citation are.
+	if err := p.s3StoreObjectACL(ctx, bucket, key, objectACL); err != nil {
+		return nil, err
 	}
 
 	p.fireNotifications(reqCtx, bucket, key, "s3:ObjectCreated:Put", obj.Size, etag)
@@ -1023,6 +1135,24 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		return cksErr, nil
 	}
 
+	// A copy's ACL comes from the request and from nowhere else: "When you copy an
+	// object, the ACL metadata is not preserved and is set to private by default. Only
+	// the owner has full access control. To override the default ACL setting, specify a
+	// new ACL when you generate a copy request." So a nil here — the request named no
+	// ACL — must clear the destination's stored ACL rather than leave the source's or
+	// the destination's previous one in place, which is exactly what
+	// [S3Plugin.s3StoreObjectACL] does with it below.
+	//
+	// The configuration consulted is the *destination* bucket's, and it is consulted
+	// before the body is written, so a refused copy leaves the destination key exactly
+	// as it was — the same all-or-nothing property PutObject has.
+	dstACL := s3RequestACL(req.Headers, dstBucket, s3ACLObject)
+	if denied, dErr := p.s3RequestACLDenied(ctx, dstBucket, dstACL, req.Headers); dErr != nil {
+		return nil, dErr
+	} else if denied != nil {
+		return denied, nil
+	}
+
 	// Source preconditions gate whether the copy may read; destination
 	// preconditions gate whether it may overwrite. Both are checked before any
 	// write, so a rejected copy leaves the destination untouched.
@@ -1103,6 +1233,10 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	}
 	if err := p.state.Put(ctx, s3Namespace, "object:"+dstBucket+"/"+dstKey, dstMeta); err != nil {
 		return nil, fmt.Errorf("save dest metadata: %w", err)
+	}
+
+	if err := p.s3StoreObjectACL(ctx, dstBucket, dstKey, dstACL); err != nil {
+		return nil, err
 	}
 
 	type copyObjectResult struct {
@@ -1338,6 +1472,19 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		return cksErr, nil
 	}
 
+	// The ACL is fixed here too, and for the same reason the encryption is: Complete's
+	// request carries no ACL header, so an ACL not recorded on the upload is lost for
+	// good. BlockPublicAcls is therefore evaluated here as well — a public ACL named at
+	// create is refused before an upload ID exists, so a consumer cannot upload parts
+	// against an upload whose Complete was always going to be refused. Nothing has been
+	// written at this point, so the refusal leaves no upload behind.
+	uploadACL := s3RequestACL(req.Headers, bucket, s3ACLObject)
+	if denied, dErr := p.s3RequestACLDenied(ctx, bucket, uploadACL, req.Headers); dErr != nil {
+		return nil, dErr
+	} else if denied != nil {
+		return denied, nil
+	}
+
 	uploadID := generateUploadID()
 
 	// Resolved case-insensitively, like every other header this function reads
@@ -1358,6 +1505,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		S3SystemMetadata:       resolveSystemMetadata(req.Headers),
 		S3ServerSideEncryption: resolveServerSideEncryption(req.Headers),
 		StorageClass:           storageClass,
+		ACL:                    uploadACL,
 		ChecksumAlgorithm:      checksumAlgorithm,
 		ChecksumType:           checksumType,
 		Initiated:              p.tc.Now(),
@@ -1634,6 +1782,15 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 	}
 	if err := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, objData); err != nil {
 		return nil, fmt.Errorf("save assembled object metadata: %w", err)
+	}
+
+	// The ACL crosses from the upload the same way the metadata families do, and for
+	// the same reason: this request carries no ACL header to read. Storing it here
+	// rather than at create keeps the invariant every other write path has — an
+	// object_acl: entry exists only for an object that exists — and a nil clears any
+	// ACL a previous object at this key had, since Complete replaces it wholesale.
+	if err := p.s3StoreObjectACL(ctx, bucket, key, upload.ACL); err != nil {
+		return nil, err
 	}
 
 	// Clean up multipart state.
@@ -2537,8 +2694,10 @@ func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket strin
 				"The XML you provided was not well-formed.", http.StatusBadRequest), nil
 		}
 	} else {
-		// Honor the x-amz-acl canned ACL header.
-		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
+		// Honor the x-amz-acl canned ACL header and the x-amz-grant-* family. Until
+		// #470 only the canned header was read here, so an ACL set through grant
+		// headers was refused when public and silently discarded when not.
+		acl = s3ResolveRequestACL(req.Headers, bucket, s3ACLBucket)
 	}
 
 	// BlockPublicAcls rejects a PutBucketAcl carrying a public ACL, without
@@ -2619,7 +2778,7 @@ func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key 
 				"The XML you provided was not well-formed.", http.StatusBadRequest), nil
 		}
 	} else {
-		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
+		acl = s3ResolveRequestACL(req.Headers, bucket, s3ACLObject)
 	}
 
 	// The configuration consulted is the *bucket's*: Block Public Access has no
@@ -2642,17 +2801,6 @@ func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key 
 		StatusCode: http.StatusOK,
 		Headers:    map[string]string{},
 	}, nil
-}
-
-// s3DefaultACL returns an owner-full-control ACL for the given resource.
-func s3DefaultACL(resource string) S3AccessControlList {
-	return S3AccessControlList{
-		Owner: S3Owner{ID: resource + "-owner", DisplayName: resource},
-		Grants: []S3Grant{{
-			Grantee:    S3Grantee{Type: "CanonicalUser", ID: resource + "-owner"},
-			Permission: "FULL_CONTROL",
-		}},
-	}
 }
 
 // getBucketNotificationConfiguration handles GET /<bucket>?notification.
@@ -3066,34 +3214,6 @@ func (p *S3Plugin) deleteObjectTagging(_ *RequestContext, _ *AWSRequest, bucket,
 		return nil, fmt.Errorf("deleteObjectTagging state.Put: %w", putErr)
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/xml"}, Body: nil}, nil
-}
-
-// s3CannedACL maps a canned ACL name (x-amz-acl header) to an S3AccessControlList.
-// Unsupported or empty canned ACL values fall back to the private (owner-only) ACL.
-func s3CannedACL(cannedACL, resource string) S3AccessControlList {
-	owner := S3Owner{ID: resource + "-owner", DisplayName: resource}
-	fullControlGrant := S3Grant{
-		Grantee:    S3Grantee{Type: "CanonicalUser", ID: resource + "-owner"},
-		Permission: "FULL_CONTROL",
-	}
-	publicReadGrant := S3Grant{
-		Grantee:    S3Grantee{Type: "Group", URI: "http://acs.amazonaws.com/groups/global/AllUsers"},
-		Permission: "READ",
-	}
-
-	switch cannedACL {
-	case "public-read":
-		return S3AccessControlList{Owner: owner, Grants: []S3Grant{fullControlGrant, publicReadGrant}}
-	case "public-read-write":
-		return S3AccessControlList{Owner: owner, Grants: []S3Grant{
-			fullControlGrant,
-			publicReadGrant,
-			{Grantee: S3Grantee{Type: "Group", URI: "http://acs.amazonaws.com/groups/global/AllUsers"}, Permission: "WRITE"},
-		}}
-	default:
-		// "private" and all other values → owner-only.
-		return S3AccessControlList{Owner: owner, Grants: []S3Grant{fullControlGrant}}
-	}
 }
 
 // --- Versioning helpers ------------------------------------------------------

@@ -84,13 +84,34 @@ func (p *S3Plugin) s3BlocksPublicPolicy(ctx context.Context, bucket string) (boo
 	return cfg != nil && cfg.BlockPublicPolicy, nil
 }
 
+// s3RequestACLDenied returns the 403 to send when a create operation named a
+// public ACL on a bucket that blocks them, or nil when the write may proceed.
+//
+// A nil acl — the request named none — proceeds without consulting the bucket at
+// all. That short-circuit is safe rather than convenient: [s3RequestACL] returns
+// nil only when [s3RequestNamesACL] found none of the six headers in any case, so
+// there is nothing for either half of [S3Plugin.s3PublicACLDenied] to find, and the
+// resolved default ACL grants only the owner.
+//
+// PutObject, CopyObject, CreateMultipartUpload and CreateBucket all go through
+// here; PutBucketAcl and PutObjectAcl call s3PublicACLDenied directly, because an
+// ACL is never absent from those two — an empty body resolves to private.
+func (p *S3Plugin) s3RequestACLDenied(ctx context.Context, bucket string, acl *S3AccessControlList, headers map[string]string) (*AWSResponse, error) {
+	if acl == nil {
+		return nil, nil
+	}
+	return p.s3PublicACLDenied(ctx, bucket, *acl, headers)
+}
+
 // s3PublicACLDenied returns the 403 to send when a bucket blocks public ACLs and
 // the request carries one, or nil when the request may proceed.
 //
 // The ACL and the headers are both examined because they are two of the three ways
-// a public grant arrives: acl is what PutBucketAcl/PutObjectAcl resolved from the
-// XML body or the x-amz-acl canned header, and headers still needs reading for
-// x-amz-grant-*, which substrate does not fold into the resolved ACL.
+// a public grant arrives: acl is what the caller's XML body or x-amz-acl canned
+// header resolved to, and headers still needs reading for x-amz-grant-* — which
+// [s3ResolveRequestACL] does fold into the resolved ACL as of #470, but only when
+// the caller sent no XML body. PutBucketAcl with a private body and a public grant
+// header is the case the second half still catches.
 //
 // The error return is reserved for a state-store failure, which the caller must
 // propagate rather than report as an authorization decision.
@@ -126,40 +147,24 @@ func s3ACLIsPublic(acl S3AccessControlList) bool {
 	return false
 }
 
-// s3GrantHeaderNames are the x-amz-grant-* headers PutBucketAcl and PutObjectAcl
-// accept, each naming grantees for one permission.
-//
-// Substrate does not otherwise model these headers — an ACL set through them is
-// not stored, which is a separate gap. They are parsed here because a header
-// naming a public group URI is a public ACL expressed the third documented way,
-// and a Block Public Access check that ignored them would have a hole a consumer
-// could drive a public grant straight through.
-var s3GrantHeaderNames = []string{
-	"X-Amz-Grant-Read",
-	"X-Amz-Grant-Write",
-	"X-Amz-Grant-Read-Acp",
-	"X-Amz-Grant-Write-Acp",
-	"X-Amz-Grant-Full-Control",
-}
-
 // s3GrantHeadersArePublic reports whether any x-amz-grant-* header names a
 // predefined public group.
 //
-// The header value is a comma-separated list of grantees, each written as
-// type=value — for example `uri="http://acs.amazonaws.com/groups/global/AllUsers"`.
-// Values may be quoted, so quotes are trimmed before the comparison.
+// A header naming a public group URI is a public ACL expressed the third
+// documented way, so a Block Public Access check that ignored them would have a
+// hole a consumer could drive a public grant straight through. Since #470 an ACL
+// set through them is also *stored*, which means [s3ACLIsPublic] catches most of
+// these first; this stays the check that covers the one case it cannot, a
+// PutBucketAcl or PutObjectAcl whose XML body wins over its headers.
+//
+// The names and the grantee parsing are [s3GrantHeaders] and [s3ParseGrantees],
+// shared with the resolver so the two can never disagree about which headers exist
+// or how a grantee is spelled — and the read is case-insensitive for the reason
+// [s3GrantsFromHeaders] gives.
 func s3GrantHeadersArePublic(headers map[string]string) bool {
-	for _, name := range s3GrantHeaderNames {
-		value := headers[name]
-		if value == "" {
-			continue
-		}
-		for _, grantee := range strings.Split(value, ",") {
-			key, val, found := strings.Cut(strings.TrimSpace(grantee), "=")
-			if !found || !strings.EqualFold(strings.TrimSpace(key), "uri") {
-				continue
-			}
-			switch strings.Trim(strings.TrimSpace(val), `"`) {
+	for _, gh := range s3GrantHeaders {
+		for _, grantee := range s3ParseGrantees(headerValueFold(headers, gh.name)) {
+			switch grantee.URI {
 			case s3GroupAllUsers, s3GroupAuthenticatedUsers:
 				return true
 			}
