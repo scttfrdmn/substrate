@@ -60,6 +60,9 @@ func createLaunchTemplate(t *testing.T, ts *httptest.Server, name string, data m
 // launchedInstance is the instance state a launch-template test inspects.
 type launchedInstance struct {
 	InstanceID      string `xml:"instanceId"`
+	ImageID         string `xml:"imageId"`
+	InstanceType    string `xml:"instanceType"`
+	KeyName         string `xml:"keyName"`
 	SubnetID        string `xml:"subnetId"`
 	VpcID           string `xml:"vpcId"`
 	PublicIPAddress string `xml:"publicIpAddress"`
@@ -67,6 +70,15 @@ type launchedInstance struct {
 		GroupID   string `xml:"groupId"`
 		GroupName string `xml:"groupName"`
 	} `xml:"groupSet>item"`
+}
+
+// groupIDs flattens the instance's security group IDs.
+func (l launchedInstance) groupIDs() []string {
+	ids := make([]string, 0, len(l.Groups))
+	for _, g := range l.Groups {
+		ids = append(ids, g.GroupID)
+	}
+	return ids
 }
 
 // describeInstance runs DescribeInstances for one instance ID.
@@ -403,6 +415,249 @@ func TestEC2_LaunchTemplate_NoNetworkInterface(t *testing.T) {
 	// fall-through from the non-default subnets the tests above use.
 	if got.PublicIPAddress == "" {
 		t.Error("publicIpAddress is empty; the default subnet should assign one")
+	}
+}
+
+// TestEC2_LaunchTemplate_MergesWithRequestParams is #453's headline case: a
+// request that names both an ImageId and a launch template.
+//
+// runInstances gated its entire template block on imageID == "", so such a
+// request never read the template at all — its InstanceType, KeyName, subnet,
+// security groups and public-IP preference were silently dropped and the instance
+// landed in a substrate-chosen default VPC on a default instance type. The launch
+// succeeded, so nothing failed; the instance simply was not the one asked for.
+//
+// AWS's RunInstances reference states the rule this asserts: "Any additional
+// parameters that you specify for the new instance overwrite the corresponding
+// parameters included in the launch template." So the request's AMI wins *and*
+// every field it did not name comes from the template — one launch, all of it.
+func TestEC2_LaunchTemplate_MergesWithRequestParams(t *testing.T) {
+	ts := newEC2TestServer(t)
+	net := newLTNetwork(t, ts, "10.20.0.0/16", "lt-merge")
+	ltID := createLaunchTemplate(t, ts, "merge", map[string]string{
+		"LaunchTemplateData.ImageId":                                     "ami-0template000001",
+		"LaunchTemplateData.InstanceType":                                "c5.xlarge",
+		"LaunchTemplateData.KeyName":                                     "template-key",
+		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
+		"LaunchTemplateData.NetworkInterface.1.SubnetId":                 net.subnetID,
+		"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1":        net.sgID,
+		"LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress": "true",
+	})
+
+	id := runInstance(t, ts, map[string]string{
+		"LaunchTemplate.LaunchTemplateId": ltID,
+		// The only field the request names. Before #453 its presence alone was
+		// enough to discard everything else above.
+		"ImageId": "ami-0request0000001",
+	})
+	got := describeInstance(t, ts, id)
+
+	if got.ImageID != "ami-0request0000001" {
+		t.Errorf("imageId = %q, want the request's AMI", got.ImageID)
+	}
+	if got.InstanceType != "c5.xlarge" {
+		t.Errorf("instanceType = %q, want the template's c5.xlarge", got.InstanceType)
+	}
+	if got.KeyName != "template-key" {
+		t.Errorf("keyName = %q, want the template's template-key", got.KeyName)
+	}
+	if got.SubnetID != net.subnetID {
+		t.Errorf("subnetId = %q, want the template's %q", got.SubnetID, net.subnetID)
+	}
+	if ids := got.groupIDs(); len(ids) != 1 || ids[0] != net.sgID {
+		t.Errorf("groupSet = %v, want the template's group %s", ids, net.sgID)
+	}
+	// The subnet is non-default and does not map public IPs, so a public IP can
+	// only have come from the template's preference.
+	if got.PublicIPAddress == "" {
+		t.Error("publicIpAddress is empty; want one from the template's preference")
+	}
+}
+
+// TestEC2_LaunchTemplate_FieldPrecedence walks each mergeable field three ways:
+// the request wins when it names a value, the template fills the gap when it does
+// not, and the built-in default applies when neither does.
+//
+// The InstanceType rows are the ones that matter most. The template fallback used
+// to test instanceType == "t3.micro" as a proxy for "the request named nothing",
+// because the default was applied before the template was read — so a request
+// explicitly asking for t3.micro was indistinguishable from one asking for
+// nothing, and the template overrode it. That inverts AWS's precedence on the one
+// value most likely to be spelled out in a cost-sensitive launch.
+func TestEC2_LaunchTemplate_FieldPrecedence(t *testing.T) {
+	tests := []struct {
+		name string
+		// templateData is merged into the launch template.
+		templateData map[string]string
+		// requestParams is merged into the RunInstances call.
+		requestParams map[string]string
+		check         func(t *testing.T, got launchedInstance)
+	}{
+		{
+			name:          "request InstanceType wins over the template's",
+			templateData:  map[string]string{"LaunchTemplateData.InstanceType": "c5.xlarge"},
+			requestParams: map[string]string{"InstanceType": "m5.large"},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.InstanceType != "m5.large" {
+					t.Errorf("instanceType = %q, want m5.large", got.InstanceType)
+				}
+			},
+		},
+		{
+			// The sentinel bug, stated directly: t3.micro is also the default, so
+			// an implementation that compares against the default cannot tell this
+			// request from one that named no type at all.
+			name:          "an explicit t3.micro wins over the template's type",
+			templateData:  map[string]string{"LaunchTemplateData.InstanceType": "m5.large"},
+			requestParams: map[string]string{"InstanceType": "t3.micro"},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.InstanceType != "t3.micro" {
+					t.Errorf("instanceType = %q, want the explicitly requested t3.micro", got.InstanceType)
+				}
+			},
+		},
+		{
+			name:          "the template fills an absent InstanceType",
+			templateData:  map[string]string{"LaunchTemplateData.InstanceType": "m5.large"},
+			requestParams: map[string]string{},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.InstanceType != "m5.large" {
+					t.Errorf("instanceType = %q, want the template's m5.large", got.InstanceType)
+				}
+			},
+		},
+		{
+			name:          "neither names an InstanceType, so the default applies",
+			templateData:  map[string]string{},
+			requestParams: map[string]string{},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.InstanceType != "t3.micro" {
+					t.Errorf("instanceType = %q, want the t3.micro default", got.InstanceType)
+				}
+			},
+		},
+		{
+			name:          "request KeyName wins over the template's",
+			templateData:  map[string]string{"LaunchTemplateData.KeyName": "template-key"},
+			requestParams: map[string]string{"KeyName": "request-key"},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.KeyName != "request-key" {
+					t.Errorf("keyName = %q, want request-key", got.KeyName)
+				}
+			},
+		},
+		{
+			name:          "the template fills an absent KeyName",
+			templateData:  map[string]string{"LaunchTemplateData.KeyName": "template-key"},
+			requestParams: map[string]string{},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.KeyName != "template-key" {
+					t.Errorf("keyName = %q, want the template's template-key", got.KeyName)
+				}
+			},
+		},
+		{
+			name:          "the template fills an absent ImageId",
+			templateData:  map[string]string{"LaunchTemplateData.ImageId": "ami-0template000002"},
+			requestParams: map[string]string{},
+			check: func(t *testing.T, got launchedInstance) {
+				if got.ImageID != "ami-0template000002" {
+					t.Errorf("imageId = %q, want the template's", got.ImageID)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+
+			// Every template carries an AMI so the #412 check is satisfied even in
+			// the cases whose request names one; a case asserting on the AMI
+			// overrides it explicitly.
+			data := map[string]string{"LaunchTemplateData.ImageId": "ami-0template000001"}
+			for k, v := range tt.templateData {
+				data[k] = v
+			}
+			ltID := createLaunchTemplate(t, ts, "precedence", data)
+
+			params := map[string]string{"LaunchTemplate.LaunchTemplateId": ltID}
+			for k, v := range tt.requestParams {
+				params[k] = v
+			}
+			tt.check(t, describeInstance(t, ts, runInstance(t, ts, params)))
+		})
+	}
+}
+
+// TestEC2_LaunchTemplate_NetworkingPrecedenceWithRequestImageID is the #444
+// networking precedence re-asserted for the case #453 opened up.
+//
+// Those fallbacks were previously unreachable whenever the request named an
+// ImageId, so their guards had never actually been exercised against a
+// call-level value. This runs both directions with an ImageId present: a
+// request-level subnet and security group win, and the template's public-IP
+// preference still fills a gap the request left.
+func TestEC2_LaunchTemplate_NetworkingPrecedenceWithRequestImageID(t *testing.T) {
+	ts := newEC2TestServer(t)
+	tmplNet := newLTNetwork(t, ts, "10.30.0.0/16", "lt-net-tmpl")
+	reqNet := newLTNetwork(t, ts, "10.31.0.0/16", "lt-net-req")
+
+	ltID := createLaunchTemplate(t, ts, "net-precedence", map[string]string{
+		"LaunchTemplateData.ImageId":                                     "ami-0template000003",
+		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
+		"LaunchTemplateData.NetworkInterface.1.SubnetId":                 tmplNet.subnetID,
+		"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1":        tmplNet.sgID,
+		"LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress": "true",
+	})
+
+	got := describeInstance(t, ts, runInstance(t, ts, map[string]string{
+		"LaunchTemplate.LaunchTemplateId": ltID,
+		"ImageId":                         "ami-0request0000002",
+		"SubnetId":                        reqNet.subnetID,
+		"SecurityGroupId.1":               reqNet.sgID,
+	}))
+
+	if got.SubnetID != reqNet.subnetID {
+		t.Errorf("subnetId = %q, want the request's %q", got.SubnetID, reqNet.subnetID)
+	}
+	if ids := got.groupIDs(); len(ids) != 1 || ids[0] != reqNet.sgID {
+		t.Errorf("groupSet = %v, want only the request's group %s", ids, reqNet.sgID)
+	}
+	// The request named no public-IP preference, so the template's still applies —
+	// on a non-default subnet, which would otherwise assign none.
+	if got.PublicIPAddress == "" {
+		t.Error("publicIpAddress is empty; the template's preference should still fill the gap")
+	}
+}
+
+// TestEC2_LaunchTemplate_RequestFalseBeatsTemplateTrue pins the direction of the
+// public-IP preference that a bool cannot express.
+//
+// AssociatePublicIpAddress is carried as a three-state string ("" / "true" /
+// "false") precisely so an explicit false can override a template's true. With
+// the template now read even when the request names an ImageId, this is the case
+// where collapsing the states would visibly assign an unwanted public IP.
+func TestEC2_LaunchTemplate_RequestFalseBeatsTemplateTrue(t *testing.T) {
+	ts := newEC2TestServer(t)
+	net := newLTNetwork(t, ts, "10.40.0.0/16", "lt-public-false")
+	ltID := createLaunchTemplate(t, ts, "public-false", map[string]string{
+		"LaunchTemplateData.ImageId":                                     "ami-0template000004",
+		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
+		"LaunchTemplateData.NetworkInterface.1.SubnetId":                 net.subnetID,
+		"LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress": "true",
+	})
+
+	got := describeInstance(t, ts, runInstance(t, ts, map[string]string{
+		"LaunchTemplate.LaunchTemplateId": ltID,
+		"ImageId":                         "ami-0request0000003",
+		"NetworkInterface.1.AssociatePublicIpAddress": "false",
+		"NetworkInterface.1.SubnetId":                 net.subnetID,
+	}))
+
+	if got.PublicIPAddress != "" {
+		t.Errorf("publicIpAddress = %q, want none: the request explicitly asked for false",
+			got.PublicIPAddress)
 	}
 }
 

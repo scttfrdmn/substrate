@@ -102,6 +102,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this rather than implying a doc citation.
 
 ### Fixed
+- EC2: `RunInstances` now merges a named launch template with the request field by
+  field, instead of consulting the template only when the request omitted `ImageId`
+  (#453). The entire template block was gated on the AMI being absent, so a request
+  passing both an `ImageId` and a `LaunchTemplate` never read the template at all: its
+  `InstanceType`, `KeyName`, `UserData`, security groups and — since #444 — its subnet
+  and public-IP preference were all silently dropped. The launch still succeeded and
+  still returned an instance ID, so nothing in the response said anything was wrong;
+  the instance simply was not the one that was asked for. A consumer templating a
+  `c5.xlarge` in a private subnet and pinning the AMI per environment at the call —
+  which is why `ImageId` is passed alongside a template in the first place — got a
+  `t3.micro` in the default VPC and a green test.
+
+  The template is now resolved whenever one is named, and each field falls back to it
+  only when the request did not supply that field. AWS's `RunInstances` reference is
+  the specification: "Any additional parameters that you specify for the new instance
+  overwrite the corresponding parameters included in the launch template." The
+  `ImageId` check added by #412 still runs after resolution, so a template remains a
+  valid sole source of the AMI, and a template that carries none still fails with
+  `MissingParameter`.
+
+  The `UserData` fallback is new rather than restored: a template's user data was
+  parsed and stored but never applied to the launch. Note that no registered operation
+  reads it back — substrate does not implement `DescribeInstanceAttribute` — so the
+  merge is observable only in the recorded instance state, not through an API call.
+
+  Separately, an explicit `InstanceType=t3.micro` on the request is now honoured over a
+  template's type. The `t3.micro` default used to be applied *before* the template was
+  read, and the template fallback then tested for that literal value as a proxy for
+  "the request named no instance type" — so asking for `t3.micro` alongside a template
+  naming `m5.large` yielded `m5.large`, exactly inverting the documented precedence.
+  The default is now resolved last, after the template has had its chance, so it
+  applies only when neither side names a type. This bug was reachable before this
+  change and is far more reachable after it, which is why it is fixed here rather than
+  deferred.
+
+  A template's `TagSpecifications` and `IamInstanceProfile` are still not parsed, so
+  neither participates in the merge; the request wins those two by default rather than
+  by rule.
 - S3: `HeadObject` now resolves a synthesized task-completion record, so `HEAD` and
   `GET` agree about whether the key exists (#457). `getObject` consulted the
   completion resolver when no real object was staged at
