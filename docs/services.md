@@ -1086,7 +1086,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -1147,6 +1147,46 @@ Note that `ImageId` is an optional `*string` in the typed SDKs, so
 service rather than being caught client-side. That is the shape this check exists
 for. The AMI value itself is not format-validated — substrate accepts any
 non-empty string, so fixtures like `ami-test` work.
+
+### A launch template merges with the request, field by field
+
+Naming a launch template does not replace the request, and the request does not
+replace the template: the two are merged per field, with the request winning any
+field it names. AWS's `RunInstances` reference states the rule directly — "Any
+additional parameters that you specify for the new instance overwrite the
+corresponding parameters included in the launch template."
+
+| Field | Request | Template | Result |
+|---|---|---|---|
+| `ImageId` | `ami-request` | `ami-template` | `ami-request` |
+| `ImageId` | absent | `ami-template` | `ami-template` |
+| `InstanceType` | `m5.large` | `c5.xlarge` | `m5.large` |
+| `InstanceType` | `t3.micro` | `m5.large` | `t3.micro` |
+| `InstanceType` | absent | `m5.large` | `m5.large` |
+| `InstanceType` | absent | absent | `t3.micro` (substrate's default) |
+| `KeyName` | `k-request` | `k-template` | `k-request` |
+| `SubnetId`, security groups, `AssociatePublicIpAddress` | see [Launch template networking](#launch-template-networking) | | |
+
+Two details are worth stating, because both were wrong before and each fails
+silently rather than loudly.
+
+Substrate used to consult the template **only when the request omitted `ImageId`**.
+A request naming both an AMI and a template therefore ignored the template
+entirely — its instance type, key name, user data, subnet, security groups and
+public-IP preference were all dropped — and the launch still succeeded. The
+instance simply was not the one that was asked for, which is the hardest kind of
+infidelity to notice from a test that only checks that the call worked.
+
+The `t3.micro` default is now applied **last**, after the template has had its
+chance. It used to be applied first, and the template fallback then treated
+`t3.micro` as a proxy for "the request named no instance type" — so a request
+explicitly asking for `t3.micro` alongside a template naming something else got
+the template's type, exactly inverting the documented precedence. An explicit
+`t3.micro` is now honoured, and the default applies only when neither side names
+a type.
+
+A template's `TagSpecifications` and `IamInstanceProfile` are not parsed at all, so
+neither participates in the merge.
 
 ### Launch template networking
 

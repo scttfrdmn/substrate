@@ -235,10 +235,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	imageID := req.Params["ImageId"]
+	// The call-level instance type is kept verbatim, with no default applied yet: a
+	// launch template may supply one, and the default can only be resolved once the
+	// template has had its chance. Defaulting here and then testing for the default
+	// value later cannot tell "absent" from "explicitly t3.micro" — which is how a
+	// caller naming t3.micro alongside a template naming something else used to get
+	// the template's type, exactly inverting AWS's precedence (#453).
 	instanceType := req.Params["InstanceType"]
-	if instanceType == "" {
-		instanceType = "t3.micro"
-	}
 	// Absent counts still default; a count that is present and invalid is rejected
 	// rather than clamped, because clamping MinCount=0 up to 1 launched an instance
 	// where AWS fails the request (#431). See resolveInstanceCounts for why the
@@ -298,38 +301,55 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			"NetworkInterface.1.SecurityGroupId.%d", "NetworkInterface.1.Groups.%d")
 	}
 
-	// Resolve launch template parameters when no ImageId is provided directly.
+	// Merge a named launch template into the request, per field.
+	//
+	// The template is consulted whenever one is named, not only when the request
+	// omitted ImageId (#453). AWS's RunInstances reference states the rule plainly:
+	// "Any additional parameters that you specify for the new instance overwrite the
+	// corresponding parameters included in the launch template." A request carrying
+	// both an ImageId and a template therefore gets its own AMI *and* the template's
+	// instance type, key name, subnet, security groups and public-IP preference —
+	// where the old imageID == "" gate meant such a request never read the template
+	// at all and silently dropped every one of those values.
 	//
 	// Every fallback below is guarded on the call-level value being absent, which is
-	// AWS's precedence: a value named in the request wins over the template's. The
-	// networking fallbacks in particular must run *after* the call-level
-	// NetworkInterface.1.* reads above rather than before them (#444) — the subnet
-	// fallback used to sit ahead of this block, where there was nothing yet to fall
-	// back to.
-	if imageID == "" {
-		ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
-		ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
-		if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
+	// what implements that precedence. The networking fallbacks in particular must
+	// run *after* the call-level NetworkInterface.1.* reads above rather than before
+	// them (#444) — the subnet fallback used to sit ahead of this block, where there
+	// was nothing yet to fall back to.
+	ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
+	ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
+	if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
+		if imageID == "" {
 			imageID = lt.LatestData.ImageID
-			if instanceType == "t3.micro" && lt.LatestData.InstanceType != "" {
-				instanceType = lt.LatestData.InstanceType
-			}
-			if keyName == "" {
-				keyName = lt.LatestData.KeyName
-			}
-			if subnetID == "" {
-				subnetID = lt.LatestData.SubnetID
-			}
-			if publicIPPref == "" {
-				publicIPPref = lt.LatestData.AssociatePublicIPAddress
-			}
-			if len(securityGroupIDs) == 0 {
-				securityGroupIDs = lt.LatestData.NetworkSecurityGroupIDs()
-			}
-			if sgID == "" && len(securityGroupIDs) > 0 {
-				sgID = securityGroupIDs[0]
-			}
 		}
+		if instanceType == "" {
+			instanceType = lt.LatestData.InstanceType
+		}
+		if keyName == "" {
+			keyName = lt.LatestData.KeyName
+		}
+		if userData == "" {
+			userData = lt.LatestData.UserData
+		}
+		if subnetID == "" {
+			subnetID = lt.LatestData.SubnetID
+		}
+		if publicIPPref == "" {
+			publicIPPref = lt.LatestData.AssociatePublicIPAddress
+		}
+		if len(securityGroupIDs) == 0 {
+			securityGroupIDs = lt.LatestData.NetworkSecurityGroupIDs()
+		}
+		if sgID == "" && len(securityGroupIDs) > 0 {
+			sgID = securityGroupIDs[0]
+		}
+	}
+
+	// The instance-type default is resolved last, so it applies only when neither the
+	// request nor the template named one.
+	if instanceType == "" {
+		instanceType = "t3.micro"
 	}
 
 	associatePublicIP := strings.EqualFold(publicIPPref, "true")
