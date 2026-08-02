@@ -1480,9 +1480,9 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance) |
-| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); `availability-zone` filter |
+| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids) |
@@ -1526,7 +1526,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
-| DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances |
+| DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) |
 
@@ -1867,9 +1867,82 @@ just harder to notice, since it looks like extra rigor.
 an instance's user data is expressible: `UserData.Value=` on a stopped instance empties
 it, and the attribute then reads back as the empty element above.
 
-Termination protection is **recorded and reported but not acted on**: `TerminateInstances`
-still terminates a protected instance, where real EC2 refuses with `OperationNotPermitted`.
-That is tracked separately.
+#### Termination protection is honoured, one Availability Zone at a time
+
+`TerminateInstances` refuses a protected instance with `OperationNotPermitted`, HTTP
+`400`, and the instance stays `running`. The **code** is documented — EC2's client-error
+table lists `OperationNotPermitted` as "The specified operation is not allowed" and names
+this case first among its examples, "you might be trying to terminate an instance that has
+termination protection enabled" — while the **message text is substrate's own**, since no
+capture of the string AWS sends was found. It interpolates the instance ID and names the
+attribute to clear, which is what a caller acts on:
+
+```
+OperationNotPermitted: The instance 'i-0123456789abcdef0' may not be terminated. Modify
+its 'disableApiTermination' instance attribute and try again.
+```
+
+A request naming both protected and unprotected instances is where this gets
+counter-intuitive, and it is worth reading the reference's own words, because the answer is
+neither "the whole request is refused" nor "the unprotected instances are terminated":
+
+> If you terminate multiple instances across multiple Availability Zones, and one or more
+> of the specified instances are enabled for termination protection, the request fails with
+> the following results:
+>
+> - The specified instances that are in the same Availability Zone as the protected
+>   instance are not terminated.
+> - The specified instances that are in different Availability Zones, where no other
+>   specified instances are protected, are successfully terminated.
+
+Partial failure is scoped to the **Availability Zone**. So for the reference's own worked
+example — A and B unprotected in `us-east-1a`, C protected and D unprotected in
+`us-east-1b`, all four named in one request:
+
+| Instance | Zone | Protected | Outcome |
+|---|---|---|---|
+| A | `us-east-1a` | no | **terminated** |
+| B | `us-east-1a` | no | **terminated** |
+| C | `us-east-1b` | yes | still `running` |
+| D | `us-east-1b` | no | still `running` — it shares C's zone |
+
+The request itself reports `OperationNotPermitted`, naming C, **after** the terminations in
+`us-east-1a` have been persisted. An unprotected instance sharing a zone with a protected
+one survives; an unprotected instance in another zone does not.
+
+Because the grouping key is the zone, every instance carries one. It is resolved at launch
+from `Placement.AvailabilityZone`, or from the subnet's zone when the launch named only a
+`SubnetId`, or from the region's first zone (`<region>a`) when it named neither — matching
+the reference's "EC2 automatically selects an Availability Zone for you". `AvailabilityZoneId`
+is not modelled. The zone is reported by `RunInstances` and `DescribeInstances` as
+`<placement><availabilityZone>`, and `DescribeInstances` accepts an `availability-zone`
+filter, so a caller can work out in advance which of their instances a terminate would
+spare. (The filter is named `availability-zone`, not `placement.availability-zone` — the
+placement family's filter names are spelled out individually in the reference's list.)
+
+An instance unmarshalled from an **event log recorded before this field existed** reads back
+with an empty zone, which groups all such instances together. That is the conservative
+reading, being what a single-zone account looks like.
+
+A bad instance ID still fails the whole request before anything is written, per "If you
+specify multiple instances and the request fails (for example, because of a single incorrect
+instance ID), none of the instances are terminated." The protection scan runs as a second
+pre-flight pass, after every named instance resolves, so no state is written for a zone that
+is about to be refused. Terminating an already-terminated instance still succeeds; the
+operation is idempotent and the protection check does not change that.
+
+`DeleteFleets --terminate-instances` goes through the same handler, so the rule applies
+there too: a protected fleet instance **survives** its fleet's deletion, an unprotected
+sibling in another zone does not, and `DeleteFleets` propagates the `OperationNotPermitted`
+rather than folding it into `unsuccessfulFleetDeletionSet`. `DeleteFleetError`'s documented
+codes are exactly `fleetIdDoesNotExist`, `fleetIdMalformed`, `fleetNotInDeletableState` and
+`unexpectedError`, none of which covers termination protection, so folding it in would mean
+answering `unexpectedError` and losing the code the caller acts on.
+
+One divergence remains, unrelated to protection and pre-existing: substrate reports a
+terminated instance as code `48` `terminated` immediately, where real EC2 reports code `32`
+`shutting-down` first and settles to `48`. A consumer polling for `shutting-down` will never
+observe it. That is tracked separately.
 
 ### MinCount and MaxCount
 

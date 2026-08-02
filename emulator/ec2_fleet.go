@@ -482,6 +482,13 @@ func (p *EC2Plugin) launchFleetPool(
 	if pool.override.PlacementGroupName != "" {
 		params["Placement.GroupName"] = pool.override.PlacementGroupName
 	}
+	// A pool can name a zone instead of a subnet, so forward it as the launch's
+	// placement. Without this the instance would take the subnet's zone or the
+	// region default, and a fleet spread across zones would look single-zone to
+	// #489's termination-protection grouping.
+	if pool.override.AvailabilityZone != "" {
+		params["Placement.AvailabilityZone"] = pool.override.AvailabilityZone
+	}
 	// The caller's tags travel as already-parsed values rather than as re-emitted
 	// TagSpecification.N params, so the fleet-ID tag can be appended without hunting
 	// for a free index — and, more to the point, without riding the request-tag path

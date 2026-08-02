@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -598,4 +599,372 @@ func TestEC2_InstanceAttribute_EmptyGroupSetIsStillPresent(t *testing.T) {
 
 	assert.Contains(t, string(body), "<groupSet></groupSet>",
 		"groupSet is present and empty when it is what was asked for")
+}
+
+// createSubnetInAZ creates a subnet in a named Availability Zone. The existing
+// createSubnet helper lets CreateSubnet pick the zone, which is not enough for a
+// test whose subject is the zone grouping.
+func createSubnetInAZ(t *testing.T, ts *httptest.Server, vpcID, cidr, az string) string {
+	t.Helper()
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "CreateSubnet", "VpcId": vpcID,
+		"CidrBlock": cidr, "AvailabilityZone": az,
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var out struct {
+		Subnet struct {
+			SubnetID         string `xml:"subnetId"`
+			AvailabilityZone string `xml:"availabilityZone"`
+		} `xml:"subnet"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&out))
+	require.Equal(t, az, out.Subnet.AvailabilityZone, "the subnet must hold the zone asked for")
+	return out.Subnet.SubnetID
+}
+
+// terminateInstances sends TerminateInstances for the given IDs and returns the
+// status and body, so a test can assert both the refusal and what it says.
+func terminateInstances(t *testing.T, ts *httptest.Server, ids ...string) (int, string) {
+	t.Helper()
+	params := map[string]string{"Action": "TerminateInstances"}
+	for i, id := range ids {
+		params[fmt.Sprintf("InstanceId.%d", i+1)] = id
+	}
+	resp := ec2Request(t, ts, params)
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(body)
+}
+
+// instanceState reads an instance's current state name through DescribeInstances,
+// which is how a consumer checks whether their teardown destroyed something.
+func instanceState(t *testing.T, ts *httptest.Server, instID string) string {
+	t.Helper()
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeInstances", "InstanceId.1": instID,
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var out struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+			State      struct {
+				Name string `xml:"name"`
+			} `xml:"instanceState"`
+		} `xml:"reservationSet>item>instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&out))
+	require.Len(t, out.Instances, 1, "DescribeInstances must find %s", instID)
+	return out.Instances[0].State.Name
+}
+
+// ec2ErrorCodeOf extracts the code from an already-read EC2 error document. It is
+// the sibling of ec2ErrorCode, which sends the request itself — TerminateInstances
+// tests need the body as well as the code, so the two steps are separate here.
+func ec2ErrorCodeOf(t *testing.T, body string) string {
+	t.Helper()
+	var out struct {
+		Code string `xml:"Error>Code"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &out), "body was %s", body)
+	return out.Code
+}
+
+// TestEC2_TerminateInstances_ProtectionRefused is #489's gate. Before this,
+// termination protection was recorded and reported but not acted on, so a test
+// asserting "my teardown does not destroy the protected instance" passed against a
+// code path that ignored protection entirely — the assertion could not fail.
+func TestEC2_TerminateInstances_ProtectionRefused(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	id := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"DisableApiTermination": "true",
+	})
+
+	code, body := terminateInstances(t, ts, id)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "OperationNotPermitted", ec2ErrorCodeOf(t, body))
+	assert.Contains(t, body, id, "the refusal names the instance a caller must act on")
+	assert.Contains(t, body, "disableApiTermination",
+		"and names the attribute to clear")
+
+	assert.Equal(t, "running", instanceState(t, ts, id),
+		"a refused terminate leaves the instance running")
+}
+
+// TestEC2_TerminateInstances_ProtectionClearedThenTerminates is the sequence a
+// consumer's teardown actually performs: clear protection, then terminate.
+func TestEC2_TerminateInstances_ProtectionClearedThenTerminates(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	id := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"DisableApiTermination": "true",
+	})
+	require.Equal(t, http.StatusOK, modifyInstanceAttribute(t, ts, map[string]string{
+		"Action": "ModifyInstanceAttribute", "InstanceId": id,
+		"DisableApiTermination.Value": "false",
+	}))
+
+	code, body := terminateInstances(t, ts, id)
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Equal(t, "terminated", instanceState(t, ts, id))
+}
+
+// TestEC2_TerminateInstances_UnprotectedUnaffected guards the ordinary path: the
+// protection check must not refuse a request naming no protected instance.
+func TestEC2_TerminateInstances_UnprotectedUnaffected(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	a := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	b := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+
+	code, body := terminateInstances(t, ts, a, b)
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Equal(t, "terminated", instanceState(t, ts, a))
+	assert.Equal(t, "terminated", instanceState(t, ts, b))
+}
+
+// TestEC2_TerminateInstances_ProtectionIsZoneScoped is the reference's own
+// four-instance worked example, and the assertion neither of #489's two guesses
+// would satisfy. Quoting TerminateInstances:
+//
+//	The specified instances that are in the same Availability Zone as the
+//	protected instance are not terminated. The specified instances that are in
+//	different Availability Zones, where no other specified instances are
+//	protected, are successfully terminated.
+//
+// So the request reports failure while A and B — unprotected and in a zone with no
+// protected instance — are terminated anyway. Refusing the whole request fails this
+// test on A and B; terminating per-instance fails it on D.
+func TestEC2_TerminateInstances_ProtectionIsZoneScoped(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	launch := func(az string, protected bool) string {
+		params := map[string]string{
+			"ImageId": "ami-1", "InstanceType": "t3.micro",
+			"Placement.AvailabilityZone": az,
+		}
+		if protected {
+			params["DisableApiTermination"] = "true"
+		}
+		return runInstance(t, ts, params)
+	}
+	a := launch("us-east-1a", false)
+	b := launch("us-east-1a", false)
+	c := launch("us-east-1b", true)
+	d := launch("us-east-1b", false)
+
+	code, body := terminateInstances(t, ts, a, b, c, d)
+	assert.Equal(t, http.StatusBadRequest, code, "the request reports failure")
+	assert.Equal(t, "OperationNotPermitted", ec2ErrorCodeOf(t, body))
+	assert.Contains(t, body, c, "the error names the protected instance, not a sibling")
+
+	assert.Equal(t, "terminated", instanceState(t, ts, a),
+		"A is in a zone with no protected instance, so it terminates")
+	assert.Equal(t, "terminated", instanceState(t, ts, b), "and so does B")
+	assert.Equal(t, "running", instanceState(t, ts, c), "C is protected")
+	assert.Equal(t, "running", instanceState(t, ts, d),
+		"D shares C's zone, so it survives despite being unprotected")
+}
+
+// TestEC2_TerminateInstances_ProtectedAloneInItsZone is the simpler half of the
+// same rule, kept separate because it is the case a per-instance implementation
+// also passes: with one instance per zone, zone-scoped and per-instance agree.
+func TestEC2_TerminateInstances_ProtectedAloneInItsZone(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	protected := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"Placement.AvailabilityZone": "us-east-1a",
+		"DisableApiTermination":      "true",
+	})
+	other := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"Placement.AvailabilityZone": "us-east-1b",
+	})
+
+	code, _ := terminateInstances(t, ts, protected, other)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "running", instanceState(t, ts, protected))
+	assert.Equal(t, "terminated", instanceState(t, ts, other))
+}
+
+// TestEC2_TerminateInstances_BadIDTerminatesNothing pins that the pre-flight order
+// did not regress: an unresolvable ID fails the whole request before any state is
+// written. The reference states it directly — "If you specify multiple instances and
+// the request fails (for example, because of a single incorrect instance ID), none of
+// the instances are terminated" — and the protection scan runs after that resolution
+// pass, so neither check can write partial state.
+func TestEC2_TerminateInstances_BadIDTerminatesNothing(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	good := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+
+	code, _ := terminateInstances(t, ts, good, "i-0deadbeefdeadbeef")
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "running", instanceState(t, ts, good),
+		"a request that fails on one ID terminates none of the instances")
+}
+
+// TestEC2_TerminateInstances_Idempotent guards the reference's statement that the
+// operation is idempotent: terminating an already-terminated instance succeeds. The
+// protection check must not turn a repeat call into a refusal.
+func TestEC2_TerminateInstances_Idempotent(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	code, _ := terminateInstances(t, ts, id)
+	require.Equal(t, http.StatusOK, code)
+	code, body := terminateInstances(t, ts, id)
+	assert.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Equal(t, "terminated", instanceState(t, ts, id))
+}
+
+// TestEC2_TerminateInstances_ZoneFromSubnet asserts the grouping works for a launch
+// that named no Placement.AvailabilityZone, which is the common case: the zone comes
+// from the subnet, so two subnets in different zones are two groups.
+//
+// Without this, protection would look zone-scoped only for callers who pass
+// Placement.AvailabilityZone explicitly, and collapse to whole-request refusal for
+// everyone else — the wrong behavior, reached by the right code.
+func TestEC2_TerminateInstances_ZoneFromSubnet(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	vpcID := createVPC(t, ts, "10.0.0.0/16")
+	subnetA := createSubnetInAZ(t, ts, vpcID, "10.0.1.0/24", "us-east-1a")
+	subnetB := createSubnetInAZ(t, ts, vpcID, "10.0.2.0/24", "us-east-1b")
+
+	protected := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"SubnetId": subnetA, "DisableApiTermination": "true",
+	})
+	sameZone := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro", "SubnetId": subnetA,
+	})
+	otherZone := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro", "SubnetId": subnetB,
+	})
+
+	code, _ := terminateInstances(t, ts, protected, sameZone, otherZone)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "running", instanceState(t, ts, protected))
+	assert.Equal(t, "running", instanceState(t, ts, sameZone),
+		"the subnet supplied the zone, so this instance shares the protected one's")
+	assert.Equal(t, "terminated", instanceState(t, ts, otherZone))
+}
+
+// TestEC2_Instance_ReportsAvailabilityZone asserts the zone is observable, which is
+// what makes the rule above assertable by a consumer rather than only internally
+// consistent. A caller reasoning about which of their instances a terminate would
+// spare has to be able to read the grouping key.
+func TestEC2_Instance_ReportsAvailabilityZone(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	// RunInstances reports it directly, so no follow-up describe is needed.
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "RunInstances", "MinCount": "1", "MaxCount": "1",
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"Placement.AvailabilityZone": "us-west-2c",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	launched, err := io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.NoError(t, err)
+	assert.Contains(t, string(launched), "<availabilityZone>us-west-2c</availabilityZone>",
+		"RunInstances reports the placement it applied")
+
+	var out struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(launched, &out))
+	require.Len(t, out.Instances, 1)
+	id := out.Instances[0].InstanceID
+
+	described := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeInstances", "InstanceId.1": id,
+	})
+	require.Equal(t, http.StatusOK, described.StatusCode)
+	body, err := io.ReadAll(described.Body)
+	require.NoError(t, described.Body.Close())
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "<availabilityZone>us-west-2c</availabilityZone>",
+		"and DescribeInstances reports it too")
+}
+
+// TestEC2_DescribeInstances_AvailabilityZoneFilter covers the filter that lets a
+// caller enumerate a zone's instances, which is how they would work out what a
+// terminate is about to spare.
+func TestEC2_DescribeInstances_AvailabilityZoneFilter(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	inA := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"Placement.AvailabilityZone": "eu-west-1a",
+	})
+	inB := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"Placement.AvailabilityZone": "eu-west-1b",
+	})
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":        "DescribeInstances",
+		"Filter.1.Name": "availability-zone", "Filter.1.Value.1": "eu-west-1a",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), inA)
+	assert.NotContains(t, string(body), inB)
+}
+
+// TestEC2_Instance_AlwaysCarriesAZone pins the invariant the zone grouping depends
+// on: every instance has a zone, whatever the launch named. An instance with an empty
+// zone would group with every other zoneless instance, so a whole-request refusal
+// would masquerade as the zone-scoped rule.
+//
+// The path that reaches the region-default fallback is a launch naming a SubnetId that
+// resolves to nothing — RunInstances does not validate the ID, which is a pre-existing
+// looseness this test relies on rather than endorses. An absent SubnetId cannot reach
+// it, because the auto-created default subnet already supplies a zone.
+func TestEC2_Instance_AlwaysCarriesAZone(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+
+	id := runInstance(t, ts, map[string]string{
+		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"SubnetId": "subnet-0000000000000dead",
+	})
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeInstances", "InstanceId.1": id,
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var out struct {
+		Instances []struct {
+			AZ string `xml:"placement>availabilityZone"`
+		} `xml:"reservationSet>item>instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&out))
+	require.Len(t, out.Instances, 1)
+	assert.Equal(t, "us-east-1a", out.Instances[0].AZ,
+		"a launch resolving no subnet still lands in the region's first zone")
 }

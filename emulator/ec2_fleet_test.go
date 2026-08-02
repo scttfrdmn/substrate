@@ -1009,3 +1009,122 @@ func TestEC2_CreateFleet_FleetIDTagZeroCapacity(t *testing.T) {
 		t.Errorf("filter returned %d instances, want 0", len(desc.Instances))
 	}
 }
+
+// TestEC2_DeleteFleets_TerminationProtection asserts the decision #489 records for
+// the fleet path: a protected instance survives DeleteFleets --terminate-instances
+// exactly as it survives a direct TerminateInstances, and the fleet deletion reports
+// the failure rather than quietly leaving a fleet whose instances outlived it.
+//
+// deleteFleets synthesizes a TerminateInstances request through the same handler, so
+// protection applies for free — but "for free" is exactly the kind of behavior that
+// regresses unnoticed, and the AZ grouping makes it non-obvious: the unprotected
+// sibling in the other zone still goes away. DeleteFleets returns the error, so the
+// fleet is not marked deleted and a retry after clearing protection is clean.
+//
+// The reference gives DeleteFleetError exactly four codes — fleetIdDoesNotExist,
+// fleetIdMalformed, fleetNotInDeletableState, unexpectedError — none of which covers
+// termination protection, so folding the refusal into unsuccessfulFleetDeletionSet
+// would mean picking unexpectedError and losing the OperationNotPermitted code the
+// caller acts on. Propagating it is the more useful answer.
+func TestEC2_DeleteFleets_TerminationProtection(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-protected")
+
+	// Two pools, one per zone, so the fleet spans the grouping the rule is scoped to.
+	var fleet createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"LaunchTemplateConfigs.1.Overrides.1.InstanceType":                     "t3.micro",
+		"LaunchTemplateConfigs.1.Overrides.1.AvailabilityZone":                 "us-east-1a",
+		"LaunchTemplateConfigs.1.Overrides.2.InstanceType":                     "t3.small",
+		"LaunchTemplateConfigs.1.Overrides.2.AvailabilityZone":                 "us-east-1b",
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "2",
+		"TargetCapacitySpecification.DefaultTargetCapacityType":                "on-demand",
+	}, &fleet)
+
+	if len(fleet.Instances) != 2 {
+		t.Fatalf("fleetInstanceSet items = %d, want 2 (one pool per zone); %+v",
+			len(fleet.Instances), fleet.Instances)
+	}
+	var inA, inB string
+	for _, group := range fleet.Instances {
+		if len(group.InstanceIDs) != 1 {
+			t.Fatalf("pool %s launched %v, want exactly 1", group.InstanceType, group.InstanceIDs)
+		}
+		switch group.InstanceType {
+		case "t3.micro":
+			inA = group.InstanceIDs[0]
+		case "t3.small":
+			inB = group.InstanceIDs[0]
+		}
+	}
+	if inA == "" || inB == "" {
+		t.Fatalf("could not identify both pools' instances: %+v", fleet.Instances)
+	}
+
+	// The pool's AvailabilityZone override must reach the launch, or the two
+	// instances land in one zone and the assertions below pass for the wrong reason.
+	var desc struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+			AZ         string `xml:"placement>availabilityZone"`
+		} `xml:"reservationSet>item>instancesSet>item"`
+	}
+	ec2FleetXML(t, ts, map[string]string{"Action": "DescribeInstances"}, &desc)
+	zones := map[string]string{}
+	for _, d := range desc.Instances {
+		zones[d.InstanceID] = d.AZ
+	}
+	if zones[inA] != "us-east-1a" || zones[inB] != "us-east-1b" {
+		t.Fatalf("pool zones did not reach the launch: %s=%q %s=%q",
+			inA, zones[inA], inB, zones[inB])
+	}
+
+	// Protect one instance the way a consumer would, after the fleet created it.
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "ModifyInstanceAttribute", "InstanceId": inA,
+		"DisableApiTermination.Value": "true",
+	}, nil)
+
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "DeleteFleets", "FleetId.1": fleet.FleetID,
+		"TerminateInstances": "true",
+	})
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read DeleteFleets body: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close DeleteFleets body: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("DeleteFleets status = %d, want 400; body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "OperationNotPermitted") {
+		t.Errorf("DeleteFleets body = %s, want OperationNotPermitted", body)
+	}
+	if !strings.Contains(string(body), inA) {
+		t.Errorf("DeleteFleets body = %s, want it to name the protected instance %s", body, inA)
+	}
+
+	states := map[string]string{}
+	var after struct {
+		Instances []struct {
+			InstanceID string `xml:"instanceId"`
+			State      string `xml:"instanceState>name"`
+		} `xml:"reservationSet>item>instancesSet>item"`
+	}
+	ec2FleetXML(t, ts, map[string]string{"Action": "DescribeInstances"}, &after)
+	for _, d := range after.Instances {
+		states[d.InstanceID] = d.State
+	}
+	if states[inA] != "running" {
+		t.Errorf("protected fleet instance %s state = %q, want running", inA, states[inA])
+	}
+	if states[inB] != "terminated" {
+		t.Errorf("unprotected sibling %s in another zone state = %q, want terminated",
+			inB, states[inB])
+	}
+}
