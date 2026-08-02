@@ -102,6 +102,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this rather than implying a doc citation.
 
 ### Fixed
+- S3: `BlockPublicAcls` and `BlockPublicPolicy` are now enforced rather than merely
+  recorded (#458). #446 made the four Block Public Access settings storable and
+  readable, and nothing acted on any of them — so a consumer whose test asserted "once
+  we lock the bucket down, a public ACL is refused" got a green test that verified
+  nothing, and the assertion would have to be written a second time before it ever ran
+  against AWS. A bucket with `BlockPublicAcls` set now refuses a public ACL on
+  `PutBucketAcl` and `PutObjectAcl`, and one with `BlockPublicPolicy` set refuses a
+  public policy on `PutBucketPolicy`, both with `403 AccessDenied` / `Access Denied`.
+
+  **A rejection stores nothing.** The check runs before the write, so the bucket or
+  object keeps the ACL or policy it already had — "existing policies and ACLs for
+  buckets and objects aren't modified". Deleting the configuration re-allows what it was
+  refusing, matching the documented reversibility. `PutObjectAcl` reads the *bucket's*
+  configuration: "Amazon S3 doesn't support block public access settings on a per-object
+  basis".
+
+  **A public policy is decided by assuming public and then disqualifying, not by
+  looking for `Principal: "*"`.** This is the substance of the change and it is stricter
+  than the wildcard check the obvious reading suggests. Per the user guide, S3 "begins by
+  assuming that the policy is public" and a statement qualifies as non-public only when
+  it grants access solely to *fixed* values — no `*`, no `?`, no `${...}` IAM policy
+  variable — through its `Principal` or through a `Condition` on one of the documented
+  keys (`aws:SourceIp`, `aws:SourceArn`, `aws:SourceVpc`, `aws:SourceVpce`,
+  `aws:SourceOwner`, `aws:SourceAccount`, `aws:userid`, `aws:PrincipalOrgID`,
+  `aws:PrincipalArn`, `aws:PrincipalAccount`, `s3:DataAccessPointArn`,
+  `s3:DataAccessPointAccount`). So `Principal: "*"` narrowed by `StringLike
+  aws:SourceVpc: "vpc-*"` **is public** — the narrowing value is itself a wildcard —
+  where the same statement with `StringEquals aws:SourceVpc: "vpc-91237329"` is not.
+  Only an `Allow` can make a policy public, and one surviving public statement makes the
+  whole policy public: the guide's own example, where a single public statement disables
+  an otherwise-legal cross-account grant.
+
+  The `aws:SourceIp` breadth rule is implemented too, including the exclusion that makes
+  it usable: a range "broader than `/8` for IPv4 and `/32` for IPv6 (excluding RFC1918
+  private ranges)" pins nothing, so a policy conditioned on `0.0.0.0/0` is public
+  despite containing no wildcard character, while `10.0.0.0/8` and a unique-local IPv6
+  prefix are not. So is the `s3:DataAccessPointArn` carve-out, where a wildcard
+  access-point name does not make a *bucket* policy public as long as the account ID is
+  fixed.
+
+  **A public ACL is one granting any permission to `AllUsers` or
+  `AuthenticatedUsers`** — matched on the grantee URI, with the permission not
+  inspected, so `WRITE_ACP` counts as much as `READ`. `AuthenticatedUsers` is every AWS
+  account rather than every account in yours, which is why it counts despite the name and
+  why it can only arrive through an XML body: the canned-ACL resolver never emits it.
+  All three documented forms are covered — the `x-amz-acl` canned header, an XML `Grant`
+  naming a public group, and an `x-amz-grant-*` header whose grantee list contains one.
+  The grant headers were previously unread anywhere in substrate and are parsed for this
+  check only; an ACL set through them is still not stored, which is a separate gap.
+
+  **Provenance:** none of `PutBucketAcl`, `PutObjectAcl` or `PutBucketPolicy` documents
+  an Errors section covering this, so the `AccessDenied` / `Access Denied` / `403` triple
+  comes from observed real-AWS behaviour rather than from the API model — a blocked
+  `PutBucketPolicy` surfaces through the CLI as `An error occurred (AccessDenied) when
+  calling the PutBucketPolicy operation: Access Denied`. The definitions of "public" are
+  quoted from the user guide's *Blocking public access → The meaning of "public"*.
+
+  Three things stay as they were, deliberately. `IgnorePublicAcls` and
+  `RestrictPublicBuckets` remain recorded-only: both govern how an incoming request is
+  evaluated against an ACL or policy already in place rather than which write is refused,
+  and substrate has no unauthenticated or cross-account request path to deny. `PutObject`
+  and `CreateBucket` with a public ACL are not refused, because neither handler reads
+  `x-amz-acl` at all — covering them means modelling ACL-on-create first. And a body that
+  parses as JSON but not as a policy document is not treated as public: `PutBucketPolicy`
+  already rejects non-JSON with `400 MalformedPolicy`, and the new check is not a second
+  validity check. An unconfigured bucket, and one whose four settings are all `false`,
+  behave exactly as they did before enforcement existed — the case that guards #446.
+
 - SQS: message attributes are now stored on send and returned on receive (#461). #454
   parsed them in order to measure them against `MaximumMessageSize` and then discarded
   them: `SQSMessage.MessageAttributes` existed and was never populated, and
