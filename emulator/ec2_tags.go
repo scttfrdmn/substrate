@@ -35,6 +35,66 @@ func ec2ReservedTagKeyError() *AWSError {
 	}
 }
 
+// ec2MaxTagsPerResource is the number of user tags EC2 allows on one resource.
+//
+// From the tagging documentation's restrictions: "Maximum number of tags per resource –
+// 50". Tags whose keys carry [ec2ReservedTagPrefix] are excluded from the count, per the
+// same list — "Tags with the aws: prefix do not count against your tags per resource
+// limit" — so a resource can hold 50 user tags plus any number of reserved ones.
+const ec2MaxTagsPerResource = 50
+
+// ec2TagLimitExceededError returns the error EC2 raises when a resource would exceed
+// [ec2MaxTagsPerResource].
+//
+// Provenance, which is split: the *code* is documented — EC2's client-error table lists
+// TagLimitExceeded as "You've reached the limit on the number of tags that you can
+// assign to the specified resource." The *message* is not published anywhere, so the
+// wording here is moto's, from a reimplementation rather than a captured response. That
+// is a weaker claim than the code's and is marked as such deliberately: SDKs dispatch on
+// Error.Code, so the code is the part a consumer's error branch turns on.
+func ec2TagLimitExceededError() *AWSError {
+	return &AWSError{
+		Code:       "TagLimitExceeded",
+		Message:    "The maximum number of Tags for a resource has been reached.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2CheckTagLimit returns an error if merging incoming into existing would leave a
+// resource with more than [ec2MaxTagsPerResource] user tags, or nil.
+//
+// The count is over the **post-merge key set**, excluding reserved keys, which is what
+// gets both of the documented rules right in one expression:
+//
+//   - A key already on the resource adds nothing, so overwriting an existing tag on a
+//     resource already at the limit succeeds. Written as len(existing)+len(incoming) it
+//     would fail instead — real AWS permits it, and getmoto/moto#8151 reports exactly
+//     that case.
+//   - Reserved keys are excluded from both sides, so they neither count nor consume
+//     room. This is load-bearing rather than pedantry: substrate stamps
+//     [ec2FleetIDTagKey] on every fleet instance, so a counter that included it would
+//     reject a 50-tag launch template on a fleet instance that real EC2 accepts.
+//
+// Callers on a tag-on-create path must check before the resource is created; see
+// [ec2CheckReservedTagKeys] for the rollback rule both checks follow.
+func ec2CheckTagLimit(existing, incoming []EC2Tag) *AWSError {
+	keys := make(map[string]struct{}, len(existing)+len(incoming))
+	for _, t := range existing {
+		if !strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+			keys[t.Key] = struct{}{}
+		}
+	}
+	for _, t := range incoming {
+		if !strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+			keys[t.Key] = struct{}{}
+		}
+	}
+	if len(keys) > ec2MaxTagsPerResource {
+		return ec2TagLimitExceededError()
+	}
+	return nil
+}
+
 // ec2LaunchTagsForResource collects the TagSpecification.N tags scoped to
 // resourceType, in the request's Tag.N order.
 //
