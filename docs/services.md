@@ -1260,9 +1260,13 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateLaunchTemplate | Networking is read from `NetworkInterface.1.*` — see [Launch template networking](#launch-template-networking) |
-| DescribeLaunchTemplates | |
+| CreateLaunchTemplate | Creates version 1. Networking is read from `NetworkInterface.1.*` — see [Launch template networking](#launch-template-networking) |
+| DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters |
 | DeleteLaunchTemplate | |
+| CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
+| ModifyLaunchTemplate | `SetDefaultVersion` only, which is AWS's only modifiable attribute |
+| DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken`, and the account-wide form |
+| DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances |
@@ -1311,6 +1315,10 @@ corresponding parameters included in the launch template."
 | `KeyName` | `k-request` | `k-template` | `k-request` |
 | `SubnetId`, security groups, `AssociatePublicIpAddress` | see [Launch template networking](#launch-template-networking) | | |
 
+Which *version* of the template supplies those values is resolved from
+`LaunchTemplate.Version`; an absent version means the template's **default**
+version, not its latest. See [Launch template versions](#launch-template-versions).
+
 Two details are worth stating, because both were wrong before and each fails
 silently rather than loudly.
 
@@ -1331,6 +1339,66 @@ a type.
 
 A template's `TagSpecifications` and `IamInstanceProfile` are not parsed at all, so
 neither participates in the merge.
+
+### Launch template versions
+
+Launch templates are versioned. `CreateLaunchTemplate` creates version 1, each
+`CreateLaunchTemplateVersion` appends the next number, and `ModifyLaunchTemplate`
+moves the default.
+
+**An absent `LaunchTemplate.Version` means the default version, not the latest.**
+aws-sdk-go-v2 documents this on `LaunchTemplateSpecification.Version` — "Default:
+The default version of the launch template" — and it is the detail worth stating
+loudest, because a new version does *not* become the default. A consumer that
+creates version 2 and launches without naming a version still gets version 1.
+
+| `LaunchTemplate.Version` | Resolves to |
+|---|---|
+| absent | the **default** version |
+| `$Default` | the default version |
+| `$Latest` | the highest version number |
+| a number | that version, or `InvalidLaunchTemplateId.VersionNotFound` |
+
+Both aliases are matched case-insensitively, so a hand-built `$latest` works. A
+version that does not exist is an error rather than a silent fallback: a fallback
+would launch instances from parameters the caller never asked for.
+
+`CreateLaunchTemplateVersion`'s `SourceVersion` is the asymmetry to know:
+
+- **With `SourceVersion`**, the new version inherits that version's parameters and
+  the request's values overwrite the ones they name.
+- **Without it**, the new version holds *only* what the request names. Nothing is
+  inherited — not from version 1, not from the latest.
+
+`DeleteLaunchTemplateVersions` reports **per version**, at HTTP 200:
+`successfullyDeletedLaunchTemplateVersionSet` and
+`unsuccessfullyDeletedLaunchTemplateVersionSet`. A request naming a deletable and an
+undeletable version puts one entry in each set and still returns 200, so a caller
+checking only the status code sees success. The default version cannot be deleted
+("you must first assign a different version as the default"), and a deleted version
+number is never reused.
+
+The `responseError.code` on a failed item is `launchTemplateVersionDoesNotExist` for
+a missing version. For the default-version rejection substrate emits
+`unexpectedError`: `ResponseError.code` is a **closed six-value enum** in the AWS
+SDK models (`launchTemplateIdDoesNotExist`, `launchTemplateIdMalformed`,
+`launchTemplateNameDoesNotExist`, `launchTemplateNameMalformed`,
+`launchTemplateVersionDoesNotExist`, `unexpectedError`) with no default-version
+member, and a typed SDK deserializes anything outside it as an unknown variant.
+AWS's real code for this case is not published and no capture of the rejection
+exists — the code is the modeled catch-all and the message is the reference's own
+sentence. Both are inferred, not captured.
+
+Omitting both `LaunchTemplateId` and `LaunchTemplateName` from
+`DescribeLaunchTemplateVersions` selects the **account-wide** form, which lists every
+template's `$Latest` and/or `$Default`. As AWS does, it accepts only those two
+aliases — a version number means nothing across templates — and rejects a request
+naming neither.
+
+**A template stored before versioning existed reads back as version 1, default.**
+Its single stored parameter set *is* its version 1, synthesized on read, so a
+replayed event log recorded against an earlier substrate still launches instances
+and still describes correctly. No event rewriting is involved.
 
 ### Launch template networking
 

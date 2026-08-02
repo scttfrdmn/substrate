@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **EC2 launch templates are now versioned** (#456).
+  `CreateLaunchTemplateVersion`, `ModifyLaunchTemplate`,
+  `DescribeLaunchTemplateVersions` and `DeleteLaunchTemplateVersions` were all
+  unregistered, so a consumer that shipped a second version of a template got
+  `InvalidAction` from the create and — worse — every launch silently used the one
+  stored parameter set. There was also no way to read a template's contents back at
+  all: `DescribeLaunchTemplates` returns only summary fields, matching AWS, and
+  `DescribeLaunchTemplateVersions` is the only operation that carries
+  `launchTemplateData`.
+
+  **An absent `LaunchTemplate.Version` resolves to the template's *default*
+  version, not its latest**, per aws-sdk-go-v2's
+  `LaunchTemplateSpecification.Version` ("Default: The default version of the launch
+  template"). This is the detail worth checking a test against, because a new
+  version does not become the default: creating version 2 and launching without
+  naming a version still gets version 1, and an emulator that resolved to the latest
+  instead would agree with every test that never pins a default.
+
+  `CreateLaunchTemplateVersion`'s `SourceVersion` inherits the source version's
+  parameters and lets the request overwrite the ones it names; **omitting
+  `SourceVersion` inherits nothing**, so the new version holds only what the request
+  names. `DeleteLaunchTemplateVersions` reports per version at HTTP 200 rather than
+  failing the request — the default version cannot be deleted, and a request naming
+  both a deletable and an undeletable version puts one entry in each set while still
+  returning 200, so a caller checking only the status code sees success. A deleted
+  version number is never reused.
+
+  A `CreateFleet` config's `LaunchTemplateSpecification.Version` now reaches the
+  launch. It was parsed and then dropped, so a fleet pinned to version 1 launched
+  whatever the template held latest, with nothing reporting the substitution.
+
+  Templates stored before this change keep working: a stored template with no
+  versions array reads back as version 1, default, synthesized from the parameters
+  it does carry. A recorded event log from an earlier substrate replays unchanged —
+  no event rewriting is involved.
+
+  Provenance: the default-version deletion is reported with `responseError.code`
+  `unexpectedError`, because `ResponseError.code` is a closed six-value enum in the
+  AWS SDK models with no default-version member and a typed SDK deserializes
+  anything outside it as an unknown variant. AWS's real code for this case is not
+  published and no capture of the rejection exists (searched the API reference, the
+  CLI help, moto — which does not implement the operation — LocalStack, and the SDK
+  models); the message is the reference's own sentence. Both are inferred, not
+  captured.
 - `make tag-releases-check` (`scripts/check-tag-releases.sh`) fails if a published
   `vX.Y.Z` tag has no GitHub Release behind it, run daily by the new `Release Audit`
   workflow. Pushing a tag does not create a Release and nothing asserted otherwise,

@@ -681,13 +681,67 @@ type EC2LaunchTemplate struct {
 	Tags []EC2Tag `json:"tags,omitempty"`
 
 	// LatestData holds the launch template parameters for the latest version.
+	//
+	// Retained alongside Versions rather than derived from it, for two reasons. It
+	// is the field a template stored before versioning existed (#456) carries, so
+	// [EC2LaunchTemplate.TemplateVersions] can synthesize version 1 from it — that
+	// synthesis is the whole migration, with no event rewriting. And several call
+	// sites read it directly, so removing it would turn a storage change into a
+	// rewrite of the RunInstances merge block. It is kept in sync on every version
+	// append; do not delete it as redundant.
 	LatestData EC2LaunchTemplateData `json:"latestData"`
+
+	// Versions holds every version of the template, ordered by version number.
+	//
+	// Nil for a template stored before #456; see
+	// [EC2LaunchTemplate.TemplateVersions], which is how every reader must access
+	// this field.
+	Versions []EC2LaunchTemplateVersion `json:"versions,omitempty"`
 
 	// AccountID is the AWS account that owns the launch template.
 	AccountID string `json:"accountID"`
 
 	// Region is the AWS region in which the launch template resides.
 	Region string `json:"region"`
+}
+
+// EC2LaunchTemplateVersion represents one version of an EC2 launch template.
+type EC2LaunchTemplateVersion struct {
+	// VersionNumber is the version's number, starting at 1 for the version created
+	// alongside the template itself.
+	VersionNumber int64 `json:"versionNumber"`
+
+	// VersionDescription is the caller-supplied description, if any.
+	VersionDescription string `json:"versionDescription,omitempty"`
+
+	// CreateTime is the RFC3339 timestamp when the version was created.
+	CreateTime string `json:"createTime"`
+
+	// CreatedBy is the principal that created the version.
+	CreatedBy string `json:"createdBy"`
+
+	// Data holds the launch parameters this version carries.
+	Data EC2LaunchTemplateData `json:"data"`
+}
+
+// TemplateVersions returns the template's versions, synthesizing version 1 from
+// LatestData when the stored template predates version tracking.
+//
+// Every reader must go through this rather than reading Versions directly. A
+// template written to the event log before #456 has no versions array at all, and
+// replaying such a log must still launch instances and read back as a
+// single-version template — which it does, because that template's LatestData *is*
+// its version 1.
+func (t EC2LaunchTemplate) TemplateVersions() []EC2LaunchTemplateVersion {
+	if len(t.Versions) > 0 {
+		return t.Versions
+	}
+	return []EC2LaunchTemplateVersion{{
+		VersionNumber: 1,
+		CreateTime:    t.CreateTime,
+		CreatedBy:     t.CreatedBy,
+		Data:          t.LatestData,
+	}}
 }
 
 // generateLaunchTemplateID generates a random launch template ID.

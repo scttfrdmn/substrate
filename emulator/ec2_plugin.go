@@ -200,6 +200,14 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeLaunchTemplates(ctx, req)
 	case "DeleteLaunchTemplate":
 		return p.deleteLaunchTemplate(ctx, req)
+	case "CreateLaunchTemplateVersion":
+		return p.createLaunchTemplateVersion(ctx, req)
+	case "ModifyLaunchTemplate":
+		return p.modifyLaunchTemplate(ctx, req)
+	case "DescribeLaunchTemplateVersions":
+		return p.describeLaunchTemplateVersions(ctx, req)
+	case "DeleteLaunchTemplateVersions":
+		return p.deleteLaunchTemplateVersions(ctx, req)
 	// EC2 Fleet operations
 	case "CreateFleet":
 		return p.createFleet(ctx, req)
@@ -317,29 +325,38 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	// run *after* the call-level NetworkInterface.1.* reads above rather than before
 	// them (#444) — the subnet fallback used to sit ahead of this block, where there
 	// was nothing yet to fall back to.
+	//
+	// Which *version* supplies those values is resolved from LaunchTemplate.Version.
+	// An absent version means the template's default version, not its latest — see
+	// [ec2ResolveTemplateVersion] (#456).
 	ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
 	ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
 	if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
+		version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
+		if awsErr != nil {
+			return nil, awsErr
+		}
+		ltData := version.Data
 		if imageID == "" {
-			imageID = lt.LatestData.ImageID
+			imageID = ltData.ImageID
 		}
 		if instanceType == "" {
-			instanceType = lt.LatestData.InstanceType
+			instanceType = ltData.InstanceType
 		}
 		if keyName == "" {
-			keyName = lt.LatestData.KeyName
+			keyName = ltData.KeyName
 		}
 		if userData == "" {
-			userData = lt.LatestData.UserData
+			userData = ltData.UserData
 		}
 		if subnetID == "" {
-			subnetID = lt.LatestData.SubnetID
+			subnetID = ltData.SubnetID
 		}
 		if publicIPPref == "" {
-			publicIPPref = lt.LatestData.AssociatePublicIPAddress
+			publicIPPref = ltData.AssociatePublicIPAddress
 		}
 		if len(securityGroupIDs) == 0 {
-			securityGroupIDs = lt.LatestData.NetworkSecurityGroupIDs()
+			securityGroupIDs = ltData.NetworkSecurityGroupIDs()
 		}
 		if sgID == "" && len(securityGroupIDs) > 0 {
 			sgID = securityGroupIDs[0]
@@ -4118,8 +4135,17 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 		CreatedBy:          ctx.AccountID,
 		CreateTime:         now,
 		LatestData:         ltData,
-		AccountID:          ctx.AccountID,
-		Region:             ctx.Region,
+		// Creating a template creates its version 1, which is both the default and
+		// the latest (#456).
+		Versions: []EC2LaunchTemplateVersion{{
+			VersionNumber:      1,
+			VersionDescription: req.Params["VersionDescription"],
+			CreateTime:         now,
+			CreatedBy:          ctx.AccountID,
+			Data:               ltData,
+		}},
+		AccountID: ctx.AccountID,
+		Region:    ctx.Region,
 	}
 
 	ltJSON, err := json.Marshal(lt)
@@ -4136,28 +4162,56 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
 	updateStringIndex(goCtx, p.state, ec2Namespace, idsKey, ltID)
 
-	type ltItem struct {
-		LaunchTemplateID   string `xml:"launchTemplateId"`
-		LaunchTemplateName string `xml:"launchTemplateName"`
-		CreateTime         string `xml:"createTime"`
-		DefaultVersionNum  int64  `xml:"defaultVersionNumber"`
-		LatestVersionNum   int64  `xml:"latestVersionNumber"`
-	}
 	type response struct {
-		XMLName        xml.Name `xml:"CreateLaunchTemplateResponse"`
-		XMLNS          string   `xml:"xmlns,attr"`
-		LaunchTemplate ltItem   `xml:"launchTemplate"`
+		XMLName        xml.Name             `xml:"CreateLaunchTemplateResponse"`
+		XMLNS          string               `xml:"xmlns,attr"`
+		LaunchTemplate ec2LaunchTemplateXML `xml:"launchTemplate"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
-		XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/",
-		LaunchTemplate: ltItem{
-			LaunchTemplateID:   ltID,
-			LaunchTemplateName: name,
-			CreateTime:         now,
-			DefaultVersionNum:  1,
-			LatestVersionNum:   1,
-		},
+		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
+		LaunchTemplate: ec2LaunchTemplateSummary(&lt),
 	})
+}
+
+// ec2LaunchTemplateXML is the launchTemplate summary element AWS returns from
+// CreateLaunchTemplate, DescribeLaunchTemplates and ModifyLaunchTemplate.
+//
+// Notably it carries no launchTemplateData: DescribeLaunchTemplates cannot read a
+// template's parameters back, which is why DescribeLaunchTemplateVersions exists and
+// why anything asserting on a template's contents has to call it.
+type ec2LaunchTemplateXML struct {
+	LaunchTemplateID   string       `xml:"launchTemplateId"`
+	LaunchTemplateName string       `xml:"launchTemplateName"`
+	CreateTime         string       `xml:"createTime"`
+	CreatedBy          string       `xml:"createdBy,omitempty"`
+	DefaultVersionNum  int64        `xml:"defaultVersionNumber"`
+	LatestVersionNum   int64        `xml:"latestVersionNumber"`
+	Tags               []ec2TagItem `xml:"tagSet>item,omitempty"`
+}
+
+// ec2TagItem is a tagSet entry on the wire.
+type ec2TagItem struct {
+	// Key is the tag key.
+	Key string `xml:"key"`
+
+	// Value is the tag value.
+	Value string `xml:"value"`
+}
+
+// ec2LaunchTemplateSummary renders a launch template as its summary element.
+func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
+	out := ec2LaunchTemplateXML{
+		LaunchTemplateID:   lt.LaunchTemplateID,
+		LaunchTemplateName: lt.LaunchTemplateName,
+		CreateTime:         lt.CreateTime,
+		CreatedBy:          lt.CreatedBy,
+		DefaultVersionNum:  lt.DefaultVersionNum,
+		LatestVersionNum:   lt.LatestVersionNum,
+	}
+	for _, t := range lt.Tags {
+		out.Tags = append(out.Tags, ec2TagItem(t))
+	}
+	return out
 }
 
 func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -4192,28 +4246,15 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		}
 	}
 
-	type ltItem struct {
-		LaunchTemplateID   string `xml:"launchTemplateId"`
-		LaunchTemplateName string `xml:"launchTemplateName"`
-		CreateTime         string `xml:"createTime"`
-		DefaultVersionNum  int64  `xml:"defaultVersionNumber"`
-		LatestVersionNum   int64  `xml:"latestVersionNumber"`
-	}
 	type response struct {
-		XMLName         xml.Name `xml:"DescribeLaunchTemplatesResponse"`
-		XMLNS           string   `xml:"xmlns,attr"`
-		LaunchTemplates []ltItem `xml:"launchTemplates>item"`
+		XMLName         xml.Name               `xml:"DescribeLaunchTemplatesResponse"`
+		XMLNS           string                 `xml:"xmlns,attr"`
+		LaunchTemplates []ec2LaunchTemplateXML `xml:"launchTemplates>item"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	for _, lt := range lts {
-		resp.LaunchTemplates = append(resp.LaunchTemplates, ltItem{
-			LaunchTemplateID:   lt.LaunchTemplateID,
-			LaunchTemplateName: lt.LaunchTemplateName,
-			CreateTime:         lt.CreateTime,
-			DefaultVersionNum:  lt.DefaultVersionNum,
-			LatestVersionNum:   lt.LatestVersionNum,
-		})
+	for i := range lts {
+		resp.LaunchTemplates = append(resp.LaunchTemplates, ec2LaunchTemplateSummary(&lts[i]))
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }

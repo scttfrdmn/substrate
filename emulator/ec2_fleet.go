@@ -447,6 +447,13 @@ func (p *EC2Plugin) launchFleetPool(
 	if pool.ltName != "" {
 		params["LaunchTemplate.LaunchTemplateName"] = pool.ltName
 	}
+	// The config's version is forwarded so a fleet pinned to a specific launch
+	// template version gets that version's parameters. fleetPools has always parsed
+	// this value; before #456 nothing consumed it, so a fleet naming version 1 of a
+	// template silently launched whatever the template held latest.
+	if pool.version != "" {
+		params["LaunchTemplate.Version"] = pool.version
+	}
 	// An override's ImageId replaces the launch template's AMI.
 	if pool.override.ImageID != "" {
 		params["ImageId"] = pool.override.ImageID
