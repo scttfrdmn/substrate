@@ -3243,7 +3243,6 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequ
 	region := reqCtx.Region
 	// Derive abbreviated region for zoneId (e.g. "use1" from "us-east-1").
 	abbrev := azRegionAbbrev(region)
-	azSuffixes := []string{"a", "b", "c"}
 	type azItem struct {
 		ZoneName   string `xml:"zoneName"`
 		State      string `xml:"zoneState"`
@@ -3256,7 +3255,7 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequ
 		AvailabilityZones []azItem `xml:"availabilityZoneInfo>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	for i, suffix := range azSuffixes {
+	for i, suffix := range ec2SeededAZSuffixes {
 		resp.AvailabilityZones = append(resp.AvailabilityZones, azItem{
 			ZoneName:   region + suffix,
 			State:      "available",
@@ -3938,54 +3937,24 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
-// --- Instance type and spot price catalog ------------------------------------
-
-// ec2InstanceTypeCatalog is a pre-seeded catalog of common instance types
-// available for use without real AWS credentials.
-var ec2InstanceTypeCatalog = []ec2InstanceTypeInfo{
-	{InstanceType: "t3.micro", VCpus: 2, MemoryMiB: 1024, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "c5.xlarge", VCpus: 4, MemoryMiB: 8192, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "c5.2xlarge", VCpus: 8, MemoryMiB: 16384, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "m5.large", VCpus: 2, MemoryMiB: 8192, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "r5.xlarge", VCpus: 4, MemoryMiB: 32768, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "p3.2xlarge", VCpus: 8, MemoryMiB: 62464, GPU: 1, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "g4dn.xlarge", VCpus: 4, MemoryMiB: 16384, GPU: 1, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-	{InstanceType: "inf1.xlarge", VCpus: 4, MemoryMiB: 8192, GPU: 0, SupportedArchs: []string{"x86_64"}, SupportedUsageClasses: []string{"on-demand", "spot"}},
-}
-
-// ec2SpotPriceCatalog maps instance type to stub spot price (USD/hr).
-var ec2SpotPriceCatalog = map[string]string{
-	"t3.micro":    "0.0042",
-	"c5.xlarge":   "0.068",
-	"c5.2xlarge":  "0.136",
-	"m5.large":    "0.038",
-	"r5.xlarge":   "0.076",
-	"p3.2xlarge":  "0.918",
-	"g4dn.xlarge": "0.188",
-	"inf1.xlarge": "0.076",
-}
-
-// ec2InstanceTypeInfo holds the details for one instance type in the catalog.
-type ec2InstanceTypeInfo struct {
-	InstanceType          string
-	VCpus                 int
-	MemoryMiB             int
-	GPU                   int
-	SupportedArchs        []string
-	SupportedUsageClasses []string
-}
-
 // --- DescribeInstanceTypes ---------------------------------------------------
 
-func (p *EC2Plugin) describeInstanceTypes(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Build filter set from InstanceType.N params.
+// describeInstanceTypes answers from the seeded [ec2InstanceTypeCatalog].
+//
+// Filter.N is not applied. The operation documents some 60 filter names, nearly all over
+// response fields the seeded catalog does not carry, so applying the handful that are
+// modellable and ignoring the rest would be the same silent-narrowing defect #485
+// reported on the offerings operation (TODO(#495): apply the filters the catalog can
+// answer and refuse the rest). InstanceType.N is honored, and unlike a filter it is an
+// assertion that the types exist.
+func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	requested := indexedParams(req.Params, "InstanceType.%d")
+	if err := ec2CheckInstanceTypesExist(requested); err != nil {
+		return nil, err
+	}
 	wanted := map[string]bool{}
-	for i := 1; ; i++ {
-		v := req.Params[fmt.Sprintf("InstanceType.%d", i)]
-		if v == "" {
-			break
-		}
-		wanted[v] = true
+	for _, t := range requested {
+		wanted[t] = true
 	}
 
 	type gpuInfoItem struct {
@@ -4043,30 +4012,51 @@ func (p *EC2Plugin) describeInstanceTypes(reqCtx *RequestContext, req *AWSReques
 
 // --- DescribeInstanceTypeOfferings ------------------------------------------
 
+// describeInstanceTypeOfferings lists the seeded catalog's types per location.
+//
+// The operation's filters are exactly two — its reference lists `instance-type` and
+// `location` and no others — so both are applied and any other name is refused. Before
+// #485 this read `wantedTypes` from an `InstanceType.N` parameter the operation does not
+// have (the reference's parameters are `DryRun`, `Filter.N`, `LocationType`, `MaxResults`
+// and `NextToken`; botocore rejects `InstanceTypes` outright), so the type filter was
+// unreachable dead code and every query returned the whole catalog. The pattern had been
+// copied from describeInstanceTypes, where the parameter does exist.
+//
+// An `instance-type` value matching nothing yields **zero offerings and HTTP 200**, not
+// InvalidInstanceType. That is deliberately the opposite of DescribeInstanceTypes'
+// InstanceType.N; see [ec2CheckInstanceTypesExist] for why, and #485 for the real-AWS
+// diff of both.
 func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Build filter map from Filter.N.{Name,Value.1} params.
-	locationFilter := ""
-	for i := 1; ; i++ {
-		name := req.Params[fmt.Sprintf("Filter.%d.Name", i)]
-		if name == "" {
-			break
+	filters := extractEC2Filters(req.Params)
+	for name := range filters {
+		if name != "instance-type" && name != "location" {
+			return nil, ec2InvalidFilterError(name)
 		}
-		if name == "location" {
-			locationFilter = req.Params[fmt.Sprintf("Filter.%d.Value.1", i)]
-		}
-	}
-	// Build instance-type filter from InstanceType.N params.
-	wantedTypes := map[string]bool{}
-	for i := 1; ; i++ {
-		v := req.Params[fmt.Sprintf("InstanceType.%d", i)]
-		if v == "" {
-			break
-		}
-		wantedTypes[v] = true
 	}
 
-	region := reqCtx.Region
-	azSuffixes := []string{"a", "b", "c"}
+	// LocationType is a top-level parameter, not a filter name, and it selects what the
+	// locations in the response *are*. Only availability-zone (the default per the
+	// reference — "If no location is specified, the default is to list the instance types
+	// that are offered in the current Region") and region are modeled;
+	// availability-zone-id and outpost are documented as unmodelled in docs/services.md,
+	// and are refused rather than silently treated as availability-zone.
+	locationType := req.Params["LocationType"]
+	if locationType == "" {
+		locationType = "availability-zone"
+	}
+	var locations []string
+	switch locationType {
+	case "availability-zone":
+		for _, suffix := range ec2SeededAZSuffixes {
+			locations = append(locations, reqCtx.Region+suffix)
+		}
+	case "region":
+		locations = []string{reqCtx.Region}
+	case "availability-zone-id", "outpost":
+		return nil, ec2UnmodelledLocationTypeError(locationType)
+	default:
+		return nil, ec2InvalidLocationTypeError(locationType)
+	}
 
 	type offeringItem struct {
 		InstanceType string `xml:"instanceType"`
@@ -4081,18 +4071,17 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, info := range ec2InstanceTypeCatalog {
-		if len(wantedTypes) > 0 && !wantedTypes[info.InstanceType] {
+		if !ec2FilterAccepts(filters["instance-type"], info.InstanceType) {
 			continue
 		}
-		for _, suffix := range azSuffixes {
-			az := region + suffix
-			if locationFilter != "" && locationFilter != az && locationFilter != region {
+		for _, loc := range locations {
+			if !ec2FilterAccepts(filters["location"], loc) {
 				continue
 			}
 			resp.InstanceTypeOfferings = append(resp.InstanceTypeOfferings, offeringItem{
 				InstanceType: info.InstanceType,
-				LocationType: "availability-zone",
-				Location:     az,
+				LocationType: locationType,
+				Location:     loc,
 			})
 		}
 	}
@@ -4101,15 +4090,17 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 
 // --- DescribeSpotPriceHistory ------------------------------------------------
 
+// describeSpotPriceHistory reports one stub price per catalog type per Availability Zone.
+//
+// InstanceType.N here is a filter, not an assertion: the reference describes it as
+// "Filters the results by the specified instance types", so an unknown type yields an
+// empty history rather than InvalidInstanceType. That is the opposite of
+// DescribeInstanceTypes, whose InstanceType.N asserts existence; see
+// [ec2CheckInstanceTypesExist].
 func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Build instance-type filter from InstanceType.N params.
 	wantedTypes := map[string]bool{}
-	for i := 1; ; i++ {
-		v := req.Params[fmt.Sprintf("InstanceType.%d", i)]
-		if v == "" {
-			break
-		}
-		wantedTypes[v] = true
+	for _, t := range indexedParams(req.Params, "InstanceType.%d") {
+		wantedTypes[t] = true
 	}
 	// AZ filter.
 	azFilter := req.Params["AvailabilityZone"]
@@ -4117,7 +4108,6 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 	pdFilter := req.Params["ProductDescription.1"]
 
 	region := reqCtx.Region
-	azSuffixes := []string{"a", "b", "c"}
 	// Stub timestamp: use time controller's current time.
 	ts := p.tc.Now().UTC().Format(time.RFC3339)
 
@@ -4139,15 +4129,11 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 		if len(wantedTypes) > 0 && !wantedTypes[info.InstanceType] {
 			continue
 		}
-		price, ok := ec2SpotPriceCatalog[info.InstanceType]
-		if !ok {
-			continue
-		}
 		desc := "Linux/UNIX"
 		if pdFilter != "" && pdFilter != desc {
 			continue
 		}
-		for _, suffix := range azSuffixes {
+		for _, suffix := range ec2SeededAZSuffixes {
 			az := region + suffix
 			if azFilter != "" && azFilter != az {
 				continue
@@ -4155,7 +4141,7 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 			resp.SpotPriceHistory = append(resp.SpotPriceHistory, spotPriceItem{
 				InstanceType:       info.InstanceType,
 				ProductDescription: desc,
-				SpotPrice:          price,
+				SpotPrice:          info.SpotPrice,
 				Timestamp:          ts,
 				AvailabilityZone:   az,
 			})

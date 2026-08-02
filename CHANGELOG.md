@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`DescribeInstanceTypes` now refuses an instance type it does not model** (#485).
+  An unknown type was answered with HTTP 200 and an empty list, so a consumer
+  validating a user-supplied instance type got no signal at all and their validation
+  branch was unreachable — the same shape as #391's unknown instance ID. Real
+  `us-east-1` answers `InvalidInstanceType`, HTTP 400, and substrate now does too,
+  collecting every unknown type in the request into one bracketed list in request
+  order. One bad type fails the whole request; the known types are not returned,
+  because `InstanceType.N` asserts that the types supplied exist.
+
+  The code is documented in EC2's client-error table. The message is verbatim from
+  the single real-`us-east-1` capture reported in #485, so the brackets and the
+  plural phrasing are observed; the `", "` separator for a multi-type list is
+  **not** corroborated and is substrate's choice. Dispatch on the code.
+
+- **The `DescribeInstanceTypeOfferings` instance-type filter now works** (#485). It
+  had never worked: the handler built its filter from an `InstanceType.N` parameter
+  the operation does not have — its reference lists exactly `DryRun`, `Filter.N`,
+  `LocationType`, `MaxResults` and `NextToken`, and botocore rejects `InstanceTypes`
+  outright — so the filter map was always empty and every query returned the whole
+  catalog in every zone. A caller asking "is `m5.xlarge` offered here?" got yes for
+  any input, including nonsense. The pattern had been copied from
+  `DescribeInstanceTypes`, where the parameter does exist.
+
+  Both documented filter names are now applied — `instance-type` and `location` —
+  with EC2's documented wildcards (`*` for zero or more characters, `?` for zero or
+  **one**, `\` to escape a literal), case-sensitive values, all `Filter.N.Value.M`
+  values as an OR, and separate `Filter.N` entries ANDed. Any other filter name is
+  **refused** with `InvalidParameterValue` rather than ignored, since silently
+  dropping a filter is how this defect went unnoticed for four releases.
+  `location-type` is among the refused: it is not a filter name, contrary to #485's
+  aside — `LocationType` is a separate top-level parameter, now honoured for
+  `availability-zone` (the default) and `region`. `availability-zone-id` and
+  `outpost` are real AWS values substrate does not model and are refused with a
+  message naming substrate, rather than answered with zone names under a
+  `locationType` claiming they are IDs or Outpost ARNs.
+
+  An `instance-type` filter matching nothing is **zero offerings and HTTP 200**, not
+  an error — deliberately the opposite of `DescribeInstanceTypes`' identically
+  spelled parameter, and confirmed by #485's real-AWS diff of both. The two are
+  different questions: a filter narrows a result set, so an unmatched value is a
+  legitimate empty answer, while `InstanceType.N` asserts existence. Both halves are
+  pinned by tests so neither can later be "tidied" into consistency with the other.
+  `DescribeSpotPriceHistory`'s `InstanceType.N` is a filter too, per its reference,
+  so an unknown type there is an empty history.
+
+### Added
+- **The instance-type catalog now covers whole families** (#485), widened from 8
+  types to 57. The old catalog split families mid-way — `c5.xlarge` in and `c5.large`
+  out, `m5.large` in and `m5.xlarge` out — which was incidental to #234's consumer and
+  became a correctness problem the moment an absent type started being *refused*: a
+  catalog stopping at `c5.xlarge` answers `InvalidInstanceType` for `c5.large`, the
+  right code for a bogus type and the wrong one for a real one. `t3`, `t3a`, `m5`,
+  `m5a`, `c5`, `c5a` and `r5` are now complete (note `c5`'s ladder differs from
+  `c5a`'s: `9xlarge`/`18xlarge` against `8xlarge`/`16xlarge`), alongside the three
+  accelerated sizes #234 seeded. All ten types #485 names are present; five were not.
+
+  Bare-metal sizes are deliberately excluded and the exclusion is pinned by a test:
+  they are real types, but nothing else in the plugin models their behaviour.
+
+  Spot prices are now generated from the same per-family table as the specs, so a
+  type cannot be in the catalog and missing from the price index — the previous pair
+  of parallel maps had exactly that hazard, and `DescribeSpotPriceHistory` silently
+  dropped any type absent from the price map. The eight prices #234 shipped are
+  preserved verbatim so no recorded fixture moves. They remain deterministic stubs,
+  not AWS prices.
+
+  `DescribeAvailabilityZones`, `DescribeInstanceTypeOfferings` and
+  `DescribeSpotPriceHistory` now derive their zone names from one list, so filtering
+  an offerings query by a zone you just enumerated cannot return empty.
+
 ## [v0.86.0] - 2026-08-02
 
 ### Added
