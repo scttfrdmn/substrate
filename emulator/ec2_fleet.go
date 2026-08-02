@@ -279,14 +279,14 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	// exactly as RunInstances checks its own. Only the fleet-ID tag substrate adds
 	// afterwards is exempt, and it is exempt by never being part of a request (#468).
 	instanceTags := ec2LaunchTagsForResource(req.Params, "instance")
-	if awsErr := ec2CheckReservedTagKeys(instanceTags); awsErr != nil {
+	if awsErr := ec2CheckTagRules(instanceTags); awsErr != nil {
 		return nil, awsErr
 	}
 	if awsErr := ec2CheckTagLimit(nil, instanceTags); awsErr != nil {
 		return nil, awsErr
 	}
 	fleetTags := ec2LaunchTagsForResource(req.Params, "fleet")
-	if awsErr := ec2CheckReservedTagKeys(fleetTags); awsErr != nil {
+	if awsErr := ec2CheckTagRules(fleetTags); awsErr != nil {
 		return nil, awsErr
 	}
 	if awsErr := ec2CheckTagLimit(nil, fleetTags); awsErr != nil {

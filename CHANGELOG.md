@@ -229,6 +229,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapter maps them to AWS codes by matching sentinel prefixes — typed errors
   behind the model would remove the string matching and are filed as #502.
 
+- **EC2 tag keys and values now have their documented length limits enforced**
+  (#490). A key longer than 128 characters or a value longer than 256 was accepted
+  everywhere: `CreateTags`, `DeleteTags`, and tag-on-create through `RunInstances`,
+  `CreateFleet`, `CreateImage`, `CreateNatGateway` and a launch template. This was the
+  third restriction in the same table #469 read for the 50-tag count and the only one
+  left unenforced, so a consumer generating tag values from a resource description or a
+  git ref — the case that actually overruns 256 characters — had no way to reach real
+  EC2's rejection, and a test asserting it passed against substrate while the same code
+  failed against AWS. The rejection is `InvalidParameterValue`, HTTP 400, and names
+  which limit was exceeded and by how much.
+
+  **The unit is Unicode characters, not bytes**, per "Maximum key length – 128 Unicode
+  characters in UTF-8". A key of 128 emoji is 128 characters and 512 bytes and is
+  legal; counting bytes would refuse it while reporting a length the caller never sent.
+  The two counts agree on ASCII, which is why an ASCII-only suite cannot tell them
+  apart, so the tests carry emoji and three-byte rows.
+
+  There is no lower bound — "You can set the value of a tag to an empty string, but you
+  can't set the value of a tag to null" — so the check is an upper bound only. That is
+  also what makes `DeleteTags` correct without a special case: it names keys and treats
+  the value as optional, so an absent `Tag.N.Value` is the empty string and passes.
+
+  Reserved `aws:` keys are **not** exempt from the lengths, though they are from the
+  count: the exemption in the restrictions list is scoped to the count alone ("Tags
+  with the `aws:` prefix do not count against your tags per resource limit") and
+  nothing in it exempts a reserved key from either length. That answers the question
+  #490 raised, and it is worth being precise about what it buys — the reserved-key
+  check runs first, so an `aws:`-prefixed key is refused for being reserved before its
+  length is measured, and the choice therefore changes no wire behaviour today. It is
+  the right code for any future path that checks lengths alone, and it is recorded
+  because the adjacent count check does the opposite. Where the length check does bite
+  is the case-sensitive edge: `AWS:` is an ordinary user tag, and an over-long one is
+  refused for its length.
+
+  As with the other two tag restrictions, the whole request is refused before anything
+  is modified, and on a tag-on-create path before the resource exists — a refused
+  `RunInstances` launches no instance, a refused `CreateImage` creates neither the AMI
+  nor its snapshot, and a refused `CreateLaunchTemplate` creates no template. A launch
+  template is checked at creation and at each version as well as at every launch that
+  names it, following #471, so an over-long template tag is reported once at the
+  operation that named it.
+
+  The three tag checks are now applied through one function rather than at each of the
+  nine call sites that had to be found by hand for this fix, so the next restriction is
+  added in one place.
+
+  Provenance is the weakest of the three tag restrictions and is marked as such. The
+  **code** `InvalidParameterValue` with HTTP 400 is by analogy with the reserved-key
+  rejection — the other tag-restriction violation on the same operations, and
+  `CreateTags`' Errors section is empty so the API model supplies nothing. The
+  **message text is substrate's own**: no captured real-AWS length rejection was found,
+  in moto or LocalStack either. It interpolates the limit and the actual length,
+  following the `SendMessage` size-limit message's precedent, because the message is
+  the only place a caller learns which limit they hit. Dispatch on the code.
+
 ## [v0.86.0] - 2026-08-02
 
 ### Added

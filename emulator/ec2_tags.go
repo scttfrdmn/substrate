@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 // ec2ReservedTagPrefix is the tag-key prefix EC2 reserves for its own use. A caller
@@ -95,6 +96,97 @@ func ec2CheckTagLimit(existing, incoming []EC2Tag) *AWSError {
 	return nil
 }
 
+// ec2MaxTagKeyLength and ec2MaxTagValueLength are the tag length limits, from the
+// tagging documentation's restrictions list: "Maximum key length – 128 Unicode
+// characters in UTF-8" and "Maximum value length – 256 Unicode characters in UTF-8".
+//
+// The unit is **Unicode characters, not bytes**, which is why [ec2CheckTagLengths]
+// counts runes. A 128-emoji key is 128 characters and 512 bytes; it is legal, and a
+// byte-counting check would reject it. The two agree on ASCII, so an ASCII-only test
+// suite passes under either and cannot tell them apart.
+//
+// There is no lower bound. The same documentation states "You can set the value of a
+// tag to an empty string, but you can't set the value of a tag to null", so an empty
+// value is legal and the check is upper-bound only. A key is required by the query
+// encoding — [extractEC2Tags] ends its walk on an absent or empty Tag.N.Key — so an
+// empty key is not expressible rather than rejected here.
+const (
+	ec2MaxTagKeyLength   = 128
+	ec2MaxTagValueLength = 256
+)
+
+// ec2TagLengthError returns the error EC2 raises for a tag key or value over its
+// length limit. what names the part that was too long ("key" or "value").
+//
+// Provenance, which is the weakest of any error in the EC2 tagging paths and is marked
+// as such deliberately. The *code* is by analogy with [ec2ReservedTagKeyError]:
+// InvalidParameterValue, HTTP 400, is what real AWS answers for the other
+// tag-restriction violation on the same operations, and CreateTags' Errors section is
+// empty so the model supplies nothing. The *message text is substrate's own* — no
+// captured real-AWS length rejection was found, in moto or LocalStack either. It
+// follows sqsMessageTooLong's precedent of interpolating the limit and the actual
+// length, because the message is the only place a caller learns which of the two
+// limits they hit and by how much.
+func ec2TagLengthError(what string, limit, actual int) *AWSError {
+	return &AWSError{
+		Code: "InvalidParameterValue",
+		Message: fmt.Sprintf(
+			"Tag %s must be no more than %d Unicode characters in UTF-8; the supplied %s is %d",
+			what, limit, what, actual),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2CheckTagLengths returns an error if any tag's key or value exceeds its length
+// limit, or nil. Pass an empty value on a key-only path such as DeleteTags, which
+// names keys and treats the value as optional.
+//
+// **Reserved keys are checked too**, which is deliberately narrower than
+// [ec2CheckTagLimit]'s exemption sitting a few lines above, and the difference is worth
+// stating because the adjacent function doing the opposite is what a reader will trip
+// on. The exemption in the restrictions list is scoped to the count alone — "Tags with
+// the aws: prefix do not count against your tags per resource limit" — and nothing in
+// it exempts a reserved key from either length. Substrate's own [ec2FleetIDTagKey] is
+// far under both limits, so checking them changes nothing it stamps.
+//
+// That choice is currently unobservable, and saying so is more useful than implying
+// otherwise: [ec2CheckTagRules] runs [ec2CheckReservedTagKeys] first, so a caller's
+// reserved key is refused for being reserved before its length is ever measured. The
+// exemption question therefore decides no wire behavior today. Checking reserved keys is
+// still the right code — it is correct for any future path that checks lengths alone, and
+// it is the reading the documentation supports — but it is a clarity decision rather than
+// a behavioral one.
+//
+// Tags are checked in slice order, so which tag a mixed request is rejected on is
+// decided identically on every run — the same reason [ec2CheckReservedTagKeys] avoids a
+// map. Callers on a tag-on-create path must check before the resource is created; see
+// [ec2CheckReservedTagKeys] for the rollback rule all three checks follow.
+func ec2CheckTagLengths(tags []EC2Tag) *AWSError {
+	for _, t := range tags {
+		if n := utf8.RuneCountInString(t.Key); n > ec2MaxTagKeyLength {
+			return ec2TagLengthError("key", ec2MaxTagKeyLength, n)
+		}
+		if n := utf8.RuneCountInString(t.Value); n > ec2MaxTagValueLength {
+			return ec2TagLengthError("value", ec2MaxTagValueLength, n)
+		}
+	}
+	return nil
+}
+
+// ec2CheckTagRules runs every tag restriction substrate models over one tag list:
+// reserved keys, then lengths. It is what a tag-on-create path calls, so a new
+// restriction is added in one place rather than at each of the eleven call sites that
+// had to be found by hand for #490.
+//
+// The per-resource count is *not* included, because it needs the resource's existing
+// tags as well and its callers pass different things for them — see [ec2CheckTagLimit].
+func ec2CheckTagRules(tags []EC2Tag) *AWSError {
+	if awsErr := ec2CheckReservedTagKeys(tags); awsErr != nil {
+		return awsErr
+	}
+	return ec2CheckTagLengths(tags)
+}
+
 // ec2LaunchTagsForResource collects the TagSpecification.N tags scoped to
 // resourceType, in the request's Tag.N order.
 //
@@ -149,17 +241,17 @@ func ec2TagSpecificationTags(params map[string]string, prefix, resourceType stri
 }
 
 // ec2CheckTemplateTags returns an error if a launch template's instance-scoped tags
-// break either tag rule, or nil.
+// break any tag rule, or nil.
 //
 // Run when a template or a version of one is created, so a template carrying a
-// reserved key or more than [ec2MaxTagsPerResource] is refused up front rather than
-// at every launch that names it. Real EC2 rejects at creation too: both rules are on
-// the key and the count, not on the operation.
+// reserved key, an over-long key or value, or more than [ec2MaxTagsPerResource] is
+// refused up front rather than at every launch that names it. Real EC2 rejects at
+// creation too: every rule is on the tag and the count, not on the operation.
 //
 // The launch path checks again, deliberately — see the fallback in
 // [EC2Plugin.runInstancesWithTags] for why a stored template can still carry one.
 func ec2CheckTemplateTags(d EC2LaunchTemplateData) *AWSError {
-	if awsErr := ec2CheckReservedTagKeys(d.TagSpecifications); awsErr != nil {
+	if awsErr := ec2CheckTagRules(d.TagSpecifications); awsErr != nil {
 		return awsErr
 	}
 	return ec2CheckTagLimit(nil, d.TagSpecifications)
