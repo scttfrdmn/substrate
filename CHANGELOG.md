@@ -113,6 +113,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CLI help, moto — which does not implement the operation — LocalStack, and the SDK
   models); the message is the reference's own sentence. Both are inferred, not
   captured.
+- **SQS message attributes are now validated against their documented rules** (#472).
+  Every attribute was stored and returned as sent, so an eleventh attribute, a name real
+  SQS reserves, a `DataType` that is not one of the three, and a `Number` attribute
+  holding `"abc"` were all accepted and delivered. That last one is the shape this
+  tracker exists to close: a consumer whose handler parses a `Number` attribute had no
+  way to reach its parse-failure branch, and a test of that branch passed against
+  substrate while the same code broke against AWS.
+
+  `SendMessage` and each `SendMessageBatch` entry now enforce, all as
+  `InvalidParameterValue` / HTTP 400: the maximum of 10 attributes; a name shorter than
+  256 bytes drawn from alphanumerics, `_`, `-` and `.`, with no `AWS.`/`Amazon.` prefix
+  and no leading, trailing or sequential period; a `DataType` shorter than 256 bytes
+  prefixed `String`, `Number` or `Binary`; a non-empty value on a `String` attribute; and
+  a `Number` value that parses as a decimal number within −10^128 … 10^126. Both length
+  bounds are exclusive — the guide says "up to 256 characters" while the error says "must
+  be shorter than 256 Bytes", and the error is the more specific evidence.
+
+  **The reserved-prefix check is case-insensitive**, so `aws.trace` and `AwS.trace` are
+  refused too, per the guide's "or any casing variations". This is the **opposite** of
+  #468's `aws:` tag-key rule, where `AWS:foo` remains a legal key. Both are correct, the
+  two services document different rules, and the checks are deliberately not shared —
+  which is the detail a reader arriving from one will get wrong about the other.
+
+  A rejected send **enqueues nothing**. On a FIFO queue the check runs before the
+  deduplication ID is recorded, so a corrected retry reusing the same
+  `MessageDeduplicationId` is delivered rather than swallowed as a duplicate — the same
+  ordering #454's size check established, for the same reason.
+
+  `SendMessageBatch` reports a violation **per entry**: a `BatchResultErrorEntry` in
+  `Failed` with `SenderFault: true` at HTTP **200**, the offending entry not enqueued and
+  its siblings delivered. Substrate had no such type — both batch paths emitted an empty
+  `Failed` placeholder — so a consumer's per-entry error handling had nothing to
+  exercise, and the reference warns that "you should check for batch errors even when the
+  call returns an HTTP status code of `200`". `Failed` is now always present, empty rather
+  than absent on full success. This is deliberately unlike the batch size checks a few
+  lines away, which still fail the whole request with `BatchRequestTooLong`: the payload
+  cap is a property of the aggregate the caller transmitted, while a malformed attribute
+  is a defect in one entry.
+
+  Provenance, strongest first, and recorded per message in the code. **Real-AWS
+  captures**: the count rejection's message (an SDK exception quoting an AWS Request ID
+  and status 400), the `Number` cast failure (code *and* message, from boto3 against live
+  SQS), and the empty-`String`-value message (captured twice independently). **A
+  snapshot-tested reimplementation**: the name and type messages, from LocalStack, whose
+  character-class string is reproduced verbatim including its "upper and lower score
+  characters" phrasing and its trailing space. **A single reimplementation, the weakest
+  claim here and labelled as such in the file**: the `Number` range message, which only
+  elasticmq supplies. The count rejection's *code* is absent from its capture and comes
+  from agreement across five reimplementations; neither moto nor LocalStack enforces the
+  count at all, which is why substrate accepting an eleventh attribute went unnoticed
+  until #461 made attributes observable.
+
+  The rules apply on send, not on receive: a message written into state before they
+  existed is still returned as stored, because withholding it would make a recorded run
+  unreplayable. Tracked separately.
 - `make tag-releases-check` (`scripts/check-tag-releases.sh`) fails if a published
   `vX.Y.Z` tag has no GitHub Release behind it, run daily by the new `Release Audit`
   workflow. Pushing a tag does not create a Release and nothing asserted otherwise,
