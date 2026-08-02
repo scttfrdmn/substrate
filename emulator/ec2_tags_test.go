@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1108,4 +1109,527 @@ func TestEC2_CreateTags_UncountedResourceIDs(t *testing.T) {
 				"an ID the apply step ignores must not be counted against")
 		})
 	}
+}
+
+// The tag length limits, restated here because an external test package cannot see
+// ec2MaxTagKeyLength and ec2MaxTagValueLength. As with [ec2TagLimit], that is a
+// feature: the tests assert the documented numbers rather than whatever the constants
+// happen to hold, so editing a constant alone cannot make them pass.
+//
+// From the tagging documentation's restrictions list: "Maximum key length – 128
+// Unicode characters in UTF-8" and "Maximum value length – 256 Unicode characters in
+// UTF-8".
+const (
+	ec2TagKeyLimit   = 128
+	ec2TagValueLimit = 256
+)
+
+// ec2Repeat returns s repeated until it is exactly count *runes* long.
+//
+// strings.Repeat is the whole implementation, and the wrapper exists for the assertion
+// beside it: a test that builds a 129-character key out of a multi-byte rune must be
+// able to state that it built 129 characters and not 129 bytes, or the row that
+// distinguishes the two limits silently stops distinguishing them.
+func ec2Repeat(t *testing.T, s string, count int) string {
+	t.Helper()
+	out := strings.Repeat(s, count)
+	require.Equal(t, count, utf8.RuneCountInString(out),
+		"the test fixture must be %d runes; s must be a single rune", count)
+	return out
+}
+
+// ec2TagLengthMessage is the wording substrate emits for an over-long tag key or
+// value, pinned so it cannot drift silently.
+//
+// This is the weakest provenance of any error in the EC2 tagging paths and is labeled
+// as such deliberately. The *code* InvalidParameterValue with HTTP 400 is by analogy
+// with the reserved-key rejection — the other tag-restriction violation on the same
+// operations, and CreateTags' Errors section is empty so the model supplies nothing.
+// The *message text is substrate's own*: no captured real-AWS length rejection was
+// found, in moto or LocalStack either. It interpolates the limit and the actual length
+// following sqsMessageTooLong's precedent, because the message is the only place a
+// caller learns which limit they hit and by how much.
+func ec2TagLengthMessage(what string, limit, actual int) string {
+	return fmt.Sprintf(
+		"Tag %s must be no more than %d Unicode characters in UTF-8; the supplied %s is %d",
+		what, limit, what, actual)
+}
+
+// TestEC2_CreateTags_EnforcesLengthLimits covers #490: substrate accepted a tag key or
+// value of any length, so a consumer that hit real EC2's 128/256-character ceilings had
+// no way to test the rejection — and a test asserting it passed against substrate while
+// the same code failed against AWS. The #469 count limit came from the same
+// restrictions table and the lengths were left behind.
+//
+// The boundaries are adjacent on purpose: an off-by-one in either direction is the
+// failure mode, and a table testing only 500-character keys catches neither.
+func TestEC2_CreateTags_EnforcesLengthLimits(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      string
+		value    string
+		wantWhat string // "" means the tag is legal
+		wantLen  int
+	}{
+		{
+			name:  "a 128-character key is legal",
+			key:   strings.Repeat("k", ec2TagKeyLimit),
+			value: "v",
+		},
+		{
+			name:     "a 129-character key is not",
+			key:      strings.Repeat("k", ec2TagKeyLimit+1),
+			value:    "v",
+			wantWhat: "key",
+			wantLen:  ec2TagKeyLimit + 1,
+		},
+		{
+			name:  "a 256-character value is legal",
+			key:   "k",
+			value: strings.Repeat("v", ec2TagValueLimit),
+		},
+		{
+			name:     "a 257-character value is not",
+			key:      "k",
+			value:    strings.Repeat("v", ec2TagValueLimit+1),
+			wantWhat: "value",
+			wantLen:  ec2TagValueLimit + 1,
+		},
+		{
+			// The limit has no lower bound: "You can set the value of a tag to an empty
+			// string, but you can't set the value of a tag to null." A naive
+			// len(value) > 0 && guard would refuse this.
+			name:  "an empty value is legal",
+			key:   "k",
+			value: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			instID := ec2TagTestInstance(t, ts)
+
+			status, code, message := ec2CreateTags(t, ts, instID, map[string]string{
+				"Tag.1.Key":   tc.key,
+				"Tag.1.Value": tc.value,
+			})
+
+			if tc.wantWhat != "" {
+				assert.Equal(t, http.StatusBadRequest, status)
+				assert.Equal(t, "InvalidParameterValue", code)
+				assert.Equal(t, ec2TagLengthMessage(tc.wantWhat, map[string]int{
+					"key":   ec2TagKeyLimit,
+					"value": ec2TagValueLimit,
+				}[tc.wantWhat], tc.wantLen), message)
+				assert.Zero(t, ec2InstanceTagCount(t, ts, instID),
+					"a rejected tag must not have been applied")
+				return
+			}
+
+			require.Equal(t, http.StatusOK, status)
+			got, ok := ec2InstanceTagValue(t, ts, instID, tc.key)
+			require.True(t, ok, "the accepted tag must be readable back")
+			assert.Equal(t, tc.value, got)
+		})
+	}
+}
+
+// TestEC2_CreateTags_LengthIsCountedInRunes is the row an ASCII-only suite cannot
+// write, and the one that fails under len().
+//
+// The documented unit is "Unicode characters in UTF-8", so a key of 128 emoji is 128
+// characters — legal — and 512 bytes. A byte-counting check refuses it, and refuses it
+// while reporting a length the caller never sent. The rejected half is the mirror: 129
+// characters is over the limit however many bytes that is.
+func TestEC2_CreateTags_LengthIsCountedInRunes(t *testing.T) {
+	tests := []struct {
+		name    string
+		rune    string
+		count   int
+		reject  bool
+		wantLen int
+	}{
+		{name: "128 emoji make a legal key", rune: "\U0001F600", count: ec2TagKeyLimit},
+		{
+			name: "129 emoji do not", rune: "\U0001F600", count: ec2TagKeyLimit + 1,
+			reject: true, wantLen: ec2TagKeyLimit + 1,
+		},
+		{name: "128 three-byte runes make a legal key", rune: "あ", count: ec2TagKeyLimit},
+		{
+			name: "129 three-byte runes do not", rune: "あ", count: ec2TagKeyLimit + 1,
+			reject: true, wantLen: ec2TagKeyLimit + 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			instID := ec2TagTestInstance(t, ts)
+			key := ec2Repeat(t, tc.rune, tc.count)
+			// Stated so a reader can see that a byte count would answer differently:
+			// the fixture is over the limit in bytes even when it is legal in runes.
+			require.Greater(t, len(key), ec2TagKeyLimit,
+				"the fixture must exceed the limit in bytes, or it proves nothing")
+
+			status, code, message := ec2CreateTags(t, ts, instID, map[string]string{
+				"Tag.1.Key":   key,
+				"Tag.1.Value": "v",
+			})
+
+			if tc.reject {
+				assert.Equal(t, http.StatusBadRequest, status)
+				assert.Equal(t, "InvalidParameterValue", code)
+				assert.Equal(t, ec2TagLengthMessage("key", ec2TagKeyLimit, tc.wantLen), message,
+					"the reported length must be in characters, not bytes")
+				return
+			}
+
+			require.Equal(t, http.StatusOK, status,
+				"%d characters is within the limit however many bytes they occupy", tc.count)
+			_, ok := ec2InstanceTagValue(t, ts, instID, key)
+			assert.True(t, ok)
+		})
+	}
+}
+
+// TestEC2_CreateTags_LongValueIsCountedInRunes is the value half of the rune count,
+// which has its own limit and its own comparison and so can be wrong independently.
+func TestEC2_CreateTags_LongValueIsCountedInRunes(t *testing.T) {
+	ts := newEC2TestServer(t)
+	instID := ec2TagTestInstance(t, ts)
+
+	value := ec2Repeat(t, "\U0001F600", ec2TagValueLimit)
+	require.Greater(t, len(value), ec2TagValueLimit)
+
+	status, _, _ := ec2CreateTags(t, ts, instID, map[string]string{
+		"Tag.1.Key":   "emoji-value",
+		"Tag.1.Value": value,
+	})
+	require.Equal(t, http.StatusOK, status, "256 characters is legal at any byte width")
+	got, ok := ec2InstanceTagValue(t, ts, instID, "emoji-value")
+	require.True(t, ok)
+	assert.Equal(t, value, got, "the value must round-trip unmangled")
+
+	status, code, message := ec2CreateTags(t, ts, instID, map[string]string{
+		"Tag.1.Key":   "emoji-value-2",
+		"Tag.1.Value": ec2Repeat(t, "\U0001F600", ec2TagValueLimit+1),
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidParameterValue", code)
+	assert.Equal(t, ec2TagLengthMessage("value", ec2TagValueLimit, ec2TagValueLimit+1), message)
+}
+
+// TestEC2_TagLength_ReservedKeyIsStillRefused covers the question #490 flagged as
+// needing research, and states plainly what the answer turns out to be worth.
+//
+// The research settles the code: the restrictions list scopes the reserved-key exemption
+// to the count alone — "Tags with the aws: prefix do not count against your tags per
+// resource limit" — and nothing in it exempts a reserved key from either length, so
+// ec2CheckTagLengths checks reserved keys too. That is deliberately narrower than the
+// count check sitting a few lines above it, which is why the code says so.
+//
+// What a caller can *observe*, though, is narrower still, and pretending otherwise would
+// be the wrong test. Every path runs the reserved-key check before the length check, so a
+// reserved key is always refused for being reserved and its length is never reached. The
+// exemption question therefore changes no observation substrate can produce today. This
+// test asserts the two things that are true: the request is refused, and it is refused
+// with the reserved-key error rather than a length one. Checking reserved keys' lengths
+// remains the right code — it is correct if a future path ever checks lengths alone — but
+// it is a code-clarity decision, not a behavioral one, and the CHANGELOG says that.
+//
+// The case-sensitivity row is where the length check genuinely does the work: EC2
+// documents tag keys as case-sensitive, so "AWS:" is an ordinary user tag, reaches the
+// length check, and is refused for its length.
+func TestEC2_TagLength_ReservedKeyIsStillRefused(t *testing.T) {
+	tests := []struct {
+		name        string
+		prefix      string
+		wantMessage string
+	}{
+		{
+			name:        "a reserved key is refused for being reserved, not for its length",
+			prefix:      "aws:",
+			wantMessage: ec2ReservedTagMessage,
+		},
+		{
+			// Not reserved, because the prefix match is case-sensitive — so this key is
+			// an ordinary one and the length check is what refuses it.
+			name:        "an uppercase AWS: key is ordinary and refused for its length",
+			prefix:      "AWS:",
+			wantMessage: ec2TagLengthMessage("key", ec2TagKeyLimit, ec2TagKeyLimit+4),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			instID := ec2TagTestInstance(t, ts)
+
+			key := tc.prefix + strings.Repeat("x", ec2TagKeyLimit)
+			require.Greater(t, utf8.RuneCountInString(key), ec2TagKeyLimit,
+				"the fixture must break the length limit as well as name a prefix")
+
+			status, code, message := ec2CreateTags(t, ts, instID, map[string]string{
+				"Tag.1.Key":   key,
+				"Tag.1.Value": "v",
+			})
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, "InvalidParameterValue", code)
+			assert.Equal(t, tc.wantMessage, message)
+			assert.Zero(t, ec2InstanceTagCount(t, ts, instID),
+				"the refused tag must not have been applied")
+		})
+	}
+}
+
+// TestEC2_DeleteTags_EnforcesKeyLength covers DeleteTags' asymmetry: it names keys and
+// treats the value as optional, so the key limit applies while an absent Tag.N.Value is
+// the empty string and passes the value check unremarked.
+//
+// That falls out of the check being upper-bound only rather than needing a special case,
+// and the second half of this test is what would fail if a lower bound were ever added.
+func TestEC2_DeleteTags_EnforcesKeyLength(t *testing.T) {
+	ts := newEC2TestServer(t)
+	instID := ec2TagTestInstance(t, ts)
+
+	status, _, _ := ec2CreateTags(t, ts, instID, map[string]string{
+		"Tag.1.Key":   "Env",
+		"Tag.1.Value": "prod",
+	})
+	require.Equal(t, http.StatusOK, status)
+
+	// An over-long key is refused on the delete path too.
+	status, code, message := ec2ErrorDetail(t, ts, map[string]string{
+		"Action":       "DeleteTags",
+		"ResourceId.1": instID,
+		"Tag.1.Key":    strings.Repeat("k", ec2TagKeyLimit+1),
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidParameterValue", code)
+	assert.Equal(t, ec2TagLengthMessage("key", ec2TagKeyLimit, ec2TagKeyLimit+1), message)
+
+	// A key with no value at all is an ordinary delete, not a zero-length violation.
+	status, _, _ = ec2ErrorDetail(t, ts, map[string]string{
+		"Action":       "DeleteTags",
+		"ResourceId.1": instID,
+		"Tag.1.Key":    "Env",
+	})
+	require.Equal(t, http.StatusOK, status, "a value-less DeleteTags must be accepted")
+	_, ok := ec2InstanceTagValue(t, ts, instID, "Env")
+	assert.False(t, ok, "the tag must actually have been deleted")
+}
+
+// TestEC2_TagOnCreate_EnforcesLengthLimits covers the length limits on every
+// tag-on-create path, and the rollback that goes with them.
+//
+// The tagging documentation is explicit about the outcome: "If tags cannot be applied
+// during resource creation, we roll back the resource creation process. This ensures
+// that resources are either created with tags or not created at all." So each subtest
+// asserts both halves — the rejection and the absence of the resource — since a check
+// placed after the write produces the right status and the wrong state.
+func TestEC2_TagOnCreate_EnforcesLengthLimits(t *testing.T) {
+	overLongKey := strings.Repeat("k", ec2TagKeyLimit+1)
+
+	t.Run("RunInstances", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		status, code, message := ec2ErrorDetail(t, ts, map[string]string{
+			"Action":                          "RunInstances",
+			"ImageId":                         "ami-0taglength00000001",
+			"MinCount":                        "2",
+			"MaxCount":                        "2",
+			"TagSpecification.1.ResourceType": "instance",
+			"TagSpecification.1.Tag.1.Key":    "Env",
+			"TagSpecification.1.Tag.1.Value":  "prod",
+			"TagSpecification.1.Tag.2.Key":    overLongKey,
+			"TagSpecification.1.Tag.2.Value":  "v",
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Equal(t, ec2TagLengthMessage("key", ec2TagKeyLimit, ec2TagKeyLimit+1), message)
+		assert.Zero(t, ec2InstanceCount(t, ts),
+			"a launch rejected for tag length must not create an instance")
+	})
+
+	t.Run("CreateImage", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		instID := ec2TagTestInstance(t, ts)
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+			"Action":                          "CreateImage",
+			"InstanceId":                      instID,
+			"Name":                            "over-long-tag-ami",
+			"TagSpecification.1.ResourceType": "image",
+			"TagSpecification.1.Tag.1.Key":    overLongKey,
+			"TagSpecification.1.Tag.1.Value":  "v",
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+
+		var images struct {
+			Images []struct {
+				ImageID string `xml:"imageId"`
+			} `xml:"imagesSet>item"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "DescribeImages"}, &images)
+		assert.Empty(t, images.Images, "a rejected CreateImage must not create an AMI")
+	})
+
+	t.Run("CreateImage snapshot scope", func(t *testing.T) {
+		// The snapshot scope is checked separately from the image scope, so it can be
+		// missed independently — as it was before #468 routed both through the shared
+		// parser.
+		ts := newEC2TestServer(t)
+		instID := ec2TagTestInstance(t, ts)
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+			"Action":                          "CreateImage",
+			"InstanceId":                      instID,
+			"Name":                            "over-long-snapshot-tag-ami",
+			"TagSpecification.1.ResourceType": "snapshot",
+			"TagSpecification.1.Tag.1.Key":    overLongKey,
+			"TagSpecification.1.Tag.1.Value":  "v",
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+	})
+
+	t.Run("CreateNatGateway", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		subnetID := ec2TagTestSubnet(t, ts)
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+			"Action":                          "CreateNatGateway",
+			"SubnetId":                        subnetID,
+			"ConnectivityType":                "private",
+			"TagSpecification.1.ResourceType": "natgateway",
+			"TagSpecification.1.Tag.1.Key":    overLongKey,
+			"TagSpecification.1.Tag.1.Value":  "v",
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+
+		var gws struct {
+			Gateways []struct {
+				NatGatewayID string `xml:"natGatewayId"`
+			} `xml:"natGatewaySet>item"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "DescribeNatGateways"}, &gws)
+		assert.Empty(t, gws.Gateways, "a rejected CreateNatGateway must not create a gateway")
+	})
+
+	t.Run("CreateFleet", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		ltID := newFleetLaunchTemplate(t, ts, "tag-length-fleet")
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+			"Action": "CreateFleet",
+			"Type":   "instant",
+			"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+			"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+			"TagSpecification.1.ResourceType":                                      "instance",
+			"TagSpecification.1.Tag.1.Key":                                         overLongKey,
+			"TagSpecification.1.Tag.1.Value":                                       "v",
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Zero(t, ec2InstanceCount(t, ts),
+			"a rejected fleet must not launch an instance")
+	})
+
+	t.Run("CreateFleet fleet scope", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		ltID := newFleetLaunchTemplate(t, ts, "tag-length-fleet-scope")
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+			"Action": "CreateFleet",
+			"Type":   "instant",
+			"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+			"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+			"TagSpecification.1.ResourceType":                                      "fleet",
+			"TagSpecification.1.Tag.1.Key":                                         "Owner",
+			"TagSpecification.1.Tag.1.Value":                                       strings.Repeat("v", ec2TagValueLimit+1),
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Zero(t, ec2InstanceCount(t, ts))
+	})
+}
+
+// TestEC2_LaunchTemplate_EnforcesTagLengthAtCreation covers the template paths, where
+// the check earns its place twice over: refusing at CreateLaunchTemplate means a
+// consumer learns about the over-long tag once, at the operation that named it, rather
+// than at every launch that references the template (#471's precedent).
+func TestEC2_LaunchTemplate_EnforcesTagLengthAtCreation(t *testing.T) {
+	overLongKey := strings.Repeat("k", ec2TagKeyLimit+1)
+
+	t.Run("CreateLaunchTemplate", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		params := map[string]string{
+			"Action":                     "CreateLaunchTemplate",
+			"LaunchTemplateName":         "over-long-tag",
+			"LaunchTemplateData.ImageId": "ami-0lttaglength00001",
+		}
+		for k, v := range ltTagParams([2]string{overLongKey, "v"}) {
+			params[k] = v
+		}
+		status, code, message := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Equal(t, ec2TagLengthMessage("key", ec2TagKeyLimit, ec2TagKeyLimit+1), message)
+
+		// And the template itself was not created, so a second attempt does not collide
+		// with a half-made one.
+		var out struct {
+			Templates []struct {
+				LaunchTemplateID string `xml:"launchTemplateId"`
+			} `xml:"launchTemplates>item"`
+		}
+		ec2FleetXML(t, ts, map[string]string{"Action": "DescribeLaunchTemplates"}, &out)
+		assert.Empty(t, out.Templates, "a rejected CreateLaunchTemplate must create nothing")
+	})
+
+	t.Run("CreateLaunchTemplateVersion", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		ltID := createLaunchTemplate(t, ts, "version-tag-length", map[string]string{
+			"LaunchTemplateData.ImageId": "ami-0lttaglength00002",
+		})
+
+		params := map[string]string{
+			"Action":                     "CreateLaunchTemplateVersion",
+			"LaunchTemplateId":           ltID,
+			"LaunchTemplateData.ImageId": "ami-0lttaglength00003",
+		}
+		for k, v := range ltTagParams([2]string{"Env", strings.Repeat("v", ec2TagValueLimit+1)}) {
+			params[k] = v
+		}
+		status, code, message := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Equal(t, ec2TagLengthMessage("value", ec2TagValueLimit, ec2TagValueLimit+1), message)
+
+		// Version 1 is still the latest: the rejected version was not appended.
+		assert.Equal(t, int64(1), describeLT(t, ts, ltID).LatestVersionNum)
+	})
+
+	t.Run("a legal template still launches with its tags", func(t *testing.T) {
+		// The regression guard on the check's placement: it must refuse the over-long
+		// case without refusing the ordinary one, which is what a mis-scoped comparison
+		// would do.
+		ts := newEC2TestServer(t)
+		data := map[string]string{"LaunchTemplateData.ImageId": "ami-0lttaglength00004"}
+		for k, v := range ltTagParams([2]string{
+			strings.Repeat("k", ec2TagKeyLimit),
+			strings.Repeat("v", ec2TagValueLimit),
+		}) {
+			data[k] = v
+		}
+		ltID := createLaunchTemplate(t, ts, "at-the-limit", data)
+
+		ids := ec2RunInstanceIDs(t, ts, map[string]string{
+			"Action":                          "RunInstances",
+			"LaunchTemplate.LaunchTemplateId": ltID,
+			"MinCount":                        "1",
+			"MaxCount":                        "1",
+		})
+		require.Len(t, ids, 1)
+		value, ok := ec2InstanceTagValue(t, ts, ids[0], strings.Repeat("k", ec2TagKeyLimit))
+		require.True(t, ok, "a tag exactly at both limits must survive the launch")
+		assert.Equal(t, strings.Repeat("v", ec2TagValueLimit), value)
+	})
 }

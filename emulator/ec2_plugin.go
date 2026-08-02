@@ -257,7 +257,7 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // property this emulator exists for.
 func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	launchTags := ec2LaunchTagsForResource(req.Params, "instance")
-	if awsErr := ec2CheckReservedTagKeys(launchTags); awsErr != nil {
+	if awsErr := ec2CheckTagRules(launchTags); awsErr != nil {
 		return nil, awsErr
 	}
 	// A new instance starts with no tags, so the request's own tags are the whole count
@@ -433,7 +433,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 			// checks existed, or one written straight into state by a replayed event
 			// log, can still carry a reserved key or more than the limit, and this is
 			// the launch that would otherwise apply them.
-			if awsErr := ec2CheckReservedTagKeys(ltData.TagSpecifications); awsErr != nil {
+			if awsErr := ec2CheckTagRules(ltData.TagSpecifications); awsErr != nil {
 				return nil, awsErr
 			}
 			if awsErr := ec2CheckTagLimit(nil, ltData.TagSpecifications); awsErr != nil {
@@ -2132,15 +2132,16 @@ func (p *EC2Plugin) rebootInstances(_ *RequestContext, _ *AWSRequest) (*AWSRespo
 // createTags handles CreateTags — applies key-value tags to one or more EC2 resources.
 //
 // Keys using the reserved "aws:" prefix are rejected before anything is applied, so a
-// mixed request leaves every named resource untouched (#452), and every resource named
-// is checked against the per-resource tag limit before any of them is modified (#469).
-// Both checks run over the whole request for the same reason: CreateTags accepts up to
-// 1000 resource IDs, and a rejection partway through the apply loop would leave a
-// partially-tagged state real EC2 never produces.
+// mixed request leaves every named resource untouched (#452); a key or value over its
+// length limit likewise (#490); and every resource named is checked against the
+// per-resource tag limit before any of them is modified (#469). All three checks run
+// over the whole request for the same reason: CreateTags accepts up to 1000 resource
+// IDs, and a rejection partway through the apply loop would leave a partially-tagged
+// state real EC2 never produces.
 func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
 	tags := extractEC2Tags(req.Params)
-	if err := ec2CheckReservedTagKeys(tags); err != nil {
+	if err := ec2CheckTagRules(tags); err != nil {
 		return nil, err
 	}
 	for _, id := range resourceIDs {
@@ -2180,10 +2181,15 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 // "can't be edited or deleted" by a caller — and a DeleteTags that returned success
 // while leaving the tag in place would be its own infidelity, so rejecting is the
 // closer of the two available behaviors.
+//
+// The length limits apply here as well, but asymmetrically: DeleteTags names keys and
+// treats the value as optional, so an absent Tag.N.Value is the empty string and passes
+// the value check unremarked. Only what the request actually supplied is checked
+// (#490), which is what [ec2CheckTagLengths]' upper-bound-only shape gives for free.
 func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
 	tags := extractEC2Tags(req.Params)
-	if err := ec2CheckReservedTagKeys(tags); err != nil {
+	if err := ec2CheckTagRules(tags); err != nil {
 		return nil, err
 	}
 	for _, id := range resourceIDs {
@@ -3053,10 +3059,10 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	snapshotTags := ec2LaunchTagsForResource(req.Params, "snapshot")
 	// Checked before the snapshot and image are written, so a rejected request creates
 	// neither. See [ec2CheckReservedTagKeys] for the rollback rule this follows.
-	if awsErr := ec2CheckReservedTagKeys(tags); awsErr != nil {
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
 		return nil, awsErr
 	}
-	if awsErr := ec2CheckReservedTagKeys(snapshotTags); awsErr != nil {
+	if awsErr := ec2CheckTagRules(snapshotTags); awsErr != nil {
 		return nil, awsErr
 	}
 	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
@@ -3812,7 +3818,7 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	}
 
 	gw.Tags = ec2LaunchTagsForResource(req.Params, "natgateway")
-	if awsErr := ec2CheckReservedTagKeys(gw.Tags); awsErr != nil {
+	if awsErr := ec2CheckTagRules(gw.Tags); awsErr != nil {
 		return nil, awsErr
 	}
 	if awsErr := ec2CheckTagLimit(nil, gw.Tags); awsErr != nil {

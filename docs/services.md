@@ -1527,8 +1527,8 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) |
-| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit) |
+| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits) |
 
 ### RunInstances requires a resolvable AMI
 
@@ -2251,8 +2251,65 @@ A launch template's instance-scoped tags are counted the same way, at
 that names the template. Exactly 50 template tags launch; 51 are refused at template
 creation.
 
-Two documented restrictions substrate does **not** enforce: a tag key's maximum length
-of 128 Unicode characters, and a value's maximum of 256. Both are tracked separately.
+The third restriction from the same table — the key and value **length** limits — is
+enforced too, with one deliberate difference in how reserved keys are treated. See
+[Tag key and value length limits](#tag-key-and-value-length-limits).
+
+### Tag key and value length limits
+
+A tag key longer than **128 characters** or a value longer than **256** is refused, on
+`CreateTags`, `DeleteTags` and every tag-on-create path:
+
+```
+InvalidParameterValue: Tag key must be no more than 128 Unicode characters in UTF-8; the supplied key is 129
+```
+
+The status is `400`. The message names which of the two limits was exceeded and by how
+much, because that is the only place a caller learns it. From the same restrictions list
+that gives the 50-tag count: "Maximum key length – 128 Unicode characters in UTF-8" and
+"Maximum value length – 256 Unicode characters in UTF-8".
+
+**The unit is Unicode characters, not bytes.** A key of 128 emoji is 128 characters and
+512 bytes, and it is legal; a byte-counting check would refuse it, and refuse it while
+reporting a length the caller never sent. The two counts agree on ASCII, so a suite that
+only tests ASCII keys cannot tell them apart.
+
+There is **no lower bound**. The documentation states that "You can set the value of a
+tag to an empty string, but you can't set the value of a tag to null", so an empty value
+is legal and the check is an upper bound only. That is also what makes `DeleteTags` work
+unremarkably: it names keys and treats the value as optional, so a request with no
+`Tag.N.Value` supplies the empty string and passes. A key is required by the query
+encoding rather than by this check — the tag walk ends on an absent or empty
+`Tag.N.Key` — so an empty key is not expressible in the first place.
+
+As with the other two tag restrictions, the whole request is refused before anything is
+modified, and on a tag-on-create path before the resource is created: a refused
+`RunInstances` launches no instance, a refused `CreateImage` creates neither the AMI nor
+its snapshot, a refused `CreateNatGateway` creates no gateway, and a refused
+`CreateLaunchTemplate` creates no template. A launch template is checked at
+`CreateLaunchTemplate` and `CreateLaunchTemplateVersion` as well as at every launch that
+names it, so a consumer hears about an over-long template tag once, at the operation that
+named it.
+
+**Reserved keys are not exempt from the lengths, though they are from the count.** The
+exemption in the restrictions list is scoped to the count alone — "Tags with the `aws:`
+prefix do not count against your tags per resource limit" — and nothing in it exempts a
+reserved key from either length, so substrate checks them. In practice that decides no
+observation: the reserved-key check runs first, so a caller's `aws:`-prefixed key is
+refused for being reserved before its length is measured. It matters for the code rather
+than the wire, and it is recorded here because the adjacent count check does the opposite.
+Where the length check does bite is the case-sensitive edge: `AWS:` is an ordinary user
+tag, so an over-long `AWS:`-prefixed key is refused for its length.
+
+Provenance is the weakest of the three tag restrictions, and is marked as such
+deliberately. The **code** `InvalidParameterValue` with `400` is by analogy with the
+reserved-key rejection — the other tag-restriction violation on the same operations, and
+`CreateTags`' Errors section is empty so the API model supplies nothing. The **message
+text is substrate's own**: no captured real-AWS length rejection was found, in
+[moto](https://github.com/getmoto/moto) or LocalStack either. It follows the
+`SendMessage` size-limit message's precedent of interpolating the limit and the actual
+value. A consumer's error branch should dispatch on the code, which is the part that
+rests on something.
 
 #### Tag scoping on `CreateImage`
 
