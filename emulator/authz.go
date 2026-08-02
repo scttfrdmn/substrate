@@ -517,6 +517,12 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 
 	case "ec2":
 		// EC2 tags arrive as query params: TagSpecification.1.Tag.N.Key / .Value
+		//
+		// This walk is deliberately not ec2LaunchTagsForResource: it collects every
+		// tag in the request regardless of which resource the specification is scoped
+		// to, because a policy condition on aws:RequestTag is about what the request
+		// asked for, not about what state a handler ends up writing. Filtering by
+		// resourceType here would silently narrow policy evaluation (#468).
 		for i := 1; ; i++ {
 			prefix := fmt.Sprintf("TagSpecification.%d.Tag.", i)
 			found := false

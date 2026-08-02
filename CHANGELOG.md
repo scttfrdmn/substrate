@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Reserved `aws:` tag keys are now rejected on every tag-on-create path** (#468).
+  #452 closed this for `CreateTags` and `DeleteTags` but deliberately left it off
+  tag-on-create, so a key real EC2 refuses was still accepted whenever it arrived
+  through a `TagSpecification` — on `RunInstances`, `CreateFleet`, `CreateImage` or
+  `CreateNatGateway`. A consumer's error branch for the rejection stayed unreachable
+  on exactly the path where the rejection is best evidenced: both real-AWS captures
+  behind the message are of `RunInstances` tag-on-create.
+
+  The rejection happens **before the resource is created**. A refused `RunInstances`
+  launches no instance, a refused `CreateImage` leaves behind neither the AMI nor its
+  backing snapshot, and a refused `CreateNatGateway` creates no gateway — per the
+  tagging documentation, "If tags cannot be applied during resource creation, we roll
+  back the resource creation process. This ensures that resources are either created
+  with tags or not created at all."
+
+  Substrate stamps `aws:ec2:fleet-id` on every fleet instance (#443), which is itself
+  a reserved key on a checked path — the reason the check was previously left off it.
+  That tag is now exempt **structurally rather than by a flag**: `CreateFleet` parses
+  and checks the caller's tags exactly as `RunInstances` does, and the fleet-ID tag is
+  appended afterwards, on an internal launch entry point taking already-parsed tags
+  that no request can address. A validation-skipping flag would have made the
+  outcome depend on internal state a consumer cannot observe, which is the opposite of
+  the deterministic-replay property. So a caller naming `aws:` anything in a
+  `CreateFleet` request is now rejected — instance- and fleet-scoped alike — while the
+  fleet's own stamp still lands, alongside the caller's legal tags.
+
+  The match remains **case-sensitive**, so `AWS:foo` is still an ordinary user tag.
+  Note that #472's SQS attribute prefix rule is case-*insensitive*; the two services
+  document different rules and the checks are deliberately not shared.
 - **EC2 launch templates are now versioned** (#456).
   `CreateLaunchTemplateVersion`, `ModifyLaunchTemplate`,
   `DescribeLaunchTemplateVersions` and `DeleteLaunchTemplateVersions` were all
@@ -86,6 +115,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   way this step could damage a release rather than merely omit one. Deferred issues
   are also now explicitly moved to the next milestone rather than closed with the
   release.
+- `CreateImage` now honours its `TagSpecification.N` `ResourceType` (#468). The
+  reference gives two scopes — `image` tags the AMI, `snapshot` tags the snapshots
+  created of the attached volumes — but substrate read `TagSpecification.1`'s tags
+  whatever they were scoped to, so a request tagging only its snapshots put those tags
+  on the AMI. Snapshot-scoped tags now land on the backing snapshot substrate
+  materializes, where `DescribeSnapshots` reports them. A caller asserting on
+  `DescribeImages` for tags that were actually snapshot-scoped will see them move,
+  which is where real EC2 has them.
 
 ## [v0.85.0] - 2026-08-02
 

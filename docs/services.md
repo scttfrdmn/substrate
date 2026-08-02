@@ -1559,8 +1559,9 @@ A caller cannot delete this tag — see
 
 ### Reserved tag keys
 
-`CreateTags` and `DeleteTags` reject any tag whose key begins with `aws:`, the
-prefix EC2 reserves for its own use:
+Every path that assigns a tag rejects any key beginning with `aws:`, the prefix EC2
+reserves for its own use — `CreateTags`, `DeleteTags`, and tag-on-create through
+`RunInstances`, `CreateFleet`, `CreateImage` and `CreateNatGateway`:
 
 ```
 InvalidParameterValue: Tag keys starting with 'aws:' are reserved for internal use
@@ -1575,21 +1576,61 @@ The match is **case-sensitive**. AWS documents tag keys and values as
 case-sensitive, so `AWS:foo` and `Aws:foo` are ordinary user tags and are accepted;
 only the lowercase `aws:` prefix is reserved.
 
-Two caveats about the scope of this rule:
+On a tag-on-create path the rejection happens **before the resource is created**, so
+a refused `RunInstances` launches no instance, a refused `CreateImage` leaves behind
+neither the AMI nor its backing snapshot, and a refused `CreateNatGateway` creates no
+gateway. This follows the tagging documentation directly: "If tags cannot be applied
+during resource creation, we roll back the resource creation process. This ensures
+that resources are either created with tags or not created at all."
 
-- Provenance: the `CreateTags` API reference has an empty Errors section, so neither
-  the code nor the message above is derivable from the API model. Both come from
-  observed real-AWS responses. The `DeleteTags` rejection is a step weaker still —
-  substrate found no captured `DeleteTags` error and inherits the wording from the
-  `CreateTags` capture. What the tagging documentation does state plainly is the
-  outcome: such a tag "can't be edited or deleted" by a caller.
-- `RunInstances` tag-on-create is **not** covered. Real EC2 rejects a reserved key
-  there too, but substrate stamps [`aws:ec2:fleet-id`](#finding-a-fleets-instances)
-  through exactly that path, so restricting it would reject substrate's own fleet
-  tagging.
+Provenance: the `CreateTags` API reference has an empty Errors section, so neither
+the code nor the message above is derivable from the API model. Both come from
+observed real-AWS responses — and both captures are in fact of `RunInstances`
+tag-on-create, so that path has the strongest claim to this wording. The
+`DeleteTags` rejection is a step weaker — substrate found no captured `DeleteTags`
+error and inherits the wording from the same capture. What the tagging documentation
+does state plainly is the outcome: such a tag "can't be edited or deleted" by a
+caller.
 
-The 50-tag-per-resource limit is not modelled at all, so the companion rule that
-reserved tags are exempt from it has nothing to exempt them from yet.
+#### How substrate's own fleet tag is exempt
+
+Substrate stamps [`aws:ec2:fleet-id`](#finding-a-fleets-instances) on every fleet
+instance, which is a reserved key on a tag-on-create path — the reason this check
+was previously left off that path entirely.
+
+It is exempt structurally rather than by a flag. `CreateFleet` parses the caller's
+`TagSpecification.N` tags and checks them exactly as `RunInstances` does; the
+fleet-ID tag is appended to the resulting value *after* that check, on an internal
+launch entry point that takes already-parsed tags. There is no param a request could
+set to reach it. A validation-skipping flag would have made the outcome depend on
+internal state a consumer cannot observe, which is the opposite of the
+deterministic-replay property substrate exists for.
+
+So a caller naming `aws:` anything in a `CreateFleet` request is rejected —
+instance- and fleet-scoped alike — while the fleet's own stamp is still applied, and
+both coexist with the caller's legal tags on the same instance.
+
+Two limits of the current scope, stated rather than implied:
+
+- Only tags scoped to a resource substrate models are checked. A
+  `TagSpecification` naming `volume` or `network-interface` on `RunInstances` is
+  skipped, because substrate does not tag those resources at all; real EC2 would
+  reject a reserved key there too.
+- The 50-tag-per-resource limit is not modelled, so the companion rule that
+  reserved tags are exempt from it has nothing to exempt them from yet.
+
+#### Tag scoping on `CreateImage`
+
+`CreateImage` accepts two tag scopes, and substrate now honours the distinction:
+`ResourceType=image` tags the AMI, and `ResourceType=snapshot` tags the backing
+snapshot substrate materializes for the AMI's root device. Per the reference, "the
+same tag is applied to all of the snapshots that are created."
+
+This is a behaviour change. `CreateImage` previously read `TagSpecification.1`'s tags
+whatever they were scoped to, so a request that tagged only its snapshots put those
+tags on the AMI instead. A caller asserting on `DescribeImages` tags that were
+actually snapshot-scoped will now see them on `DescribeSnapshots`, which is where
+real EC2 puts them.
 
 ### Seeding EC2 Fleet partial fulfillment
 

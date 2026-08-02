@@ -275,8 +275,17 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	wantPerPool := distributeAcrossPools(total, len(pools))
 	gotPerPool := distributeAcrossPools(fulfill, len(pools))
 
-	instanceTags := passthroughFleetTagSpecs(req.Params, "instance")
-	fleetTags := fleetTagsFor(req.Params, "fleet")
+	// The fleet's own instance-scoped tags are the caller's, so they are checked here
+	// exactly as RunInstances checks its own. Only the fleet-ID tag substrate adds
+	// afterwards is exempt, and it is exempt by never being part of a request (#468).
+	instanceTags := ec2LaunchTagsForResource(req.Params, "instance")
+	if awsErr := ec2CheckReservedTagKeys(instanceTags); awsErr != nil {
+		return nil, awsErr
+	}
+	fleetTags := ec2LaunchTagsForResource(req.Params, "fleet")
+	if awsErr := ec2CheckReservedTagKeys(fleetTags); awsErr != nil {
+		return nil, awsErr
+	}
 
 	fleet := EC2Fleet{
 		FleetID:                   generateFleetID(),
@@ -433,7 +442,7 @@ func (p *EC2Plugin) launchFleetPool(
 	reqCtx *RequestContext,
 	pool fleetPool,
 	count int,
-	instanceTags map[string]string,
+	instanceTags []EC2Tag,
 	fleetID string,
 ) ([]string, error) {
 	params := map[string]string{
@@ -467,19 +476,25 @@ func (p *EC2Plugin) launchFleetPool(
 	if pool.override.PlacementGroupName != "" {
 		params["Placement.GroupName"] = pool.override.PlacementGroupName
 	}
-	for k, v := range instanceTags {
-		params[k] = v
-	}
-	for k, v := range fleetIDTagSpec(instanceTags, fleetID) {
-		params[k] = v
+	// The caller's tags travel as already-parsed values rather than as re-emitted
+	// TagSpecification.N params, so the fleet-ID tag can be appended without hunting
+	// for a free index — and, more to the point, without riding the request-tag path
+	// that now rejects reserved keys. See [EC2Plugin.runInstances] for why that split
+	// is structural rather than a bypass flag (#468).
+	tags := instanceTags
+	if fleetID != "" {
+		tags = append(append([]EC2Tag{}, instanceTags...), EC2Tag{
+			Key:   ec2FleetIDTagKey,
+			Value: fleetID,
+		})
 	}
 
-	resp, err := p.runInstances(reqCtx, &AWSRequest{
+	resp, err := p.runInstancesWithTags(reqCtx, &AWSRequest{
 		Service:   "ec2",
 		Operation: "RunInstances",
 		Params:    params,
 		Headers:   map[string]string{},
-	})
+	}, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -557,36 +572,6 @@ func parseFleetOverride(params map[string]string, prefix string) (EC2FleetOverri
 	return ov, present
 }
 
-// passthroughFleetTagSpecs extracts TagSpecification.N entries for resourceType
-// and re-emits them as RunInstances TagSpecification params, so launch-time tags
-// declared on a fleet land on its instances (callers find fleet instances with
-// DescribeInstances tag filters).
-func passthroughFleetTagSpecs(params map[string]string, resourceType string) map[string]string {
-	out := map[string]string{}
-	idx := 0
-	for n := 1; ; n++ {
-		rt, ok := params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
-		if !ok || rt == "" {
-			break
-		}
-		if rt != resourceType {
-			continue
-		}
-		idx++
-		for m := 1; ; m++ {
-			key, keyOK := params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
-			if !keyOK || key == "" {
-				break
-			}
-			out[fmt.Sprintf("TagSpecification.%d.ResourceType", idx)] = resourceType
-			out[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", idx, m)] = key
-			out[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", idx, m)] =
-				params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)]
-		}
-	}
-	return out
-}
-
 // ec2FleetIDTagKey is the reserved tag EC2 stamps on every instance a fleet
 // launches, naming the fleet that created it.
 //
@@ -602,64 +587,17 @@ func passthroughFleetTagSpecs(params map[string]string, resourceType string) map
 //
 // The "aws:" prefix is reserved: per the EC2 tagging documentation such a tag
 // cannot be edited or deleted by a caller and does not count against the 50-tag
-// per-resource limit. CreateTags and DeleteTags now enforce the first rule (#452);
-// the second has nothing to exempt from yet, since substrate does not model the
-// 50-tag limit at all. Substrate stamps this tag by building RunInstances
-// TagSpecification params, which is a separate parse from CreateTags and is
-// deliberately left unrestricted — restricting it would reject substrate's own
-// fleet tagging.
-const ec2FleetIDTagKey = "aws:ec2:fleet-id"
-
-// fleetIDTagSpec returns the RunInstances TagSpecification params that stamp
-// ec2FleetIDTagKey on a pool's instances.
+// per-resource limit. CreateTags and DeleteTags enforce the first rule (#452), and
+// every tag-on-create path now enforces it too (#468).
 //
-// The index is chosen past whatever passthroughFleetTagSpecs already emitted:
-// that function renumbers its output from 1, so reusing an occupied index would
-// silently overwrite a caller's own launch-time tag. existing is the map it
-// returned; an empty fleetID yields no params, so a caller that somehow has no
-// fleet ID launches unchanged rather than stamping an empty tag.
-func fleetIDTagSpec(existing map[string]string, fleetID string) map[string]string {
-	if fleetID == "" {
-		return nil
-	}
-	idx := 1
-	for {
-		if _, taken := existing[fmt.Sprintf("TagSpecification.%d.ResourceType", idx)]; !taken {
-			break
-		}
-		idx++
-	}
-	return map[string]string{
-		fmt.Sprintf("TagSpecification.%d.ResourceType", idx): "instance",
-		fmt.Sprintf("TagSpecification.%d.Tag.1.Key", idx):    ec2FleetIDTagKey,
-		fmt.Sprintf("TagSpecification.%d.Tag.1.Value", idx):  fleetID,
-	}
-}
-
-// fleetTagsFor collects TagSpecification.N tags for resourceType as EC2Tags.
-func fleetTagsFor(params map[string]string, resourceType string) []EC2Tag {
-	var tags []EC2Tag
-	for n := 1; ; n++ {
-		rt, ok := params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
-		if !ok || rt == "" {
-			break
-		}
-		if rt != resourceType {
-			continue
-		}
-		for m := 1; ; m++ {
-			key, keyOK := params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
-			if !keyOK || key == "" {
-				break
-			}
-			tags = append(tags, EC2Tag{
-				Key:   key,
-				Value: params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)],
-			})
-		}
-	}
-	return tags
-}
+// Substrate stamps this tag without tripping its own check because
+// [EC2Plugin.launchFleetPool] appends it to the already-parsed, already-checked tag
+// slice it hands [EC2Plugin.runInstancesWithTags] — it never becomes a
+// TagSpecification.N param, and so is never part of anything a caller could send.
+// That is deliberately a structural exemption rather than a validation-skipping flag:
+// a flag would make the check's outcome depend on internal state a consumer cannot
+// see, whereas this way the checked path is simply the only path a request can reach.
+const ec2FleetIDTagKey = "aws:ec2:fleet-id"
 
 // fleetDefaultErrorMessage returns the message AWS pairs with a fleet error code.
 func fleetDefaultErrorMessage(code string) string {
