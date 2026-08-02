@@ -223,11 +223,17 @@ type S3BucketPolicy struct {
 // "absent" and "explicitly false" are the same observation, so a third state
 // would be one substrate could produce but real S3 never returns.
 //
-// Substrate records the configuration and reports it back; it does not enforce
-// it. Nothing here rejects a public ACL or a public bucket policy, because those
-// are the resource-internal consequences of the setting rather than the setting
-// itself — see the scope boundary in CLAUDE.md. Enforcement is tracked
-// separately (#458).
+// Substrate enforces the two request-time settings: BlockPublicAcls refuses a
+// public ACL on PutBucketAcl/PutObjectAcl and BlockPublicPolicy refuses a public
+// bucket policy on PutBucketPolicy, both with 403 AccessDenied and without storing
+// anything (#458). See s3_publicaccess.go for the definitions of "public", which
+// are not the obvious ones.
+//
+// IgnorePublicAcls and RestrictPublicBuckets stay recorded-only. Both govern how an
+// incoming request is evaluated against an ACL or policy already in place rather
+// than which write is refused, and substrate has no unauthenticated or
+// cross-account request path to deny — every request it serves is already the
+// bucket owner's.
 type S3PublicAccessBlockConfiguration struct {
 	XMLName xml.Name `xml:"PublicAccessBlockConfiguration" json:"-"`
 

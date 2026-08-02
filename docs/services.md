@@ -204,15 +204,15 @@ STS operations are free.
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
-| PutBucketPolicy | |
+| PutBucketPolicy | `403 AccessDenied` for a public policy when `BlockPublicPolicy` is set — see [Block Public Access](#block-public-access) |
 | DeleteBucketPolicy | |
-| PutPublicAccessBlock | Records the configuration; a partial body reports omitted settings as `false` — see [Block Public Access](#block-public-access) |
+| PutPublicAccessBlock | Records the configuration and enforces `BlockPublicAcls` / `BlockPublicPolicy`; a partial body reports omitted settings as `false` — see [Block Public Access](#block-public-access) |
 | GetPublicAccessBlock | `404 NoSuchPublicAccessBlockConfiguration` when the bucket has none — see [Block Public Access](#block-public-access) |
 | DeletePublicAccessBlock | Idempotent; removes only the configuration, never the bucket — see [Block Public Access](#block-public-access) |
 | GetBucketAcl | |
-| PutBucketAcl | |
+| PutBucketAcl | Accepts a canned `x-amz-acl` or an XML body; `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
 | GetObjectAcl | |
-| PutObjectAcl | |
+| PutObjectAcl | `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
 | GetBucketNotificationConfiguration | |
 | PutBucketNotificationConfiguration | Triggers Lambda/SQS on PutObject/DeleteObject |
 | PutBucketTagging | |
@@ -726,10 +726,90 @@ SDKs and CloudFormation both do.
 configuration. Deleting one that was never written is a `204`, which is what a
 teardown path that deletes unconditionally relies on.
 
-**The settings are recorded, not enforced.** Nothing rejects a public ACL or a public
-bucket policy on a bucket with `BlockPublicAcls` or `BlockPublicPolicy` set. Those are
-the resource-internal consequences of the setting rather than the setting itself;
-enforcement is tracked separately.
+**`BlockPublicAcls` and `BlockPublicPolicy` are enforced at request time.** A bucket
+carrying either setting refuses the call that would make it public:
+
+| Setting | Refuses | Response |
+|---------|---------|----------|
+| `BlockPublicAcls` | `PutBucketAcl`, `PutObjectAcl` with a public ACL | `403 AccessDenied` / `Access Denied` |
+| `BlockPublicPolicy` | `PutBucketPolicy` with a public policy | `403 AccessDenied` / `Access Denied` |
+
+A rejection stores nothing: the bucket or object keeps the ACL or policy it already
+had, matching "existing policies and ACLs for buckets and objects aren't modified".
+Deleting the configuration re-allows what it was refusing, per "removing a block
+public access setting causes a bucket or object with a public policy or ACL to again
+be publicly accessible". The configuration read for `PutObjectAcl` is the *bucket's* —
+"Amazon S3 doesn't support block public access settings on a per-object basis".
+
+Neither operation documents an Errors section covering this, so the `AccessDenied` /
+`Access Denied` / `403` triple comes from observed real-AWS behaviour rather than from
+the API model: a blocked `PutBucketPolicy` surfaces through the CLI as `An error
+occurred (AccessDenied) when calling the PutBucketPolicy operation: Access Denied`.
+
+**A public ACL is one that grants any permission to a predefined public group.**
+Substrate matches the grantee URI against
+`http://acs.amazonaws.com/groups/global/AllUsers` and
+`.../AuthenticatedUsers`, per "Amazon S3 considers a bucket or object ACL public if it
+grants any permissions to members of the predefined `AllUsers` or `AuthenticatedUsers`
+groups". `AuthenticatedUsers` is every AWS account, not every account in yours, which
+is why it counts despite the name. The permission itself is not inspected — `READ`,
+`WRITE`, `READ_ACP`, `WRITE_ACP` and `FULL_CONTROL` all count. All three ways a public
+ACL arrives are covered: the `x-amz-acl` canned header (`public-read`,
+`public-read-write`), an XML `Grant` naming a public group URI, and an
+`x-amz-grant-*` header whose grantee list contains one. The grant headers are read for
+this check only; substrate does not otherwise model them, so an ACL set through them
+is still not stored.
+
+**A public policy is decided by assuming public and then trying to disqualify —
+not by looking for `Principal: "*"`.** This is stronger than wildcard-detection and is
+the part a naive implementation gets backwards. Per "When evaluating a bucket policy,
+Amazon S3 begins by assuming that the policy is public. It then evaluates the policy to
+determine whether it qualifies as non-public", a statement is non-public only when it
+grants access solely to *fixed* values — no `*`, no `?`, no `${...}` IAM policy
+variable — either through its `Principal` or through a `Condition` on one of
+`aws:SourceIp`, `aws:SourceArn`, `aws:SourceVpc`, `aws:SourceVpce`, `aws:SourceOwner`,
+`aws:SourceAccount`, `aws:userid`, `aws:PrincipalOrgID`, `aws:PrincipalArn`,
+`aws:PrincipalAccount`, `s3:DataAccessPointArn` or `s3:DataAccessPointAccount`.
+
+The consequence, and AWS's own example:
+
+| Policy | Public? |
+|--------|---------|
+| `Principal: "*"`, no condition | yes |
+| `Principal: "*"` + `StringLike aws:SourceVpc: "vpc-*"` | **yes** — the narrowing value is itself a wildcard |
+| `Principal: "*"` + `StringEquals aws:SourceVpc: "vpc-91237329"` | no |
+| `Principal: {"AWS": "arn:aws:iam::123456789012:root"}` | no |
+| `Principal: {"AWS": "arn:aws:iam::123456789012:user/*"}` | yes |
+| `Principal: "*"` + `aws:SourceIp: "203.0.113.0/24"` | no |
+| `Principal: "*"` + `aws:SourceIp: "0.0.0.0/1"` | **yes** — broader than `/8` |
+| `Effect: Deny`, `Principal: "*"` | no |
+| A fixed cross-account grant **plus** one public statement | yes |
+
+Three further rules follow from the same page. Only an `Allow` can make a policy
+public. A single surviving public statement makes the *whole* policy public — the
+guide's worked example, where one public statement disables an otherwise-legal
+cross-account grant. And an `aws:SourceIp` range pins nothing when it is "broader than
+`/8` for IPv4 and `/32` for IPv6 (excluding RFC1918 private ranges)", so a bucket
+policy conditioned on `0.0.0.0/0` is public even though it contains no wildcard
+character; the RFC1918 exclusion is what keeps a unique-local IPv6 range from tripping
+the `/32` bound.
+
+A body that parses as JSON but not as a policy document is **not** treated as public.
+`PutBucketPolicy` already rejects a non-JSON body with `400 MalformedPolicy` before
+this check runs, and the public-access check is not a second validity check — a
+malformed-but-JSON document keeps whatever answer it had before enforcement existed.
+
+**`IgnorePublicAcls` and `RestrictPublicBuckets` remain recorded-only.** Both govern
+how an *incoming* request is evaluated against an existing ACL or policy rather than
+which write is refused, and substrate has no unauthenticated or cross-account request
+path to deny — every request it serves is already the bucket owner's. Substrate also
+does not model the guide's unsupported-action clause (S3 treats a statement granting an
+action S3 does not support as potentially public), which would need an authoritative
+list of every supported `s3:` action.
+
+**`PutObject` and `CreateBucket` with a public ACL are not yet refused.** Real
+`BlockPublicAcls` rejects those too, but neither handler reads `x-amz-acl` at all, so
+covering them means first modelling ACL-on-create. Tracked separately.
 
 ### Betty CFN resource types
 

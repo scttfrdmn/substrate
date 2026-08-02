@@ -2409,6 +2409,19 @@ func (p *S3Plugin) putBucketPolicy(_ *RequestContext, req *AWSRequest, bucket st
 			"Bucket policy must be valid JSON.", http.StatusBadRequest), nil
 	}
 
+	// BlockPublicPolicy "causes Amazon S3 to reject calls to PutBucketPolicy if the
+	// specified bucket policy allows public access" (#458). The check runs before the
+	// Put so a rejected policy is not stored: "Enabling this setting doesn't affect
+	// existing access point or bucket policies", which means the bucket keeps whatever
+	// policy it had.
+	blocked, err := p.s3BlocksPublicPolicy(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if blocked && s3PolicyIsPublic(policyJSON) {
+		return s3AccessDeniedResponse(), nil
+	}
+
 	pol := S3BucketPolicy{Policy: string(policyJSON)}
 	raw, err := json.Marshal(pol)
 	if err != nil {
@@ -2495,6 +2508,16 @@ func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket strin
 		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
 	}
 
+	// BlockPublicAcls rejects a PutBucketAcl carrying a public ACL, without
+	// modifying the ACL already in place (#458). The check runs after the ACL is
+	// resolved from whichever of the three forms the caller used, so a canned
+	// header, an XML grant and an x-amz-grant-* header are all covered.
+	if denied, err := p.s3PublicACLDenied(ctx, bucket, acl, req.Headers); err != nil {
+		return nil, err
+	} else if denied != nil {
+		return denied, nil
+	}
+
 	raw, err := json.Marshal(acl)
 	if err != nil {
 		return nil, fmt.Errorf("marshal bucket acl: %w", err)
@@ -2564,6 +2587,14 @@ func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key 
 		}
 	} else {
 		acl = s3CannedACL(req.Headers["X-Amz-Acl"], bucket)
+	}
+
+	// The configuration consulted is the *bucket's*: Block Public Access has no
+	// per-object setting (#458).
+	if denied, err := p.s3PublicACLDenied(ctx, bucket, acl, req.Headers); err != nil {
+		return nil, err
+	} else if denied != nil {
+		return denied, nil
 	}
 
 	raw, err := json.Marshal(acl)
