@@ -1327,8 +1327,11 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | AttachInternetGateway | |
 | DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids) |
 | DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeAvailabilityZones | |
+| DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog) |
 | DescribeRegions | |
+| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. `Filter.N` is not applied |
+| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#instance-types-are-a-seeded-catalog)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
+| DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids) |
@@ -1725,6 +1728,97 @@ describe two parameters AWS documents as used together; the defect is the *value
 
 The upper bound is a per-account, per-instance-type quota substrate does not model,
 so it is not enforced: any count at or above 1 is accepted.
+
+### Instance types are a seeded catalog
+
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and
+`DescribeSpotPriceHistory` all answer from one seeded catalog. It is **not
+exhaustive** — EC2 offers some 800 types — but it is **complete per family**:
+
+| Family | Sizes |
+|---|---|
+| `t3`, `t3a` | `nano`, `micro`, `small`, `medium`, `large`, `xlarge`, `2xlarge` |
+| `m5`, `m5a`, `r5`, `c5a` | `large`, `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge`, `24xlarge` |
+| `c5` | `large`, `xlarge`, `2xlarge`, `4xlarge`, `9xlarge`, `12xlarge`, `18xlarge`, `24xlarge` — note the ladder is **not** the same as `c5a`'s |
+| accelerated | `p3.2xlarge`, `g4dn.xlarge`, `inf1.xlarge` |
+
+Whole families rather than a sample, because an absent type is *refused* (below) —
+a catalog stopping at `c5.xlarge` would answer `InvalidInstanceType` for
+`c5.large`, which is the right code for a bogus type and the wrong one for a real
+one. Bare-metal sizes (`m5.metal` and friends) are deliberately excluded: they are
+real types, but nothing else in the plugin models their behaviour, so returning
+them would advertise fidelity that is not there. vCPU and memory figures come from
+the AWS instance-type guides. `inf1`'s Inferentia accelerator is not reported
+through `gpuInfo`, matching real EC2, so its GPU count is zero.
+
+#### A type outside the catalog: refused, or empty?
+
+Both — and which one depends on whether the parameter is an assertion or a filter.
+This asymmetry is deliberate and matches real AWS; #485 diffed all three
+operations against `us-east-1`.
+
+| Request | Answer |
+|---|---|
+| `DescribeInstanceTypes --instance-types zz9.bogus` | `InvalidInstanceType`, HTTP 400 — `InstanceType.N` asserts the types exist |
+| `DescribeInstanceTypeOfferings --filters Name=instance-type,Values=zz9.bogus` | **0 offerings, HTTP 200** — a filter that matches nothing is a legitimate empty answer |
+| `DescribeSpotPriceHistory --instance-types zz9.bogus` | **Empty history, HTTP 200** — the reference describes this parameter as filtering the results |
+
+Every unknown type in one `DescribeInstanceTypes` request is collected into a
+single error, in request order:
+
+```
+InvalidInstanceType: The following supplied instance types do not exist: [zz9.bogus, aa1.nope]
+```
+
+One bad type fails the whole request; the known types are not returned. The
+message is verbatim from a real `us-east-1` capture for the single-type case; the
+`", "` separator for a list is substrate's choice, so dispatch on the code.
+
+`DescribeInstanceTypes` ignores `Filter.N` entirely. The operation documents some
+60 filter names, nearly all over response fields the seeded catalog does not carry,
+and applying the handful that are answerable while silently dropping the rest is
+the same defect as an ignored filter. Tracked in
+[#495](https://github.com/scttfrdmn/substrate/issues/495).
+
+#### Offerings filters and wildcards
+
+`DescribeInstanceTypeOfferings` accepts exactly the two filter names its reference
+documents — `instance-type` and `location`. **Any other name is refused** with
+`InvalidParameterValue` rather than ignored. Multiple `Filter.N.Value.M` values are
+an OR; separate `Filter.N` entries AND together.
+
+Filter values honour EC2's documented wildcards, and are **case-sensitive**:
+
+| Value | Matches |
+|---|---|
+| `c5.2xlarge` | that type |
+| `c5.*` | the eight `c5` sizes |
+| `c5*` | `c5` **and** `c5a` — `*` matches zero or more characters, including the `a` |
+| `t3?.micro` | `t3.micro` and `t3a.micro` — `?` matches zero **or one** character |
+| `m5.larg\*` | nothing; a backslash escapes a literal wildcard |
+| `M5.XLarge` | nothing |
+
+`LocationType` is a top-level **parameter**, not a filter name (`location-type` is
+refused as a filter). `availability-zone` is the default and `region` returns one
+offering per type located at the region. `availability-zone-id` and `outpost` are
+valid AWS values that substrate does **not** model, and are refused with a message
+naming substrate — treating them as `availability-zone` would return zone *names*
+under a `locationType` claiming they are IDs or Outpost ARNs, which a caller
+matching the two would silently mis-read.
+
+The three zones `DescribeAvailabilityZones` reports are the same three the
+offerings and spot-price operations use, so filtering an offerings query by a zone
+you just enumerated always returns an answer.
+
+#### Spot prices are stubs
+
+The `spotPrice` values are **deterministic stubs, not AWS prices**: substrate has
+no price feed, and the numbers exist so a spot-price response has a plausible,
+stable figure in it. Within a family they are a fixed rate per GiB, so they stay
+monotonic in size. Assert on the *shape* of a spot-price response, never on the
+amount. Every catalog type has a price — the two are generated together, so a type
+cannot appear in `DescribeInstanceTypes` and be missing from
+`DescribeSpotPriceHistory`.
 
 ### Explicit resource IDs
 

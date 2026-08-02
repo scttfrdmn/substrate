@@ -2466,9 +2466,12 @@ func TestEC2_DescribeInstanceTypeOfferings(t *testing.T) {
 	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// 8 types * 3 AZs = 24 offerings.
-	if len(result.Offerings) != 24 {
-		t.Fatalf("expected 24 offerings (8 types * 3 AZs), got %d", len(result.Offerings))
+	// Every catalog type in each of the three seeded AZs. Derived from the catalog rather
+	// than a literal: #485 widened the catalog from 8 types to whole families, and a
+	// hardcoded count made every such widening look like a regression.
+	want := catalogSize(t, ts) * 3
+	if len(result.Offerings) != want {
+		t.Fatalf("expected %d offerings (catalog * 3 AZs), got %d", want, len(result.Offerings))
 	}
 }
 
@@ -2494,9 +2497,8 @@ func TestEC2_DescribeInstanceTypeOfferings_LocationFilter(t *testing.T) {
 	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// 8 types * 1 AZ = 8 offerings.
-	if len(result.Offerings) != 8 {
-		t.Fatalf("expected 8 offerings for us-east-1a, got %d", len(result.Offerings))
+	if want := catalogSize(t, ts); len(result.Offerings) != want {
+		t.Fatalf("expected %d offerings for us-east-1a, got %d", want, len(result.Offerings))
 	}
 	for _, o := range result.Offerings {
 		if o.Location != "us-east-1a" {
@@ -2563,9 +2565,8 @@ func TestEC2_DescribeSpotPriceHistory_AZFilter(t *testing.T) {
 	if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// 8 types * 1 AZ = 8 items.
-	if len(result.Items) != 8 {
-		t.Fatalf("expected 8 spot price items (8 types * us-east-1b), got %d", len(result.Items))
+	if want := catalogSize(t, ts); len(result.Items) != want {
+		t.Fatalf("expected %d spot price items (catalog * us-east-1b), got %d", want, len(result.Items))
 	}
 	for _, item := range result.Items {
 		if item.AZ != "us-east-1b" {
