@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- EC2: `CreateTags` and `DeleteTags` now reject tag keys using the reserved `aws:`
+  prefix (#452). Substrate accepted them, so a consumer could tag a resource in a way
+  real EC2 refuses — and a test asserting that refusal passed against substrate while
+  the same call failed against AWS. The rejection is `InvalidParameterValue`, HTTP 400,
+  `Tag keys starting with 'aws:' are reserved for internal use`.
+
+  The whole request is refused before any resource is modified, so a request mixing a
+  legal tag with a reserved one leaves every resource it named untouched. `CreateTags`
+  accepts up to 1000 resource IDs, and rejecting partway through the apply loop would
+  leave a prefix of them tagged — a state real EC2 never produces, and a worse outcome
+  than either accepting or refusing cleanly.
+
+  **The match is case-sensitive**, which corrects the assumption #452 was filed with.
+  AWS documents tag keys and values as case-sensitive, and every observed rejection
+  quotes the lowercase form, so `AWS:foo` and `Aws:foo` are ordinary user tags and are
+  accepted. A case-folded check would have traded this infidelity for a new one in the
+  opposite direction.
+
+  **Provenance, stated plainly:** the `CreateTags` reference's Errors section is empty,
+  so neither the code nor the message is derivable from the API model. Both come from
+  observed real-AWS responses — two independent captures giving byte-identical text,
+  one recording `Service: AmazonEC2; Status Code: 400; Error Code:
+  InvalidParameterValue`. Both captures are of `RunInstances` tag-on-create rather than
+  `CreateTags`; the message is evidently shared across the tagging paths, but substrate
+  has not observed it on `CreateTags` directly. The `DeleteTags` rejection rests on
+  weaker evidence still: no captured `DeleteTags` error was found, so its code and
+  message are inherited from the `CreateTags` capture. What the tagging documentation
+  does state unambiguously is the outcome — such a tag "can't be edited or deleted" by
+  a caller — and a `DeleteTags` that returned success while leaving the tag in place
+  would be its own infidelity, so refusing is the closer of the two available
+  behaviors. `docs/services.md` records all of this rather than implying a doc
+  citation.
+
+  Two parts of AWS's rule are deliberately **not** covered. `RunInstances`
+  tag-on-create is unrestricted: real EC2 rejects a reserved key there too, but
+  substrate stamps `aws:ec2:fleet-id` (#443) by building `RunInstances`
+  `TagSpecification` params, so restricting that path would reject substrate's own
+  fleet tagging and silently undo the only route from an `instant` fleet back to its
+  instances. A regression test pins that a fleet still stamps and still filters on the
+  tag. And the companion rule that reserved tags do not count against the 50-tag
+  per-resource limit is vacuous here, because substrate does not model that limit at
+  all — `TagLimitExceeded` never fires. Both gaps are tracked separately.
 - SQS: `SendMessage` and `SendMessageBatch` now enforce `MaximumMessageSize` (#454).
   No length check existed anywhere in the send path — against the queue's attribute or
   against any constant — so a body of any size was accepted and delivered. Real SQS

@@ -595,7 +595,12 @@ func passthroughFleetTagSpecs(params map[string]string, resourceType string) map
 //
 // The "aws:" prefix is reserved: per the EC2 tagging documentation such a tag
 // cannot be edited or deleted by a caller and does not count against the 50-tag
-// per-resource limit. Substrate does not yet enforce either rule on CreateTags.
+// per-resource limit. CreateTags and DeleteTags now enforce the first rule (#452);
+// the second has nothing to exempt from yet, since substrate does not model the
+// 50-tag limit at all. Substrate stamps this tag by building RunInstances
+// TagSpecification params, which is a separate parse from CreateTags and is
+// deliberately left unrestricted — restricting it would reject substrate's own
+// fleet tagging.
 const ec2FleetIDTagKey = "aws:ec2:fleet-id"
 
 // fleetIDTagSpec returns the RunInstances TagSpecification params that stamp

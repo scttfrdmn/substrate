@@ -1124,6 +1124,8 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) |
+| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) |
 
 ### RunInstances requires a resolvable AMI
 
@@ -1301,10 +1303,43 @@ documented API contract: it appears in neither the EC2 API reference nor the fle
 tagging and describe pages. It is applied to every fleet type, and — unlike a
 caller's own `TagSpecification` entries — it is not scoped by `ResourceType`.
 
-Note that substrate does not yet enforce the two rules AWS attaches to the
-reserved `aws:` prefix: such a tag cannot be edited or deleted by a caller, and
-does not count against the 50-tag limit. `CreateTags` currently accepts an
-`aws:`-prefixed key that real EC2 would reject with `InvalidParameterValue`.
+A caller cannot delete this tag — see
+[reserved tag keys](#reserved-tag-keys) — which matches the rule AWS attaches to the
+`aws:` prefix.
+
+### Reserved tag keys
+
+`CreateTags` and `DeleteTags` reject any tag whose key begins with `aws:`, the
+prefix EC2 reserves for its own use:
+
+```
+InvalidParameterValue: Tag keys starting with 'aws:' are reserved for internal use
+```
+
+The status is `400`. The whole request is refused before any resource is modified,
+so a request that mixes a legal tag with a reserved one leaves every resource it
+named untouched — `CreateTags` accepts up to 1000 resource IDs, and a partial
+application is a state real EC2 never produces.
+
+The match is **case-sensitive**. AWS documents tag keys and values as
+case-sensitive, so `AWS:foo` and `Aws:foo` are ordinary user tags and are accepted;
+only the lowercase `aws:` prefix is reserved.
+
+Two caveats about the scope of this rule:
+
+- Provenance: the `CreateTags` API reference has an empty Errors section, so neither
+  the code nor the message above is derivable from the API model. Both come from
+  observed real-AWS responses. The `DeleteTags` rejection is a step weaker still —
+  substrate found no captured `DeleteTags` error and inherits the wording from the
+  `CreateTags` capture. What the tagging documentation does state plainly is the
+  outcome: such a tag "can't be edited or deleted" by a caller.
+- `RunInstances` tag-on-create is **not** covered. Real EC2 rejects a reserved key
+  there too, but substrate stamps [`aws:ec2:fleet-id`](#finding-a-fleets-instances)
+  through exactly that path, so restricting it would reject substrate's own fleet
+  tagging.
+
+The 50-tag-per-resource limit is not modelled at all, so the companion rule that
+reserved tags are exempt from it has nothing to exempt them from yet.
 
 ### Seeding EC2 Fleet partial fulfillment
 

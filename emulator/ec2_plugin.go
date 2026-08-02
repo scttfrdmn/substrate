@@ -1962,9 +1962,18 @@ func (p *EC2Plugin) rebootInstances(_ *RequestContext, _ *AWSRequest) (*AWSRespo
 }
 
 // createTags handles CreateTags — applies key-value tags to one or more EC2 resources.
+//
+// Keys using the reserved "aws:" prefix are rejected before anything is applied, so a
+// mixed request leaves every named resource untouched (#452). Note that this covers
+// CreateTags only: RunInstances tag-on-create parses its TagSpecification.N params
+// separately, and substrate's own fleet tagging stamps aws:ec2:fleet-id through that
+// path — see [ec2FleetIDTagKey].
 func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
 	tags := extractEC2Tags(req.Params)
+	if err := ec2CheckReservedTagKeys(tags); err != nil {
+		return nil, err
+	}
 	for _, id := range resourceIDs {
 		if err := p.applyTagsToResource(reqCtx, id, tags, false); err != nil {
 			return nil, err
@@ -1979,9 +1988,20 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 }
 
 // deleteTags handles DeleteTags — removes tags from one or more EC2 resources.
+//
+// Reserved "aws:" keys are rejected here too (#452). The evidence for this is weaker
+// than for CreateTags: substrate found no captured real-AWS DeleteTags rejection, so
+// the code and message are inherited from the CreateTags capture rather than separately
+// observed. The tagging documentation is unambiguous about the outcome — such a tag
+// "can't be edited or deleted" by a caller — and a DeleteTags that returned success
+// while leaving the tag in place would be its own infidelity, so rejecting is the
+// closer of the two available behaviors.
 func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
 	tags := extractEC2Tags(req.Params)
+	if err := ec2CheckReservedTagKeys(tags); err != nil {
+		return nil, err
+	}
 	for _, id := range resourceIDs {
 		if err := p.applyTagsToResource(reqCtx, id, tags, true); err != nil {
 			return nil, err
