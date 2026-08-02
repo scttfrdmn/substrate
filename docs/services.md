@@ -875,8 +875,8 @@ Lambda invocations: $0.0000002 per request.
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | |
-| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement); stores [message attributes](#message-attributes) and returns `MD5OfMessageAttributes` |
-| SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement); stores [message attributes](#message-attributes) per entry |
+| SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement); stores [message attributes](#message-attributes) and returns `MD5OfMessageAttributes`; enforces the [attribute count, name, type and `Number` rules](#attribute-rules) |
+| SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement); stores [message attributes](#message-attributes) per entry; reports an [attribute-rule violation per entry](#batch-failures-are-per-entry) in `Failed` at HTTP 200 |
 | ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; returns [message attributes](#message-attributes) for the names requested |
 | DeleteMessage | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessageBatch | |
@@ -1095,10 +1095,84 @@ A deduplicated FIFO send reports the digest of *that request's* attributes rathe
 the stored original's, for the same reason: the digest is a checksum of what the caller
 sent.
 
-Two limits are **not** enforced (tracked separately): the documented maximum of 10
-attributes per message, and the attribute-name character rules (no `AWS.` or `Amazon.`
-prefix, no leading, trailing or sequential periods). A 10-attribute message is accepted,
-which is the boundary rather than a rejection.
+#### Attribute rules
+
+Every rule below is checked on `SendMessage` and on each `SendMessageBatch` entry, under
+both protocols, and every rejection is `InvalidParameterValue` with HTTP 400. A rejected
+send **enqueues nothing** — on a FIFO queue the check runs before the deduplication ID is
+recorded, so a corrected retry reusing the same `MessageDeduplicationId` is delivered
+rather than swallowed as a duplicate.
+
+| Rule | Rejected |
+|---|---|
+| count | more than 10 attributes on one message |
+| name length | 256 bytes or more |
+| name characters | anything outside `A-Z`, `a-z`, `0-9`, `_`, `-`, `.` |
+| reserved prefix | starting with `AWS.` or `Amazon.`, **any casing** |
+| periods | a leading or trailing `.`, or two in sequence |
+| type | a `DataType` not prefixed `String`, `Number` or `Binary`; an absent one |
+| type length | 256 bytes or more |
+| empty value | a `String` attribute with no value |
+| `Number` value | not a decimal number, or outside −10^128 … 10^126 |
+
+Both length bounds are **exclusive**: 255 bytes is legal, 256 is not. The developer guide
+says "up to 256 characters" while the error text says "must be shorter than 256 Bytes";
+the error is the more specific evidence, and the conflict is recorded rather than quietly
+resolved.
+
+A custom suffix on a type is legal and preserved — `Number.java.lang.Long`, `Binary.gif`
+— and a `Number` is range-checked whatever its suffix. Scientific notation (`1e5`) is
+accepted, which is the permissive reading of a detail no source settles. Uniqueness
+within a message is structural rather than checked: attributes are keyed by name.
+
+**The reserved-prefix check is case-insensitive**, so `aws.trace` and `AwS.trace` are
+refused alongside `AWS.trace`. This is the **opposite** of EC2's `aws:` tag-key rule,
+where [`AWS:foo` is a legal key](#reserved-tag-keys) — the two services document
+different rules, and unifying them would break one of the two. A name merely beginning
+with those letters and no period (`AWSfoo`) is not reserved.
+
+A message breaking two rules always reports the same one: attributes are visited in
+sorted name order, because a walk over the Go map would report one error on some runs and
+the other on others.
+
+#### Batch failures are per entry
+
+`SendMessageBatch` reports an attribute violation as a **`BatchResultErrorEntry` in
+`Failed`** with `SenderFault: true`, at HTTP **200** — the offending entry does not
+enqueue while its siblings do. This is what the reference warns about: "you should check
+for batch errors even when the call returns an HTTP status code of `200`". `Failed` is
+always present, empty rather than absent on a fully successful batch. The ten-attribute
+maximum is per message, so three entries of nine attributes each is legal.
+
+That differs deliberately from the [size checks](#message-size-enforcement) ten lines
+away in the same operation, which fail the **whole request** with `BatchRequestTooLong`:
+the payload cap is a documented property of the aggregate the caller transmitted, while a
+malformed attribute is a defect in one entry.
+
+#### Provenance
+
+Message text carries different weights, and the code says which is which:
+
+- **Real-AWS captures**: the count rejection (an SDK exception quoting a Request ID and
+  status 400), the `Number` cast failure (`Can't cast the value of message (user)
+  attribute '…' to a number.`, captured from boto3 against live SQS, code and message
+  together), and the empty-`String`-value message (captured twice independently).
+- **Snapshot-tested reimplementation**: the name and type messages, from LocalStack's
+  `check_attributes`, which snapshot-tests against real AWS. The character-class message
+  is reproduced verbatim including its odd "upper and lower score characters" phrasing
+  and its trailing space — a tidied string is no longer the one a consumer sees.
+- **A single reimplementation, and the weakest claim here**: the `Number` **range**
+  message (`Number attribute value … should be in range (-10**128..10**126)`), which only
+  elasticmq supplies.
+
+The count rejection's **code** is not in the capture; it comes from agreement across five
+reimplementations. Neither moto nor LocalStack enforces the count at all, which is why
+substrate accepting an eleventh attribute went unnoticed until message attributes became
+observable.
+
+The rules apply on send, not on receive. A message written into state before they existed
+— replayed from an older event log — is returned as stored rather than withheld, since
+withholding it would make a recorded run unreplayable.
 
 ### QueueNameExists
 

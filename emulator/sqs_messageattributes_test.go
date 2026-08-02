@@ -618,11 +618,14 @@ func TestSQS_MessageAttributes_SurviveRedelivery(t *testing.T) {
 // TestSQS_MessageAttributes_TenAttributesAccepted pins AWS's documented per-message
 // maximum as the boundary it is, not as a rejection.
 //
-// The reference states a message "can have up to 10 metadata attributes", and
-// substrate does not enforce the count — so this asserts the legal case works rather
-// than asserting an error substrate does not raise. Enforcing the maximum is tracked
-// separately; pinning the boundary here is what makes that change visible when it
-// lands, instead of silently turning a passing test into a failing one.
+// The reference states a message "can have up to 10 metadata attributes", so ten is
+// legal and the eleventh is not. This test owns the legal side, and it is the guard
+// #472's enforcement had to survive: an off-by-one in the count check turns a documented
+// maximum into a rejection at nine.
+//
+// It also asserts all ten come back, which the rejection test cannot: a count check that
+// dropped an attribute instead of refusing the message would pass an error-code
+// assertion.
 func TestSQS_MessageAttributes_TenAttributesAccepted(t *testing.T) {
 	bothProtocols(t, func(t *testing.T, jsonProto bool) {
 		srv, _ := newSQSTestServer(t)

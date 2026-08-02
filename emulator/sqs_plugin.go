@@ -802,10 +802,20 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		msgAttrs = sqsQueryMessageAttributes(req.Params, "")
 	}
 
+	// Validate the attributes before measuring them (#472). A message that is both
+	// malformed and oversized reports the malformation, which is the more specific
+	// fault: the size is a property of what was sent, while an illegal attribute name
+	// or a non-numeric Number is a defect in the request itself, and shrinking the
+	// message would not fix it.
+	if awsErr := sqsCheckMessageAttributes(msgAttrs); awsErr != nil {
+		return nil, awsErr
+	}
+
 	// Enforce MaximumMessageSize before anything else observable happens (#454).
 	// Ahead of the FIFO branch deliberately: both queue types enforce it, and a FIFO
 	// send that recorded a deduplication ID before failing would poison the dedup
-	// window for the corrected retry that follows.
+	// window for the corrected retry that follows. The attribute check above inherits
+	// that ordering for the same reason.
 	if limit := sqsEffectiveMaximumMessageSize(q); sqsMessageSize(msgBody, msgAttrs) > limit {
 		return nil, sqsMessageTooLong(limit)
 	}
@@ -1034,6 +1044,11 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	var successesXML []successEntryXML
 	var successesJSON []successEntryJSON
 
+	// Failed entries, shared by both protocol branches. An attribute-rule violation
+	// fails only its own entry (#472) — see [sqsBatchFailure] for why that differs from
+	// the size checks below, which fail the whole request.
+	var failures []sqsBatchResultErrorEntry
+
 	// The per-message limit is the queue's effective MaximumMessageSize; the batch
 	// total has its own cap. Both are checked before any entry is stored, so a
 	// rejected batch enqueues nothing — a partially-applied batch would leave a
@@ -1058,6 +1073,15 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			return nil, sizeErr
 		}
 		for _, entry := range input.Entries {
+			// A malformed entry fails alone and is not stored, while its siblings
+			// proceed. The sizes above were measured over every entry as sent,
+			// including this one: the payload cap is about what the caller
+			// transmitted, so a whole-request size failure still supersedes a
+			// per-entry one.
+			if awsErr := sqsCheckMessageAttributes(entry.MessageAttributes); awsErr != nil {
+				failures = append(failures, sqsBatchFailure(entry.ID, awsErr))
+				continue
+			}
 			msgID := generateSQSMessageID()
 			md5Body := computeMD5(entry.MessageBody)
 			msg := &SQSMessage{
@@ -1096,9 +1120,14 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		if successesJSON == nil {
 			successesJSON = make([]successEntryJSON, 0)
 		}
+		if failures == nil {
+			failures = make([]sqsBatchResultErrorEntry, 0)
+		}
+		// HTTP 200 even when entries failed, per the reference: a caller "should check
+		// for batch errors even when the call returns an HTTP status code of 200".
 		return sqsJSONResponse(http.StatusOK, map[string]interface{}{
 			"Successful": successesJSON,
-			"Failed":     []struct{}{},
+			"Failed":     failures,
 		})
 	}
 
@@ -1131,6 +1160,12 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		delayStr := req.Params[entryPrefix+"DelaySeconds"]
 		delay, _ := strconv.Atoi(delayStr)
 		entryAttrs := sqsQueryMessageAttributes(req.Params, entryPrefix)
+
+		// Per-entry, as in the JSON branch above.
+		if awsErr := sqsCheckMessageAttributes(entryAttrs); awsErr != nil {
+			failures = append(failures, sqsBatchFailure(entryID, awsErr))
+			continue
+		}
 
 		msgID := generateSQSMessageID()
 		md5Body := computeMD5(body)
@@ -1172,8 +1207,12 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		})
 	}
 
+	// Both lists sit directly under the result wrapper as repeated elements, since the
+	// query-protocol model declares each flattened with its own locationName rather
+	// than nested under a Successful or Failed wrapper.
 	type result struct {
-		SendMessageBatchResultEntry []successEntryXML `xml:"SendMessageBatchResultEntry"`
+		SendMessageBatchResultEntry []successEntryXML          `xml:"SendMessageBatchResultEntry"`
+		BatchResultErrorEntry       []sqsBatchResultErrorEntry `xml:"BatchResultErrorEntry"`
 	}
 	type response struct {
 		XMLName                xml.Name         `xml:"SendMessageBatchResponse"`
@@ -1181,10 +1220,14 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		SendMessageBatchResult result           `xml:"SendMessageBatchResult"`
 		ResponseMetadata       responseMetadata `xml:"ResponseMetadata"`
 	}
+	// HTTP 200 with failures present, as in the JSON branch.
 	return sqsXMLResponse(http.StatusOK, response{
-		Xmlns:                  "http://queue.amazonaws.com/doc/2012-11-05/",
-		SendMessageBatchResult: result{SendMessageBatchResultEntry: successesXML},
-		ResponseMetadata:       responseMetadata{RequestID: ctx.RequestID},
+		Xmlns: "http://queue.amazonaws.com/doc/2012-11-05/",
+		SendMessageBatchResult: result{
+			SendMessageBatchResultEntry: successesXML,
+			BatchResultErrorEntry:       failures,
+		},
+		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
 	})
 }
 
