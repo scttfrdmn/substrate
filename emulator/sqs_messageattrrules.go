@@ -118,6 +118,42 @@ func sqsCheckMessageAttributes(attrs map[string]SQSMessageAttribute) *AWSError {
 	return nil
 }
 
+// sqsWarnStoredAttributes logs at WARN when a stored message's attributes violate a
+// rule that [sqsCheckMessageAttributes] enforces on send, and does nothing else. The
+// message is still returned, in full, exactly as stored (#491).
+//
+// Returning it is the decision, not an omission. Substrate's core property is that
+// replaying an event log reproduces the same observations, and a message written by an
+// older substrate was accepted by the substrate that recorded it — so withholding or
+// dropping it now would make a recorded run unreplayable, which is the one outcome #491
+// rules out. The warning gives an operator the signal that their fixture predates the
+// rules without changing what any caller observes.
+//
+// The whole stored attribute set is checked rather than the subset the request asked
+// for: the violation is a property of what is in state, and #461's selection means a
+// request naming no attribute names would otherwise hide it entirely.
+//
+// It fires on every receive of the same message rather than once. A message redelivered
+// after its visibility timeout is a fixture being exercised again, and remembering which
+// messages have already warned would be per-process state that a replay could not
+// reproduce.
+//
+// The attribute-free fast path is the common case — most messages carry no attributes at
+// all — and skips a sort and an allocation per message in the receive loop.
+func sqsWarnStoredAttributes(logger Logger, queueURL string, msg *SQSMessage) {
+	if len(msg.MessageAttributes) == 0 {
+		return
+	}
+	awsErr := sqsCheckMessageAttributes(msg.MessageAttributes)
+	if awsErr == nil {
+		return
+	}
+	logger.Warn("sqs receiveMessage: stored message attributes violate a current rule; "+
+		"returning the message as stored so the run stays replayable",
+		"queue", queueURL, "messageId", msg.MessageID,
+		"code", awsErr.Code, "violation", awsErr.Message)
+}
+
 // sqsCheckAttributeName validates one attribute name against the guide's rules.
 //
 // The prefix rule is **case-INsensitive**, and that is the detail a reader arriving

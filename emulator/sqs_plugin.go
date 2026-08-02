@@ -1368,6 +1368,12 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			continue
 		}
 
+		// Warn, but return the message unchanged, when its stored attributes violate a
+		// rule enforced on send (#491). The observation is deliberately untouched: the
+		// message was accepted by the substrate that recorded it, so withholding it here
+		// would make an older event log unreplayable.
+		sqsWarnStoredAttributes(p.logger, queueURL, msg)
+
 		// The digest covers what is being returned, not what was sent: a request
 		// naming a subset gets the digest of that subset, which is what lets a caller
 		// checksum the attributes actually in hand. Reusing the send-time digest would
