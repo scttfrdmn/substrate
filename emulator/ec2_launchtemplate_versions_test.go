@@ -32,6 +32,19 @@ type ltVersionItem struct {
 			AssociatePublicIPAddress string   `xml:"associatePublicIpAddress"`
 			Groups                   []string `xml:"groupSet>item"`
 		} `xml:"networkInterfaceSet>item"`
+		IamInstanceProfile struct {
+			ARN  string `xml:"arn"`
+			Name string `xml:"name"`
+		} `xml:"iamInstanceProfile"`
+		// Note the name: the response member is tagSpecificationSet while the request
+		// member is TagSpecification.N, so a round-trip has to spell it both ways.
+		TagSpecifications []struct {
+			ResourceType string `xml:"resourceType"`
+			Tags         []struct {
+				Key   string `xml:"key"`
+				Value string `xml:"value"`
+			} `xml:"tagSet>item"`
+		} `xml:"tagSpecificationSet>item"`
 	} `xml:"launchTemplateData"`
 }
 

@@ -1313,6 +1313,10 @@ corresponding parameters included in the launch template."
 | `InstanceType` | absent | `m5.large` | `m5.large` |
 | `InstanceType` | absent | absent | `t3.micro` (substrate's default) |
 | `KeyName` | `k-request` | `k-template` | `k-request` |
+| `TagSpecification` (instance-scoped) | `Env=req` | `Env=tmpl,Team=x` | `Env=req` alone — replace, not merge |
+| `TagSpecification` (instance-scoped) | absent | `Env=tmpl` | `Env=tmpl` |
+| `IamInstanceProfile` | `p-request` | `p-template` | `p-request` |
+| `IamInstanceProfile` | absent | `p-template` | `p-template` |
 | `SubnetId`, security groups, `AssociatePublicIpAddress` | see [Launch template networking](#launch-template-networking) | | |
 
 Which *version* of the template supplies those values is resolved from
@@ -1337,8 +1341,49 @@ the template's type, exactly inverting the documented precedence. An explicit
 `t3.micro` is now honoured, and the default applies only when neither side names
 a type.
 
-A template's `TagSpecifications` and `IamInstanceProfile` are not parsed at all, so
-neither participates in the merge.
+A template's `TagSpecifications` and `IamInstanceProfile` used to be accepted and
+stored nowhere, so a template that tagged its instances produced untagged ones and a
+template naming a role produced an instance with none — with nothing failing to say
+so. That is worse than a dropped `KeyName`, because a `tag:` filter is how IaC finds
+the resources it just created: `DescribeInstances --filters tag:Env,Values=prod`
+simply returned nothing, and a suite asserting on the tags it asked for had an
+assertion that could not pass.
+
+Both now participate in the merge, with two things worth stating:
+
+- **Tags replace rather than merge.** A request naming `Env=req` against a template
+  naming `Env=tmpl,Team=x` yields `Env=req` alone; `Team` is not inherited. The
+  reference gives no `TagSpecifications`-specific merge semantics, only the general
+  "overwrite the corresponding parameters" rule quoted above, and replacement is that
+  rule applied to the whole specification.
+- **Substrate's own `aws:ec2:fleet-id` stamp does not count as the request naming
+  tags.** A fleet instance already carries that reserved key by the time the merge
+  runs, so the fallback tests for a non-reserved key rather than for an empty set —
+  otherwise a fleet launched from a tagging template would silently lose the
+  template's tags. See [Reserved tag keys](#reserved-tag-keys).
+
+**Only the instance scope is modelled.** A template may also scope tags to `volume`,
+`network-interface` or `spot-instances-request`. Substrate models none of those
+resources, so those specifications are recorded nowhere rather than misapplied to the
+instance: they neither reach the launch nor read back from
+`DescribeLaunchTemplateVersions`. Note that a template's instance-scoped tags land on
+the *instance*, not on the template — the reference is explicit that "these tags are
+not applied to the launch template."
+
+A template's tags are subject to both tag rules, so a template is not a second
+unrestricted tagging path: a `TagSpecifications` naming an `aws:`-prefixed key or
+exceeding the 50-tag limit is rejected at `CreateLaunchTemplate` and at
+`CreateLaunchTemplateVersion` (after any `SourceVersion` inheritance, so an inherited
+violation is caught too). The launch checks again, because a template written
+straight into state by a replayed event log can predate those checks.
+
+The instance profile is stored as the single string the request supplied, matching
+the shape an instance holds, so it is echoed back from
+`DescribeLaunchTemplateVersions` in whichever member it arrived in — `arn` for an
+`arn:`-prefixed value and `name` otherwise. `DescribeInstances` surfaces it as an ARN
+either way, because AWS's instance response shape has no name member; for a
+*template* read-back, synthesizing the other member would report the template as
+naming something the caller never wrote.
 
 ### Launch template versions
 
@@ -1612,8 +1657,15 @@ both coexist with the caller's legal tags on the same instance.
 
 One limit of the current scope, stated rather than implied: only tags scoped to a
 resource substrate models are checked. A `TagSpecification` naming `volume` or
-`network-interface` on `RunInstances` is skipped, because substrate does not tag those
-resources at all; real EC2 would reject a reserved key there too.
+`network-interface` on `RunInstances`, or inside a launch template's
+`LaunchTemplateData`, is skipped, because substrate does not tag those resources at
+all; real EC2 would reject a reserved key there too.
+
+A launch template's own instance-scoped tags *are* checked, at
+`CreateLaunchTemplate` and `CreateLaunchTemplateVersion` as well as at every launch
+that names the template — so a template cannot serve as an unchecked second path to a
+reserved key. See
+[A launch template merges with the request, field by field](#a-launch-template-merges-with-the-request-field-by-field).
 
 ### The 50-tag-per-resource limit
 
@@ -1657,6 +1709,11 @@ published nowhere, so the wording above is [moto](https://github.com/getmoto/mot
 from a reimplementation rather than a captured response. That is a weaker claim than the
 code's, and is a distinction worth stating: SDKs dispatch on `Error.Code`, so the code
 is the part a consumer's error branch turns on.
+
+A launch template's instance-scoped tags are counted the same way, at
+`CreateLaunchTemplate` and `CreateLaunchTemplateVersion` as well as at every launch
+that names the template. Exactly 50 template tags launch; 51 are refused at template
+creation.
 
 Two documented restrictions substrate does **not** enforce: a tag key's maximum length
 of 128 Unicode characters, and a value's maximum of 256. Both are tracked separately.

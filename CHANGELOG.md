@@ -156,6 +156,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeImages` for tags that were actually snapshot-scoped will see them move,
   which is where real EC2 has them.
 
+### Fixed
+- **A launch template's `TagSpecifications` and `IamInstanceProfile` now reach the
+  instance** (#471). Both were accepted by `CreateLaunchTemplate` and stored nowhere,
+  so a template that tagged its instances produced untagged ones and a template naming
+  a role produced an instance with none — with nothing failing to say so. The tag half
+  is the more damaging: `DescribeInstances --filters tag:Env,Values=prod` is how IaC
+  finds the resources it just created, and it simply returned nothing, so an assertion
+  on the tags the template asked for could not pass however the code was written.
+  Neither field could even be read back before this release, because
+  `DescribeLaunchTemplates` carries no `launchTemplateData`; #456's
+  `DescribeLaunchTemplateVersions` is what makes the round-trip assertable.
+
+  **Template tags replace rather than merge.** A request naming `Env=req` against a
+  template naming `Env=tmpl,Team=x` yields `Env=req` alone — `Team` is not inherited.
+  The reference gives no `TagSpecifications`-specific merge semantics, only the general
+  "Any additional parameters that you specify for the new instance overwrite the
+  corresponding parameters included in the launch template", and replacement is that
+  rule applied to the whole specification rather than a per-field citation.
+
+  **Substrate's own `aws:ec2:fleet-id` stamp does not count as the request naming
+  tags.** A fleet instance already carries that reserved key by the time the merge
+  runs, so the fallback tests for a non-reserved key rather than for an empty set. Had
+  it tested emptiness, a fleet launched from a tagging template would have silently
+  lost the template's tags — the very defect this entry closes, on the path #443 added.
+  It is the same reserved-key exclusion #469's counter uses.
+
+  **A template's tags are subject to both tag rules**, so a template is not a second
+  unrestricted tagging path: `TagSpecifications` naming an `aws:`-prefixed key or
+  exceeding the 50-tag limit is rejected at `CreateLaunchTemplate` and at
+  `CreateLaunchTemplateVersion` — the latter *after* any `SourceVersion` inheritance, so
+  an inherited violation is caught rather than propagated. The launch checks again,
+  deliberately and not redundantly: a template written straight into state by a replayed
+  event log can predate these checks, and that launch is the one that would otherwise
+  apply the key.
+
+  Two scope limits, stated rather than implied. Only the **instance** scope is stored: a
+  template may also scope tags to `volume`, `network-interface` or
+  `spot-instances-request`, none of which substrate models, so those specifications are
+  recorded nowhere rather than misapplied to the instance. And the profile is stored as
+  the single string the request supplied, so `DescribeLaunchTemplateVersions` echoes it
+  in whichever member it arrived in — `arn` for an `arn:`-prefixed value, `name`
+  otherwise. `DescribeInstances` still surfaces it as an ARN either way, because AWS's
+  instance response shape has no name member; synthesizing the missing member for a
+  *template* read-back would report the template as naming something the caller never
+  wrote.
+
 ## [v0.85.0] - 2026-08-02
 
 ### Added

@@ -1,10 +1,17 @@
 package emulator_test
 
 import (
+	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/scttfrdmn/substrate/emulator"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ltNetwork is the networking a launch-template test asks for and then asserts
@@ -659,6 +666,549 @@ func TestEC2_LaunchTemplate_RequestFalseBeatsTemplateTrue(t *testing.T) {
 		t.Errorf("publicIpAddress = %q, want none: the request explicitly asked for false",
 			got.PublicIPAddress)
 	}
+}
+
+// ltTagParams returns the LaunchTemplateData.TagSpecification.N params that scope
+// tags to instances, in the request's key order.
+//
+// Note the singular member name: the *request* spells it TagSpecification.N while
+// the response spells it tagSpecificationSet. Getting that backwards silently
+// produces a template with no tags, which is exactly #471's defect.
+func ltTagParams(tags ...[2]string) map[string]string {
+	params := map[string]string{
+		"LaunchTemplateData.TagSpecification.1.ResourceType": "instance",
+	}
+	for i, tag := range tags {
+		params[fmt.Sprintf("LaunchTemplateData.TagSpecification.1.Tag.%d.Key", i+1)] = tag[0]
+		params[fmt.Sprintf("LaunchTemplateData.TagSpecification.1.Tag.%d.Value", i+1)] = tag[1]
+	}
+	return params
+}
+
+// instanceTagMap returns an instance's tags as DescribeInstances reports them.
+func instanceTagMap(t *testing.T, ts *httptest.Server, instID string) map[string]string {
+	t.Helper()
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{
+		"Action":       "DescribeInstances",
+		"InstanceId.1": instID,
+	}, &desc)
+	require.Len(t, desc.Instances, 1)
+	tags := map[string]string{}
+	for _, tag := range desc.Instances[0].Tags {
+		tags[tag.Key] = tag.Value
+	}
+	return tags
+}
+
+// instanceIDsMatchingTag returns the instance IDs a DescribeInstances tag: filter
+// returns, which is the observation a consumer's IaC actually depends on.
+func instanceIDsMatchingTag(t *testing.T, ts *httptest.Server, key, value string) []string {
+	t.Helper()
+	var desc describedInstances
+	ec2FleetXML(t, ts, map[string]string{
+		"Action":           "DescribeInstances",
+		"Filter.1.Name":    "tag:" + key,
+		"Filter.1.Value.1": value,
+	}, &desc)
+	ids := make([]string, 0, len(desc.Instances))
+	for _, inst := range desc.Instances {
+		ids = append(ids, inst.InstanceID)
+	}
+	return ids
+}
+
+// instanceProfileARN returns the iamInstanceProfile ARN DescribeInstances reports.
+func instanceProfileARN(t *testing.T, ts *httptest.Server, instID string) string {
+	t.Helper()
+	resp := ec2Request(t, ts, map[string]string{
+		"Action":       "DescribeInstances",
+		"InstanceId.1": instID,
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	var out struct {
+		Instances []struct {
+			Profile struct {
+				ARN string `xml:"arn"`
+			} `xml:"iamInstanceProfile"`
+		} `xml:"reservationSet>item>instancesSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&out))
+	require.Len(t, out.Instances, 1)
+	return out.Instances[0].Profile.ARN
+}
+
+// TestEC2_LaunchTemplate_RoundTripsTagsAndProfile covers the read-back half of
+// #471: both fields were accepted by CreateLaunchTemplate and stored nowhere, so a
+// template that tagged its instances and named a role read back as carrying neither.
+//
+// DescribeLaunchTemplateVersions is the only operation that can make this
+// assertion — DescribeLaunchTemplates' response has no launchTemplateData at all —
+// which is why #456 landed in the same release rather than this criterion being
+// weakened.
+func TestEC2_LaunchTemplate_RoundTripsTagsAndProfile(t *testing.T) {
+	tests := []struct {
+		name string
+		// profileParam is the member the request uses; both are valid and AWS's
+		// LaunchTemplateIamInstanceProfileSpecificationRequest has exactly these two.
+		profileParam string
+		profile      string
+		wantARN      string
+		wantName     string
+	}{
+		{
+			name:         "Name form",
+			profileParam: "LaunchTemplateData.IamInstanceProfile.Name",
+			profile:      "tmpl-profile",
+			wantName:     "tmpl-profile",
+		},
+		{
+			name:         "Arn form",
+			profileParam: "LaunchTemplateData.IamInstanceProfile.Arn",
+			profile:      "arn:aws:iam::000000000000:instance-profile/tmpl-profile",
+			wantARN:      "arn:aws:iam::000000000000:instance-profile/tmpl-profile",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			data := map[string]string{
+				"LaunchTemplateData.ImageId": "ami-0roundtrip000001",
+				tt.profileParam:              tt.profile,
+			}
+			for k, v := range ltTagParams([2]string{"Env", "prod"}, [2]string{"Team", "core"}) {
+				data[k] = v
+			}
+			ltID := createLaunchTemplate(t, ts, "roundtrip-"+tt.name, data)
+
+			versions, _ := describeLTVersions(t, ts, map[string]string{"LaunchTemplateId": ltID})
+			require.Len(t, versions, 1)
+
+			// The profile is echoed in whichever member it arrived in. Synthesizing the
+			// other would report the template as naming something the caller never wrote.
+			assert.Equal(t, tt.wantARN, versions[0].Data.IamInstanceProfile.ARN)
+			assert.Equal(t, tt.wantName, versions[0].Data.IamInstanceProfile.Name)
+
+			require.Len(t, versions[0].Data.TagSpecifications, 1)
+			spec := versions[0].Data.TagSpecifications[0]
+			assert.Equal(t, "instance", spec.ResourceType)
+			require.Len(t, spec.Tags, 2)
+			// Request order is preserved, so the assertion is deterministic.
+			assert.Equal(t, "Env", spec.Tags[0].Key)
+			assert.Equal(t, "prod", spec.Tags[0].Value)
+			assert.Equal(t, "Team", spec.Tags[1].Key)
+			assert.Equal(t, "core", spec.Tags[1].Value)
+		})
+	}
+}
+
+// TestEC2_LaunchTemplate_TagsReachTheInstance is #471's headline case: an instance
+// launched from a tagging template came up untagged, so DescribeInstances reported
+// no tags and a tag: filter returned nothing — with no error to explain why.
+//
+// The filter is asserted as well as the tagSet, because the filter is the half a
+// consumer's IaC actually depends on: it is how a stack finds the instances it just
+// created, and it can fail even when the tagSet is right.
+func TestEC2_LaunchTemplate_TagsReachTheInstance(t *testing.T) {
+	ts := newEC2TestServer(t)
+	data := map[string]string{"LaunchTemplateData.ImageId": "ami-0tagsreach00001"}
+	for k, v := range ltTagParams([2]string{"Env", "prod"}, [2]string{"Team", "core"}) {
+		data[k] = v
+	}
+	ltID := createLaunchTemplate(t, ts, "tags-reach", data)
+
+	instID := runInstance(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": ltID})
+
+	tags := instanceTagMap(t, ts, instID)
+	assert.Equal(t, "prod", tags["Env"])
+	assert.Equal(t, "core", tags["Team"])
+
+	assert.Equal(t, []string{instID}, instanceIDsMatchingTag(t, ts, "Env", "prod"),
+		"a tag: filter must find an instance tagged through its launch template")
+}
+
+// TestEC2_LaunchTemplate_ProfileReachesTheInstance pins the other dropped field.
+// A consumer asserting which role its instances carry had an assertion that could
+// not fail: the instance reported no profile at all.
+//
+// DescribeInstances reports the profile as an ARN — AWS's IamInstanceProfile
+// response shape has no name member — so a bare template name is surfaced as the
+// ARN it implies, matching what a call-level IamInstanceProfile.Name already did.
+func TestEC2_LaunchTemplate_ProfileReachesTheInstance(t *testing.T) {
+	const arn = "arn:aws:iam::000000000000:instance-profile/tmpl-profile"
+	tests := []struct {
+		name  string
+		param string
+		value string
+	}{
+		{
+			name:  "Name is surfaced as the ARN it implies",
+			param: "LaunchTemplateData.IamInstanceProfile.Name",
+			value: "tmpl-profile",
+		},
+		{
+			name:  "an ARN is surfaced verbatim",
+			param: "LaunchTemplateData.IamInstanceProfile.Arn",
+			value: arn,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			ltID := createLaunchTemplate(t, ts, "profile-"+tt.param, map[string]string{
+				"LaunchTemplateData.ImageId": "ami-0profile0000001",
+				tt.param:                     tt.value,
+			})
+			instID := runInstance(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": ltID})
+			assert.Equal(t, arn, instanceProfileARN(t, ts, instID))
+		})
+	}
+}
+
+// TestEC2_LaunchTemplate_TagAndProfilePrecedence extends #453's matrix with the two
+// fields #471 adds, three ways each: the request wins, the template fills the gap,
+// and neither names one.
+//
+// Before this, the request's value won by *default* rather than by rule — the
+// template's was never parsed — which happens to match AWS's precedence for the
+// wrong reason. Parsing the fields without writing the fallback would invert it
+// silently, which is what this table exists to catch.
+//
+// The tags row that matters is the first: template tags **replace** rather than
+// merge. The reference gives no TagSpecifications-specific merge semantics, only the
+// general "overwrite the corresponding parameters" rule, so replacement is that rule
+// applied — a request naming Env=req does not also inherit the template's Team=x.
+func TestEC2_LaunchTemplate_TagAndProfilePrecedence(t *testing.T) {
+	const reqARN = "arn:aws:iam::000000000000:instance-profile/p-req"
+	const tmplARN = "arn:aws:iam::000000000000:instance-profile/p-tmpl"
+
+	tests := []struct {
+		name          string
+		templateData  map[string]string
+		requestParams map[string]string
+		wantTags      map[string]string
+		// wantAbsentTags are keys that must not be present at all, which is how the
+		// replace-not-merge rule is asserted.
+		wantAbsentTags []string
+		wantProfile    string
+	}{
+		{
+			name:         "request tags replace the template's, not merge with them",
+			templateData: ltTagParams([2]string{"Env", "tmpl"}, [2]string{"Team", "x"}),
+			requestParams: map[string]string{
+				"TagSpecification.1.ResourceType": "instance",
+				"TagSpecification.1.Tag.1.Key":    "Env",
+				"TagSpecification.1.Tag.1.Value":  "req",
+			},
+			wantTags:       map[string]string{"Env": "req"},
+			wantAbsentTags: []string{"Team"},
+		},
+		{
+			name:          "the template fills absent tags",
+			templateData:  ltTagParams([2]string{"Env", "tmpl"}),
+			requestParams: map[string]string{},
+			wantTags:      map[string]string{"Env": "tmpl"},
+		},
+		{
+			name:           "neither names tags",
+			templateData:   map[string]string{},
+			requestParams:  map[string]string{},
+			wantAbsentTags: []string{"Env", "Team"},
+		},
+		{
+			name:          "request IamInstanceProfile wins",
+			templateData:  map[string]string{"LaunchTemplateData.IamInstanceProfile.Name": "p-tmpl"},
+			requestParams: map[string]string{"IamInstanceProfile.Name": "p-req"},
+			wantProfile:   reqARN,
+		},
+		{
+			name:          "the template fills an absent IamInstanceProfile",
+			templateData:  map[string]string{"LaunchTemplateData.IamInstanceProfile.Name": "p-tmpl"},
+			requestParams: map[string]string{},
+			wantProfile:   tmplARN,
+		},
+		{
+			name:          "neither names an IamInstanceProfile",
+			templateData:  map[string]string{},
+			requestParams: map[string]string{},
+			wantProfile:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newEC2TestServer(t)
+			data := map[string]string{"LaunchTemplateData.ImageId": "ami-0precedence0001"}
+			for k, v := range tt.templateData {
+				data[k] = v
+			}
+			ltID := createLaunchTemplate(t, ts, "tag-precedence", data)
+
+			params := map[string]string{"LaunchTemplate.LaunchTemplateId": ltID}
+			for k, v := range tt.requestParams {
+				params[k] = v
+			}
+			instID := runInstance(t, ts, params)
+
+			tags := instanceTagMap(t, ts, instID)
+			for key, want := range tt.wantTags {
+				assert.Equal(t, want, tags[key], "tag %q", key)
+			}
+			for _, key := range tt.wantAbsentTags {
+				assert.NotContains(t, tags, key, "tag %q must not be present", key)
+			}
+			assert.Equal(t, tt.wantProfile, instanceProfileARN(t, ts, instID))
+		})
+	}
+}
+
+// TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules is #471's own interaction
+// criterion: a template's tags must not become a second, unrestricted path for
+// reserved keys or for exceeding the 50-tag limit (#468, #469).
+//
+// The rejection happens at CreateLaunchTemplate, as it does on real EC2 — both
+// rules are on the key and the count, not on the operation.
+func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
+	t.Run("a reserved key is rejected at template creation", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		params := map[string]string{
+			"Action":                     "CreateLaunchTemplate",
+			"LaunchTemplateName":         "reserved-tag",
+			"LaunchTemplateData.ImageId": "ami-0reserved00001",
+		}
+		for k, v := range ltTagParams([2]string{"Name", "ok"}, [2]string{"aws:foo", "v"}) {
+			params[k] = v
+		}
+		status, code, message := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Equal(t, ec2ReservedTagMessage, message)
+
+		// Nothing is created, so the name is still free.
+		_ = createLaunchTemplate(t, ts, "reserved-tag", map[string]string{
+			"LaunchTemplateData.ImageId": "ami-0reserved00002",
+		})
+	})
+
+	t.Run("SourceVersion inheritance does not outrank the new version's tags", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		v1 := map[string]string{"LaunchTemplateData.ImageId": "ami-0overlay00000001"}
+		for k, v := range ltTagParams([2]string{"Env", "one"}) {
+			v1[k] = v
+		}
+		v1["LaunchTemplateData.IamInstanceProfile.Name"] = "p-one"
+		ltID := createLaunchTemplate(t, ts, "overlay", v1)
+
+		v2 := map[string]string{
+			"LaunchTemplateId": ltID,
+			"SourceVersion":    "1",
+			"LaunchTemplateData.IamInstanceProfile.Name": "p-two",
+		}
+		for k, v := range ltTagParams([2]string{"Env", "two"}) {
+			v2[k] = v
+		}
+		got := createLTVersion(t, ts, v2)
+
+		// The overlay direction is what this asserts: the request overwrites the
+		// inherited value rather than the inherited value winning. Both fields are
+		// separate overlay arms, so each can be dropped independently.
+		require.Len(t, got.Data.TagSpecifications, 1)
+		require.Len(t, got.Data.TagSpecifications[0].Tags, 1)
+		assert.Equal(t, "two", got.Data.TagSpecifications[0].Tags[0].Value)
+		assert.Equal(t, "p-two", got.Data.IamInstanceProfile.Name)
+
+		// And the launch takes the new version's values, not version 1's.
+		instID := runInstance(t, ts, map[string]string{
+			"LaunchTemplate.LaunchTemplateId": ltID,
+			"LaunchTemplate.Version":          "2",
+		})
+		assert.Equal(t, "two", instanceTagMap(t, ts, instID)["Env"])
+		assert.Contains(t, instanceProfileARN(t, ts, instID), "instance-profile/p-two")
+	})
+
+	t.Run("a new version carrying a reserved key is rejected", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		ltID := createLaunchTemplate(t, ts, "reserved-version", map[string]string{
+			"LaunchTemplateData.ImageId": "ami-0reserved00003",
+		})
+		params := map[string]string{
+			"Action":                     "CreateLaunchTemplateVersion",
+			"LaunchTemplateId":           ltID,
+			"LaunchTemplateData.ImageId": "ami-0reserved00004",
+		}
+		for k, v := range ltTagParams([2]string{"aws:foo", "v"}) {
+			params[k] = v
+		}
+		status, code, _ := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Equal(t, int64(1), describeLT(t, ts, ltID).LatestVersionNum,
+			"the rejected version must not have been appended")
+	})
+
+	t.Run("more than the tag limit is rejected at template creation", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		tags := make([][2]string, 0, ec2TagLimit+1)
+		for i := 1; i <= ec2TagLimit+1; i++ {
+			tags = append(tags, [2]string{fmt.Sprintf("key%d", i), "v"})
+		}
+		params := map[string]string{
+			"Action":                     "CreateLaunchTemplate",
+			"LaunchTemplateName":         "too-many-tags",
+			"LaunchTemplateData.ImageId": "ami-0toomany000001",
+		}
+		for k, v := range ltTagParams(tags...) {
+			params[k] = v
+		}
+		status, code, message := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "TagLimitExceeded", code)
+		assert.Equal(t, ec2TagLimitMessage, message)
+	})
+
+	t.Run("exactly the tag limit launches", func(t *testing.T) {
+		ts := newEC2TestServer(t)
+		tags := make([][2]string, 0, ec2TagLimit)
+		for i := 1; i <= ec2TagLimit; i++ {
+			tags = append(tags, [2]string{fmt.Sprintf("key%d", i), "v"})
+		}
+		data := map[string]string{"LaunchTemplateData.ImageId": "ami-0atlimit0000001"}
+		for k, v := range ltTagParams(tags...) {
+			data[k] = v
+		}
+		ltID := createLaunchTemplate(t, ts, "at-limit", data)
+		instID := runInstance(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": ltID})
+		assert.Len(t, instanceTagMap(t, ts, instID), ec2TagLimit)
+	})
+}
+
+// storeTemplateWithTags writes a launch template straight into state with the given
+// instance-scoped tags and returns a server reading it.
+//
+// Written by hand rather than created through the API, because CreateLaunchTemplate
+// can no longer produce these templates — that is exactly the point. A template
+// stored before the tag checks existed, or one arriving from a replayed event log,
+// can still carry a violation, and the launch is where it would otherwise be applied.
+func storeTemplateWithTags(t *testing.T, name, ltID string, tags []map[string]string) *httptest.Server {
+	t.Helper()
+	registry := emulator.NewPluginRegistry()
+	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
+	state := emulator.NewMemoryStateManager()
+	tc := emulator.NewTimeController(time.Now())
+	logger := emulator.NewDefaultLogger(0, false)
+
+	p := &emulator.EC2Plugin{}
+	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{ //nolint:contextcheck
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(p)
+	ts := httptest.NewServer(emulator.NewServer(*emulator.DefaultConfig(), registry, store, state, tc, logger))
+	t.Cleanup(ts.Close)
+
+	const acct, region = "000000000000", "us-east-1"
+	raw, err := json.Marshal(map[string]any{
+		"launchTemplateId":     ltID,
+		"launchTemplateName":   name,
+		"defaultVersionNumber": 1,
+		"latestVersionNumber":  1,
+		"createdBy":            acct,
+		"createTime":           "2026-01-01T00:00:00Z",
+		"latestData": map[string]any{
+			"imageId":           "ami-0stored00000001",
+			"tagSpecifications": tags,
+		},
+		"accountID": acct,
+		"region":    region,
+	})
+	require.NoError(t, err)
+	ctx := t.Context()
+	require.NoError(t, state.Put(ctx, "ec2", "lt:"+acct+"/"+region+"/"+ltID, raw))
+	require.NoError(t, state.Put(ctx, "ec2", "lt_by_name:"+acct+"/"+region+"/"+name, []byte(ltID)))
+	return ts
+}
+
+// TestEC2_LaunchTemplate_StoredTagsAreCheckedAtLaunch is the other half of the
+// interaction. The creation-time checks cannot see a template that predates them, so
+// the launch checks again — both rules, not just the reserved-key one.
+func TestEC2_LaunchTemplate_StoredTagsAreCheckedAtLaunch(t *testing.T) {
+	tests := []struct {
+		name        string
+		ltID        string
+		tags        []map[string]string
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "a reserved key",
+			ltID:        "lt-0stored000000001",
+			tags:        []map[string]string{{"key": "aws:foo", "value": "v"}},
+			wantCode:    "InvalidParameterValue",
+			wantMessage: ec2ReservedTagMessage,
+		},
+		{
+			name:        "more than the tag limit",
+			ltID:        "lt-0stored000000002",
+			tags:        storedNumberedTags(ec2TagLimit + 1),
+			wantCode:    "TagLimitExceeded",
+			wantMessage: ec2TagLimitMessage,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := storeTemplateWithTags(t, "stored-"+tt.wantCode, tt.ltID, tt.tags)
+			status, code, message := ec2ErrorDetail(t, ts, map[string]string{
+				"Action":                          "RunInstances",
+				"MinCount":                        "1",
+				"MaxCount":                        "1",
+				"LaunchTemplate.LaunchTemplateId": tt.ltID,
+			})
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, tt.wantCode, code)
+			assert.Equal(t, tt.wantMessage, message)
+		})
+	}
+}
+
+// storedNumberedTags builds count distinct user tags in the stored JSON's shape.
+func storedNumberedTags(count int) []map[string]string {
+	tags := make([]map[string]string, 0, count)
+	for i := 1; i <= count; i++ {
+		tags = append(tags, map[string]string{"key": fmt.Sprintf("key%d", i), "value": "v"})
+	}
+	return tags
+}
+
+// TestEC2_Fleet_TemplateTagsReachFleetInstances pins that a fleet launched from a
+// tagging template gets the template's tags *and* substrate's fleet stamp.
+//
+// This is why the fallback tests for a non-reserved tag rather than for an empty
+// slice: by the time a fleet launch reaches the merge, aws:ec2:fleet-id has already
+// been appended, so a plain len(tags) == 0 would read the stamp as "the caller named
+// tags" and drop the template's — losing exactly the tags #471 exists to deliver, on
+// exactly the path #443 added.
+func TestEC2_Fleet_TemplateTagsReachFleetInstances(t *testing.T) {
+	ts := newEC2TestServer(t)
+	data := map[string]string{"LaunchTemplateData.ImageId": "ami-0fleettags00001"}
+	for k, v := range ltTagParams([2]string{"Env", "prod"}) {
+		data[k] = v
+	}
+	ltID := createLaunchTemplate(t, ts, "fleet-tags", data)
+
+	var fleet createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet",
+		"Type":   "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+	}, &fleet)
+
+	ids := fleet.instanceIDs()
+	require.Len(t, ids, 1)
+	tags := instanceTagMap(t, ts, ids[0])
+	assert.Equal(t, "prod", tags["Env"], "the template's tag must survive the fleet stamp")
+	assert.Equal(t, fleet.FleetID, tags[fleetIDTagKey], "the fleet stamp must survive the template's tags")
 }
 
 // TestEC2_LaunchTemplate_DescribeEchoesNetworking pins that the stored template
