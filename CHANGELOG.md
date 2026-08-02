@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.87.0] - 2026-08-02
+
 ### Fixed
 - **`DescribeInstanceTypes` now refuses an instance type it does not model** (#485).
   An unknown type was answered with HTTP 200 and an empty list, so a consumer
@@ -3929,7 +3931,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.86.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.87.0...HEAD
+[v0.87.0]: https://github.com/scttfrdmn/substrate/compare/v0.86.0...v0.87.0
 [v0.86.0]: https://github.com/scttfrdmn/substrate/compare/v0.85.0...v0.86.0
 [v0.85.0]: https://github.com/scttfrdmn/substrate/compare/v0.84.0...v0.85.0
 [v0.84.0]: https://github.com/scttfrdmn/substrate/compare/v0.83.0...v0.84.0
