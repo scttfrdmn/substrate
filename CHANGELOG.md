@@ -92,6 +92,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immediately, where real EC2 reports code `32` `shutting-down` first. That is
   pre-existing, unrelated to protection, and tracked separately.
 
+- **S3 now stores the ACL a write names, and `BlockPublicAcls` refuses the writes it
+  should** (#470). `PutObject` and `CreateBucket` read `x-amz-acl` not at all, so the
+  ACL `GetObjectAcl` and `GetBucketAcl` reported was never the one the write set — a
+  consumer asserting "my upload is publicly readable" saw the default owner-only ACL
+  with no signal the header had been discarded. An ACL expressed through the five
+  `x-amz-grant-*` headers was stored by **no** operation, `PutBucketAcl` and
+  `PutObjectAcl` included: the headers were parsed only to decide whether #458's
+  public-access check should refuse, so a non-public grant was silently dropped and a
+  public one was refused without ever being storable. Six operations now resolve and
+  store an ACL — `CreateBucket`, `PutObject`, `CopyObject`, `CreateMultipartUpload`,
+  `PutBucketAcl`, `PutObjectAcl` — and the canned-ACL table is modelled per resource
+  kind, so `log-delivery-write` grants the `LogDelivery` group on a bucket and nothing
+  on an object, per its "Applies to: Bucket".
+
+  **`authenticated-read` resolved to owner-only, which let a blocked bucket be walked
+  straight through.** `AuthenticatedUsers` is every AWS account, not every account in
+  yours, so an ACL granting it is public by Block Public Access's own definition — and
+  a canned ACL that resolved to no group grant was invisible to the check. It now
+  resolves to an `AuthenticatedUsers` `READ` grant and is refused where the two
+  `public-*` names are.
+
+  With an ACL to examine, `BlockPublicAcls` now enforces its other documented bullet:
+  "PUT Object calls fail if the request includes a public ACL". `PutObject`,
+  `CopyObject` and `CreateMultipartUpload` are refused with `403 AccessDenied`
+  **before anything is written**, so a refused upload stores no object, a refused copy
+  stores no destination object, a refused multipart create leaves no upload ID behind,
+  and a refused overwrite leaves the object already at the key untouched — body and
+  ACL both. A copy is judged against the **destination** bucket's configuration, since
+  reading the source's would let a public ACL be laundered into a blocked bucket by
+  copying rather than uploading.
+
+  A write replaces the whole ACL rather than part of it, per "You cannot use
+  `PutObject` to only update a single piece of metadata for an existing object. You
+  must put the entire object with updated metadata". So an overwrite naming no ACL
+  clears one the key already had, whether it arrived through the original write or a
+  later `PutObjectAcl`; `CompleteMultipartUpload` and `CopyObject` replace it the same
+  way. A copy never inherits: "When you copy an object, the ACL metadata is not
+  preserved and is set to `private` by default." A multipart upload's ACL is fixed at
+  create and carried on the upload record, because Complete's request accepts no ACL
+  header — the same shape #492 established for encryption.
+
+  Fixed along the way: `bucket_acl:<bucket>` outlived `DeleteBucket`, so creating a
+  bucket with a public ACL, deleting it and creating it again reported the deleted
+  bucket's ACL on the new one. `CreateBucket` is now authoritative and clears it. The
+  six *other* bucket sub-resources still leak this way — three of them changing
+  behaviour rather than just a `GET` — and that is tracked separately.
+
+  **`CreateBucket` with a public ACL is still accepted, and that gap is now stated
+  rather than left ambiguous.** The setting's third bullet refuses such a call, but the
+  configuration that does so is the **account-level** one — a bucket-level
+  configuration cannot exist before the bucket does — and substrate models no
+  account-level Block Public Access, so gating this one operation would mean modeling a
+  control the emulator does not otherwise have. A test pins the acceptance so adding
+  account-level support later changes a failing test rather than passing silently.
+
+  An `emailAddress` grantee is skipped rather than refused with the `HTTP 405` S3 has
+  returned since October 1 2025: the 405 is Region-conditional and applies to the XML
+  body form too, so it is filed rather than guessed at. A canned name substrate does
+  not recognize resolves to owner-only rather than being refused, because the
+  per-operation Valid Values lists differ (four names on `CreateBucket`, seven on
+  `PutObject`) and no error code is documented for a name outside them.
+
 ### Added
 - **EC2 instances now carry and report an Availability Zone** (#489), which is what
   makes the zone-scoped rule above observable rather than merely internally

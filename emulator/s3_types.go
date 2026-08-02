@@ -188,6 +188,18 @@ type S3MultipartUpload struct {
 	// the object CompleteMultipartUpload assembles. Empty means STANDARD.
 	StorageClass string `json:"storage_class,omitempty"`
 
+	// ACL is the access control list the x-amz-acl or x-amz-grant-* headers named at
+	// upload creation, applied to the object CompleteMultipartUpload assembles. Nil
+	// when the create named none, which is what makes the assembled object report the
+	// default owner-only ACL rather than a stored copy of it.
+	//
+	// Create is the only place an ACL can be supplied — Complete's request accepts no
+	// ACL header, exactly as it accepts no encryption header — so a multipart object's
+	// ACL is fixed for the whole upload at creation. A pointer rather than a value
+	// because "named none" and "named private" are different observations here in the
+	// same way they are on [S3Plugin.s3StoreObjectACL].
+	ACL *S3AccessControlList `json:"acl,omitempty"`
+
 	// ChecksumAlgorithm is the algorithm named in x-amz-checksum-algorithm at
 	// upload creation, applied to every part and to the assembled object. Empty
 	// when the upload was created without one.
