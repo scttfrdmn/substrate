@@ -53,7 +53,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeSpotPriceHistory`'s `InstanceType.N` is a filter too, per its reference,
   so an unknown type there is an empty history.
 
+- **`TerminateInstances` now honours termination protection** (#489). #473 made
+  `disableApiTermination` observable but nothing acted on it, which is the sharpest
+  case of this tracker's recurring shape: a consumer's test asserting "my teardown
+  does not destroy the protected instance" passed against a code path that ignored
+  protection entirely, so the assertion *could not fail*. A protected instance is now
+  refused with `OperationNotPermitted`, HTTP 400, and stays `running`. Clearing
+  protection with `ModifyInstanceAttribute` and terminating again succeeds, which is
+  the sequence a teardown actually performs.
+
+  **A request naming both protected and unprotected instances fails per Availability
+  Zone, not per request and not per instance.** This is the behaviour a reader will
+  guess wrong in one of two directions, so it is quoted: "The specified instances that
+  are in the same Availability Zone as the protected instance are not terminated. The
+  specified instances that are in different Availability Zones, where no other
+  specified instances are protected, are successfully terminated." So an *unprotected*
+  instance sharing a zone with a protected one survives, while an unprotected instance
+  in another zone is terminated — and the request reports the error **after** those
+  terminations are persisted. Refusing the whole request and terminating every
+  unprotected instance are both wrong, in opposite directions.
+
+  `DeleteFleets --terminate-instances` routes through the same handler, so a protected
+  fleet instance survives its fleet's deletion while an unprotected sibling in another
+  zone does not, and `DeleteFleets` propagates `OperationNotPermitted` rather than
+  folding it into `unsuccessfulFleetDeletionSet` — `DeleteFleetError`'s documented
+  codes are exactly `fleetIdDoesNotExist`, `fleetIdMalformed`,
+  `fleetNotInDeletableState` and `unexpectedError`, so folding it in would mean
+  answering `unexpectedError` and losing the code a caller acts on.
+
+  Provenance is split. The **code** is documented: EC2's client-error table lists
+  `OperationNotPermitted` and names this case first among its examples, "you might be
+  trying to terminate an instance that has termination protection enabled". The
+  **message text is substrate's own** — #489 supplied a remembered console wording
+  that no capture corroborates, so per `docs/fidelity.md` it is not dressed up as
+  observed. Dispatch on the code.
+
+  Unchanged and still divergent: a terminated instance reports code `48` `terminated`
+  immediately, where real EC2 reports code `32` `shutting-down` first. That is
+  pre-existing, unrelated to protection, and tracked separately.
+
 ### Added
+- **EC2 instances now carry and report an Availability Zone** (#489), which is what
+  makes the zone-scoped rule above observable rather than merely internally
+  consistent. It resolves at launch from `Placement.AvailabilityZone`, else the named
+  subnet's zone, else the region's first zone (`<region>a`) — matching the reference's
+  "EC2 automatically selects an Availability Zone for you" — and a fleet pool's
+  `Overrides.N.AvailabilityZone` now reaches the launch, so a fleet spread across
+  zones no longer looks single-zone. `RunInstances` and `DescribeInstances` report it
+  as `<placement><availabilityZone>`, and `DescribeInstances` accepts an
+  `availability-zone` filter (that is the reference's spelling; the placement family's
+  filter names are listed individually, so there is no `placement.availability-zone`).
+  `AvailabilityZoneId` is not modelled. An instance replayed from an event log
+  predating the field reads back with an empty zone, grouping all such instances
+  together — the conservative reading, being what a single-zone account looks like.
+
+
 - **The instance-type catalog now covers whole families** (#485), widened from 8
   types to 57. The old catalog split families mid-way — `c5.xlarge` in and `c5.large`
   out, `m5.large` in and `m5.xlarge` out — which was incidental to #234's consumer and

@@ -311,9 +311,18 @@ func (p *EC2Plugin) runInstancesWithTags(
 		iamInstanceProfile = req.Params["IamInstanceProfile.Arn"]
 	}
 	userData := req.Params["UserData"]
-	// Recorded so DescribeInstanceAttribute can report it (#473). AWS documents the
-	// default as false, so an absent parameter and an explicit "false" agree.
+	// Recorded so DescribeInstanceAttribute can report it (#473) and so
+	// TerminateInstances can refuse (#489). AWS documents the default as false, so
+	// an absent parameter and an explicit "false" agree.
 	disableAPITermination := strings.EqualFold(req.Params["DisableApiTermination"], "true")
+	// Placement.AvailabilityZone is optional; the reference says EC2 selects a zone
+	// when neither it nor AvailabilityZoneId is given. Substrate resolves an absent
+	// value from the subnet below, which is where a real launch's zone comes from
+	// too, and only falls back to the region's first zone when there is no subnet.
+	// AvailabilityZoneId is not modeled: substrate has no per-account zone-ID
+	// mapping to resolve it through, and inventing one would be an observation
+	// nothing backs.
+	placementAZ := req.Params["Placement.AvailabilityZone"]
 
 	subnetID := req.Params["SubnetId"]
 	sgID := req.Params["SecurityGroupId.1"]
@@ -538,6 +547,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 			Tags:               tags,
 
 			DisableAPITermination: disableAPITermination,
+			AvailabilityZone:      placementAZ,
 		}
 
 		// Look up VPCID from subnet and decide whether to assign a public IP.
@@ -546,6 +556,13 @@ func (p *EC2Plugin) runInstancesWithTags(
 			var subnet EC2Subnet
 			if json.Unmarshal(subnetData, &subnet) == nil {
 				inst.VPCID = subnet.VPCID
+				// A launch that named no zone lands in the subnet's, which is how a
+				// real launch resolves it. An explicit Placement.AvailabilityZone
+				// wins, because that is the caller's stated intent even where it
+				// disagrees with the subnet.
+				if inst.AvailabilityZone == "" {
+					inst.AvailabilityZone = subnet.AvailabilityZone
+				}
 				// Always set private DNS name.
 				inst.PrivateDNSName = ec2PrivateDNSName(inst.PrivateIPAddress, reqCtx.Region)
 				// Assign public IP for default subnets, subnets with
@@ -556,6 +573,13 @@ func (p *EC2Plugin) runInstancesWithTags(
 					inst.PublicDNSName = ec2PublicDNSName(inst.PublicIPAddress, reqCtx.Region)
 				}
 			}
+		}
+		// A launch naming neither a zone nor a resolvable subnet still runs
+		// somewhere. Default to the region's first zone, matching what CreateSubnet
+		// does with an absent AvailabilityZone, so every instance carries a zone and
+		// #489's grouping has something to group by.
+		if inst.AvailabilityZone == "" {
+			inst.AvailabilityZone = reqCtx.Region + "a"
 		}
 
 		data, err := json.Marshal(inst)
@@ -621,18 +645,25 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		Key   string `xml:"key"`
 		Value string `xml:"value"`
 	}
+	// See [EC2Plugin.describeInstances]'s placement item: RunInstances reports the
+	// zone too, so a caller launching into two zones can read back which is which
+	// without a follow-up describe.
+	type placementItem struct {
+		AvailabilityZone string `xml:"availabilityZone"`
+	}
 	type ec2InstanceItem struct {
-		InstanceID       string `xml:"instanceId"`
-		ImageID          string `xml:"imageId"`
-		InstanceType     string `xml:"instanceType"`
-		LaunchTime       string `xml:"launchTime"`
-		PrivateIPAddress string `xml:"privateIpAddress"`
-		PublicIPAddress  string `xml:"publicIpAddress,omitempty"`
-		PublicDNSName    string `xml:"dnsName,omitempty"`
-		PrivateDNSName   string `xml:"privateDnsName,omitempty"`
-		SubnetID         string `xml:"subnetId"`
-		VpcID            string `xml:"vpcId"`
-		KeyName          string `xml:"keyName,omitempty"`
+		InstanceID       string        `xml:"instanceId"`
+		ImageID          string        `xml:"imageId"`
+		InstanceType     string        `xml:"instanceType"`
+		LaunchTime       string        `xml:"launchTime"`
+		PrivateIPAddress string        `xml:"privateIpAddress"`
+		PublicIPAddress  string        `xml:"publicIpAddress,omitempty"`
+		PublicDNSName    string        `xml:"dnsName,omitempty"`
+		PrivateDNSName   string        `xml:"privateDnsName,omitempty"`
+		SubnetID         string        `xml:"subnetId"`
+		VpcID            string        `xml:"vpcId"`
+		KeyName          string        `xml:"keyName,omitempty"`
+		Placement        placementItem `xml:"placement"`
 		State            struct {
 			Code int    `xml:"code"`
 			Name string `xml:"name"`
@@ -666,6 +697,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
 			KeyName:          inst.KeyName,
+			Placement:        placementItem{AvailabilityZone: inst.AvailabilityZone},
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
@@ -724,6 +756,11 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 		return containsStr(values, inst.SubnetID)
 	case "key-name":
 		return containsStr(values, inst.KeyName)
+	case "availability-zone":
+		// The reference names this filter "availability-zone", not
+		// "placement.availability-zone" — the placement family's filters are
+		// spelled out individually in DescribeInstances' filter list.
+		return containsStr(values, inst.AvailabilityZone)
 	case "tag-key":
 		// Instance has a tag with any of the requested keys (any value).
 		for _, t := range inst.Tags {
@@ -762,6 +799,12 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		ARN string `xml:"arn"`
 		ID  string `xml:"id"`
 	}
+	// placementItem is the instance's placement structure. Only availabilityZone is
+	// emitted: it is the one member substrate records, and it must be readable for a
+	// caller to reason about TerminateInstances' zone-scoped protection rule (#489).
+	type placementItem struct {
+		AvailabilityZone string `xml:"availabilityZone"`
+	}
 	type ec2InstanceItem struct {
 		InstanceID         string          `xml:"instanceId"`
 		ImageID            string          `xml:"imageId"`
@@ -776,6 +819,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		KeyName            string          `xml:"keyName,omitempty"`
 		IamInstanceProfile *iamProfileItem `xml:"iamInstanceProfile,omitempty"`
 		State              ec2StateItem    `xml:"instanceState"`
+		Placement          placementItem   `xml:"placement"`
 		Groups             []ec2GroupItem  `xml:"groupSet>item"`
 		Tags               []tagItem       `xml:"tagSet>item"`
 	}
@@ -823,6 +867,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			SubnetID:         inst.SubnetID,
 			VpcID:            inst.VPCID,
 			KeyName:          inst.KeyName,
+			Placement:        placementItem{AvailabilityZone: inst.AvailabilityZone},
 		}
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
@@ -880,6 +925,14 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 
+	// Pass 1: resolve every named instance before terminating any. A bad ID fails
+	// the whole request without writing state, which is what the reference means by
+	// "If you specify multiple instances and the request fails (for example,
+	// because of a single incorrect instance ID), none of the instances are
+	// terminated." Termination protection is the other pre-flight, and it needs the
+	// full set in hand because its scope is the Availability Zone (#489).
+	instances := make([]EC2Instance, 0, len(ids))
+	keys := make([]string, 0, len(ids))
 	for _, id := range ids {
 		key := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
 		data, err := p.state.Get(context.Background(), ec2Namespace, key)
@@ -893,18 +946,45 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 		if err := json.Unmarshal(data, &inst); err != nil {
 			return nil, fmt.Errorf("ec2 terminateInstances unmarshal: %w", err)
 		}
+		instances = append(instances, inst)
+		keys = append(keys, key)
+	}
+
+	// Pass 2: terminate every instance in a zone that holds no protected instance,
+	// then report the failure if any zone was blocked. The terminations persist —
+	// the request "reports failure" while the unaffected zones still went through —
+	// so the ordering here is the behavior, not an implementation detail.
+	blocked := ec2TerminationProtectionBlocked(instances)
+	for i, inst := range instances {
+		if _, azBlocked := blocked[inst.AvailabilityZone]; azBlocked {
+			continue
+		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 48, Name: "terminated"}
 		inst.TerminatedTime = p.tc.Now().UTC().Format(time.RFC3339)
-		newData, _ := json.Marshal(inst)
-		_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+		newData, err := json.Marshal(inst)
+		if err != nil {
+			return nil, fmt.Errorf("ec2 terminateInstances marshal: %w", err)
+		}
+		if err := p.state.Put(context.Background(), ec2Namespace, keys[i], newData); err != nil {
+			return nil, fmt.Errorf("ec2 terminateInstances state.Put: %w", err)
+		}
 
-		sc := stateChange{InstanceID: id}
+		sc := stateChange{InstanceID: inst.InstanceID}
 		sc.CurrentState.Code = inst.State.Code
 		sc.CurrentState.Name = inst.State.Name
 		sc.PreviousState.Code = prev.Code
 		sc.PreviousState.Name = prev.Name
 		resp.Items = append(resp.Items, sc)
+	}
+	if len(blocked) > 0 {
+		// Report the protected instance that appeared first in request order, so the
+		// message is stable across replays rather than depending on map iteration.
+		for _, inst := range instances {
+			if blockingID, azBlocked := blocked[inst.AvailabilityZone]; azBlocked {
+				return nil, ec2TerminationProtectedError(blockingID)
+			}
+		}
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }

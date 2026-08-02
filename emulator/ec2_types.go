@@ -99,10 +99,19 @@ type EC2Instance struct {
 	// AWS documents the default as false, which is the zero value, so an instance
 	// unmarshalled from an event log predating this field reads back correctly.
 	//
-	// Substrate records and reports it but does not act on it: TerminateInstances
-	// still terminates a protected instance. Real EC2 refuses with
-	// OperationNotPermitted, which is tracked separately.
+	// TerminateInstances honors it (#489), refusing with OperationNotPermitted.
+	// Because the refusal is scoped to the Availability Zone rather than to the
+	// request or the instance, it is read together with AvailabilityZone; see
+	// [ec2TerminationProtectionBlocked].
 	DisableAPITermination bool `json:"disable_api_termination,omitempty"`
+
+	// AvailabilityZone is the zone the instance runs in, taken from
+	// Placement.AvailabilityZone or from the subnet's zone when the launch named
+	// neither. An instance unmarshalled from an event log predating this field
+	// reads back as the empty string, which groups all such instances into one
+	// zone — the conservative reading, since it is what a single-zone account
+	// looks like.
+	AvailabilityZone string `json:"availability_zone,omitempty"`
 }
 
 // EC2KeyPair represents an EC2 key pair (public/private key used for SSH access).
