@@ -241,6 +241,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one.
 
 ### Changed
+- `docs/fidelity.md` now states substrate's position on **error message text**, which
+  the page previously left unsaid. It committed to verifying "request/response shapes,
+  error codes, pagination, and IAM condition keys" and never mentioned messages — no
+  false claim, but a reader could reasonably have assumed more than substrate delivers.
+  Codes and HTTP statuses are verified and are the contract SDKs dispatch on; message
+  text is faithful only where a capture or a parity-tested reimplementation supplies it,
+  and carries its source in the code comment where so. Elsewhere it is substrate's own
+  and reads as such. The page now also says why the remainder is closed incrementally
+  rather than swept: the reference describes error *conditions* rather than quoting the
+  strings AWS sends, so a blind rewrite would replace recognisably substrate-shaped text
+  with invented text that reads as authoritative. Tracked in #487, which records the
+  measured counts.
 - `CLAUDE.md`'s release procedure now includes publishing the GitHub Release. The
   step was absent, so v0.84.0 and v0.85.0 were tagged and their tags pushed with no
   Release entry behind them — the tag alone does not create one, and v0.83.0 was

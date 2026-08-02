@@ -13,6 +13,32 @@ condition keys — not against built-in assumptions. When Substrate's behaviour
 intentionally differs from real AWS, that divergence is documented alongside the
 behaviour and its rationale.
 
+### Error codes are verified; message text mostly is not
+
+One part of that list deserves to be stated precisely, because the difference matters
+to what you can assert on. **Error codes and HTTP statuses are verified against the
+reference.** They are the contract: botocore and `aws-sdk-go-v2` dispatch on
+`Error.Code` and never on message text, so a caller's error branch turns on the part
+Substrate researches.
+
+**Message text is faithful only where a source supplies it** — a captured real-AWS
+response, or a reimplementation that snapshot-tests against real AWS. Where that
+exists, the wording is reproduced verbatim, right down to typos and stray whitespace,
+and its source is named in the code comment beside the literal. Where it does not, the
+text is Substrate's own and reads as such, and the comment says so.
+
+That distinction cannot be closed by reading the documentation: the reference's Errors
+sections describe error *conditions*, not the strings AWS sends. Rewriting the
+remainder into AWS-*looking* text from inference would replace recognisably
+Substrate-shaped strings with invented ones that read as authoritative — and you could
+no longer tell which messages had actually been researched. So the gap is closed
+incrementally, per service, each message with its own corroborating source
+([#487](https://github.com/scttfrdmn/substrate/issues/487)).
+
+The practical consequence: **assert on `Error.Code` and the HTTP status, not on message
+text.** That is also the advice for code that will run against real AWS, where message
+wording is not a stable contract either.
+
 The guiding question for any addition is the scope test:
 
 > *Is this observable through an API call, or is it resource-internal?*
