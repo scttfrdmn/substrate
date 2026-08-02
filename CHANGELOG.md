@@ -102,6 +102,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this rather than implying a doc citation.
 
 ### Fixed
+- SQS: message attributes are now stored on send and returned on receive (#461). #454
+  parsed them in order to measure them against `MaximumMessageSize` and then discarded
+  them: `SQSMessage.MessageAttributes` existed and was never populated, and
+  `ReceiveMessage` had no attribute handling at all. A consumer routing on an attribute
+  — a `messageType` discriminator, a trace ID, a tenant key — saw every message fall to
+  its default branch, with no error to explain why, because the attribute was simply
+  not there. `SendMessage`, `SendMessageBatch` and `ReceiveMessage` all carry them now,
+  under both the query and JSON protocols.
+
+  **Attributes are returned only for the names a receive asks for.** Returning them
+  unconditionally is the trap here, and it fails in the permissive direction: a consumer
+  whose production caller never sets `MessageAttributeNames` would pass against
+  substrate and then read nothing from real SQS. All the documented selector forms work
+  — `All` and `.*` for everything, a bare name for one, and the `prefix.*` form the
+  guide documents as "all message attributes starting with a prefix, for example
+  `bar.*`". A named attribute the message does not carry is absent rather than an error,
+  matching AWS.
+
+  `MD5OfMessageAttributes` is returned on `SendMessage`, on each `SendMessageBatch`
+  result entry, and on each received message, computed with the algorithm published in
+  the developer guide under "Calculating the MD5 message digest for message attributes".
+  Two details of it are load-bearing and a reimplementation gets both wrong by default:
+  **a binary value is hashed raw, not base64** — the same raw-versus-encoded distinction
+  #454 already drew for measurement, except here there is a hash to settle it, since
+  base64 yields `5ff413c9dc7bd18abea88ca05643f902` where AWS yields
+  `049075255ebc53fb95f7f9f3cedf3c50` for the same input — and **a custom data-type
+  suffix is hashed in full**, so `Number.java.lang.Long` is the whole string rather than
+  its `Number` base type.
+
+  The implementation is pinned against **three real-AWS digests**, which is what makes
+  #461's "verified against a known-good digest" criterion satisfiable with no network
+  access: the vectors ship in the test file with their provenance, and each fails on a
+  different mistake — the minimal single-attribute case, the custom-suffix case, and the
+  raw-binary case.
+
+  The field is **omitted entirely** for a message with no attributes rather than
+  reported as the MD5 of zero bytes, matching observed behaviour. A digest of nothing is
+  a value a caller could compare against and "successfully" verify, which is worse than
+  no value at all.
+
+  On a receive the digest covers **what is being returned**, not what was sent, so a
+  request naming a subset gets that subset's digest — the digest exists to let a caller
+  checksum the attributes in hand, and replaying the send-time value would fail that
+  check for a request that legitimately succeeded. A deduplicated FIFO send likewise
+  reports the digest of that request's attributes rather than the stored original's.
+  Attributes are emitted in name order; real SQS promises no order, but a Go map
+  iterates randomly, and two identical requests must not produce different responses.
+
+  Not enforced, and deliberately so for now: the documented maximum of 10 attributes per
+  message, and the attribute-name character rules (no `AWS.`/`Amazon.` prefix, no
+  leading, trailing or sequential periods). Both are newly reachable and tracked
+  separately; a 10-attribute message is accepted, pinned as the boundary it is.
 - EC2: `RunInstances` now merges a named launch template with the request field by
   field, instead of consulting the template only when the request omitted `ImageId`
   (#453). The entire template block was gated on the AMI being absent, so a request

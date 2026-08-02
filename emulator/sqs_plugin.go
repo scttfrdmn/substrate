@@ -841,13 +841,26 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		urlKey := sqsURLKey(queueURL)
 		if existing, dupMsgID := p.checkFIFODedup(context.Background(), urlKey, dedupID, p.tc.Now()); existing {
 			// Return success with original message ID (idempotent).
+			//
+			// The attribute digest is computed over *this* request's attributes rather
+			// than the deduplicated original's, because the digest is a checksum of
+			// what the caller sent — its purpose is letting a caller verify the
+			// service received the attributes intact. Reporting the earlier message's
+			// digest would fail that check for a caller whose retry is byte-identical
+			// only in its deduplication ID.
 			md5Body := computeMD5(msgBody)
+			md5Attrs := sqsMD5OfMessageAttributes(msgAttrs)
 			if sqsIsJSONProtocol(req) {
-				return sqsJSONResponse(http.StatusOK, map[string]string{"MessageId": dupMsgID, "MD5OfMessageBody": md5Body})
+				out := map[string]string{"MessageId": dupMsgID, "MD5OfMessageBody": md5Body}
+				if md5Attrs != "" {
+					out["MD5OfMessageAttributes"] = md5Attrs
+				}
+				return sqsJSONResponse(http.StatusOK, out)
 			}
 			type result struct {
-				MD5OfMessageBody string `xml:"MD5OfMessageBody"`
-				MessageID        string `xml:"MessageId"`
+				MD5OfMessageBody       string `xml:"MD5OfMessageBody"`
+				MD5OfMessageAttributes string `xml:"MD5OfMessageAttributes,omitempty"`
+				MessageID              string `xml:"MessageId"`
 			}
 			type response struct {
 				XMLName           xml.Name         `xml:"SendMessageResponse"`
@@ -856,9 +869,13 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 				ResponseMetadata  responseMetadata `xml:"ResponseMetadata"`
 			}
 			return sqsXMLResponse(http.StatusOK, response{
-				Xmlns:             "http://queue.amazonaws.com/doc/2012-11-05/",
-				SendMessageResult: result{MD5OfMessageBody: md5Body, MessageID: dupMsgID},
-				ResponseMetadata:  responseMetadata{RequestID: ctx.RequestID},
+				Xmlns: "http://queue.amazonaws.com/doc/2012-11-05/",
+				SendMessageResult: result{
+					MD5OfMessageBody:       md5Body,
+					MD5OfMessageAttributes: md5Attrs,
+					MessageID:              dupMsgID,
+				},
+				ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
 			})
 		}
 		// Record this deduplication ID.
@@ -866,6 +883,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		p.recordFIFODedup(context.Background(), urlKey, dedupID, msgID, p.tc.Now())
 
 		md5Body := computeMD5(msgBody)
+		md5Attrs := sqsMD5OfMessageAttributes(msgAttrs)
 		now := p.tc.Now()
 		msg := &SQSMessage{
 			MessageID:     msgID,
@@ -876,11 +894,12 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 				"SenderId":      ctx.AccountID,
 				"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
 			},
-			SentTimestamp:  now.UnixMilli(),
-			DelayUntil:     now.Add(time.Duration(delay) * time.Second),
-			VisibleAfter:   time.Time{},
-			ReceiveCount:   0,
-			MessageGroupID: msgGroupID,
+			MessageAttributes: msgAttrs,
+			SentTimestamp:     now.UnixMilli(),
+			DelayUntil:        now.Add(time.Duration(delay) * time.Second),
+			VisibleAfter:      time.Time{},
+			ReceiveCount:      0,
+			MessageGroupID:    msgGroupID,
 		}
 		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
 			return nil, fmt.Errorf("sqs sendMessage saveMsg: %w", saveErr)
@@ -894,11 +913,16 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			return nil, fmt.Errorf("sqs sendMessage saveMsgIDs: %w", saveErr)
 		}
 		if sqsIsJSONProtocol(req) {
-			return sqsJSONResponse(http.StatusOK, map[string]string{"MessageId": msgID, "MD5OfMessageBody": md5Body})
+			out := map[string]string{"MessageId": msgID, "MD5OfMessageBody": md5Body}
+			if md5Attrs != "" {
+				out["MD5OfMessageAttributes"] = md5Attrs
+			}
+			return sqsJSONResponse(http.StatusOK, out)
 		}
 		type result struct {
-			MD5OfMessageBody string `xml:"MD5OfMessageBody"`
-			MessageID        string `xml:"MessageId"`
+			MD5OfMessageBody       string `xml:"MD5OfMessageBody"`
+			MD5OfMessageAttributes string `xml:"MD5OfMessageAttributes,omitempty"`
+			MessageID              string `xml:"MessageId"`
 		}
 		type response struct {
 			XMLName           xml.Name         `xml:"SendMessageResponse"`
@@ -907,14 +931,19 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			ResponseMetadata  responseMetadata `xml:"ResponseMetadata"`
 		}
 		return sqsXMLResponse(http.StatusOK, response{
-			Xmlns:             "http://queue.amazonaws.com/doc/2012-11-05/",
-			SendMessageResult: result{MD5OfMessageBody: md5Body, MessageID: msgID},
-			ResponseMetadata:  responseMetadata{RequestID: ctx.RequestID},
+			Xmlns: "http://queue.amazonaws.com/doc/2012-11-05/",
+			SendMessageResult: result{
+				MD5OfMessageBody:       md5Body,
+				MD5OfMessageAttributes: md5Attrs,
+				MessageID:              msgID,
+			},
+			ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
 		})
 	}
 
 	msgID := generateSQSMessageID()
 	md5Body := computeMD5(msgBody)
+	md5Attrs := sqsMD5OfMessageAttributes(msgAttrs)
 	now := p.tc.Now()
 
 	msg := &SQSMessage{
@@ -926,10 +955,11 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			"SenderId":      ctx.AccountID,
 			"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
 		},
-		SentTimestamp: now.UnixMilli(),
-		DelayUntil:    now.Add(time.Duration(delay) * time.Second),
-		VisibleAfter:  time.Time{},
-		ReceiveCount:  0,
+		MessageAttributes: msgAttrs,
+		SentTimestamp:     now.UnixMilli(),
+		DelayUntil:        now.Add(time.Duration(delay) * time.Second),
+		VisibleAfter:      time.Time{},
+		ReceiveCount:      0,
 	}
 
 	urlKey := sqsURLKey(queueURL)
@@ -947,11 +977,16 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	if sqsIsJSONProtocol(req) {
-		return sqsJSONResponse(http.StatusOK, map[string]string{"MessageId": msgID, "MD5OfMessageBody": md5Body})
+		out := map[string]string{"MessageId": msgID, "MD5OfMessageBody": md5Body}
+		if md5Attrs != "" {
+			out["MD5OfMessageAttributes"] = md5Attrs
+		}
+		return sqsJSONResponse(http.StatusOK, out)
 	}
 	type result struct {
-		MD5OfMessageBody string `xml:"MD5OfMessageBody"`
-		MessageID        string `xml:"MessageId"`
+		MD5OfMessageBody       string `xml:"MD5OfMessageBody"`
+		MD5OfMessageAttributes string `xml:"MD5OfMessageAttributes,omitempty"`
+		MessageID              string `xml:"MessageId"`
 	}
 	type response struct {
 		XMLName           xml.Name         `xml:"SendMessageResponse"`
@@ -962,8 +997,9 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	return sqsXMLResponse(http.StatusOK, response{
 		Xmlns: "http://queue.amazonaws.com/doc/2012-11-05/",
 		SendMessageResult: result{
-			MD5OfMessageBody: md5Body,
-			MessageID:        msgID,
+			MD5OfMessageBody:       md5Body,
+			MD5OfMessageAttributes: md5Attrs,
+			MessageID:              msgID,
 		},
 		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
 	})
@@ -983,14 +1019,16 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	now := p.tc.Now()
 
 	type successEntryXML struct {
-		ID               string `xml:"Id"`
-		MessageID        string `xml:"MessageId"`
-		MD5OfMessageBody string `xml:"MD5OfMessageBody"`
+		ID                     string `xml:"Id"`
+		MessageID              string `xml:"MessageId"`
+		MD5OfMessageBody       string `xml:"MD5OfMessageBody"`
+		MD5OfMessageAttributes string `xml:"MD5OfMessageAttributes,omitempty"`
 	}
 	type successEntryJSON struct {
-		ID               string `json:"Id"`
-		MessageID        string `json:"MessageId"`
-		MD5OfMessageBody string `json:"MD5OfMessageBody"`
+		ID                     string `json:"Id"`
+		MessageID              string `json:"MessageId"`
+		MD5OfMessageBody       string `json:"MD5OfMessageBody"`
+		MD5OfMessageAttributes string `json:"MD5OfMessageAttributes,omitempty"`
 	}
 
 	var successesXML []successEntryXML
@@ -1031,10 +1069,11 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 					"SenderId":      ctx.AccountID,
 					"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
 				},
-				SentTimestamp: now.UnixMilli(),
-				DelayUntil:    now.Add(time.Duration(entry.DelaySeconds) * time.Second),
-				VisibleAfter:  time.Time{},
-				ReceiveCount:  0,
+				MessageAttributes: entry.MessageAttributes,
+				SentTimestamp:     now.UnixMilli(),
+				DelayUntil:        now.Add(time.Duration(entry.DelaySeconds) * time.Second),
+				VisibleAfter:      time.Time{},
+				ReceiveCount:      0,
 			}
 			if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
 				return nil, fmt.Errorf("sqs sendMessageBatch saveMsg: %w", saveErr)
@@ -1047,7 +1086,12 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			if saveErr := p.saveMsgIDs(context.Background(), urlKey, ids); saveErr != nil {
 				return nil, fmt.Errorf("sqs sendMessageBatch saveMsgIDs: %w", saveErr)
 			}
-			successesJSON = append(successesJSON, successEntryJSON{ID: entry.ID, MessageID: msgID, MD5OfMessageBody: md5Body})
+			successesJSON = append(successesJSON, successEntryJSON{
+				ID:                     entry.ID,
+				MessageID:              msgID,
+				MD5OfMessageBody:       md5Body,
+				MD5OfMessageAttributes: sqsMD5OfMessageAttributes(entry.MessageAttributes),
+			})
 		}
 		if successesJSON == nil {
 			successesJSON = make([]successEntryJSON, 0)
@@ -1078,13 +1122,15 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	for i := 1; ; i++ {
-		entryID := req.Params[fmt.Sprintf("SendMessageBatchRequestEntry.%d.Id", i)]
+		entryPrefix := fmt.Sprintf("SendMessageBatchRequestEntry.%d.", i)
+		entryID := req.Params[entryPrefix+"Id"]
 		if entryID == "" {
 			break
 		}
-		body := req.Params[fmt.Sprintf("SendMessageBatchRequestEntry.%d.MessageBody", i)]
-		delayStr := req.Params[fmt.Sprintf("SendMessageBatchRequestEntry.%d.DelaySeconds", i)]
+		body := req.Params[entryPrefix+"MessageBody"]
+		delayStr := req.Params[entryPrefix+"DelaySeconds"]
 		delay, _ := strconv.Atoi(delayStr)
+		entryAttrs := sqsQueryMessageAttributes(req.Params, entryPrefix)
 
 		msgID := generateSQSMessageID()
 		md5Body := computeMD5(body)
@@ -1098,10 +1144,11 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 				"SenderId":      ctx.AccountID,
 				"SentTimestamp": strconv.FormatInt(now.UnixMilli(), 10),
 			},
-			SentTimestamp: now.UnixMilli(),
-			DelayUntil:    now.Add(time.Duration(delay) * time.Second),
-			VisibleAfter:  time.Time{},
-			ReceiveCount:  0,
+			MessageAttributes: entryAttrs,
+			SentTimestamp:     now.UnixMilli(),
+			DelayUntil:        now.Add(time.Duration(delay) * time.Second),
+			VisibleAfter:      time.Time{},
+			ReceiveCount:      0,
 		}
 
 		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
@@ -1117,7 +1164,12 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			return nil, fmt.Errorf("sqs sendMessageBatch saveMsgIDs: %w", saveErr)
 		}
 
-		successesXML = append(successesXML, successEntryXML{ID: entryID, MessageID: msgID, MD5OfMessageBody: md5Body})
+		successesXML = append(successesXML, successEntryXML{
+			ID:                     entryID,
+			MessageID:              msgID,
+			MD5OfMessageBody:       md5Body,
+			MD5OfMessageAttributes: sqsMD5OfMessageAttributes(entryAttrs),
+		})
 	}
 
 	type result struct {
@@ -1204,19 +1256,30 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, err
 	}
 
+	// Attributes are returned only for the names the request asked for (#461).
+	// Volunteering them unconditionally would be its own infidelity: a consumer whose
+	// production caller never sets MessageAttributeNames would see substrate hand back
+	// attributes real SQS withholds, so the routing branch their test exercises is not
+	// the branch that runs against AWS.
+	requestedAttrNames := sqsRequestedAttributeNames(req)
+
 	type msgResultXML struct {
-		MessageID      string `xml:"MessageId"`
-		ReceiptHandle  string `xml:"ReceiptHandle"`
-		MD5OfBody      string `xml:"MD5OfBody"`
-		Body           string `xml:"Body"`
-		MessageGroupID string `xml:"MessageGroupId,omitempty"`
+		MessageID              string                   `xml:"MessageId"`
+		ReceiptHandle          string                   `xml:"ReceiptHandle"`
+		MD5OfBody              string                   `xml:"MD5OfBody"`
+		Body                   string                   `xml:"Body"`
+		MD5OfMessageAttributes string                   `xml:"MD5OfMessageAttributes,omitempty"`
+		MessageAttribute       []sqsMessageAttributeXML `xml:"MessageAttribute,omitempty"`
+		MessageGroupID         string                   `xml:"MessageGroupId,omitempty"`
 	}
 	type msgResultJSON struct {
-		MessageID      string `json:"MessageId"`
-		ReceiptHandle  string `json:"ReceiptHandle"`
-		MD5OfBody      string `json:"MD5OfBody"`
-		Body           string `json:"Body"`
-		MessageGroupID string `json:"MessageGroupId,omitempty"`
+		MessageID              string                         `json:"MessageId"`
+		ReceiptHandle          string                         `json:"ReceiptHandle"`
+		MD5OfBody              string                         `json:"MD5OfBody"`
+		Body                   string                         `json:"Body"`
+		MD5OfMessageAttributes string                         `json:"MD5OfMessageAttributes,omitempty"`
+		MessageAttributes      map[string]SQSMessageAttribute `json:"MessageAttributes,omitempty"`
+		MessageGroupID         string                         `json:"MessageGroupId,omitempty"`
 	}
 
 	messagesXML := make([]msgResultXML, 0)
@@ -1262,21 +1325,31 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			continue
 		}
 
+		// The digest covers what is being returned, not what was sent: a request
+		// naming a subset gets the digest of that subset, which is what lets a caller
+		// checksum the attributes actually in hand. Reusing the send-time digest would
+		// hand them a value their own recomputation could never match.
+		selectedAttrs := sqsSelectMessageAttributes(msg.MessageAttributes, requestedAttrNames)
+
 		if sqsIsJSONProtocol(req) {
 			messagesJSON = append(messagesJSON, msgResultJSON{
-				MessageID:      msg.MessageID,
-				ReceiptHandle:  newHandle,
-				MD5OfBody:      msg.MD5OfBody,
-				Body:           msg.Body,
-				MessageGroupID: msg.MessageGroupID,
+				MessageID:              msg.MessageID,
+				ReceiptHandle:          newHandle,
+				MD5OfBody:              msg.MD5OfBody,
+				Body:                   msg.Body,
+				MD5OfMessageAttributes: sqsMD5OfMessageAttributes(selectedAttrs),
+				MessageAttributes:      selectedAttrs,
+				MessageGroupID:         msg.MessageGroupID,
 			})
 		} else {
 			messagesXML = append(messagesXML, msgResultXML{
-				MessageID:      msg.MessageID,
-				ReceiptHandle:  newHandle,
-				MD5OfBody:      msg.MD5OfBody,
-				Body:           msg.Body,
-				MessageGroupID: msg.MessageGroupID,
+				MessageID:              msg.MessageID,
+				ReceiptHandle:          newHandle,
+				MD5OfBody:              msg.MD5OfBody,
+				Body:                   msg.Body,
+				MD5OfMessageAttributes: sqsMD5OfMessageAttributes(selectedAttrs),
+				MessageAttribute:       sqsMessageAttributesXML(selectedAttrs),
+				MessageGroupID:         msg.MessageGroupID,
 			})
 		}
 	}
