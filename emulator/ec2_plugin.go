@@ -241,7 +241,38 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // --- Instance operations ---
 
+// runInstances handles a caller's RunInstances request: it parses the request's
+// instance-scoped TagSpecification.N tags, rejects any reserved key among them, and
+// delegates to [EC2Plugin.runInstancesWithTags].
+//
+// The parse-and-check is split from the launch so that substrate's own internal
+// launches — the fleet path, which stamps [ec2FleetIDTagKey] — can supply a reserved
+// tag without going through this check, while a caller's request cannot. The
+// distinction is structural rather than a bypass flag: a request reaches only this
+// function, and extraTags is not addressable from a param map. #468 rules out a flag
+// explicitly, and rightly — an internal "skip validation" switch would make behavior
+// depend on state a consumer cannot observe, the opposite of the deterministic-replay
+// property this emulator exists for.
 func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	launchTags := ec2LaunchTagsForResource(req.Params, "instance")
+	if awsErr := ec2CheckReservedTagKeys(launchTags); awsErr != nil {
+		return nil, awsErr
+	}
+	return p.runInstancesWithTags(reqCtx, req, launchTags)
+}
+
+// runInstancesWithTags launches instances carrying tags, which the caller has already
+// parsed and, if they came from a request, checked.
+//
+// tags is the complete tag set for the new instances: [EC2Plugin.runInstances] passes
+// the request's checked TagSpecification.N tags, and the fleet path passes those plus
+// its own fleet-ID tag. See [EC2Plugin.runInstances] for why the check lives with the
+// parse rather than here.
+func (p *EC2Plugin) runInstancesWithTags(
+	reqCtx *RequestContext,
+	req *AWSRequest,
+	tags []EC2Tag,
+) (*AWSResponse, error) {
 	imageID := req.Params["ImageId"]
 	// The call-level instance type is kept verbatim, with no default applied yet: a
 	// launch template may supply one, and the default can only be resolved once the
@@ -444,28 +475,6 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
-	// Extract tags for instances from TagSpecification.N (ResourceType=instance).
-	var launchTags []EC2Tag
-	for n := 1; ; n++ {
-		rt := req.Params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
-		if rt == "" {
-			break
-		}
-		if rt != "instance" {
-			continue
-		}
-		for m := 1; ; m++ {
-			key := req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
-			if key == "" {
-				break
-			}
-			launchTags = append(launchTags, EC2Tag{
-				Key:   key,
-				Value: req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)],
-			})
-		}
-	}
-
 	reservationID := generateReservationID()
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	var instances []EC2Instance
@@ -486,7 +495,7 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			KeyName:            keyName,
 			IamInstanceProfile: iamInstanceProfile,
 			UserData:           userData,
-			Tags:               launchTags,
+			Tags:               tags,
 		}
 
 		// Look up VPCID from subnet and decide whether to assign a public IP.
@@ -2839,14 +2848,22 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "InstanceId and Name are required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Parse TagSpecifications (TagSpecification.1.Tag.N.Key / Value).
-	var tags []EC2Tag
-	for i := 1; ; i++ {
-		key := req.Params[fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)]
-		if key == "" {
-			break
-		}
-		tags = append(tags, EC2Tag{Key: key, Value: req.Params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i)]})
+	// CreateImage can tag the AMI, the snapshots it creates, or both: "To tag the AMI,
+	// the value for ResourceType must be image. To tag the snapshots […] the value for
+	// ResourceType must be snapshot. The same tag is applied to all of the snapshots
+	// that are created." Both are parsed through the shared parser, so ResourceType is
+	// honored rather than ignored — this path previously read TagSpecification.1's tags
+	// regardless of what resource they were scoped to, which put snapshot-scoped tags
+	// on the AMI (#468).
+	tags := ec2LaunchTagsForResource(req.Params, "image")
+	snapshotTags := ec2LaunchTagsForResource(req.Params, "snapshot")
+	// Checked before the snapshot and image are written, so a rejected request creates
+	// neither. See [ec2CheckReservedTagKeys] for the rollback rule this follows.
+	if awsErr := ec2CheckReservedTagKeys(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckReservedTagKeys(snapshotTags); awsErr != nil {
+		return nil, awsErr
 	}
 
 	// Materialize a backing EBS snapshot for the AMI's root device, so that
@@ -2859,6 +2876,7 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		State:       "completed",
 		StartTime:   p.tc.Now().UTC().Format(time.RFC3339),
 		Description: "Created by CreateImage for " + name,
+		Tags:        snapshotTags,
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}
@@ -3594,25 +3612,9 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		}
 	}
 
-	// Extract tags from TagSpecification.N.
-	for n := 1; ; n++ {
-		rt := req.Params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
-		if rt == "" {
-			break
-		}
-		if rt != "natgateway" {
-			continue
-		}
-		for m := 1; ; m++ {
-			key := req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Key", n, m)]
-			if key == "" {
-				break
-			}
-			gw.Tags = append(gw.Tags, EC2Tag{
-				Key:   key,
-				Value: req.Params[fmt.Sprintf("TagSpecification.%d.Tag.%d.Value", n, m)],
-			})
-		}
+	gw.Tags = ec2LaunchTagsForResource(req.Params, "natgateway")
+	if awsErr := ec2CheckReservedTagKeys(gw.Tags); awsErr != nil {
+		return nil, awsErr
 	}
 
 	data, marshalErr := json.Marshal(gw)
