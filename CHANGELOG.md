@@ -474,6 +474,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the outcome of every existing seeded run, so it is filed as #510 rather than changed
   inside a fix for something else.
 
+- **`ReceiveMessage` now warns when a stored message's attributes violate a current
+  rule, and still returns the message** (#491). v0.86.0 added SQS's message-attribute
+  count, name, type and `Number` value rules on send. A message written into state
+  before they existed — replayed from an event log recorded against an older substrate —
+  can still carry an illegal name, an eleventh attribute or a `Number` holding `"abc"`.
+  It is returned as stored, in full, and a `WARN` line names the queue, the message ID
+  and the violated rule.
+
+  **Returning it is the decision, not an omission.** Substrate's core property is that
+  replaying an event log reproduces the same observations, and the message was accepted
+  by the substrate that recorded it — so withholding or dropping it would make a recorded
+  run unreplayable, which is the property everything else rests on. A receive-time
+  rejection also has no AWS behaviour to imitate: real SQS never accepted the message, so
+  there is nothing to copy. The suite now fails if anyone adds one, which is what makes
+  this a recorded decision rather than an unfixed gap.
+
+  The warning covers the whole stored attribute set rather than the subset the request
+  named, because the violation is a property of state and a request naming no attributes
+  gets none back — checking only the selection would hide it from exactly the caller most
+  likely to be replaying an old log. It fires on every receive rather than once, since
+  remembering which messages had already warned would be per-process state a replay could
+  not reproduce. Send-time rejection is unchanged, so no new run can produce this state.
+  A replay-time report is the more principled home for the signal and is filed as #512;
+  it needs a surface in the replay machinery that does not exist, and the warning delivers
+  the operator-facing value now.
+
 ## [v0.86.0] - 2026-08-02
 
 ### Added

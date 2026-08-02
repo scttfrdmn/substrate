@@ -1530,9 +1530,30 @@ reimplementations. Neither moto nor LocalStack enforces the count at all, which 
 substrate accepting an eleventh attribute went unnoticed until message attributes became
 observable.
 
-The rules apply on send, not on receive. A message written into state before they existed
-— replayed from an older event log — is returned as stored rather than withheld, since
-withholding it would make a recorded run unreplayable.
+### The rules apply on send, not on receive
+
+A message written into state before the rules existed — replayed from an older event log
+— is **returned as stored**, in full: same body, same attributes, nothing filtered,
+nothing corrected. `ReceiveMessage` logs a warning at `WARN` naming the queue, the message
+ID and the violated rule, and that is the whole of the receive-side behaviour.
+
+Returning it is the decision, not an omission. Substrate's core property is that
+replaying an event log reproduces the same observations, and the message was accepted by
+the substrate that recorded it. Withholding or dropping it now would make a recorded run
+unreplayable — the one property the emulator rests on — and a receive-time rejection has
+no AWS behaviour to imitate: real SQS never accepted the message, so there is nothing to
+copy. Rejecting on receive is deliberately not done, and the test suite fails if anyone
+adds it.
+
+The warning covers the **whole stored attribute set**, not the subset the request named.
+The violation is a property of what is in state, and a request that names no attribute
+names gets no attributes back, so checking only the selection would hide it from exactly
+the caller most likely to be replaying an old log. It also fires on every receive of the
+same message rather than once: a redelivery after the visibility timeout is the fixture
+being exercised again, and remembering which messages had already warned would be
+per-process state a replay could not reproduce.
+
+Send-time rejection is unchanged, so no new run can produce this state.
 
 ### QueueNameExists
 

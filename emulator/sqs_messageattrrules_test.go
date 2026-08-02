@@ -1,13 +1,16 @@
 package emulator_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -769,51 +772,244 @@ func TestSQS_MessageAttributes_ErrorIsDeterministicAcrossRules(t *testing.T) {
 	}
 }
 
-// TestSQS_MessageAttributes_StoredAttributesAreNotRechecked records the deliberate
-// scope boundary: the rules apply on send, not on receive.
+// storeIllegalAttributes replaces a stored message's MessageAttributes with attrs,
+// writing straight into the state store, and returns the message ID.
 //
-// A message written into state before these checks existed — the only way an illegal
-// name can still be there, since no API path stores one now — is returned as stored
-// rather than withheld. Withholding it would make a recorded run unreplayable, which is
-// the property the whole emulator rests on, and a receive-time rejection has no AWS
-// behavior behind it: real SQS never accepted the message, so there is nothing to
-// imitate. Tracked separately; this test pins the choice rather than the gap.
+// Going around the API is the point rather than a shortcut: no send path stores an
+// illegal attribute any more, so the only way this state exists is an event log recorded
+// against a substrate that predates the rules. Reaching it through the API is impossible
+// by construction, and anything weaker would not exercise the path at all.
 //
-// The illegal name is written directly into state, which is what a pre-#472 event log
-// replays into. Reaching it through the API is impossible by construction now, so
-// nothing weaker would exercise the path.
-func TestSQS_MessageAttributes_StoredAttributesAreNotRechecked(t *testing.T) {
-	state := emulator.NewMemoryStateManager()
-	srv, _ := newSQSTestServerWithState(t, state)
-	queueURL := createAttrQueue(t, srv, "attr-stored")
-
-	status, code := sendMessageWithAttrs(t, srv, queueURL, "body",
-		[]sqsMessageAttr{{name: "trace", dataType: "String", stringValue: "v"}}, false)
-	require.Equal(t, http.StatusOK, status, "send failed: %s", code)
-
-	// Rename the stored attribute to one the send path would now refuse.
+// The queue must hold exactly one message, which every caller here arranges by sending
+// one legal message first.
+func storeIllegalAttributes(t *testing.T, state emulator.StateManager, queueName string,
+	attrs map[string]interface{},
+) string {
+	t.Helper()
 	ctx := context.Background()
-	idsRaw, err := state.Get(ctx, "sqs", "msg_ids:000000000000/attr-stored")
+	urlKey := "000000000000/" + queueName
+
+	idsRaw, err := state.Get(ctx, "sqs", "msg_ids:"+urlKey)
 	require.NoError(t, err)
 	var ids []string
 	require.NoError(t, json.Unmarshal(idsRaw, &ids))
-	require.Len(t, ids, 1)
+	require.Len(t, ids, 1, "the helper assumes one stored message")
 
-	msgKey := "msg:000000000000/attr-stored:" + ids[0]
+	msgKey := "msg:" + urlKey + ":" + ids[0]
 	raw, err := state.Get(ctx, "sqs", msgKey)
 	require.NoError(t, err)
 	var stored map[string]interface{}
 	require.NoError(t, json.Unmarshal(raw, &stored))
-	attrs, ok := stored["MessageAttributes"].(map[string]interface{})
-	require.True(t, ok, "stored message has no MessageAttributes: %v", stored)
-	attrs["AWS.trace"] = attrs["trace"]
-	delete(attrs, "trace")
+	stored["MessageAttributes"] = attrs
 	mutated, err := json.Marshal(stored)
 	require.NoError(t, err)
 	require.NoError(t, state.Put(ctx, "sqs", msgKey, mutated))
+	return ids[0]
+}
 
-	msgs := receiveMessages(t, srv, queueURL, []string{"All"}, false)
-	require.Len(t, msgs, 1, "a stored message must still be delivered")
-	assert.Equal(t, "v", msgs[0].attributes["AWS.trace"].stringValue,
-		"the illegal name is returned as stored, not corrected or withheld")
+// newSQSServerCapturingLogs builds an SQS test server whose logger writes to buf, so a
+// warning can be asserted rather than assumed.
+func newSQSServerCapturingLogs(t *testing.T, state emulator.StateManager,
+	buf *bytes.Buffer,
+) *emulator.Server {
+	t.Helper()
+	cfg := emulator.DefaultConfig()
+	registry := emulator.NewPluginRegistry()
+	logger := newTestLogger(buf, slog.LevelWarn)
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := emulator.NewTimeController(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	plugin := &emulator.SQSPlugin{}
+	require.NoError(t, plugin.Initialize(context.TODO(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(plugin)
+
+	return emulator.NewServer(*cfg, registry, store, state, tc, logger)
+}
+
+// TestSQS_MessageAttributes_StoredAttributesAreReturnedNotWithheld is #491's decision,
+// and the guarantee it protects is replay rather than validation.
+//
+// The rules apply on send, not on receive. A message written into state before they
+// existed is returned as stored, in full, because substrate's core property is that
+// replaying an event log reproduces the same observations — and the message was accepted
+// by the substrate that recorded it. Withholding or dropping it now would break exactly
+// that, and a receive-time rejection has no AWS behavior behind it to imitate: real SQS
+// never accepted the message, so there is nothing to copy.
+//
+// This test must fail if anyone later "fixes" receive to validate. All three violation
+// families are covered, because a fix that withheld would most likely be written against
+// one of them and the other two would silently follow.
+func TestSQS_MessageAttributes_StoredAttributesAreReturnedNotWithheld(t *testing.T) {
+	// Eleven attributes: the count rule, which is a property of the set rather than of
+	// any one attribute, so it is the one a per-attribute filter would miss.
+	eleven := make(map[string]interface{}, 11)
+	for i := 0; i < 11; i++ {
+		eleven["attr"+strconv.Itoa(i)] = map[string]interface{}{
+			"DataType": "String", "StringValue": "v" + strconv.Itoa(i),
+		}
+	}
+
+	tests := []struct {
+		name  string
+		attrs map[string]interface{}
+		// want is the attribute name and value that must come back unchanged.
+		wantName, wantValue string
+	}{
+		{
+			name: "a reserved name prefix",
+			attrs: map[string]interface{}{
+				"AWS.trace": map[string]interface{}{"DataType": "String", "StringValue": "v"},
+			},
+			wantName: "AWS.trace", wantValue: "v",
+		},
+		{
+			name:     "an eleventh attribute",
+			attrs:    eleven,
+			wantName: "attr10", wantValue: "v10",
+		},
+		{
+			name: "a Number attribute holding a non-number",
+			attrs: map[string]interface{}{
+				"Age": map[string]interface{}{"DataType": "Number", "StringValue": "abc"},
+			},
+			wantName: "Age", wantValue: "abc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bothProtocols(t, func(t *testing.T, jsonProto bool) {
+				state := emulator.NewMemoryStateManager()
+				srv, _ := newSQSTestServerWithState(t, state)
+				queueName := "attr-stored"
+				queueURL := createAttrQueue(t, srv, queueName)
+
+				status, code := sendMessageWithAttrs(t, srv, queueURL, "body",
+					[]sqsMessageAttr{{name: "trace", dataType: "String", stringValue: "v"}},
+					jsonProto)
+				require.Equal(t, http.StatusOK, status, "send failed: %s", code)
+				msgID := storeIllegalAttributes(t, state, queueName, tt.attrs)
+
+				msgs := receiveMessages(t, srv, queueURL, []string{"All"}, jsonProto)
+				require.Len(t, msgs, 1, "a stored message must still be delivered")
+				assert.Equal(t, msgID, msgs[0].messageID)
+				assert.Equal(t, "body", msgs[0].body, "the body is returned as stored")
+				assert.Len(t, msgs[0].attributes, len(tt.attrs),
+					"every stored attribute is returned, none filtered out")
+				assert.Equal(t, tt.wantValue, msgs[0].attributes[tt.wantName].stringValue,
+					"the illegal attribute is returned as stored, not corrected or withheld")
+			})
+		})
+	}
+}
+
+// TestSQS_MessageAttributes_StoredViolationWarns is the signal #491 chose over silence:
+// an operator whose fixture predates the rules learns about it, and the observation does
+// not change.
+//
+// The warning is asserted through a capturing logger rather than assumed, and its
+// absence for a legal message is asserted too — a warning that fires on every receive
+// would be noise an operator learns to ignore, which is the failure mode that would make
+// the whole decision worthless.
+func TestSQS_MessageAttributes_StoredViolationWarns(t *testing.T) {
+	t.Run("a violation warns and names what to look at", func(t *testing.T) {
+		state := emulator.NewMemoryStateManager()
+		var buf bytes.Buffer
+		srv := newSQSServerCapturingLogs(t, state, &buf)
+		queueName := "attr-warn"
+		queueURL := createAttrQueue(t, srv, queueName)
+
+		status, code := sendMessageWithAttrs(t, srv, queueURL, "body",
+			[]sqsMessageAttr{{name: "trace", dataType: "String", stringValue: "v"}}, false)
+		require.Equal(t, http.StatusOK, status, "send failed: %s", code)
+		msgID := storeIllegalAttributes(t, state, queueName, map[string]interface{}{
+			"Age": map[string]interface{}{"DataType": "Number", "StringValue": "abc"},
+		})
+
+		msgs := receiveMessages(t, srv, queueURL, nil, false)
+		require.Len(t, msgs, 1)
+
+		logged := buf.String()
+		assert.Contains(t, logged, "stored message attributes violate a current rule")
+		assert.Contains(t, logged, msgID, "the message ID is what an operator greps for")
+		assert.Contains(t, logged, queueName, "the queue names which fixture to look at")
+		assert.Contains(t, logged, "Can't cast the value of message (user) attribute 'Age'",
+			"the violation itself is reported, not merely that there was one")
+	})
+
+	t.Run("the request naming no attributes still warns", func(t *testing.T) {
+		// The violation is a property of what is in state, not of what was asked for.
+		// Checking only the selected subset would hide it from exactly the caller most
+		// likely to be replaying an old log, since #461 returns nothing by default.
+		state := emulator.NewMemoryStateManager()
+		var buf bytes.Buffer
+		srv := newSQSServerCapturingLogs(t, state, &buf)
+		queueName := "attr-warn-unselected"
+		queueURL := createAttrQueue(t, srv, queueName)
+
+		status, code := sendMessageWithAttrs(t, srv, queueURL, "body",
+			[]sqsMessageAttr{{name: "trace", dataType: "String", stringValue: "v"}}, false)
+		require.Equal(t, http.StatusOK, status, "send failed: %s", code)
+		storeIllegalAttributes(t, state, queueName, map[string]interface{}{
+			"AWS.trace": map[string]interface{}{"DataType": "String", "StringValue": "v"},
+		})
+
+		msgs := receiveMessages(t, srv, queueURL, nil, false)
+		require.Len(t, msgs, 1)
+		assert.Empty(t, msgs[0].attributes, "no selector was sent, so none are returned")
+		assert.Contains(t, buf.String(), "stored message attributes violate a current rule")
+	})
+
+	t.Run("a legal message logs nothing", func(t *testing.T) {
+		state := emulator.NewMemoryStateManager()
+		var buf bytes.Buffer
+		srv := newSQSServerCapturingLogs(t, state, &buf)
+		queueURL := createAttrQueue(t, srv, "attr-quiet")
+
+		status, code := sendMessageWithAttrs(t, srv, queueURL, "body", []sqsMessageAttr{
+			{name: "trace", dataType: "String", stringValue: "v"},
+			{name: "Age", dataType: "Number", stringValue: "42"},
+		}, false)
+		require.Equal(t, http.StatusOK, status, "send failed: %s", code)
+
+		msgs := receiveMessages(t, srv, queueURL, []string{"All"}, false)
+		require.Len(t, msgs, 1)
+		assert.Empty(t, buf.String(), "a legal message must produce no warning")
+	})
+
+	t.Run("a message with no attributes logs nothing", func(t *testing.T) {
+		state := emulator.NewMemoryStateManager()
+		var buf bytes.Buffer
+		srv := newSQSServerCapturingLogs(t, state, &buf)
+		queueURL := createAttrQueue(t, srv, "attr-none")
+
+		status, code := sendMessage(t, srv, queueURL, "body", false)
+		require.Equal(t, http.StatusOK, status, "send failed: %s", code)
+
+		msgs := receiveMessages(t, srv, queueURL, []string{"All"}, false)
+		require.Len(t, msgs, 1)
+		assert.Empty(t, buf.String())
+	})
+}
+
+// TestSQS_MessageAttributes_SendTimeRejectionIsUnchanged guards the other half of the
+// decision. Warning on receive must not have softened the send path: a message with an
+// illegal attribute is still refused before it is stored, so no new run can produce the
+// state the warning exists to report.
+func TestSQS_MessageAttributes_SendTimeRejectionIsUnchanged(t *testing.T) {
+	bothProtocols(t, func(t *testing.T, jsonProto bool) {
+		srv, _ := newSQSTestServer(t)
+		queueURL := createAttrQueue(t, srv, "attr-send-still-refuses")
+
+		status, code, message := sendAttrError(t, srv, queueURL,
+			sqsMessageAttr{name: "AWS.trace", dataType: "String", stringValue: "v"}, jsonProto)
+		require.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Contains(t, message, "reserved for internal use")
+		assert.Equal(t, 0, sqsQueueDepth(t, srv, queueURL), "a refused send stores nothing")
+	})
 }
