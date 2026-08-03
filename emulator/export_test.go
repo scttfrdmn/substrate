@@ -506,6 +506,33 @@ func CFNResolveImportForTest(
 // join of ExportNames against Outputs that the registry reads.
 func CFNStackExportsForTest(s CFNStackState) map[string]string { return s.exports() }
 
+// CWLogGroupPolicyARNForTest wraps cwLogGroupPolicyARN for external tests.
+//
+// Exported because two of its cases are not reachable over HTTP: a created group
+// always has substrate's own unsuffixed ARN, so the empty-ARN input (a record a
+// snapshot restored before the field existed) and the already-suffixed input
+// (idempotence over its own output) can only be exercised directly.
+func CWLogGroupPolicyARNForTest(arn string) string { return cwLogGroupPolicyARN(arn) }
+
+// CWPutLogGroupStateForTest writes a log group record into state under the key
+// layout the plugin reads, without going through CreateLogGroup.
+//
+// This is how a test reaches a stored group whose fields the API path would never
+// produce — an ARN-less record from an older snapshot, say — so the wire
+// projection can be asserted over it.
+func CWPutLogGroupStateForTest(ctx context.Context, state StateManager, accountID, region string, lg CWLogGroup) error {
+	data, err := json.Marshal(lg)
+	if err != nil {
+		return fmt.Errorf("CWPutLogGroupStateForTest marshal: %w", err)
+	}
+	key := cwLogGroupKey(accountID, region, lg.LogGroupName)
+	if putErr := state.Put(ctx, cloudwatchLogsNamespace, key, data); putErr != nil {
+		return fmt.Errorf("CWPutLogGroupStateForTest state.Put: %w", putErr)
+	}
+	updateStringIndex(ctx, state, cloudwatchLogsNamespace, cwLogGroupNamesKey(accountID, region), lg.LogGroupName)
+	return nil
+}
+
 // CFNSeededAZsForTest returns the Availability Zone names substrate reports for a
 // region, derived from the same list EC2's DescribeAvailabilityZones uses.
 //

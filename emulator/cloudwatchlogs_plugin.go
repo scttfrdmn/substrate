@@ -13,9 +13,9 @@ import (
 )
 
 // CloudWatchLogsPlugin emulates the Amazon CloudWatch Logs JSON-protocol API.
-// It handles CreateLogGroup, DeleteLogGroup, DescribeLogGroups, CreateLogStream,
-// DeleteLogStream, DescribeLogStreams, PutLogEvents, GetLogEvents, and
-// FilterLogEvents.
+// It handles CreateLogGroup, DeleteLogGroup, DescribeLogGroups,
+// PutRetentionPolicy, DeleteRetentionPolicy, CreateLogStream, DeleteLogStream,
+// DescribeLogStreams, PutLogEvents, GetLogEvents, and FilterLogEvents.
 type CloudWatchLogsPlugin struct {
 	state  StateManager
 	logger Logger
@@ -50,6 +50,10 @@ func (p *CloudWatchLogsPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.deleteLogGroup(ctx, req)
 	case "DescribeLogGroups":
 		return p.describeLogGroups(ctx, req)
+	case "PutRetentionPolicy":
+		return p.putRetentionPolicy(ctx, req)
+	case "DeleteRetentionPolicy":
+		return p.deleteRetentionPolicy(ctx, req)
 	case "CreateLogStream":
 		return p.createLogStream(ctx, req)
 	case "DeleteLogStream":
@@ -217,7 +221,7 @@ func (p *CloudWatchLogsPlugin) describeLogGroups(ctx *RequestContext, req *AWSRe
 		end = len(names)
 	}
 
-	groups := make([]CWLogGroup, 0, end-offset)
+	groups := make([]cwLogGroupOut, 0, end-offset)
 	for _, name := range names[offset:end] {
 		data, getErr := p.state.Get(goCtx, cloudwatchLogsNamespace, cwLogGroupKey(ctx.AccountID, ctx.Region, name))
 		if getErr != nil || data == nil {
@@ -227,14 +231,150 @@ func (p *CloudWatchLogsPlugin) describeLogGroups(ctx *RequestContext, req *AWSRe
 		if unmarshalErr := json.Unmarshal(data, &lg); unmarshalErr != nil {
 			continue
 		}
-		groups = append(groups, lg)
+		groups = append(groups, cwLogGroupWire(lg))
 	}
 
 	type response struct {
-		LogGroups []CWLogGroup `json:"logGroups"`
-		NextToken string       `json:"nextToken,omitempty"`
+		LogGroups []cwLogGroupOut `json:"logGroups"`
+		NextToken string          `json:"nextToken,omitempty"`
 	}
 	return cwLogsJSONResponse(http.StatusOK, response{LogGroups: groups, NextToken: nextToken})
+}
+
+// cwRetentionDays is the fixed set of values retentionInDays accepts. The API
+// enumerates it rather than accepting a range, so anything else is an
+// InvalidParameterException — including a plausible-looking 45 or 100.
+var cwRetentionDays = map[int]bool{
+	1: true, 3: true, 5: true, 7: true, 14: true, 30: true, 60: true, 90: true,
+	120: true, 150: true, 180: true, 365: true, 400: true, 545: true, 731: true,
+	1096: true, 1827: true, 2192: true, 2557: true, 2922: true, 3288: true,
+	3653: true,
+}
+
+// putRetentionPolicy sets a log group's retention in days.
+//
+// Both of this operation's failure modes are documented at HTTP 400, including
+// ResourceNotFoundException — the JSON-1.1 protocol carries the error code in the
+// body's "__type", so the status is 400 for every modeled error rather than the
+// 404 an HTTP-shaped API would use.
+func (p *CloudWatchLogsPlugin) putRetentionPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var body struct {
+		LogGroupName    string `json:"logGroupName"`
+		RetentionInDays *int   `json:"retentionInDays"`
+	}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+	}
+	if body.LogGroupName == "" {
+		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	// A pointer, not an int: retentionInDays is required, and 0 is not a valid
+	// value, so an absent member and an explicit 0 are both errors — but only a
+	// pointer can tell substrate which one the caller sent.
+	if body.RetentionInDays == nil {
+		return nil, &AWSError{Code: "InvalidParameterException", Message: "retentionInDays is required", HTTPStatus: http.StatusBadRequest}
+	}
+	if !cwRetentionDays[*body.RetentionInDays] {
+		return nil, &AWSError{
+			Code: "InvalidParameterException",
+			Message: fmt.Sprintf(
+				"retentionInDays value of %d is not valid; possible values are: %s",
+				*body.RetentionInDays, cwRetentionDaysList()),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	goCtx := context.Background()
+	stateKey := cwLogGroupKey(ctx.AccountID, ctx.Region, body.LogGroupName)
+	lg, err := p.loadLogGroup(goCtx, stateKey, body.LogGroupName, "putRetentionPolicy")
+	if err != nil {
+		return nil, err
+	}
+
+	lg.RetentionInDays = *body.RetentionInDays
+	if putErr := p.storeLogGroup(goCtx, stateKey, lg, "putRetentionPolicy"); putErr != nil {
+		return nil, putErr
+	}
+	return cwLogsJSONResponse(http.StatusOK, struct{}{})
+}
+
+// deleteRetentionPolicy clears a log group's retention, so its events never
+// expire. The API documents this as the way to make events permanent — there is
+// no retentionInDays value meaning "never".
+func (p *CloudWatchLogsPlugin) deleteRetentionPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var body struct {
+		LogGroupName string `json:"logGroupName"`
+	}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+	}
+	if body.LogGroupName == "" {
+		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	goCtx := context.Background()
+	stateKey := cwLogGroupKey(ctx.AccountID, ctx.Region, body.LogGroupName)
+	lg, err := p.loadLogGroup(goCtx, stateKey, body.LogGroupName, "deleteRetentionPolicy")
+	if err != nil {
+		return nil, err
+	}
+
+	// Deleting a policy that is not there is not an error — the operation is
+	// idempotent and its documented errors do not include one for it.
+	lg.RetentionInDays = 0
+	if putErr := p.storeLogGroup(goCtx, stateKey, lg, "deleteRetentionPolicy"); putErr != nil {
+		return nil, putErr
+	}
+	return cwLogsJSONResponse(http.StatusOK, struct{}{})
+}
+
+// loadLogGroup reads a log group, reporting ResourceNotFoundException when it is
+// absent. op names the calling operation for the wrapped-error context.
+func (p *CloudWatchLogsPlugin) loadLogGroup(ctx context.Context, stateKey, logGroupName, op string) (CWLogGroup, error) {
+	data, err := p.state.Get(ctx, cloudwatchLogsNamespace, stateKey)
+	if err != nil {
+		return CWLogGroup{}, fmt.Errorf("logs %s state.Get: %w", op, err)
+	}
+	if data == nil {
+		return CWLogGroup{}, &AWSError{
+			Code:       "ResourceNotFoundException",
+			Message:    "The specified log group does not exist: " + logGroupName,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	var lg CWLogGroup
+	if unmarshalErr := json.Unmarshal(data, &lg); unmarshalErr != nil {
+		return CWLogGroup{}, fmt.Errorf("logs %s unmarshal: %w", op, unmarshalErr)
+	}
+	return lg, nil
+}
+
+// storeLogGroup writes a log group back to state.
+func (p *CloudWatchLogsPlugin) storeLogGroup(ctx context.Context, stateKey string, lg CWLogGroup, op string) error {
+	data, err := json.Marshal(lg)
+	if err != nil {
+		return fmt.Errorf("logs %s marshal: %w", op, err)
+	}
+	if putErr := p.state.Put(ctx, cloudwatchLogsNamespace, stateKey, data); putErr != nil {
+		return fmt.Errorf("logs %s state.Put: %w", op, putErr)
+	}
+	return nil
+}
+
+// cwRetentionDaysList renders the valid retention values in ascending order for
+// an error message. Sorted, not map order: a nondeterministic error message is
+// one a consumer's test cannot assert on.
+func cwRetentionDaysList() string {
+	days := make([]int, 0, len(cwRetentionDays))
+	for d := range cwRetentionDays {
+		days = append(days, d)
+	}
+	sort.Ints(days)
+	parts := make([]string, len(days))
+	for i, d := range days {
+		parts[i] = strconv.Itoa(d)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // --- Log stream operations --------------------------------------------------
@@ -382,7 +522,7 @@ func (p *CloudWatchLogsPlugin) describeLogStreams(ctx *RequestContext, req *AWSR
 		end = len(names)
 	}
 
-	streams := make([]CWLogStream, 0, end-offset)
+	streams := make([]cwLogStreamOut, 0, end-offset)
 	for _, name := range names[offset:end] {
 		data, getErr := p.state.Get(goCtx, cloudwatchLogsNamespace, cwLogStreamKey(ctx.AccountID, ctx.Region, body.LogGroupName, name))
 		if getErr != nil || data == nil {
@@ -392,12 +532,12 @@ func (p *CloudWatchLogsPlugin) describeLogStreams(ctx *RequestContext, req *AWSR
 		if unmarshalErr := json.Unmarshal(data, &ls); unmarshalErr != nil {
 			continue
 		}
-		streams = append(streams, ls)
+		streams = append(streams, cwLogStreamWire(ls))
 	}
 
 	type response struct {
-		LogStreams []CWLogStream `json:"logStreams"`
-		NextToken  string        `json:"nextToken,omitempty"`
+		LogStreams []cwLogStreamOut `json:"logStreams"`
+		NextToken  string           `json:"nextToken,omitempty"`
 	}
 	return cwLogsJSONResponse(http.StatusOK, response{LogStreams: streams, NextToken: nextToken})
 }
@@ -538,13 +678,19 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 		end = len(filtered)
 	}
 
+	page := filtered[offset:end]
+	events := make([]cwOutputLogEventOut, 0, len(page))
+	for _, ev := range page {
+		events = append(events, cwOutputLogEventWire(ev))
+	}
+
 	type response struct {
-		Events            []CWLogEvent `json:"events"`
-		NextForwardToken  string       `json:"nextForwardToken,omitempty"`
-		NextBackwardToken string       `json:"nextBackwardToken,omitempty"`
+		Events            []cwOutputLogEventOut `json:"events"`
+		NextForwardToken  string                `json:"nextForwardToken,omitempty"`
+		NextBackwardToken string                `json:"nextBackwardToken,omitempty"`
 	}
 	return cwLogsJSONResponse(http.StatusOK, response{
-		Events:           filtered[offset:end],
+		Events:           events,
 		NextForwardToken: nextToken,
 	})
 }
