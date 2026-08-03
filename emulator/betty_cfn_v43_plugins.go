@@ -33,25 +33,23 @@ func (d *StackDeployer) deployFSxFileSystem(
 	}
 	storageType := resolveStringProp(props, "StorageType", "SSD", cctx)
 
-	var subnetIDs []string
-	if si, ok := props["SubnetIds"]; ok {
-		if arr, ok2 := si.([]interface{}); ok2 {
-			for _, item := range arr {
-				if s := resolveValue(item, cctx); s != "" {
-					subnetIDs = append(subnetIDs, s)
-				}
-			}
-		}
-	}
+	// resolveStringList rather than a hand-rolled loop, so the whole property is
+	// list-aware: a Ref to a List<AWS::EC2::Subnet::Id> parameter or a nested
+	// Fn::Split contributes every subnet rather than one (#521, #526).
+	subnetIDs := resolveStringList(props["SubnetIds"], cctx)
 
 	var tags []FSxTag
 	if t, ok := props["Tags"]; ok {
 		if arr, ok2 := t.([]interface{}); ok2 {
 			for _, item := range arr {
 				if m, ok3 := item.(map[string]interface{}); ok3 {
-					k, _ := m["Key"].(string)
-					v, _ := m["Value"].(string)
-					tags = append(tags, FSxTag{Key: k, Value: v})
+					// resolveValue rather than a string assertion: a tag value
+					// is very often `{"Fn::Sub": "${AWS::StackName}-data"}`, and
+					// asserting on string dropped it silently (#526).
+					tags = append(tags, FSxTag{
+						Key:   resolveValue(m["Key"], cctx),
+						Value: resolveValue(m["Value"], cctx),
+					})
 				}
 			}
 		}

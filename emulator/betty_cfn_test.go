@@ -842,6 +842,18 @@ func TestCFN_EC2Instance(t *testing.T) {
 // APIGateway, StepFunctions, ECR, ECS, Cognito, Kinesis, CloudFront and ACM.
 func newFullTestDeployer(t *testing.T) *emulator.StackDeployer {
 	t.Helper()
+	d, _ := newFullTestDeployerWithRegistry(t)
+	return d
+}
+
+// newFullTestDeployerWithRegistry is newFullTestDeployer, additionally returning
+// the registry so a test can read a deployed resource back through the same API a
+// consumer's SDK would call.
+//
+// Reading back through the registry is what a DeployResult assertion cannot do:
+// #527's symptom was a correct deploy result over an empty container list.
+func newFullTestDeployerWithRegistry(t *testing.T) (*emulator.StackDeployer, *emulator.PluginRegistry) {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
 	state := emulator.NewMemoryStateManager()
@@ -890,7 +902,7 @@ func newFullTestDeployer(t *testing.T) *emulator.StackDeployer {
 		registry.Register(p)
 	}
 
-	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs)
+	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs), registry
 }
 
 func TestCFN_ACMCertificate(t *testing.T) {

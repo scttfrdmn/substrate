@@ -26,7 +26,10 @@ func (d *StackDeployer) deployACMCertificate(
 		"DomainName": domain,
 	}
 	if sans, ok := props["SubjectAlternativeNames"]; ok {
-		body["SubjectAlternativeNames"] = sans
+		// A list of domain names, so a nested Ref or Fn::Split resolves and
+		// splices (#526). ACM's RequestCertificate is natively PascalCase, so
+		// the member name is forwarded as CloudFormation spells it.
+		body["SubjectAlternativeNames"] = resolveValueList(sans, cctx)
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

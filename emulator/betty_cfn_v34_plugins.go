@@ -79,16 +79,17 @@ func (d *StackDeployer) deployMSKCluster(
 		"ClientSubnets": []string{},
 	}
 	if bi, ok := props["BrokerNodeGroupInfo"].(map[string]interface{}); ok {
-		if it, ok := bi["InstanceType"].(string); ok && it != "" {
+		// Resolved rather than asserted on string: a template names its subnets
+		// with a Ref far more often than as literals, and a string assertion
+		// dropped every one of them (#526). MSK's API is natively PascalCase, so
+		// only the values need attention.
+		if it := resolveValue(bi["InstanceType"], cctx); it != "" {
 			brokerInfo["InstanceType"] = it
 		}
-		if cs, ok := bi["ClientSubnets"].([]interface{}); ok {
-			subnets := make([]string, 0, len(cs))
-			for _, s := range cs {
-				if sv, ok := s.(string); ok {
-					subnets = append(subnets, sv)
-				}
-			}
+		if subnets := resolveStringList(bi["ClientSubnets"], cctx); len(subnets) > 0 {
+			// Only overwritten when the property resolves to something, so an
+			// absent or empty ClientSubnets keeps the empty-slice default rather
+			// than becoming a JSON null.
 			brokerInfo["ClientSubnets"] = subnets
 		}
 	}

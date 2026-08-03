@@ -568,11 +568,12 @@ func TestCFN_YAMLShortForm_ConsumerTemplate(t *testing.T) {
 	body, err := os.ReadFile("testdata/cfn/ecs_worker.yml")
 	require.NoError(t, err)
 
-	d := newFullTestDeployer(t)
+	d, registry := newFullTestDeployerWithRegistry(t)
 	result, err := d.Deploy(context.Background(), string(body), "ecs-worker", map[string]string{
 		"WorkflowId":     "wf1",
 		"JobId":          "job1",
 		"ContainerImage": "public.ecr.aws/parsl/worker:latest",
+		"Command":        "python,-m,worker",
 	})
 	require.NoError(t, err)
 
@@ -607,6 +608,61 @@ func TestCFN_YAMLShortForm_ConsumerTemplate(t *testing.T) {
 	for _, r := range result.Resources {
 		assert.Empty(t, r.Error, "resource %s failed: %s", r.LogicalID, r.Error)
 	}
+
+	// #521/#526/#527 end to end, in the template that reported them. The
+	// container is declared as
+	//
+	//	- Name: !Sub 'parsl-container-${WorkflowId}-${JobId}'
+	//	  Image: !Ref ContainerImage
+	//	  Command: !If [HasCommand, !Split [',', !Ref Command], !Ref 'AWS::NoValue']
+	//	  LogConfiguration: {LogDriver: awslogs, Options: {awslogs-group: !Ref LogGroup, …}}
+	//
+	// so reading it back exercises all three fixes at once: the member names an
+	// SDK reads (#527), the intrinsics nested inside a forwarded property (#526),
+	// and Fn::Split contributing three elements rather than one rejoined string
+	// (#521). Before them, this query returned [{}].
+	cdefs := describeTaskDefinition(t, registry, "parsl-task-wf1-job1")
+	require.Len(t, cdefs, 1)
+	c := cdefs[0]
+	assert.Equal(t, "parsl-container-wf1-job1", rawString(t, c["name"]))
+	assert.Equal(t, "public.ecr.aws/parsl/worker:latest", rawString(t, c["image"]))
+	assert.JSONEq(t, `["python","-m","worker"]`, string(c["command"]),
+		"Command: !If [HasCommand, !Split [',', !Ref Command], …] is the whole list")
+	assert.JSONEq(t, `{
+		"logDriver": "awslogs",
+		"options": {
+			"awslogs-group":         "/aws/ecs/parsl-wf1-job1",
+			"awslogs-region":        "us-east-1",
+			"awslogs-stream-prefix": "parsl"
+		}
+	}`, string(c["logConfiguration"]),
+		"the options keys are user data and survive verbatim with their values resolved")
+}
+
+// TestCFN_YAMLShortForm_ConsumerTemplateNoCommand is the same template with
+// Command left at its `Default: ”`, which makes HasCommand false and the
+// container's Command an `!Ref 'AWS::NoValue'`.
+//
+// CloudFormation removes the property rather than sending an empty value, and ECS
+// rejects an empty `command`, so the absence is the observable that matters here
+// — a resolved-to-"" member would be a different defect wearing the same 200.
+func TestCFN_YAMLShortForm_ConsumerTemplateNoCommand(t *testing.T) {
+	body, err := os.ReadFile("testdata/cfn/ecs_worker.yml")
+	require.NoError(t, err)
+
+	d, registry := newFullTestDeployerWithRegistry(t)
+	_, err = d.Deploy(context.Background(), string(body), "ecs-worker-nocmd", map[string]string{
+		"WorkflowId":     "wf2",
+		"JobId":          "job2",
+		"ContainerImage": "public.ecr.aws/parsl/worker:latest",
+	})
+	require.NoError(t, err)
+
+	cdefs := describeTaskDefinition(t, registry, "parsl-task-wf2-job2")
+	require.Len(t, cdefs, 1)
+	assert.NotContains(t, cdefs[0], "command",
+		"!Ref 'AWS::NoValue' removes the member; it does not resolve to an empty value")
+	assert.NotContains(t, cdefs[0], "Command")
 }
 
 // TestCFN_EmptyStringParameterDefaultIsDeclared pins that `Default: ”` declares a

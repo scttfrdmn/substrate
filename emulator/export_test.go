@@ -331,3 +331,34 @@ func ResolveValueListForTest(v interface{}, params map[string]string, listParams
 // CFNListParameterTypeForTest wraps cfnListParameterType so the set of declared
 // types that make a Ref list-valued can be asserted directly.
 func CFNListParameterTypeForTest(t string) bool { return cfnListParameterType(t) }
+
+// ResolveNestedForTest wraps resolveNested so its four rules can be asserted at
+// the seam rather than only through a deployer.
+//
+// Most of them are invisible downstream: a plugin that stores an untyped property
+// cannot report that a key was rewritten, and a multi-key map resolving to
+// whichever key Go's map iteration reached first is a race a single deploy passes
+// by luck.
+func ResolveNestedForTest(v interface{}, params map[string]string, listParams map[string]bool, conditions map[string]bool) interface{} {
+	cctx := &cfnContext{
+		params:     params,
+		listParams: listParams,
+		conditions: conditions,
+		resources:  map[string]DeployedResource{},
+		evaluating: map[string]bool{},
+		region:     "us-east-1",
+		accountID:  "123456789012",
+	}
+	return resolveNested(v, cctx)
+}
+
+// ECSRewriteContainerKeysForTest wraps the ECS container-definition key rewrite,
+// so the members it must refuse to descend into can be asserted without a deploy.
+func ECSRewriteContainerKeysForTest(v interface{}) interface{} {
+	return ecsRewriteKeys(v, ecsContainerDefinitionKeys)
+}
+
+// ECSContainerDefinitionKeysForTest returns the ECS container-definition key
+// mapping, so a typo in a hand-written table is caught by asserting the whole
+// table against the rule its entries follow.
+func ECSContainerDefinitionKeysForTest() map[string]string { return ecsContainerDefinitionKeys }
