@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -499,13 +500,12 @@ func (p *S3Plugin) s3StoreObjectACL(ctx context.Context, bucket, key string, acl
 // copy of it. The two are identical in content; storing nothing keeps the state
 // store's contents a record of what the caller actually asked for.
 //
-// The clear is not hypothetical tidiness: DeleteBucket removes the bucket: entry and
-// leaves its sub-resources behind, so without it a bucket created, given a public
-// ACL, deleted and created again would report the deleted bucket's ACL. That the
-// create is authoritative either way is the same whole-resource-replacement rule
-// [S3Plugin.s3StoreObjectACL] follows. Other bucket sub-resources — the policy, the
-// Block Public Access configuration, tagging — still outlive a DeleteBucket; that is
-// pre-existing and wider than this fix (#508).
+// The clear is redundant with DeleteBucket, which now clears every bucket-scoped key
+// including this one (#508), and is kept deliberately: it makes the create
+// authoritative regardless of how the previous bucket of this name went away, which
+// is the same whole-resource-replacement rule [S3Plugin.s3StoreObjectACL] follows.
+// A CreateBucket that does not name an ACL must report the default, not whatever a
+// predecessor stored.
 //
 // **Block Public Access cannot refuse a CreateBucket in substrate, and that is a
 // stated scope boundary rather than an oversight** (#470). Real S3 refuses one:
@@ -555,7 +555,53 @@ func (p *S3Plugin) headBucket(_ *RequestContext, _ *AWSRequest, bucket string) (
 	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{}}, nil
 }
 
+// s3BucketSubresourceKey returns the state key holding one of a bucket's
+// singleton sub-resource configurations, for each prefix in
+// [s3BucketSubresourcePrefixes].
+func s3BucketSubresourceKey(prefix, bucket string) string {
+	return prefix + bucket
+}
+
+// s3BucketSubresourcePrefixes are the state-key prefixes of every configuration
+// scoped to a bucket as a whole, each keyed by bucket name alone.
+//
+// DeleteBucket must clear all of them: the bucket name is the entire key, so a
+// configuration left behind is inherited by the next bucket created with that name
+// (#508). Keeping them in one list rather than open-coding the deletes is what
+// makes adding a new bucket-scoped configuration a change to this slice — the
+// alternative is the drift that produced the bug, where only bucket_acl: was
+// cleared and five others were not.
+//
+// Bucket tagging is deliberately absent: PutBucketTagging writes Tags into the
+// bucket: record itself, so tagging cannot outlive the bucket. Block Public Access
+// is present via [s3PublicAccessBlockKey]'s prefix, which is why that key is
+// spelled here rather than derived — the two must not disagree.
+var s3BucketSubresourcePrefixes = []string{
+	"bucket_acl:",
+	"bucket_policy:",
+	"bucket_lifecycle:",
+	"bucket_versioning:",
+	"notification:",
+	"bucket_public_access_block:",
+}
+
 // deleteBucket handles DELETE /<bucket>.
+//
+// The bucket's own record is removed last, after every key scoped to it: an error
+// part-way through leaves the bucket present and reports a failure, rather than
+// removing the bucket and stranding its sub-resources under a name a later
+// CreateBucket will reuse. Errors propagate for the same reason — a discarded
+// Delete error is exactly how the leak this fixes went unnoticed (#508).
+//
+// "All objects (including all object versions and delete markers) in the bucket
+// must be deleted before the bucket itself can be deleted", so noncurrent versions
+// and delete markers refuse the delete with BucketNotEmpty alongside live objects.
+// Incomplete multipart uploads do **not** refuse it: for general purpose buckets
+// the reference only recommends removing them ("While emptying your bucket, we
+// recommend that you also remove all incomplete multipart uploads"), and the
+// refusal is documented for directory buckets, which substrate does not model. They
+// are aborted as part of the delete instead, since an upload whose destination
+// bucket is gone can never be completed.
 func (p *S3Plugin) deleteBucket(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
 	ctx := context.Background()
 
@@ -567,18 +613,120 @@ func (p *S3Plugin) deleteBucket(_ *RequestContext, _ *AWSRequest, bucket string)
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
-	objKeys, listErr := p.state.List(ctx, s3Namespace, "object:"+bucket+"/")
-	if listErr != nil {
-		return nil, fmt.Errorf("list objects: %w", listErr)
+	// Live objects, noncurrent versions and delete markers all count towards
+	// emptiness. object_version: covers the latter two — a delete marker is stored
+	// as one — so a bucket whose only content is the history of a deleted object is
+	// refused, as real S3 refuses it.
+	for _, prefix := range []string{"object:", "object_version:"} {
+		keys, listErr := p.state.List(ctx, s3Namespace, prefix+bucket+"/")
+		if listErr != nil {
+			return nil, fmt.Errorf("list %s%s: %w", prefix, bucket, listErr)
+		}
+		if len(keys) > 0 {
+			return s3ErrorResponse("BucketNotEmpty",
+				"The bucket you tried to delete is not empty.", http.StatusConflict), nil
+		}
 	}
-	if len(objKeys) > 0 {
-		return s3ErrorResponse("BucketNotEmpty", "The bucket you tried to delete is not empty.", http.StatusConflict), nil
+
+	if err := p.clearBucketState(ctx, bucket); err != nil {
+		return nil, err
 	}
 
 	if err := p.state.Delete(ctx, s3Namespace, "bucket:"+bucket); err != nil {
 		return nil, fmt.Errorf("delete bucket: %w", err)
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
+}
+
+// clearBucketState removes every state key scoped to bucket except the bucket:
+// record itself, which its caller removes last.
+//
+// An empty bucket can still own state: an object's ACL and version index outlive
+// the object they describe, and a multipart upload is not an object until it
+// completes. None of it is reachable through the API once the bucket is gone, and
+// all of it is inherited by the next bucket of the same name if left behind.
+func (p *S3Plugin) clearBucketState(ctx context.Context, bucket string) error {
+	for _, prefix := range s3BucketSubresourcePrefixes {
+		if err := p.state.Delete(ctx, s3Namespace, s3BucketSubresourceKey(prefix, bucket)); err != nil {
+			return fmt.Errorf("clear %s%s: %w", prefix, bucket, err)
+		}
+	}
+
+	// Object-scoped leftovers. object_acl: and object_versions: are keyed by
+	// object, so they need a prefix scan rather than a single delete.
+	for _, prefix := range []string{"object_acl:", "object_versions:"} {
+		keys, listErr := p.state.List(ctx, s3Namespace, prefix+bucket+"/")
+		if listErr != nil {
+			return fmt.Errorf("list %s%s: %w", prefix, bucket, listErr)
+		}
+		for _, k := range keys {
+			if err := p.state.Delete(ctx, s3Namespace, k); err != nil {
+				return fmt.Errorf("clear %s: %w", k, err)
+			}
+		}
+	}
+
+	if err := p.abortBucketMultipartUploads(ctx, bucket); err != nil {
+		return err
+	}
+	return nil
+}
+
+// abortBucketMultipartUploads aborts every in-progress multipart upload targeting
+// bucket, discarding its parts.
+//
+// A multipart upload is keyed by upload ID alone, so its bucket is a field on the
+// record rather than part of the key and every upload must be read to know whether
+// it belongs to this bucket — the same scan [S3Plugin.listMultipartUploads]
+// performs.
+func (p *S3Plugin) abortBucketMultipartUploads(ctx context.Context, bucket string) error {
+	uploadKeys, listErr := p.state.List(ctx, s3Namespace, "multipart:")
+	if listErr != nil {
+		return fmt.Errorf("list multipart uploads: %w", listErr)
+	}
+	for _, k := range uploadKeys {
+		data, getErr := p.state.Get(ctx, s3Namespace, k)
+		if getErr != nil {
+			return fmt.Errorf("get %s: %w", k, getErr)
+		}
+		if data == nil {
+			continue
+		}
+		var upload S3MultipartUpload
+		if unmarshalErr := json.Unmarshal(data, &upload); unmarshalErr != nil {
+			return fmt.Errorf("unmarshal %s: %w", k, unmarshalErr)
+		}
+		if upload.Bucket != bucket {
+			continue
+		}
+		if err := p.abortUploadState(ctx, upload.UploadID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// abortUploadState removes a multipart upload's record, its part records and the
+// part bodies in the object mirror. It is the state half of AbortMultipartUpload,
+// shared with DeleteBucket so an aborted-by-bucket-delete upload leaves exactly
+// what an explicit abort leaves: nothing.
+func (p *S3Plugin) abortUploadState(ctx context.Context, uploadID string) error {
+	partKeys, listErr := p.state.List(ctx, s3Namespace, "part:"+uploadID+"/")
+	if listErr != nil {
+		return fmt.Errorf("list parts of %s: %w", uploadID, listErr)
+	}
+	for _, pk := range partKeys {
+		if err := p.state.Delete(ctx, s3Namespace, pk); err != nil {
+			return fmt.Errorf("delete %s: %w", pk, err)
+		}
+	}
+	if err := p.state.Delete(ctx, s3Namespace, "multipart:"+uploadID); err != nil {
+		return fmt.Errorf("delete multipart:%s: %w", uploadID, err)
+	}
+	if err := p.fs.RemoveAll("/.multipart/" + uploadID); err != nil {
+		return fmt.Errorf("remove parts of %s: %w", uploadID, err)
+	}
+	return nil
 }
 
 // s3ObjectHasBody reports whether an object key has a body stored in the afero
@@ -967,6 +1115,9 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 			}
 		}
 		p.saveVersionIDs(ctx, bucket, key, filtered)
+		if err := p.promoteCurrentVersion(ctx, bucket, key, filtered); err != nil {
+			return nil, err
+		}
 		return &AWSResponse{
 			StatusCode: http.StatusNoContent,
 			Headers:    map[string]string{"x-amz-version-id": versionID},
@@ -1986,16 +2137,9 @@ func (p *S3Plugin) abortMultipartUpload(_ *RequestContext, req *AWSRequest, buck
 		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
 	}
 
-	_ = p.state.Delete(ctx, s3Namespace, "multipart:"+uploadID)
-
-	// Delete all stored parts.
-	partKeys, listErr := p.state.List(ctx, s3Namespace, "part:"+uploadID+"/")
-	if listErr == nil {
-		for _, k := range partKeys {
-			_ = p.state.Delete(ctx, s3Namespace, k)
-		}
+	if abortErr := p.abortUploadState(ctx, uploadID); abortErr != nil {
+		return nil, abortErr
 	}
-	_ = p.fs.RemoveAll(fmt.Sprintf("/.multipart/%s", uploadID))
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
@@ -3275,6 +3419,89 @@ func (p *S3Plugin) getBucketVersioningStatus(ctx context.Context, bucket string)
 		return ""
 	}
 	return string(data)
+}
+
+// promoteCurrentVersion resets the object: current-version pointer for bucket/key
+// after a version was permanently deleted, given the key's remaining newest-first
+// version IDs.
+//
+// Deleting a version by ID leaves the current pointer stale, and the pointer is what
+// ListObjectsV2 and an unversioned GET read. Deleting the newest version must
+// promote the next one — "if you delete the current object version, ... the version
+// that is next in the version stack becomes the current version" — and deleting the
+// *last* version must remove the pointer, or the key stays listed forever. Without
+// the second case a versioned bucket can never be emptied, so DeleteBucket's
+// emptiness check could never be satisfied (#508).
+//
+// The promoted version's *body* moves with its record. A versioned PUT writes the
+// body twice — once under .versions/<key>/<versionID> and once at the unversioned
+// path — and an unversioned GET reads the unversioned one, so promoting the record
+// alone would serve the deleted version's bytes under the promoted version's ETag.
+// A delete marker has no body to copy, which is why the copy is conditional on one
+// existing rather than on the marker flag.
+//
+// A remaining version whose record is missing is treated as no version at all rather
+// than as an error: the pointer must not be left describing something unreadable.
+func (p *S3Plugin) promoteCurrentVersion(ctx context.Context, bucket, key string, remaining []string) error {
+	currentKey := "object:" + bucket + "/" + key
+
+	for _, vid := range remaining {
+		data, err := p.state.Get(ctx, s3Namespace, "object_version:"+bucket+"/"+key+"/"+vid)
+		if err != nil {
+			return fmt.Errorf("get version %s of %s: %w", vid, key, err)
+		}
+		if data == nil {
+			continue
+		}
+		if putErr := p.state.Put(ctx, s3Namespace, currentKey, data); putErr != nil {
+			return fmt.Errorf("promote version %s of %s: %w", vid, key, putErr)
+		}
+		if err := p.promoteVersionBody(bucket, key, vid); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// No version survives, so neither does the key.
+	if err := p.state.Delete(ctx, s3Namespace, currentKey); err != nil {
+		return fmt.Errorf("clear current version of %s: %w", key, err)
+	}
+	if err := p.state.Delete(ctx, s3Namespace, "object_versions:"+bucket+"/"+key); err != nil {
+		return fmt.Errorf("clear version index of %s: %w", key, err)
+	}
+	if s3ObjectHasBody(key) {
+		if err := p.fs.Remove("/" + bucket + "/" + key); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove body of %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// promoteVersionBody copies a version's stored body to the unversioned path an
+// unversioned GET reads, for [S3Plugin.promoteCurrentVersion].
+//
+// An absent versioned body is not an error: a delete marker has none, and an object
+// written before versioning was enabled has only the unversioned copy — which is
+// already the right body, since it is the one being promoted.
+func (p *S3Plugin) promoteVersionBody(bucket, key, versionID string) error {
+	if !s3ObjectHasBody(key) {
+		return nil
+	}
+	body, err := afero.ReadFile(p.fs, "/"+bucket+"/.versions/"+key+"/"+versionID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read version %s of %s: %w", versionID, key, err)
+	}
+	path := "/" + bucket + "/" + key
+	if mkErr := p.fs.MkdirAll(filepath.Dir(path), 0o755); mkErr != nil {
+		return fmt.Errorf("mkdir for %s: %w", key, mkErr)
+	}
+	if wErr := afero.WriteFile(p.fs, path, body, 0o644); wErr != nil {
+		return fmt.Errorf("promote body of %s: %w", key, wErr)
+	}
+	return nil
 }
 
 // loadVersionIDs returns the newest-first list of version IDs for bucket/key.

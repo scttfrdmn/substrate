@@ -8,6 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`DeleteBucket` now clears the bucket's namespace instead of only its `bucket:`
+  record** (#508). A bucket-scoped configuration is keyed by bucket name alone, so
+  every one of them outlived its bucket and was inherited by the next bucket created
+  with that name: create a bucket, enable versioning, delete it, create it again, and
+  writes to the "new" bucket came back versioned. All six are now cleared —
+  `bucket_acl:`, `bucket_policy:`, `bucket_lifecycle:`, `bucket_versioning:`,
+  `notification:`, `bucket_public_access_block:`. Two corrections to the issue's
+  table: the notification prefix is `notification:`, not `bucket_notification:`, and
+  **bucket tagging never leaked**, because `PutBucketTagging` writes `Tags` into the
+  `bucket:` record rather than under a key of its own.
+
+  Errors **propagate** and the `bucket:` record is deleted **last**, so a failed
+  clear leaves the bucket present and retryable rather than half-deleted. A
+  discarded `Delete` error is how the leak went unnoticed in the first place.
+
+  Object-scoped leftovers go too. An object ACL and a version index are stored under
+  their own keys and outlive the object they describe, so an *empty* bucket could
+  still own state that a recreated bucket inherited.
+
+- **`DeleteBucket`'s emptiness check counted only live objects** (#508, found while
+  fixing it and not reported in the issue). "All objects (including all object
+  versions and delete markers) in the bucket must be deleted before the bucket
+  itself can be deleted", but the check listed only `object:<bucket>/`, so a bucket
+  holding nothing but a deleted object's history deleted "successfully" and stranded
+  every version. It now counts `object_version:` too, which covers both noncurrent
+  versions and delete markers. The sharpest case is a **versioning-suspended**
+  bucket: substrate's `DELETE` removes the current-version pointer outright there,
+  so the bucket looked empty while the version it wrote was still present — and real
+  S3 keeps that version as well, since "when you suspend versioning, existing
+  objects in your bucket do not change".
+
+  In-flight multipart uploads are **aborted rather than refused**, correcting this
+  release's own plan. The refusal is documented for *directory* buckets, which
+  substrate does not model; for general purpose buckets the reference only
+  recommends that you "remove all incomplete multipart uploads" while emptying. An
+  upload whose destination bucket is gone can never be completed, so the delete
+  aborts it — part records, upload record and part bodies — through the same helper
+  `AbortMultipartUpload` now uses, so the two paths cannot leave different residue.
+  Only uploads whose `Bucket` field names the bucket being deleted are touched; an
+  upload is keyed by upload ID alone, so the scan sees every bucket's.
+
+- **Permanently deleting an object version now updates the current-version pointer**
+  (#508). Deleting a version by ID removed its record and left the `object:` pointer
+  stale, which made a versioned bucket impossible to empty — so `DeleteBucket`'s
+  widened emptiness check could never have been satisfied. Deleting the current
+  version promotes the next one, since "if you delete the current object version,
+  ... the version that is next in the version stack becomes the current version";
+  deleting the last version removes the key entirely. The promoted version's **body**
+  moves with its record: a versioned `PUT` writes the body both under
+  `.versions/<key>/<versionID>` and at the unversioned path an unversioned `GET`
+  reads, so promoting the record alone served the deleted version's bytes under the
+  promoted version's ETag. A delete marker has no body to promote, which an absent
+  versioned body is treated as rather than as an error, and the promotion honours
+  #534's `s3ObjectHasBody` guard — afero reads a directory as an empty body with no
+  error, so an unguarded promote would truncate the object at `dir` while promoting a
+  version of the marker `dir/`.
+
 - **Deleting a directory-marker object no longer strands the keys beneath it**
   (#534). `PUT dir/`, `PUT dir/a.txt`, `DELETE dir/`, `DELETE dir/a.txt` — the last
   call returned **HTTP 500**. S3 keys are opaque strings, but the afero filesystem
