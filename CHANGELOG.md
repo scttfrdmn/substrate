@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Deleting a directory-marker object no longer strands the keys beneath it**
+  (#534). `PUT dir/`, `PUT dir/a.txt`, `DELETE dir/`, `DELETE dir/a.txt` — the last
+  call returned **HTTP 500**. S3 keys are opaque strings, but the afero filesystem
+  the plugin mirrors object *bodies* into is hierarchical, and `filepath.Clean`
+  normalizes `/bucket/dir/` to `/bucket/dir`: the same path as the directory node
+  `MkdirAll` created to hold `dir/a.txt`. Removing the marker therefore removed that
+  node, orphaning its children, and the child's own delete then panicked inside
+  `MemMapFs` and surfaced as a 500. The multi-object `DeleteObjects` inherited it,
+  since it delegates per key.
+
+  The write path already had the right guard — a marker is never written to the
+  mirror, because its body is always empty — and the delete and copy paths simply
+  did not. All six sites now go through one `s3ObjectHasBody(key)` predicate rather
+  than four hand-copied `strings.HasSuffix` checks, which is the drift that produced
+  the bug. This also closes two adjacent cases the reproduction did not name: `dir`
+  and `dir/` are **distinct S3 keys** that collide on a single mirror path, so a
+  marker operation used to truncate or delete the body of the object one character
+  away from it; and a marker's versioned path `.versions/dir//<versionID>`
+  normalizes onto the directory holding the versions of a child key named
+  `dir/<versionID>` — reachable, not theoretical, since a client reads that version
+  ID off the marker's own `PUT` response. `CopyObject` over a marker now succeeds
+  in both directions, yielding the empty object a marker is, where reading one as a
+  source used to fail outright.
+
 ## [v0.88.0] - 2026-08-03
 
 ### Added

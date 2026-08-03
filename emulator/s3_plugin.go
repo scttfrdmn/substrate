@@ -581,6 +581,19 @@ func (p *S3Plugin) deleteBucket(_ *RequestContext, _ *AWSRequest, bucket string)
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
 
+// s3ObjectHasBody reports whether an object key has a body stored in the afero
+// filesystem the plugin mirrors object contents into.
+//
+// The mirror holds bodies only. A key ending in "/" is a directory marker: it has
+// no body, and its filesystem path collides with the directory node MkdirAll
+// created for the keys beneath it — so writing one corrupts that node and removing
+// one deletes it, stranding every child. Every path that touches the mirror for a
+// named object key must be gated on this, which is why it is one function rather
+// than a strings.HasSuffix at each site.
+func s3ObjectHasBody(key string) bool {
+	return !strings.HasSuffix(key, "/")
+}
+
 // putObject handles PUT /<bucket>/<key>.
 func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
@@ -648,11 +661,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		return cksErr, nil
 	}
 
-	// Directory-marker objects (key ends with "/") must not be written to the
-	// afero filesystem: filepath.Clean inside MemMapFs would strip the trailing
-	// slash, corrupting the path and conflicting with real sub-key directories.
-	// State metadata is sufficient for directory markers (body is always empty).
-	if !strings.HasSuffix(key, "/") {
+	if s3ObjectHasBody(key) {
 		filePath := "/" + bucket + "/" + key
 		if mkdirErr := p.fs.MkdirAll(filepath.Dir(filePath), 0o755); mkdirErr != nil {
 			return nil, fmt.Errorf("mkdir: %w", mkdirErr)
@@ -699,8 +708,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		versionID := fmt.Sprintf("v%d-%d", p.tc.Now().UnixNano(), atomic.AddInt64(&p.versionSeq, 1))
 		obj.VersionID = versionID
 		// Write body to version-specific filesystem path.
-		// Skip filesystem for directory-marker keys (same reason as above).
-		if !strings.HasSuffix(key, "/") {
+		if s3ObjectHasBody(key) {
 			vfPath := "/" + bucket + "/.versions/" + key + "/" + versionID
 			if mkErr := p.fs.MkdirAll(filepath.Dir(vfPath), 0o755); mkErr != nil {
 				return nil, fmt.Errorf("mkdir versioned path: %w", mkErr)
@@ -804,9 +812,7 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 			return s3DeleteMarkerResponse(versionID != "", obj.VersionID), nil
 		}
 
-		// Directory-marker objects (key ends with "/") are never written to the
-		// afero filesystem; their body is always empty.
-		if !strings.HasSuffix(key, "/") {
+		if s3ObjectHasBody(key) {
 			// Try versioned fs path first, then fallback to main path.
 			var readErr error
 			body, readErr = afero.ReadFile(p.fs, fsPath)
@@ -949,7 +955,9 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 		// Permanently remove a specific version.
 		versionedKey := "object_version:" + bucket + "/" + key + "/" + versionID
 		_ = p.state.Delete(ctx, s3Namespace, versionedKey)
-		_ = p.fs.Remove("/" + bucket + "/.versions/" + key + "/" + versionID)
+		if s3ObjectHasBody(key) {
+			_ = p.fs.Remove("/" + bucket + "/.versions/" + key + "/" + versionID)
+		}
 		// Remove from version list.
 		vids := p.loadVersionIDs(ctx, bucket, key)
 		filtered := vids[:0]
@@ -1001,7 +1009,9 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 	}
 
 	_ = p.state.Delete(ctx, s3Namespace, "object:"+bucket+"/"+key)
-	_ = p.fs.Remove("/" + bucket + "/" + key)
+	if s3ObjectHasBody(key) {
+		_ = p.fs.Remove("/" + bucket + "/" + key)
+	}
 
 	p.fireNotifications(reqCtx, bucket, key, "s3:ObjectRemoved:Delete", 0, "")
 
@@ -1207,17 +1217,28 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		}
 	}
 
-	srcBody, readErr := afero.ReadFile(p.fs, "/"+srcBucket+"/"+srcKey)
-	if readErr != nil {
-		return nil, fmt.Errorf("read source body: %w", readErr)
+	// Source and destination are guarded independently: copying a marker onto a
+	// regular key yields the empty object the marker is, and copying anything onto a
+	// marker key records only state. srcBody stays nil for a marker source, which is
+	// the body it has, so the ETag and checksum below are computed over the right
+	// bytes either way.
+	var srcBody []byte
+	if s3ObjectHasBody(srcKey) {
+		read, readErr := afero.ReadFile(p.fs, "/"+srcBucket+"/"+srcKey)
+		if readErr != nil {
+			return nil, fmt.Errorf("read source body: %w", readErr)
+		}
+		srcBody = read
 	}
 
-	dstFilePath := "/" + dstBucket + "/" + dstKey
-	if mkdirErr := p.fs.MkdirAll(filepath.Dir(dstFilePath), 0o755); mkdirErr != nil {
-		return nil, fmt.Errorf("mkdir dest: %w", mkdirErr)
-	}
-	if writeErr := afero.WriteFile(p.fs, dstFilePath, srcBody, 0o644); writeErr != nil {
-		return nil, fmt.Errorf("write dest body: %w", writeErr)
+	if s3ObjectHasBody(dstKey) {
+		dstFilePath := "/" + dstBucket + "/" + dstKey
+		if mkdirErr := p.fs.MkdirAll(filepath.Dir(dstFilePath), 0o755); mkdirErr != nil {
+			return nil, fmt.Errorf("mkdir dest: %w", mkdirErr)
+		}
+		if writeErr := afero.WriteFile(p.fs, dstFilePath, srcBody, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("write dest body: %w", writeErr)
+		}
 	}
 
 	now := p.tc.Now()
