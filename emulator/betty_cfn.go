@@ -91,6 +91,13 @@ type cfnContext struct {
 	accountID  string
 	stackName  string
 
+	// listParams records which parameters were declared with a list type
+	// (CommaDelimitedList, List<Number>, List<AWS::EC2::Subnet::Id>, …). A Ref
+	// to one is list-valued, and only the declaration says so: the value is a
+	// comma-separated string either way, and a String parameter that happens to
+	// contain a comma is a single value.
+	listParams map[string]bool
+
 	// conditionExprs holds the template's unevaluated Conditions, so a condition
 	// that references another by name can evaluate its referent on demand rather
 	// than depending on the order the conditions happened to be walked in.
@@ -2970,12 +2977,16 @@ func cfnDispatchError(resp *AWSResponse, routeErr error) error {
 // buildCFNContext constructs a cfnContext from template parameters and caller-supplied values.
 func buildCFNContext(tmpl *cfnTemplate, callerParams map[string]string, region, accountID, stackName string) *cfnContext {
 	params := make(map[string]string)
+	listParams := make(map[string]bool)
 	// Start with template defaults. A declared default is recorded even when it
 	// is the empty string: that is how an optional parameter is spelled, and
 	// leaving it out would make Ref resolve to the parameter's own name.
 	for name, p := range tmpl.Parameters {
 		if p.Default != nil {
 			params[name] = *p.Default
+		}
+		if cfnListParameterType(p.Type) {
+			listParams[name] = true
 		}
 	}
 	// Overlay caller-supplied params.
@@ -2984,6 +2995,7 @@ func buildCFNContext(tmpl *cfnTemplate, callerParams map[string]string, region, 
 	}
 	return &cfnContext{
 		params:     params,
+		listParams: listParams,
 		conditions: make(map[string]bool),
 		resources:  make(map[string]DeployedResource),
 		region:     region,
@@ -3123,6 +3135,17 @@ func resolveValue(v interface{}, cctx *cfnContext) string {
 		}
 		return "false"
 	case map[string]interface{}:
+		// A single key is what makes a map an intrinsic; every intrinsic
+		// CloudFormation defines is a one-member object. A map carrying other
+		// keys alongside is user data — a container definition or a policy
+		// document may hold a member named "Ref" — and walking it returned
+		// whichever recognized key Go's map iteration reached first, so the same
+		// template resolved differently from one run to the next. That is the
+		// one outcome an emulator built on deterministic replay must never
+		// produce; such a map falls through to the JSON encoding below.
+		if len(val) != 1 {
+			break
+		}
 		for fn, args := range val {
 			switch fn {
 			case "Ref":
@@ -3138,8 +3161,11 @@ func resolveValue(v interface{}, cctx *cfnContext) string {
 			case "Fn::Select":
 				return resolveFnSelect(args, cctx)
 			case "Fn::Split":
-				// Returns a list; return first element as string.
-				return resolveFnSplitFirst(args, cctx)
+				// Fn::Split returns a list and this context has nowhere to put
+				// one, so the elements are rejoined on the delimiter. See
+				// resolveFnSplitJoined for why that beats truncating, and
+				// resolveValueList for the context that keeps the list.
+				return resolveFnSplitJoined(args, cctx)
 			case "Fn::Base64":
 				return resolveFnBase64(args, cctx)
 			case "Fn::GetAtt":
@@ -3152,6 +3178,127 @@ func resolveValue(v interface{}, cctx *cfnContext) string {
 	// Fallback: JSON-encode.
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// resolveValueList resolves a CloudFormation value in a list-valued context.
+//
+// resolveValue returns a string, so every list-valued intrinsic — Fn::Split, a
+// Ref to a CommaDelimitedList parameter, and (once modeled) Fn::GetAZs and
+// Fn::Cidr — had nowhere to put its list and lost everything but one element
+// (#521). This is that missing return shape; the two live side by side because
+// CloudFormation itself distinguishes the contexts: the same intrinsic in a
+// scalar property is an error there and a rejoined string here.
+//
+// Conventions, which resolveStringList and resolveFnSelect both depend on:
+//
+//   - A scalar resolves to a one-element list, so a property that accepts either
+//     a single value or a list needs no special case at the call site.
+//   - Ref AWS::NoValue contributes *no* element, matching CloudFormation's
+//     removal semantics — a template writes
+//     `!If [HasCommand, !Split [...], !Ref 'AWS::NoValue']` precisely to say
+//     "and otherwise nothing".
+//   - An element that is itself list-valued splices rather than nesting, since
+//     a list of lists is not a shape any AWS API member has.
+//   - Empty elements are preserved: `!Split ['|', 'a||c|']` is documented to
+//     return ["a", "", "c", ""]. A caller that cannot use an empty member
+//     filters them itself; resolveStringList does.
+//   - Only a *single-key* map is an intrinsic. A map that also carries other
+//     keys is user data — an ECS container definition naming a member "Ref", say
+//     — and resolving it would both corrupt that data and make the result depend
+//     on Go's map iteration order, since the walk would return whichever
+//     recognized key it reached first.
+func resolveValueList(v interface{}, cctx *cfnContext) []string {
+	switch val := v.(type) {
+	case nil:
+		return nil
+	case []interface{}:
+		out := make([]string, 0, len(val))
+		for _, item := range val {
+			out = append(out, resolveValueList(item, cctx)...)
+		}
+		return out
+	case map[string]interface{}:
+		if len(val) == 1 {
+			for fn, args := range val {
+				switch fn {
+				case "Ref":
+					ref, ok := args.(string)
+					if !ok {
+						return nil
+					}
+					return resolveRefList(ref, cctx)
+				case "Fn::Split":
+					arr, ok := args.([]interface{})
+					if !ok || len(arr) < 2 {
+						return nil
+					}
+					sep, ok := arr[0].(string)
+					if !ok {
+						return nil
+					}
+					return splitFnSplit(sep, resolveValue(arr[1], cctx))
+				case "Fn::If":
+					arr, ok := args.([]interface{})
+					if !ok || len(arr) < 3 {
+						return nil
+					}
+					condName, ok := arr[0].(string)
+					if !ok {
+						return nil
+					}
+					if cctx.condition(condName) {
+						return resolveValueList(arr[1], cctx)
+					}
+					return resolveValueList(arr[2], cctx)
+				}
+			}
+		}
+	}
+	return []string{resolveValue(v, cctx)}
+}
+
+// resolveRefList resolves a Ref in a list-valued context.
+//
+// A Ref is list-valued exactly when it names a parameter whose declared type is
+// a list type, so the parameter declarations have to be consulted rather than
+// the value guessed at: a String parameter that happens to hold a comma is one
+// value, not several.
+func resolveRefList(ref string, cctx *cfnContext) []string {
+	if ref == "AWS::NoValue" {
+		return nil
+	}
+	if cctx.listParams[ref] {
+		if v, ok := cctx.params[ref]; ok {
+			return splitParameterList(v)
+		}
+	}
+	return []string{resolveRef(ref, cctx)}
+}
+
+// splitParameterList splits a list-typed parameter's value on commas.
+//
+// "The total number of strings should be one more than the total number of
+// commas. Also, each member string is space trimmed." An empty value is an empty
+// list rather than a list holding one empty string, which is how a template
+// spells "no members" with `Default: ”`.
+func splitParameterList(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.TrimSpace(p))
+	}
+	return out
+}
+
+// cfnListParameterType reports whether a declared parameter type holds a list.
+//
+// CommaDelimitedList is the literal-string form; every AWS-specific and Number
+// list type is spelled List<…> (List<Number>, List<AWS::EC2::Subnet::Id>, …).
+func cfnListParameterType(t string) bool {
+	return t == "CommaDelimitedList" || strings.HasPrefix(t, "List<")
 }
 
 func resolveRef(ref string, cctx *cfnContext) string {
@@ -3254,6 +3401,19 @@ func resolveFnJoin(args interface{}, cctx *cfnContext) string {
 	return strings.Join(parts, sep)
 }
 
+// resolveFnSelect resolves Fn::Select by index.
+//
+// The list argument goes through resolveValueList rather than being required to
+// be a literal []interface{}: the Fn::Select reference permits Fn::FindInMap,
+// Fn::GetAtt, Fn::GetAZs, Fn::If, Fn::Split and Ref there, and
+// `!Select ['2', !Split [':', arn]]` is the example the Fn::Split reference
+// itself leads with. Requiring a literal made every one of those resolve to the
+// empty string with nothing reporting a problem (#521).
+//
+// An out-of-range index yields the empty string. Real CloudFormation fails the
+// stack — "Fn::Select cannot select nonexistent value at index N" — which is
+// #502's typed-error work; until then the resolver keeps its existing shape
+// rather than acquiring a second, inconsistent failure mode.
 func resolveFnSelect(args interface{}, cctx *cfnContext) string {
 	arr, ok := args.([]interface{})
 	if !ok || len(arr) < 2 {
@@ -3262,25 +3422,48 @@ func resolveFnSelect(args interface{}, cctx *cfnContext) string {
 	idxStr := resolveValue(arr[0], cctx)
 	var idx int
 	_, _ = fmt.Sscanf(idxStr, "%d", &idx)
-	items, ok := arr[1].([]interface{})
-	if !ok || idx < 0 || idx >= len(items) {
+	items := resolveValueList(arr[1], cctx)
+	if idx < 0 || idx >= len(items) {
 		return ""
 	}
-	return resolveValue(items[idx], cctx)
+	return items[idx]
 }
 
-func resolveFnSplitFirst(args interface{}, cctx *cfnContext) string {
+// resolveFnSplitJoined resolves Fn::Split in a scalar context by rejoining the
+// elements on the delimiter, which reproduces the source string.
+//
+// Fn::Split returns a list, so a scalar property is a context CloudFormation
+// itself would reject. Substrate resolves rather than rejects — a template that
+// deploys against AWS must deploy here — and of the two ways to spell a list as
+// one string, rejoining loses nothing while truncating to the first element
+// silently dropped everything after the first delimiter (#521). A list-valued
+// property gets the list itself, through resolveValueList.
+func resolveFnSplitJoined(args interface{}, cctx *cfnContext) string {
 	arr, ok := args.([]interface{})
 	if !ok || len(arr) < 2 {
 		return ""
 	}
-	sep := resolveValue(arr[0], cctx)
-	s := resolveValue(arr[1], cctx)
-	parts := strings.SplitN(s, sep, 2)
-	if len(parts) > 0 {
-		return parts[0]
+	sep, ok := arr[0].(string)
+	if !ok {
+		// "For the Fn::Split delimiter, you can't use any functions. You must
+		// specify a string value."
+		return ""
 	}
-	return s
+	return strings.Join(splitFnSplit(sep, resolveValue(arr[1], cctx)), sep)
+}
+
+// splitFnSplit applies Fn::Split's documented split semantics: every delimiter
+// divides, so consecutive delimiters and a trailing delimiter each produce an
+// empty element — `!Split ['|', 'a||c|']` is ["a", "", "c", ""].
+//
+// An empty delimiter has no documented behavior; it yields the source string as
+// a single element rather than one element per byte, which is what strings.Split
+// would give.
+func splitFnSplit(sep, s string) []string {
+	if sep == "" {
+		return []string{s}
+	}
+	return strings.Split(s, sep)
 }
 
 func resolveFnBase64(args interface{}, cctx *cfnContext) string {

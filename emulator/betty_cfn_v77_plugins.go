@@ -342,26 +342,25 @@ func (d *StackDeployer) servicePluginLoaded(resType string) bool {
 	return false
 }
 
-// resolveStringList resolves a CFN list-valued property to a string slice,
-// resolving each element through Ref/Fn::GetAtt. A single scalar is treated as a
-// one-element list, which is what templates that omit the YAML list syntax
-// produce.
+// resolveStringList resolves a CFN list-valued property to a string slice for a
+// caller that indexes the result into an AWS query parameter (Member.1,
+// Member.2, …).
+//
+// It delegates the resolution to resolveValueList and drops empty members. The
+// numbering is what makes that necessary: an empty member would still occupy an
+// index, so a query API would receive `SecurityGroupId.2=` and reject it. A
+// caller that needs Fn::Split's documented empty elements preserved uses
+// resolveValueList directly.
 func resolveStringList(v interface{}, cctx *cfnContext) []string {
-	switch val := v.(type) {
-	case nil:
-		return nil
-	case []interface{}:
-		out := make([]string, 0, len(val))
-		for _, item := range val {
-			if s := resolveValue(item, cctx); s != "" {
-				out = append(out, s)
-			}
+	resolved := resolveValueList(v, cctx)
+	out := make([]string, 0, len(resolved))
+	for _, s := range resolved {
+		if s != "" {
+			out = append(out, s)
 		}
-		return out
-	default:
-		if s := resolveValue(v, cctx); s != "" {
-			return []string{s}
-		}
+	}
+	if len(out) == 0 {
 		return nil
 	}
+	return out
 }

@@ -574,7 +574,9 @@ func TestCFN_FnSub_WithMap(t *testing.T) {
 	assert.Equal(t, "Hello World", result.Outputs["Greeting"])
 }
 
-// TestCFN_FnSplit verifies that Fn::Split returns the first element.
+// TestCFN_FnSplit verifies that Fn::Split in a scalar context keeps every
+// element. An Output is a scalar context, so the elements are rejoined on the
+// delimiter; before #521 everything after the first delimiter was dropped.
 func TestCFN_FnSplit(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
@@ -583,7 +585,7 @@ func TestCFN_FnSplit(t *testing.T) {
 			"MyBucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "fnsplit-bucket"}}
 		},
 		"Outputs": {
-			"FirstPart": {
+			"Path": {
 				"Value": {"Fn::Split": ["/", "a/b/c"]}
 			}
 		}
@@ -591,8 +593,7 @@ func TestCFN_FnSplit(t *testing.T) {
 
 	result, err := d.Deploy(context.Background(), tmpl, "fn-split-stack", nil)
 	require.NoError(t, err)
-	// resolveFnSplitFirst returns only the first part.
-	assert.Equal(t, "a", result.Outputs["FirstPart"])
+	assert.Equal(t, "a/b/c", result.Outputs["Path"])
 }
 
 // TestCFN_Condition_And verifies the Fn::And condition combinator using inline

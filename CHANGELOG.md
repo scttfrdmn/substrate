@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`Fn::Split` resolves to a list, so a split list no longer loses everything
+  after its first element** (#521). `resolveValue` returns a `string`, so every
+  list-valued intrinsic had nowhere to put a list: `resolveFnSplitFirst` was
+  honest about it in its own name, and a container command of `python,-m,worker`
+  deployed as `python` while the resource reported `CREATE_COMPLETE`. That was
+  reachable from conventional YAML only from v0.87.1 onward — before #516 the
+  whole `!Split` tag was dropped before the resolver saw it.
+
+  The resolver gains a list-returning sibling, `resolveValueList`, which the
+  list-valued property paths call. `resolveStringList` delegates to it, so all its
+  existing call sites gain full split results with no signature change. Its
+  conventions are the ones CloudFormation states: a scalar is a one-element list;
+  `Ref AWS::NoValue` contributes **no** element, which is what makes
+  `!If [HasCommand, !Split [',', !Ref Command], !Ref 'AWS::NoValue']` mean what it
+  says; a nested list-valued intrinsic splices rather than nesting, since a list
+  of lists is not a shape any AWS API member has; and empty elements are preserved,
+  because `!Split ['|', 'a||c|']` is documented to return `["a", "", "c", ""]`.
+
+- **`Fn::Select` over `Fn::Split` resolves** (#521). This is the idiom the AWS
+  `Fn::Split` reference itself leads with — `!Select ['2', !Split [':', arn]]` —
+  and it silently produced the empty string: `resolveFnSelect` required its second
+  argument to be a literal list, so every one of the six functions the `Fn::Select`
+  reference permits there (`Fn::FindInMap`, `Fn::GetAtt`, `Fn::GetAZs`, `Fn::If`,
+  `Fn::Split`, `Ref`) resolved to nothing with no error reported. The list argument
+  now goes through `resolveValueList`.
+
+- **A `Ref` to a `CommaDelimitedList` or `List<…>` parameter is list-valued**
+  (#521). `SecurityGroupIds: !Ref SubnetIds` reached the API as one string
+  containing commas rather than as several IDs. Which parameters are list-valued
+  comes from the **declared type** rather than from whether a value happens to
+  contain a comma — a `String` parameter holding `a,b` is one value — and each
+  member is space-trimmed, as the Parameters reference specifies.
+
+- **`Fn::Split` in a scalar context rejoins rather than truncates** (#521). A
+  scalar property has nowhere to put a list, and real CloudFormation rejects the
+  template; substrate resolves rather than rejects, so of the two ways to spell a
+  list as one string it now picks the one that loses nothing.
+
+- **A multi-key map is no longer resolved as an intrinsic** (#521). Every
+  intrinsic CloudFormation defines is a one-member object, but the resolver walked
+  a map of any size and returned whichever recognized key Go's map iteration
+  reached first — so a property holding both `Ref` and another member resolved two
+  different ways across runs. Nondeterminism is the sharper half of the defect: it
+  is the one outcome an emulator built on deterministic replay must never produce.
+  Such a map now falls through to its JSON encoding, which also leaves user data
+  that happens to carry a member named `Ref` — an ECS container definition, an IAM
+  policy document — untouched.
+
 ## [v0.87.1] - 2026-08-03
 
 ### Fixed

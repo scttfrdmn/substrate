@@ -220,10 +220,22 @@ literal where a value should be rather than failing. Tracked in
 [#522](https://github.com/scttfrdmn/substrate/issues/522) — `Fn::FindInMap` needs a
 `Mappings` model, which the template struct does not have.
 
-`Fn::Split` resolves to its **first element only**, because the resolver returns
-a string. A template that splits a comma-separated list into a container command
-gets one element where the whole list is meant. Tracked in
-[#521](https://github.com/scttfrdmn/substrate/issues/521).
+`Fn::Split` resolves to a **list**, and a list-valued property receives every
+element. A `CommaDelimitedList` (or `List<…>`) parameter is list-valued too: a
+`Ref` to one yields one member per comma, each space-trimmed, so
+`!Select ['2', !Split [':', arn]]` picks the third field and
+`SecurityGroupIds: !Ref SubnetIds` reaches the API as several IDs rather than one
+string. Whether a `Ref` is list-valued comes from the parameter's declared type,
+not from whether its value happens to contain a comma.
+
+`Ref 'AWS::NoValue'` in a list position contributes **no** element, which is what
+makes the conventional `!If [HasCommand, !Split [',', !Ref Command], !Ref
+'AWS::NoValue']` idiom work.
+
+Where the property is scalar and has nowhere to put a list — an `Outputs` value,
+say — `Fn::Split`'s elements are rejoined on the delimiter, reproducing the
+source string. Real CloudFormation rejects the template instead; substrate
+resolves rather than rejects, and rejoining is the spelling that loses nothing.
 
 A parameter declared `Default: ''` is a parameter whose default is the empty
 string, not a parameter without one — which is what makes the conventional
