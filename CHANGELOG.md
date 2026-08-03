@@ -105,6 +105,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `logConfiguration.options` and `dockerLabels` are named by their parent's table and
   then left whole, their keys being user data.
 
+- **A template's `Mappings` section is read, and `Fn::FindInMap` resolves against
+  it** (#522). `cfnTemplate` had no `Mappings` field, so the section every
+  region→AMI template carries was discarded at parse time and the intrinsic fell
+  back to its JSON encoding: the near-universal
+  `ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]` reached `RunInstances`
+  as the literal string `{"Fn::FindInMap":["RegionMap",…]}` and **the instance
+  launched**, the resource reporting `CREATE_COMPLETE`.
+
+  All three levels resolve, including the nested form the reference leads with,
+  where the second-level key is itself a `Ref` or a `Fn::FindInMap`. A leaf may be a
+  string or a **list**, since "the values can be of type String or List", so a
+  list-valued lookup contributes its members to a list-valued property and is
+  rejoined on commas in a scalar one. The optional fourth argument is honored — but
+  only spelled exactly `{DefaultValue: …}`, because a map with any other key is not
+  a default and guessing at the intent is how a template gets a value neither
+  CloudFormation nor the author asked for.
+
+  A lookup that misses now **fails the resource** — `CREATE_FAILED` with a
+  `ResourceStatusReason` naming the intrinsic and the key that missed — rather than
+  falling back to the literal. That is the whole point of modelling `Mappings` rather
+  than tolerating it: a nonsense `ImageId` reported as success is the defect, and a
+  template CloudFormation would have rejected must not deploy. The rest of the stack
+  still deploys, matching the per-resource failure reporting #519 established.
+  Reporting it needed a new channel — a resolver returns a `string`, in which "no
+  such key" and "the key held an empty string" are the same value — so `cfnContext`
+  now accumulates failures, drained per resource onto `DeployedResource.Error`, which
+  is already what `DescribeStackResources` derives `CREATE_FAILED` from.
+
+- **`Fn::GetAZs` resolves, to the same zones `DescribeAvailabilityZones` reports**
+  (#522). A subnet placed with the conventional `!Select [0, !GetAZs '']` had the
+  intrinsic's JSON encoding as its `AvailabilityZone`. It now derives from the same
+  seeded zone list EC2's own `DescribeAvailabilityZones` answers from rather than
+  carrying a second list, so the two cannot disagree — a subnet in a zone the
+  emulator does not report is not something a caller can then query, and two
+  independent lists is how that happens. An empty string means the caller's region,
+  as the reference specifies.
+
+- **`Fn::Cidr` resolves, for IPv4 and IPv6** (#522). `!Cidr ['192.168.0.0/24', 6, 5]`
+  yields six `/27`s and `!Cidr ['2001:db8::/56', 1, 64]` a `/64`, the mask taken
+  from the address family rather than assumed — both are the reference's own
+  examples, and both are asserted against it. A request the block cannot satisfy
+  fails the resource rather than returning a short list: a `count` larger than the
+  number of blocks that fit, a `cidrBits` that would widen the block, a `count`
+  outside the documented 1–256, or an `ipBlock` that is not a CIDR block. A short
+  list is the worse failure, because `!Select [3, !Cidr [...]]` reads an empty string
+  out of it and deploys.
+
+- **The four remaining pseudo-parameters resolve** (#522), which closes the
+  unresolved list rather than shortening it. `AWS::Partition` and `AWS::URLSuffix`
+  follow the region (`aws-cn`/`amazonaws.com.cn`, `aws-us-gov`, else
+  `aws`/`amazonaws.com`), so an ARN a template builds with
+  `!Sub 'arn:${AWS::Partition}:s3:::${Bucket}'` is an ARN rather than a string with
+  a placeholder in it. `AWS::NotificationARNs` is an **empty list** — substrate has
+  no notification model, and empty is the accurate answer for a stack created
+  without any, where the reference string was not.
+
+  `AWS::StackId` resolves to the stack's ARN, and the builder is now shared with the
+  wire's `CreateStack`/`DescribeStacks` rather than duplicated: a consumer that
+  captures `StackId` from `CreateStack` and compares it against a resource property
+  built from `AWS::StackId` must find one ARN for one stack, and two builders is
+  exactly the divergence #517 fixed for the caller's account.
+
+  `Fn::ImportValue` remains unresolved and #522 stays open for it: resolving it needs
+  an export registry across stacks and a refusal to delete a stack whose export is
+  imported, which is a new cross-stack model rather than another resolver.
+
 ## [v0.87.1] - 2026-08-03
 
 ### Fixed

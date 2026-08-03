@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"sort"
 	"strconv"
@@ -19,10 +20,27 @@ type cfnTemplate struct {
 	AWSTemplateFormatVersion string                 `json:"AWSTemplateFormatVersion" yaml:"AWSTemplateFormatVersion"`
 	Description              string                 `json:"Description,omitempty"    yaml:"Description,omitempty"`
 	Parameters               map[string]cfnParam    `json:"Parameters,omitempty"     yaml:"Parameters,omitempty"`
+	Mappings                 cfnMappings            `json:"Mappings,omitempty"       yaml:"Mappings,omitempty"`
 	Conditions               map[string]interface{} `json:"Conditions,omitempty"     yaml:"Conditions,omitempty"`
 	Resources                map[string]cfnResource `json:"Resources"                yaml:"Resources"`
 	Outputs                  map[string]cfnOutput   `json:"Outputs,omitempty"        yaml:"Outputs,omitempty"`
 }
+
+// cfnMappings is the template's Mappings section: a mapping name, a top-level
+// key, a second-level key, and a value.
+//
+// Exactly three levels of map, because that is what CloudFormation defines —
+// "within the mapping, each map is a key followed by another mapping", and
+// Fn::FindInMap takes exactly a map name and two keys. The leaf is interface{}
+// because "the values can be of type String or List", which is why Fn::FindInMap
+// is one of the intrinsics that can resolve to a list.
+//
+// The first three levels being typed is also a check: "the keys in mappings must
+// be literal strings" and "you can't include parameters, pseudo parameters, or
+// intrinsic functions in the Mappings section", so a template that puts an
+// intrinsic where a key belongs fails to decode here rather than resolving to
+// something CloudFormation would have rejected.
+type cfnMappings map[string]map[string]map[string]interface{}
 
 // cfnParam is a CloudFormation template parameter declaration.
 type cfnParam struct {
@@ -106,6 +124,37 @@ type cfnContext struct {
 	// evaluating tracks the conditions currently being evaluated, so a reference
 	// cycle terminates instead of recursing forever.
 	evaluating map[string]bool
+
+	// mappings holds the template's Mappings section, which Fn::FindInMap
+	// resolves against. Nothing else reads it: a mapping cannot be referenced
+	// any other way.
+	mappings cfnMappings
+
+	// failures records the resolution errors encountered while deploying the
+	// current resource — an Fn::FindInMap naming a key no mapping holds, say.
+	//
+	// A resolver returns a string, and there is no shape in which it can report
+	// "there is no answer": returning the empty string is indistinguishable from
+	// a property that legitimately resolved to one, and returning the JSON
+	// encoding of the intrinsic is the silent-literal defect (#522). So the
+	// failure is collected here and read by deployResource, which records it on
+	// the resource — that surfaces as CREATE_FAILED with the reason, the same
+	// observable a plugin's own refusal already produces (#519), rather than
+	// failing the whole Deploy call and needing #502's typed errors first.
+	failures []string
+}
+
+// fail records a resolution failure against the resource being deployed.
+func (c *cfnContext) fail(format string, args ...interface{}) {
+	c.failures = append(c.failures, fmt.Sprintf(format, args...))
+}
+
+// takeFailures returns the failures recorded since the last call and clears
+// them, so each resource reports only its own.
+func (c *cfnContext) takeFailures() []string {
+	out := c.failures
+	c.failures = nil
+	return out
 }
 
 // cfnNamespace is the state namespace for CloudFormation stack state.
@@ -1330,8 +1379,54 @@ func compareSNSTopicDrift(ctx context.Context, d *StackDeployer, stack *CFNStack
 	return []CFNPropertyDiff{driftDiff("/DisplayName", exp, act)}
 }
 
-// deployResource dispatches a single CFN resource to the correct deploy helper.
+// deployResource dispatches a single CFN resource to the correct deploy helper
+// and reports any intrinsic that could not be resolved.
+//
+// A resolver cannot report a failure through its return value — a string has no
+// shape for "there is no answer", which is why an unresolvable Fn::FindInMap used
+// to reach the API as a JSON literal (#522). So resolution failures accumulate on
+// the context and are drained here, after the helper has run: the resource is
+// marked CREATE_FAILED with the reason, exactly as a plugin's own refusal is
+// (#519), and the rest of the stack still deploys.
+//
+// The failure is recorded rather than returned because Deploy's error return
+// aborts the whole stack, and CloudFormation fails the *resource*. It also keeps
+// the reason a per-resource observable, which is what DescribeStackResources
+// reports; #502's typed errors are about the request-level codes and are not
+// needed for this.
 func (d *StackDeployer) deployResource(
+	ctx context.Context,
+	logicalID string,
+	res cfnResource,
+	streamID string,
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	// Drain anything a previous resource left behind, so this resource cannot
+	// inherit a reason that is not its own. Nothing should have: Deploy drains
+	// after every resource. Outputs are resolved after the last resource and are
+	// not attributable to one, so their failures are dropped here deliberately.
+	cctx.takeFailures()
+
+	dr, cost, err := d.dispatchResource(ctx, logicalID, res, streamID, cctx)
+	failures := cctx.takeFailures()
+	if err != nil || len(failures) == 0 {
+		return dr, cost, err
+	}
+	// A resolution failure takes precedence over a dispatch error: the request
+	// the plugin refused was built from a value that never resolved, so the
+	// resolver's reason is the cause and the plugin's is the symptom.
+	reason := strings.Join(failures, "; ")
+	if dr.Error != "" {
+		reason += " (request also refused: " + dr.Error + ")"
+	}
+	dr.Error = reason
+	d.logger.Warn("cfn: resource failed to resolve an intrinsic",
+		"logical_id", logicalID, "type", res.Type, "reason", reason)
+	return dr, cost, nil
+}
+
+// dispatchResource routes a CFN resource type to its deploy helper.
+func (d *StackDeployer) dispatchResource(
 	ctx context.Context,
 	logicalID string,
 	res cfnResource,
@@ -3004,6 +3099,7 @@ func buildCFNContext(tmpl *cfnTemplate, callerParams map[string]string, region, 
 		accountID:  accountID,
 		stackName:  stackName,
 		evaluating: make(map[string]bool),
+		mappings:   tmpl.Mappings,
 	}
 }
 
@@ -3174,6 +3270,14 @@ func resolveValue(v interface{}, cctx *cfnContext) string {
 				return resolveFnGetAtt(args, cctx)
 			case "Fn::If":
 				return resolveFnIf(args, cctx)
+			case "Fn::FindInMap":
+				return resolveFnFindInMap(args, cctx)
+			case "Fn::GetAZs", "Fn::Cidr":
+				// Both return an array, and this context has nowhere to put
+				// one, so the elements are rejoined the way Fn::Split's are —
+				// see resolveFnSplitJoined. resolveValueList is the context
+				// that keeps the list.
+				return strings.Join(resolveValueList(val, cctx), ",")
 			}
 		}
 	}
@@ -3252,6 +3356,20 @@ func resolveValueList(v interface{}, cctx *cfnContext) []string {
 						return resolveValueList(arr[1], cctx)
 					}
 					return resolveValueList(arr[2], cctx)
+				case "Fn::GetAZs":
+					return resolveFnGetAZs(args, cctx)
+				case "Fn::Cidr":
+					return resolveFnCidr(args, cctx)
+				case "Fn::FindInMap":
+					// A mapping's values "can be of type String or List", so a
+					// lookup whose leaf is a list contributes its members here
+					// and is rejoined in a scalar context. resolveFnFindInMap
+					// returns the leaf untouched for exactly this reason.
+					leaf, ok := resolveFnFindInMapValue(args, cctx)
+					if !ok {
+						return nil
+					}
+					return resolveValueList(leaf, cctx)
 				}
 			}
 		}
@@ -3267,6 +3385,17 @@ func resolveValueList(v interface{}, cctx *cfnContext) []string {
 // value, not several.
 func resolveRefList(ref string, cctx *cfnContext) []string {
 	if ref == "AWS::NoValue" {
+		return nil
+	}
+	if ref == "AWS::NotificationARNs" {
+		// "Unlike other pseudo parameters, AWS::NotificationARNs returns a list
+		// of ARNs", so it belongs here as well as in resolveRef. The list is
+		// always empty: substrate has no notification model — CreateStack's
+		// NotificationARNs parameter is not recorded and no stack event is
+		// published — so an empty list is the accurate answer rather than a
+		// placeholder. A template's `!Select [0, !Ref 'AWS::NotificationARNs']`
+		// therefore resolves to the empty string, which is what a stack created
+		// without notification ARNs would give.
 		return nil
 	}
 	if cctx.listParams[ref] {
@@ -3407,11 +3536,24 @@ func cfnListValuedIntrinsic(m map[string]interface{}, cctx *cfnContext) bool {
 	}
 	for fn, args := range m {
 		switch fn {
-		case "Fn::Split":
+		case "Fn::Split", "Fn::GetAZs", "Fn::Cidr":
 			return true
+		case "Fn::FindInMap":
+			// List-valued exactly when the leaf it finds is a list, since "the
+			// values can be of type String or List". A failed lookup is not
+			// list-valued, and asking here does not double-report the failure:
+			// resolveIntrinsicPreservingShape resolves the same intrinsic
+			// immediately after, and a resource carrying the same reason twice
+			// would be noise.
+			leaf, found, _ := cfnFindInMapLeaf(args, cctx)
+			if !found {
+				return false
+			}
+			_, isList := leaf.([]interface{})
+			return isList
 		case "Ref":
 			name, ok := args.(string)
-			return ok && cctx.listParams[name]
+			return ok && (cctx.listParams[name] || name == "AWS::NotificationARNs")
 		case "Fn::If":
 			arr, ok := args.([]interface{})
 			if !ok || len(arr) < 3 {
@@ -3441,14 +3583,17 @@ func cfnListValuedIntrinsic(m map[string]interface{}, cctx *cfnContext) bool {
 // plus Ref. A map is an intrinsic only when it has exactly one key and that key
 // is one of these.
 var cfnIntrinsicNames = map[string]bool{
-	"Ref":        true,
-	"Fn::Sub":    true,
-	"Fn::Join":   true,
-	"Fn::Select": true,
-	"Fn::Split":  true,
-	"Fn::Base64": true,
-	"Fn::GetAtt": true,
-	"Fn::If":     true,
+	"Ref":           true,
+	"Fn::Sub":       true,
+	"Fn::Join":      true,
+	"Fn::Select":    true,
+	"Fn::Split":     true,
+	"Fn::Base64":    true,
+	"Fn::GetAtt":    true,
+	"Fn::If":        true,
+	"Fn::FindInMap": true,
+	"Fn::GetAZs":    true,
+	"Fn::Cidr":      true,
 }
 
 // isCFNIntrinsic reports whether a map is an intrinsic function invocation.
@@ -3509,6 +3654,18 @@ func resolveRef(ref string, cctx *cfnContext) string {
 		return cctx.stackName
 	case "AWS::NoValue":
 		return ""
+	case "AWS::Partition":
+		return cfnPartition(cctx.region)
+	case "AWS::URLSuffix":
+		return cfnURLSuffix(cctx.region)
+	case "AWS::StackId":
+		return cfnStackARN(cctx.region, cctx.accountID, cctx.stackName)
+	case "AWS::NotificationARNs":
+		// A list-valued pseudo-parameter in a scalar context. Empty rather than
+		// the reference string, since the accurate answer is "this stack has no
+		// notification ARNs" — see resolveRefList, which is where a template
+		// using it in a list position lands.
+		return ""
 	}
 	// Parameter reference.
 	if v, ok := cctx.params[ref]; ok {
@@ -3519,6 +3676,55 @@ func resolveRef(ref string, cctx *cfnContext) string {
 		return dr.PhysicalID
 	}
 	return ref
+}
+
+// cfnPartition returns the ARN partition a region belongs to.
+//
+// "For standard AWS Regions, the partition is aws. For resources in other
+// partitions, the partition is aws-{partitionname}. For example, the partition
+// for resources in the China (Beijing and Ningxia) Regions is aws-cn and the
+// partition for resources in the AWS GovCloud (US-West) Region is aws-us-gov."
+//
+// Derived from the region prefix rather than fixed at "aws", so a template that
+// builds an ARN with `!Sub arn:${AWS::Partition}:s3:::bucket` gets the value real
+// CloudFormation would give it. Note the rest of substrate mints ARNs in the aws
+// partition unconditionally, so in a cn- or us-gov- region this value and a
+// deployed resource's ARN disagree; that is pre-existing and not something this
+// resolver can decide on its own.
+func cfnPartition(region string) string {
+	switch {
+	case strings.HasPrefix(region, "cn-"):
+		return "aws-cn"
+	case strings.HasPrefix(region, "us-gov-"):
+		return "aws-us-gov"
+	default:
+		return "aws"
+	}
+}
+
+// cfnURLSuffix returns the AWS domain suffix for a region.
+//
+// "The suffix is typically amazonaws.com, but for the China (Beijing) Region, the
+// suffix is amazonaws.com.cn." Both China regions take the .cn suffix, so the
+// test is on the partition rather than on the one region the sentence names.
+func cfnURLSuffix(region string) string {
+	if cfnPartition(region) == "aws-cn" {
+		return "amazonaws.com.cn"
+	}
+	return "amazonaws.com"
+}
+
+// cfnStackARN builds a stack's ARN — the value of AWS::StackId, and what
+// CreateStack reports as its StackId.
+//
+// One function so the two cannot disagree: a template that writes its own
+// AWS::StackId into a resource property and a caller reading StackId off
+// CreateStack are describing the same stack, and #517 is what happens when two
+// places derive an identity separately.
+func cfnStackARN(region, accountID, stackName string) string {
+	return fmt.Sprintf("arn:%s:cloudformation:%s:%s:stack/%s/%s",
+		cfnPartition(region), region, accountID, stackName,
+		cfnDeterministicUUID(region, accountID, stackName))
 }
 
 func resolveFnSub(args interface{}, cctx *cfnContext) string {
@@ -3661,6 +3867,251 @@ func splitFnSplit(sep, s string) []string {
 		return []string{s}
 	}
 	return strings.Split(s, sep)
+}
+
+// resolveFnFindInMap resolves Fn::FindInMap in a scalar context.
+//
+// A lookup whose leaf is a list is rejoined on commas, for the same reason
+// Fn::Split's is (see resolveFnSplitJoined): the context has nowhere to put a
+// list, and a comma is the separator every list-valued property in this codebase
+// is split on. A failed lookup returns the empty string *and* records a failure,
+// which is what stops it being the silent literal #522 reported.
+func resolveFnFindInMap(args interface{}, cctx *cfnContext) string {
+	leaf, ok := resolveFnFindInMapValue(args, cctx)
+	if !ok {
+		return ""
+	}
+	if _, isList := leaf.([]interface{}); isList {
+		return strings.Join(resolveValueList(leaf, cctx), ",")
+	}
+	return resolveValue(leaf, cctx)
+}
+
+// resolveFnFindInMapValue looks a value up in the template's Mappings section,
+// returning the leaf *unresolved* so a list-valued leaf keeps its shape. ok is
+// false when the lookup failed, in which case the reason has been recorded on
+// cctx and the resource will report CREATE_FAILED.
+func resolveFnFindInMapValue(args interface{}, cctx *cfnContext) (interface{}, bool) {
+	leaf, ok, reason := cfnFindInMapLeaf(args, cctx)
+	if !ok {
+		cctx.fail("%s", reason)
+	}
+	return leaf, ok
+}
+
+// cfnFindInMapLeaf performs the lookup without recording anything, returning the
+// reason a caller should report if it fails. Two callers need the answer without
+// the side effect — cfnListValuedIntrinsic asks only about the leaf's shape, and
+// would otherwise record the same failure twice for one intrinsic.
+//
+// Both keys go through resolveValue: the documented form is
+// `!FindInMap [RegionMap, !Ref 'AWS::Region', InstanceType]`, and the two
+// functions permitted inside the arguments without the AWS::LanguageExtensions
+// transform are Fn::FindInMap and Ref — both of which resolveValue handles, so
+// the nested-key form (`!FindInMap [Arch2AMI, !Ref 'AWS::Region', !FindInMap
+// [Type2Arch, !Ref InstanceType, Arch]]`) resolves without a special case. The
+// map *name* is resolved too, which costs nothing: a literal string resolves to
+// itself, and the documented restriction is on what a template may write, not on
+// what this may read.
+//
+// A missing key is a failure rather than a fallback, unless the optional fourth
+// argument supplies one: "if omitted, Fn::FindInMap raises an error when a key is
+// not found", and "the fourth parameter must be a map with the key DefaultValue".
+// A present top-level key holding no such second-level key takes the same path,
+// since the documented DefaultValue covers "either the TopLevelKey or
+// SecondLevelKey is not found".
+func cfnFindInMapLeaf(args interface{}, cctx *cfnContext) (leaf interface{}, ok bool, reason string) {
+	arr, isArr := args.([]interface{})
+	if !isArr || len(arr) < 3 {
+		return nil, false, "Fn::FindInMap requires a map name and two keys"
+	}
+	mapName := resolveValue(arr[0], cctx)
+	topKey := resolveValue(arr[1], cctx)
+	secondKey := resolveValue(arr[2], cctx)
+
+	defaultValue, hasDefault := cfnFindInMapDefault(arr)
+
+	top, found := cctx.mappings[mapName]
+	if !found {
+		if hasDefault {
+			return defaultValue, true, ""
+		}
+		return nil, false, fmt.Sprintf(
+			"Fn::FindInMap: no mapping named %q in the template's Mappings section", mapName)
+	}
+	second, found := top[topKey]
+	if !found {
+		if hasDefault {
+			return defaultValue, true, ""
+		}
+		return nil, false, fmt.Sprintf(
+			"Fn::FindInMap: mapping %q has no top-level key %q", mapName, topKey)
+	}
+	value, found := second[secondKey]
+	if !found {
+		if hasDefault {
+			return defaultValue, true, ""
+		}
+		return nil, false, fmt.Sprintf(
+			"Fn::FindInMap: mapping %q key %q has no second-level key %q", mapName, topKey, secondKey)
+	}
+	return value, true, ""
+}
+
+// cfnFindInMapDefault reads Fn::FindInMap's optional fourth argument.
+//
+// The argument is a map with exactly the key DefaultValue; anything else is not
+// the documented form and is ignored rather than guessed at, so a template that
+// misspells it gets the lookup failure it would get from CloudFormation instead
+// of a silently different value.
+func cfnFindInMapDefault(arr []interface{}) (interface{}, bool) {
+	if len(arr) < 4 {
+		return nil, false
+	}
+	m, ok := arr[3].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	v, has := m["DefaultValue"]
+	return v, has
+}
+
+// resolveFnGetAZs resolves Fn::GetAZs to the Availability Zones of a region.
+//
+// The zones come from ec2SeededAZSuffixes, the same list EC2's
+// DescribeAvailabilityZones, DescribeInstanceTypeOfferings and
+// DescribeSpotPriceHistory derive their zone names from, so a template that picks
+// a zone with !Select over !GetAZs names a zone a caller can then query. Two
+// independent lists would be the defect worth avoiding here: a subnet in a zone
+// DescribeAvailabilityZones does not report is not observable-consistent.
+//
+// "Specifying an empty string is equivalent to specifying AWS::Region", and the
+// one function permitted inside is Ref — which is how the documented
+// `{"Fn::GetAZs": {"Ref": "AWS::Region"}}` form arrives — so the argument goes
+// through resolveValue and an empty result falls back to the caller's region.
+//
+// Substrate reports every zone for every region, where real CloudFormation
+// "returns only Availability Zones that have a default subnet" and warns the
+// order "isn't guaranteed". Substrate's order is fixed, which is what a
+// deterministic emulator owes a caller indexing into the list.
+func resolveFnGetAZs(args interface{}, cctx *cfnContext) []string {
+	region := resolveValue(args, cctx)
+	if region == "" {
+		region = cctx.region
+	}
+	out := make([]string, 0, len(ec2SeededAZSuffixes))
+	for _, suffix := range ec2SeededAZSuffixes {
+		out = append(out, region+suffix)
+	}
+	return out
+}
+
+// resolveFnCidr resolves Fn::Cidr to a list of CIDR blocks.
+//
+// The arguments are `[ipBlock, count, cidrBits]`: "count — the number of CIDRs to
+// generate. Valid range is between 1 and 256", and "cidrBits — the number of
+// subnet bits for the CIDR. For example, specifying a value "8" for this
+// parameter will create a CIDR with a mask of "/24"". So the generated mask is
+// (address bits − cidrBits): the documented example
+// `{"Fn::Cidr": ["192.168.0.0/24", "6", "5"]}` yields six /27 blocks, since
+// 32 − 5 = 27.
+//
+// Both IPv4 and IPv6 are handled, because the documented IPv6 example asks for
+// cidrBits 64 against a /56 — the address width has to come from the parsed
+// block rather than being assumed to be 32.
+//
+// A malformed or impossible request records a failure rather than returning a
+// short list: a caller doing `!Select [3, !Cidr [...]]` would otherwise read an
+// empty string out of a list that was silently too short.
+func resolveFnCidr(args interface{}, cctx *cfnContext) []string {
+	arr, ok := args.([]interface{})
+	if !ok || len(arr) < 3 {
+		cctx.fail("Fn::Cidr requires an ipBlock, a count and a cidrBits value")
+		return nil
+	}
+	ipBlock := resolveValue(arr[0], cctx)
+	count, err := strconv.Atoi(resolveValue(arr[1], cctx))
+	if err != nil || count < 1 || count > 256 {
+		cctx.fail("Fn::Cidr: count %q is not in the valid range 1-256", resolveValue(arr[1], cctx))
+		return nil
+	}
+	cidrBits, err := strconv.Atoi(resolveValue(arr[2], cctx))
+	if err != nil || cidrBits < 1 {
+		cctx.fail("Fn::Cidr: cidrBits %q is not a positive integer", resolveValue(arr[2], cctx))
+		return nil
+	}
+	blocks, err := cfnCidrBlocks(ipBlock, count, cidrBits)
+	if err != nil {
+		cctx.fail("Fn::Cidr: %s", err)
+		return nil
+	}
+	return blocks
+}
+
+// cfnCidrBlocks splits ipBlock into count subnets whose host part is cidrBits
+// wide, in ascending order.
+//
+// net/netip rather than net: netip.Prefix carries the address family, which is
+// what decides whether the new mask is 32 − cidrBits or 128 − cidrBits, and
+// netip.Addr's bytes can be incremented without the allocation-per-address that
+// net.IP arithmetic needs.
+func cfnCidrBlocks(ipBlock string, count, cidrBits int) ([]string, error) {
+	prefix, err := netip.ParsePrefix(ipBlock)
+	if err != nil {
+		return nil, fmt.Errorf("ipBlock %q is not a CIDR block: %w", ipBlock, err)
+	}
+	prefix = prefix.Masked()
+	addrBits := prefix.Addr().BitLen()
+	newMask := addrBits - cidrBits
+	if newMask < prefix.Bits() {
+		return nil, fmt.Errorf("cidrBits %d would widen %s to /%d, which is larger than the block itself",
+			cidrBits, ipBlock, newMask)
+	}
+	// Each subnet is 2^cidrBits addresses, so the number that fit is
+	// 2^(newMask − prefix.Bits()). Computed as a shift over the exponent rather
+	// than over the count itself, since a /0 with cidrBits 1 would overflow.
+	if exp := newMask - prefix.Bits(); exp < 9 && count > 1<<exp {
+		return nil, fmt.Errorf("%s holds only %d /%d blocks, not %d", ipBlock, 1<<exp, newMask, count)
+	}
+	out := make([]string, 0, count)
+	addr := prefix.Addr()
+	for i := 0; i < count; i++ {
+		out = append(out, netip.PrefixFrom(addr, newMask).String())
+		if i == count-1 {
+			// Not advanced past the last block, so a request for the single
+			// block that fills the whole address space succeeds rather than
+			// failing on an increment nobody needed.
+			break
+		}
+		addr, err = cfnCidrAdvance(addr, cidrBits)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// cfnCidrAdvance returns the address 2^hostBits above addr, which is the first
+// address of the next subnet of that size.
+func cfnCidrAdvance(addr netip.Addr, hostBits int) (netip.Addr, error) {
+	b := addr.AsSlice()
+	// The increment lands on the bit hostBits from the right, so it is applied to
+	// byte len(b)-1-hostBits/8 at bit hostBits%8, and any carry propagates left.
+	idx := len(b) - 1 - hostBits/8
+	if idx < 0 {
+		return netip.Addr{}, fmt.Errorf("cidrBits %d exceeds the address width", hostBits)
+	}
+	carry := uint16(1) << (hostBits % 8)
+	for ; idx >= 0 && carry != 0; idx-- {
+		sum := uint16(b[idx]) + carry
+		b[idx] = byte(sum)
+		carry = sum >> 8
+	}
+	next, ok := netip.AddrFromSlice(b)
+	if !ok {
+		return netip.Addr{}, fmt.Errorf("advancing %s by 2^%d produced an invalid address", addr, hostBits)
+	}
+	return next, nil
 }
 
 func resolveFnBase64(args interface{}, cctx *cfnContext) string {

@@ -362,3 +362,110 @@ func ECSRewriteContainerKeysForTest(v interface{}) interface{} {
 // mapping, so a typo in a hand-written table is caught by asserting the whole
 // table against the rule its entries follow.
 func ECSContainerDefinitionKeysForTest() map[string]string { return ecsContainerDefinitionKeys }
+
+// CFNCidrBlocksForTest wraps cfnCidrBlocks so the documented examples — and the
+// requests it must refuse rather than answer with a short list — can be asserted
+// without a template.
+func CFNCidrBlocksForTest(ipBlock string, count, cidrBits int) ([]string, error) {
+	return cfnCidrBlocks(ipBlock, count, cidrBits)
+}
+
+// CFNPartitionForTest wraps cfnPartition.
+func CFNPartitionForTest(region string) string { return cfnPartition(region) }
+
+// CFNURLSuffixForTest wraps cfnURLSuffix.
+func CFNURLSuffixForTest(region string) string { return cfnURLSuffix(region) }
+
+// CFNResolveWithMappingsForTest resolves v against a template's Mappings section,
+// returning the resolved value and any failure the resolution recorded.
+//
+// The failures are the point: a resolver returns a string, so "no such mapping
+// key" and "the key held an empty string" are the same observable downstream, and
+// the whole of #522's silent-literal defect lives in that gap. Reading them here
+// pins which lookups fail and which fall back to a DefaultValue.
+func CFNResolveWithMappingsForTest(
+	v interface{},
+	mappings map[string]map[string]map[string]interface{},
+	params map[string]string,
+	region string,
+) (string, []string) {
+	cctx := &cfnContext{
+		params:     params,
+		listParams: map[string]bool{},
+		conditions: map[string]bool{},
+		resources:  map[string]DeployedResource{},
+		evaluating: map[string]bool{},
+		mappings:   mappings,
+		region:     region,
+		accountID:  testAccountID,
+		stackName:  "teststack",
+	}
+	return resolveValue(v, cctx), cctx.takeFailures()
+}
+
+// CFNResolveListWithMappingsForTest is CFNResolveWithMappingsForTest for a
+// list-valued context, which is where Fn::GetAZs, Fn::Cidr and a list-valued
+// mapping leaf keep their elements rather than being rejoined.
+func CFNResolveListWithMappingsForTest(
+	v interface{},
+	mappings map[string]map[string]map[string]interface{},
+	params map[string]string,
+	region string,
+) ([]string, []string) {
+	cctx := &cfnContext{
+		params:     params,
+		listParams: map[string]bool{},
+		conditions: map[string]bool{},
+		resources:  map[string]DeployedResource{},
+		evaluating: map[string]bool{},
+		mappings:   mappings,
+		region:     region,
+		accountID:  testAccountID,
+		stackName:  "teststack",
+	}
+	return resolveValueList(v, cctx), cctx.takeFailures()
+}
+
+// CFNResolveNestedWithMappingsForTest resolves v as a *structured property* rather
+// than as a whole value, which is the only context where an intrinsic's resolved
+// **shape** is observable.
+//
+// A scalar context rejoins a list, so "resolved to a list" and "resolved to a
+// comma-joined string" are the same observable there. Inside a structured property
+// they are not: a member holding a list and a member holding one string are
+// different JSON, and different again from a member holding "". That distinction is
+// what decides whether a list-valued mapping leaf or AWS::NotificationARNs reaches
+// a plugin as an array.
+func CFNResolveNestedWithMappingsForTest(
+	v interface{},
+	mappings map[string]map[string]map[string]interface{},
+	params map[string]string,
+	region string,
+) (interface{}, []string) {
+	cctx := &cfnContext{
+		params:     params,
+		listParams: map[string]bool{},
+		conditions: map[string]bool{},
+		resources:  map[string]DeployedResource{},
+		evaluating: map[string]bool{},
+		mappings:   mappings,
+		region:     region,
+		accountID:  testAccountID,
+		stackName:  "teststack",
+	}
+	return resolveNested(v, cctx), cctx.takeFailures()
+}
+
+// CFNSeededAZsForTest returns the Availability Zone names substrate reports for a
+// region, derived from the same list EC2's DescribeAvailabilityZones uses.
+//
+// Exported so a test can assert Fn::GetAZs against EC2's own answer without
+// hard-coding a zone list in a second place — which is the disagreement the
+// resolver exists to avoid.
+func CFNSeededAZsForTest(region string) []string {
+	out := make([]string, 0, len(ec2SeededAZSuffixes))
+	for _, suffix := range ec2SeededAZSuffixes {
+		out = append(out, region+suffix)
+	}
+	return out
+}
