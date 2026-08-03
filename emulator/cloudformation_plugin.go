@@ -1083,10 +1083,11 @@ func cfnTime(t time.Time) string {
 // account and region, and most state keys embed both, so a stack created by a
 // caller in any other partition wrote its EC2 instances, ECS clusters and log
 // groups where that caller could not see them. Fixed in #517.
+// The ARN is built by cfnStackARN, which the AWS::StackId pseudo-parameter also
+// uses (#522): a template writing its own stack ID into a resource property and a
+// caller reading StackId off CreateStack must describe the same stack.
 func cfnStackID(reqCtx *RequestContext, stackName string) string {
-	return fmt.Sprintf("arn:aws:cloudformation:%s:%s:stack/%s/%s",
-		reqCtx.Region, reqCtx.AccountID, stackName,
-		cfnDeterministicUUID(reqCtx.Region, reqCtx.AccountID, stackName))
+	return cfnStackARN(reqCtx.Region, reqCtx.AccountID, stackName)
 }
 
 // cfnChangeSetID builds the change-set ARN.

@@ -209,16 +209,64 @@ holds only the request a real client would have made.
 backs under **Betty CFN resource types**. A template body may be JSON or YAML.
 
 `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`, `Fn::Select`, `Fn::Split`,
-`Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or` and `Fn::Not` resolve,
-as do the `AWS::Region`, `AWS::AccountId`, `AWS::StackName` and `AWS::NoValue`
-pseudo-parameters. `Fn::FindInMap`, `Fn::ImportValue`, `Fn::Cidr`,
-`Fn::GetAZs` and the remaining pseudo-parameters (`AWS::Partition`,
-`AWS::URLSuffix`, `AWS::StackId`, `AWS::NotificationARNs`) are **not** resolved —
-an unrecognized intrinsic falls back to its JSON encoding and an unrecognized
-`Ref` to the reference string itself, so a template using one deploys with a
-literal where a value should be rather than failing. Tracked in
-[#522](https://github.com/scttfrdmn/substrate/issues/522) — `Fn::FindInMap` needs a
-`Mappings` model, which the template struct does not have.
+`Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or`, `Fn::Not`,
+`Fn::FindInMap`, `Fn::GetAZs` and `Fn::Cidr` resolve, as do every pseudo-parameter:
+`AWS::Region`, `AWS::AccountId`, `AWS::StackName`, `AWS::StackId`,
+`AWS::Partition`, `AWS::URLSuffix`, `AWS::NotificationARNs` and `AWS::NoValue`.
+`Fn::ImportValue` is the one intrinsic that does **not** resolve — it falls back to
+its JSON encoding, so a template using it deploys with a literal where a value
+should be rather than failing. Tracked in
+[#522](https://github.com/scttfrdmn/substrate/issues/522): resolving it needs an
+export registry across stacks, not another resolver.
+
+`AWS::Partition` and `AWS::URLSuffix` follow the region — `aws-cn` and
+`amazonaws.com.cn` for a `cn-` region, `aws-us-gov` for a `us-gov-` one, `aws` and
+`amazonaws.com` otherwise. `AWS::StackId` is the same ARN `CreateStack` returned
+and `DescribeStacks` reports for the stack, so a template that writes its own
+stack ID into a property and a caller that captured `StackId` agree.
+`AWS::NotificationARNs` is an **empty list**, which is the accurate answer for a
+stack created without any: substrate has no notification model, so there is never
+an ARN to report, and `!Select ['0', !Ref 'AWS::NotificationARNs']` yields the
+empty string rather than the reference string.
+
+#### `Mappings` and `Fn::FindInMap`
+
+A template's `Mappings` section is read and `Fn::FindInMap` resolves all three
+levels — map name, top-level key, second-level key — including the nested form the
+reference leads with, where the second-level key is itself a `Ref` or a
+`Fn::FindInMap`. A mapping's leaf value may be a string or a **list**, so
+`SecurityGroupIds: !FindInMap [SGs, Prod, Ids]` contributes several IDs; in a
+scalar context the members are rejoined on commas, as `Fn::Split`'s are.
+
+A lookup that misses **fails the resource**: it reports `CREATE_FAILED` with a
+`ResourceStatusReason` naming the intrinsic and the key, and the resource is not
+created. This is deliberate and it is the point of the model — the JSON-encoding
+fallback would have turned a missing AMI into a nonsense `ImageId` that launched an
+instance, reporting success for a template real CloudFormation rejects. The rest of
+the stack still deploys; one unresolvable property does not abort it, matching the
+per-resource failure reporting above.
+
+The optional fourth argument supplies a fallback: `!FindInMap [M, K1, K2, {DefaultValue: x}]`
+resolves to `x` when either key is missing, and the fallback is not consulted when
+the lookup succeeds. It must be spelled exactly `DefaultValue` — a map with any
+other key is not a default and the lookup fails as it would without one, rather
+than substrate guessing at the intent.
+
+#### `Fn::GetAZs` and `Fn::Cidr`
+
+`Fn::GetAZs` resolves to the **same zone names EC2's `DescribeAvailabilityZones`
+reports** for that region, from the same list, so a subnet placed with
+`!Select [0, !GetAZs '']` names a zone the caller can afterwards query. An empty
+string means the caller's region, as `Ref 'AWS::Region'` does.
+
+`Fn::Cidr` splits `ipBlock` into `count` blocks whose mask is the address width
+less `cidrBits`, for IPv4 and IPv6 alike — `!Cidr ['192.168.0.0/24', 6, 5]` gives
+six `/27`s, and `!Cidr ['2001:db8::/56', 1, 64]` gives a `/64`. A request the block
+cannot satisfy — a `count` larger than the number of blocks that fit, a `cidrBits`
+that would widen the block, a `count` outside 1–256, an `ipBlock` that is not a
+CIDR block — fails the resource rather than returning a short list, for the same
+reason: `!Select [3, !Cidr [...]]` over a short list would read an empty string out
+of it and deploy.
 
 `Fn::Split` resolves to a **list**, and a list-valued property receives every
 element. A `CommaDelimitedList` (or `List<…>`) parameter is list-valued too: a
@@ -256,7 +304,8 @@ list-valued. So `"Cpu": {"Ref": "Cpu"}` reaches the API as `"256"` where a liter
 
 Where the property is scalar and has nowhere to put a list — an `Outputs` value,
 say — `Fn::Split`'s elements are rejoined on the delimiter, reproducing the
-source string. Real CloudFormation rejects the template instead; substrate
+source string, and `Fn::GetAZs`, `Fn::Cidr` and a list-valued `Fn::FindInMap` leaf
+are rejoined on commas. Real CloudFormation rejects the template instead; substrate
 resolves rather than rejects, and rejoining is the spelling that loses nothing.
 
 A parameter declared `Default: ''` is a parameter whose default is the empty
@@ -291,9 +340,8 @@ takes a two-element list, and the split is on the **first** period only, so
 `!GetAtt Res.Outputs.Nested` is `["Res", "Outputs.Nested"]` — an attribute name
 may itself contain periods.
 
-Expansion is not resolution. `!FindInMap`, `!ImportValue`, `!Cidr` and `!GetAZs`
-expand to long forms that are still unresolved (#522), and hit the same fallback the
-long forms already do.
+Expansion is not resolution. `!ImportValue` expands to a long form that is still
+unresolved (#522), and hits the same fallback the long form already does.
 
 A tag substrate does not recognize is **not** dropped: the node's value is kept
 and a `WARN` naming the tag is logged, since a macro or transform may introduce a
