@@ -80,7 +80,7 @@ CloudFormation, and cost detail follows below the matrix.
 
 ---
 
-The per-service sections below carry hand-written operation lists, Betty
+The per-service sections below carry hand-written operation lists,
 CloudFormation resource types, and cost notes for the most heavily used plugins.
 They are maintained by hand and cover a subset of the plugins in the matrix
 above; the remaining plugins are registered and functional but not yet detailed
@@ -142,7 +142,7 @@ aws s3api head-bucket --bucket probe-data      # 200 — a real bucket
 aws s3api put-object --bucket probe-data --key k --body f
 ```
 
-The reverse also holds: a stack created in process through `emulator.BettyClient`
+The reverse also holds: a stack created in process through `emulator.Client`
 is visible to `DescribeStacks` over the wire, and a wire-created stack is visible
 to the in-process API. There is one set of stacks.
 
@@ -169,7 +169,7 @@ aws --endpoint-url http://localhost:4566 --region eu-west-1 \
 `AWS::AccountId` and `AWS::Region` resolve to the same caller, so a physical name
 built from either agrees with the stack ARN.
 
-The in-process `emulator.BettyClient` deploys into substrate's default partition
+The in-process `emulator.Client` deploys into substrate's default partition
 (`123456789012` / `us-east-1`). Its callers never sign a request, so there is no
 caller identity to take; an in-process caller that needs another partition can set
 one on the deployer with `emulator.WithDeployerIdentity`.
@@ -327,7 +327,7 @@ holds only the request a real client would have made.
 ### Templates
 
 113 resource types are supported; each service section below lists the types it
-backs under **Betty CFN resource types**. A template body may be JSON or YAML.
+backs under **CloudFormation resource types**. A template body may be JSON or YAML.
 
 **Every intrinsic function resolves.** `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`,
 `Fn::Select`, `Fn::Split`, `Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`,
@@ -692,7 +692,7 @@ attachment count and dates — which is what AWS returns. On AWS the document co
 readable in process through `emulator.GetManagedPolicy` and are what the IAM policy
 evaluator reads.
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -1542,7 +1542,7 @@ substrate has no canonical user IDs: there is one owner per bucket and it owns e
 in it. An ACL's `Owner` and its `CanonicalUser` `FULL_CONTROL` grantee are therefore
 always the same ID, and an object's owner is its bucket's.
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -1578,7 +1578,7 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | UntagResource | |
 | ListTags | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -1996,7 +1996,7 @@ name was "recently deleted", which is why the condition is seeded rather than
 inferred: a seeded name is refused on its next create whether or not a delete
 preceded it.
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -2033,7 +2033,7 @@ SQS requests: $0.0000004 per request.
 | TransactWriteItems | |
 | UpdateTimeToLive | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -2921,7 +2921,7 @@ any. The shortfall is spread across the request's capacity pools, so `errorSet`
 reports one item per pool that came up short, and `DescribeFleets` reports the
 result in `fulfilledCapacity`.
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -2965,7 +2965,7 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | DescribeRules | |
 | DeleteRule | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -2996,7 +2996,7 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 | ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions |
 | ListResourceRecordSets | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3052,7 +3052,7 @@ Resource Groups Tagging API operations are free.
 | Publish | Dispatches to subscribed Lambda/SQS via cross-service dispatch |
 | PublishBatch | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3083,7 +3083,7 @@ SNS publish: $0.0000005 per message.
 | DescribeSecret | |
 | TagResource | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3111,7 +3111,7 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 | DeleteParameter | |
 | DescribeParameters | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3141,7 +3141,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | GenerateDataKey | |
 | GenerateDataKeyWithoutPlaintext | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3205,7 +3205,7 @@ the error code travels in the body's `__type`, not the status line. Substrate's
 older group- and stream-level not-found responses on the other operations still
 use 404 and are not changed here.
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3238,7 +3238,7 @@ CloudWatch Logs ingestion: $0.50 per GB. Storage: $0.03 per GB-month.
 | PutEvents | Stores last 100 events in ring buffer |
 | ListTargetsByRule | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3266,7 +3266,7 @@ EventBridge custom events: $1.00 per million events.
 | DescribeAlarms | |
 | DeleteAlarms | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3293,7 +3293,7 @@ CloudWatch metrics: $0.30 per metric per month. Alarms: $0.10 per alarm per mont
 | ListCertificates | |
 | AddTagsToCertificate | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3332,7 +3332,7 @@ ACM certificates are free.
 | CreateStage | |
 | GetStage | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3370,7 +3370,7 @@ API Gateway REST API calls: $3.50 per million calls.
 | GetStage | |
 | CreateAuthorizer | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3402,7 +3402,7 @@ API Gateway HTTP API calls: $1.00 per million calls.
 | DescribeExecution | Transitions to SUCCEEDED on describe |
 | StopExecution | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3430,7 +3430,7 @@ Step Functions state transitions: $0.025 per 1,000 transitions.
 | PutImage | |
 | BatchGetImage | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3467,7 +3467,7 @@ ECR storage: $0.10 per GB-month. Data transfer is free within the same region.
 | ListTasks | |
 | StopTask | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3502,7 +3502,7 @@ ECS Fargate vCPU: $0.04048 per vCPU-hour. Memory: $0.004445 per GB-hour.
 | AdminDeleteUser | |
 | InitiateAuth | Returns stub JWT tokens |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3529,7 +3529,7 @@ Cognito MAUs: first 50,000 free, then $0.0055 per MAU.
 | DeleteIdentityPool | |
 | GetCredentialsForIdentity | Returns stub temporary credentials |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3560,7 +3560,7 @@ Cognito Identity operations are free.
 | GetShardIterator | Returns base64-encoded cursor |
 | GetRecords | Ring buffer of last 10,000 records per shard |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3590,7 +3590,7 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 
 All CloudFront resources are stored under `us-east-1` (global service).
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3620,7 +3620,7 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | DeleteDBSnapshot | |
 | RestoreDBInstanceFromDBSnapshot | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3648,7 +3648,7 @@ RDS db.t3.micro on-demand: $0.017 per hour (approximate for testing purposes).
 | DescribeReplicationGroups | |
 | DeleteReplicationGroup | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3680,7 +3680,7 @@ ElastiCache cache.t3.micro: $0.017 per node-hour (approximate).
 | DescribeAccessPoints | |
 | DeleteAccessPoint | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3719,7 +3719,7 @@ EFS standard storage: $0.30 per GB-month.
 | GetJobRun | Transitions to SUCCEEDED after describe |
 | GetJobRuns | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3770,7 +3770,7 @@ Cost Explorer API calls: $0.01 per request.
 | DescribeBudgets | Lists all budgets for account |
 | DescribeBudgetActionsForBudget | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3959,7 +3959,7 @@ Organizations API calls are free.
 | ListEmailIdentities | |
 | SendEmail | Returns stub MessageId; does not deliver |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
@@ -3987,7 +3987,7 @@ SES outbound email: $0.10 per 1,000 emails.
 | PutRecord | |
 | PutRecordBatch | |
 
-### Betty CFN resource types
+### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|

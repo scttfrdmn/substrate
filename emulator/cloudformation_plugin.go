@@ -22,7 +22,7 @@ const cfnXMLNS = "http://cloudformation.amazonaws.com/doc/2010-05-15/"
 // It is deliberately a thin adapter: every handler translates query parameters
 // in and XML out, and all stack, change-set and drift behavior lives in
 // [StackDeployer], which substrate has always exposed to in-process Go callers
-// through [BettyClient]. Before #483 that model was reachable only from Go, so a
+// through [Client]. Before #483 that model was reachable only from Go, so a
 // consumer driving the emulator with the AWS CLI or an SDK — the way CDK,
 // CloudFormation and Terraform users actually do — got ServiceNotAvailable from
 // [PluginRegistry.RouteRequest] for a service README.md advertises as a
@@ -221,7 +221,7 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 	}
 
 	// The stack name is passed as the deployer's stream ID because
-	// StackDeployer.Deploy derives the persisted stack name from it. BettyClient
+	// StackDeployer.Deploy derives the persisted stack name from it. [Client]
 	// instead passes deploy-<unixnano>, which is right for a one-shot in-process
 	// validation run but would make a wire-created stack undiscoverable by the
 	// name the caller asked for.
@@ -1063,7 +1063,7 @@ func (p *CloudFormationPlugin) listAllStacks() ([]CFNStackState, error) {
 // findStack returns the stack named name, or nil when no such stack exists.
 //
 // The lookup goes through StackDeployer.ListStacks rather than reading the
-// cfn namespace directly so the state key layout stays betty_cfn.go's business.
+// cfn namespace directly so the state key layout stays cfn_deployer.go's business.
 func (p *CloudFormationPlugin) findStack(name string) (*CFNStackState, error) {
 	stacks, err := p.listAllStacks()
 	if err != nil {

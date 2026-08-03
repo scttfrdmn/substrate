@@ -68,7 +68,7 @@ func (m *S3SystemMetadata) fields() []s3MetadataField {
 // Headers are matched case-insensitively via [headerValueFold] rather than by direct
 // map access: an [AWSRequest] reaching a plugin has not always been through
 // net/http's header canonicalization, since substrate builds requests in-process too
-// (see betty_cfn.go), and RFC 9110 header names are case-insensitive regardless.
+// (see cfn_deployer.go), and RFC 9110 header names are case-insensitive regardless.
 //
 // An absent header yields the empty string, which [S3SystemMetadata.emit] omits from
 // the response — S3 returns no header for metadata that was never set, and an empty

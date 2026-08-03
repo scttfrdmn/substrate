@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Intent expresses constraints that BettyClient checks during validation.
+// Intent expresses constraints that Client checks during validation.
 type Intent struct {
 	// MaxCost is the maximum allowed total cost in USD. Zero means unchecked.
 	MaxCost float64
@@ -34,7 +34,7 @@ type DeployedResource struct {
 	Metadata map[string]interface{}
 }
 
-// DeployResult is returned by DeployStack and BettyClient.Deploy.
+// DeployResult is returned by DeployStack and Client.Deploy.
 type DeployResult struct {
 	// StackName is the name of the deployed CloudFormation stack.
 	StackName string
@@ -74,10 +74,10 @@ type DeployResult struct {
 	ResourceDeletions []CFNResourceDeletion
 }
 
-// BettyClient is a convenience wrapper for the full Betty.codes validation workflow.
-// It orchestrates CloudFormation deployment, event recording, and validation analysis
+// Client is a convenience wrapper for the full in-process validation workflow. It
+// orchestrates CloudFormation deployment, event recording, and validation analysis
 // without requiring an HTTP server.
-type BettyClient struct {
+type Client struct {
 	registry *PluginRegistry
 	store    *EventStore
 	state    StateManager
@@ -87,15 +87,15 @@ type BettyClient struct {
 	intent   Intent
 }
 
-// NewBettyClient creates a BettyClient wired to the provided dependencies.
-func NewBettyClient(
+// NewClient creates a Client wired to the provided dependencies.
+func NewClient(
 	registry *PluginRegistry,
 	store *EventStore,
 	state StateManager,
 	tc *TimeController,
 	logger Logger,
-) *BettyClient {
-	return &BettyClient{
+) *Client {
+	return &Client{
 		registry: registry,
 		store:    store,
 		state:    state,
@@ -108,7 +108,7 @@ func NewBettyClient(
 // Deploy parses cfn (JSON or YAML CloudFormation template), creates all described
 // resources in order, records events under a generated stream, and validates the
 // result against intent.
-func (b *BettyClient) Deploy(ctx context.Context, cfn string, intent Intent) (*DeployResult, error) {
+func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*DeployResult, error) {
 	b.intent = intent
 
 	// Built through the constructor rather than as a struct literal so there is one
@@ -116,7 +116,7 @@ func (b *BettyClient) Deploy(ctx context.Context, cfn string, intent Intent) (*D
 	// literal left the account and region empty, which was harmless until the
 	// deployer started reading them.
 	//
-	// No identity option: BettyClient is the in-process validation client and its
+	// No identity option: Client is the in-process validation client and its
 	// callers never sign a request, so there is no caller whose identity could be
 	// threaded — substrate's defaults are the right answer here rather than a
 	// placeholder for one. An in-process caller that does need another partition
@@ -141,13 +141,13 @@ func (b *BettyClient) Deploy(ctx context.Context, cfn string, intent Intent) (*D
 
 // StartRecording opens a named recording session. Events recorded while the session
 // is open are tagged with the session's StreamID.
-func (b *BettyClient) StartRecording(ctx context.Context, name string) (*RecordingSession, error) {
+func (b *Client) StartRecording(ctx context.Context, name string) (*RecordingSession, error) {
 	engine := NewReplayEngine(b.store, b.state, b.tc, b.registry, ReplayConfig{}, b.logger)
 	return engine.StartRecording(ctx, name)
 }
 
 // StopRecording closes session and returns a ValidationReport for its stream.
-func (b *BettyClient) StopRecording(ctx context.Context, session *RecordingSession) (*ValidationReport, error) {
+func (b *Client) StopRecording(ctx context.Context, session *RecordingSession) (*ValidationReport, error) {
 	engine := NewReplayEngine(b.store, b.state, b.tc, b.registry, ReplayConfig{}, b.logger)
 	if _, err := engine.StopRecording(ctx, session); err != nil {
 		return nil, fmt.Errorf("stop recording: %w", err)
@@ -157,16 +157,42 @@ func (b *BettyClient) StopRecording(ctx context.Context, session *RecordingSessi
 
 // Validate analyses the event stream identified by streamID and returns a full
 // ValidationReport. The stored intent (from the most recent Deploy call) is applied.
-func (b *BettyClient) Validate(ctx context.Context, streamID string) (*ValidationReport, error) {
+func (b *Client) Validate(ctx context.Context, streamID string) (*ValidationReport, error) {
 	return ValidateRecording(ctx, b.store, streamID, b.intent)
 }
 
 // NewDebugSession returns a DebugSession initialized for time-travel inspection
 // of the recorded stream identified by streamID.
-func (b *BettyClient) NewDebugSession(streamID string) *DebugSession {
+func (b *Client) NewDebugSession(streamID string) *DebugSession {
 	engine := NewReplayEngine(b.store, b.state, b.tc, b.registry, ReplayConfig{}, b.logger)
 	return &DebugSession{
 		engine:   engine,
 		streamID: streamID,
 	}
+}
+
+// BettyClient is the former name of [Client].
+//
+// Deprecated: use [Client]. The name referred to an unrelated project and says
+// nothing about what the type does; BettyClient will be removed in v1.0.0, which is
+// the only point a Go module can drop an exported symbol without breaking the import
+// path for every consumer.
+//
+// It is an alias rather than a distinct type on purpose: a consumer holding both a
+// *BettyClient and a *Client, or passing one where the other is expected, keeps
+// compiling for the whole deprecation window. A defined type would have made the
+// rename a breaking change dressed as a deprecation.
+type BettyClient = Client
+
+// NewBettyClient is the former name of [NewClient].
+//
+// Deprecated: use [NewClient]. Will be removed in v1.0.0. See [BettyClient].
+func NewBettyClient(
+	registry *PluginRegistry,
+	store *EventStore,
+	state StateManager,
+	tc *TimeController,
+	logger Logger,
+) *Client {
+	return NewClient(registry, store, state, tc, logger)
 }

@@ -1,15 +1,15 @@
 //go:build ignore
 
-// Run: go run examples/betty_workflow/main.go
+// Run: go run examples/validation_workflow/main.go
 
-// Package main demonstrates the full Betty.codes validation workflow using
+// Package main demonstrates the full in-process validation workflow using
 // Substrate's in-process API — no HTTP server required.
 //
 // The example:
 //  1. Wires up IAM and S3 plugins.
-//  2. Deploys a CloudFormation template (role + S3 bucket) via BettyClient.Deploy.
+//  2. Deploys a CloudFormation template (role + S3 bucket) via Client.Deploy.
 //  3. Opens a recording session and runs manual S3 PutObject operations.
-//  4. Stops the session and validates it with BettyClient.StopRecording.
+//  4. Stops the session and validates it with Client.StopRecording.
 //  5. Opens a DebugSession and inspects state at event 0.
 //  6. Prints the ValidationReport as formatted JSON.
 package main
@@ -66,18 +66,18 @@ func main() {
 	}
 	registry.Register(s3Plugin)
 
-	betty := substrate.NewBettyClient(registry, store, state, tc, logger)
+	client := substrate.NewClient(registry, store, state, tc, logger)
 
 	// --- 2. Deploy a CloudFormation stack ----------------------------------
 
 	cfnTemplate := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
-		"Description": "Betty workflow example stack",
+		"Description": "Validation workflow example stack",
 		"Resources": {
 			"AppRole": {
 				"Type": "AWS::IAM::Role",
 				"Properties": {
-					"RoleName": "betty-example-role",
+					"RoleName": "validation-example-role",
 					"AssumeRolePolicyDocument": {
 						"Version": "2012-10-17",
 						"Statement": [{
@@ -91,13 +91,13 @@ func main() {
 			"DataBucket": {
 				"Type": "AWS::S3::Bucket",
 				"Properties": {
-					"BucketName": "betty-example-bucket"
+					"BucketName": "validation-example-bucket"
 				}
 			}
 		}
 	}`
 
-	deployResult, err := betty.Deploy(ctx, cfnTemplate, substrate.Intent{
+	deployResult, err := client.Deploy(ctx, cfnTemplate, substrate.Intent{
 		MaxCost: 1.0, // warn if deploy cost exceeds $1
 	})
 	if err != nil {
@@ -119,7 +119,7 @@ func main() {
 
 	// --- 3. Record S3 operations -------------------------------------------
 
-	session, err := betty.StartRecording(ctx, "s3-workload")
+	session, err := client.StartRecording(ctx, "s3-workload")
 	if err != nil {
 		log.Fatalf("StartRecording: %v", err)
 	}
@@ -137,7 +137,7 @@ func main() {
 		req := &substrate.AWSRequest{
 			Service:   "s3",
 			Operation: "PutObject",
-			Path:      fmt.Sprintf("/betty-example-bucket/item-%d", i),
+			Path:      fmt.Sprintf("/validation-example-bucket/item-%d", i),
 			Headers:   map[string]string{"Content-Type": "application/octet-stream"},
 			Params:    map[string]string{},
 			Body:      []byte(fmt.Sprintf(`{"index":%d}`, i)),
@@ -154,14 +154,14 @@ func main() {
 
 	// --- 4. Stop recording and validate ------------------------------------
 
-	report, err := betty.StopRecording(ctx, session)
+	report, err := client.StopRecording(ctx, session)
 	if err != nil {
 		log.Fatalf("StopRecording: %v", err)
 	}
 
 	// --- 5. Debug session — inspect state at event 0 ----------------------
 
-	dbg := betty.NewDebugSession(session.StreamID)
+	dbg := client.NewDebugSession(session.StreamID)
 	if jumpErr := dbg.JumpToEvent(ctx, 0); jumpErr != nil {
 		fmt.Printf("[WARN] JumpToEvent(0): %v\n", jumpErr)
 	} else {

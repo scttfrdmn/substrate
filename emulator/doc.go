@@ -85,19 +85,19 @@
 //
 // # Quick Start
 //
-// Use [BettyClient] to deploy a CloudFormation template, record operations,
+// Use [Client] to deploy a CloudFormation template, record operations,
 // and validate the results in a single workflow:
 //
-//	betty := emulator.NewBettyClient(registry, store, state, tc, logger)
+//	client := emulator.NewClient(registry, store, state, tc, logger)
 //
-//	result, err := betty.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
+//	result, err := client.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
 //	if err != nil { ... }
 //
-//	session, err := betty.StartRecording(ctx, "my-integration-test")
+//	session, err := client.StartRecording(ctx, "my-integration-test")
 //	// ... run operations against the emulator ...
-//	report, err := betty.StopRecording(ctx, session)
+//	report, err := client.StopRecording(ctx, session)
 //
-// See examples/betty_workflow/main.go for a complete runnable example.
+// See examples/validation_workflow/main.go for a complete runnable example.
 //
 // # Architecture
 //
@@ -115,7 +115,7 @@
 // versioning, and lifecycle configuration. For the authoritative per-service
 // operation list and plugin count, see docs/services.md, which is generated
 // from the plugin registry by cmd/gen-service-reference — counts are
-// deliberately not repeated here so they cannot drift. The [BettyClient]
+// deliberately not repeated here so they cannot drift. The [Client]
 // integrates CloudFormation deployment ([StackDeployer]), recording,
 // [ValidateRecording], and [DebugSession] time-travel into a single
 // high-level API for AI-generated infrastructure validation.

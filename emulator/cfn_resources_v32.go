@@ -1,5 +1,11 @@
 package emulator
 
+// cfn_resources_v32.go holds the StackDeployer.deployResource helpers for
+// Athena, Backup, CloudTrail, the CodeSuite, Config, OpenSearch, Transfer and WAFv2.
+// The name records the substrate release that added them (v0.32.0) rather than the
+// services, because several releases touched overlapping services; the helpers here
+// follow the same pattern as those in cfn_deployer.go.
+
 import (
 	"context"
 	"encoding/json"

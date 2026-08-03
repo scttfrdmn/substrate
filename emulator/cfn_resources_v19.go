@@ -1,8 +1,10 @@
 package emulator
 
-// betty_cfn_v19_plugins.go contains StackDeployer.deployResource helpers for
-// plugins added in v0.19.0 (ACM, API Gateway v1, API Gateway v2). The functions
-// in this file follow the same pattern as the deploy helpers in betty_cfn.go.
+// cfn_resources_v19.go holds the StackDeployer.deployResource helpers for ACM and
+// API Gateway (both REST and HTTP APIs).
+// The name records the substrate release that added them (v0.19.0) rather than the
+// services, because several releases touched overlapping services; the helpers here
+// follow the same pattern as those in cfn_deployer.go.
 
 import (
 	"context"

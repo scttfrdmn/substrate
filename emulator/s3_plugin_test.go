@@ -1049,7 +1049,7 @@ func TestS3_PutObject_PersistedContentEncoding(t *testing.T) {
 // This cannot be driven through s3Request: net/http canonicalizes header names on
 // the way in, so a lowercase key never reaches the plugin from an HTTP test and an
 // apparent test of it would assert nothing. It matters because substrate builds
-// AWSRequest values in-process too (see betty_cfn.go), where no canonicalization
+// AWSRequest values in-process too (see cfn_deployer.go), where no canonicalization
 // has happened.
 func TestS3PersistedContentEncoding_HeaderCasing(t *testing.T) {
 	t.Parallel()

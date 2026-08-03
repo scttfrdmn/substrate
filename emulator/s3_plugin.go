@@ -1691,7 +1691,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 	// Resolved case-insensitively, like every other header this function reads
 	// (cf. resolveStorageClass, resolveUploadChecksum): an AWSRequest reaching a
 	// plugin has not always been through net/http's canonicalization, since
-	// substrate builds requests in-process too (see betty_cfn.go).
+	// substrate builds requests in-process too (see cfn_deployer.go).
 	contentType := headerValueFold(req.Headers, "Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"

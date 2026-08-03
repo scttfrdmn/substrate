@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+- **`emulator.BettyClient` and `emulator.NewBettyClient`, in favour of
+  `emulator.Client` and `emulator.NewClient`** (#549). The name referred to an
+  unrelated project and said nothing about what the type does, so no reader could
+  learn its meaning from this repository — while it appeared in the public
+  documentation of all 65 plugins, since `docs/services.md` advertised a "Betty CFN
+  resource types" section per service.
+
+  `BettyClient` is now a type **alias** for `Client`, not a defined type, so a
+  consumer holding both spellings — or passing one where the other is expected —
+  keeps compiling for the whole deprecation window; a defined type would have made
+  the rename a breaking change wearing a deprecation's clothes. A test asserts the
+  alias resolves to one type in both directions, because both spellings compile in
+  isolation and nothing else would catch the difference. `NewBettyClient` is a
+  one-line wrapper. Both are marked `// Deprecated:` naming the replacement, so
+  `staticcheck` flags a consumer's use without breaking their build, and both will be
+  removed in **v1.0.0** — the only point a Go module can drop an exported symbol
+  without breaking the import path for everyone.
+
+### Changed
+- **The `Betty` naming is gone from the code, the docs and the examples** (#549).
+  Thirty-five `emulator/betty*.go` files are renamed for what they contain
+  (`betty.go` → `client.go`, `betty_cfn.go` → `cfn_deployer.go`, `betty_report.go` →
+  `validation_report.go`, `betty_debug.go` → `debug_session.go`, `betty_cfn_*` →
+  `cfn_*`), `examples/betty_workflow/` → `examples/validation_workflow/`, and
+  `docs/services.md`'s repeated **Betty CFN resource types** heading is now
+  **CloudFormation resource types**. Every rename is recorded as a `git mv` so
+  `git log --follow` and `git blame` still reach each file's history.
+
+  The `betty_cfn_vNN_plugins.go` files were named for the substrate release that
+  added them rather than their contents, and keep that suffix as
+  `cfn_resources_vNN.go`: several releases touched overlapping services (RDS appears
+  in two, EC2 in two), so renaming by service would mean *merging* files, which is a
+  refactor rather than a rename and does not belong in the same diff. Each now opens
+  with a header naming the services it holds, which is what the file name could not.
+
+  This is a pure rename: no behaviour changes, so the diff reads as a rename and a
+  bisect over it cannot land on a mixed commit. Two references are deliberately left
+  alone as historical records — this changelog, and the `"v0.6.0 — Betty
+  integration"` option in the feature-request issue template, since rewriting a
+  release label in a dropdown would make past issues unmatchable. The `area: betty`
+  GitHub label was renamed in place to `area: cloudformation`, which preserves it on
+  every issue already carrying it.
+
 ## [v0.89.0] - 2026-08-03
 
 ### Added
