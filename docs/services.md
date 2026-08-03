@@ -99,7 +99,7 @@ here.
 |-----------|-------|
 | CreateStack | Deploys every resource in `TemplateBody` and returns the stack ARN |
 | UpdateStack | Re-deploys the template; an omitted `TemplateBody` re-uses the stored one |
-| DeleteStack | Deletes the stack's resources; deleting an absent stack succeeds |
+| DeleteStack | Deletes the stack **record only**, not the resources it deployed (see below); deleting an absent stack succeeds |
 | DescribeStacks | One stack by `StackName`, or every stack when omitted |
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
@@ -139,6 +139,45 @@ to the in-process API. There is one set of stacks.
 Deleting a stack's resource outside CloudFormation is the drift substrate models
 — `DescribeStackResourceDrifts` reports it as `DELETED`.
 
+### DeleteStack deletes the stack, not its resources
+
+`DeleteStack` removes the stack record and its name index. The resources the
+stack deployed are **left in place**: a bucket a stack created is still there
+after the stack is gone, and `s3api head-bucket` still answers 200. Real
+CloudFormation deletes them subject to each resource's `DeletionPolicy`, which
+substrate does not model at all. Tracked in
+[#518](https://github.com/scttfrdmn/substrate/issues/518) — a per-type delete
+dispatcher across 113 resource types, in reverse dependency order, with
+`DeletionPolicy` (`Delete`/`Retain`/`Snapshot`) honoured.
+
+Until then, a test that deletes a stack and expects the resources to be gone
+should delete them explicitly.
+
+### A refused resource reports CREATE_FAILED
+
+A plugin that refuses a resource — an invalid bucket name, a malformed trust
+policy, a security group that does not exist — makes that resource
+`CREATE_FAILED` in `DescribeStackResources`, with the plugin's **own** error code
+and message as the reason:
+
+```
+aws cloudformation describe-stack-resources --stack-name badname
+# ResourceStatus: CREATE_FAILED
+# ResourceStatusReason: InvalidBucketName: The specified bucket is not valid.
+```
+
+The stack itself still reaches a terminal `CREATE_COMPLETE`, and the resources
+declared after the failed one are **still deployed**. Real CloudFormation would
+roll the whole stack back to `ROLLBACK_COMPLETE`; substrate records the failure
+per resource and carries on. Rollback is not modelled — tracked in
+[#520](https://github.com/scttfrdmn/substrate/issues/520). Assert on the
+per-resource status rather than on the stack status when a template is expected
+to fail.
+
+A refused resource's follow-up configuration requests are not sent either. A bucket
+whose name S3 rejected has no `PUT ?versioning` issued against it, so the event log
+holds only the request a real client would have made.
+
 ### Templates
 
 113 resource types are supported; each service section below lists the types it
@@ -152,7 +191,68 @@ pseudo-parameters. `Fn::FindInMap`, `Fn::ImportValue`, `Fn::Cidr`,
 `AWS::URLSuffix`, `AWS::StackId`, `AWS::NotificationARNs`) are **not** resolved —
 an unrecognized intrinsic falls back to its JSON encoding and an unrecognized
 `Ref` to the reference string itself, so a template using one deploys with a
-literal where a value should be rather than failing.
+literal where a value should be rather than failing. Tracked in
+[#522](https://github.com/scttfrdmn/substrate/issues/522) — `Fn::FindInMap` needs a
+`Mappings` model, which the template struct does not have.
+
+`Fn::Split` resolves to its **first element only**, because the resolver returns
+a string. A template that splits a comma-separated list into a container command
+gets one element where the whole list is meant. Tracked in
+[#521](https://github.com/scttfrdmn/substrate/issues/521).
+
+A parameter declared `Default: ''` is a parameter whose default is the empty
+string, not a parameter without one — which is what makes the conventional
+optional-parameter idiom work:
+
+```yaml
+Parameters:
+  Command: {Type: String, Default: ''}
+Conditions:
+  HasCommand: !Not [!Equals [!Ref Command, '']]
+```
+
+A condition that references another condition by name resolves regardless of the
+order the template declares them in; a reference cycle resolves to `false`. Each
+condition is evaluated once, before any resource deploys, and keeps that value for
+the whole deployment — as in real CloudFormation, where conditions are evaluated when
+the stack is created or updated and cannot reference a resource or its attributes.
+
+#### YAML short forms
+
+The YAML tag shorthands are expanded to their long forms before the template is
+read, so a template written with `!Ref` / `!Sub` / `!If` resolves **identically**
+to the same template written with `Ref` / `Fn::Sub` / `Fn::If`. All of
+`!Ref`, `!Condition`, `!GetAtt`, `!Sub`, `!Join`, `!Select`, `!Split`, `!Base64`,
+`!If`, `!Equals`, `!Not`, `!And`, `!Or`, `!FindInMap`, `!ImportValue`, `!Cidr`,
+`!GetAZs` and `!Transform` are expanded, at any nesting depth — `!Not [!Equals
+[!Ref VpcId, '']]` is three levels and works.
+
+`!GetAtt` is the one irregular form: it takes a dotted string where `Fn::GetAtt`
+takes a two-element list, and the split is on the **first** period only, so
+`!GetAtt Res.Outputs.Nested` is `["Res", "Outputs.Nested"]` — an attribute name
+may itself contain periods.
+
+Expansion is not resolution. `!FindInMap`, `!ImportValue`, `!Cidr` and `!GetAZs`
+expand to long forms that are still unresolved (#522), and hit the same fallback the
+long forms already do.
+
+A tag substrate does not recognize is **not** dropped: the node's value is kept
+and a `WARN` naming the tag is logged, since a macro or transform may introduce a
+tag substrate has never heard of, and refusing the template would reject one real
+CloudFormation accepts.
+
+A short form's value is read as a string, as the long forms' unquoted values are, so
+`!Sub 12345` and `!Sub 2026-08-02` reach the resolver as written rather than as a
+number and a timestamp.
+
+One tag per node is a YAML rule, not a substrate limitation: `!Base64 !Ref P` is a
+parse error, which is why AWS's own examples spell the outer function long-form —
+`Fn::Base64: !Ref P`. That nesting works.
+
+`Fn::Sub` honours the documented `${!Literal}` escape: `${!Count.Index}` renders
+as the literal `${Count.Index}` with no substitution, which is how a template
+passes a `${…}` through to something that interpolates it later, such as Terraform
+or cloud-init.
 
 Parameters use the Query protocol's list encoding, which is what every SDK and
 the CLI send:

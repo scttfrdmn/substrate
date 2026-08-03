@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CloudFormation YAML short-form intrinsics now resolve** (#516). A template
+  written with `!Ref`, `!Sub` or `!If` deployed with unresolved literals where a
+  value should be: `go.yaml.in/yaml/v3` has no notion of CloudFormation's tag
+  shorthands, so it dropped the tag and kept the node value. `!Sub 'x-${P}'` reached
+  the resolver as the plain string `"x-${P}"`, indistinguishable from a literal the
+  template really did intend, and `!If [C, a, b]` arrived as the raw array
+  `["C", "a", "b"]` — which is what a reporting consumer saw stamped into an ECS
+  task-definition family verbatim. The `Fn::`-prefixed long forms were unaffected
+  throughout, so this was purely tag resolution.
+
+  The template is now decoded into a `yaml.Node`, whose `.Tag` survives, and every
+  recognized shorthand is rewritten into its long form before the node is decoded.
+  All eighteen are handled — `!Ref`, `!Condition`, `!GetAtt`, `!Sub`, `!Join`,
+  `!Select`, `!Split`, `!Base64`, `!If`, `!Equals`, `!Not`, `!And`, `!Or`,
+  `!FindInMap`, `!ImportValue`, `!Cidr`, `!GetAZs`, `!Transform` — and the walk is
+  depth-first, children before parents, because the tags nest: `!Not [!Equals
+  [!Ref VpcId, '']]` is three levels deep and is the single most common condition
+  idiom in real templates.
+
+  `!GetAtt` is the one irregular expansion: it takes a dotted string where
+  `Fn::GetAtt` takes a two-element list, and the split is on the **first** period
+  only, since an attribute name may itself contain periods — AWS's own example maps
+  `!GetAtt myELB.SourceSecurityGroup.OwnerAlias` to
+  `["myELB", "SourceSecurityGroup.OwnerAlias"]`.
+
+  A tag substrate does not recognize is **not** dropped: its value is kept and a
+  `WARN` naming the tag is logged. Silently dropping it is the defect being fixed,
+  and refusing the template would reject templates real CloudFormation accepts,
+  since a macro or transform may introduce a tag substrate has never heard of.
+
+  A short form's value is decoded as a string rather than having its YAML type
+  resolved afresh, because CloudFormation values are strings and the long forms are
+  written unquoted the same way. Otherwise `!Sub 12345` would arrive as an `int` and
+  `!Ref 2026-08-02` as a `time.Time`, which matches none of the resolver's cases and
+  would silently empty the property.
+
+  Expansion is not resolution. `!FindInMap`, `!ImportValue`, `!Cidr` and `!GetAZs`
+  now expand to long forms the resolver still ignores, and hit the same documented
+  fallback the long forms already got. That is still an improvement — the two
+  syntaxes now behave *identically*, which is the invariant at issue — but
+  "expanded" must not be read as "resolved"; `docs/services.md` says so, and #522
+  tracks the resolvers (`Fn::FindInMap` needs a `Mappings` model the template struct
+  does not have).
+
+- **`Fn::Sub` now honours the `${!Literal}` escape** (#516). `${!Count.Index}`
+  renders as the literal `${Count.Index}` with no substitution, which is how a
+  template passes a `${…}` through to something that interpolates it later. The
+  escape was unreachable before the expander — with the whole `!Sub` discarded,
+  `substituteTemplate` never saw the string — which is why it ships in the same
+  change rather than separately.
+
+- **A resource a plugin refused now reports `CREATE_FAILED`** (#519). The deployer
+  set a resource's error only when the dispatched request returned a non-nil `error`,
+  and never looked at the response status. But plugins signal a client error two
+  ways, and both are in wide use: S3 (58 sites) and IAM (162) return a 4xx response
+  with a nil error — the same shape a real endpoint puts on the wire — while EC2
+  (49), ECS (27), CloudWatch Logs (20) and SQS (5) return an `*AWSError`. Only the
+  second was ever inspected, so **every S3 and IAM resource failure in a stack was
+  swallowed** and the stack reported `CREATE_COMPLETE` for a resource that does not
+  exist. That asymmetry is also why this survived #483's review.
+
+  One helper now derives the failure from either convention, applied centrally in
+  `dispatch` so all 31 recording sites became correct without being individually
+  edited. The plugin's own error code is lifted from the response body, so the
+  recorded reason is `InvalidBucketName: The specified bucket is not valid.` rather
+  than a bare status number. `deployS3Bucket` also stopped discarding its response
+  and now returns early instead of configuring versioning on a bucket that was
+  refused. The follow-up could not have corrupted the recorded reason — its own
+  result was discarded too — but it did put a `PUT ?versioning` refused with
+  `NoSuchBucket` into the event log, a request no real client would have sent, in the
+  log substrate replays.
+
+  **Compatibility: a resource that genuinely fails now reports `CREATE_FAILED` where
+  it reported `CREATE_COMPLETE`.** A test asserting the old status was asserting a
+  defect, but it will still turn red. The stack status is unchanged, and substrate
+  still does not roll back (#520).
+
+- **A parameter declared `Default: ''` is now a declared parameter** (#516). The
+  empty string was treated as "no default at all", so such a parameter was left
+  undeclared, `Ref` fell through to echoing the parameter's own name back, and the
+  conventional optional-parameter test `!Not [!Equals [!Ref X, '']]` **inverted**: a
+  parameter the caller never set read as set, and every template taking the wrong
+  branch did so silently. `Default: ''` is how an optional parameter is spelled —
+  21 occurrences across the five templates of the consumer that reported #516 — so
+  the distinction is load-bearing rather than pedantic. Found by deploying one of
+  those templates as a checked-in fixture rather than by reading the code.
+
+- **A condition referencing another condition no longer depends on map order**
+  (#516). `Conditions` were evaluated by iterating a Go map, so a condition
+  referencing another via `{"Condition": "Other"}` read the referent's zero value
+  whenever it happened to be evaluated first. The same template deployed differently
+  from one run to the next — nondeterminism, which is the one outcome an emulator
+  built on deterministic replay must never produce. Conditions are now resolved on
+  demand, so a referent is evaluated when it is needed regardless of declaration
+  order, and a reference cycle resolves to `false` (real CloudFormation rejects one
+  at validation time) rather than recursing forever. Names are additionally walked in
+  sorted order, which matters only for a cycle: one running through `Fn::Not`
+  resolves its two members to *opposite* values, so absent the sort the answer would
+  still depend on which member the map happened to yield first.
+
+  Each condition's first answer is also cached for the rest of the deployment. AWS
+  evaluates conditions once, when the stack is created or updated, and forbids a
+  condition from referencing a resource's logical ID or attributes; substrate has no
+  validation pass to reject such a reference, so caching is what keeps a template
+  that makes one anyway from seeing one value in a property resolved early and
+  another in an output resolved last.
+
+### Changed
+- **`docs/services.md` no longer claims `DeleteStack` deletes the stack's
+  resources** (#518). It deletes the stack record and its name index only — a bucket
+  a stack created outlives the stack, and `head-bucket` still answers 200. The
+  correction is documented now, independent of the sweep itself, which is bigger than
+  it looks: 113 resource types need a per-type delete dispatcher, `DeletionPolicy`
+  is not modelled at all, deletion must run in reverse dependency order, and a bucket
+  sweep inherits #508's leak. Tracked in #518.
+
+  The CloudFormation section also now states that a refused resource reports
+  `CREATE_FAILED` while the stack still reaches a terminal status without rolling
+  back (#520), that `Fn::Split` yields only its first element (#521), and what the
+  YAML short forms do and do not resolve.
+
 ## [v0.87.0] - 2026-08-02
 
 ### Fixed

@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"go.yaml.in/yaml/v3"
 )
 
 // cfnTemplate is the top-level CloudFormation template structure.
@@ -31,8 +29,13 @@ type cfnParam struct {
 	// Type is the CloudFormation parameter type (e.g., "String").
 	Type string `json:"Type" yaml:"Type"`
 
-	// Default is the default value for the parameter.
-	Default string `json:"Default" yaml:"Default"`
+	// Default is the default value for the parameter, or nil when the template
+	// declares none. The pointer distinguishes `Default: ''` — the conventional
+	// way to declare an optional parameter, which every `Fn::Not [Fn::Equals
+	// [Ref X, '']]` condition tests for — from a parameter with no default at
+	// all. Treating the two alike left the parameter undeclared, and Ref then
+	// echoed the parameter's own name back, inverting the condition.
+	Default *string `json:"Default" yaml:"Default"`
 }
 
 // cfnOutput is a CloudFormation template output declaration.
@@ -87,6 +90,15 @@ type cfnContext struct {
 	region     string
 	accountID  string
 	stackName  string
+
+	// conditionExprs holds the template's unevaluated Conditions, so a condition
+	// that references another by name can evaluate its referent on demand rather
+	// than depending on the order the conditions happened to be walked in.
+	conditionExprs map[string]interface{}
+
+	// evaluating tracks the conditions currently being evaluated, so a reference
+	// cycle terminates instead of recursing forever.
+	evaluating map[string]bool
 }
 
 // cfnNamespace is the state namespace for CloudFormation stack state.
@@ -370,7 +382,7 @@ func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateMa
 // skipped with a warning. The optional params map overrides template parameter
 // defaults.
 func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params map[string]string) (*DeployResult, error) {
-	tmpl, err := parseCFNTemplate(cfn)
+	tmpl, err := d.parseCFNTemplate(cfn)
 	if err != nil {
 		return nil, fmt.Errorf("parse template: %w", err)
 	}
@@ -589,11 +601,11 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	}
 
 	// Parse old and new templates.
-	oldTmpl, err := parseCFNTemplate(stack.TemplateBody)
+	oldTmpl, err := d.parseCFNTemplate(stack.TemplateBody)
 	if err != nil {
 		return nil, fmt.Errorf("cfn CreateChangeSet: parse old template: %w", err)
 	}
-	newTmpl, err := parseCFNTemplate(templateBody)
+	newTmpl, err := d.parseCFNTemplate(templateBody)
 	if err != nil {
 		return nil, fmt.Errorf("cfn CreateChangeSet: parse new template: %w", err)
 	}
@@ -1001,8 +1013,8 @@ var cfnDriftComparators = map[string]func(ctx context.Context, d *StackDeployer,
 // Properties map plus a resolution context for the given deployed resource.
 // It returns (nil, nil, false) when the template cannot be parsed or the
 // resource is absent, so callers can simply skip drift comparison.
-func cfnDriftResourceProps(stack *CFNStackState, dr DeployedResource) (map[string]interface{}, *cfnContext, bool) {
-	tmpl, err := parseCFNTemplate(stack.TemplateBody)
+func (d *StackDeployer) cfnDriftResourceProps(stack *CFNStackState, dr DeployedResource) (map[string]interface{}, *cfnContext, bool) {
+	tmpl, err := d.parseCFNTemplate(stack.TemplateBody)
 	if err != nil {
 		return nil, nil, false
 	}
@@ -1029,7 +1041,7 @@ func driftDiff(path, expected, actual string) CFNPropertyDiff {
 // compareS3BucketDrift compares a deployed S3 bucket's VersioningConfiguration
 // against its live state, reporting a property difference if they diverge.
 func compareS3BucketDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	props, cctx, ok := d.cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
@@ -1055,7 +1067,7 @@ func compareS3BucketDrift(ctx context.Context, d *StackDeployer, stack *CFNStack
 // compareDynamoDBTableDrift compares a deployed DynamoDB table's declared
 // BillingMode and provisioned throughput against live state.
 func compareDynamoDBTableDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	props, cctx, ok := d.cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
@@ -1095,7 +1107,7 @@ func compareDynamoDBTableDrift(ctx context.Context, d *StackDeployer, stack *CFN
 // compareLambdaFunctionDrift compares a deployed Lambda function's declared
 // configuration properties against live state.
 func compareLambdaFunctionDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	props, cctx, ok := d.cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
@@ -1140,7 +1152,7 @@ func compareLambdaFunctionDrift(ctx context.Context, d *StackDeployer, stack *CF
 // and AssumeRolePolicyDocument against live state. The trust policy is compared
 // order-independently via policyDocumentsEqual.
 func compareIAMRoleDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	props, cctx, ok := d.cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
@@ -1195,7 +1207,7 @@ var sqsDriftAttributes = []string{
 // compareSQSQueueDrift compares a deployed SQS queue's declared attribute
 // properties against the live queue attributes.
 func compareSQSQueueDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	props, cctx, ok := d.cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
@@ -1237,7 +1249,7 @@ func snsTopicNameFromPhysicalID(physicalID string) string {
 // compareSNSTopicDrift compares a deployed SNS topic's declared DisplayName
 // against live state.
 func compareSNSTopicDrift(ctx context.Context, d *StackDeployer, stack *CFNStackState, dr DeployedResource) []CFNPropertyDiff {
-	props, cctx, ok := cfnDriftResourceProps(stack, dr)
+	props, cctx, ok := d.cfnDriftResourceProps(stack, dr)
 	if !ok {
 		return nil
 	}
@@ -1537,7 +1549,7 @@ func (d *StackDeployer) deployS3Bucket(
 		Params:    map[string]string{},
 	}
 
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+	_, cost, routeErr := d.dispatch(ctx, req, streamID)
 
 	dr := DeployedResource{
 		LogicalID:  logicalID,
@@ -1545,9 +1557,14 @@ func (d *StackDeployer) deployS3Bucket(
 		PhysicalID: bucketName,
 	}
 	if routeErr != nil {
+		// Recorded on the resource, not returned — a returned error aborts the
+		// stack. The early return skips the follow-up configuration requests: a
+		// bucket that was refused has nothing to configure, and each request would
+		// be refused in turn with NoSuchBucket and recorded in the event log,
+		// leaving a replay to explain requests no real client would have sent.
 		dr.Error = routeErr.Error()
+		return dr, cost, nil //nolint:nilerr
 	}
-	_ = resp
 
 	// Apply VersioningConfiguration if present.
 	if vc, ok := props["VersioningConfiguration"].(map[string]interface{}); ok {
@@ -2864,16 +2881,52 @@ func (d *StackDeployer) dispatch(
 
 	_ = d.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr)
 
-	return resp, cost, routeErr
+	return resp, cost, cfnDispatchError(resp, routeErr)
+}
+
+// cfnDispatchError reports the failure a dispatched request represents, or nil if
+// it succeeded.
+//
+// Plugins signal a client error one of two ways, and both are in wide use: EC2,
+// ECS, CloudWatch Logs and SQS return an *AWSError, while S3 and IAM return a 4xx
+// *AWSResponse with a nil error — the same shape a real endpoint puts on the wire.
+// PluginRegistry.RouteRequest passes both through unchanged, so a deployer that
+// only checked the error return recorded no failure at all for an S3 or IAM
+// resource that had been refused, and the stack reported CREATE_COMPLETE for a
+// resource that does not exist.
+//
+// The error code is lifted out of the response body so the recorded reason names
+// what went wrong ("InvalidBucketName: The specified bucket is not valid.")
+// rather than a bare status number. Both conventions put it in a <Code> element;
+// a body in any other shape falls back to the status alone.
+func cfnDispatchError(resp *AWSResponse, routeErr error) error {
+	if routeErr != nil {
+		return routeErr
+	}
+	if resp == nil || resp.StatusCode < 400 {
+		return nil
+	}
+	code := extractXMLField(resp.Body, "Code")
+	message := extractXMLField(resp.Body, "Message")
+	switch {
+	case code != "" && message != "":
+		return fmt.Errorf("%s: %s", code, message)
+	case code != "":
+		return fmt.Errorf("%s (HTTP %d)", code, resp.StatusCode)
+	default:
+		return fmt.Errorf("request failed with HTTP %d", resp.StatusCode)
+	}
 }
 
 // buildCFNContext constructs a cfnContext from template parameters and caller-supplied values.
 func buildCFNContext(tmpl *cfnTemplate, callerParams map[string]string, region, accountID, stackName string) *cfnContext {
 	params := make(map[string]string)
-	// Start with template defaults.
+	// Start with template defaults. A declared default is recorded even when it
+	// is the empty string: that is how an optional parameter is spelled, and
+	// leaving it out would make Ref resolve to the parameter's own name.
 	for name, p := range tmpl.Parameters {
-		if p.Default != "" {
-			params[name] = p.Default
+		if p.Default != nil {
+			params[name] = *p.Default
 		}
 	}
 	// Overlay caller-supplied params.
@@ -2887,14 +2940,65 @@ func buildCFNContext(tmpl *cfnTemplate, callerParams map[string]string, region, 
 		region:     region,
 		accountID:  accountID,
 		stackName:  stackName,
+		evaluating: make(map[string]bool),
 	}
 }
 
 // evaluateConditions evaluates all Conditions in the template into cctx.conditions.
+//
+// A condition may reference another by name ({"Condition": "Other"}), so the
+// evaluation order matters. Iterating tmpl.Conditions directly made the result
+// depend on Go's map iteration order: a condition evaluated before the one it
+// references read the referent's zero value and the whole template resolved
+// differently from one run to the next — the one outcome an emulator built on
+// deterministic replay must never produce.
+//
+// Each condition is therefore resolved on demand through cctx.condition, which
+// evaluates a referent the first time it is needed regardless of declaration
+// order. Names are walked in sorted order so that a template containing a
+// reference cycle reports the same result every time.
 func evaluateConditions(tmpl *cfnTemplate, cctx *cfnContext) {
-	for name, expr := range tmpl.Conditions {
-		cctx.conditions[name] = evalConditionExpr(expr, cctx)
+	cctx.conditionExprs = tmpl.Conditions
+
+	names := make([]string, 0, len(tmpl.Conditions))
+	for name := range tmpl.Conditions {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	for _, name := range names {
+		cctx.condition(name)
+	}
+}
+
+// condition returns the value of the named condition, evaluating it — and any
+// condition it references — on first use.
+//
+// A cycle resolves to false rather than recursing forever: real CloudFormation
+// rejects a circular condition at validation time, and returning false is the same
+// answer an undeclared condition already gets, so a malformed template degrades
+// instead of hanging the deployment.
+func (c *cfnContext) condition(name string) bool {
+	// Memoized, and not only to save work: "CloudFormation evaluates conditions
+	// when creating or updating a stack", once, and a condition "can't reference
+	// resource logical IDs or their attributes". Caching the first answer is what
+	// keeps a condition's value fixed for the whole deployment, so a template that
+	// does reach a resource anyway cannot see one value before that resource
+	// deploys and another after.
+	if v, ok := c.conditions[name]; ok {
+		return v
+	}
+	expr, ok := c.conditionExprs[name]
+	if !ok {
+		return false
+	}
+	if c.evaluating[name] {
+		return false
+	}
+	c.evaluating[name] = true
+	v := evalConditionExpr(expr, c)
+	delete(c.evaluating, name)
+	c.conditions[name] = v
+	return v
 }
 
 // evalConditionExpr evaluates a single condition expression.
@@ -2944,7 +3048,7 @@ func evalConditionExpr(expr interface{}, cctx *cfnContext) bool {
 			if !ok {
 				return false
 			}
-			return cctx.conditions[name]
+			return cctx.condition(name)
 		}
 	}
 	return false
@@ -3058,6 +3162,14 @@ func substituteTemplate(s string, cctx *cfnContext, extra map[string]string) str
 			end := strings.Index(s[i+2:], "}")
 			if end >= 0 {
 				varName := s[i+2 : i+2+end]
+				// "${!Literal}" is Fn::Sub's documented escape for a literal
+				// "${Literal}": the exclamation mark is dropped and the rest is
+				// emitted verbatim, with no substitution.
+				if strings.HasPrefix(varName, "!") {
+					result.WriteString("${" + varName[1:] + "}")
+					i = i + 2 + end + 1
+					continue
+				}
 				if v, ok := extra[varName]; ok {
 					result.WriteString(v)
 				} else {
@@ -3298,7 +3410,12 @@ func resolveFnIf(args interface{}, cctx *cfnContext) string {
 	if !ok {
 		return ""
 	}
-	if cctx.conditions[condName] {
+	// Through the accessor rather than the map so that the two read sites cannot
+	// disagree. evaluateConditions has already resolved every declared condition by
+	// the time any Fn::If is resolved, so a direct map read would behave the same
+	// for a valid template; it would differ only for a name the template never
+	// declared, which both spellings answer false.
+	if cctx.condition(condName) {
 		return resolveValue(arr[1], cctx)
 	}
 	return resolveValue(arr[2], cctx)
@@ -3356,15 +3473,24 @@ func (d *StackDeployer) deployGenericStub(
 	}, 0, nil
 }
 
-// parseCFNTemplate attempts JSON then YAML unmarshalling of a CloudFormation template.
-func parseCFNTemplate(cfn string) (*cfnTemplate, error) {
+// parseCFNTemplate attempts JSON then YAML unmarshalling of a CloudFormation
+// template. The YAML path expands short-form intrinsic tags (!Sub, !Ref, !If, …)
+// into their long forms first, so the two syntaxes resolve identically; see
+// cfnExpandYAMLTags. JSON templates cannot carry tags, so the JSON path is
+// untouched.
+func (d *StackDeployer) parseCFNTemplate(cfn string) (*cfnTemplate, error) {
 	var tmpl cfnTemplate
 	if err := json.Unmarshal([]byte(cfn), &tmpl); err == nil {
 		if len(tmpl.Resources) > 0 {
 			return &tmpl, nil
 		}
 	}
-	if err := yaml.Unmarshal([]byte(cfn), &tmpl); err == nil {
+	if unknown, err := cfnUnmarshalYAMLTemplate(cfn, &tmpl); err == nil {
+		for _, tag := range unknown {
+			d.logger.Warn("cfn: unrecognized YAML tag left unexpanded; its value is used verbatim",
+				"tag", tag,
+			)
+		}
 		if len(tmpl.Resources) > 0 {
 			return &tmpl, nil
 		}
