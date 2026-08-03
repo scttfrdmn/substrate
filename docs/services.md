@@ -174,19 +174,76 @@ The in-process `emulator.BettyClient` deploys into substrate's default partition
 caller identity to take; an in-process caller that needs another partition can set
 one on the deployer with `emulator.WithDeployerIdentity`.
 
-### DeleteStack deletes the stack, not its resources
+### DeleteStack deletes the stack's resources
 
-`DeleteStack` removes the stack record and its name index. The resources the
-stack deployed are **left in place**: a bucket a stack created is still there
-after the stack is gone, and `s3api head-bucket` still answers 200. Real
-CloudFormation deletes them subject to each resource's `DeletionPolicy`, which
-substrate does not model at all. Tracked in
-[#518](https://github.com/scttfrdmn/substrate/issues/518) — a per-type delete
-dispatcher across 113 resource types, in reverse dependency order, with
-`DeletionPolicy` (`Delete`/`Retain`/`Snapshot`) honoured.
+`DeleteStack` sweeps the resources the stack deployed before removing the stack
+record: a bucket a stack created is gone once its stack is, and `s3api head-bucket`
+answers 404.
 
-Until then, a test that deletes a stack and expects the resources to be gone
-should delete them explicitly.
+The sweep is the exact inverse of the deploy — resources are ordered by descending
+deploy priority, ties by descending logical ID — so a resource is deleted before
+whatever it was created after. Substrate deploys in priority order rather than from
+a dependency graph, and inverting that order is what makes the teardown observable:
+the recorded event sequence for a stack of an IAM role, a bucket, a queue and a
+topic reads `CreateRole, CreateBucket, CreateQueue, CreateTopic` and then
+`DeleteTopic, DeleteQueue, DeleteBucket, DeleteRole`.
+
+`DeletionPolicy` and `UpdateReplacePolicy` are parsed from both the JSON and YAML
+template paths, and a value outside `Delete`/`Retain`/`RetainExceptOnCreate`/
+`Snapshot` is a template error rather than a silent default. `Retain` keeps the
+resource and the stack still deletes; `RetainExceptOnCreate` retains for a
+`DeleteStack` but not for the rollback of the create that made the resource. The
+default is `Delete`, **except** `Snapshot` for `AWS::RDS::DBCluster` and for an
+`AWS::RDS::DBInstance` that declares no `DBClusterIdentifier` — a sweep that
+assumed `Delete` would destroy a database the template asked to be snapshotted.
+`Snapshot` does not retain: substrate deletes the resource and records in the
+per-resource reason that no snapshot was taken, since no snapshot resource is
+modelled for any of the eight Snapshot-capable types.
+
+A resource already absent — deleted out of band between the deploy and the sweep —
+is a **success**, not a failure: a stack must not be wedged by a resource someone
+else removed. Any other refusal is a failure, and a stack with a failed deletion
+keeps its record, its resource list and its name index while reporting
+`DELETE_FAILED` in `DescribeStacks`, with the offending resource and the plugin's
+own error code in the reason. A stack that reported a failed delete and then
+vanished would leave a caller no way to retry and no way to learn what held it.
+
+The `delete-stack` **call** still answers 200 in that case, as the API does: real
+`DeleteStack` returns success and the stack reaches `DELETE_FAILED` asynchronously,
+so poll `DescribeStacks` to learn the outcome rather than relying on the call
+raising. The in-process `emulator.StackDeployer.DeleteStack` returns an error
+directly, since a Go caller has no status to poll.
+
+```
+aws cloudformation delete-stack --stack-name probe
+aws s3api head-bucket --bucket probe-data     # 404 — deleted with its stack
+
+aws cloudformation delete-stack --stack-name stuck          # 200
+aws cloudformation describe-stacks --stack-name stuck \
+  --query 'Stacks[0].StackStatus'                           # DELETE_FAILED
+```
+
+Coverage is stated rather than implied. Of the 109 resource types the deployer
+dispatches, 89 have a delete request and 11 are state-only types whose stub record
+is removed. The remaining 9 sweep to a no-op and are reported as `DELETE_SKIPPED`
+naming the reason:
+
+| Type | Why the sweep is a no-op |
+|---|---|
+| `AWS::CloudFront::CloudFrontOriginAccessIdentity` | the deploy records no state to remove |
+| `AWS::ECS::CapacityProvider` | the deploy records no state to remove |
+| `AWS::SSM::Association` | the deploy records no state to remove |
+| `AWS::SecretsManager::SecretTargetAttachment` | the deploy records no state to remove |
+| `AWS::Route53::RecordSetGroup` | its record sets are dispatches the stack does not record individually |
+| `AWS::ECR::LifecyclePolicy` | `DeleteLifecyclePolicy` is not routed; deleting the repository removes the policy |
+| `AWS::ApiGateway::UsagePlanKey` | `DeleteUsagePlanKey` is not routed; the key goes with its usage plan |
+| `AWS::Cognito::IdentityPoolRoleAttachment` | Cognito models no `DeleteIdentityPoolRoles` |
+| `AWS::SecretsManager::RotationSchedule` | `CancelRotateSecret` is not routed; the schedule goes with the secret |
+
+A type the deployer does not recognize at all is also `DELETE_SKIPPED`: its stub
+state is removed, but substrate never created a resource for it, so reporting
+`DELETE_COMPLETE` would claim a deletion that did not happen. A skip is always
+reported — a claim of cleanliness that is not true is worse than a stated gap.
 
 ### A refused resource reports CREATE_FAILED
 

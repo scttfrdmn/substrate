@@ -291,7 +291,20 @@ func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSReque
 	// stack's exports, and export visibility is scoped per account and Region, so
 	// the default identity would consult the wrong namespace.
 	if err := p.deployerFor(reqCtx).DeleteStack(context.Background(), name); err != nil {
-		return nil, cfnMapDeployerError(err)
+		// A sweep that could not remove a resource is reported the way the API
+		// reports it: DeleteStack "returns success" and the stack reaches
+		// DELETE_FAILED, which the caller learns by polling DescribeStacks. Raising
+		// it on the call instead would be wrong twice over — a caller following AWS
+		// semantics gets an exception where the API gives it a status to poll, and
+		// the 500 it would have to be makes an SDK *retry* the delete, running the
+		// sweep again against a stack already in DELETE_FAILED.
+		//
+		// This mirrors CreateStack, where a refused resource is CREATE_FAILED on the
+		// resource and 200 on the call. The in-process deployer still returns
+		// [ErrCFNDeleteFailed], so a Go caller sees the failure directly.
+		if !errors.Is(err, ErrCFNDeleteFailed) {
+			return nil, cfnMapDeployerError(err)
+		}
 	}
 
 	type response struct {
@@ -1139,8 +1152,11 @@ func cfnMapDeployerError(err error) *AWSError {
 		}
 	default:
 		// A resource that failed to deploy lands here, as does anything
-		// unclassified: the template parsed and the request named things that
-		// exist, so the failure is substrate's rather than the caller's.
+		// unclassified: the template parsed and the request named things that exist,
+		// so the failure is substrate's rather than the caller's.
+		//
+		// [ErrCFNDeleteFailed] deliberately does not reach here — deleteStack
+		// answers 200 and leaves the stack in DELETE_FAILED, as the API does.
 		return &AWSError{Code: "InternalFailure", Message: msg, HTTPStatus: http.StatusInternalServerError}
 	}
 }

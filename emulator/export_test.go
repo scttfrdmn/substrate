@@ -546,3 +546,36 @@ func CFNSeededAZsForTest(region string) []string {
 	}
 	return out
 }
+
+// DispatchForTest routes req through the deployer's own registry, so a test can
+// observe a resource the way the sweep does.
+//
+// It exists because the delete sweep's whole claim is about state a caller can
+// observe through an API call: asserting a bucket is gone by reading the state
+// manager would assert the implementation rather than the observable, and a test
+// server of its own would be a second registry that need not agree with the one the
+// sweep dispatched into.
+func (d *StackDeployer) DispatchForTest(
+	ctx context.Context, req *AWSRequest, streamID string,
+) (*AWSResponse, error) {
+	resp, _, err := d.dispatch(ctx, req, streamID)
+	return resp, err
+}
+
+// DeleteStackResourcesForTest sweeps a persisted stack's resources and returns the
+// per-resource outcome, without touching the stack record.
+//
+// DeleteStack reports the per-resource detail only on failure — a successful sweep
+// removes the whole record — so this is the only way to assert what a *successful*
+// sweep decided: that a Snapshot policy deleted without a snapshot, that an
+// unmodeled type was skipped with a reason naming it, or that an RDS instance
+// resolved its default policy as Snapshot.
+func (d *StackDeployer) DeleteStackResourcesForTest(
+	ctx context.Context, stackName string,
+) []CFNResourceDeletion {
+	stack, err := d.loadStack(ctx, stackName)
+	if err != nil || stack == nil {
+		return nil
+	}
+	return d.deleteStackResources(ctx, stack, stackName, cfnDeleteStackOp)
+}

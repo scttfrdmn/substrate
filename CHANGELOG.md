@@ -7,7 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`DeletionPolicy` and `UpdateReplacePolicy` on a template resource** (#518), which
+  no template could previously declare — the attributes were dropped on parse in both
+  the JSON and YAML paths. A value outside `Delete`/`Retain`/`RetainExceptOnCreate`/
+  `Snapshot` is now a template error rather than a silent fall back to the default: a
+  typo'd `Retian` that deletes the resource is precisely what the attribute exists to
+  prevent, and CloudFormation itself rejects the template.
+
+  The default is resolved rather than assumed, because it is not uniformly `Delete`:
+  "the default policy is `Snapshot` for `AWS::RDS::DBCluster` resources and for
+  `AWS::RDS::DBInstance` resources that don't specify the `DBClusterIdentifier`
+  property". A sweep that assumed `Delete` would destroy a database the template asked
+  to be snapshotted. `Snapshot` does **not** retain — substrate deletes the resource
+  and says in the per-resource reason that no snapshot was taken, since no snapshot
+  resource is modelled for any of the eight Snapshot-capable types.
+  `RetainExceptOnCreate` retains for a `DeleteStack` but not for the rollback of the
+  create that made the resource, so the operation is passed into the policy resolver
+  rather than special-cased by a caller. `UpdateReplacePolicy` is parsed and reported
+  but nothing consults it yet: `UpdateStack` is a re-deploy rather than a per-resource
+  replace, so a template that declares it round-trips instead of being silently
+  dropped.
+
 ### Fixed
+- **`DeleteStack` now deletes the stack's resources, not just the stack record**
+  (#518). Every resource a stack created outlived it: create a stack holding a bucket,
+  delete the stack, and `head-bucket` still answered 200 — a test that tore down and
+  asserted cleanliness passed for the wrong reason. `DeleteStack` swept nothing at
+  all, and because the stack record is what *names* the resources, removing it first
+  stranded them with no way left to find them.
+
+  The sweep runs before the record is dropped, in the exact inverse of the deploy:
+  descending deploy priority, ties by descending logical ID. Substrate deploys in
+  priority order rather than from a dependency graph, so inverting that order is what
+  makes teardown ordering observable and assertable — the recorded events for a stack
+  of a role, a bucket, a queue and a topic read `CreateRole, CreateBucket,
+  CreateQueue, CreateTopic` and then `DeleteTopic, DeleteQueue, DeleteBucket,
+  DeleteRole`.
+
+  Deletes are declared in a per-type table that **returns** the request rather than
+  performing it, so the sweep owns ordering, error handling and event recording once
+  and each entry is a data declaration. Three things the table deliberately does not
+  do. It does not assume the physical ID is the delete identifier: SQS records the
+  queue *name* while `DeleteQueue` requires a `QueueUrl`, a standalone security-group
+  rule records its *group* because EC2's opaque `sgr-` ID is not modelled (so the
+  revoke restates the permission the authorize granted, since a revoke built any other
+  way silently removes nothing), and an AppSync resolver's is `TypeName.FieldName`
+  while the path wants the two separately. It does not guess an operation from the
+  type: KMS has no `DeleteKey` at all, so its entry dispatches `ScheduleKeyDeletion`,
+  and neither an SNS topic policy nor a Route 53 record set has a delete of its own —
+  the first is an attribute set back to empty, the second a change batch carrying
+  `Action DELETE`, each the mirror of the call that created it. And it does not read a
+  parent ID off the resource: the composite types re-resolve theirs from the stored
+  template, which is where an API Gateway method's API *and* resource come from.
+
+  A resource that is already absent is a **success**. A resource deleted out of band
+  between the deploy and the sweep must not wedge its stack, so the sweep tolerates 33
+  not-found codes — each one measured by dispatching that type's delete against an
+  empty registry and recording what came back, rather than read off a reference and
+  hoped for.
+
+  Any other refusal is a failure, and a failed sweep **keeps** the stack: its record,
+  its resource list and its name index all survive, and `DescribeStacks` reports
+  `DELETE_FAILED` with the offending resource and the plugin's own error code as the
+  reason. A stack that reported a failed delete and then vanished would be a worse lie
+  than the leak — a caller would have no way to retry and no way to learn what held
+  it. Only a fully successful sweep removes the record. Deleting a stack that does not
+  exist stays a success, as it was: `DeleteStack` documents no not-found error.
+
+  On the wire the failure is reported the way the API reports it: `DeleteStack`
+  "returns success" and the stack reaches `DELETE_FAILED`, which a caller learns by
+  polling `DescribeStacks`. Raising it on the call would be wrong twice over — a
+  caller following AWS semantics would get an exception where the API gives it a
+  status to poll, and the 500 it would have to be makes an SDK **retry** the delete,
+  sweeping a stack already in `DELETE_FAILED`. The in-process deployer still returns
+  an error, so a Go caller sees the failure directly.
+
+  Coverage is **stated**, not implied. Of the 109 types the deployer dispatches, 89
+  have a delete request, 11 are state-only types whose stub record is removed, and the
+  remaining 9 report `DELETE_SKIPPED` with a reason distinguishing "AWS models no
+  delete" from "substrate does not route the one it has" — different facts, and only
+  the second is substrate's to fix. A type the deployer does not recognize at all also
+  skips, but its `cfn_stub` key is now removed rather than left for a redeployed stack
+  to read as the previous one's properties. Reporting `DELETE_COMPLETE` for any of
+  these would claim a deletion that did not happen, and a false claim of cleanliness
+  is worse than a stated gap. `docs/services.md` enumerates all nine.
+
 - **`DeleteBucket` now clears the bucket's namespace instead of only its `bucket:`
   record** (#508). A bucket-scoped configuration is keyed by bucket name alone, so
   every one of them outlived its bucket and was inherited by the next bucket created
