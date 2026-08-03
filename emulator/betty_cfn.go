@@ -86,11 +86,142 @@ type cfnExport struct {
 }
 
 // cfnResource is a single CloudFormation resource declaration.
+//
+// DeletionPolicy and UpdateReplacePolicy are plain string resource attributes, so
+// one field with both tags serves the JSON and YAML template paths alike — both
+// unmarshal into this struct.
 type cfnResource struct {
 	Type       string                 `json:"Type"                yaml:"Type"`
 	Properties map[string]interface{} `json:"Properties"          yaml:"Properties"`
 	DependsOn  interface{}            `json:"DependsOn,omitempty" yaml:"DependsOn,omitempty"`
 	Condition  string                 `json:"Condition,omitempty" yaml:"Condition,omitempty"`
+
+	// DeletionPolicy is what to do with the resource when it leaves the stack:
+	// "Delete", "Retain", "RetainExceptOnCreate" or "Snapshot". Empty means the
+	// template declared none, which is not the same as "Delete" — the default is
+	// Snapshot for two RDS types, so the default is resolved rather than assumed
+	// (see cfnDeletionPolicyFor).
+	DeletionPolicy string `json:"DeletionPolicy,omitempty" yaml:"DeletionPolicy,omitempty"`
+
+	// UpdateReplacePolicy is the same set of values for the resource CloudFormation
+	// leaves behind when an update replaces it. Substrate's UpdateStack is a
+	// re-deploy rather than a per-resource replace, so nothing consults this yet;
+	// it is parsed so a template that declares it round-trips rather than being
+	// silently dropped, and so DescribeStackResources can report it.
+	UpdateReplacePolicy string `json:"UpdateReplacePolicy,omitempty" yaml:"UpdateReplacePolicy,omitempty"`
+}
+
+// CloudFormation deletion policies, as the DeletionPolicy attribute reference
+// defines them.
+const (
+	// cfnPolicyDelete deletes the resource and its content.
+	cfnPolicyDelete = "Delete"
+
+	// cfnPolicyRetain keeps the resource, removing it from the stack's scope only.
+	cfnPolicyRetain = "Retain"
+
+	// cfnPolicyRetainExceptOnCreate behaves like Retain "except for the stack
+	// operation that initially created the resource": if the operation that created
+	// the resource is rolled back, CloudFormation deletes it.
+	cfnPolicyRetainExceptOnCreate = "RetainExceptOnCreate"
+
+	// cfnPolicySnapshot snapshots the resource before deleting it.
+	cfnPolicySnapshot = "Snapshot"
+)
+
+// cfnDeletionOp is the stack operation a deletion policy is being resolved for.
+// RetainExceptOnCreate is the only policy whose meaning depends on it, and it
+// depends on it entirely: the same declaration retains on a delete and deletes on
+// a create rollback. Passing the operation in is what keeps that rule in one place
+// instead of special-cased at each caller.
+type cfnDeletionOp int
+
+const (
+	// cfnDeleteStackOp is a DeleteStack sweep.
+	cfnDeleteStackOp cfnDeletionOp = iota
+
+	// cfnCreateRollbackOp is the rollback of the operation that created the
+	// resource, where RetainExceptOnCreate deletes rather than retains.
+	cfnCreateRollbackOp
+)
+
+// cfnValidDeletionPolicies is the set a template may declare. A value outside it
+// is a template error rather than a silent fall back to the default: a typo'd
+// "Retian" that deletes the resource is exactly what the attribute exists to
+// prevent, and CloudFormation itself rejects the template.
+var cfnValidDeletionPolicies = map[string]bool{
+	cfnPolicyDelete:               true,
+	cfnPolicyRetain:               true,
+	cfnPolicyRetainExceptOnCreate: true,
+	cfnPolicySnapshot:             true,
+}
+
+// cfnSnapshotDefaultTypes are the types whose default deletion policy is Snapshot
+// rather than Delete. "The default policy is Snapshot for AWS::RDS::DBCluster
+// resources and for AWS::RDS::DBInstance resources that don't specify the
+// DBClusterIdentifier property" — the DBInstance condition is a property test, so
+// it lives in cfnDeletionPolicyFor rather than in this set.
+var cfnSnapshotDefaultTypes = map[string]bool{
+	"AWS::RDS::DBCluster":  true,
+	"AWS::RDS::DBInstance": true,
+}
+
+// cfnSnapshotCapableTypes are the eight types the reference lists as supporting
+// Snapshot. Substrate models a delete for four of them; the rest are recorded here
+// so a Snapshot declaration on a type that genuinely supports it is distinguished
+// from one on a type where it means nothing.
+var cfnSnapshotCapableTypes = map[string]bool{
+	"AWS::DocDB::DBCluster":              true,
+	"AWS::EC2::Volume":                   true,
+	"AWS::ElastiCache::CacheCluster":     true,
+	"AWS::ElastiCache::ReplicationGroup": true,
+	"AWS::Neptune::DBCluster":            true,
+	"AWS::RDS::DBCluster":                true,
+	"AWS::RDS::DBInstance":               true,
+	"AWS::Redshift::Cluster":             true,
+}
+
+// cfnDeletionPolicyFor resolves the policy in force for a resource, applying the
+// default the reference specifies for its type.
+//
+// The default is resolved here rather than at the call site because it is not
+// uniformly "Delete": an RDS cluster, and a standalone RDS instance, default to
+// Snapshot. A sweep that assumed Delete would destroy a database the template
+// asked to be snapshotted, which is the one failure mode this attribute exists to
+// prevent.
+func cfnDeletionPolicyFor(res cfnResource) string {
+	if res.DeletionPolicy != "" {
+		return res.DeletionPolicy
+	}
+	if cfnSnapshotDefaultTypes[res.Type] {
+		// "for AWS::RDS::DBInstance resources that don't specify the
+		// DBClusterIdentifier property" — an instance in a cluster follows the
+		// cluster's fate, so its own default is Delete.
+		if res.Type == "AWS::RDS::DBInstance" {
+			if v, ok := res.Properties["DBClusterIdentifier"]; ok && v != nil {
+				return cfnPolicyDelete
+			}
+		}
+		return cfnPolicySnapshot
+	}
+	return cfnPolicyDelete
+}
+
+// cfnPolicyRetainsResource reports whether policy leaves the resource in place for
+// the given operation.
+//
+// Snapshot does not retain: it snapshots and then deletes. Only Retain always
+// retains, and RetainExceptOnCreate retains for every operation except the
+// rollback of the create that made the resource.
+func cfnPolicyRetainsResource(policy string, op cfnDeletionOp) bool {
+	switch policy {
+	case cfnPolicyRetain:
+		return true
+	case cfnPolicyRetainExceptOnCreate:
+		return op != cfnCreateRollbackOp
+	default:
+		return false
+	}
 }
 
 // CFNStackState holds persisted state for a deployed CloudFormation stack.
@@ -143,6 +274,12 @@ type CFNStackState struct {
 
 	// UpdatedAt is the time the stack was last updated.
 	UpdatedAt time.Time `json:"UpdatedAt"`
+
+	// ResourceDeletions records what a delete sweep did with each resource. It is
+	// written only when the sweep failed — a successful sweep removes the whole
+	// record — so its presence and DELETE_FAILED go together, and it is what tells
+	// a caller which resource is holding the stack.
+	ResourceDeletions []CFNResourceDeletion `json:"ResourceDeletions,omitempty"`
 }
 
 // exports returns the stack's export name → resolved value map, joining
@@ -294,6 +431,22 @@ var (
 	// The API's rule: for each AWS account, Export names must be unique within a
 	// Region.
 	ErrCFNExportNameConflict = errors.New("export name already exists")
+
+	// ErrCFNDeleteFailed is returned when a stack's resource sweep could not
+	// delete one of its resources.
+	//
+	// The stack survives in DELETE_FAILED with the per-resource reasons recorded,
+	// so this is not the end of the caller's options: fix what is holding the
+	// resource and delete again. It is substrate's own failure rather than an
+	// invalid request, hence a 500 like the deploy failures.
+	ErrCFNDeleteFailed = errors.New("stack delete failed")
+)
+
+// Stack statuses substrate reports, for the ones written from more than one place.
+const (
+	// cfnStackDeleteFailed is the status a stack carries after a sweep failed to
+	// delete one of its resources. The stack remains in DescribeStacks.
+	cfnStackDeleteFailed = "DELETE_FAILED"
 )
 
 // cfnClassifiedError carries a [StackDeployer] failure's classification
@@ -848,6 +1001,33 @@ func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error
 	if err := d.checkExportsNotImported(ctx, stackName); err != nil {
 		return err
 	}
+
+	// Sweep the stack's resources before dropping its record. The record is what
+	// names them, so removing it first would strand every resource with no way
+	// left to find it — which is exactly the leak this fixes (#518).
+	//
+	// A stack whose record is already gone sweeps nothing and succeeds: DeleteStack
+	// documents no not-found error, and deleting an absent stack is a success.
+	stack, err := d.loadStack(ctx, stackName)
+	if err != nil {
+		return err
+	}
+	if stack != nil {
+		deletions := d.deleteStackResources(ctx, stack, stackName, cfnDeleteStackOp)
+		if failed := cfnFailedDeletions(deletions); len(failed) > 0 {
+			// The stack stays visible in DescribeStacks reporting DELETE_FAILED,
+			// with its resource list intact. A stack that reports a failed delete
+			// and then vanishes is a worse lie than the leak: a caller has no way
+			// to retry, and no way to learn which resource is holding it.
+			stack.Status = cfnStackDeleteFailed
+			stack.ResourceDeletions = deletions
+			stack.UpdatedAt = d.tc.Now()
+			d.persistStack(ctx, *stack)
+			return cfnErrf(ErrCFNDeleteFailed, "delete stack %s: %s", stackName,
+				strings.Join(failed, "; "))
+		}
+	}
+
 	if err := d.state.Delete(ctx, cfnNamespace, "stack:"+stackName); err != nil {
 		return fmt.Errorf("delete stack %s: %w", stackName, err)
 	}
@@ -863,6 +1043,42 @@ func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error
 		}
 	}
 	return d.saveStackNames(ctx, newNames)
+}
+
+// loadStack reads a persisted stack by name, returning (nil, nil) when no stack of
+// that name exists and (nil, nil) when its record does not unmarshal.
+//
+// A corrupt record reads as absent rather than as an error because that is what
+// ListStacks already does with one, and a delete that cannot be completed because
+// the record is unreadable would leave a stack nothing can remove.
+func (d *StackDeployer) loadStack(ctx context.Context, stackName string) (*CFNStackState, error) {
+	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+	if err != nil {
+		return nil, fmt.Errorf("load stack %s: %w", stackName, err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var s CFNStackState
+	if unmarshalErr := json.Unmarshal(data, &s); unmarshalErr != nil {
+		d.logger.Warn("cfn: stack record does not unmarshal", "stack", stackName,
+			"error", unmarshalErr.Error())
+		return nil, nil
+	}
+	return &s, nil
+}
+
+// cfnFailedDeletions returns one "LogicalID (Type): reason" description per
+// resource the sweep failed to delete.
+func cfnFailedDeletions(deletions []CFNResourceDeletion) []string {
+	var failed []string
+	for _, del := range deletions {
+		if del.Status == cfnDeleteFailed {
+			failed = append(failed,
+				fmt.Sprintf("%s (%s): %s", del.LogicalID, del.Type, del.Reason))
+		}
+	}
+	return failed
 }
 
 // ListStacks returns all persisted stack states.

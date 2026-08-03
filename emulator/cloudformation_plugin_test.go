@@ -559,6 +559,70 @@ func TestCFNPlugin_DeleteStack(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code, "body was %s", body)
 }
 
+// TestCFNPlugin_DeleteStackSweepsItsResources is the wire half of #518: the
+// resource goes with the stack, and a resource that cannot be deleted leaves the
+// stack visible in DELETE_FAILED while the call itself still answers 200.
+//
+// The 200 is the point of the second half. Real DeleteStack "returns success" and
+// the stack reaches DELETE_FAILED asynchronously, which a caller learns by polling
+// DescribeStacks — so raising the failure on the call would both break a caller
+// following AWS semantics and, being a 500, make an SDK retry the delete and sweep
+// a stack already in DELETE_FAILED.
+func TestCFNPlugin_DeleteStackSweepsItsResources(t *testing.T) {
+	ts := newCFNTestServer(t)
+	code, body := cfnAction(t, ts, "CreateStack", map[string]string{
+		"StackName":    "swept",
+		"TemplateBody": cfnBucketTemplate,
+	})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	require.Equal(t, http.StatusOK, cfnHeadBucket(t, ts, "cfn-wire-bucket"),
+		"the stack's bucket exists before the delete")
+
+	code, body = cfnAction(t, ts, "DeleteStack", map[string]string{"StackName": "swept"})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Equal(t, http.StatusNotFound, cfnHeadBucket(t, ts, "cfn-wire-bucket"),
+		"the bucket is deleted with its stack (#518)")
+
+	t.Run("a refused delete answers 200 and reports DELETE_FAILED", func(t *testing.T) {
+		code, body := cfnAction(t, ts, "CreateStack", map[string]string{
+			"StackName":    "stuck",
+			"TemplateBody": cfnBucketTemplate,
+		})
+		require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+		// A bucket holding an object the stack did not create is refused with
+		// BucketNotEmpty, which is a real refusal rather than an injected one.
+		put := httptest.NewRequest(http.MethodPut,
+			"http://s3.amazonaws.com/cfn-wire-bucket/keeper.txt", strings.NewReader("x"))
+		put.Host = "s3.amazonaws.com"
+		pw := httptest.NewRecorder()
+		ts.srv.ServeHTTP(pw, put)
+		require.Equal(t, http.StatusOK, pw.Code)
+
+		code, body = cfnAction(t, ts, "DeleteStack", map[string]string{"StackName": "stuck"})
+		require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+		code, body = cfnAction(t, ts, "DescribeStacks", map[string]string{"StackName": "stuck"})
+		require.Equal(t, http.StatusOK, code, "the stack stays visible so a caller can retry")
+		assert.Contains(t, body, "<StackStatus>DELETE_FAILED</StackStatus>")
+		assert.Equal(t, http.StatusOK, cfnHeadBucket(t, ts, "cfn-wire-bucket"),
+			"the bucket the sweep could not delete is still there")
+	})
+}
+
+// cfnHeadBucket reports the status of a HEAD against a bucket, which is how a test
+// observes whether a swept resource is really gone. It goes through the same server
+// the stack deployed into: a bucket read from a registry of its own would be a
+// different bucket.
+func cfnHeadBucket(t *testing.T, ts *cfnTestServer, bucket string) int {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodHead, "http://s3.amazonaws.com/"+bucket, nil)
+	r.Host = "s3.amazonaws.com"
+	w := httptest.NewRecorder()
+	ts.srv.ServeHTTP(w, r)
+	return w.Code
+}
+
 // TestCFNPlugin_UpdateStack asserts the status moves to UPDATE_COMPLETE and that
 // the new template's resources are deployed.
 func TestCFNPlugin_UpdateStack(t *testing.T) {
