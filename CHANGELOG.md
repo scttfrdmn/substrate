@@ -85,6 +85,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defect, but it will still turn red. The stack status is unchanged, and substrate
   still does not roll back (#520).
 
+- **A stack now deploys into the calling account and region** (#517). The deployer
+  synthesized its own request context from substrate's package defaults —
+  `123456789012` and `us-east-1` — regardless of who created the stack. Most plugins
+  embed the account, and some the region, in their state keys
+  (`instance:<account>/<region>/<id>`, `table:<account>/<name>`,
+  `queue:<account>/<name>`, `topic:<account>/<region>/<name>`), so a caller in any
+  other partition got a stack ARN naming their own account whose resources were
+  written where they could not read them. An unsigned client — which resolves to
+  `000000000000` — created a stack reporting `CREATE_COMPLETE` with a
+  `PhysicalResourceId` of `i-…`, and `DescribeInstances` then correctly returned
+  nothing. **Every read scoped to the caller was right; the write was in the wrong
+  place.**
+
+  The reporting consumer read that as `AWS::EC2::*` being stubbed while
+  `AWS::IAM::*` worked, which is worth stating plainly because the asymmetry is real
+  but the diagnosis was not: S3 (`bucket:<name>`) and IAM (`role:<name>`) key their
+  state *unpartitioned*, so a resource written under the wrong identity is still
+  found by a read under the right one. Both families were fully implemented. That is
+  also why this survived #483's review — its shared-state test asserted a bucket
+  through S3 and a role through IAM, the only two services that could not see the
+  bug.
+
+  Identity now rides on the deployer as an explicit account and region, defaulting to
+  today's constants, and the CloudFormation plugin builds a deployer carrying the
+  requesting caller's identity for every path that deploys or reads a resource. A
+  deployer is six pointer copies with no I/O, so one per deploying request is cheaper
+  than making a single deployer's identity mutable and therefore racy. Two strings
+  rather than a whole request context, deliberately: a deployer holding one would
+  carry a single request's ID and timestamp across every resource it deploys, and
+  would invite a future reader to propagate the principal, which is a separate
+  decision (#411). Because the default is unchanged, no existing caller behaves
+  differently.
+
+  Six sites read that identity, and threading only the obvious one would have left a
+  half-fix. `dispatch` builds each resource's request context, so it is the write
+  path. Both `buildCFNContext` calls resolve `AWS::AccountId` and `AWS::Region`, so
+  before this a template whose bucket name was `{"Fn::Sub": "b-${AWS::AccountId}"}`
+  named substrate's account rather than the caller's — a defect neither the issue nor
+  the reporter named, and one that produced a *wrong physical name* rather than a
+  misplaced resource. And three drift comparators read their own partitioned state
+  keys directly (DynamoDB, SQS, SNS), which drift detection needs on top of the
+  existence checkers: a wrong-partition existence check reports `DELETED` for a
+  resource that is fine, and a wrong-partition comparator finds nothing to compare
+  and reports no difference at all — drift silently blind, which no `IN_SYNC`
+  assertion can distinguish from drift working.
+
+  `BettyClient` keeps the defaults, and that is a decision rather than an oversight:
+  it is the in-process validation client, its callers never sign a request, so there
+  is no caller whose identity could be threaded. Its deployer is now built through
+  the constructor rather than as a struct literal, so there is one construction path
+  and the default cannot drift away from it — the literal left both fields empty,
+  which was harmless only for as long as nothing read them. An in-process caller that
+  does need another partition can set the identity on the deployer directly.
+
+  The comment #483 left on the stack-ARN builder described this as a discrepancy
+  confined to the two pseudo-parameters. That understated it considerably and has
+  been rewritten.
+
 - **A parameter declared `Default: ''` is now a declared parameter** (#516). The
   empty string was treated as "no default at all", so such a parameter was left
   undeclared, `Ref` fell through to echoing the parameter's own name back, and the
