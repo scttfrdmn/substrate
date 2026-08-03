@@ -172,12 +172,22 @@ func TestCFN_SucceededResourceRecordsNoError(t *testing.T) {
 	}
 }
 
-// TestCFN_FailedResourceDoesNotStopTheStack pins what is deliberately *not*
-// changed here: substrate records a per-resource failure and carries on, while real
-// CloudFormation would roll the stack back to ROLLBACK_COMPLETE. Rollback is a much
-// larger behavior than the status check, so it is filed rather than fixed, and this
-// test states the current contract so the difference is a decision rather than an
-// oversight.
+// TestCFN_FailedResourceDoesNotStopTheStack is the DO_NOTHING case, and it is this
+// test rather than a new one because the behavior it pins did not go away — it
+// stopped being unconditional.
+//
+// Until #520 this asserted "substrate does not roll back" as substrate's whole
+// contract: a refused resource left the stack complete and every resource beside it
+// in place. That is now what OnFailure=DO_NOTHING asks for, so the same assertions
+// stand with the option named, and the difference between the old default and the new
+// one is exactly the option.
+//
+// Substrate still deploys the resources *after* the failure, where real
+// CloudFormation stops at the first one. That divergence is deliberate and predates
+// rollback: it is what makes a single deploy report every refusal a template contains
+// rather than only the first, which is the more useful observable for the
+// validation-run case substrate exists to serve. The stack status is the same either
+// way, and the status is what a caller keys off.
 func TestCFN_FailedResourceDoesNotStopTheStack(t *testing.T) {
 	d := newFullTestDeployer(t)
 	tmpl := `{"Resources": {
@@ -185,9 +195,16 @@ func TestCFN_FailedResourceDoesNotStopTheStack(t *testing.T) {
 		"Accepted": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "after-failure"}}
 	}}`
 
-	result, err := d.Deploy(context.Background(), tmpl, "partial-failure", nil)
-	require.NoError(t, err)
+	result, err := d.DeployWithOptions(context.Background(), tmpl, "partial-failure", nil,
+		emulator.CFNDeployOptions{OnFailure: emulator.CFNOnFailureDoNothing})
+	require.NoError(t, err, "a failed resource is a stack status, not a failed call")
 	require.Len(t, result.Resources, 2)
+
+	assert.Equal(t, "CREATE_FAILED", result.Status,
+		"DO_NOTHING leaves the failure standing rather than rolling it back")
+	assert.Contains(t, result.StatusReason, "InvalidBucketName",
+		"the stack's reason names what failed")
+	assert.Empty(t, result.ResourceDeletions, "DO_NOTHING deletes nothing")
 
 	byLogicalID := map[string]emulator.DeployedResource{}
 	for _, r := range result.Resources {
@@ -195,7 +212,7 @@ func TestCFN_FailedResourceDoesNotStopTheStack(t *testing.T) {
 	}
 	assert.Contains(t, byLogicalID["Refused"].Error, "InvalidBucketName")
 	assert.Empty(t, byLogicalID["Accepted"].Error,
-		"a resource after the failure is still deployed; substrate does not roll back")
+		"a resource after the failure is still deployed")
 	assert.Equal(t, "after-failure", byLogicalID["Accepted"].PhysicalID,
 		"the queue should have been deployed despite the earlier failure")
 }

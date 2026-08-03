@@ -209,13 +209,29 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 		}
 	}
 
+	// Whether a failed create rolls back is the caller's choice, and the two
+	// parameters that express it are mutually exclusive. Presence, not value,
+	// decides: the CLI's --no-disable-rollback sends DisableRollback=false
+	// explicitly, so testing the value would accept a pairing the API rejects.
+	disableRollback, disableRollbackPresent := req.Params["DisableRollback"]
+	opts, err := cfnResolveFailureOptions(req.Params["OnFailure"], disableRollback,
+		disableRollbackPresent)
+	if err != nil {
+		return nil, cfnMapDeployerError(err)
+	}
+
 	// The stack name is passed as the deployer's stream ID because
 	// StackDeployer.Deploy derives the persisted stack name from it. BettyClient
 	// instead passes deploy-<unixnano>, which is right for a one-shot in-process
 	// validation run but would make a wire-created stack undiscoverable by the
 	// name the caller asked for.
-	if _, err := p.deployerFor(reqCtx).Deploy(context.Background(), body, name,
-		cfnRequestParameters(req.Params, nil)); err != nil {
+	//
+	// A failed resource is not an error here: the create's outcome is the stack's
+	// status, which is where the API puts it — real CreateStack has returned its
+	// StackId before any rollback happens — so a rolled-back stack answers 200 and
+	// says ROLLBACK_COMPLETE through DescribeStacks.
+	if _, err := p.deployerFor(reqCtx).DeployWithOptions(context.Background(), body, name,
+		cfnRequestParameters(req.Params, nil), opts); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -319,11 +335,20 @@ func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSReque
 // members substrate can answer from CFNStackState are emitted; CreationTime,
 // StackName and StackStatus are the three the API marks required.
 type cfnStackItem struct {
-	StackID         string            `xml:"StackId"`
-	StackName       string            `xml:"StackName"`
-	CreationTime    string            `xml:"CreationTime"`
-	LastUpdatedTime string            `xml:"LastUpdatedTime,omitempty"`
-	StackStatus     string            `xml:"StackStatus"`
+	StackID         string `xml:"StackId"`
+	StackName       string `xml:"StackName"`
+	CreationTime    string `xml:"CreationTime"`
+	LastUpdatedTime string `xml:"LastUpdatedTime,omitempty"`
+	StackStatus     string `xml:"StackStatus"`
+
+	// StackStatusReason is the "success/failure message associated with the stack
+	// status", omitted when there is none — a CREATE_COMPLETE stack has no reason
+	// to report, and emitting an empty one would suggest otherwise.
+	StackStatusReason string `xml:"StackStatusReason,omitempty"`
+
+	// DisableRollback is derived from the stack's stored OnFailure rather than being
+	// stored beside it: DisableRollback=true *is* DO_NOTHING, and a record holding
+	// both could contradict itself.
 	DisableRollback bool              `xml:"DisableRollback"`
 	Parameters      []cfnParameterXML `xml:"Parameters>member,omitempty"`
 	Outputs         []cfnOutputXML    `xml:"Outputs>member,omitempty"`
@@ -380,13 +405,15 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 	resp := response{XMLNS: cfnXMLNS, Metadata: cfnMetadata(reqCtx)}
 	for _, s := range stacks {
 		resp.Result.Stacks = append(resp.Result.Stacks, cfnStackItem{
-			StackID:         cfnStackID(reqCtx, s.StackName),
-			StackName:       s.StackName,
-			CreationTime:    cfnTime(s.CreatedAt),
-			LastUpdatedTime: cfnTime(s.UpdatedAt),
-			StackStatus:     s.Status,
-			Parameters:      cfnParametersXML(s.Parameters),
-			Outputs:         cfnOutputsXML(s.Outputs, s.ExportNames),
+			StackID:           cfnStackID(reqCtx, s.StackName),
+			StackName:         s.StackName,
+			CreationTime:      cfnTime(s.CreatedAt),
+			LastUpdatedTime:   cfnTime(s.UpdatedAt),
+			StackStatus:       s.Status,
+			StackStatusReason: s.StatusReason,
+			DisableRollback:   cfnStackDisablesRollback(s.OnFailure),
+			Parameters:        cfnParametersXML(s.Parameters),
+			Outputs:           cfnOutputsXML(s.Outputs, s.ExportNames),
 		})
 	}
 	return cfnXMLResponse(http.StatusOK, resp)
@@ -501,6 +528,13 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 			status, reason := "CREATE_COMPLETE", ""
 			if r.Error != "" {
 				status, reason = "CREATE_FAILED", r.Error
+			}
+			// A rollback swept the resources the failed create had created, so
+			// reporting CREATE_COMPLETE for one would claim a resource that is gone.
+			// The sweep's own record is what says which, and why.
+			if del := cfnDeletionFor(s.ResourceDeletions, r.LogicalID); del != nil && r.Error == "" {
+				status = del.Status
+				reason = del.Reason
 			}
 			resp.Result.Resources = append(resp.Result.Resources, resourceItem{
 				StackID:              cfnStackID(reqCtx, s.StackName),
@@ -1142,7 +1176,11 @@ func cfnMapDeployerError(err error) *AWSError {
 		// "all the imports must be removed before you can delete the exporting
 		// stack" is an instruction to the caller — so both are 400s.
 		errors.Is(err, ErrCFNExportInUse),
-		errors.Is(err, ErrCFNExportNameConflict):
+		errors.Is(err, ErrCFNExportNameConflict),
+		// An OnFailure outside the three values, a non-boolean DisableRollback, or
+		// both parameters at once, are all the request being malformed. The API
+		// documents no code of its own for them.
+		errors.Is(err, ErrCFNInvalidOnFailure):
 		return &AWSError{Code: "ValidationError", Message: msg, HTTPStatus: http.StatusBadRequest}
 	case errors.Is(err, ErrCFNTemplateInvalid):
 		return &AWSError{

@@ -406,8 +406,14 @@ func TestCFN_AStackDoesNotImportItsOwnExport(t *testing.T) {
 		`"QueueName":{"Fn::ImportValue":"Ouroboros-Name"}}}},` +
 		`"Outputs":{"N":{"Value":{"Ref":"Data"},"Export":{"Name":"Ouroboros-Name"}}}}`
 
+	// DO_NOTHING keeps the stack across both passes, which is what makes the second
+	// pass a redeploy of an existing stack rather than a first deploy again. Under the
+	// default ROLLBACK the queue's failure would sweep the bucket away each time and
+	// both passes would be identical, so the "first deploy vs redeploy" distinction —
+	// the whole point of looping — would assert nothing.
+	opts := emulator.CFNDeployOptions{OnFailure: emulator.CFNOnFailureDoNothing}
 	for _, pass := range []string{"first deploy", "redeploy"} {
-		result, err := d.Deploy(ctx, tmpl, "ouroboros", nil)
+		result, err := d.DeployWithOptions(ctx, tmpl, "ouroboros", nil, opts)
 		require.NoError(t, err, pass)
 
 		var queue *emulator.DeployedResource
@@ -421,11 +427,15 @@ func TestCFN_AStackDoesNotImportItsOwnExport(t *testing.T) {
 			"%s: a stack cannot import the name it is itself exporting", pass)
 	}
 
-	// The export is published for *other* stacks all the same.
+	// And the export is not published, because the stack failed. Before #520 it was:
+	// the stack reached CREATE_COMPLETE with a broken resource inside it and published
+	// its outputs regardless. A stack that did not succeed publishing an export other
+	// stacks could import is the resolves-against-nothing shape the export model exists
+	// to prevent, so the failure now withholds it — which is also what real
+	// CloudFormation does, since a rolled-back stack has no outputs.
 	exports, err := d.Exports(ctx)
 	require.NoError(t, err)
-	require.Len(t, exports, 1)
-	assert.Equal(t, "Ouroboros-Name", exports[0].Name)
+	assert.Empty(t, exports, "a stack whose resource failed publishes no exports")
 }
 
 // TestCFN_AStacksOwnImportDoesNotPinIt pins the invariant both export checks rest

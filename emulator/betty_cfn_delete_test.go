@@ -58,6 +58,20 @@ const (
 func newSweepDeployer(t *testing.T) (*emulator.StackDeployer,
 	*emulator.MemoryStateManager, afero.Fs, *emulator.EventStore) {
 	t.Helper()
+	d, state, fs, store, _ := newSweepDeployerShared(t)
+	return d, state, fs, store
+}
+
+// newSweepDeployerShared is newSweepDeployer with a factory for building further
+// deployers over the same registry, state and store.
+//
+// The factory exists for the identity tests: a persisted record is only the *previous*
+// deployment of a stack when it belongs to the same account and Region, and the only
+// way to assert that is two deployers of differing identity reading the same records.
+func newSweepDeployerShared(t *testing.T) (*emulator.StackDeployer,
+	*emulator.MemoryStateManager, afero.Fs, *emulator.EventStore,
+	func(accountID, region string) *emulator.StackDeployer) {
+	t.Helper()
 	ctx := context.Background()
 	cfg := emulator.DefaultConfig()
 	require.True(t, cfg.EventStore.Enabled,
@@ -76,8 +90,12 @@ func newSweepDeployer(t *testing.T) (*emulator.StackDeployer,
 	// returned only for the tests that inspect object bodies.
 	fs := afero.NewMemMapFs()
 	costs := emulator.NewCostController(emulator.CostConfig{Enabled: true})
+	as := func(accountID, region string) *emulator.StackDeployer {
+		return emulator.NewStackDeployer(registry, store, state, tc, logger, costs,
+			emulator.WithDeployerIdentity(accountID, region))
+	}
 	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs),
-		state, fs, store
+		state, fs, store, as
 }
 
 // headBucket reports the status a HeadBucket against name returns, which is the

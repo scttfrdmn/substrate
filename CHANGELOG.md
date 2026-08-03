@@ -174,6 +174,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in both directions, yielding the empty object a marker is, where reading one as a
   source used to fail outright.
 
+- **A create whose resource failed now rolls the stack back** (#520). A stack holding
+  a resource a plugin refused still reported a terminal `CREATE_COMPLETE`, with every
+  resource beside it left in place — so a consumer's failure-handling path could not
+  be tested at all, because substrate never produced the failure that path exists to
+  handle. The default is `ROLLBACK`, as the API's is: the resources the create had
+  already made are swept through #518's dispatcher in the same reverse order a
+  `DeleteStack` uses, and the stack reaches `ROLLBACK_COMPLETE` naming the failed
+  resource and the plugin's own error code. The stack record stays, because a
+  `ROLLBACK_COMPLETE` stack still blocks a create of the same name — which is the one
+  thing that makes the failure impossible to miss.
+
+  `CreateStack`'s two failure parameters are read and honoured for the first time.
+  They are **mutually exclusive** — "you can specify either `DisableRollback` or
+  `OnFailure`, but not both" — so giving both is a `ValidationError` rather than a
+  precedence rule, and the test is *presence* rather than value: the CLI's
+  `--no-disable-rollback` sends `DisableRollback=false` explicitly, so a rule that
+  ignored a `false` would accept a combination the API rejects. `OnFailure=DO_NOTHING`
+  (equivalently `DisableRollback=true`) leaves everything standing at `CREATE_FAILED`,
+  which is what substrate used to do unconditionally; `OnFailure=DELETE` sweeps and
+  removes the record, so the `DeployResult`'s `DELETE_COMPLETE` is the only place that
+  outcome is readable. `DescribeStacks` now reports the option it was given rather
+  than emitting `DisableRollback: false` for every stack. A sweep that cannot delete
+  gives `ROLLBACK_FAILED` and keeps the record, so the undeleted resource is
+  discoverable. All of these answer **200** on the wire: real `CreateStack` returns
+  its `StackId` before any rollback happens, so a rolled-back stack is not a failed
+  call, and returning a 5xx would make an SDK retry a create that already ran.
+
+  A failed stack publishes **no outputs**, and therefore exports none — an import
+  resolving against a value whose resource never deployed is the silent-literal
+  failure the export model exists to prevent. A duplicate export name is still
+  answered as an error rather than as a rolled-back stack, because it is a refusal of
+  the *request*: a request substrate declines outright never became a stack whose
+  resources could roll back, and the refusal now reads the same whether or not some
+  resource beside it also failed.
+
+  A failed `UpdateStack` reports `UPDATE_ROLLBACK_COMPLETE`, and the approximation
+  behind that is stated rather than implied: `UpdateStack` is a re-`Deploy`, so the
+  stored previous template is the only description of the previous state substrate
+  holds, and the rollback re-deploys it. It converges on that template's *declared*
+  state rather than restoring properties field by field, so a resource the failed
+  update replaced may keep a new physical ID. A previous record that cannot be read
+  leaves the stack at `UPDATE_FAILED` with the reason logged, rather than a rollback
+  attempted against nothing.
+
+- **An unchanged resource no longer looks like a failed create on every update**
+  (#520), found while building the rollback rather than reported. Because
+  `UpdateStack` is a re-`Deploy` of the whole template, every unchanged resource's
+  create is re-issued and its plugin refuses it as already existing — where real
+  CloudFormation issues no call at all for a resource it is not changing. Before
+  rollback this was merely invisible: the refusal landed on the resource's error field
+  and the stack still said `UPDATE_COMPLETE`. With rollback added it becomes data
+  loss, since every `UpdateStack` would see failures and sweep the resources it was
+  asked to keep.
+
+  So an already-exists refusal is cleared when — and only when — the stack's previous
+  deployment created that logical ID *successfully* and the template still declares it
+  identically, compared as canonically marshalled JSON. Each of those conditions is
+  load-bearing: a rename into a name another stack owns, a resource that failed the
+  previous time (so this stack never owned the name), and a record belonging to
+  another account or region all remain real failures. The refusal cannot be keyed on
+  the physical ID, because a refused create returns an empty one.
+
 ## [v0.88.0] - 2026-08-03
 
 ### Added

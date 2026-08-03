@@ -258,13 +258,67 @@ aws cloudformation describe-stack-resources --stack-name badname
 # ResourceStatusReason: InvalidBucketName: The specified bucket is not valid.
 ```
 
-The stack itself still reaches a terminal `CREATE_COMPLETE`, and the resources
-declared after the failed one are **still deployed**. Real CloudFormation would
-roll the whole stack back to `ROLLBACK_COMPLETE`; substrate records the failure
-per resource and carries on. Rollback is not modelled — tracked in
-[#520](https://github.com/scttfrdmn/substrate/issues/520). Assert on the
-per-resource status rather than on the stack status when a template is expected
-to fail.
+**The stack rolls back.** By default the resources the create had already made are
+swept — in the same reverse order a `DeleteStack` uses — and the stack reaches
+`ROLLBACK_COMPLETE`, naming the resource that failed and the plugin's error code in
+its reason:
+
+```
+aws cloudformation create-stack --stack-name partial --template-body file:///tmp/partial.json
+aws cloudformation describe-stacks --stack-name partial \
+  --query 'Stacks[0].StackStatus'                    # ROLLBACK_COMPLETE
+aws sqs get-queue-url --queue-name still-here        # absent — swept with the stack
+```
+
+`CreateStack`'s two failure options both work, and are **mutually exclusive** as the
+API makes them: specifying `OnFailure` and `DisableRollback` together is a
+`ValidationError`, and the test is *presence* rather than value, so the CLI's
+`--no-disable-rollback` counts as specifying it.
+
+| Option | Outcome |
+|---|---|
+| `OnFailure=ROLLBACK` (default), `DisableRollback=false` | resources swept, stack reports `ROLLBACK_COMPLETE` |
+| `OnFailure=DO_NOTHING`, `DisableRollback=true` | nothing swept, stack reports `CREATE_FAILED` |
+| `OnFailure=DELETE` | resources swept and the stack record removed |
+
+Whichever was given is reported back: `DescribeStacks` emits `DisableRollback` as
+`true` for a `DO_NOTHING` stack rather than always `false`. A sweep that cannot
+delete a resource gives `ROLLBACK_FAILED`, and the stack keeps its record so the
+undeleted resource is discoverable. All of these answer **200** on the wire — real
+`CreateStack` has returned its `StackId` before the rollback happens, so a
+rolled-back stack is not a failed call; poll `DescribeStacks` for the outcome.
+
+`RetainExceptOnCreate` interacts here: it retains a resource for a `DeleteStack`
+sweep but **deletes** it for the rollback of the create that made it.
+
+A failed stack publishes **no outputs**, and therefore exports none — an import
+against a value whose resource never deployed would resolve against nothing. A
+duplicate export name is still refused as an error rather than as a rolled-back
+stack, so that refusal reads the same whether or not a resource beside it failed.
+
+Two divergences are substrate's own, both deliberate:
+
+- Substrate deploys the resources declared **after** the failure, where real
+  CloudFormation stops at the first one, so a single deploy reports every refusal a
+  template contains rather than only the first. The stack status is the same either
+  way, and the status is what a caller keys off. Under `DO_NOTHING` those later
+  resources are therefore left in place too.
+- A failed `UpdateStack` reports `UPDATE_ROLLBACK_COMPLETE` by **re-deploying the
+  stored previous template**, since that is the only description of the previous
+  state substrate holds. It converges on the previous template's *declared* state
+  rather than restoring properties field by field, so a resource the failed update
+  replaced may keep a new physical ID. A previous record that cannot be read leaves
+  the stack at `UPDATE_FAILED` with the reason logged rather than a rollback
+  attempted against nothing.
+
+Because an update is a re-deploy, an unchanged resource's create is re-issued and
+the plugin refuses it as already existing. That refusal is **not** a failure of the
+update: substrate clears it when the stack's previous deployment created that
+logical ID successfully *and* the template still declares it identically. A rename
+into a name another stack owns, a resource that failed the previous time, and a
+record belonging to another account or region are all left standing as real
+failures — without that guard every `UpdateStack` would roll back the resources it
+was asked to keep.
 
 A refused resource's follow-up configuration requests are not sent either. A bucket
 whose name S3 rejected has no `PUT ?versioning` issued against it, so the event log
