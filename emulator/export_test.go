@@ -304,3 +304,30 @@ func CFNDispatchErrorForTest(status int, body string, routeErr error) error {
 	}
 	return cfnDispatchError(resp, routeErr)
 }
+
+// ResolveValueListForTest wraps resolveValueList so its conventions can be
+// asserted at the seam rather than only through a deployer.
+//
+// The distinctions it draws are invisible downstream: resolveStringList drops
+// empty members because a query API numbers its list parameters, so "AWS::NoValue
+// contributes no element" and "an empty member is preserved" — two rules
+// CloudFormation states and that a nested Fn::Split depends on — produce the same
+// observable through every current call site. Pinning them here is what makes
+// them regressions rather than accidents.
+//
+// listParams names the parameters declared with a list type, which is the only
+// thing that makes a Ref list-valued.
+func ResolveValueListForTest(v interface{}, params map[string]string, listParams map[string]bool, conditions map[string]bool) []string {
+	cctx := &cfnContext{
+		params:     params,
+		listParams: listParams,
+		conditions: conditions,
+		resources:  map[string]DeployedResource{},
+		evaluating: map[string]bool{},
+	}
+	return resolveValueList(v, cctx)
+}
+
+// CFNListParameterTypeForTest wraps cfnListParameterType so the set of declared
+// types that make a Ref list-valued can be asserted directly.
+func CFNListParameterTypeForTest(t string) bool { return cfnListParameterType(t) }

@@ -64,10 +64,11 @@ func TestCFN_YAMLShortForm_MatchesLongForm(t *testing.T) {
 			want:  "live",
 		},
 		{
+			// Scalar context, so the list is rejoined on the delimiter (#521).
 			name:  "Split",
 			short: `!Split [',', 'live,dead']`,
 			long:  `{Fn::Split: [',', 'live,dead']}`,
-			want:  "live",
+			want:  "live,dead",
 		},
 		{
 			// A node carries at most one tag, so `!Base64 !Ref P` is not legal
@@ -211,9 +212,7 @@ func TestCFN_YAMLShortForm_GetAttSplitsOnFirstPeriod(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newTestDeployer(t)
 			// The assertion runs through Outputs, which resolveValue handles
-			// directly: the resolved ARN is not a legal bucket name, and asserting
-			// through one would need Fn::Select over Fn::Split, which resolves to
-			// its first element only (see docs/services.md).
+			// directly: the resolved ARN is not a legal bucket name.
 			tmpl := `
 Resources:
   Role:

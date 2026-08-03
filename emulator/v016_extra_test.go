@@ -819,7 +819,7 @@ func TestCFN_ResolveValueTypes(t *testing.T) {
 			"AccountId":  {"Value": {"Ref": "AWS::AccountId"}},
 			"NoValue":    {"Value": {"Ref": "AWS::NoValue"}},
 			"JoinResult": {"Value": {"Fn::Join": ["-", ["x", "y", "z"]]}},
-			"SplitFirst": {"Value": {"Fn::Split": ["/", "a/b/c"]}}
+			"SplitJoined": {"Value": {"Fn::Split": ["/", "a/b/c"]}}
 		}
 	}`
 
@@ -828,6 +828,8 @@ func TestCFN_ResolveValueTypes(t *testing.T) {
 	assert.Equal(t, "a", result.Outputs["Selected"])
 	assert.Equal(t, "resolve-types-stack", result.Outputs["StackName"])
 	assert.Equal(t, "x-y-z", result.Outputs["JoinResult"])
+	// A scalar context rejoins Fn::Split's list rather than truncating (#521).
+	assert.Equal(t, "a/b/c", result.Outputs["SplitJoined"])
 	assert.NotEmpty(t, result.Outputs["AccountId"])
 }
 
