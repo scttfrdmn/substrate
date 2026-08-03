@@ -269,16 +269,33 @@ type CFNStackState struct {
 	// Status is the stack status (e.g., "CREATE_COMPLETE").
 	Status string `json:"Status"`
 
+	// StatusReason is the "success/failure message associated with the stack
+	// status", which for substrate is always a failure message: the reasons the
+	// resources that failed gave, or what a rollback could not delete. It is what a
+	// caller reads to learn *why* a stack is not CREATE_COMPLETE without walking
+	// every resource.
+	StatusReason string `json:"StatusReason,omitempty"`
+
+	// OnFailure is the failure action the create was requested with, empty for a
+	// stack created before the option was modeled. It is persisted because
+	// DescribeStacks reports DisableRollback, which is this value in another form —
+	// see cfnStackDisablesRollback.
+	OnFailure string `json:"OnFailure,omitempty"`
+
 	// CreatedAt is the time the stack was first deployed.
 	CreatedAt time.Time `json:"CreatedAt"`
 
 	// UpdatedAt is the time the stack was last updated.
 	UpdatedAt time.Time `json:"UpdatedAt"`
 
-	// ResourceDeletions records what a delete sweep did with each resource. It is
-	// written only when the sweep failed — a successful sweep removes the whole
-	// record — so its presence and DELETE_FAILED go together, and it is what tells
-	// a caller which resource is holding the stack.
+	// ResourceDeletions records what a delete or rollback sweep did with each
+	// resource, and is what tells a caller which resource is holding a stack.
+	//
+	// Written whenever a sweep ran and the record survived it, which is two cases: a
+	// DeleteStack sweep that failed (a successful one removes the whole record), and
+	// a create rollback, where the stack remains in ROLLBACK_COMPLETE or
+	// ROLLBACK_FAILED with the resources gone. So its presence does not by itself
+	// mean failure — the Status says which.
 	ResourceDeletions []CFNResourceDeletion `json:"ResourceDeletions,omitempty"`
 }
 
@@ -440,6 +457,15 @@ var (
 	// resource and delete again. It is substrate's own failure rather than an
 	// invalid request, hence a 500 like the deploy failures.
 	ErrCFNDeleteFailed = errors.New("stack delete failed")
+
+	// ErrCFNInvalidOnFailure is returned when a create's failure options are not
+	// ones CreateStack accepts: an OnFailure outside DO_NOTHING/ROLLBACK/DELETE, a
+	// DisableRollback that is not a boolean, or both parameters at once — "you can
+	// specify either DisableRollback or OnFailure, but not both".
+	//
+	// The caller's request is malformed rather than substrate failing, so this maps
+	// to a ValidationError at 400.
+	ErrCFNInvalidOnFailure = errors.New("invalid stack failure option")
 )
 
 // Stack statuses substrate reports, for the ones written from more than one place.
@@ -846,7 +872,26 @@ func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateMa
 // Resources are deployed in type-priority order. Unknown resource types are
 // skipped with a warning. The optional params map overrides template parameter
 // defaults.
+//
+// A resource that fails rolls the stack back, which is CreateStack's default: "although
+// the default setting is ROLLBACK". Use [StackDeployer.DeployWithOptions] to ask for
+// DO_NOTHING or DELETE instead.
 func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params map[string]string) (*DeployResult, error) {
+	return d.DeployWithOptions(ctx, cfn, streamID, params, CFNDeployOptions{})
+}
+
+// DeployWithOptions is [StackDeployer.Deploy] with the stack-level failure options a
+// create was requested with.
+//
+// Deploy remains the whole of the API for the succeeding case; this exists because
+// what happens to a *failed* create is the caller's decision, not substrate's, and
+// the zero CFNDeployOptions is CloudFormation's own default.
+func (d *StackDeployer) DeployWithOptions(
+	ctx context.Context, cfn, streamID string, params map[string]string, opts CFNDeployOptions,
+) (*DeployResult, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
 	tmpl, err := d.parseCFNTemplate(cfn)
 	if err != nil {
 		return nil, cfnErrf(ErrCFNTemplateInvalid, "parse template: %w", err)
@@ -907,6 +952,15 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 		resources = append(resources, dr)
 	}
 
+	// A refusal that only says "this already exists" is not a failure of this
+	// deployment, because a real deployment would not have made the call. Cleared
+	// before the stack's fate is decided, or every redeploy of an unchanged template
+	// would look like a failed create and roll back the resources it was asked to
+	// keep.
+	if prev, prevErr := d.previousStack(ctx, stackName); prevErr == nil {
+		d.clearUnchangedRedeploys(prev, tmpl.Resources, resources)
+	}
+
 	// Resolve outputs, and with them the export names this stack publishes.
 	outputs := make(map[string]string)
 	exportNames := make(map[string]string)
@@ -932,6 +986,30 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 		return nil, err
 	}
 
+	// Only now is the stack's fate decided. The export checks run first because they
+	// are refusals of the *request* — substrate answers them as errors rather than as
+	// a rolled-back stack (see [StackDeployer.checkExports]) — and a request substrate
+	// refuses outright never became a stack whose resources could roll back.
+	//
+	// The outputs resolved above are then deliberately discarded: a failed stack
+	// publishes none, and therefore exports none. Publishing them would let another
+	// stack import a value whose resource either never deployed or is about to be
+	// swept, which is the resolves-against-nothing failure the export model exists to
+	// prevent.
+	if failures := cfnFailedResources(resources); len(failures) > 0 {
+		return d.handleFailedCreate(ctx, cfnFailedCreate{
+			stackName:    stackName,
+			templateBody: cfn,
+			params:       cctx.params,
+			resources:    resources,
+			failures:     failures,
+			streamID:     streamID,
+			totalCost:    totalCost,
+			start:        start,
+			onFailure:    opts.resolve(),
+		})
+	}
+
 	duration := d.tc.Now().Sub(start)
 
 	result := &DeployResult{
@@ -941,6 +1019,7 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 		TotalCost: totalCost,
 		Duration:  duration,
 		Outputs:   outputs,
+		Status:    cfnStackCreateComplete,
 	}
 
 	// Persist stack state if state manager is available.
@@ -955,7 +1034,8 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 			Imports:      cctx.importedNames(),
 			AccountID:    d.identity.accountID,
 			Region:       d.identity.region,
-			Status:       "CREATE_COMPLETE",
+			Status:       cfnStackCreateComplete,
+			OnFailure:    opts.resolve(),
 			CreatedAt:    start,
 			UpdatedAt:    d.tc.Now(),
 		}
@@ -966,23 +1046,65 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 }
 
 // UpdateStack re-deploys a previously deployed stack with new template or parameters.
+//
+// A resource that fails during the update rolls the stack back onto the template that
+// was deployed before it and reports UPDATE_ROLLBACK_COMPLETE. That is a *re-deploy of
+// the previous template*, not CloudFormation's per-resource restore — see
+// [StackDeployer.rollbackFailedUpdate] for what the difference costs. An update whose
+// rollback is not wanted has no option to disable it: DisableRollback and OnFailure are
+// CreateStack parameters, and UpdateStack models neither.
 func (d *StackDeployer) UpdateStack(ctx context.Context, cfn, stackName string, params map[string]string) (*DeployResult, error) {
-	result, err := d.Deploy(ctx, cfn, stackName, params)
+	// Read before the update, because the update overwrites it: this is the only
+	// description of the pre-update state a rollback has to converge on.
+	prev, prevErr := d.loadStack(ctx, stackName)
+
+	// DO_NOTHING, so a failed update does not take the create-rollback path and
+	// delete the resources: an update failure rolls *back to a template*, and
+	// deleting what the previous template declares is the opposite of that.
+	result, err := d.DeployWithOptions(ctx, cfn, stackName, params,
+		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing})
 	if err != nil {
 		return nil, fmt.Errorf("update stack %s: %w", stackName, err)
 	}
+
+	if failures := cfnFailedResources(result.Resources); len(failures) > 0 {
+		// With no readable previous template there is nothing to converge on, so
+		// the update stops at UPDATE_FAILED rather than claiming a rollback it
+		// could not perform.
+		if prevErr != nil || prev == nil || prev.TemplateBody == "" {
+			reason := strings.Join(failures, "; ")
+			result.Status = cfnStackUpdateFailed
+			result.StatusReason = reason
+			d.setStackStatus(ctx, stackName, cfnStackUpdateFailed, reason)
+			// prevErr is logged rather than returned, and this is the one place that
+			// choice is not obvious. Failing to read the *previous* state is not a
+			// failure of this update: the update itself already ran and its resources
+			// already deployed, so returning an error here would report a call that
+			// did not happen and lose the UPDATE_FAILED status the caller needs. The
+			// unreadable record is why no rollback was attempted, which is what the
+			// log line says.
+			d.logger.Warn("cfn: stack update failed and no previous template is readable; "+
+				"not rolling back", "stack", stackName, "failures", len(failures),
+				"previous_state_error", cfnErrText(prevErr))
+			return result, nil //nolint:nilerr
+		}
+		return d.rollbackFailedUpdate(ctx, *prev, failures, stackName)
+	}
+
 	// Overwrite the persisted status.
 	if d.state != nil {
 		data, getErr := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
 		if getErr == nil && data != nil {
 			var s CFNStackState
 			if unmarshalErr := json.Unmarshal(data, &s); unmarshalErr == nil {
-				s.Status = "UPDATE_COMPLETE"
+				s.Status = cfnStackUpdateComplete
+				s.StatusReason = ""
 				s.UpdatedAt = d.tc.Now()
 				d.persistStack(ctx, s)
 			}
 		}
 	}
+	result.Status = cfnStackUpdateComplete
 	return result, nil
 }
 
@@ -1028,21 +1150,7 @@ func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error
 		}
 	}
 
-	if err := d.state.Delete(ctx, cfnNamespace, "stack:"+stackName); err != nil {
-		return fmt.Errorf("delete stack %s: %w", stackName, err)
-	}
-	// Remove from stack names list.
-	names, err := d.loadStackNames(ctx)
-	if err != nil {
-		return err
-	}
-	newNames := make([]string, 0, len(names))
-	for _, n := range names {
-		if n != stackName {
-			newNames = append(newNames, n)
-		}
-	}
-	return d.saveStackNames(ctx, newNames)
+	return d.removeStackRecord(ctx, stackName)
 }
 
 // loadStack reads a persisted stack by name, returning (nil, nil) when no stack of
@@ -1260,10 +1368,13 @@ func (d *StackDeployer) loadExports(ctx context.Context, deployingStack string) 
 // exported value another stack imports may not change.
 //
 // Both run after the resources deploy, because an export name or value may be
-// built from a resource attribute and so is not knowable earlier. The deployment
-// is refused rather than the resources rolled back, which substrate does not model
-// (#520) — the resources exist and the caller is told the stack record was not
-// written, which is the honest observable rather than a fabricated rollback.
+// built from a resource attribute and so is not knowable earlier. The deployment is
+// refused rather than rolled back: this is a refusal of the *request*, reported as
+// an error, and it is checked before a failed resource is allowed to roll the stack
+// back so that a duplicate export name is answered the same way whether or not some
+// resource beside it also failed. The resources exist and the caller is told the
+// stack record was not written, which is the honest observable rather than a
+// fabricated rollback.
 func (d *StackDeployer) checkExports(ctx context.Context, stackName string, exports map[string]string) error {
 	if d.state == nil {
 		return nil

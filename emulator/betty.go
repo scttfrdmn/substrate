@@ -53,6 +53,25 @@ type DeployResult struct {
 
 	// Outputs contains the resolved CloudFormation Outputs section values.
 	Outputs map[string]string
+
+	// Status is the terminal stack status the deploy reached: CREATE_COMPLETE,
+	// UPDATE_COMPLETE, or one of the failure statuses when a resource failed —
+	// CREATE_FAILED, ROLLBACK_COMPLETE, ROLLBACK_FAILED, DELETE_COMPLETE,
+	// UPDATE_ROLLBACK_COMPLETE, UPDATE_ROLLBACK_FAILED.
+	//
+	// A failed create is reported here rather than as an error, the way the API
+	// reports it: real CreateStack has already returned its StackId before the
+	// rollback happens, so a rolled-back stack is not a failed call. For
+	// OnFailure=DELETE this is the *only* place the outcome is readable, since the
+	// stack record is gone.
+	Status string
+
+	// StatusReason explains a non-successful Status, and is empty otherwise.
+	StatusReason string
+
+	// ResourceDeletions records what a rollback did with each resource the failed
+	// create had created, and is empty when nothing was rolled back.
+	ResourceDeletions []CFNResourceDeletion
 }
 
 // BettyClient is a convenience wrapper for the full Betty.codes validation workflow.

@@ -346,6 +346,12 @@ func TestCFNPlugin_CreateStack_TemplateURLRefused(t *testing.T) {
 // a broken resource inside it. A stack reporting every resource complete
 // regardless is the failure mode this pins: a consumer asserting on a resource's
 // status would be told a queue exists that does not.
+//
+// DisableRollback because the per-resource status is what is under test: the default
+// ROLLBACK would sweep the good bucket away and report it DELETE_COMPLETE, so the
+// assertion that a resource beside a failure is CREATE_COMPLETE would be asserting the
+// rollback instead. Sent as the wire parameter rather than OnFailure so this also
+// covers the parameter a caller reaches for most often.
 func TestCFNPlugin_ResourceFailureReported(t *testing.T) {
 	ts := newCFNTestServer(t)
 
@@ -353,7 +359,8 @@ func TestCFNPlugin_ResourceFailureReported(t *testing.T) {
 	// dispatch comes back ServiceNotAvailable while the bucket beside it deploys.
 	require.NotContains(t, ts.registry.Names(), "sqs")
 	code, body := cfnAction(t, ts, "CreateStack", map[string]string{
-		"StackName": "half-broken",
+		"StackName":       "half-broken",
+		"DisableRollback": "true",
 		"TemplateBody": `{"Resources":{` +
 			`"Good":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cfn-good-bucket"}},` +
 			`"Bad":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cfn-doomed-queue"}}}}`,
@@ -621,6 +628,209 @@ func cfnHeadBucket(t *testing.T, ts *cfnTestServer, bucket string) int {
 	w := httptest.NewRecorder()
 	ts.srv.ServeHTTP(w, r)
 	return w.Code
+}
+
+// cfnRollbackWireTemplate is the wire tests' failing stack: a bucket that deploys and
+// one whose name is shorter than S3's three-character minimum, so CreateBucket answers
+// InvalidBucketName. A real refusal rather than an injected one, and one reachable in a
+// registry holding only S3, IAM and CloudFormation.
+const cfnRollbackWireTemplate = `{"Resources":{` +
+	`"Good":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cfn-wire-rollback"}},` +
+	`"Bad":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"no"}}}}`
+
+// TestCFNPlugin_CreateStackRollsBackOnTheWire is #520 as a caller sees it: the create
+// answers 200 and DescribeStacks reports ROLLBACK_COMPLETE.
+//
+// The 200 is not incidental. Real CreateStack has returned its StackId before any
+// rollback happens, so the outcome is a status a caller polls for, not an exception —
+// the same rule DeleteStack follows for DELETE_FAILED. A 500 here would break every
+// caller written against AWS semantics.
+func TestCFNPlugin_CreateStackRollsBackOnTheWire(t *testing.T) {
+	ts := newCFNTestServer(t)
+
+	code, body := cfnAction(t, ts, "CreateStack", map[string]string{
+		"StackName":    "wire-rolled",
+		"TemplateBody": cfnRollbackWireTemplate,
+	})
+	require.Equal(t, http.StatusOK, code,
+		"a rolled-back create still answers 200; body was %s", body)
+
+	code, body = cfnAction(t, ts, "DescribeStacks", map[string]string{"StackName": "wire-rolled"})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Contains(t, body, "<StackStatus>ROLLBACK_COMPLETE</StackStatus>")
+	assert.Contains(t, body, "InvalidBucketName",
+		"StackStatusReason carries what failed, which is where a caller reads it")
+
+	assert.Equal(t, http.StatusNotFound, cfnHeadBucket(t, ts, "cfn-wire-rollback"),
+		"the bucket that did deploy was swept")
+}
+
+// TestCFNPlugin_DisableRollbackIsHonouredAndReported pins both halves of the
+// parameter: it changes the outcome, and DescribeStacks reports it back.
+//
+// Before #520 DescribeStacks emitted DisableRollback unconditionally false while
+// createStack read the parameter not at all — a field substrate reported wrongly for
+// every stack. A caller that set it and read it back was told it had not taken effect.
+func TestCFNPlugin_DisableRollbackIsHonouredAndReported(t *testing.T) {
+	tests := []struct {
+		name       string
+		params     map[string]string
+		wantStatus string
+		wantFlag   string
+		wantBucket int
+	}{
+		{
+			name:       "DisableRollback=true keeps the failed stack",
+			params:     map[string]string{"DisableRollback": "true"},
+			wantStatus: "CREATE_FAILED",
+			wantFlag:   "<DisableRollback>true</DisableRollback>",
+			wantBucket: http.StatusOK,
+		},
+		{
+			// The CLI's --no-disable-rollback sends this explicitly, so it has to
+			// mean the default rather than being ignored as a zero value.
+			name:       "DisableRollback=false rolls back",
+			params:     map[string]string{"DisableRollback": "false"},
+			wantStatus: "ROLLBACK_COMPLETE",
+			wantFlag:   "<DisableRollback>false</DisableRollback>",
+			wantBucket: http.StatusNotFound,
+		},
+		{
+			name:       "OnFailure=DO_NOTHING is the same knob by another name",
+			params:     map[string]string{"OnFailure": "DO_NOTHING"},
+			wantStatus: "CREATE_FAILED",
+			wantFlag:   "<DisableRollback>true</DisableRollback>",
+			wantBucket: http.StatusOK,
+		},
+		{
+			name:       "OnFailure=DELETE leaves nothing",
+			params:     map[string]string{"OnFailure": "DELETE"},
+			wantStatus: "",
+			wantBucket: http.StatusNotFound,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// A server per case: the bucket names are shared, and a stack left over
+			// from another case would make the create collide rather than fail the
+			// way the case intends.
+			ts := newCFNTestServer(t)
+			params := map[string]string{
+				"StackName":    "wire-opt",
+				"TemplateBody": cfnRollbackWireTemplate,
+			}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			code, body := cfnAction(t, ts, "CreateStack", params)
+			require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+			code, body = cfnAction(t, ts, "DescribeStacks", map[string]string{"StackName": "wire-opt"})
+			if tc.wantStatus == "" {
+				assert.Equal(t, http.StatusBadRequest, code,
+					"OnFailure DELETE removes the stack, so there is nothing to describe")
+			} else {
+				require.Equal(t, http.StatusOK, code, "body was %s", body)
+				assert.Contains(t, body, "<StackStatus>"+tc.wantStatus+"</StackStatus>")
+				assert.Contains(t, body, tc.wantFlag,
+					"the flag is reported back as the caller set it")
+			}
+			assert.Equal(t, tc.wantBucket, cfnHeadBucket(t, ts, "cfn-wire-rollback"))
+		})
+	}
+}
+
+// TestCFNPlugin_OnFailureAndDisableRollbackAreMutuallyExclusive pins the refusal:
+// "you can specify either DisableRollback or OnFailure, but not both".
+//
+// The test is *presence*, not value, which is why the false/DO_NOTHING pairing below is
+// refused even though the two agree: --no-disable-rollback sends DisableRollback=false
+// explicitly, so a rule that ignored a false value would accept a request the API
+// rejects and silently pick a winner.
+func TestCFNPlugin_OnFailureAndDisableRollbackAreMutuallyExclusive(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]string
+	}{
+		{
+			name:   "both set and agreeing",
+			params: map[string]string{"OnFailure": "DO_NOTHING", "DisableRollback": "true"},
+		},
+		{
+			name:   "both set and disagreeing",
+			params: map[string]string{"OnFailure": "ROLLBACK", "DisableRollback": "true"},
+		},
+		{
+			name:   "an explicit false is still a specification",
+			params: map[string]string{"OnFailure": "DO_NOTHING", "DisableRollback": "false"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newCFNTestServer(t)
+			params := map[string]string{
+				"StackName":    "wire-both",
+				"TemplateBody": cfnBucketTemplate,
+			}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			code, body := cfnAction(t, ts, "CreateStack", params)
+			assert.Equal(t, http.StatusBadRequest, code, "body was %s", body)
+			assert.Equal(t, "ValidationError", cfnErrorCode(t, body))
+			assert.Contains(t, body, "but not both")
+		})
+	}
+
+	t.Run("an unrecognized OnFailure is refused rather than defaulted", func(t *testing.T) {
+		ts := newCFNTestServer(t)
+		code, body := cfnAction(t, ts, "CreateStack", map[string]string{
+			"StackName":    "wire-typo",
+			"TemplateBody": cfnBucketTemplate,
+			"OnFailure":    "ROLBACK",
+		})
+		assert.Equal(t, http.StatusBadRequest, code, "body was %s", body)
+		assert.Equal(t, "ValidationError", cfnErrorCode(t, body))
+	})
+}
+
+// TestCFNPlugin_DescribeStackResourcesShowsTheRollback pins that the per-resource view
+// reflects the sweep rather than the create that preceded it.
+//
+// A resource the rollback deleted reporting CREATE_COMPLETE would tell a caller a
+// bucket exists that does not, which is the same silent-success shape as the stack
+// status itself.
+func TestCFNPlugin_DescribeStackResourcesShowsTheRollback(t *testing.T) {
+	ts := newCFNTestServer(t)
+	code, body := cfnAction(t, ts, "CreateStack", map[string]string{
+		"StackName":    "wire-resources",
+		"TemplateBody": cfnRollbackWireTemplate,
+	})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+	code, body = cfnAction(t, ts, "DescribeStackResources",
+		map[string]string{"StackName": "wire-resources"})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+	var doc struct {
+		Resources []struct {
+			LogicalID string `xml:"LogicalResourceId"`
+			Status    string `xml:"ResourceStatus"`
+			Reason    string `xml:"ResourceStatusReason"`
+		} `xml:"DescribeStackResourcesResult>StackResources>member"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &doc))
+	byLogical := map[string]string{}
+	reasons := map[string]string{}
+	for _, r := range doc.Resources {
+		byLogical[r.LogicalID] = r.Status
+		reasons[r.LogicalID] = r.Reason
+	}
+	assert.Equal(t, "DELETE_COMPLETE", byLogical["Good"],
+		"the resource the rollback swept says so")
+	assert.Equal(t, "CREATE_FAILED", byLogical["Bad"],
+		"the resource that failed keeps its own status; the sweep never touched it")
+	assert.Contains(t, reasons["Bad"], "InvalidBucketName")
 }
 
 // TestCFNPlugin_UpdateStack asserts the status moves to UPDATE_COMPLETE and that
