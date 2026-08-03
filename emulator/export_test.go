@@ -305,6 +305,22 @@ func CFNDispatchErrorForTest(status int, body string, routeErr error) error {
 	return cfnDispatchError(resp, routeErr)
 }
 
+// CFNMapDeployerErrorForTest wraps cfnMapDeployerError so the classification it
+// derives can be asserted against an error built by hand, rather than only
+// against whichever deployer path a test happens to be able to provoke.
+func CFNMapDeployerErrorForTest(err error) *AWSError { return cfnMapDeployerError(err) }
+
+// CFNClassifiedErrorForTest builds a classified deployer error carrying class and
+// an arbitrary message.
+//
+// The message being arbitrary is the point: it is what proves the wire code no
+// longer depends on the wording. A test can hand this a message that says nothing
+// a substring match would have recognized and assert the code still resolves,
+// which is the regression #502 removed.
+func CFNClassifiedErrorForTest(class error, message string) error {
+	return cfnErrf(class, "%s", message)
+}
+
 // ResolveValueListForTest wraps resolveValueList so its conventions can be
 // asserted at the seam rather than only through a deployer.
 //

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/netip"
 	"reflect"
@@ -156,6 +157,118 @@ func (c *cfnContext) takeFailures() []string {
 	c.failures = nil
 	return out
 }
+
+// The sentinel errors a [StackDeployer] operation wraps, so a caller can
+// classify a failure with [errors.Is] rather than by matching the message.
+//
+// The wire plugin has to turn a deployer failure into an AWS error code and an
+// HTTP status, and until these existed it did so with strings.Contains over the
+// message (#502). That worked and was fragile in two directions. Rewording
+// "stack %q not found" — an ordinary copy-edit — silently turned a
+// ValidationError at 400 into an InternalFailure at 500 for every consumer, with
+// no compiler error and no failing test outside the plugin's own suite. And it
+// was lossy the other way: a resource-level deploy failure whose wrapped cause
+// happened to contain "not found" (an instance whose AMI does not resolve, say)
+// was reported as though the *request* had named something absent.
+//
+// Each site wraps the sentinel with %w and keeps its message text byte for byte,
+// so anything reading a log is unaffected; only the classification changes.
+var (
+	// ErrCFNStackNotFound is returned when an operation names a stack that does
+	// not exist.
+	ErrCFNStackNotFound = errors.New("stack not found")
+
+	// ErrCFNChangeSetNotFound is returned when an operation names a change set
+	// that does not exist.
+	ErrCFNChangeSetNotFound = errors.New("change set not found")
+
+	// ErrCFNDriftDetectionNotFound is returned when a drift-detection ID does
+	// not resolve.
+	ErrCFNDriftDetectionNotFound = errors.New("drift detection not found")
+
+	// ErrCFNTemplateInvalid is returned when a template body cannot be parsed.
+	ErrCFNTemplateInvalid = errors.New("invalid template")
+
+	// ErrCFNResourceDeployFailed is returned when a template resource could not
+	// be deployed.
+	//
+	// This is deliberately distinct from ErrCFNTemplateInvalid: the template
+	// parsed, so the caller's request was well-formed and the failure is
+	// substrate's, which is a 500 rather than a 400.
+	ErrCFNResourceDeployFailed = errors.New("resource deploy failed")
+
+	// ErrCFNStateRequired is returned when an operation needs a state manager and
+	// the deployer was built without one.
+	ErrCFNStateRequired = errors.New("state manager required")
+)
+
+// cfnClassifiedError carries a [StackDeployer] failure's classification
+// alongside its message, so the two can be independent.
+//
+// Wrapping the sentinel into the message with a second %w would have worked for
+// errors.Is and changed the text every consumer's logs already carry — and
+// "message unchanged" is the property that makes this refactor safe to land on
+// its own. Holding the class in a field instead means a message may be reworded
+// freely without moving the wire code, which was the whole complaint.
+type cfnClassifiedError struct {
+	class error
+	msg   string
+	cause error
+}
+
+// Error implements the error interface.
+func (e *cfnClassifiedError) Error() string { return e.msg }
+
+// Unwrap returns the wrapped cause, or the classification when there is none, so
+// errors.Is finds the class either way.
+func (e *cfnClassifiedError) Unwrap() error {
+	if e.cause != nil {
+		return e.cause
+	}
+	return e.class
+}
+
+// Is reports whether the error carries the given classification.
+func (e *cfnClassifiedError) Is(target error) bool { return target == e.class }
+
+// cfnErrf builds a classified deployer error whose message is exactly format
+// applied to args. A %w in format is unwrapped as usual, so a parse failure's
+// cause survives underneath the classification.
+func cfnErrf(class error, format string, args ...interface{}) error {
+	wrapped := fmt.Errorf(format, args...)
+	return &cfnClassifiedError{
+		class: class,
+		msg:   wrapped.Error(),
+		cause: errors.Unwrap(wrapped),
+	}
+}
+
+// CFNResourceDeployError reports a template resource that could not be deployed,
+// naming the resource so a caller need not re-parse the message to find it.
+//
+// DescribeStackResources reads the failure off the resource record rather than
+// this error, but a deploy that fails outright returns before any record is
+// written — so the logical ID has to travel with the error or it is lost.
+type CFNResourceDeployError struct {
+	// LogicalID is the template logical ID of the resource that failed.
+	LogicalID string
+
+	// Err is the underlying failure.
+	Err error
+}
+
+// Error implements the error interface.
+func (e *CFNResourceDeployError) Error() string {
+	return fmt.Sprintf("deploy resource %s: %v", e.LogicalID, e.Err)
+}
+
+// Unwrap returns the underlying failure.
+func (e *CFNResourceDeployError) Unwrap() error { return e.Err }
+
+// Is reports that a CFNResourceDeployError matches ErrCFNResourceDeployFailed,
+// so a caller can classify it without also matching whatever the wrapped cause
+// happens to be.
+func (e *CFNResourceDeployError) Is(target error) bool { return target == ErrCFNResourceDeployFailed }
 
 // cfnNamespace is the state namespace for CloudFormation stack state.
 const cfnNamespace = "cfn"
@@ -489,7 +602,7 @@ func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateMa
 func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params map[string]string) (*DeployResult, error) {
 	tmpl, err := d.parseCFNTemplate(cfn)
 	if err != nil {
-		return nil, fmt.Errorf("parse template: %w", err)
+		return nil, cfnErrf(ErrCFNTemplateInvalid, "parse template: %w", err)
 	}
 
 	stackName := streamID
@@ -534,7 +647,7 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 	for _, e := range entries {
 		dr, cost, deployErr := d.deployResource(ctx, e.logicalID, e.resource, streamID, cctx)
 		if deployErr != nil {
-			return nil, fmt.Errorf("deploy resource %s: %w", e.logicalID, deployErr)
+			return nil, &CFNResourceDeployError{LogicalID: e.logicalID, Err: deployErr}
 		}
 		totalCost += cost
 		cctx.resources[e.logicalID] = dr
@@ -692,13 +805,13 @@ func (d *StackDeployer) saveStackNames(ctx context.Context, names []string) erro
 // in state and can be executed later via [StackDeployer.ExecuteChangeSet].
 func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSetName, templateBody string, params map[string]string) (*CFNChangeSet, error) {
 	if d.state == nil {
-		return nil, fmt.Errorf("cfn CreateChangeSet: state manager required")
+		return nil, cfnErrf(ErrCFNStateRequired, "cfn CreateChangeSet: state manager required")
 	}
 
 	// Load existing stack.
 	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
 	if err != nil || data == nil {
-		return nil, fmt.Errorf("cfn CreateChangeSet: stack %q not found", stackName)
+		return nil, cfnErrf(ErrCFNStackNotFound, "cfn CreateChangeSet: stack %q not found", stackName)
 	}
 	var stack CFNStackState
 	if err := json.Unmarshal(data, &stack); err != nil {
@@ -708,11 +821,11 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	// Parse old and new templates.
 	oldTmpl, err := d.parseCFNTemplate(stack.TemplateBody)
 	if err != nil {
-		return nil, fmt.Errorf("cfn CreateChangeSet: parse old template: %w", err)
+		return nil, cfnErrf(ErrCFNTemplateInvalid, "cfn CreateChangeSet: parse old template: %w", err)
 	}
 	newTmpl, err := d.parseCFNTemplate(templateBody)
 	if err != nil {
-		return nil, fmt.Errorf("cfn CreateChangeSet: parse new template: %w", err)
+		return nil, cfnErrf(ErrCFNTemplateInvalid, "cfn CreateChangeSet: parse new template: %w", err)
 	}
 
 	// Diff resources.
@@ -749,11 +862,11 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 // DescribeChangeSet returns a previously created change set.
 func (d *StackDeployer) DescribeChangeSet(ctx context.Context, stackName, changeSetName string) (*CFNChangeSet, error) {
 	if d.state == nil {
-		return nil, fmt.Errorf("cfn DescribeChangeSet: state manager required")
+		return nil, cfnErrf(ErrCFNStateRequired, "cfn DescribeChangeSet: state manager required")
 	}
 	data, err := d.state.Get(ctx, cfnNamespace, "changeset:"+stackName+"/"+changeSetName)
 	if err != nil || data == nil {
-		return nil, fmt.Errorf("cfn DescribeChangeSet: change set %q not found", changeSetName)
+		return nil, cfnErrf(ErrCFNChangeSetNotFound, "cfn DescribeChangeSet: change set %q not found", changeSetName)
 	}
 	var cs CFNChangeSet
 	if err := json.Unmarshal(data, &cs); err != nil {
@@ -824,11 +937,11 @@ func (d *StackDeployer) DeleteChangeSet(ctx context.Context, stackName, changeSe
 // any resource has been deleted outside of CloudFormation.
 func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) (*CFNDriftResult, error) {
 	if d.state == nil {
-		return nil, fmt.Errorf("cfn DetectStackDrift: state manager required")
+		return nil, cfnErrf(ErrCFNStateRequired, "cfn DetectStackDrift: state manager required")
 	}
 	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
 	if err != nil || data == nil {
-		return nil, fmt.Errorf("cfn DetectStackDrift: stack %q not found", stackName)
+		return nil, cfnErrf(ErrCFNStackNotFound, "cfn DetectStackDrift: stack %q not found", stackName)
 	}
 	var stack CFNStackState
 	if err := json.Unmarshal(data, &stack); err != nil {
@@ -909,10 +1022,10 @@ func (d *StackDeployer) DescribeStackResourceDrifts(ctx context.Context, stackNa
 // [StackDeployer.DescribeStackDriftDetectionStatus] read can observe it.
 func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName string) (string, error) {
 	if d.state == nil {
-		return "", fmt.Errorf("cfn StartStackDriftDetection: state manager required")
+		return "", cfnErrf(ErrCFNStateRequired, "cfn StartStackDriftDetection: state manager required")
 	}
 	if data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName); err != nil || data == nil {
-		return "", fmt.Errorf("cfn StartStackDriftDetection: stack %q not found", stackName)
+		return "", cfnErrf(ErrCFNStackNotFound, "cfn StartStackDriftDetection: stack %q not found", stackName)
 	}
 
 	detectionID := generateRequestID()
@@ -958,7 +1071,7 @@ func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName 
 func (d *StackDeployer) DescribeStackDriftDetectionStatus(ctx context.Context, detectionID string) (*CFNDriftDetectionStatus, error) {
 	data, err := d.state.Get(ctx, cfnNamespace, "drift_detection:"+detectionID)
 	if err != nil || data == nil {
-		return nil, fmt.Errorf("cfn DescribeStackDriftDetectionStatus: detection %q not found", detectionID)
+		return nil, cfnErrf(ErrCFNDriftDetectionNotFound, "cfn DescribeStackDriftDetectionStatus: detection %q not found", detectionID)
 	}
 	var status CFNDriftDetectionStatus
 	if err := json.Unmarshal(data, &status); err != nil {

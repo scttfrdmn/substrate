@@ -117,6 +117,14 @@ here.
 template is a network read substrate does not perform, and silently accepting the
 parameter deployed a stack with no resources in it.
 
+A request that names something absent — a stack, a change set, a drift detection —
+is a `ValidationError` at 400, and a template body that cannot be decoded is a
+`ValidationError` at 400 prefixed `Template format error:`. A resource that failed
+to deploy after the template parsed is an `InternalFailure` at 500, because the
+request was well-formed and the failure is substrate's. That distinction is drawn
+from the classification the stack model attaches to a failure, not from its
+message, so a message may be reworded without moving any consumer's error code.
+
 ### Stacks share state with every other plugin
 
 The plugin is a thin adapter over the same stack model substrate has always
