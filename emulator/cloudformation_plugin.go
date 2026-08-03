@@ -145,6 +145,10 @@ func (p *CloudFormationPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.listChangeSets(ctx, req)
 	case "DeleteChangeSet":
 		return p.deleteChangeSet(ctx, req)
+	case "ListExports":
+		return p.listExports(ctx, req)
+	case "ListImports":
+		return p.listImports(ctx, req)
 	case "DetectStackDrift":
 		return p.detectStackDrift(ctx, req)
 	case "DescribeStackResourceDrifts":
@@ -281,7 +285,12 @@ func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSReque
 	}
 	// DeleteStack documents no not-found error: a deleted stack simply stops
 	// appearing in DescribeStacks, so deleting an absent stack succeeds.
-	if err := p.deployer.DeleteStack(context.Background(), name); err != nil {
+	//
+	// The caller's identity is needed even though the stack record itself is
+	// unpartitioned: the delete is refused when another stack imports one of this
+	// stack's exports, and export visibility is scoped per account and Region, so
+	// the default identity would consult the wrong namespace.
+	if err := p.deployerFor(reqCtx).DeleteStack(context.Background(), name); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -317,6 +326,12 @@ type cfnParameterXML struct {
 type cfnOutputXML struct {
 	OutputKey   string `xml:"OutputKey"`
 	OutputValue string `xml:"OutputValue"`
+
+	// ExportName is the name under which the output is exported, omitted for an
+	// output the template declares no Export for. It is reported here as well as
+	// by ListExports because that is how a caller holding a DescribeStacks
+	// response learns the name to import, without a second call.
+	ExportName string `xml:"ExportName,omitempty"`
 }
 
 func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -358,7 +373,7 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 			LastUpdatedTime: cfnTime(s.UpdatedAt),
 			StackStatus:     s.Status,
 			Parameters:      cfnParametersXML(s.Parameters),
-			Outputs:         cfnOutputsXML(s.Outputs),
+			Outputs:         cfnOutputsXML(s.Outputs, s.ExportNames),
 		})
 	}
 	return cfnXMLResponse(http.StatusOK, resp)
@@ -779,6 +794,85 @@ func (p *CloudFormationPlugin) deleteChangeSet(reqCtx *RequestContext, req *AWSR
 	return cfnXMLResponse(http.StatusOK, response{XMLNS: cfnXMLNS, Metadata: cfnMetadata(reqCtx)})
 }
 
+// --- Export operations ---
+
+// listExports lists every exported output value in the caller's account and
+// Region.
+//
+// The caller's own identity is used rather than the plugin's default, for the same
+// reason DescribeStacks does: exports are scoped per account and Region, so a
+// eu-west-1 caller asking what it can import must not be shown us-east-1's
+// exports. The API documents no service-specific errors and paginates above 100
+// exports; substrate returns them all in one page and emits no NextToken, which is
+// the documented answer for a result that fits.
+func (p *CloudFormationPlugin) listExports(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	exports, err := p.deployerFor(reqCtx).Exports(context.Background())
+	if err != nil {
+		return nil, cfnMapDeployerError(err)
+	}
+
+	type member struct {
+		Name             string `xml:"Name"`
+		Value            string `xml:"Value"`
+		ExportingStackID string `xml:"ExportingStackId"`
+	}
+	type result struct {
+		Exports []member `xml:"Exports>member"`
+	}
+	type response struct {
+		XMLName  xml.Name            `xml:"ListExportsResponse"`
+		XMLNS    string              `xml:"xmlns,attr"`
+		Result   result              `xml:"ListExportsResult"`
+		Metadata cfnResponseMetadata `xml:"ResponseMetadata"`
+	}
+	resp := response{XMLNS: cfnXMLNS, Metadata: cfnMetadata(reqCtx)}
+	for _, e := range exports {
+		resp.Result.Exports = append(resp.Result.Exports, member{
+			Name:  e.Name,
+			Value: e.Value,
+			// The stack ARN is built here rather than persisted with the export:
+			// this is the only place that knows the requesting caller's partition,
+			// and the ARN DescribeStacks reports for the same stack has to agree.
+			ExportingStackID: cfnStackID(reqCtx, e.ExportingStackName),
+		})
+	}
+	return cfnXMLResponse(http.StatusOK, resp)
+}
+
+// listImports lists the stacks importing an exported output value.
+//
+// ExportName is required and the API documents no service-specific errors, so an
+// export nothing imports — including one that does not exist — is an empty list
+// rather than a refusal. That is the same answer the real API gives, and it is the
+// one a caller checking "may I delete this stack" needs.
+func (p *CloudFormationPlugin) listImports(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	exportName := req.Params["ExportName"]
+	if exportName == "" {
+		return nil, cfnMissingParameter("ExportName")
+	}
+	importers, err := p.deployerFor(reqCtx).Imports(context.Background(), exportName)
+	if err != nil {
+		return nil, cfnMapDeployerError(err)
+	}
+
+	type result struct {
+		Imports []string `xml:"Imports>member"`
+	}
+	type response struct {
+		XMLName  xml.Name            `xml:"ListImportsResponse"`
+		XMLNS    string              `xml:"xmlns,attr"`
+		Result   result              `xml:"ListImportsResult"`
+		Metadata cfnResponseMetadata `xml:"ResponseMetadata"`
+	}
+	// Stack *names*, not ARNs: "a list of stack names that are importing the
+	// specified exported output value".
+	return cfnXMLResponse(http.StatusOK, response{
+		XMLNS:    cfnXMLNS,
+		Result:   result{Imports: importers},
+		Metadata: cfnMetadata(reqCtx),
+	})
+}
+
 // --- Drift operations ---
 
 func (p *CloudFormationPlugin) detectStackDrift(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1029,7 +1123,13 @@ func cfnMapDeployerError(err error) *AWSError {
 	switch {
 	case errors.Is(err, ErrCFNStackNotFound),
 		errors.Is(err, ErrCFNChangeSetNotFound),
-		errors.Is(err, ErrCFNDriftDetectionNotFound):
+		errors.Is(err, ErrCFNDriftDetectionNotFound),
+		// An export still imported, or a name another stack already exports, is
+		// the caller's request being invalid rather than substrate failing —
+		// "all the imports must be removed before you can delete the exporting
+		// stack" is an instruction to the caller — so both are 400s.
+		errors.Is(err, ErrCFNExportInUse),
+		errors.Is(err, ErrCFNExportNameConflict):
 		return &AWSError{Code: "ValidationError", Message: msg, HTTPStatus: http.StatusBadRequest}
 	case errors.Is(err, ErrCFNTemplateInvalid):
 		return &AWSError{
@@ -1174,8 +1274,9 @@ func cfnParametersXML(params map[string]string) []cfnParameterXML {
 	return out
 }
 
-// cfnOutputsXML renders a resolved output map, sorted by key.
-func cfnOutputsXML(outputs map[string]string) []cfnOutputXML {
+// cfnOutputsXML renders a resolved output map, sorted by key, carrying each
+// output's export name where the template declared one.
+func cfnOutputsXML(outputs, exportNames map[string]string) []cfnOutputXML {
 	keys := make([]string, 0, len(outputs))
 	for k := range outputs {
 		keys = append(keys, k)
@@ -1183,7 +1284,11 @@ func cfnOutputsXML(outputs map[string]string) []cfnOutputXML {
 	sort.Strings(keys)
 	out := make([]cfnOutputXML, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, cfnOutputXML{OutputKey: k, OutputValue: outputs[k]})
+		out = append(out, cfnOutputXML{
+			OutputKey:   k,
+			OutputValue: outputs[k],
+			ExportName:  exportNames[k],
+		})
 	}
 	return out
 }

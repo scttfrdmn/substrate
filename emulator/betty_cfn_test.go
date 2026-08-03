@@ -2163,9 +2163,26 @@ func TestBettyCFN_EC2NatGateway(t *testing.T) {
 // direct state manipulation in drift tests.
 func newTestDeployerWithState(t *testing.T) (*emulator.StackDeployer, *emulator.MemoryStateManager) {
 	t.Helper()
+	state := emulator.NewMemoryStateManager()
+	return newTestDeployerOverState(t, state), state
+}
+
+// newTestDeployerWithIdentity creates a deployer over an existing state manager,
+// deploying as the given account and region.
+//
+// Sharing the state manager is the point: cross-stack exports are scoped per
+// account and Region, and the only way to assert that scoping is to have two
+// deployers of different identity reading the same persisted stack records.
+func newTestDeployerWithIdentity(t *testing.T, state *emulator.MemoryStateManager, accountID, region string) *emulator.StackDeployer {
+	t.Helper()
+	return newTestDeployerOverState(t, state,
+		emulator.WithDeployerIdentity(accountID, region))
+}
+
+func newTestDeployerOverState(t *testing.T, state *emulator.MemoryStateManager, opts ...emulator.StackDeployerOption) *emulator.StackDeployer {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
@@ -2208,7 +2225,7 @@ func newTestDeployerWithState(t *testing.T) (*emulator.StackDeployer, *emulator.
 	}))
 	registry.Register(sqsPlugin)
 
-	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs), state
+	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs, opts...)
 }
 
 func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
