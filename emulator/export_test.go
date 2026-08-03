@@ -287,3 +287,20 @@ func MarshalAWSErrorForTest(code, message, proto, jsonContentType string, status
 func S3ErrorResponseForTest(code, message string, status int) []byte {
 	return s3ErrorResponseWith(s3Error{Code: code, Message: message, Status: status}).Body
 }
+
+// CFNDispatchErrorForTest wraps cfnDispatchError so its precedence and its
+// degraded reason shapes can be asserted directly.
+//
+// Going through the function rather than a deployed stack is deliberate: every
+// response-style plugin a stack can reach (S3, IAM) writes both a <Code> and a
+// <Message>, so the body-less and message-less arms are unreachable from any
+// template. They still have to be right — a 4xx that produced an empty reason
+// would be recorded as CREATE_COMPLETE, which is the whole defect — so they are
+// pinned here at the unit the plan extracted them into.
+func CFNDispatchErrorForTest(status int, body string, routeErr error) error {
+	var resp *AWSResponse
+	if status != 0 {
+		resp = &AWSResponse{StatusCode: status, Body: []byte(body)}
+	}
+	return cfnDispatchError(resp, routeErr)
+}

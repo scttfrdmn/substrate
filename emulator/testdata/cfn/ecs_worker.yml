@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Parsl Ephemeral AWS Provider - ECS/Fargate Worker Resources'
+
+# The RegionMap that used to sit here was dead: no FindInMap referenced it
+# anywhere, and its AMIs dated from a Python 3.9 era. The EC2 path now takes an
+# ImageId parameter, which the caller resolves from SSM (#83).
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Name of the ECS cluster
+    Default: ''
+
+  TaskFamily:
+    Type: String
+    Description: Family name for the task definition
+    Default: ''
+
+  ContainerImage:
+    Type: String
+    Description: Docker image for the container
+    Default: 'python:3.12-slim'
+
+  TaskCpu:
+    Type: Number
+    Description: CPU units for the task
+    Default: 1024
+    AllowedValues:
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+
+  TaskMemory:
+    Type: Number
+    Description: Memory for the task in MB
+    Default: 2048
+    AllowedValues:
+      - 512
+      - 1024
+      - 2048
+      - 3072
+      - 4096
+      - 5120
+      - 6144
+      - 7168
+      - 8192
+      - 16384
+      - 30720
+
+  Command:
+    Type: String
+    Description: Command to run in the container
+    Default: ''
+
+  VpcId:
+    Type: String
+    Description: VPC ID for task networking
+    Default: ''
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: Subnet IDs for task networking
+    Default: ''
+
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: Security group IDs for task networking
+    Default: ''
+
+  AssignPublicIp:
+    Type: String
+    Description: Whether to assign a public IP to the task
+    Default: 'ENABLED'
+    AllowedValues:
+      - 'ENABLED'
+      - 'DISABLED'
+
+  WorkflowId:
+    Type: String
+    Description: Unique ID for the workflow
+
+  JobId:
+    Type: String
+    Description: Unique ID for the job
+
+  TaskCount:
+    Type: Number
+    Description: Number of tasks to run
+    Default: 1
+    MinValue: 1
+
+  UseSpot:
+    Type: String
+    Description: Whether to use Fargate Spot
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  Tags:
+    Type: String
+    Description: JSON encoded tags to apply to resources
+    Default: '{}'
+
+Conditions:
+  HasVpcConfig: !Not [!Equals [!Ref VpcId, '']]
+  HasCommand: !Not [!Equals [!Ref Command, '']]
+  UseFargateSpot: !Equals [!Ref UseSpot, 'true']
+  HasClusterName: !Not [!Equals [!Ref ClusterName, '']]
+  HasTaskFamily: !Not [!Equals [!Ref TaskFamily, '']]
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !If
+        - HasClusterName
+        - !Ref ClusterName
+        - !Sub 'parsl-cluster-${WorkflowId}'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !If [UseFargateSpot, 'FARGATE_SPOT', 'FARGATE']
+          Weight: 1
+      Tags:
+        - Key: ParslResource
+          Value: 'true'
+        - Key: ParslWorkflowId
+          Value: !Ref WorkflowId
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: ParslResource
+          Value: 'true'
+        - Key: ParslWorkflowId
+          Value: !Ref WorkflowId
+        - Key: ParslJobId
+          Value: !Ref JobId
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: ParslResource
+          Value: 'true'
+        - Key: ParslWorkflowId
+          Value: !Ref WorkflowId
+        - Key: ParslJobId
+          Value: !Ref JobId
+
+  # The SpotFleetRole that used to live here is gone with the API it served:
+  # CreateFleet has no IamFleetRole member, so an EC2 Fleet needs no service
+  # role at all (#86). Its name also carried the prefix the orphan sweep did not
+  # know about, so every one it made was leaked.
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/parsl-${WorkflowId}-${JobId}'
+      RetentionInDays: 7
+      Tags:
+        - Key: ParslResource
+          Value: 'true'
+        - Key: ParslWorkflowId
+          Value: !Ref WorkflowId
+        - Key: ParslJobId
+          Value: !Ref JobId
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !If
+        - HasTaskFamily
+        - !Ref TaskFamily
+        - !Sub 'parsl-task-${WorkflowId}-${JobId}'
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ContainerDefinitions:
+        - Name: !Sub 'parsl-container-${WorkflowId}-${JobId}'
+          Image: !Ref ContainerImage
+          Essential: true
+          Command: !If [HasCommand, !Split [',', !Ref Command], !Ref 'AWS::NoValue']
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: parsl
+      Tags:
+        - Key: ParslResource
+          Value: 'true'
+        - Key: ParslWorkflowId
+          Value: !Ref WorkflowId
+        - Key: ParslJobId
+          Value: !Ref JobId
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref TaskCount
+      LaunchType: !If [UseFargateSpot, !Ref 'AWS::NoValue', 'FARGATE']
+      CapacityProviderStrategy: !If
+        - UseFargateSpot
+        - - CapacityProvider: FARGATE_SPOT
+            Weight: 1
+        - !Ref 'AWS::NoValue'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          Subnets: !Ref SubnetIds
+          SecurityGroups: !Ref SecurityGroupIds
+      Tags:
+        - Key: ParslResource
+          Value: 'true'
+        - Key: ParslWorkflowId
+          Value: !Ref WorkflowId
+        - Key: ParslJobId
+          Value: !Ref JobId
+
+  # This template no longer carries a fleet. It used to hold an AWS::EC2::SpotFleet
+  # and then, briefly, an AWS::EC2::EC2Fleet -- but CloudFormation cannot express
+  # the resource this package needs (#86):
+  #
+  #   The Overrides list is variable-length, one entry per instance type, and
+  #   CFN has no way to build one. Fn::ForEach (AWS::LanguageExtensions) expands
+  #   to a *map*, confirmed by reading the processed template off a change set.
+  #   A fixed set of !Select slots cannot be left partly filled either, because
+  #   an out-of-range !Select fails validation even inside the untaken branch of
+  #   an !If: "Fn::Select cannot select nonexistent value at index 2". Padding
+  #   the slots by repeating a type is rejected by EC2 itself --
+  #   "InvalidFleetConfig: The fleet configuration contains duplicate instance
+  #   pools" -- which a DryRun does not catch.
+  #
+  # ServerlessMode._create_job_fleet() calls CreateFleet directly instead, which
+  # takes the override list natively. Deploying this stack to obtain one fleet
+  # also created an ECS cluster, a task definition, two IAM roles, and a log
+  # group that an EC2 fleet never uses.
+
+Outputs:
+  ClusterName:
+    Description: Name of the ECS cluster
+    Value: !Ref ECSCluster
+
+  TaskDefinitionArn:
+    Description: ARN of the task definition
+    Value: !Ref TaskDefinition
+
+  ServiceName:
+    Description: Name of the ECS service
+    Value: !GetAtt ECSService.Name
+
+  LogGroupName:
+    Description: Name of the CloudWatch Logs log group
+    Value: !Ref LogGroup

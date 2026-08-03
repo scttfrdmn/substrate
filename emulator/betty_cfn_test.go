@@ -883,6 +883,7 @@ func newFullTestDeployer(t *testing.T) *emulator.StackDeployer {
 		&emulator.MSKPlugin{},
 		&emulator.SESv2Plugin{},
 		&emulator.FirehosePlugin{},
+		&emulator.CloudWatchLogsPlugin{},
 	} {
 		require.NoError(t, p.Initialize(context.Background(), opts))
 		registry.Register(p)
