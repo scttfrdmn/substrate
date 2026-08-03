@@ -64,6 +64,25 @@ type cfnOutput struct {
 
 	// Description is a human-readable description of the output.
 	Description string `json:"Description" yaml:"Description"`
+
+	// Export names the output for cross-stack import, or is nil when the output
+	// is local to its stack. Only an exported output is importable: an output
+	// without an Export is readable through DescribeStacks and nowhere else.
+	Export *cfnExport `json:"Export,omitempty" yaml:"Export,omitempty"`
+}
+
+// cfnExport is an output's Export block, which names the value for import by
+// another stack's Fn::ImportValue.
+//
+// Name is an expression rather than a string because the conventional form is
+// `Export: {Name: !Sub '${AWS::StackName}-SubnetID'}` — the export name is
+// namespaced by the exporting stack so two deployments of the same template do
+// not collide. It resolves before any resource deploys, which the API permits:
+// "the value of the Name property of an Export can't use Ref or GetAtt functions
+// that depend on a resource", so an export name is knowable from the template and
+// its parameters alone.
+type cfnExport struct {
+	Name interface{} `json:"Name" yaml:"Name"`
 }
 
 // cfnResource is a single CloudFormation resource declaration.
@@ -91,6 +110,31 @@ type CFNStackState struct {
 	// Outputs holds resolved output values.
 	Outputs map[string]string `json:"Outputs"`
 
+	// ExportNames maps an output key to the export name the template declared for
+	// it, for the outputs that declare one. An output without an Export
+	// contributes nothing: it is readable through DescribeStacks and importable
+	// nowhere.
+	//
+	// Keyed by output key rather than by export name so it is one map serving two
+	// readers without either deriving the other's answer: DescribeStacks reports
+	// the ExportName beside its output, and the export registry joins these keys
+	// against Outputs to get name → value.
+	ExportNames map[string]string `json:"ExportNames,omitempty"`
+
+	// Imports lists the export names this stack resolved, sorted. This is the
+	// record that makes the exporting stack undeletable, and it is written from
+	// what the resolver actually walked rather than from the template text — an
+	// Fn::ImportValue in a false Fn::If branch or in a skipped resource is not an
+	// import.
+	Imports []string `json:"Imports,omitempty"`
+
+	// AccountID and Region scope the two above. Exports and imports are matched
+	// within one account and Region — "for each AWS account, Export names must be
+	// unique within a Region" — so a stack that exports MyApp-SubnetID in
+	// us-east-1 must not satisfy an import of the same name in eu-west-1.
+	AccountID string `json:"AccountID,omitempty"`
+	Region    string `json:"Region,omitempty"`
+
 	// Status is the stack status (e.g., "CREATE_COMPLETE").
 	Status string `json:"Status"`
 
@@ -99,6 +143,25 @@ type CFNStackState struct {
 
 	// UpdatedAt is the time the stack was last updated.
 	UpdatedAt time.Time `json:"UpdatedAt"`
+}
+
+// exports returns the stack's export name → resolved value map, joining
+// ExportNames against Outputs.
+//
+// An export name whose output has since disappeared from Outputs is dropped
+// rather than exported as the empty string: an import that resolved to "" is the
+// silent-literal failure the export model exists to prevent.
+func (s CFNStackState) exports() map[string]string {
+	if len(s.ExportNames) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(s.ExportNames))
+	for outKey, name := range s.ExportNames {
+		if value, ok := s.Outputs[outKey]; ok {
+			out[name] = value
+		}
+	}
+	return out
 }
 
 // cfnContext holds per-deployment resolution context for intrinsic functions.
@@ -130,6 +193,22 @@ type cfnContext struct {
 	// resolves against. Nothing else reads it: a mapping cannot be referenced
 	// any other way.
 	mappings cfnMappings
+
+	// exports holds the export names visible to this deployment — every value
+	// exported by a stack in the same account and Region — which is what
+	// Fn::ImportValue resolves against. Loaded once before the first resource
+	// deploys, because "cross-stack references are limited to the same account
+	// and Region" and nothing a deployment does can add to the set: a stack
+	// cannot import a value it exports itself in the same operation.
+	exports map[string]string
+
+	// imports records the export names this deployment resolved, which is what
+	// makes the exporting stack undeletable — "all the imports must be removed
+	// before you can delete the exporting stack". Recorded at resolution time
+	// rather than derived from the template afterwards, because an Fn::ImportValue
+	// inside a false Fn::If branch or a skipped resource is not an import, and
+	// only the resolver knows which of the two it walked.
+	imports map[string]bool
 
 	// failures records the resolution errors encountered while deploying the
 	// current resource — an Fn::FindInMap naming a key no mapping holds, say.
@@ -200,6 +279,21 @@ var (
 	// ErrCFNStateRequired is returned when an operation needs a state manager and
 	// the deployer was built without one.
 	ErrCFNStateRequired = errors.New("state manager required")
+
+	// ErrCFNExportInUse is returned when a stack cannot be deleted because
+	// another stack imports one of its exported output values.
+	//
+	// The caller's request is what is invalid — "all the imports must be removed
+	// before you can delete the exporting stack" — so this is a 400, unlike the
+	// deploy failures above.
+	ErrCFNExportInUse = errors.New("export in use")
+
+	// ErrCFNExportNameConflict is returned when a stack's Export name is already
+	// exported by a different stack in the same account and Region.
+	//
+	// The API's rule: for each AWS account, Export names must be unique within a
+	// Region.
+	ErrCFNExportNameConflict = errors.New("export name already exists")
 )
 
 // cfnClassifiedError carries a [StackDeployer] failure's classification
@@ -612,6 +706,12 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 	cctx := buildCFNContext(tmpl, params, d.identity.region, d.identity.accountID, stackName)
 	evaluateConditions(tmpl, cctx)
 
+	// Load the exports Fn::ImportValue may resolve against, before the first
+	// resource deploys. The stack being redeployed is excluded: its own exports
+	// are not importable by itself, and leaving them in would let a template
+	// import a name it is in the middle of redefining.
+	cctx.exports = d.loadExports(ctx, stackName)
+
 	// Sort logical IDs by type priority, then alphabetically for stability.
 	type entry struct {
 		logicalID string
@@ -654,10 +754,29 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 		resources = append(resources, dr)
 	}
 
-	// Resolve outputs.
+	// Resolve outputs, and with them the export names this stack publishes.
 	outputs := make(map[string]string)
-	for outKey, outVal := range tmpl.Outputs {
+	exportNames := make(map[string]string)
+	outKeys := make([]string, 0, len(tmpl.Outputs))
+	for outKey := range tmpl.Outputs {
+		outKeys = append(outKeys, outKey)
+	}
+	// Sorted so that a template declaring two outputs with the same export name
+	// reports the same one as the conflict every time.
+	sort.Strings(outKeys)
+	for _, outKey := range outKeys {
+		outVal := tmpl.Outputs[outKey]
 		outputs[outKey] = resolveValue(outVal.Value, cctx)
+		if outVal.Export == nil {
+			continue
+		}
+		if name := resolveValue(outVal.Export.Name, cctx); name != "" {
+			exportNames[outKey] = name
+		}
+	}
+	pending := CFNStackState{Outputs: outputs, ExportNames: exportNames}
+	if err := d.checkExports(ctx, stackName, pending.exports()); err != nil {
+		return nil, err
 	}
 
 	duration := d.tc.Now().Sub(start)
@@ -679,6 +798,10 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 			Parameters:   cctx.params,
 			Resources:    resources,
 			Outputs:      outputs,
+			ExportNames:  exportNames,
+			Imports:      cctx.importedNames(),
+			AccountID:    d.identity.accountID,
+			Region:       d.identity.region,
 			Status:       "CREATE_COMPLETE",
 			CreatedAt:    start,
 			UpdatedAt:    d.tc.Now(),
@@ -711,9 +834,19 @@ func (d *StackDeployer) UpdateStack(ctx context.Context, cfn, stackName string, 
 }
 
 // DeleteStack removes a deployed stack from state.
+//
+// A stack whose exported output another stack imports is refused with
+// [ErrCFNExportInUse]: "after another stack imports an output value, you can't
+// delete the stack that is exporting the output value … all the imports must be
+// removed before you can delete the exporting stack". That refusal is the whole
+// reason exports are modeled rather than faked — an import that resolves against
+// nothing enforceable is a lookup, not a reference.
 func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error {
 	if d.state == nil {
 		return nil
+	}
+	if err := d.checkExportsNotImported(ctx, stackName); err != nil {
+		return err
 	}
 	if err := d.state.Delete(ctx, cfnNamespace, "stack:"+stackName); err != nil {
 		return fmt.Errorf("delete stack %s: %w", stackName, err)
@@ -798,6 +931,236 @@ func (d *StackDeployer) saveStackNames(ctx context.Context, names []string) erro
 		return fmt.Errorf("cfn saveStackNames marshal: %w", err)
 	}
 	return d.state.Put(ctx, cfnNamespace, "stack_names", data)
+}
+
+// CFNExport is one exported output value as [StackDeployer.Exports] reports it.
+type CFNExport struct {
+	// Name is the export name, unique per account and Region.
+	Name string `json:"Name"`
+
+	// Value is the resolved output value.
+	Value string `json:"Value"`
+
+	// ExportingStackName names the stack that declared the export. The API
+	// reports an ExportingStackId; the stack ARN is built at the wire boundary,
+	// which is the only place that knows the requesting caller's partition.
+	ExportingStackName string `json:"ExportingStackName"`
+}
+
+// Exports returns every exported output value visible in the deployer's account
+// and Region, sorted by export name.
+//
+// Visibility is scoped rather than global because "for each AWS account, Export
+// names must be unique within a Region" and "cross-stack references are limited to
+// the same account and Region" — an emulator that ignored the scope would resolve
+// an import a real deployment would reject, which is worse than not resolving it.
+func (d *StackDeployer) Exports(ctx context.Context) ([]CFNExport, error) {
+	stacks, err := d.ListStacks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CFNExport, 0, len(stacks))
+	for _, s := range stacks {
+		if !d.sameScope(s) {
+			continue
+		}
+		for name, value := range s.exports() {
+			out = append(out, CFNExport{Name: name, Value: value, ExportingStackName: s.StackName})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// Imports returns the names of the stacks importing an export, sorted.
+//
+// An unknown export name yields an empty list rather than an error: ListImports
+// documents no service-specific error, and "no stack imports this" and "no such
+// export" are the same answer to the question the API asks.
+func (d *StackDeployer) Imports(ctx context.Context, exportName string) ([]string, error) {
+	stacks, err := d.ListStacks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, s := range stacks {
+		if !d.sameScope(s) {
+			continue
+		}
+		if containsStr(s.Imports, exportName) {
+			out = append(out, s.StackName)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// sameScope reports whether a persisted stack shares the deployer's account and
+// Region, and so participates in its export namespace.
+//
+// An empty AccountID or Region is treated as in scope. Those fields arrived with
+// exports, so a stack persisted by an earlier substrate has neither, and excluding
+// it would make a restored snapshot's stacks vanish from ListExports rather than
+// simply exporting nothing — a stack with no Exports map contributes nothing here
+// either way.
+func (d *StackDeployer) sameScope(s CFNStackState) bool {
+	if s.AccountID != "" && s.AccountID != d.identity.accountID {
+		return false
+	}
+	return s.Region == "" || s.Region == d.identity.region
+}
+
+// loadExports builds the export-name → value map a deployment resolves
+// Fn::ImportValue against, excluding the stack being deployed.
+//
+// A failure to read state yields an empty map rather than an error: an import that
+// finds no export records a resolution failure on the resource, which is the same
+// observable and reaches the caller as CREATE_FAILED with a reason naming the
+// export. Aborting the whole deployment would be a worse answer to a state read
+// that a redeploy may well satisfy.
+func (d *StackDeployer) loadExports(ctx context.Context, deployingStack string) map[string]string {
+	if d.state == nil {
+		return nil
+	}
+	stacks, err := d.ListStacks(ctx)
+	if err != nil {
+		d.logger.Warn("cfn: could not read exports; Fn::ImportValue will not resolve", "err", err)
+		return nil
+	}
+	out := make(map[string]string)
+	for _, s := range stacks {
+		if s.StackName == deployingStack || !d.sameScope(s) {
+			continue
+		}
+		for name, value := range s.exports() {
+			out[name] = value
+		}
+	}
+	return out
+}
+
+// checkExports refuses a deployment whose exports would break the two rules the
+// export namespace enforces: a name may be exported by only one stack, and an
+// exported value another stack imports may not change.
+//
+// Both run after the resources deploy, because an export name or value may be
+// built from a resource attribute and so is not knowable earlier. The deployment
+// is refused rather than the resources rolled back, which substrate does not model
+// (#520) — the resources exist and the caller is told the stack record was not
+// written, which is the honest observable rather than a fabricated rollback.
+func (d *StackDeployer) checkExports(ctx context.Context, stackName string, exports map[string]string) error {
+	if d.state == nil {
+		return nil
+	}
+	existing, err := d.Exports(ctx)
+	if err != nil {
+		return err
+	}
+
+	// "For each AWS account, Export names must be unique within a Region."
+	owner := make(map[string]string, len(existing))
+	for _, e := range existing {
+		if e.ExportingStackName != stackName {
+			owner[e.Name] = e.ExportingStackName
+		}
+	}
+	for _, name := range sortedStringKeys(exports) {
+		if other, taken := owner[name]; taken {
+			return cfnErrf(ErrCFNExportNameConflict,
+				"cfn Deploy: export name %q is already exported by stack %q", name, other)
+		}
+	}
+
+	// "You can't … modify the exported output value" while it is imported. An
+	// export this stack previously published and now drops is the same
+	// modification from the importer's side — the value it resolved stops
+	// existing — so a removal is refused on the same terms as a change.
+	for _, e := range existing {
+		if e.ExportingStackName != stackName {
+			continue
+		}
+		newValue, still := exports[e.Name]
+		if still && newValue == e.Value {
+			continue
+		}
+		importers, importErr := d.Imports(ctx, e.Name)
+		if importErr != nil {
+			return importErr
+		}
+		if importers = removeStr(importers, stackName); len(importers) == 0 {
+			continue
+		}
+		what := "changed"
+		if !still {
+			what = "removed"
+		}
+		return cfnErrf(ErrCFNExportInUse,
+			"cfn Deploy: export %q cannot be %s while it is imported by %s; "+
+				"all imports must be removed first",
+			e.Name, what, strings.Join(importers, ", "))
+	}
+	return nil
+}
+
+// sortedStringKeys returns a string-keyed map's keys in sorted order, so a loop
+// over them reports the same element first every time.
+func sortedStringKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// checkExportsNotImported refuses to delete a stack whose export another stack
+// imports, naming the export and the importing stacks.
+//
+// The message names them because that is the only way a caller can act on the
+// refusal: the API's own remedy is "first find out which stacks are importing
+// them", and a refusal that withheld the answer would send them to ListImports for
+// something substrate already knows.
+func (d *StackDeployer) checkExportsNotImported(ctx context.Context, stackName string) error {
+	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+	if err != nil {
+		return fmt.Errorf("cfn DeleteStack: read stack %q: %w", stackName, err)
+	}
+	if data == nil {
+		// An absent stack is not an error — DeleteStack documents no not-found
+		// error — and a stack that is not there exports nothing.
+		return nil
+	}
+	var stack CFNStackState
+	if err := json.Unmarshal(data, &stack); err != nil {
+		// A record substrate wrote and cannot read back is corrupt state, not a
+		// caller error. Reporting it beats deleting a stack whose exports could
+		// not be checked, which is how an importer loses its reference silently.
+		return fmt.Errorf("cfn DeleteStack: unmarshal stack %q: %w", stackName, err)
+	}
+	for _, name := range sortedStringKeys(stack.exports()) {
+		importers, err := d.Imports(ctx, name)
+		if err != nil {
+			return err
+		}
+		importers = removeStr(importers, stackName)
+		if len(importers) > 0 {
+			return cfnErrf(ErrCFNExportInUse,
+				"cfn DeleteStack: export %q is imported by %s; all imports must be removed first",
+				name, strings.Join(importers, ", "))
+		}
+	}
+	return nil
+}
+
+// removeStr returns list without any element equal to drop.
+func removeStr(list []string, drop string) []string {
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		if s != drop {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // CreateChangeSet compares a proposed template against the current stack state
@@ -3213,6 +3576,7 @@ func buildCFNContext(tmpl *cfnTemplate, callerParams map[string]string, region, 
 		stackName:  stackName,
 		evaluating: make(map[string]bool),
 		mappings:   tmpl.Mappings,
+		imports:    make(map[string]bool),
 	}
 }
 
@@ -3385,6 +3749,8 @@ func resolveValue(v interface{}, cctx *cfnContext) string {
 				return resolveFnIf(args, cctx)
 			case "Fn::FindInMap":
 				return resolveFnFindInMap(args, cctx)
+			case "Fn::ImportValue":
+				return resolveFnImportValue(args, cctx)
 			case "Fn::GetAZs", "Fn::Cidr":
 				// Both return an array, and this context has nowhere to put
 				// one, so the elements are rejoined the way Fn::Split's are —
@@ -3707,6 +4073,13 @@ var cfnIntrinsicNames = map[string]bool{
 	"Fn::FindInMap": true,
 	"Fn::GetAZs":    true,
 	"Fn::Cidr":      true,
+
+	// Fn::ImportValue was deliberately withheld from this table until it
+	// resolved: resolveNested consults it to decide what is an intrinsic, and
+	// admitting an unresolvable one would have resolved every import to "" —
+	// worse than the JSON-literal fallback, which at least left the intrinsic
+	// visible in the request the plugin refused.
+	"Fn::ImportValue": true,
 }
 
 // isCFNIntrinsic reports whether a map is an intrinsic function invocation.
@@ -3998,6 +4371,58 @@ func resolveFnFindInMap(args interface{}, cctx *cfnContext) string {
 		return strings.Join(resolveValueList(leaf, cctx), ",")
 	}
 	return resolveValue(leaf, cctx)
+}
+
+// resolveFnImportValue resolves Fn::ImportValue against the exports another stack
+// in the same account and Region published, recording the import so the exporting
+// stack cannot then be deleted.
+//
+// The argument goes through resolveValue because the documented form is an
+// expression — `Fn::ImportValue: !Sub '${NetworkStack}-SubnetID'` — and the
+// functions the API permits inside it (Fn::Base64, Fn::FindInMap, Fn::If,
+// Fn::Join, Fn::Select, Fn::Sub, Ref) are all ones resolveValue already handles,
+// so no special case is needed. The documented restriction is that "the value of
+// these functions can't depend on a resource"; substrate does not enforce it,
+// because by the time an import resolves the resources it could name have already
+// deployed, so honoring such a reference is strictly more permissive than
+// CloudFormation rather than differently behaved.
+//
+// A name that no export supplies is a resolution failure, not the empty string:
+// the whole of #522's silent-literal defect is a value that looks resolved and is
+// not, and an import naming an export that does not exist is a template a real
+// deployment would reject.
+func resolveFnImportValue(args interface{}, cctx *cfnContext) string {
+	name := resolveValue(args, cctx)
+	if name == "" {
+		cctx.fail("Fn::ImportValue requires an export name")
+		return ""
+	}
+	value, found := cctx.exports[name]
+	if !found {
+		cctx.fail("Fn::ImportValue: no exported output named %q in this account and region", name)
+		return ""
+	}
+	// Recorded only on a successful resolution. A failed import leaves the
+	// exporting stack — there is none — deletable, and recording the name would
+	// make a typo'd import block a delete that has nothing to do with it.
+	if cctx.imports == nil {
+		cctx.imports = make(map[string]bool)
+	}
+	cctx.imports[name] = true
+	return value
+}
+
+// importedNames returns the export names this deployment resolved, sorted.
+func (c *cfnContext) importedNames() []string {
+	if len(c.imports) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.imports))
+	for name := range c.imports {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resolveFnFindInMapValue looks a value up in the template's Mappings section,

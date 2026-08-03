@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`ListExports` and `ListImports`** (#522), which were `InvalidAction` before there
+  was anything to list. `ListExports` reports every export in the caller's account
+  and Region with the `ExportingStackId` ARN `DescribeStacks` reports for the same
+  stack, in one page with no `NextToken`; `ListImports` reports stack **names**, and
+  an export nothing imports — including one that does not exist — is an empty list
+  rather than an error, since the reference documents no service-specific errors for
+  it. `DescribeStacks` additionally reports each output's `ExportName` beside it,
+  saving a caller a second call to learn whether an output is importable.
+
 ### Fixed
 - **`Fn::Split` resolves to a list, so a split list no longer loses everything
   after its first element** (#521). `resolveValue` returns a `string`, so every
@@ -167,9 +177,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built from `AWS::StackId` must find one ARN for one stack, and two builders is
   exactly the divergence #517 fixed for the caller's account.
 
-  `Fn::ImportValue` remains unresolved and #522 stays open for it: resolving it needs
-  an export registry across stacks and a refusal to delete a stack whose export is
-  imported, which is a new cross-stack model rather than another resolver.
+- **`Fn::ImportValue` resolves, against a cross-stack export registry** (#522), which
+  closes the intrinsic list: every function CloudFormation defines now resolves. It
+  was the last one falling through to its JSON encoding, so a template importing
+  another stack's subnet ID deployed a resource whose `SubnetId` was the literal
+  `{"Fn::ImportValue":"net-SubnetID"}` and reported `CREATE_COMPLETE` — the
+  silent-success shape this whole release is about, and the worst instance of it,
+  because the two-stack split is how every non-trivial template is organised.
+
+  An output may now declare `Export: {Name: …}`, absent from `cfnOutput` until now.
+  The name is an expression rather than a string, because the conventional form is
+  `Export: {Name: !Sub '${AWS::StackName}-SubnetID'}` — an export name must be unique
+  per account and Region, so a template that hard-codes one cannot be deployed twice.
+  It resolves before the first resource deploys, which the API permits: an export
+  name may not depend on a resource, so it is knowable from the template and its
+  parameters alone.
+
+  Exports are scoped **per account and Region**, per the documented restriction that
+  cross-stack references are limited to the same account and Region. Getting this
+  wrong in the permissive direction would be worse than not resolving at all: a
+  template would pass under test and fail in AWS. `deleteStack` on the wire now uses
+  the caller's deployer for the same reason — the stack record is unpartitioned, but
+  the export visibility deciding the refusal is not.
+
+  Four rules are enforced, and they are why exports are modelled rather than faked —
+  an import that resolves against nothing enforceable is a lookup, not a reference:
+  an import of an unpublished name **fails the resource** with the name in its
+  `ResourceStatusReason` rather than resolving to `""` or to JSON; an export name
+  already held by another stack is refused; a stack whose export is imported cannot
+  be **deleted**; and an imported export's value cannot be **changed** — nor dropped,
+  which is the same thing from the importer's side, so a removal is refused on the
+  same terms. Re-deploying an unchanged value is not a change, so an idempotent
+  redeploy still works. Both refusals are a `ValidationError` at 400 naming the
+  export and every importing stack.
+
+  What counts as an import is recorded **when the resolver walks the template**, not
+  derived from the template's text, which is the one design decision here that a
+  reader would otherwise get wrong: an `Fn::ImportValue` in the branch of an `Fn::If`
+  that was not taken never happened, and neither did one that failed to resolve, so
+  neither pins an exporting stack. Only the resolver knows which branch it walked.
+
+  `Fn::ImportValue` was deliberately kept out of the intrinsic-name table until it
+  resolved. `resolveNested` (#526) consults that table to decide what is an
+  intrinsic, and admitting an unresolvable one would have resolved every nested
+  import to `""` — strictly worse than the JSON fallback, which at least left the
+  intrinsic visible in the request the plugin refused.
 
 ### Changed
 - **A CloudFormation error code is derived from the failure's classification, not

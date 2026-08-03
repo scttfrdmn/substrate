@@ -472,6 +472,40 @@ func CFNResolveNestedWithMappingsForTest(
 	return resolveNested(v, cctx), cctx.takeFailures()
 }
 
+// CFNResolveImportForTest resolves v against a set of exports, returning the
+// resolved value, the export names the resolution recorded as imports, and any
+// failure.
+//
+// The imports are the half that has no other observable: whether an
+// Fn::ImportValue counted as an import is what decides if the exporting stack can
+// be deleted, and it is decided at resolution time — an import inside a false
+// Fn::If branch never happened. Reading it here pins that without having to deploy
+// two stacks and then attempt a delete.
+func CFNResolveImportForTest(
+	v interface{},
+	exports map[string]string,
+	params map[string]string,
+) (value string, imports []string, failures []string) {
+	cctx := &cfnContext{
+		params:     params,
+		listParams: map[string]bool{},
+		conditions: map[string]bool{},
+		resources:  map[string]DeployedResource{},
+		evaluating: map[string]bool{},
+		imports:    map[string]bool{},
+		exports:    exports,
+		region:     defaultRegion,
+		accountID:  testAccountID,
+		stackName:  "teststack",
+	}
+	value = resolveValue(v, cctx)
+	return value, cctx.importedNames(), cctx.takeFailures()
+}
+
+// CFNStackExportsForTest returns a persisted stack's export name → value map, the
+// join of ExportNames against Outputs that the registry reads.
+func CFNStackExportsForTest(s CFNStackState) map[string]string { return s.exports() }
+
 // CFNSeededAZsForTest returns the Availability Zone names substrate reports for a
 // region, derived from the same list EC2's DescribeAvailabilityZones uses.
 //

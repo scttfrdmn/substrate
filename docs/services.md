@@ -112,6 +112,8 @@ here.
 | DetectStackDrift | Returns a `StackDriftDetectionId` |
 | DescribeStackDriftDetectionStatus | Resolves that ID to a completed detection |
 | DescribeStackResourceDrifts | Per-resource drift; honours `StackResourceDriftStatusFilters.member.N` |
+| ListExports | Every exported output value in the caller's account and Region, in one page |
+| ListImports | Stack **names** importing an `ExportName`; an export nothing imports is an empty list |
 
 `TemplateURL` is refused with `ValidationError` rather than ignored: fetching a
 template is a network read substrate does not perform, and silently accepting the
@@ -216,16 +218,12 @@ holds only the request a real client would have made.
 113 resource types are supported; each service section below lists the types it
 backs under **Betty CFN resource types**. A template body may be JSON or YAML.
 
-`Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`, `Fn::Select`, `Fn::Split`,
-`Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or`, `Fn::Not`,
-`Fn::FindInMap`, `Fn::GetAZs` and `Fn::Cidr` resolve, as do every pseudo-parameter:
-`AWS::Region`, `AWS::AccountId`, `AWS::StackName`, `AWS::StackId`,
-`AWS::Partition`, `AWS::URLSuffix`, `AWS::NotificationARNs` and `AWS::NoValue`.
-`Fn::ImportValue` is the one intrinsic that does **not** resolve — it falls back to
-its JSON encoding, so a template using it deploys with a literal where a value
-should be rather than failing. Tracked in
-[#522](https://github.com/scttfrdmn/substrate/issues/522): resolving it needs an
-export registry across stacks, not another resolver.
+**Every intrinsic function resolves.** `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`,
+`Fn::Select`, `Fn::Split`, `Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`,
+`Fn::Or`, `Fn::Not`, `Fn::FindInMap`, `Fn::GetAZs`, `Fn::Cidr` and
+`Fn::ImportValue`, as do every pseudo-parameter: `AWS::Region`, `AWS::AccountId`,
+`AWS::StackName`, `AWS::StackId`, `AWS::Partition`, `AWS::URLSuffix`,
+`AWS::NotificationARNs` and `AWS::NoValue`.
 
 `AWS::Partition` and `AWS::URLSuffix` follow the region — `aws-cn` and
 `amazonaws.com.cn` for a `cn-` region, `aws-us-gov` for a `us-gov-` one, `aws` and
@@ -333,6 +331,51 @@ condition is evaluated once, before any resource deploys, and keeps that value f
 the whole deployment — as in real CloudFormation, where conditions are evaluated when
 the stack is created or updated and cannot reference a resource or its attributes.
 
+#### Cross-stack exports and `Fn::ImportValue`
+
+An output that declares `Export: {Name: …}` publishes its value for another stack
+to import; an output without one is readable through `DescribeStacks` and nowhere
+else. `Fn::ImportValue` resolves against those exports, so the two-stack idiom —
+a network stack exporting a subnet ID, an app stack importing it — deploys and reads
+back as it does in AWS. The export name may itself be an intrinsic, which is what
+makes the conventional `Export: {Name: !Sub '${AWS::StackName}-SubnetID'}` work; it
+resolves before the first resource deploys, which the API permits because an export
+name may not depend on a resource.
+
+Exports are scoped **per account and Region**, matching the documented restriction
+that cross-stack references are limited to the same account and Region. A caller in
+another account or another Region does not see them in `ListExports` and cannot
+import them — a template that would fail in AWS fails here rather than resolving
+against an export it is not entitled to.
+
+Four rules are enforced, and they are the reason exports are modelled rather than
+faked:
+
+- **An import of an unpublished name fails the resource**, with the export name in
+  the `ResourceStatusReason`. It does not resolve to the empty string or to the
+  intrinsic's JSON — either would launch a resource named with nonsense and report
+  success.
+- **Export names are unique per account and Region.** A second stack claiming a name
+  another stack already exports is a `ValidationError` at 400 naming the holder.
+- **A stack whose export is imported cannot be deleted.** `DeleteStack` is a
+  `ValidationError` at 400 naming the export and every importing stack; the stack is
+  untouched. Delete the importers first, as AWS requires.
+- **An imported export's value cannot be changed** — nor dropped, which is the same
+  thing from the importer's side. An `UpdateStack` that would change or remove it is
+  refused on the same terms. Re-deploying the *same* value is not a change, so an
+  idempotent redeploy is unaffected.
+
+What counts as an import is decided **when the resolver walks the template**, not
+from the template's text. An `Fn::ImportValue` in the branch of an `Fn::If` that was
+not taken never happened, and neither does one that failed to resolve, so neither
+pins an exporting stack. `DescribeStacks` reports each output's `ExportName` beside
+it, and `ListImports` answers the "who is holding this" question a refused delete
+raises.
+
+The two refusals above use `ValidationError` at 400. The `DeleteStack` reference
+documents only `TokenAlreadyExists`, so that code is substrate's own choice for this
+case — the same code the service uses for every other unsatisfiable request on it.
+
 #### YAML short forms
 
 The YAML tag shorthands are expanded to their long forms before the template is
@@ -348,8 +391,10 @@ takes a two-element list, and the split is on the **first** period only, so
 `!GetAtt Res.Outputs.Nested` is `["Res", "Outputs.Nested"]` — an attribute name
 may itself contain periods.
 
-Expansion is not resolution. `!ImportValue` expands to a long form that is still
-unresolved (#522), and hits the same fallback the long form already does.
+Expansion is not resolution, but nothing is now expanded that does not also
+resolve: every tag in the list above reaches a resolver, `!Transform` excepted —
+it expands to `Fn::Transform`, which substrate carries but does not apply, since a
+macro is code substrate does not run.
 
 A tag substrate does not recognize is **not** dropped: the node's value is kept
 and a `WARN` naming the tag is logged, since a macro or transform may introduce a
