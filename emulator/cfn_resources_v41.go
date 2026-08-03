@@ -1,5 +1,11 @@
 package emulator
 
+// cfn_resources_v41.go holds the StackDeployer.deployResource helpers for
+// EC2 (Elastic IPs and NAT gateways).
+// The name records the substrate release that added them (v0.41.0) rather than the
+// services, because several releases touched overlapping services; the helpers here
+// follow the same pattern as those in cfn_deployer.go.
+
 import (
 	"context"
 	"fmt"

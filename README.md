@@ -57,7 +57,7 @@ A generate-and-verify loop has needs a human-paced workflow doesn't:
   loops and CI on every candidate the model produces.
 - **Cost visibility as a machine-gradeable guardrail.** An AI has no instinct for
   bill shock. Substrate prices each operation, so you get a projected dollar figure
-  *before* deploy — and can gate on it: `betty.Deploy(ctx, tmpl, Intent{MaxCost: 1.0})`
+  *before* deploy — and can gate on it: `client.Deploy(ctx, tmpl, Intent{MaxCost: 1.0})`
   fails the run if generated infra would blow a budget.
 - **Seedable failure paths, to verify the error handling the code claims to have.**
   Generated code is full of retry/poll/wait logic for capacity errors, throttling,
@@ -258,7 +258,7 @@ func TestMyInfra(t *testing.T) {
 ```
 
 Or deploy a CloudFormation template and validate it entirely in-process, no HTTP
-server required, via the **Betty** client:
+server required, via the in-process **`emulator.Client`**:
 
 ```go
 import "github.com/scttfrdmn/substrate/emulator"
@@ -268,20 +268,20 @@ state    := emulator.NewMemoryStateManager()
 tc       := emulator.NewTimeController(time.Now())
 registry := emulator.NewPluginRegistry()
 
-betty := emulator.NewBettyClient(registry, store, state, tc, logger)
+client := emulator.NewClient(registry, store, state, tc, logger)
 
-result, _ := betty.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
+result, _ := client.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
 
-session, _ := betty.StartRecording(ctx, "my-test")
+session, _ := client.StartRecording(ctx, "my-test")
 // ... run operations against the emulator ...
-report, _ := betty.StopRecording(ctx, session)
+report, _ := client.StopRecording(ctx, session)
 fmt.Printf("status=%s cost=$%.4f\n", report.PassFail, report.Cost.Total)
 ```
 
 > The Go import path is `github.com/scttfrdmn/substrate/emulator`. Installing the
 > CLI (`.../cmd/substrate@latest`) is unaffected.
 
-See [`examples/betty_workflow/main.go`](examples/betty_workflow/main.go) for a
+See [`examples/validation_workflow/main.go`](examples/validation_workflow/main.go) for a
 complete runnable example.
 
 ## Supported services
@@ -297,7 +297,7 @@ networking, databases, messaging, analytics, ML, security, and management:
 - **Security & identity** — IAM, STS, KMS, Secrets Manager, ACM, Cognito, SSO, WAFv2, RAM
 - **Management & cost** — CloudWatch (+ Logs), CloudTrail, Organizations, Budgets, Cost Explorer, Service Quotas, SSM, Health, the CodeSuite, Step Functions, Backup, Transfer
 
-Many integrate with **Betty** for CloudFormation deployment. See the
+Many are also reachable through CloudFormation deployment. See the
 [Service Reference](docs/services.md) for per-operation detail. The live plugin
 count is always available from the `/ready` endpoint
 (`curl http://localhost:4566/ready`).

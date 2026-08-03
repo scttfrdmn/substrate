@@ -1,5 +1,11 @@
 package emulator
 
+// cfn_resources_v28.go holds the StackDeployer.deployResource helpers for
+// Firehose and SES.
+// The name records the substrate release that added them (v0.28.0) rather than the
+// services, because several releases touched overlapping services; the helpers here
+// follow the same pattern as those in cfn_deployer.go.
+
 import (
 	"context"
 	"encoding/json"

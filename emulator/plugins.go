@@ -122,7 +122,7 @@ func RegisterDefaultPlugins(
 	}
 	registry.Register(s3Plugin)
 
-	// The CloudFormation plugin adapts the StackDeployer that BettyClient already
+	// The CloudFormation plugin adapts the StackDeployer that [Client] already
 	// drives in process, so it needs the registry to deploy each template resource
 	// into. It is registered after S3/IAM/Lambda only for readability: the registry
 	// is captured as a pointer and read at request time, so ordering does not

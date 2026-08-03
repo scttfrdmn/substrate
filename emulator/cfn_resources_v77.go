@@ -1,5 +1,11 @@
 package emulator
 
+// cfn_resources_v77.go holds the StackDeployer.deployResource helpers for
+// EC2 (launch templates, security-group rules) and IAM instance profiles.
+// The name records the substrate release that added them (v0.77.0) rather than the
+// services, because several releases touched overlapping services; the helpers here
+// follow the same pattern as those in cfn_deployer.go.
+
 import (
 	"context"
 	"encoding/json"

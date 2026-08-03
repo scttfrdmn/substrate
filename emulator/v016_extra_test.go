@@ -1,7 +1,7 @@
 package emulator_test
 
 // v016_extra_test.go — additional coverage tests for v0.16.0 plugins:
-// KMS, SSM, Secrets Manager, SNS secondary operations plus Betty CFN support.
+// KMS, SSM, Secrets Manager, SNS secondary operations plus CFN support.
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
-// ─── Betty CFN tests for new services ────────────────────────────────────────
+// ─── CFN tests for new services ──────────────────────────────────────────────
 
 // newV016Deployer creates a StackDeployer with all v0.16.0 plugins registered.
 func newV016Deployer(t *testing.T) *emulator.StackDeployer {

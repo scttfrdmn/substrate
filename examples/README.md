@@ -7,7 +7,7 @@ Runnable examples demonstrating Substrate.
 | Example | What it shows |
 |---------|---------------|
 | [`custom_plugin`](custom_plugin) | Implementing a minimal custom service plugin (a fictitious "weather" service) and serving it. See also the [contributor guide](../docs/contributing.md). |
-| [`betty_workflow`](betty_workflow) | Deploying a CloudFormation template through Betty and inspecting the result. |
+| [`validation_workflow`](validation_workflow) | Deploying a CloudFormation template in process and inspecting the result. |
 
 Run either with, e.g., `go run ./examples/custom_plugin`.
 

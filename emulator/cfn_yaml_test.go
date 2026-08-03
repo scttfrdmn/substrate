@@ -461,7 +461,7 @@ func TestCFN_MalformedYAMLIsRefused(t *testing.T) {
 // degraded shapes of a refusal reason.
 //
 // The two body-derived arms are exercised through deployed stacks in
-// betty_cfn_failure_test.go, which is where they belong. The remaining arms are
+// cfn_failure_test.go, which is where they belong. The remaining arms are
 // asserted here against the function, because they cannot be reached from any
 // template: the only two response-style plugins a stack dispatches to are S3 and
 // IAM, and s3ErrorResponseWith and iamErrorResponse both always write a <Code> and

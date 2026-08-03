@@ -660,7 +660,7 @@ func TestCFNIdentity_UnpartitionedServicesStillWork(t *testing.T) {
 // TestCFNIdentity_InProcessDeployerDefaultsToSubstratesOwn pins the recorded
 // decision that a deployer built without an identity uses substrate's defaults.
 //
-// BettyClient is the in-process validation client and its callers never sign a
+// emulator.Client is the in-process validation client and its callers never sign a
 // request, so there is no caller identity to thread — the defaults are the answer
 // rather than a placeholder for one. The default is load-bearing: were it the zero
 // value, every in-process deploy would write into account "" and the resources
@@ -691,7 +691,7 @@ func TestCFNIdentity_InProcessDeployerDefaultsToSubstratesOwn(t *testing.T) {
 
 // TestCFNIdentity_ExplicitIdentityOverridesTheDefault pins the option itself, so
 // an in-process caller that does need another partition has a seam and it is
-// tested. This is what the BettyClient comment points at.
+// tested. This is what the emulator.Client comment points at.
 func TestCFNIdentity_ExplicitIdentityOverridesTheDefault(t *testing.T) {
 	ts := newCFNIdentityTestServer(t)
 

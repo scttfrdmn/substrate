@@ -94,7 +94,7 @@ type S3ServerSideEncryption struct {
 // Headers are matched case-insensitively via [headerValueFold], like every other
 // header the S3 plugin reads: an [AWSRequest] reaching a plugin has not always been
 // through net/http's canonicalization, since substrate builds requests in-process too
-// (see betty_cfn.go), and RFC 9110 header names are case-insensitive regardless.
+// (see cfn_deployer.go), and RFC 9110 header names are case-insensitive regardless.
 //
 // The header *values* are not folded. An algorithm token and a KMS key ID are both
 // case-sensitive identifiers — aws:kms and AWS:KMS are not the same token, and a KMS

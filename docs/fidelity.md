@@ -59,7 +59,7 @@ transitions is not "worse" than a stateful one.
 | **Partial** | A subset of the operation's parameters or response fields is modelled. Unmodelled fields are omitted rather than faked. |
 | **Fault-aware** | Alternate outcomes (errors, capacity/throttle failures, terminal states) can be **seeded** via a control-plane endpoint, so a caller's retry/poll/wait loop can be exercised deterministically. |
 | **Stateful** | Cross-request lifecycle is modelled — a resource transitions through states over the simulated clock (e.g. `pending → running`, `Pending → InProgress → Success`). |
-| **CFN-supported** | Betty models the relevant CloudFormation resource types for deploy/drift. |
+| **CFN-supported** | Substrate models the relevant CloudFormation resource types for deploy/drift. |
 | **Pricing-supported** | Operations carry cost data, so cost summaries and budget gates work. |
 
 The per-service sections of the [Service Reference](/services) note which of

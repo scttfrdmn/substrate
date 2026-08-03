@@ -1,5 +1,10 @@
 package emulator
 
+// cfn_resources_v31.go holds the StackDeployer.deployResource helpers for AppSync.
+// The name records the substrate release that added them (v0.31.0) rather than the
+// services, because several releases touched overlapping services; the helpers here
+// follow the same pattern as those in cfn_deployer.go.
+
 import (
 	"context"
 	"encoding/json"

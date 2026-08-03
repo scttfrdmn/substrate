@@ -276,7 +276,7 @@ func TestCWLogs_FilterLogEventsStaysCorrect(t *testing.T) {
 // element types rather than retagging CWLogGroup and friends.
 //
 // Those structs are the persisted format: Snapshot/Restore round-trips them and
-// betty_debug replays them, and LambdaPlugin.autoCreateLambdaLogGroup writes one
+// debug_session.go replays them, and LambdaPlugin.autoCreateLambdaLogGroup writes one
 // directly to dodge a registry cycle. Retagging would have changed the wire and
 // the persisted bytes in one edit, so this asserts the state encoding still uses
 // the PascalCase names a v0.87 snapshot contains — and that a group written under

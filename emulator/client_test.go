@@ -14,8 +14,8 @@ import (
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
-// newBettyTestDeps creates a set of test dependencies shared across Betty tests.
-func newBettyTestDeps(t *testing.T) (
+// newClientTestDeps creates a set of test dependencies shared across Client tests.
+func newClientTestDeps(t *testing.T) (
 	*emulator.PluginRegistry,
 	*emulator.EventStore,
 	*emulator.MemoryStateManager,
@@ -60,8 +60,8 @@ func newBettyTestDeps(t *testing.T) (
 
 func TestDeployStack_S3Bucket(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -86,8 +86,8 @@ func TestDeployStack_S3Bucket(t *testing.T) {
 
 func TestDeployStack_IAMRole(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -119,8 +119,8 @@ func TestDeployStack_IAMRole(t *testing.T) {
 
 func TestDeployStack_IAMPolicy(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -152,8 +152,8 @@ func TestDeployStack_IAMPolicy(t *testing.T) {
 
 func TestDeployStack_MultipleResources(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -195,8 +195,8 @@ func TestDeployStack_MultipleResources(t *testing.T) {
 
 func TestDeployStack_YAMLTemplate(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `
 AWSTemplateFormatVersion: "2010-09-09"
@@ -219,8 +219,8 @@ Resources:
 
 func TestDeployStack_InvalidTemplate(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	_, err := client.Deploy(ctx, "not json or yaml at all: {{{", emulator.Intent{})
 	assert.Error(t, err)
@@ -228,8 +228,8 @@ func TestDeployStack_InvalidTemplate(t *testing.T) {
 
 func TestDeployStack_LambdaServiceNotAvailable(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -267,8 +267,8 @@ func TestDeployStack_LambdaServiceNotAvailable(t *testing.T) {
 
 func TestDeployStack_EventsRecorded(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -307,8 +307,8 @@ func TestValidateRecording_EmptyStream(t *testing.T) {
 
 func TestValidateRecording_WithCost(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	// Deploy an S3 bucket to generate a put request with cost.
 	const tmpl = `{"AWSTemplateFormatVersion":"2010-09-09","Resources":{"B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cost-test"}}}}`
@@ -439,12 +439,12 @@ func TestValidateRecording_Suggestions(t *testing.T) {
 	assert.NotEmpty(t, report.Suggestions, "at least one suggestion should be generated when there are events with cost")
 }
 
-// --- BettyClient tests (#25) -----------------------------------------------
+// --- Client tests (#25) -----------------------------------------------
 
-func TestBettyClient_FullWorkflow(t *testing.T) {
+func TestClient_FullWorkflow(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	// Step 1: deploy a stack.
 	const tmpl = `{"AWSTemplateFormatVersion":"2010-09-09","Resources":{"WfBucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"workflow-bucket"}}}}`
@@ -469,7 +469,7 @@ func TestBettyClient_FullWorkflow(t *testing.T) {
 	assert.Equal(t, deployResult.StreamID, deployReport.StreamID)
 }
 
-func TestBettyClient_IntentMaxCost(t *testing.T) {
+func TestClient_IntentMaxCost(t *testing.T) {
 	ctx := context.Background()
 	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
 
@@ -497,10 +497,10 @@ func TestBettyClient_IntentMaxCost(t *testing.T) {
 	assert.Contains(t, report.Violations[0], "MaxCost")
 }
 
-func TestBettyClient_StartStopRecording(t *testing.T) {
+func TestClient_StartStopRecording(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	session, err := client.StartRecording(ctx, "round-trip")
 	require.NoError(t, err)
@@ -531,10 +531,10 @@ func TestBettyClient_StartStopRecording(t *testing.T) {
 	assert.Equal(t, 1, report.TotalEvents)
 }
 
-func TestBettyClient_DebugSession_JumpToEvent(t *testing.T) {
+func TestClient_DebugSession_JumpToEvent(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	// Deploy two S3 buckets to produce at least 2 events.
 	const tmpl = `{
@@ -557,10 +557,10 @@ func TestBettyClient_DebugSession_JumpToEvent(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestBettyClient_DebugSession_StepBackward(t *testing.T) {
+func TestClient_DebugSession_StepBackward(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{"AWSTemplateFormatVersion":"2010-09-09","Resources":{"SbBucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"step-backward-bucket"}}}}`
 	result, err := client.Deploy(ctx, tmpl, emulator.Intent{})
@@ -578,10 +578,10 @@ func TestBettyClient_DebugSession_StepBackward(t *testing.T) {
 	assert.Contains(t, stepErr.Error(), "beginning")
 }
 
-func TestBettyClient_DebugSession_InspectState(t *testing.T) {
+func TestClient_DebugSession_InspectState(t *testing.T) {
 	ctx := context.Background()
-	registry, store, state, tc, logger := newBettyTestDeps(t)
-	client := emulator.NewBettyClient(registry, store, state, tc, logger)
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
 
 	const tmpl = `{"AWSTemplateFormatVersion":"2010-09-09","Resources":{"IsBucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"inspect-state-bucket"}}}}`
 	result, err := client.Deploy(ctx, tmpl, emulator.Intent{})
@@ -595,4 +595,44 @@ func TestBettyClient_DebugSession_InspectState(t *testing.T) {
 
 	// Verify it is valid JSON.
 	assert.True(t, len(snap) > 2, "snapshot JSON should be non-trivial")
+}
+
+// TestClient_DeprecatedBettyAliasesStillWork pins the deprecation seam for #549.
+//
+// The old names must keep compiling and working for the whole deprecation window, and
+// the alias must be an *alias* rather than a defined type: a consumer holding both a
+// *BettyClient and a *Client, or passing one where the other is expected, has to keep
+// compiling. A defined type would make the rename a breaking change wearing a
+// deprecation's clothes, and nothing but a test like this one would catch the
+// difference — both spellings compile in isolation.
+//
+// The two single-argument functions below are the assertion, and they have to be
+// written as functions rather than as typed `var` declarations because a redundant
+// explicit type on a `var` is itself a lint failure. Passing the deprecated type
+// where the new one is declared, and back, only compiles because the two names denote
+// one type — so if someone re-declares BettyClient as `type BettyClient Client`, this
+// file stops building.
+func TestClient_DeprecatedBettyAliasesStillWork(t *testing.T) {
+	ctx := context.Background()
+	registry, store, state, tc, logger := newClientTestDeps(t)
+
+	//nolint:staticcheck // SA1019: exercising the deprecated constructor is the point.
+	betty := emulator.NewBettyClient(registry, store, state, tc, logger)
+	require.NotNil(t, betty)
+
+	// Interchangeable in both directions, which is what "alias" buys the consumer.
+	takesNew := func(c *emulator.Client) *emulator.Client { return c }
+	//nolint:staticcheck // SA1019: as above.
+	takesOld := func(c *emulator.BettyClient) *emulator.BettyClient { return c }
+	asOld := takesOld(takesNew(betty))
+	require.Same(t, betty, asOld)
+
+	// And it is wired, not merely constructed: the deprecated path deploys.
+	const tmpl = `{"Resources":{"B":{"Type":"AWS::S3::Bucket",` +
+		`"Properties":{"BucketName":"deprecated-alias-bucket"}}}}`
+	result, err := asOld.Deploy(ctx, tmpl, emulator.Intent{})
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Empty(t, result.Resources[0].Error)
+	assert.Equal(t, "CREATE_COMPLETE", result.Status)
 }

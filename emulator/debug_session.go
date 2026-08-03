@@ -8,7 +8,7 @@ import (
 )
 
 // DebugSession supports time-travel inspection of a recorded event stream.
-// Create via BettyClient.NewDebugSession; navigation loads the stream on first call.
+// Create via [Client.NewDebugSession]; navigation loads the stream on first call.
 type DebugSession struct {
 	engine   *ReplayEngine
 	streamID string

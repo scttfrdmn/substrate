@@ -2087,8 +2087,8 @@ func TestCFN_APIGatewayMethod(t *testing.T) {
 	}
 }
 
-// TestBettyCFN_EC2EIP verifies the AWS::EC2::EIP CFN resource.
-func TestBettyCFN_EC2EIP(t *testing.T) {
+// TestCFN_EC2EIP verifies the AWS::EC2::EIP CFN resource.
+func TestCFN_EC2EIP(t *testing.T) {
 	d := newFullTestDeployer(t)
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
@@ -2110,8 +2110,8 @@ func TestBettyCFN_EC2EIP(t *testing.T) {
 	assert.True(t, strings.HasPrefix(r.PhysicalID, "eipalloc-"), "PhysicalID %q should start with eipalloc-", r.PhysicalID)
 }
 
-// TestBettyCFN_EC2NatGateway verifies the AWS::EC2::NatGateway CFN resource.
-func TestBettyCFN_EC2NatGateway(t *testing.T) {
+// TestCFN_EC2NatGateway verifies the AWS::EC2::NatGateway CFN resource.
+func TestCFN_EC2NatGateway(t *testing.T) {
 	d := newFullTestDeployer(t)
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",

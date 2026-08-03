@@ -16,7 +16,7 @@ import (
 // kwarg before serializing — so a consumer bug there cannot reach the wire.
 // Requiring presence here would validate an unreachable bug class while breaking
 // every hand-built form-encoded request, which substrate's own tests and
-// betty_cfn.go's CFN path are (#431, declined half of #412).
+// cfn_deployer.go's CFN path are (#431, declined half of #412).
 const ec2DefaultInstanceCount = 1
 
 // resolveInstanceCounts returns the MinCount/MaxCount a RunInstances request asks
