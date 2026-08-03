@@ -40,10 +40,19 @@ func newS3TestServerWithState(t *testing.T, state emulator.StateManager) *emulat
 // newS3TestServerWithFS builds the shared S3 test server over state.
 func newS3TestServerWithFS(t *testing.T, state emulator.StateManager) (*emulator.Server, afero.Fs) {
 	t.Helper()
+	fs := afero.NewMemMapFs()
+	return newS3TestServerWithFaultFS(t, state, fs), fs
+}
+
+// newS3TestServerWithFaultFS is newS3TestServerWithFS with a caller-supplied
+// filesystem, for tests that need the object mirror to fail. The mirror is the other
+// half of the state the plugin keeps, so a fault there is as observable as one in
+// the store.
+func newS3TestServerWithFaultFS(t *testing.T, state emulator.StateManager, fs afero.Fs) *emulator.Server {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
-	fs := afero.NewMemMapFs()
 
 	s3p := &emulator.S3Plugin{}
 	err := s3p.Initialize(context.Background(), emulator.PluginConfig{
@@ -76,7 +85,7 @@ func newS3TestServerWithFS(t *testing.T, state emulator.StateManager) (*emulator
 		emulator.ServerOptions{Costs: costCtrl},
 	)
 
-	return srv, fs
+	return srv
 }
 
 // s3Request is a helper for issuing HTTP requests to the S3 server and
