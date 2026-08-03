@@ -56,6 +56,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that happens to carry a member named `Ref` — an ECS container definition, an IAM
   policy document — untouched.
 
+- **Intrinsics resolve at any depth inside a structured property** (#526).
+  `resolveValue` resolves a value that *is* an intrinsic; nothing walked into a map
+  or a list to resolve one nested within. So a deploy path that forwarded a
+  structured property whole handed the plugin `{"Ref": "PK"}` as a literal object:
+  DynamoDB's typed plugin rejected it (`SerializationException: cannot unmarshal
+  object into Go struct field … of type string`, the resource `CREATE_FAILED`) while
+  an untyped plugin stored it and echoed it back. Which of a consumer's properties
+  resolved depended on how each deploy path happened to have been written — some
+  enumerate their members key by key, others forward them verbatim.
+
+  A new `resolveNested` walks a property and returns a structurally identical value
+  with every intrinsic resolved, applied at the verbatim-forwarding sites: ECS's
+  `ContainerDefinitions`, DynamoDB's `KeySchema`, `AttributeDefinitions`,
+  `ProvisionedThroughput`, `GlobalSecondaryIndexes`, `LocalSecondaryIndexes` and
+  `StreamSpecification`, ACM's `SubjectAlternativeNames`, MSK's `BrokerNodeGroupInfo`
+  and FSx's `SubnetIds` and `Tags` — the last three had asserted their property was a
+  literal `string` and silently dropped anything else, so a `!Ref`-valued subnet list
+  or the near-universal `Value: !Sub '${AWS::StackName}-data'` tag never reached the
+  API at all. Four rules a naive walk gets wrong are pinned by tests: only a
+  single-key map is an intrinsic (a multi-key map is user data even when one key is
+  `Ref` — the same map-iteration nondeterminism #521 fixed a level up); a
+  list-valued intrinsic in a list position splices its elements; an `Fn::If`
+  yielding `AWS::NoValue` **removes** the property rather than leaving an empty
+  string behind; and resolution never rewrites a key, since that is what would
+  mangle a `logConfiguration.options` whose keys are user data.
+
+- **ECS container definitions reach the ECS API under the ECS API's member names**
+  (#527). CloudFormation spells a container's members in PascalCase where the ECS
+  API spells them in camelCase, and the CFN deploy path forwarded them as written.
+  `ContainerDefinitions` is untyped both in `RegisterTaskDefinition`'s request and
+  in state, so there was nothing to reject them: the stack reached
+  `CREATE_COMPLETE`, `DescribeTaskDefinition` answered `200`, and
+  `--query 'taskDefinition.containerDefinitions'` returned `[{}]` — every member
+  present under a name no SDK reads. A direct `RegisterTaskDefinition` call was
+  never affected; the mismatch was introduced by the deploy path alone.
+
+  The mapping is an explicit table of all 42 `ContainerDefinition` members plus the
+  11 nested types (`environment`, `secrets`, `portMappings`, `logConfiguration`,
+  `mountPoints`, `volumesFrom`, `healthCheck`, `ulimits`, `dependsOn`,
+  `extraHosts`, `systemControls`), verified member by member against each type's own
+  API reference page. It is deliberately a table rather than a first-letter-lowering
+  function — which would be right for all 42 today — because only a table can tell
+  "not mapped" from "mapped to itself", so a member added to the API later passes
+  through verbatim instead of being renamed to something ECS does not accept. It is
+  also deliberately **per-service**: DynamoDB, ACM and MSK are natively PascalCase,
+  and a generic converter is precisely the change that would break them.
+  `logConfiguration.options` and `dockerLabels` are named by their parent's table and
+  then left whole, their keys being user data.
+
 ## [v0.87.1] - 2026-08-03
 
 ### Fixed

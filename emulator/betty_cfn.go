@@ -1874,26 +1874,28 @@ func (d *StackDeployer) deployDynamoDBTable(
 		"TableName": tableName,
 	}
 
-	if keySchema, ok := props["KeySchema"]; ok {
-		body["KeySchema"] = keySchema
-	}
-	if attrDefs, ok := props["AttributeDefinitions"]; ok {
-		body["AttributeDefinitions"] = attrDefs
+	// The DynamoDB API is natively PascalCase, so these properties are forwarded
+	// under CloudFormation's own member names — only the intrinsics inside them
+	// need resolving (#526).
+	// A literal passes through resolveNested untouched, so walking these costs a
+	// numeric member nothing: `{"ReadCapacityUnits": 5}` stays the integer 5. An
+	// intrinsic *inside* a numeric member is the one case still unresolvable,
+	// since a resolved intrinsic is a string — but that member fails to
+	// unmarshal today either way, so the walk does not make it worse.
+	for _, key := range []string{
+		"KeySchema",
+		"AttributeDefinitions",
+		"ProvisionedThroughput",
+		"GlobalSecondaryIndexes",
+		"LocalSecondaryIndexes",
+		"StreamSpecification",
+	} {
+		if v, ok := props[key]; ok {
+			body[key] = resolveNested(v, cctx)
+		}
 	}
 	if billingMode, ok := props["BillingMode"]; ok {
 		body["BillingMode"] = resolveValue(billingMode, cctx)
-	}
-	if pt, ok := props["ProvisionedThroughput"]; ok {
-		body["ProvisionedThroughput"] = pt
-	}
-	if gsis, ok := props["GlobalSecondaryIndexes"]; ok {
-		body["GlobalSecondaryIndexes"] = gsis
-	}
-	if lsis, ok := props["LocalSecondaryIndexes"]; ok {
-		body["LocalSecondaryIndexes"] = lsis
-	}
-	if ss, ok := props["StreamSpecification"]; ok {
-		body["StreamSpecification"] = ss
 	}
 
 	bodyBytes, err := json.Marshal(body)
@@ -3299,6 +3301,201 @@ func splitParameterList(v string) []string {
 // list type is spelled List<…> (List<Number>, List<AWS::EC2::Subnet::Id>, …).
 func cfnListParameterType(t string) bool {
 	return t == "CommaDelimitedList" || strings.HasPrefix(t, "List<")
+}
+
+// resolveNested resolves intrinsics at any depth inside a structured property,
+// returning a structurally identical value.
+//
+// resolveValue resolves a value that *is* an intrinsic; nothing walked into a
+// map or a list to resolve one nested within (#526). So a deploy path that
+// forwards a structured property whole — ContainerDefinitions, KeySchema,
+// AttributeDefinitions — handed the plugin `{"Ref": "PK"}` as a literal object,
+// which a typed plugin rejects and an untyped one stores. Real CloudFormation
+// resolves intrinsics at any depth, and which of a consumer's properties
+// resolved here depended on how each deploy path happened to have been written.
+//
+// Four rules that a naive walk gets wrong:
+//
+//   - Only a *single-key* map is an intrinsic, even when one of several keys is
+//     "Ref". A multi-key map is user data — and resolving one made the result
+//     depend on Go's map iteration order, which #521 fixed in resolveValue for
+//     the same reason.
+//   - A recognized intrinsic in a *list* position resolves through
+//     resolveValueList and splices, so a nested Fn::Split contributes its
+//     elements rather than one rejoined string.
+//   - Fn::If yielding AWS::NoValue *removes* the property, as CloudFormation
+//     does, rather than leaving an empty string behind. That is what
+//     `!If [HasCommand, !Split [...], !Ref 'AWS::NoValue']` is written to say.
+//   - Keys are never rewritten. Mapping a property's member names is a
+//     per-service concern (#527) and conflating it with resolution is how
+//     logConfiguration.options — whose keys are user data — would get mangled.
+//
+// A resolved intrinsic becomes a string, or a list of strings when the intrinsic
+// is list-valued — this walk returns interface{}, so unlike resolveValue it can
+// carry the list rather than rejoining it (#521). A resolved scalar is always a
+// *string*, though: a template that writes `"Cpu": {"Ref": "Cpu"}` gets "256"
+// where a literal `256` would have stayed a number, so a plugin needing a typed
+// member keeps resolving that member itself.
+func resolveNested(v interface{}, cctx *cfnContext) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if isCFNIntrinsic(val) {
+			return resolveIntrinsicPreservingShape(val, cctx)
+		}
+		out := make(map[string]interface{}, len(val))
+		for k, item := range val {
+			// An Fn::If choosing AWS::NoValue removes the member, so the walk
+			// has to distinguish "resolved to nothing" from "resolved to an
+			// empty string" before writing the key back.
+			if isCFNNoValue(item, cctx) {
+				continue
+			}
+			out[k] = resolveNested(item, cctx)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, 0, len(val))
+		for _, item := range val {
+			m, isMap := item.(map[string]interface{})
+			if isMap && isCFNIntrinsic(m) {
+				// A list position is where a list-valued intrinsic belongs, so
+				// its elements splice in rather than nesting.
+				for _, s := range resolveValueList(m, cctx) {
+					out = append(out, s)
+				}
+				continue
+			}
+			out = append(out, resolveNested(item, cctx))
+		}
+		return out
+	}
+	return v
+}
+
+// resolveIntrinsicPreservingShape resolves an intrinsic to a string or, when the
+// intrinsic is list-valued, to a list of strings.
+//
+// A structured property's member can hold either shape — ECS's `command` is a
+// list of strings where its `image` is one string — and JSON can express both, so
+// resolveValue's rejoin (#521), which exists only because it must return a
+// string, would be a loss here. The list-valued forms are exactly the ones
+// resolveValueList recognizes: Fn::Split, a Ref to a list-typed parameter, and an
+// Fn::If whose chosen branch is one of those.
+func resolveIntrinsicPreservingShape(m map[string]interface{}, cctx *cfnContext) interface{} {
+	if !cfnListValuedIntrinsic(m, cctx) {
+		return resolveValue(m, cctx)
+	}
+	list := resolveValueList(m, cctx)
+	// []string would marshal correctly, but []interface{} keeps the walk's
+	// result comparable to the literal lists alongside it, which arrive from
+	// encoding/json as []interface{}.
+	out := make([]interface{}, 0, len(list))
+	for _, s := range list {
+		out = append(out, s)
+	}
+	return out
+}
+
+// cfnListValuedIntrinsic reports whether an intrinsic resolves to a list.
+//
+// Fn::If is transparent: it is list-valued exactly when the branch its condition
+// selects is, which is why the condition has to be evaluated here rather than the
+// two branches inspected structurally.
+func cfnListValuedIntrinsic(m map[string]interface{}, cctx *cfnContext) bool {
+	if len(m) != 1 {
+		return false
+	}
+	for fn, args := range m {
+		switch fn {
+		case "Fn::Split":
+			return true
+		case "Ref":
+			name, ok := args.(string)
+			return ok && cctx.listParams[name]
+		case "Fn::If":
+			arr, ok := args.([]interface{})
+			if !ok || len(arr) < 3 {
+				return false
+			}
+			condName, ok := arr[0].(string)
+			if !ok {
+				return false
+			}
+			branch := arr[2]
+			if cctx.condition(condName) {
+				branch = arr[1]
+			}
+			// A literal list branch is list-valued too:
+			// `!If [C, ['a','b'], !Ref 'AWS::NoValue']`.
+			if _, isList := branch.([]interface{}); isList {
+				return true
+			}
+			inner, isMap := branch.(map[string]interface{})
+			return isMap && cfnListValuedIntrinsic(inner, cctx)
+		}
+	}
+	return false
+}
+
+// cfnIntrinsicNames are the intrinsic function keys resolveValue recognizes,
+// plus Ref. A map is an intrinsic only when it has exactly one key and that key
+// is one of these.
+var cfnIntrinsicNames = map[string]bool{
+	"Ref":        true,
+	"Fn::Sub":    true,
+	"Fn::Join":   true,
+	"Fn::Select": true,
+	"Fn::Split":  true,
+	"Fn::Base64": true,
+	"Fn::GetAtt": true,
+	"Fn::If":     true,
+}
+
+// isCFNIntrinsic reports whether a map is an intrinsic function invocation.
+//
+// Every intrinsic CloudFormation defines is a one-member object, so a map with
+// any other size is user data regardless of what its keys are named.
+func isCFNIntrinsic(m map[string]interface{}) bool {
+	if len(m) != 1 {
+		return false
+	}
+	for k := range m {
+		return cfnIntrinsicNames[k]
+	}
+	return false
+}
+
+// isCFNNoValue reports whether a value resolves to AWS::NoValue, directly or
+// through an Fn::If branch, and so should remove the member holding it.
+//
+// The recursion follows Fn::If only: that is the one intrinsic whose result can
+// *be* a Ref to AWS::NoValue, and it is the form a template uses to say "this
+// property, or nothing".
+func isCFNNoValue(v interface{}, cctx *cfnContext) bool {
+	m, ok := v.(map[string]interface{})
+	if !ok || len(m) != 1 {
+		return false
+	}
+	if ref, has := m["Ref"]; has {
+		name, isStr := ref.(string)
+		return isStr && name == "AWS::NoValue"
+	}
+	args, has := m["Fn::If"]
+	if !has {
+		return false
+	}
+	arr, isArr := args.([]interface{})
+	if !isArr || len(arr) < 3 {
+		return false
+	}
+	name, isStr := arr[0].(string)
+	if !isStr {
+		return false
+	}
+	if cctx.condition(name) {
+		return isCFNNoValue(arr[1], cctx)
+	}
+	return isCFNNoValue(arr[2], cctx)
 }
 
 func resolveRef(ref string, cctx *cfnContext) string {

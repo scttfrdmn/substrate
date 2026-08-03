@@ -228,9 +228,31 @@ element. A `CommaDelimitedList` (or `List<…>`) parameter is list-valued too: a
 string. Whether a `Ref` is list-valued comes from the parameter's declared type,
 not from whether its value happens to contain a comma.
 
-`Ref 'AWS::NoValue'` in a list position contributes **no** element, which is what
-makes the conventional `!If [HasCommand, !Split [',', !Ref Command], !Ref
-'AWS::NoValue']` idiom work.
+`Ref 'AWS::NoValue'` in a list position contributes **no** element, and as a
+*property's whole value* it **removes the property**, which is what makes the
+conventional `!If [HasCommand, !Split [',', !Ref Command], !Ref 'AWS::NoValue']`
+idiom work: the property is absent rather than present-and-empty, and an API that
+rejects an empty value sees what it would see from real CloudFormation.
+
+Intrinsics resolve **at any depth** inside a structured property, not only where
+the property's whole value is one. A `Ref` inside `KeySchema`, an `Fn::Sub` inside
+a container definition's `Environment`, an `Fn::Split` nested in a list — all
+resolve, and a nested list-valued intrinsic contributes its elements to the list
+holding it rather than one rejoined string. Two rules bound the walk:
+
+- Only a **single-key** map is an intrinsic. A map with several keys is user data
+  even when one of them is named `Ref`, so a property whose interior is a
+  caller-supplied map — a log driver's `Options`, an IAM policy `Condition` block
+  — keeps its own shape.
+- **Keys are never rewritten by resolution.** Where a property's member names
+  differ between CloudFormation and the service's API — ECS spells a container's
+  members in camelCase where CloudFormation spells them PascalCase — that mapping
+  is per-service and applied separately, and it stops at any member whose keys are
+  user-supplied.
+
+A resolved intrinsic is a **string**, or a list of strings where the intrinsic is
+list-valued. So `"Cpu": {"Ref": "Cpu"}` reaches the API as `"256"` where a literal
+`256` would have stayed a number; a literal is never retyped.
 
 Where the property is scalar and has nowhere to put a list — an `Outputs` value,
 say — `Fn::Split`'s elements are rejoined on the delimiter, reproducing the
