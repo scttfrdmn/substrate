@@ -32,10 +32,36 @@ const cfnXMLNS = "http://cloudformation.amazonaws.com/doc/2010-05-15/"
 // real resources in the other plugins: the bucket in an AWS::S3::Bucket is a
 // bucket the S3 plugin serves, not a private CloudFormation-only record.
 type CloudFormationPlugin struct {
-	state    StateManager
-	logger   Logger
-	tc       *TimeController
+	state  StateManager
+	logger Logger
+	tc     *TimeController
+
+	// deployer serves the paths that touch no resource: the stack and change-set
+	// records themselves, which are stored unpartitioned, so its identity never
+	// matters. CreateChangeSet is among them — it parses and diffs two templates
+	// without dispatching anything. Every path that deploys or reads a resource
+	// uses deployerFor instead.
 	deployer *StackDeployer
+
+	// registry, store and costs are kept so deployerFor can build a deployer
+	// carrying the requesting caller's identity. A deployer is six pointer copies
+	// with no I/O, so building one per deploying request is cheaper than the
+	// alternative of making one deployer's identity mutable and therefore racy.
+	registry *PluginRegistry
+	store    *EventStore
+	costs    *CostController
+}
+
+// deployerFor returns a [StackDeployer] that deploys into the requesting
+// caller's account and region.
+//
+// Identity is a property of the request, not of the plugin, so it cannot be fixed
+// at Initialize time. A caller signing for another account used to get a stack
+// whose ARN named that account while the resources inside it were written into
+// substrate's defaults, which put them in a partition that caller could not read.
+func (p *CloudFormationPlugin) deployerFor(reqCtx *RequestContext) *StackDeployer {
+	return NewStackDeployer(p.registry, p.store, p.state, p.tc, p.logger, p.costs,
+		WithDeployerIdentity(reqCtx.AccountID, reqCtx.Region))
 }
 
 // Name returns the service name "cloudformation".
@@ -76,6 +102,9 @@ func (p *CloudFormationPlugin) Initialize(_ context.Context, cfg PluginConfig) e
 		costs = NewCostController(CostConfig{Enabled: false})
 	}
 
+	p.registry = registry
+	p.store = store
+	p.costs = costs
 	p.deployer = NewStackDeployer(registry, store, cfg.State, p.tc, cfg.Logger, costs)
 	return nil
 }
@@ -180,7 +209,7 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 	// instead passes deploy-<unixnano>, which is right for a one-shot in-process
 	// validation run but would make a wire-created stack undiscoverable by the
 	// name the caller asked for.
-	if _, err := p.deployer.Deploy(context.Background(), body, name,
+	if _, err := p.deployerFor(reqCtx).Deploy(context.Background(), body, name,
 		cfnRequestParameters(req.Params, nil)); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -223,7 +252,7 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 		// UsePreviousTemplate is the documented way to change only parameters.
 		body = stack.TemplateBody
 	}
-	if _, err := p.deployer.UpdateStack(context.Background(), body, name,
+	if _, err := p.deployerFor(reqCtx).UpdateStack(context.Background(), body, name,
 		cfnRequestParameters(req.Params, stack.Parameters)); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -661,7 +690,9 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	if cs == nil {
 		return nil, cfnChangeSetNotFound(changeSetName)
 	}
-	if _, err := p.deployer.ExecuteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
+	// ExecuteChangeSet routes through UpdateStack to Deploy, so it deploys
+	// resources and takes the executing caller's identity like the other two.
+	if _, err := p.deployerFor(reqCtx).ExecuteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -754,7 +785,11 @@ func (p *CloudFormationPlugin) detectStackDrift(reqCtx *RequestContext, req *AWS
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	detectionID, err := p.deployer.StartStackDriftDetection(context.Background(), stackName)
+	// Drift resolves each resource by a state key that embeds the account and
+	// region, so detection has to look where the resources were actually
+	// deployed. On the default identity it would report every resource of another
+	// caller's stack as DELETED.
+	detectionID, err := p.deployerFor(reqCtx).StartStackDriftDetection(context.Background(), stackName)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -781,7 +816,9 @@ func (p *CloudFormationPlugin) describeStackResourceDrifts(reqCtx *RequestContex
 		return nil, cfnMissingParameter("StackName")
 	}
 	filters := extractIndexedParams(req.Params, "StackResourceDriftStatusFilters.member")
-	drifts, err := p.deployer.DescribeStackResourceDrifts(context.Background(), stackName, filters)
+	// Recomputes drift, so it needs the caller's identity for the same reason
+	// detectStackDrift does.
+	drifts, err := p.deployerFor(reqCtx).DescribeStackResourceDrifts(context.Background(), stackName, filters)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1036,11 +1073,16 @@ func cfnTime(t time.Time) string {
 
 // cfnStackID builds the stack ARN.
 //
-// The region and account come from the request, not from the deployer: a caller
-// signing for eu-west-1 should see a eu-west-1 stack ARN. Note that
-// StackDeployer.Deploy resolves the AWS::Region and AWS::AccountId
-// pseudo-parameters inside the template against substrate's defaults instead, so
-// the two can disagree for a non-default region.
+// The region and account come from the request: a caller signing for eu-west-1
+// sees a eu-west-1 stack ARN. The deployer takes the same identity, so the ARN and
+// the resources inside the stack cannot disagree.
+//
+// They used to. #483 shipped this comment claiming the disagreement was confined
+// to the AWS::Region and AWS::AccountId pseudo-parameters, which understated it
+// considerably: the deployer dispatched every resource under substrate's default
+// account and region, and most state keys embed both, so a stack created by a
+// caller in any other partition wrote its EC2 instances, ECS clusters and log
+// groups where that caller could not see them. Fixed in #517.
 func cfnStackID(reqCtx *RequestContext, stackName string) string {
 	return fmt.Sprintf("arn:aws:cloudformation:%s:%s:stack/%s/%s",
 		reqCtx.Region, reqCtx.AccountID, stackName,

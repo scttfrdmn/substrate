@@ -92,14 +92,17 @@ func NewBettyClient(
 func (b *BettyClient) Deploy(ctx context.Context, cfn string, intent Intent) (*DeployResult, error) {
 	b.intent = intent
 
-	deployer := &StackDeployer{
-		registry: b.registry,
-		store:    b.store,
-		state:    b.state,
-		tc:       b.tc,
-		logger:   b.logger,
-		costs:    b.costs,
-	}
+	// Built through the constructor rather than as a struct literal so there is one
+	// construction path and the deployer's defaults cannot drift away from it. A
+	// literal left the account and region empty, which was harmless until the
+	// deployer started reading them.
+	//
+	// No identity option: BettyClient is the in-process validation client and its
+	// callers never sign a request, so there is no caller whose identity could be
+	// threaded — substrate's defaults are the right answer here rather than a
+	// placeholder for one. An in-process caller that does need another partition
+	// can pass WithDeployerIdentity to NewStackDeployer directly.
+	deployer := NewStackDeployer(b.registry, b.store, b.state, b.tc, b.logger, b.costs)
 
 	streamID := fmt.Sprintf("deploy-%d", b.tc.Now().UnixNano())
 	result, err := deployer.Deploy(ctx, cfn, streamID, nil)

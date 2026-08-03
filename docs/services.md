@@ -139,6 +139,31 @@ to the in-process API. There is one set of stacks.
 Deleting a stack's resource outside CloudFormation is the drift substrate models
 — `DescribeStackResourceDrifts` reports it as `DELETED`.
 
+#### A stack deploys into the calling account and region
+
+Most plugins scope a resource to the account, and some also to the region, of the
+request that created it. A stack's resources are created under the identity of the
+caller that created the stack, so they are visible to that caller's reads and no
+one else's:
+
+```
+# unsigned, so the caller is 000000000000
+aws --endpoint-url http://localhost:4566 cloudformation create-stack \
+  --stack-name acct --template-body '{"Resources":{"I":{"Type":"AWS::EC2::Instance",
+                     "Properties":{"ImageId":"ami-12345678","InstanceType":"t3.micro"}}}}'
+aws --endpoint-url http://localhost:4566 ec2 describe-instances   # 1 reservation
+aws --endpoint-url http://localhost:4566 --region eu-west-1 \
+  ec2 describe-instances                                          # 0 — a different partition
+```
+
+`AWS::AccountId` and `AWS::Region` resolve to the same caller, so a physical name
+built from either agrees with the stack ARN.
+
+The in-process `emulator.BettyClient` deploys into substrate's default partition
+(`123456789012` / `us-east-1`). Its callers never sign a request, so there is no
+caller identity to take; an in-process caller that needs another partition can set
+one on the deployer with `emulator.WithDeployerIdentity`.
+
 ### DeleteStack deletes the stack, not its resources
 
 `DeleteStack` removes the stack record and its name index. The resources the

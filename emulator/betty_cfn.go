@@ -354,6 +354,18 @@ var typePriority = map[string]int{
 	"AWS::Athena::WorkGroup":             2,
 }
 
+// cfnIdentity is the AWS account and region a StackDeployer deploys into.
+//
+// Two strings rather than a whole *RequestContext: a deployer that carried one
+// would carry a single request's ID and timestamp across every resource it
+// deploys, which is wrong — each dispatch generates its own — and would invite a
+// future reader to propagate Principal, which is a separate decision about how
+// stack-deployed requests are authorized.
+type cfnIdentity struct {
+	accountID string
+	region    string
+}
+
 // StackDeployer parses and deploys a CloudFormation template using in-process
 // plugin dispatch.
 type StackDeployer struct {
@@ -363,18 +375,55 @@ type StackDeployer struct {
 	tc       *TimeController
 	logger   Logger
 	costs    *CostController
+
+	// identity is the account and region every request this deployer dispatches
+	// is made under, and which the AWS::AccountId and AWS::Region
+	// pseudo-parameters resolve to. It defaults to substrate's own defaults; see
+	// WithDeployerIdentity for why a caller would set it.
+	identity cfnIdentity
+}
+
+// StackDeployerOption configures optional behavior of a [StackDeployer].
+type StackDeployerOption func(*StackDeployer)
+
+// WithDeployerIdentity sets the AWS account and region the deployer deploys
+// into.
+//
+// Without it a deployer uses substrate's default account and region, which is
+// right for an in-process caller that never signs a request but wrong for one
+// reached over the wire: a request signed for another account created a stack
+// whose ARN named that account while every resource in it was written into
+// substrate's default partition. Most state keys embed the account and region
+// (EC2 instances, ECS clusters, log groups), so those resources were invisible
+// to the very caller that had just created them — DescribeInstances correctly
+// reported nothing.
+//
+// Passing the caller's identity is what keeps the stack ARN and the resources
+// inside it in one partition.
+func WithDeployerIdentity(accountID, region string) StackDeployerOption {
+	return func(d *StackDeployer) {
+		d.identity = cfnIdentity{accountID: accountID, region: region}
+	}
 }
 
 // NewStackDeployer creates a StackDeployer wired to the provided dependencies.
-func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateManager, tc *TimeController, logger Logger, costs *CostController) *StackDeployer {
-	return &StackDeployer{
+//
+// The deployer deploys into substrate's default account and region unless
+// [WithDeployerIdentity] says otherwise.
+func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateManager, tc *TimeController, logger Logger, costs *CostController, opts ...StackDeployerOption) *StackDeployer {
+	d := &StackDeployer{
 		registry: registry,
 		store:    store,
 		state:    state,
 		tc:       tc,
 		logger:   logger,
 		costs:    costs,
+		identity: cfnIdentity{accountID: testAccountID, region: defaultRegion},
 	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d
 }
 
 // Deploy parses cfn and deploys all resources, returning a DeployResult.
@@ -391,7 +440,7 @@ func (d *StackDeployer) Deploy(ctx context.Context, cfn, streamID string, params
 	start := d.tc.Now()
 
 	// Build resolution context.
-	cctx := buildCFNContext(tmpl, params, defaultRegion, testAccountID, stackName)
+	cctx := buildCFNContext(tmpl, params, d.identity.region, d.identity.accountID, stackName)
 	evaluateConditions(tmpl, cctx)
 
 	// Sort logical IDs by type priority, then alphabetically for stability.
@@ -746,7 +795,7 @@ func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) 
 
 		checker, ok := cfnDriftCheckers[dr.Type]
 		if ok {
-			exists := checker(d, ctx, testAccountID, defaultRegion, dr.PhysicalID)
+			exists := checker(d, ctx, d.identity.accountID, d.identity.region, dr.PhysicalID)
 			switch {
 			case !exists:
 				entry.DriftStatus = "DELETED"
@@ -1022,7 +1071,7 @@ func (d *StackDeployer) cfnDriftResourceProps(stack *CFNStackState, dr DeployedR
 	if !ok {
 		return nil, nil, false
 	}
-	cctx := buildCFNContext(tmpl, stack.Parameters, defaultRegion, testAccountID, stack.StackName)
+	cctx := buildCFNContext(tmpl, stack.Parameters, d.identity.region, d.identity.accountID, stack.StackName)
 	evaluateConditions(tmpl, cctx)
 	return res.Properties, cctx, true
 }
@@ -1071,7 +1120,7 @@ func compareDynamoDBTableDrift(ctx context.Context, d *StackDeployer, stack *CFN
 	if !ok {
 		return nil
 	}
-	data, _ := d.state.Get(ctx, "dynamodb", "table:"+testAccountID+"/"+dr.PhysicalID)
+	data, _ := d.state.Get(ctx, "dynamodb", "table:"+d.identity.accountID+"/"+dr.PhysicalID)
 	if data == nil {
 		return nil
 	}
@@ -1211,7 +1260,7 @@ func compareSQSQueueDrift(ctx context.Context, d *StackDeployer, stack *CFNStack
 	if !ok {
 		return nil
 	}
-	data, _ := d.state.Get(ctx, "sqs", "queue:"+testAccountID+"/"+dr.PhysicalID)
+	data, _ := d.state.Get(ctx, "sqs", "queue:"+d.identity.accountID+"/"+dr.PhysicalID)
 	if data == nil {
 		return nil
 	}
@@ -1257,7 +1306,7 @@ func compareSNSTopicDrift(ctx context.Context, d *StackDeployer, stack *CFNStack
 		return nil
 	}
 	name := snsTopicNameFromPhysicalID(dr.PhysicalID)
-	data, _ := d.state.Get(ctx, "sns", "topic:"+testAccountID+"/"+defaultRegion+"/"+name)
+	data, _ := d.state.Get(ctx, "sns", "topic:"+d.identity.accountID+"/"+d.identity.region+"/"+name)
 	if data == nil {
 		return nil
 	}
@@ -2868,8 +2917,8 @@ func (d *StackDeployer) dispatch(
 ) (*AWSResponse, float64, error) {
 	reqCtx := &RequestContext{
 		RequestID: generateRequestID(),
-		AccountID: testAccountID,
-		Region:    defaultRegion,
+		AccountID: d.identity.accountID,
+		Region:    d.identity.region,
 		Timestamp: d.tc.Now(),
 		Metadata:  map[string]interface{}{"stream_id": streamID},
 	}
