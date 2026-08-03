@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -1010,28 +1011,36 @@ func cfnTemplateURLUnsupported() *AWSError {
 
 // cfnMapDeployerError maps a StackDeployer failure onto a wire error code.
 //
-// StackDeployer reports failures as fmt.Errorf strings, so the mapping matches on
-// the sentinel text it emits. The handlers above pre-flight the not-found cases
-// themselves, so those codes are right by construction and this is the fallback
-// for anything that escapes; typed errors in betty_cfn.go would remove the string
-// matching entirely and are tracked in #502.
+// The classification comes from the sentinels StackDeployer wraps, read with
+// errors.Is, not from the message. Matching substrings was how this worked
+// through v0.87.1 and it coupled two things that have no business being coupled
+// (#502): rewording a deployer message silently moved a consumer's error code and
+// HTTP status, and a resource-level deploy failure whose wrapped cause happened
+// to contain "not found" was reported as though the request had named an absent
+// stack. Both are gone — a message may now be reworded freely.
+//
+// The handlers above pre-flight the not-found cases themselves, so those codes
+// are right by construction and this is the fallback for anything that escapes.
 func cfnMapDeployerError(err error) *AWSError {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "not found"):
+	case errors.Is(err, ErrCFNStackNotFound),
+		errors.Is(err, ErrCFNChangeSetNotFound),
+		errors.Is(err, ErrCFNDriftDetectionNotFound):
 		return &AWSError{Code: "ValidationError", Message: msg, HTTPStatus: http.StatusBadRequest}
-	case strings.Contains(msg, "parse template"),
-		strings.Contains(msg, "parse old template"),
-		strings.Contains(msg, "parse new template"):
+	case errors.Is(err, ErrCFNTemplateInvalid):
 		return &AWSError{
 			Code:       "ValidationError",
 			Message:    "Template format error: " + msg,
 			HTTPStatus: http.StatusBadRequest,
 		}
 	default:
+		// A resource that failed to deploy lands here, as does anything
+		// unclassified: the template parsed and the request named things that
+		// exist, so the failure is substrate's rather than the caller's.
 		return &AWSError{Code: "InternalFailure", Message: msg, HTTPStatus: http.StatusInternalServerError}
 	}
 }

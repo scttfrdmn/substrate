@@ -171,6 +171,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an export registry across stacks and a refusal to delete a stack whose export is
   imported, which is a new cross-stack model rather than another resolver.
 
+### Changed
+- **A CloudFormation error code is derived from the failure's classification, not
+  from its message text** (#502). `cfnMapDeployerError` recovered the AWS error code
+  and HTTP status by running `strings.Contains` over the deployer's message, which
+  coupled two things that have no business being coupled. Rewording
+  `stack %q not found` — an ordinary copy-edit — silently turned a `ValidationError`
+  at 400 into an `InternalFailure` at 500 for every consumer, with no compiler error
+  and no failing test outside the plugin's own suite. And it was lossy the other
+  way: `deploy resource %s: %w` wraps whatever the plugin returned, and a plugin's
+  own message may well contain "not found" — an instance whose AMI does not resolve,
+  say — so a genuine resource-level failure was reported as though the *request* had
+  named an absent stack, at 400 rather than 500.
+
+  `StackDeployer` now wraps one of `ErrCFNStackNotFound`,
+  `ErrCFNChangeSetNotFound`, `ErrCFNDriftDetectionNotFound`,
+  `ErrCFNTemplateInvalid`, `ErrCFNResourceDeployFailed` or `ErrCFNStateRequired`,
+  and the plugin classifies with `errors.Is`. **Every message is unchanged byte for
+  byte**, which is what makes this safe to land on its own: anything reading a
+  substrate log sees exactly what it saw before, and only the classification is new.
+  The classification lives in a field rather than being wrapped into the text with a
+  second `%w`, precisely so that the text and the code stay independent — a test
+  hands the mapping a message sharing no word with the old switch's strings and
+  asserts the code still resolves.
+
+  A failed resource additionally carries its logical ID on a typed
+  `CFNResourceDeployError`, so a caller need not re-parse the message to learn which
+  resource failed. `DescribeStackResources` reads a failure off the resource record
+  rather than off this error (#519), but a deploy that fails outright returns before
+  any record is written, so the logical ID has to travel with the error or it is
+  lost.
+
+  Landed here rather than deferred because #522's delete-refusal has no resource to
+  blame and so must come back through `DeleteStack`'s error return — the trigger the
+  issue's own analysis named for pulling this forward instead of widening the
+  substring switch.
+
 ## [v0.87.1] - 2026-08-03
 
 ### Fixed
