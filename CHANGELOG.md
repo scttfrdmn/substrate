@@ -17,7 +17,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. `DescribeStacks` additionally reports each output's `ExportName` beside it,
   saving a caller a second call to learn whether an output is importable.
 
+- **CloudWatch Logs `PutRetentionPolicy` and `DeleteRetentionPolicy`** (#528), which
+  returned `InvalidAction` while `RetentionInDays` was already modeled, settable
+  through CloudFormation, and reported by `DescribeLogGroups` — so a retention a
+  template set could be read but never changed. `retentionInDays` accepts only the
+  22 values the reference enumerates (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180,
+  365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653); anything else,
+  including a plausible-looking 45 or 100, is an `InvalidParameterException`, since
+  accepting one would let a template pass under test that the real service rejects.
+  The error message lists the valid values in ascending order so an assertion on it
+  is stable. `Delete` ships with `Put` because it is the documented way to make a
+  group's events never expire — there is no `retentionInDays` value meaning
+  "never", so a group with no policy omits the member rather than reporting `0`.
+  Both report `ResourceNotFoundException` at **HTTP 400**, as their references
+  document: this service carries the error code in the body's `__type`, not the
+  status line.
+
 ### Fixed
+- **CloudWatch Logs read operations put camelCase members on the wire, so an SDK
+  no longer parses every field to null** (#528). `DescribeLogGroups`,
+  `DescribeLogStreams` and `GetLogEvents` emitted **PascalCase** members where this
+  JSON-1.1 service uses camelCase. An SDK matches response members against the
+  service model case-sensitively, so a PascalCase member does not fail to parse —
+  it parses to *nothing*. The caller received one empty object per resource with an
+  HTTP 200 and no error: the count was right and every field read raised
+  `KeyError`, which is why a `len()` assertion passed. Reported against
+  v0.87.1/botocore 1.42.59 with a reproducer using a directly created group, so
+  this was never CloudFormation-specific.
+
+  `FilterLogEvents` was already correct, and that is what made the defect easy to
+  miss — a smoke test using it passes — because it alone declared its own response
+  element type instead of reusing the state struct. That is the pattern the fix
+  copies: each read now projects `CWLogGroup`/`CWLogStream`/`CWLogEvent` onto a
+  response-only type. Retagging the state structs would have been the shorter edit
+  and the wrong one: those structs are also the **persisted** encoding that
+  `Snapshot`/`Restore` round-trips and `betty_debug` replays, and
+  `LambdaPlugin.autoCreateLambdaLogGroup` writes one directly to dodge a registry
+  cycle, so a retag would have changed the wire and the on-disk format together. A
+  v0.87 snapshot still restores unchanged.
+
+  `DescribeLogGroups` now reports **both** ARN forms the reference documents as
+  distinct members, differing only in a trailing `:*`: `logGroupArn` without it,
+  which is what a `logGroupIdentifier` input or a tagging API wants, and `arn` with
+  it, which is what an IAM policy wants for every other action. Substrate
+  previously emitted its single unsuffixed ARN under `ARN`, so a caller who did
+  reach the value got the form the real service rejects in a policy.
 - **`Fn::Split` resolves to a list, so a split list no longer loses everything
   after its first element** (#521). `resolveValue` returns a `string`, so every
   list-valued intrinsic had nowhere to put a list: `resolveFnSplitFirst` was

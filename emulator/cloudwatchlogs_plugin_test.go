@@ -20,6 +20,19 @@ import (
 // newCWLogsTestServer creates a test server with the CloudWatchLogs plugin.
 func newCWLogsTestServer(t *testing.T) *emulator.Server {
 	t.Helper()
+	srv, _ := newCWLogsTestServerWithState(t)
+	return srv
+}
+
+// newCWLogsTestServerWithState is newCWLogsTestServer, additionally handing back
+// the state manager.
+//
+// Reaching the state manager is the point: CWLogGroup and friends are the
+// persisted encoding as well as the source of each wire response, and the only
+// way to assert that #528's fix left the persisted bytes alone is to read them
+// (see TestCWLogs_StateEncodingIsUnchanged).
+func newCWLogsTestServerWithState(t *testing.T) (*emulator.Server, *emulator.MemoryStateManager) {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
 	state := emulator.NewMemoryStateManager()
@@ -35,7 +48,7 @@ func newCWLogsTestServer(t *testing.T) *emulator.Server {
 	}))
 	registry.Register(plugin)
 
-	return emulator.NewServer(*cfg, registry, store, state, tc, logger)
+	return emulator.NewServer(*cfg, registry, store, state, tc, logger), state
 }
 
 // cwLogsRequest sends a CloudWatch Logs JSON-protocol request.
@@ -77,7 +90,7 @@ func TestCWLogs_LogGroupLifecycle(t *testing.T) {
 	body := cwLogsReadBody(t, resp)
 	var result struct {
 		LogGroups []struct {
-			LogGroupName string `json:"LogGroupName"`
+			LogGroupName string `json:"logGroupName"`
 		} `json:"logGroups"`
 	}
 	require.NoError(t, json.Unmarshal(body, &result))
@@ -123,7 +136,7 @@ func TestCWLogs_LogGroupPrefix(t *testing.T) {
 	body := cwLogsReadBody(t, resp)
 	var result struct {
 		LogGroups []struct {
-			LogGroupName string `json:"LogGroupName"`
+			LogGroupName string `json:"logGroupName"`
 		} `json:"logGroups"`
 	}
 	require.NoError(t, json.Unmarshal(body, &result))
@@ -152,7 +165,7 @@ func TestCWLogs_LogStreamLifecycle(t *testing.T) {
 	body := cwLogsReadBody(t, resp)
 	var result struct {
 		LogStreams []struct {
-			LogStreamName string `json:"LogStreamName"`
+			LogStreamName string `json:"logStreamName"`
 		} `json:"logStreams"`
 	}
 	require.NoError(t, json.Unmarshal(body, &result))
@@ -208,7 +221,7 @@ func TestCWLogs_PutAndGetLogEvents(t *testing.T) {
 	body = cwLogsReadBody(t, resp)
 	var getResult struct {
 		Events []struct {
-			Message string `json:"Message"`
+			Message string `json:"message"`
 		} `json:"events"`
 	}
 	require.NoError(t, json.Unmarshal(body, &getResult))

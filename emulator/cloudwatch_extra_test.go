@@ -328,7 +328,7 @@ func TestLambda_AutoCreatesLogGroup(t *testing.T) {
 
 	var result struct {
 		LogGroups []struct {
-			LogGroupName string `json:"LogGroupName"`
+			LogGroupName string `json:"logGroupName"`
 		} `json:"logGroups"`
 	}
 	require.NoError(t, json.Unmarshal(logsW.Body.Bytes(), &result))

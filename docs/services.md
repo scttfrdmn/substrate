@@ -3053,15 +3053,46 @@ KMS API requests: $0.03 per 10,000 requests.
 | Operation | Notes |
 |-----------|-------|
 | CreateLogGroup | |
-| DeleteLogGroup | |
-| DescribeLogGroups | |
+| DeleteLogGroup | Also removes the group's streams and their events |
+| DescribeLogGroups | Reports both ARN forms — see below |
+| PutRetentionPolicy | `retentionInDays` must be one of the API's 22 enumerated values |
+| DeleteRetentionPolicy | The documented way to make a group's events never expire |
 | CreateLogStream | |
 | DeleteLogStream | |
 | DescribeLogStreams | |
 | PutLogEvents | Accepts up to 10,000 events per call |
 | GetLogEvents | Supports nextForwardToken pagination |
+| FilterLogEvents | Substring match on `filterPattern`; reports `searchedLogStreams` |
 
 Lambda auto-creates `/aws/lambda/{name}` log groups.
+
+### Response members are camelCase
+
+CloudWatch Logs is a JSON-1.1 service whose members are camelCase, and an SDK
+matches response members against the service model **case-sensitively** — a
+PascalCase member does not fail to parse, it parses to *nothing*, so a caller
+receives one empty object per resource with an HTTP 200 and no error. Earlier
+releases had `DescribeLogGroups`, `DescribeLogStreams` and `GetLogEvents` doing
+exactly that (`FilterLogEvents` did not), so a `len()` assertion passed while every
+field read raised `KeyError`. All four now emit the API's member names.
+
+`DescribeLogGroups` reports **both** ARN forms the reference documents as distinct
+members: `logGroupArn` without a trailing `:*`, which is what a
+`logGroupIdentifier` input or a tagging API wants, and `arn` with it, which is
+what an IAM policy wants for most actions. They differ only in that suffix.
+
+A group with no retention policy omits `retentionInDays` entirely rather than
+reporting `0`, because the API has no value meaning "never" — the member's absence
+is the signal, which is why `DeleteRetentionPolicy` exists.
+
+`PutRetentionPolicy` accepts only the enumerated day counts (1, 3, 5, 7, 14, 30,
+60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288,
+3653); anything else — including a plausible 45 or 100 — is an
+`InvalidParameterException`. Note that this service returns
+`ResourceNotFoundException` at **HTTP 400**, not 404, as its reference documents:
+the error code travels in the body's `__type`, not the status line. Substrate's
+older group- and stream-level not-found responses on the other operations still
+use 404 and are not changed here.
 
 ### Betty CFN resource types
 
