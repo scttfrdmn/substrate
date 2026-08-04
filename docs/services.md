@@ -3599,6 +3599,18 @@ Every requestUri in the apigatewayv2 API is under `/v2/` and none of v1's is, so
 the split is exact. A consumer pointing an `apigatewayv2` client at Substrate needs
 no special configuration.
 
+**Response shape:** every member is lowerCamel as the service model spells it
+(`apiId`, `routeId`, `integrationId`, `apiEndpoint`, `protocolType`, …), and
+collection responses nest their elements under **`items`** — lowercase, unlike v1's
+singular `item`. Substrate returns every element in one page and honours no
+pagination token, so no response carries a `nextToken`. Two members v1 has are
+absent here because the v2 model does not declare them: a route, integration, stage
+or API mapping reports no `apiId` (the API is a path parameter of the request), and
+a domain name reports no `regionalDomainName` — v2 nests that hostname as
+`domainNameConfigurations[].apiGatewayDomainName`. Earlier releases sent PascalCase
+members under an `Items` envelope, which an AWS SDK parsed to an empty result with
+no error (#529).
+
 ### Supported operations
 
 | Operation | Notes |

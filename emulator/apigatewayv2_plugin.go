@@ -301,7 +301,7 @@ func (p *APIGatewayV2Plugin) createAPI(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region), apiID)
 
-	return apigwJSONResponse(http.StatusCreated, api)
+	return apigwJSONResponse(http.StatusCreated, v2APIWire(api))
 }
 
 func (p *APIGatewayV2Plugin) getAPI(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -317,7 +317,7 @@ func (p *APIGatewayV2Plugin) getAPI(ctx *RequestContext, apiID string) (*AWSResp
 	if err := json.Unmarshal(data, &api); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getApi unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, api)
+	return apigwJSONResponse(http.StatusOK, v2APIWire(api))
 }
 
 func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext) (*AWSResponse, error) {
@@ -327,7 +327,7 @@ func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext) (*AWSResponse, error) 
 		return nil, fmt.Errorf("apigatewayv2 getApis loadIndex: %w", err)
 	}
 
-	items := make([]V2ApiState, 0, len(ids))
+	items := make([]v2APIOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2APIKey(ctx.AccountID, ctx.Region, id))
 		if getErr != nil || data == nil {
@@ -335,14 +335,11 @@ func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext) (*AWSResponse, error) 
 		}
 		var api V2ApiState
 		if json.Unmarshal(data, &api) == nil {
-			items = append(items, api)
+			items = append(items, v2APIWire(api))
 		}
 	}
 
-	type response struct {
-		Items []V2ApiState `json:"Items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2APIOut]{Items: items})
 }
 
 func (p *APIGatewayV2Plugin) deleteAPI(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -396,7 +393,7 @@ func (p *APIGatewayV2Plugin) updateAPI(ctx *RequestContext, req *AWSRequest, api
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2APIKey(ctx.AccountID, ctx.Region, apiID), updated); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 updateApi state.Put: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, api)
+	return apigwJSONResponse(http.StatusOK, v2APIWire(api))
 }
 
 // --- Route operations --------------------------------------------------------
@@ -433,7 +430,7 @@ func (p *APIGatewayV2Plugin) createRoute(ctx *RequestContext, req *AWSRequest, a
 	}
 	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2RouteIDsKey(ctx.AccountID, ctx.Region, apiID), route.RouteID)
 
-	return apigwJSONResponse(http.StatusCreated, route)
+	return apigwJSONResponse(http.StatusCreated, v2RouteWire(route))
 }
 
 func (p *APIGatewayV2Plugin) getRoute(ctx *RequestContext, apiID, routeID string) (*AWSResponse, error) {
@@ -449,7 +446,7 @@ func (p *APIGatewayV2Plugin) getRoute(ctx *RequestContext, apiID, routeID string
 	if err := json.Unmarshal(data, &route); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getRoute unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, route)
+	return apigwJSONResponse(http.StatusOK, v2RouteWire(route))
 }
 
 func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -459,7 +456,7 @@ func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, apiID string) (*AWSR
 		return nil, fmt.Errorf("apigatewayv2 getRoutes loadIndex: %w", err)
 	}
 
-	items := make([]V2RouteState, 0, len(ids))
+	items := make([]v2RouteOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2RouteKey(ctx.AccountID, ctx.Region, apiID, id))
 		if getErr != nil || data == nil {
@@ -467,14 +464,11 @@ func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, apiID string) (*AWSR
 		}
 		var route V2RouteState
 		if json.Unmarshal(data, &route) == nil {
-			items = append(items, route)
+			items = append(items, v2RouteWire(route))
 		}
 	}
 
-	type response struct {
-		Items []V2RouteState `json:"Items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2RouteOut]{Items: items})
 }
 
 func (p *APIGatewayV2Plugin) deleteRoute(ctx *RequestContext, apiID, routeID string) (*AWSResponse, error) {
@@ -518,7 +512,7 @@ func (p *APIGatewayV2Plugin) createIntegration(ctx *RequestContext, req *AWSRequ
 	}
 	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2IntegrationIDsKey(ctx.AccountID, ctx.Region, apiID), integ.IntegrationID)
 
-	return apigwJSONResponse(http.StatusCreated, integ)
+	return apigwJSONResponse(http.StatusCreated, v2IntegrationWire(integ))
 }
 
 func (p *APIGatewayV2Plugin) getIntegration(ctx *RequestContext, apiID, intID string) (*AWSResponse, error) {
@@ -534,7 +528,7 @@ func (p *APIGatewayV2Plugin) getIntegration(ctx *RequestContext, apiID, intID st
 	if err := json.Unmarshal(data, &integ); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getIntegration unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, integ)
+	return apigwJSONResponse(http.StatusOK, v2IntegrationWire(integ))
 }
 
 func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -544,7 +538,7 @@ func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, apiID string) 
 		return nil, fmt.Errorf("apigatewayv2 getIntegrations loadIndex: %w", err)
 	}
 
-	items := make([]V2IntegrationState, 0, len(ids))
+	items := make([]v2IntegrationOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2IntegrationKey(ctx.AccountID, ctx.Region, apiID, id))
 		if getErr != nil || data == nil {
@@ -552,14 +546,11 @@ func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, apiID string) 
 		}
 		var integ V2IntegrationState
 		if json.Unmarshal(data, &integ) == nil {
-			items = append(items, integ)
+			items = append(items, v2IntegrationWire(integ))
 		}
 	}
 
-	type response struct {
-		Items []V2IntegrationState `json:"Items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2IntegrationOut]{Items: items})
 }
 
 func (p *APIGatewayV2Plugin) deleteIntegration(ctx *RequestContext, apiID, intID string) (*AWSResponse, error) {
@@ -610,7 +601,7 @@ func (p *APIGatewayV2Plugin) createStageV2(ctx *RequestContext, req *AWSRequest,
 	}
 	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2StageNamesKey(ctx.AccountID, ctx.Region, apiID), stage.StageName)
 
-	return apigwJSONResponse(http.StatusCreated, stage)
+	return apigwJSONResponse(http.StatusCreated, v2StageWire(stage))
 }
 
 func (p *APIGatewayV2Plugin) getStageV2(ctx *RequestContext, apiID, stageName string) (*AWSResponse, error) {
@@ -626,7 +617,7 @@ func (p *APIGatewayV2Plugin) getStageV2(ctx *RequestContext, apiID, stageName st
 	if err := json.Unmarshal(data, &stage); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getStage unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, stage)
+	return apigwJSONResponse(http.StatusOK, v2StageWire(stage))
 }
 
 func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -636,7 +627,7 @@ func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, apiID string) (*AW
 		return nil, fmt.Errorf("apigatewayv2 getStages loadIndex: %w", err)
 	}
 
-	items := make([]V2StageState, 0, len(names))
+	items := make([]v2StageOut, 0, len(names))
 	for _, name := range names {
 		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2StageKey(ctx.AccountID, ctx.Region, apiID, name))
 		if getErr != nil || data == nil {
@@ -644,14 +635,11 @@ func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, apiID string) (*AW
 		}
 		var stage V2StageState
 		if json.Unmarshal(data, &stage) == nil {
-			items = append(items, stage)
+			items = append(items, v2StageWire(stage))
 		}
 	}
 
-	type response struct {
-		Items []V2StageState `json:"Items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2StageOut]{Items: items})
 }
 
 func (p *APIGatewayV2Plugin) deleteStageV2(ctx *RequestContext, apiID, stageName string) (*AWSResponse, error) {
@@ -697,7 +685,7 @@ func (p *APIGatewayV2Plugin) createAuthorizerV2(ctx *RequestContext, req *AWSReq
 	}
 	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2AuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), auth.AuthorizerID)
 
-	return apigwJSONResponse(http.StatusCreated, auth)
+	return apigwJSONResponse(http.StatusCreated, v2AuthorizerWire(auth))
 }
 
 func (p *APIGatewayV2Plugin) getAuthorizerV2(ctx *RequestContext, apiID, authID string) (*AWSResponse, error) {
@@ -713,7 +701,7 @@ func (p *APIGatewayV2Plugin) getAuthorizerV2(ctx *RequestContext, apiID, authID 
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getAuthorizer unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, auth)
+	return apigwJSONResponse(http.StatusOK, v2AuthorizerWire(auth))
 }
 
 func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -723,7 +711,7 @@ func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, apiID string)
 		return nil, fmt.Errorf("apigatewayv2 getAuthorizers loadIndex: %w", err)
 	}
 
-	items := make([]V2AuthorizerState, 0, len(ids))
+	items := make([]v2AuthorizerOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2AuthorizerKey(ctx.AccountID, ctx.Region, apiID, id))
 		if getErr != nil || data == nil {
@@ -731,14 +719,11 @@ func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, apiID string)
 		}
 		var auth V2AuthorizerState
 		if json.Unmarshal(data, &auth) == nil {
-			items = append(items, auth)
+			items = append(items, v2AuthorizerWire(auth))
 		}
 	}
 
-	type response struct {
-		Items []V2AuthorizerState `json:"Items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2AuthorizerOut]{Items: items})
 }
 
 func (p *APIGatewayV2Plugin) deleteAuthorizerV2(ctx *RequestContext, apiID, authID string) (*AWSResponse, error) {
@@ -780,7 +765,7 @@ func (p *APIGatewayV2Plugin) createDeploymentV2(ctx *RequestContext, req *AWSReq
 	}
 	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2DeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), dep.DeploymentID)
 
-	return apigwJSONResponse(http.StatusCreated, dep)
+	return apigwJSONResponse(http.StatusCreated, v2DeploymentWire(dep))
 }
 
 func (p *APIGatewayV2Plugin) getDeploymentV2(ctx *RequestContext, apiID, depID string) (*AWSResponse, error) {
@@ -796,7 +781,7 @@ func (p *APIGatewayV2Plugin) getDeploymentV2(ctx *RequestContext, apiID, depID s
 	if err := json.Unmarshal(data, &dep); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getDeployment unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, dep)
+	return apigwJSONResponse(http.StatusOK, v2DeploymentWire(dep))
 }
 
 // --- Domain name and API mapping operations ----------------------------------
@@ -825,7 +810,7 @@ func (p *APIGatewayV2Plugin) createDomainNameV2(ctx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("apigatewayv2 createDomainName state.Put: %w", err)
 	}
 
-	return apigwJSONResponse(http.StatusCreated, dn)
+	return apigwJSONResponse(http.StatusCreated, v2DomainNameWire(dn))
 }
 
 func (p *APIGatewayV2Plugin) getDomainNameV2(ctx *RequestContext, name string) (*AWSResponse, error) {
@@ -841,7 +826,7 @@ func (p *APIGatewayV2Plugin) getDomainNameV2(ctx *RequestContext, name string) (
 	if err := json.Unmarshal(data, &dn); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 getDomainName unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, dn)
+	return apigwJSONResponse(http.StatusOK, v2DomainNameWire(dn))
 }
 
 func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSRequest, domainName string) (*AWSResponse, error) {
@@ -855,14 +840,7 @@ func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSReque
 	}
 
 	mappingID := generateAPIGatewayID()
-	type apiMappingState struct {
-		APIMappingID  string `json:"ApiMappingId"`
-		APIID         string `json:"ApiId"`
-		Stage         string `json:"Stage"`
-		APIMappingKey string `json:"ApiMappingKey,omitempty"`
-		DomainName    string `json:"DomainName"`
-	}
-	mapping := apiMappingState{
+	mapping := v2APIMappingState{
 		APIMappingID:  mappingID,
 		APIID:         body.APIID,
 		Stage:         body.Stage,
@@ -879,5 +857,5 @@ func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("apigatewayv2 createAPIMapping state.Put: %w", err)
 	}
 
-	return apigwJSONResponse(http.StatusCreated, mapping)
+	return apigwJSONResponse(http.StatusCreated, v2APIMappingWire(mapping))
 }

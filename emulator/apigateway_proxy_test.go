@@ -342,9 +342,11 @@ func TestAPIGatewayProxy_V2EndToEnd(t *testing.T) {
 	if err := json.Unmarshal(apiBody, &apiResult); err != nil {
 		t.Fatalf("decode v2 api: %v", err)
 	}
-	apiID, _ := apiResult["ApiId"].(string)
+	// The wire key is "apiId", lowercase — the PascalCase spelling this read
+	// before #529 is what no SDK could parse.
+	apiID, _ := apiResult["apiId"].(string)
 	if apiID == "" {
-		t.Fatalf("no ApiId in response: %s", apiBody)
+		t.Fatalf("no apiId in response: %s", apiBody)
 	}
 
 	// Create integration.
@@ -365,7 +367,7 @@ func TestAPIGatewayProxy_V2EndToEnd(t *testing.T) {
 	if err := json.Unmarshal(intBody, &intResult); err != nil {
 		t.Fatalf("decode integration: %v", err)
 	}
-	intID, _ := intResult["IntegrationId"].(string)
+	intID, _ := intResult["integrationId"].(string)
 
 	// Create a $default route.
 	routePayload, _ := json.Marshal(map[string]interface{}{

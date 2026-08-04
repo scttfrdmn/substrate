@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **API Gateway v2 responses are the shape an SDK parses** (#529). Every
+  `apigatewayv2` response used PascalCase members under an `Items` envelope, so
+  `aws apigatewayv2 create-api --query ApiId` printed `None` and
+  `get-apis --query 'length(Items)'` failed on a null — the same
+  case-sensitive-`locationName` mechanism as v1 and MSK below, and the same total
+  parse failure rather than a member missing here and there. This was invisible over
+  the wire until the routing fix below made v2 reachable by an SDK at all.
+
+  Same remedy: the seven state types keep their PascalCase tags and are
+  **untouched**, so **state encoding is unchanged and recorded runs replay**; nine
+  response-only element types tagged from the model are projected from them, and none
+  carries an `AccountID` or `Region` member at all. The five list envelopes now emit
+  `items` — lowercase, unlike v1's singular `item`; the two spellings differ and both
+  are transcribed from their own model.
+
+  v2 is far more regular than v1: all 1,545 members of its response shapes are the
+  plain lowerCamel of their member names, the only irregular spellings in the whole
+  model (`ResourceArn -> "resource-arn"`) being on the three tag *request* shapes
+  that substrate does not route. Each tag was still transcribed from the model rather
+  than lowercased programmatically, because a mechanical transform is exactly what
+  gets an exception wrong.
+
+  Three members are now absent, from the model rather than the previous code. A
+  route, integration, stage and API mapping report no `apiId`: the API is a path
+  parameter of the request and not a member of any of those shapes, so botocore
+  discarded the key regardless. A domain name reports no `regionalDomainName` — that
+  spelling is v1's, and v2 has no top-level equivalent; substrate now reports the
+  same hostname where the v2 model puts it, as
+  `domainNameConfigurations[].apiGatewayDomainName`, which is what makes it visible
+  to an SDK instead of silently dropped. And no response carries a `nextToken`, since
+  substrate returns every element in one page and honours no token. Unset optionals
+  are omitted rather than sent as `""` or `null`.
+
+  The CloudFormation v2 deploy handlers read `ApiId`, `RouteId`, `IntegrationId` and
+  `AuthorizerId` out of these responses to set a resource's physical ID; they now read
+  the wire spellings. They worked before only because Go's `json.Unmarshal` is
+  case-insensitive, which is the same reason ~10 assertions in
+  `apigatewayv2_plugin_test.go` and `apigateway_proxy_test.go` were **wrong today and
+  passed anyway**. Updating them is part of the fix. Those CloudFormation tests
+  asserted only a resource count, so a physical ID silently falling back to a logical
+  ID or a route key would not have failed one; they now assert the ID itself, which is
+  what makes every `Ref` in a stack verifiable.
+
+  `GetApiMappings` turns out to be unrouted (`POST` on that path is the only mapping
+  operation implemented). That is a missing operation rather than a wrong response
+  shape, so it is filed as #566 rather than folded in here; `create-api-mapping`
+  itself parses correctly.
+
 - **API Gateway v1 responses are the shape an SDK parses** (#529). Every `apigateway`
   response substrate sent used PascalCase members under an `items` envelope, and
   botocore matches a response key against the model's `locationName`

@@ -185,6 +185,26 @@ type V2DomainNameState struct {
 	Region string `json:"Region"`
 }
 
+// v2APIMappingState holds the state of an API Gateway v2 API mapping. It was
+// declared inside createAPIMapping until #529 needed a wire projection for it;
+// its tags are unchanged, because they are a persisted format.
+type v2APIMappingState struct {
+	// APIMappingID is the unique identifier for the mapping.
+	APIMappingID string `json:"ApiMappingId"`
+
+	// APIID is the API this mapping points at.
+	APIID string `json:"ApiId"`
+
+	// Stage is the stage this mapping points at.
+	Stage string `json:"Stage"`
+
+	// APIMappingKey is the optional path key the mapping is mounted under.
+	APIMappingKey string `json:"ApiMappingKey,omitempty"`
+
+	// DomainName is the custom domain that owns this mapping.
+	DomainName string `json:"DomainName"`
+}
+
 // --- State key helpers -------------------------------------------------------
 
 func apigwv2APIKey(accountID, region, apiID string) string {
