@@ -99,6 +99,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not describe the extent of a part.
 
 ### Fixed
+- **A Batch compute environment, job queue and job definition can be read back after
+  it is created** (#530). `DescribeComputeEnvironments`, `DescribeJobQueues` and
+  `DescribeJobDefinitions` were unrouted, so each answered an unknown-operation error
+  while `DescribeJobs` — the one read that was routed — worked. A test could perform
+  the write and had no way to verify it.
+
+  **The issue's premise was wrong, and correcting it made the change larger than
+  filed.** It reported these as read handlers over state the creates already
+  persisted. None of the three creates persisted anything: each unmarshalled only the
+  name out of the body, echoed it back, and never touched the state manager. So the
+  whole request body — `type`, `state`, `priority`, `computeEnvironmentOrder`,
+  `containerProperties`, every member a describe has to report — was not merely unread
+  but never stored, and the creates had to start recording before there was anything
+  to answer from.
+
+  Two consequences of that came with it. All three creates took `_ *RequestContext`
+  and minted a hardcoded `arn:aws:batch:us-east-1:000000000000:…` for every caller,
+  which is wrong for any caller outside that account and Region and propagates,
+  because that ARN is the identifier `computeEnvironmentOrder` and `SubmitJob` take;
+  resources are now recorded against and reported to the caller's own account and
+  Region, like every other partitioned plugin. And `RegisterJobDefinition` answered
+  `"revision": 1` unconditionally, so registering one name twice was
+  indistinguishable — each registration is now its own revision and its own record,
+  which is what makes `${name}:${revision}` addressable at all.
+
+  The reads honour the documented filters (`computeEnvironments`/`jobQueues` as names
+  or full ARNs, `jobDefinitions` as `${name}:${revision}` or an ARN,
+  `jobDefinitionName` for every revision of a definition, `status`) and paginate on
+  `maxResults`/`nextToken`, omitting the token once the results are exhausted. An
+  absent filter reports every resource in scope; a filter entry naming something that
+  does not exist is skipped rather than refused, since the operations document no
+  not-found error. `jobDefinitions` wins outright over `jobDefinitionName` when both
+  are sent, per the reference's "can't be used with other parameters". A bad request
+  is a `ClientException` at HTTP 400, the only 400-class error any Batch operation
+  declares.
+
+  A registered definition is `ACTIVE` and the `status` filter selects on it. Nothing
+  yet reports one `INACTIVE`, because `DeregisterJobDefinition` is not routed either
+  — filed separately as #555 rather than widening this — but the status is stored on
+  the resource rather than synthesised at read time, so a deregistration can set it.
 - **An S3 bucket notification configuration submitted the way the API documents it
   is now parsed, stored, reported back — and dispatched** (#542). This is not a
   lost-configuration bug. It is a working feature that could not be turned on: every
