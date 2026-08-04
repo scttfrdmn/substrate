@@ -1656,9 +1656,9 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFunction | Stores function metadata; no actual execution |
-| GetFunction | |
-| UpdateFunctionCode | |
+| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package |
+| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image) |
+| UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither |
 | UpdateFunctionConfiguration | |
 | DeleteFunction | |
 | ListFunctions | |
@@ -1670,12 +1670,83 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | UntagResource | |
 | ListTags | |
 
+### What CodeSize and CodeSha256 report
+
+`CodeSize` is "the size of the function's deployment package, in bytes" and
+`CodeSha256` is "the SHA256 hash of the function's deployment package". What
+substrate can report depends on whether it holds the package:
+
+| Code source | `CodeSize` | `CodeSha256` |
+|---|---|---|
+| `Code.ZipFile` (inline, base64) | the decoded package's length | the real SHA256 of those bytes |
+| `Code.S3Bucket` + `Code.S3Key` | the S3 object's recorded length | the object's **ETag**, not a SHA256 — see below |
+| `Code.S3ObjectVersion` | that version's length | that version's ETag |
+| `Code.ImageUri` | 0 — an image is not a package substrate holds | a digest of the image URI |
+| no `Code` at all | 0 | empty |
+
+Two of these are substrate's own decisions rather than the API model:
+
+**The digest of an S3-sourced package is the object's ETag.** Substrate does not
+fetch the object's bytes — nothing executes them unless they arrived inline — so it
+cannot compute the SHA256 real Lambda would report. It reports the ETag instead,
+unquoted. For a single-part upload that ETag is the MD5 of the body, so it changes
+exactly when the package changes, which is what a caller comparing digests across
+deploys is asking. Do not assert that it equals a SHA256 you computed yourself; do
+assert that it changes when you upload different bytes and does not when you do not.
+An image-packaged function's digest is likewise derived from its URI.
+
+**An absent S3 object does not fail the create.** Real Lambda refuses a
+`CreateFunction` naming an object that is not there. Substrate accepts it, logs a
+warning, and reports `CodeSize: 0` with no digest. The reason is that substrate's S3
+and Lambda state are independent and a template may legitimately name an object a
+test never uploaded; failing the create would make a stack undeployable for a reason
+unrelated to what the test is checking. A deleted object — one hidden by a delete
+marker — counts as absent, not as a zero-length package.
+
+`CodeSize` and `CodeSha256` describe the package. `RevisionId` does not: it is not a
+digest of anything and advances on every `UpdateFunctionCode`, including one that
+changes no code.
+
+### An image-packaged function reports its image
+
+`Code.ImageUri` is the documented spelling and implies `PackageType: Image`, which a
+request need not state — real Lambda rejects an `ImageUri` alongside
+`PackageType: Zip`, so inferring it cannot contradict a valid request. A top-level
+`ImageUri` is also accepted, for compatibility with what substrate took before
+`Code.ImageUri` worked; `Code.ImageUri` wins when both are sent.
+
+`GetFunction` reports such a function through `Code.RepositoryType: ECR` with
+`ImageUri` and `ResolvedImageUri`, and no `Location` — `RepositoryType` is "the
+service that's hosting the file", and reporting a presigned S3 URL for an image is a
+claim a caller can act on and be wrong about.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::Lambda::Function | FunctionName | |
+| AWS::Lambda::Function | FunctionName | `Code` is deployed in every form; [inline `ZipFile` is zipped](#an-inline-zipfile-is-zipped-into-a-package) |
 | AWS::Lambda::EventSourceMapping | — | |
+
+### An inline ZipFile is zipped into a package
+
+The resource type's `Code.ZipFile` and the API's `Code.ZipFile` are not the same
+thing, which is the one place the deployer does more than forward a property.
+
+The resource type's is "the source code of your Lambda function": "CloudFormation
+places it in a file named `index` and zips it to create a deployment package". The
+API's is "the base64-encoded contents of the deployment package". So substrate builds
+the archive CloudFormation would have built — a single entry named `index` with the
+extension the runtime reads (`.js` for `nodejs*`, `.py` for `python*`, bare `index`
+otherwise) — and sends that. `CodeSize` is therefore the **archive's** length, not the
+source's, and `CodeSha256` is a digest of real bytes.
+
+The archive carries no timestamps, so the same template deployed twice produces the
+same package and the same digest. A digest that changed on every deploy would not be
+worth comparing.
+
+`Code.S3Bucket`, `Code.S3Key`, `Code.S3ObjectVersion` and `Code.ImageUri` are
+forwarded as the API spells them, and each goes through the template's `Ref` and
+pseudo-parameter resolution like every other property.
 
 ### Cost
 
