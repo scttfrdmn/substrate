@@ -752,6 +752,87 @@ func TestParseAWSRequest_ServiceFromSigV4Auth(t *testing.T) {
 	}
 }
 
+// TestParseAWSRequest_APIGatewayVersionRouting pins the path discriminator that
+// makes APIGatewayV2Plugin reachable. Both clients sign as "apigateway" and use
+// the same hostname, so before #529 every v2 request landed on the v1 plugin and
+// came back NotFoundException. The v2 model's URI space is entirely under "/v2/"
+// and the v1 model's contains no "/v2/" path, so the split is exact — these cases
+// cover both directions plus the guard that keeps an unrelated service's "/v2/"
+// endpoint out of it.
+func TestParseAWSRequest_APIGatewayVersionRouting(t *testing.T) {
+	t.Parallel()
+	const apigwScope = "AKIATEST12345678901/20240101/us-east-1/apigateway/aws4_request"
+	tests := []struct {
+		name        string
+		authScope   string
+		host        string
+		path        string
+		wantService string
+	}{
+		{"v2 CreateApi by auth scope", apigwScope, "", "/v2/apis", "apigatewayv2"},
+		{"v2 GetRoutes by auth scope", apigwScope, "", "/v2/apis/abc123/routes", "apigatewayv2"},
+		{"v2 by host", "", "apigateway.us-east-1.amazonaws.com", "/v2/apis", "apigatewayv2"},
+		{"v1 restapis stays v1", apigwScope, "", "/restapis", "apigateway"},
+		{"v1 nested path stays v1", apigwScope, "", "/restapis/abc123/resources", "apigateway"},
+		{"v1 usageplans stays v1", apigwScope, "", "/usageplans", "apigateway"},
+		{"v1 root stays v1", apigwScope, "", "/account", "apigateway"},
+		// A v1 rest-api id is ten lowercase alphanumerics and a stage name is
+		// caller-chosen, so either can contain "v2". Only the "/v2/" *prefix*
+		// selects the v2 plugin.
+		{"v1 id containing v2 stays v1", apigwScope, "", "/restapis/abcv2ghijk", "apigateway"},
+		{"v1 stage named v2 stays v1", apigwScope, "", "/restapis/abc123defg/stages/v2", "apigateway"},
+		// The refinement is scoped to apigateway: another service is free to use a
+		// "/v2/" path and must not be captured.
+		{"other service with /v2/ path", "AKIATEST12345678901/20240101/us-east-1/kafka/aws4_request", "", "/v2/clusters", "msk"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodPost, "http://localhost:4566"+tt.path, nil)
+			r.Host = "localhost:4566"
+			if tt.host != "" {
+				r.Host = tt.host
+			}
+			if tt.authScope != "" {
+				r.Header.Set("Authorization",
+					"AWS4-HMAC-SHA256 Credential="+tt.authScope+", SignedHeaders=host, Signature=abc123")
+			}
+
+			req, _, err := emulator.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantService, req.Service)
+		})
+	}
+}
+
+// TestParseAWSRequest_SSOAdminTargetPrefix pins the real sso-admin target prefix.
+// "SWBExternalService" is the sso-admin model's targetPrefix and what clients
+// actually send; the previously-mapped "AWSSSOAdminService" was a guess that
+// matched nothing, so every call fell through to "service not emulated" (#561).
+// The guessed prefix is retained deliberately, so both are asserted.
+func TestParseAWSRequest_SSOAdminTargetPrefix(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{
+		"SWBExternalService.ListInstances",
+		"SWBExternalService.CreatePermissionSet",
+		"AWSSSOAdminService.ListInstances",
+	} {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+			r.Host = "localhost:4566"
+			r.Header.Set("X-Amz-Target", target)
+
+			req, _, err := emulator.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, "sso", req.Service)
+		})
+	}
+}
+
 func TestNormalizeS3VirtualHost(t *testing.T) {
 	tests := []struct {
 		host       string
