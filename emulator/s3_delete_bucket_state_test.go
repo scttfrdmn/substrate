@@ -110,16 +110,15 @@ func s3DeleteBucketSubresources() []s3BucketSubresource {
 			name: "bucket notification configuration",
 			configure: func(t *testing.T, srv *emulator.Server) {
 				t.Helper()
-				// Substrate unmarshals this body by Go field name, so the element
-				// names are QueueConfigurations/QueueArn/Events rather than real
-				// S3's QueueConfiguration/Queue/Event, and the marker is the queue
-				// ARN rather than an Id. Written the AWS way the body parses to an
-				// empty configuration and stores nothing — which would make this
-				// sub-test pass whether the key is cleared or not (#542).
-				cfg := `<NotificationConfiguration><QueueConfigurations>` +
-					`<QueueArn>arn:aws:sqs:us-east-1:123456789012:leak-marker</QueueArn>` +
-					`<Events>s3:ObjectCreated:*</Events>` +
-					`</QueueConfigurations></NotificationConfiguration>`
+				// Real S3's element names, singular and with the destination named
+				// after the service. Until #542 substrate matched this body by Go
+				// field name, so written this way it parsed to an empty
+				// configuration and stored nothing — which made this sub-test pass
+				// whether or not the delete cleared the key.
+				cfg := `<NotificationConfiguration><QueueConfiguration>` +
+					`<Queue>arn:aws:sqs:us-east-1:123456789012:leak-marker</Queue>` +
+					`<Event>s3:ObjectCreated:*</Event>` +
+					`</QueueConfiguration></NotificationConfiguration>`
 				code := s3Request(t, srv, http.MethodPut, "/recycled?notification",
 					[]byte(cfg), nil).Code
 				require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, code)

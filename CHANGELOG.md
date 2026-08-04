@@ -98,6 +98,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bytes=0-` is refused where a `GET` would accept it, because an open-ended range
   does not describe the extent of a part.
 
+### Fixed
+- **An S3 bucket notification configuration submitted the way the API documents it
+  is now parsed, stored, reported back — and dispatched** (#542). This is not a
+  lost-configuration bug. It is a working feature that could not be turned on: every
+  S3 event notification configured through the real API was silently off.
+
+  `PutBucketNotificationConfiguration` unmarshalled the request body into
+  `S3NotificationConfiguration`, a struct carrying only `json` tags. Go's XML decoder
+  falls back to matching Go field *names* when a field has no `xml` tag, and none of
+  the API's element names are substrate's field names: the wire names each
+  configuration in the **singular** (`TopicConfiguration`, `QueueConfiguration`,
+  `CloudFunctionConfiguration`), names the destination after the service rather than
+  the field (`Topic`, `Queue`, `CloudFunction` — not `TopicArn`, `QueueArn`,
+  `LambdaFunctionArn`), repeats a bare `Event` per event rather than nesting under
+  `Events`, and names the key filter's inner element `S3Key` rather than `Key`. So a
+  real-S3 body matched **nothing**.
+
+  What made it invisible is that `xml.Unmarshal` reports **no error** for a body
+  whose elements match no field. The handler's JSON fallback therefore never ran, an
+  empty configuration was persisted, and the request answered `200`. Since an empty
+  configuration is also the documented way to *disable* notifications, the effect of
+  configuring a notification the AWS way was to turn notifications off.
+
+  `fireNotifications` reads that same record, which is the more serious half and was
+  not in the report: with an empty configuration stored, no event was ever
+  dispatched. A test asserting a message arrives failed far from its assertion, and
+  one asserting no message arrives passed vacuously.
+
+  The remedy follows the one #528 established for CloudWatch Logs, because the struct
+  is dual-role — it is also the persisted encoding, so retagging it would have fixed
+  the wire and changed the stored format in the same edit, stranding existing
+  records. The state struct and its `json` tags are untouched; a set of wire types
+  with the correct `xml` element names sits beside them, with projections both ways,
+  and `EventBridgeConfiguration` is now recognized, stored and reported (delivery to
+  EventBridge is still not dispatched — substrate has no bus-to-target path for S3
+  events, and `docs/services.md` says so). `fireNotifications` and the API read now
+  share one loader, so a read-back that passes while delivery stays broken is no
+  longer reachable.
+
+  **A non-empty body naming no recognized element is now `400 MalformedXML`.** This
+  refusal is substrate's own choice, not the API model's: without it, a body with the
+  wrong element names is indistinguishable from a deliberate disable, which is
+  exactly how this defect stayed invisible. Substrate's pre-existing JSON body form,
+  keyed on the state shape's `json` tags, is still accepted.
+
+  Two existing tests are worth naming. The round-trip test passed throughout, because
+  a struct marshalled and unmarshalled by its own definition agrees with itself
+  whatever its tags say — the lesson #528/#529 already paid for, and why every new
+  assertion here is against raw wire bytes. And a delete-bucket sub-test had a
+  comment explaining that it wrote a substrate-shaped body *because* the AWS-shaped
+  one stored nothing; it now writes the AWS shape, so what it pins is again the
+  delete clearing the key.
+
 ## [v0.89.0] - 2026-08-03
 
 ### Added
