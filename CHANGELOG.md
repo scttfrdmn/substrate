@@ -151,6 +151,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one stored nothing; it now writes the AWS shape, so what it pins is again the
   delete clearing the key.
 
+- **The stack ARN `CreateStack` returns is now an identifier every stack-scoped
+  operation accepts** (#544). Substrate looked a caller's `StackName` up verbatim, so
+  the `StackId` it had just handed back resolved to no stack — even though the
+  reference documents both forms for each of these operations: "The name or the unique
+  stack ID that's associated with the stack, which aren't always interchangeable."
+
+  `DeleteStack` is the case worth stating plainly, and the reason this is a
+  silent-success bug rather than a lookup gap. It documents no not-found error, so
+  substrate treats an unresolvable name as a stack already gone and succeeds. Handed
+  an ARN, it swept nothing, answered `200`, and left the stack standing — and v0.89.0
+  *widened* the gap by shipping #518's sweep, so a delete by name now really tears
+  resources down while a delete by ARN did nothing. A caller had no error to catch and
+  no status to poll; the next `CreateStack` answering `AlreadyExists` was the only
+  symptom.
+
+  One resolver runs at the plugin boundary, modelled on the `cfnChangeSetName` this
+  repository already had, so the deployer keeps taking a name and its nine
+  `"stack:"`-keyed lookups are untouched. It is applied to every operation that takes
+  a `StackName` — thirteen call sites, not the two the report named, since fixing
+  describe and delete alone would leave the same trap in `GetTemplate`, the change-set
+  family and the drift pair, which are exactly the operations a caller reaches holding
+  a `StackId`. In `DeleteStack` it runs **ahead** of the absent-stack tolerance; that
+  ordering is the fix. `CreateStack` deliberately does not use it: its `StackName` has
+  no unique-stack-ID alternative, because the ID does not exist until that call mints
+  it.
+
+  **The ARN is verified, not merely parsed.** Substrate builds a stack ARN from the
+  caller's partition, Region and account plus a digest over those and the name, so the
+  whole string is recomputable — and it is compared whole, which checks every
+  component at once rather than field by field. Lifting the name out without that
+  check would have let a caller reach, and `DeleteStack` tear down, a stack in another
+  account, Region or partition by hand-writing an ARN: a defect worse than the silent
+  no-op being fixed. An out-of-scope ARN reports the same `ValidationError` an absent
+  stack does, deliberately — a stack outside the caller's scope is one the caller
+  cannot observe, so a distinct error would disclose whether another scope holds a
+  stack by that name.
+
 ## [v0.89.0] - 2026-08-03
 
 ### Added

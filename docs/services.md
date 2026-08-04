@@ -99,7 +99,7 @@ here.
 |-----------|-------|
 | CreateStack | Deploys every resource in `TemplateBody` and returns the stack ARN |
 | UpdateStack | Re-deploys the template; an omitted `TemplateBody` re-uses the stored one |
-| DeleteStack | Deletes the stack **record only**, not the resources it deployed (see below); deleting an absent stack succeeds |
+| DeleteStack | Sweeps the resources the stack deployed, then removes the stack record (see below); deleting an absent stack succeeds |
 | DescribeStacks | One stack by `StackName`, or every stack when omitted |
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
@@ -126,6 +126,33 @@ to deploy after the template parsed is an `InternalFailure` at 500, because the
 request was well-formed and the failure is substrate's. That distinction is drawn
 from the classification the stack model attaches to a failure, not from its
 message, so a message may be reworded without moving any consumer's error code.
+
+### A stack ARN is accepted wherever `StackName` is
+
+`CreateStack` reports the stack's ARN as its `StackId`, and every stack-scoped
+operation takes that identifier in place of the name — "The name or the unique
+stack ID that's associated with the stack", as the reference puts it. That covers
+`UpdateStack`, `DeleteStack`, `DescribeStacks`, `DescribeStackResources`,
+`GetTemplate`, the four change-set operations that take a `StackName`, and both
+drift operations. `CreateStack` is the exception, and the API's: the ID does not
+exist until that call mints it.
+
+```
+ARN=$(aws cloudformation create-stack --stack-name probe \
+        --template-body file:///tmp/probe.json --query StackId --output text)
+aws cloudformation describe-stacks --stack-name "$ARN"   # the stack
+aws cloudformation delete-stack   --stack-name "$ARN"    # sweeps its resources
+```
+
+The ARN is **verified**, not merely parsed for the name inside it. Substrate builds
+a stack ARN from the caller's partition, Region and account plus a digest over
+those and the stack name, so an ARN naming another account, another Region, another
+partition, or a digest that does not belong to the name attached to it is not an
+identifier substrate would have issued — and is refused with the same
+`ValidationError` an absent stack reports. Reporting the two cases identically is
+deliberate: a stack outside the caller's account and Region is one the caller
+cannot observe, so a distinct error would disclose whether some other scope holds a
+stack by that name.
 
 ### Stacks share state with every other plugin
 
