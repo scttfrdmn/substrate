@@ -453,8 +453,9 @@ func proxyCreateRESTAPI(t *testing.T, ts *emulator.TestServer) string {
 	if err := json.Unmarshal(b, &result); err != nil {
 		t.Fatalf("decode restapi: %v — body: %s", err, b)
 	}
-	// RestAPIState uses json tag "Id" (capital I).
-	id, _ := result["Id"].(string)
+	// The wire member is "id", lowercase, as the model spells it (#529). It read
+	// "Id" here before, matching the state struct substrate used to marshal.
+	id, _ := result["id"].(string)
 	return id
 }
 
@@ -468,16 +469,17 @@ func proxyGetRootResourceID(t *testing.T, ts *emulator.TestServer, apiID string)
 	if resp.StatusCode >= 400 {
 		t.Fatalf("GetResources status %d: %s", resp.StatusCode, b)
 	}
+	// The collection envelope is "item", singular — the member's locationName (#529).
 	var result struct {
-		Items []struct {
+		Item []struct {
 			ID   string `json:"id"`
 			Path string `json:"path"`
-		} `json:"items"`
+		} `json:"item"`
 	}
 	if err := json.Unmarshal(b, &result); err != nil {
 		t.Fatalf("decode resources (status %d): %v — body: %s", resp.StatusCode, err, b)
 	}
-	for _, item := range result.Items {
+	for _, item := range result.Item {
 		if item.Path == "/" {
 			return item.ID
 		}

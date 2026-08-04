@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **API Gateway v1 responses are the shape an SDK parses** (#529). Every `apigateway`
+  response substrate sent used PascalCase members under an `items` envelope, and
+  botocore matches a response key against the model's `locationName`
+  **case-sensitively** — so `aws apigateway create-rest-api --query id` printed
+  nothing and `get-rest-apis --query 'length(items)'` failed on a null. Not a field
+  missing here and there: nothing substrate returned parsed.
+
+  Both halves were wrong, and this corrects #529 as filed, which says the envelope
+  key `items` is *"already correct"*. Every v1 collection member is spelled `items`
+  in the model but carries `locationName: "item"` — singular — so `{"items": […]}`
+  parses to nothing and `{"item": […]}` parses. Seven of substrate's eight list
+  handlers sent the plural and now send `item`. `GetStages` is the exception: its
+  model member is literally named `item`, substrate already emitted `item`, and it
+  is deliberately **unchanged** — a blanket rename would have broken the only v1
+  list an SDK could already read. `TestAPIGatewayWire_GetStagesEnvelope` is the
+  regression gate for exactly that.
+
+  Fixed as #528 fixed CloudWatch Logs and as MSK is fixed below: the eleven state
+  types keep their PascalCase tags and are **untouched**, so **state encoding is
+  unchanged and recorded runs replay**; eleven response-only element types tagged
+  from the model are projected from them by a `Wire` function, and none of those
+  types has an `AccountID`, `Region` or `APIId` member at all, so substrate's
+  internal fields cannot leak back through a field someone adds later.
+
+  The projection recurses, which needed a second fix to be observable: `Resource`
+  declares a `resourceMethods` map and `Method` a `methodIntegration`, but substrate
+  stored methods and integrations under their own state keys and never joined them,
+  so both members were permanently absent from every response. `GetResource` and
+  `GetMethod` now report them, projected at all three depths.
+
+  Judgement calls taken from the model rather than the previous code: `providerARNs`
+  keeps its capitalised acronym, the one v1 member that is not the plain lowerCamel
+  of its name; `UsagePlan` reports no `createdDate` and `BasePathMapping` no
+  `domainName`, neither being a member of its shape; unset optionals are omitted
+  rather than sent as `""` or `null`, because real API Gateway omits them and a
+  caller distinguishing absent from null is reading a real observable; and no
+  response carries a `position` token, since substrate returns every element in one
+  page and honours none — an empty token would invite a caller to page on nothing.
+  `GetStage`'s `invokeUrl` is substrate's own convenience that no model declares; it
+  is kept, respelled from `InvokeUrl`, and cannot confuse an SDK because botocore
+  drops a key the model does not declare.
+
+  Existing assertions in `apigateway_plugin_test.go` and `apigateway_proxy_test.go`
+  are updated to the real wire keys. Worth saying plainly: those assertions were
+  **wrong today and passed anyway**, for the same case-insensitivity reason, and one
+  even carried a comment documenting the broken spelling as intended.
+
 - **MSK responses are the shape a Kafka SDK parses** (#529). Every `kafka` response
   substrate sent used PascalCase keys, and botocore matches a response key against
   the model's `locationName` **case-sensitively** — so `aws kafka list-clusters`

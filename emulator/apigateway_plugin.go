@@ -438,7 +438,7 @@ func (p *APIGatewayPlugin) createRestAPI(ctx *RequestContext, req *AWSRequest) (
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), rootResID)
 
-	return apigwJSONResponse(http.StatusCreated, api)
+	return apigwJSONResponse(http.StatusCreated, restAPIWire(api))
 }
 
 func (p *APIGatewayPlugin) getRestAPI(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -454,7 +454,7 @@ func (p *APIGatewayPlugin) getRestAPI(ctx *RequestContext, apiID string) (*AWSRe
 	if err := json.Unmarshal(data, &api); err != nil {
 		return nil, fmt.Errorf("apigateway getRestAPI unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, api)
+	return apigwJSONResponse(http.StatusOK, restAPIWire(api))
 }
 
 func (p *APIGatewayPlugin) getRestAPIs(ctx *RequestContext) (*AWSResponse, error) {
@@ -464,7 +464,7 @@ func (p *APIGatewayPlugin) getRestAPIs(ctx *RequestContext) (*AWSResponse, error
 		return nil, fmt.Errorf("apigateway getRestApis loadIndex: %w", err)
 	}
 
-	items := make([]RestAPIState, 0, len(ids))
+	items := make([]restAPIOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwAPIKey(ctx.AccountID, ctx.Region, id))
 		if getErr != nil || data == nil {
@@ -472,14 +472,11 @@ func (p *APIGatewayPlugin) getRestAPIs(ctx *RequestContext) (*AWSResponse, error
 		}
 		var api RestAPIState
 		if json.Unmarshal(data, &api) == nil {
-			items = append(items, api)
+			items = append(items, restAPIWire(api))
 		}
 	}
 
-	type response struct {
-		Items []RestAPIState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[restAPIOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteRestAPI(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -519,7 +516,7 @@ func (p *APIGatewayPlugin) updateRestAPI(ctx *RequestContext, _ *AWSRequest, api
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwAPIKey(ctx.AccountID, ctx.Region, apiID), updated); err != nil {
 		return nil, fmt.Errorf("apigateway updateRestApi state.Put: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, api)
+	return apigwJSONResponse(http.StatusOK, restAPIWire(api))
 }
 
 // --- Resource operations -----------------------------------------------------
@@ -572,7 +569,7 @@ func (p *APIGatewayPlugin) createResource(ctx *RequestContext, req *AWSRequest, 
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), resID)
 
-	return apigwJSONResponse(http.StatusCreated, res)
+	return apigwJSONResponse(http.StatusCreated, resourceWire(res))
 }
 
 func (p *APIGatewayPlugin) getResource(ctx *RequestContext, apiID, resID string) (*AWSResponse, error) {
@@ -588,7 +585,10 @@ func (p *APIGatewayPlugin) getResource(ctx *RequestContext, apiID, resID string)
 	if err := json.Unmarshal(data, &res); err != nil {
 		return nil, fmt.Errorf("apigateway getResource unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, res)
+	if res.ResourceMethods, err = p.loadResourceMethods(goCtx, ctx, apiID, resID); err != nil {
+		return nil, err
+	}
+	return apigwJSONResponse(http.StatusOK, resourceWire(res))
 }
 
 func (p *APIGatewayPlugin) getResources(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -598,22 +598,23 @@ func (p *APIGatewayPlugin) getResources(ctx *RequestContext, apiID string) (*AWS
 		return nil, fmt.Errorf("apigateway getResources loadIndex: %w", err)
 	}
 
-	items := make([]ResourceState, 0, len(ids))
+	items := make([]resourceOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwResourceKey(ctx.AccountID, ctx.Region, apiID, id))
 		if getErr != nil || data == nil {
 			continue
 		}
 		var res ResourceState
-		if json.Unmarshal(data, &res) == nil {
-			items = append(items, res)
+		if json.Unmarshal(data, &res) != nil {
+			continue
 		}
+		if res.ResourceMethods, err = p.loadResourceMethods(goCtx, ctx, apiID, id); err != nil {
+			return nil, err
+		}
+		items = append(items, resourceWire(res))
 	}
 
-	type response struct {
-		Items []ResourceState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[resourceOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteResource(ctx *RequestContext, apiID, resID string) (*AWSResponse, error) {
@@ -652,7 +653,7 @@ func (p *APIGatewayPlugin) putMethod(ctx *RequestContext, req *AWSRequest, apiID
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwMethodKey(ctx.AccountID, ctx.Region, apiID, resID, verb), data); err != nil {
 		return nil, fmt.Errorf("apigateway putMethod state.Put: %w", err)
 	}
-	return apigwJSONResponse(http.StatusCreated, method)
+	return apigwJSONResponse(http.StatusCreated, methodWire(method))
 }
 
 func (p *APIGatewayPlugin) getMethod(ctx *RequestContext, apiID, resID, verb string) (*AWSResponse, error) {
@@ -668,7 +669,66 @@ func (p *APIGatewayPlugin) getMethod(ctx *RequestContext, apiID, resID, verb str
 	if err := json.Unmarshal(data, &method); err != nil {
 		return nil, fmt.Errorf("apigateway getMethod unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, method)
+	if err := p.attachIntegration(goCtx, ctx, &method, apiID, resID, verb); err != nil {
+		return nil, err
+	}
+	return apigwJSONResponse(http.StatusOK, methodWire(method))
+}
+
+// attachIntegration joins a method's stored integration onto it. PutIntegration
+// writes the integration under its own state key, so a method read back from state
+// alone has none — and methodIntegration is a member of the Method a real
+// GetMethod reports. A method with no integration is left with a nil one, which the
+// wire type omits.
+func (p *APIGatewayPlugin) attachIntegration(goCtx context.Context, ctx *RequestContext, method *MethodState, apiID, resID, verb string) error {
+	data, err := p.state.Get(goCtx, apigatewayNamespace, apigwIntegrationKey(ctx.AccountID, ctx.Region, apiID, resID, verb))
+	if err != nil {
+		return fmt.Errorf("apigateway attachIntegration state.Get: %w", err)
+	}
+	if data == nil {
+		return nil
+	}
+	var integration IntegrationState
+	if err := json.Unmarshal(data, &integration); err != nil {
+		return fmt.Errorf("apigateway attachIntegration unmarshal: %w", err)
+	}
+	method.Integration = &integration
+	return nil
+}
+
+// loadResourceMethods collects the methods declared on one resource, each with its
+// integration attached. Methods are stored under their own keys, so a resource read
+// back from state alone reports no methods at all — and resourceMethods is a member
+// of the Resource a real GetResource reports. Returns nil when the resource has no
+// methods, which the wire type omits rather than sending an empty object.
+func (p *APIGatewayPlugin) loadResourceMethods(goCtx context.Context, ctx *RequestContext, apiID, resID string) (map[string]MethodState, error) {
+	prefix := "method:" + ctx.AccountID + "/" + ctx.Region + "/" + apiID + "/" + resID + "/"
+	keys, err := p.state.List(goCtx, apigatewayNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("apigateway loadResourceMethods state.List: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	methods := make(map[string]MethodState, len(keys))
+	for _, k := range keys {
+		data, getErr := p.state.Get(goCtx, apigatewayNamespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var method MethodState
+		if json.Unmarshal(data, &method) != nil || method.HTTPMethod == "" {
+			continue
+		}
+		if err := p.attachIntegration(goCtx, ctx, &method, apiID, resID, method.HTTPMethod); err != nil {
+			return nil, err
+		}
+		methods[method.HTTPMethod] = method
+	}
+	if len(methods) == 0 {
+		return nil, nil
+	}
+	return methods, nil
 }
 
 func (p *APIGatewayPlugin) deleteMethod(ctx *RequestContext, apiID, resID, verb string) (*AWSResponse, error) {
@@ -695,7 +755,7 @@ func (p *APIGatewayPlugin) putIntegration(ctx *RequestContext, req *AWSRequest, 
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwIntegrationKey(ctx.AccountID, ctx.Region, apiID, resID, verb), data); err != nil {
 		return nil, fmt.Errorf("apigateway putIntegration state.Put: %w", err)
 	}
-	return apigwJSONResponse(http.StatusCreated, integration)
+	return apigwJSONResponse(http.StatusCreated, integrationWire(integration))
 }
 
 func (p *APIGatewayPlugin) putIntegrationResponse(_ *RequestContext, req *AWSRequest, _, _, _, _ string) (*AWSResponse, error) {
@@ -743,7 +803,7 @@ func (p *APIGatewayPlugin) createDeployment(ctx *RequestContext, req *AWSRequest
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwDeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), dep.ID)
 
-	return apigwJSONResponse(http.StatusCreated, dep)
+	return apigwJSONResponse(http.StatusCreated, deploymentWire(dep))
 }
 
 func (p *APIGatewayPlugin) getDeployment(ctx *RequestContext, apiID, deployID string) (*AWSResponse, error) {
@@ -759,7 +819,7 @@ func (p *APIGatewayPlugin) getDeployment(ctx *RequestContext, apiID, deployID st
 	if err := json.Unmarshal(data, &dep); err != nil {
 		return nil, fmt.Errorf("apigateway getDeployment unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, dep)
+	return apigwJSONResponse(http.StatusOK, deploymentWire(dep))
 }
 
 func (p *APIGatewayPlugin) getDeployments(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -769,7 +829,7 @@ func (p *APIGatewayPlugin) getDeployments(ctx *RequestContext, apiID string) (*A
 		return nil, fmt.Errorf("apigateway getDeployments loadIndex: %w", err)
 	}
 
-	items := make([]DeploymentState, 0, len(ids))
+	items := make([]deploymentOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwDeploymentKey(ctx.AccountID, ctx.Region, apiID, id))
 		if getErr != nil || data == nil {
@@ -777,14 +837,11 @@ func (p *APIGatewayPlugin) getDeployments(ctx *RequestContext, apiID string) (*A
 		}
 		var dep DeploymentState
 		if json.Unmarshal(data, &dep) == nil {
-			items = append(items, dep)
+			items = append(items, deploymentWire(dep))
 		}
 	}
 
-	type response struct {
-		Items []DeploymentState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[deploymentOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteDeployment(ctx *RequestContext, apiID, deployID string) (*AWSResponse, error) {
@@ -835,7 +892,7 @@ func (p *APIGatewayPlugin) createStage(ctx *RequestContext, req *AWSRequest, api
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwStageNamesKey(ctx.AccountID, ctx.Region, apiID), stage.StageName)
 
-	return apigwJSONResponse(http.StatusCreated, stage)
+	return apigwJSONResponse(http.StatusCreated, stageWire(stage, apigwInvokeURL(apiID, ctx.Region, stage.StageName)))
 }
 
 func (p *APIGatewayPlugin) getStage(ctx *RequestContext, apiID, stageName string) (*AWSResponse, error) {
@@ -852,16 +909,15 @@ func (p *APIGatewayPlugin) getStage(ctx *RequestContext, apiID, stageName string
 		return nil, fmt.Errorf("apigateway getStage unmarshal: %w", err)
 	}
 
-	// Augment with computed InvokeURL.
-	type stageWithURL struct {
-		StageState
-		InvokeURL string `json:"InvokeUrl"`
-	}
-	sw := stageWithURL{
-		StageState: stage,
-		InvokeURL:  fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s", apiID, ctx.Region, stageName),
-	}
-	return apigwJSONResponse(http.StatusOK, sw)
+	return apigwJSONResponse(http.StatusOK, stageWire(stage, apigwInvokeURL(apiID, ctx.Region, stageName)))
+}
+
+// apigwInvokeURL builds the execute-api endpoint a caller invokes a stage through.
+// No model declares an invokeUrl member on a Stage, so this is substrate's own
+// convenience; see apigateway_wire.go for why it is kept and why it cannot confuse
+// an SDK.
+func apigwInvokeURL(apiID, region, stageName string) string {
+	return fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s", apiID, region, stageName)
 }
 
 func (p *APIGatewayPlugin) getStages(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -871,7 +927,7 @@ func (p *APIGatewayPlugin) getStages(ctx *RequestContext, apiID string) (*AWSRes
 		return nil, fmt.Errorf("apigateway getStages loadIndex: %w", err)
 	}
 
-	items := make([]StageState, 0, len(names))
+	items := make([]stageOut, 0, len(names))
 	for _, name := range names {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwStageKey(ctx.AccountID, ctx.Region, apiID, name))
 		if getErr != nil || data == nil {
@@ -879,14 +935,15 @@ func (p *APIGatewayPlugin) getStages(ctx *RequestContext, apiID string) (*AWSRes
 		}
 		var stage StageState
 		if json.Unmarshal(data, &stage) == nil {
-			items = append(items, stage)
+			items = append(items, stageWire(stage, apigwInvokeURL(apiID, ctx.Region, stage.StageName)))
 		}
 	}
 
-	type response struct {
-		Item []StageState `json:"item"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Item: items})
+	// The envelope here was already "item" before #529, and stays "item": GetStages
+	// is the one v1 collection whose model member is named "item" rather than
+	// "items". Renaming it to match the other seven would break the only list
+	// handler that a real SDK could already parse.
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[stageOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteStage(ctx *RequestContext, apiID, stageName string) (*AWSResponse, error) {
@@ -918,7 +975,7 @@ func (p *APIGatewayPlugin) updateStage(ctx *RequestContext, _ *AWSRequest, apiID
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwStageKey(ctx.AccountID, ctx.Region, apiID, stageName), updated); err != nil {
 		return nil, fmt.Errorf("apigateway updateStage state.Put: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, stage)
+	return apigwJSONResponse(http.StatusOK, stageWire(stage, apigwInvokeURL(apiID, ctx.Region, stage.StageName)))
 }
 
 // --- Authorizer operations ---------------------------------------------------
@@ -957,7 +1014,7 @@ func (p *APIGatewayPlugin) createAuthorizer(ctx *RequestContext, req *AWSRequest
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), auth.ID)
 
-	return apigwJSONResponse(http.StatusCreated, auth)
+	return apigwJSONResponse(http.StatusCreated, authorizerWire(auth))
 }
 
 func (p *APIGatewayPlugin) getAuthorizer(ctx *RequestContext, apiID, authID string) (*AWSResponse, error) {
@@ -973,7 +1030,7 @@ func (p *APIGatewayPlugin) getAuthorizer(ctx *RequestContext, apiID, authID stri
 	if err := json.Unmarshal(data, &auth); err != nil {
 		return nil, fmt.Errorf("apigateway getAuthorizer unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, auth)
+	return apigwJSONResponse(http.StatusOK, authorizerWire(auth))
 }
 
 func (p *APIGatewayPlugin) getAuthorizers(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -983,7 +1040,7 @@ func (p *APIGatewayPlugin) getAuthorizers(ctx *RequestContext, apiID string) (*A
 		return nil, fmt.Errorf("apigateway getAuthorizers loadIndex: %w", err)
 	}
 
-	items := make([]AuthorizerState, 0, len(ids))
+	items := make([]authorizerOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwAuthorizerKey(ctx.AccountID, ctx.Region, apiID, id))
 		if getErr != nil || data == nil {
@@ -991,14 +1048,11 @@ func (p *APIGatewayPlugin) getAuthorizers(ctx *RequestContext, apiID string) (*A
 		}
 		var auth AuthorizerState
 		if json.Unmarshal(data, &auth) == nil {
-			items = append(items, auth)
+			items = append(items, authorizerWire(auth))
 		}
 	}
 
-	type response struct {
-		Items []AuthorizerState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[authorizerOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteAuthorizer(ctx *RequestContext, apiID, authID string) (*AWSResponse, error) {
@@ -1052,7 +1106,7 @@ func (p *APIGatewayPlugin) createAPIKey(ctx *RequestContext, req *AWSRequest) (*
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIKeyIDsKey(ctx.AccountID, ctx.Region), key.ID)
 
-	return apigwJSONResponse(http.StatusCreated, key)
+	return apigwJSONResponse(http.StatusCreated, apiKeyWire(key))
 }
 
 func (p *APIGatewayPlugin) getAPIKey(ctx *RequestContext, keyID string) (*AWSResponse, error) {
@@ -1068,7 +1122,7 @@ func (p *APIGatewayPlugin) getAPIKey(ctx *RequestContext, keyID string) (*AWSRes
 	if err := json.Unmarshal(data, &key); err != nil {
 		return nil, fmt.Errorf("apigateway getAPIKey unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, key)
+	return apigwJSONResponse(http.StatusOK, apiKeyWire(key))
 }
 
 func (p *APIGatewayPlugin) getAPIKeys(ctx *RequestContext) (*AWSResponse, error) {
@@ -1078,7 +1132,7 @@ func (p *APIGatewayPlugin) getAPIKeys(ctx *RequestContext) (*AWSResponse, error)
 		return nil, fmt.Errorf("apigateway getApiKeys loadIndex: %w", err)
 	}
 
-	items := make([]APIKeyState, 0, len(ids))
+	items := make([]apiKeyOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwAPIKeyKey(ctx.AccountID, ctx.Region, id))
 		if getErr != nil || data == nil {
@@ -1086,14 +1140,11 @@ func (p *APIGatewayPlugin) getAPIKeys(ctx *RequestContext) (*AWSResponse, error)
 		}
 		var key APIKeyState
 		if json.Unmarshal(data, &key) == nil {
-			items = append(items, key)
+			items = append(items, apiKeyWire(key))
 		}
 	}
 
-	type response struct {
-		Items []APIKeyState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[apiKeyOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteAPIKey(ctx *RequestContext, keyID string) (*AWSResponse, error) {
@@ -1139,7 +1190,7 @@ func (p *APIGatewayPlugin) createUsagePlan(ctx *RequestContext, req *AWSRequest)
 	}
 	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwUsagePlanIDsKey(ctx.AccountID, ctx.Region), plan.ID)
 
-	return apigwJSONResponse(http.StatusCreated, plan)
+	return apigwJSONResponse(http.StatusCreated, usagePlanWire(plan))
 }
 
 func (p *APIGatewayPlugin) getUsagePlan(ctx *RequestContext, planID string) (*AWSResponse, error) {
@@ -1155,7 +1206,7 @@ func (p *APIGatewayPlugin) getUsagePlan(ctx *RequestContext, planID string) (*AW
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return nil, fmt.Errorf("apigateway getUsagePlan unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, plan)
+	return apigwJSONResponse(http.StatusOK, usagePlanWire(plan))
 }
 
 func (p *APIGatewayPlugin) getUsagePlans(ctx *RequestContext) (*AWSResponse, error) {
@@ -1165,7 +1216,7 @@ func (p *APIGatewayPlugin) getUsagePlans(ctx *RequestContext) (*AWSResponse, err
 		return nil, fmt.Errorf("apigateway getUsagePlans loadIndex: %w", err)
 	}
 
-	items := make([]UsagePlanState, 0, len(ids))
+	items := make([]usagePlanOut, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, apigwUsagePlanKey(ctx.AccountID, ctx.Region, id))
 		if getErr != nil || data == nil {
@@ -1173,14 +1224,11 @@ func (p *APIGatewayPlugin) getUsagePlans(ctx *RequestContext) (*AWSResponse, err
 		}
 		var plan UsagePlanState
 		if json.Unmarshal(data, &plan) == nil {
-			items = append(items, plan)
+			items = append(items, usagePlanWire(plan))
 		}
 	}
 
-	type response struct {
-		Items []UsagePlanState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[usagePlanOut]{Item: items})
 }
 
 func (p *APIGatewayPlugin) deleteUsagePlan(ctx *RequestContext, planID string) (*AWSResponse, error) {
@@ -1220,7 +1268,7 @@ func (p *APIGatewayPlugin) createDomainName(ctx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("apigateway createDomainName state.Put: %w", err)
 	}
 
-	return apigwJSONResponse(http.StatusCreated, dn)
+	return apigwJSONResponse(http.StatusCreated, domainNameWire(dn))
 }
 
 func (p *APIGatewayPlugin) getDomainName(ctx *RequestContext, name string) (*AWSResponse, error) {
@@ -1236,7 +1284,7 @@ func (p *APIGatewayPlugin) getDomainName(ctx *RequestContext, name string) (*AWS
 	if err := json.Unmarshal(data, &dn); err != nil {
 		return nil, fmt.Errorf("apigateway getDomainName unmarshal: %w", err)
 	}
-	return apigwJSONResponse(http.StatusOK, dn)
+	return apigwJSONResponse(http.StatusOK, domainNameWire(dn))
 }
 
 func (p *APIGatewayPlugin) createBasePathMapping(ctx *RequestContext, req *AWSRequest, domainName string) (*AWSResponse, error) {
@@ -1268,7 +1316,7 @@ func (p *APIGatewayPlugin) createBasePathMapping(ctx *RequestContext, req *AWSRe
 		return nil, fmt.Errorf("apigateway createBasePathMapping state.Put: %w", err)
 	}
 
-	return apigwJSONResponse(http.StatusCreated, mapping)
+	return apigwJSONResponse(http.StatusCreated, basePathMappingWire(mapping))
 }
 
 func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, domainName string) (*AWSResponse, error) {
@@ -1279,7 +1327,7 @@ func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, domainName s
 		return nil, fmt.Errorf("apigateway getBasePathMappings state.List: %w", err)
 	}
 
-	items := make([]BasePathMappingState, 0, len(keys))
+	items := make([]basePathMappingOut, 0, len(keys))
 	for _, k := range keys {
 		data, getErr := p.state.Get(goCtx, apigatewayNamespace, k)
 		if getErr != nil || data == nil {
@@ -1287,14 +1335,11 @@ func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, domainName s
 		}
 		var m BasePathMappingState
 		if json.Unmarshal(data, &m) == nil {
-			items = append(items, m)
+			items = append(items, basePathMappingWire(m))
 		}
 	}
 
-	type response struct {
-		Items []BasePathMappingState `json:"items"`
-	}
-	return apigwJSONResponse(http.StatusOK, response{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[basePathMappingOut]{Item: items})
 }
 
 // --- ID generation -----------------------------------------------------------
