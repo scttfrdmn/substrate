@@ -472,7 +472,7 @@ func (d *StackDeployer) deployAPIGatewayV2Api(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		var result struct {
-			APIID string `json:"ApiId"`
+			APIID string `json:"apiId"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil && result.APIID != "" {
 			dr.PhysicalID = result.APIID
@@ -514,7 +514,7 @@ func (d *StackDeployer) deployAPIGatewayV2Route(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		var result struct {
-			RouteID string `json:"RouteId"`
+			RouteID string `json:"routeId"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil && result.RouteID != "" {
 			dr.PhysicalID = result.RouteID
@@ -554,7 +554,7 @@ func (d *StackDeployer) deployAPIGatewayV2Integration(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		var result struct {
-			IntegrationID string `json:"IntegrationId"`
+			IntegrationID string `json:"integrationId"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil && result.IntegrationID != "" {
 			dr.PhysicalID = result.IntegrationID
@@ -628,7 +628,7 @@ func (d *StackDeployer) deployAPIGatewayV2Authorizer(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		var result struct {
-			AuthorizerID string `json:"AuthorizerId"`
+			AuthorizerID string `json:"authorizerId"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil && result.AuthorizerID != "" {
 			dr.PhysicalID = result.AuthorizerID

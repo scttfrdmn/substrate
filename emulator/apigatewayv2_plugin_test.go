@@ -67,27 +67,31 @@ func TestAPIGatewayV2Plugin_CreateApi(t *testing.T) {
 		t.Fatalf("want status 201, got %d", resp.StatusCode)
 	}
 
-	var out emulator.V2ApiState
+	// Decoded into a map with the wire keys, not into V2ApiState: the state
+	// struct's PascalCase tags are what an SDK cannot parse (#529), so an
+	// assertion made through it would pass whatever the wire said.
+	var out map[string]any
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.APIID == "" {
-		t.Error("ApiId is empty")
+	if id, _ := out["apiId"].(string); id == "" {
+		t.Error("apiId is empty")
 	}
-	if out.APIEndpoint == "" {
-		t.Error("ApiEndpoint is empty")
+	endpoint, _ := out["apiEndpoint"].(string)
+	if endpoint == "" {
+		t.Error("apiEndpoint is empty")
 	}
-	if !strings.HasPrefix(out.APIEndpoint, "https://") {
-		t.Errorf("ApiEndpoint should start with https://, got %q", out.APIEndpoint)
+	if !strings.HasPrefix(endpoint, "https://") {
+		t.Errorf("apiEndpoint should start with https://, got %q", endpoint)
 	}
-	if !strings.Contains(out.APIEndpoint, "execute-api") {
-		t.Errorf("ApiEndpoint should contain execute-api, got %q", out.APIEndpoint)
+	if !strings.Contains(endpoint, "execute-api") {
+		t.Errorf("apiEndpoint should contain execute-api, got %q", endpoint)
 	}
-	if out.Name != "my-http-api" {
-		t.Errorf("want name my-http-api, got %q", out.Name)
+	if out["name"] != "my-http-api" {
+		t.Errorf("want name my-http-api, got %v", out["name"])
 	}
-	if out.ProtocolType != "HTTP" {
-		t.Errorf("want ProtocolType HTTP, got %q", out.ProtocolType)
+	if out["protocolType"] != "HTTP" {
+		t.Errorf("want protocolType HTTP, got %v", out["protocolType"])
 	}
 }
 
@@ -102,14 +106,11 @@ func TestAPIGatewayV2Plugin_CreateRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateApi: %v", err)
 	}
-	var api emulator.V2ApiState
-	if err := json.Unmarshal(createResp.Body, &api); err != nil {
-		t.Fatalf("unmarshal api: %v", err)
-	}
+	apiID := apigwv2APIID(t, createResp.Body)
 
 	// Create a route.
 	routeResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/routes",
+		"/v2/apis/"+apiID+"/routes",
 		map[string]any{
 			"RouteKey": "GET /users",
 		},
@@ -121,15 +122,15 @@ func TestAPIGatewayV2Plugin_CreateRoute(t *testing.T) {
 		t.Fatalf("want 201, got %d", routeResp.StatusCode)
 	}
 
-	var route emulator.V2RouteState
+	var route map[string]any
 	if err := json.Unmarshal(routeResp.Body, &route); err != nil {
 		t.Fatalf("unmarshal route: %v", err)
 	}
-	if route.RouteID == "" {
-		t.Error("RouteId is empty")
+	if id, _ := route["routeId"].(string); id == "" {
+		t.Error("routeId is empty")
 	}
-	if route.RouteKey != "GET /users" {
-		t.Errorf("want RouteKey 'GET /users', got %q", route.RouteKey)
+	if route["routeKey"] != "GET /users" {
+		t.Errorf("want routeKey 'GET /users', got %v", route["routeKey"])
 	}
 }
 
@@ -144,14 +145,11 @@ func TestAPIGatewayV2Plugin_CreateStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateApi: %v", err)
 	}
-	var api emulator.V2ApiState
-	if err := json.Unmarshal(createResp.Body, &api); err != nil {
-		t.Fatalf("unmarshal api: %v", err)
-	}
+	apiID := apigwv2APIID(t, createResp.Body)
 
 	// Create a stage.
 	stageResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/stages",
+		"/v2/apis/"+apiID+"/stages",
 		map[string]any{
 			"StageName": "$default",
 		},
@@ -163,17 +161,17 @@ func TestAPIGatewayV2Plugin_CreateStage(t *testing.T) {
 		t.Fatalf("want 201, got %d", stageResp.StatusCode)
 	}
 
-	var stage emulator.V2StageState
+	var stage map[string]any
 	if err := json.Unmarshal(stageResp.Body, &stage); err != nil {
 		t.Fatalf("unmarshal stage: %v", err)
 	}
-	if stage.StageName != "$default" {
-		t.Errorf("want StageName $default, got %q", stage.StageName)
+	if stage["stageName"] != "$default" {
+		t.Errorf("want stageName $default, got %v", stage["stageName"])
 	}
 
 	// GetStage should return it.
 	getResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/stages/$default",
+		"/v2/apis/"+apiID+"/stages/$default",
 		nil,
 	))
 	if err != nil {
@@ -205,19 +203,45 @@ func TestAPIGatewayV2Plugin_GetApis(t *testing.T) {
 		t.Fatalf("want 200, got %d", listResp.StatusCode)
 	}
 
+	// The envelope is "items", lowercase — "Items" parses to nothing (#529).
 	var out struct {
-		Items []emulator.V2ApiState `json:"Items"`
+		Items []struct {
+			APIID string `json:"apiId"`
+			Name  string `json:"name"`
+		} `json:"items"`
 	}
 	if err := json.Unmarshal(listResp.Body, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(out.Items) != 2 {
-		t.Errorf("want 2 APIs, got %d", len(out.Items))
+		t.Fatalf("want 2 APIs, got %d", len(out.Items))
+	}
+	for i, it := range out.Items {
+		if it.APIID == "" || it.Name == "" {
+			t.Errorf("item %d: empty apiId or name: %+v", i, it)
+		}
 	}
 }
 
-// createTestV2API creates a V2 API and returns its state.
-func createTestV2API(t *testing.T, p *emulator.APIGatewayV2Plugin, ctx *emulator.RequestContext, name string) emulator.V2ApiState {
+// apigwv2APIID pulls the apiId out of a v2 response body. It reads the wire key
+// rather than decoding into V2ApiState, which is the state type #529 keeps off the
+// wire.
+func apigwv2APIID(t *testing.T, body []byte) string {
+	t.Helper()
+	var m struct {
+		APIID string `json:"apiId"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("unmarshal apiId: %v", err)
+	}
+	if m.APIID == "" {
+		t.Fatalf("no apiId in response: %s", body)
+	}
+	return m.APIID
+}
+
+// createTestV2API creates a V2 API and returns its wire apiId.
+func createTestV2API(t *testing.T, p *emulator.APIGatewayV2Plugin, ctx *emulator.RequestContext, name string) string {
 	t.Helper()
 	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST", "/v2/apis", map[string]any{
 		"Name":         name,
@@ -226,38 +250,30 @@ func createTestV2API(t *testing.T, p *emulator.APIGatewayV2Plugin, ctx *emulator
 	if err != nil {
 		t.Fatalf("CreateApi %q: %v", name, err)
 	}
-	var api emulator.V2ApiState
-	if err := json.Unmarshal(resp.Body, &api); err != nil {
-		t.Fatalf("unmarshal V2ApiState: %v", err)
-	}
-	return api
+	return apigwv2APIID(t, resp.Body)
 }
 
 func TestAPIGatewayV2Plugin_GetApi(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "get-me")
+	apiID := createTestV2API(t, p, ctx, "get-me")
 
-	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET", "/v2/apis/"+api.APIID, nil))
+	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET", "/v2/apis/"+apiID, nil))
 	if err != nil {
 		t.Fatalf("GetApi: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("want 200, got %d", resp.StatusCode)
 	}
-	var out emulator.V2ApiState
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if out.APIID != api.APIID {
-		t.Errorf("want APIID %q, got %q", api.APIID, out.APIID)
+	if got := apigwv2APIID(t, resp.Body); got != apiID {
+		t.Errorf("want apiId %q, got %q", apiID, got)
 	}
 }
 
 func TestAPIGatewayV2Plugin_UpdateApi(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "update-me")
+	apiID := createTestV2API(t, p, ctx, "update-me")
 
-	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "PATCH", "/v2/apis/"+api.APIID,
+	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "PATCH", "/v2/apis/"+apiID,
 		map[string]any{"Description": "updated"},
 	))
 	if err != nil {
@@ -270,9 +286,9 @@ func TestAPIGatewayV2Plugin_UpdateApi(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_DeleteApi(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "delete-me")
+	apiID := createTestV2API(t, p, ctx, "delete-me")
 
-	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "DELETE", "/v2/apis/"+api.APIID, nil))
+	resp, err := p.HandleRequest(ctx, apigwv2Request(t, "DELETE", "/v2/apis/"+apiID, nil))
 	if err != nil {
 		t.Fatalf("DeleteApi: %v", err)
 	}
@@ -283,24 +299,29 @@ func TestAPIGatewayV2Plugin_DeleteApi(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_RouteGetDelete(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "route-api")
+	apiID := createTestV2API(t, p, ctx, "route-api")
 
 	// Create route.
 	routeResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/routes",
+		"/v2/apis/"+apiID+"/routes",
 		map[string]any{"RouteKey": "POST /items"},
 	))
 	if err != nil {
 		t.Fatalf("CreateRoute: %v", err)
 	}
-	var route emulator.V2RouteState
+	var route struct {
+		RouteID string `json:"routeId"`
+	}
 	if err := json.Unmarshal(routeResp.Body, &route); err != nil {
 		t.Fatalf("unmarshal route: %v", err)
+	}
+	if route.RouteID == "" {
+		t.Fatalf("no routeId in response: %s", routeResp.Body)
 	}
 
 	// GetRoute.
 	getResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/routes/"+route.RouteID, nil))
+		"/v2/apis/"+apiID+"/routes/"+route.RouteID, nil))
 	if err != nil {
 		t.Fatalf("GetRoute: %v", err)
 	}
@@ -310,7 +331,7 @@ func TestAPIGatewayV2Plugin_RouteGetDelete(t *testing.T) {
 
 	// GetRoutes.
 	listResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/routes", nil))
+		"/v2/apis/"+apiID+"/routes", nil))
 	if err != nil {
 		t.Fatalf("GetRoutes: %v", err)
 	}
@@ -320,7 +341,7 @@ func TestAPIGatewayV2Plugin_RouteGetDelete(t *testing.T) {
 
 	// DeleteRoute.
 	delResp, err := p.HandleRequest(ctx, apigwv2Request(t, "DELETE",
-		"/v2/apis/"+api.APIID+"/routes/"+route.RouteID, nil))
+		"/v2/apis/"+apiID+"/routes/"+route.RouteID, nil))
 	if err != nil {
 		t.Fatalf("DeleteRoute: %v", err)
 	}
@@ -331,11 +352,11 @@ func TestAPIGatewayV2Plugin_RouteGetDelete(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_Integration(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "int-api")
+	apiID := createTestV2API(t, p, ctx, "int-api")
 
 	// CreateIntegration.
 	createResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/integrations",
+		"/v2/apis/"+apiID+"/integrations",
 		map[string]any{
 			"IntegrationType":      "AWS_PROXY",
 			"IntegrationUri":       "arn:aws:lambda:us-east-1:123456789012:function:my-fn",
@@ -352,14 +373,14 @@ func TestAPIGatewayV2Plugin_Integration(t *testing.T) {
 	if err := json.Unmarshal(createResp.Body, &intOut); err != nil {
 		t.Fatalf("unmarshal integration: %v", err)
 	}
-	intID, _ := intOut["IntegrationId"].(string)
+	intID, _ := intOut["integrationId"].(string)
 	if intID == "" {
-		t.Fatal("IntegrationId is empty")
+		t.Fatal("integrationId is empty")
 	}
 
 	// GetIntegration.
 	getResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/integrations/"+intID, nil))
+		"/v2/apis/"+apiID+"/integrations/"+intID, nil))
 	if err != nil {
 		t.Fatalf("GetIntegration: %v", err)
 	}
@@ -369,7 +390,7 @@ func TestAPIGatewayV2Plugin_Integration(t *testing.T) {
 
 	// GetIntegrations.
 	listResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/integrations", nil))
+		"/v2/apis/"+apiID+"/integrations", nil))
 	if err != nil {
 		t.Fatalf("GetIntegrations: %v", err)
 	}
@@ -379,7 +400,7 @@ func TestAPIGatewayV2Plugin_Integration(t *testing.T) {
 
 	// DeleteIntegration.
 	delResp, err := p.HandleRequest(ctx, apigwv2Request(t, "DELETE",
-		"/v2/apis/"+api.APIID+"/integrations/"+intID, nil))
+		"/v2/apis/"+apiID+"/integrations/"+intID, nil))
 	if err != nil {
 		t.Fatalf("DeleteIntegration: %v", err)
 	}
@@ -390,11 +411,11 @@ func TestAPIGatewayV2Plugin_Integration(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_GetStagesAndDeleteStage(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "stages-api")
+	apiID := createTestV2API(t, p, ctx, "stages-api")
 
 	// Create stage.
 	_, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/stages",
+		"/v2/apis/"+apiID+"/stages",
 		map[string]any{"StageName": "dev"},
 	))
 	if err != nil {
@@ -403,7 +424,7 @@ func TestAPIGatewayV2Plugin_GetStagesAndDeleteStage(t *testing.T) {
 
 	// GetStages.
 	listResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/stages", nil))
+		"/v2/apis/"+apiID+"/stages", nil))
 	if err != nil {
 		t.Fatalf("GetStages: %v", err)
 	}
@@ -414,14 +435,14 @@ func TestAPIGatewayV2Plugin_GetStagesAndDeleteStage(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body, &listOut); err != nil {
 		t.Fatalf("unmarshal stages: %v", err)
 	}
-	items, _ := listOut["Items"].([]any)
+	items, _ := listOut["items"].([]any)
 	if len(items) != 1 {
 		t.Errorf("want 1 stage, got %d", len(items))
 	}
 
 	// DeleteStage.
 	delResp, err := p.HandleRequest(ctx, apigwv2Request(t, "DELETE",
-		"/v2/apis/"+api.APIID+"/stages/dev", nil))
+		"/v2/apis/"+apiID+"/stages/dev", nil))
 	if err != nil {
 		t.Fatalf("DeleteStage: %v", err)
 	}
@@ -432,11 +453,11 @@ func TestAPIGatewayV2Plugin_GetStagesAndDeleteStage(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_AuthorizerCRUD(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "auth-v2-api")
+	apiID := createTestV2API(t, p, ctx, "auth-v2-api")
 
 	// CreateAuthorizer.
 	createResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/authorizers",
+		"/v2/apis/"+apiID+"/authorizers",
 		map[string]any{
 			"Name":           "my-jwt-auth",
 			"AuthorizerType": "JWT",
@@ -457,14 +478,14 @@ func TestAPIGatewayV2Plugin_AuthorizerCRUD(t *testing.T) {
 	if err := json.Unmarshal(createResp.Body, &authOut); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	authID, _ := authOut["AuthorizerId"].(string)
+	authID, _ := authOut["authorizerId"].(string)
 	if authID == "" {
-		t.Fatal("AuthorizerId is empty")
+		t.Fatal("authorizerId is empty")
 	}
 
 	// GetAuthorizer.
 	getResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/authorizers/"+authID, nil))
+		"/v2/apis/"+apiID+"/authorizers/"+authID, nil))
 	if err != nil {
 		t.Fatalf("GetAuthorizer: %v", err)
 	}
@@ -474,7 +495,7 @@ func TestAPIGatewayV2Plugin_AuthorizerCRUD(t *testing.T) {
 
 	// GetAuthorizers.
 	listResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/authorizers", nil))
+		"/v2/apis/"+apiID+"/authorizers", nil))
 	if err != nil {
 		t.Fatalf("GetAuthorizers: %v", err)
 	}
@@ -484,7 +505,7 @@ func TestAPIGatewayV2Plugin_AuthorizerCRUD(t *testing.T) {
 
 	// DeleteAuthorizer.
 	delResp, err := p.HandleRequest(ctx, apigwv2Request(t, "DELETE",
-		"/v2/apis/"+api.APIID+"/authorizers/"+authID, nil))
+		"/v2/apis/"+apiID+"/authorizers/"+authID, nil))
 	if err != nil {
 		t.Fatalf("DeleteAuthorizer: %v", err)
 	}
@@ -495,11 +516,11 @@ func TestAPIGatewayV2Plugin_AuthorizerCRUD(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_DeploymentCRUD(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "dep-v2-api")
+	apiID := createTestV2API(t, p, ctx, "dep-v2-api")
 
 	// CreateDeployment.
 	createResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/deployments",
+		"/v2/apis/"+apiID+"/deployments",
 		map[string]any{"Description": "initial"},
 	))
 	if err != nil {
@@ -512,14 +533,14 @@ func TestAPIGatewayV2Plugin_DeploymentCRUD(t *testing.T) {
 	if err := json.Unmarshal(createResp.Body, &depOut); err != nil {
 		t.Fatalf("unmarshal deployment: %v", err)
 	}
-	depID, _ := depOut["DeploymentId"].(string)
+	depID, _ := depOut["deploymentId"].(string)
 	if depID == "" {
-		t.Fatal("DeploymentId is empty")
+		t.Fatal("deploymentId is empty")
 	}
 
 	// GetDeployment.
 	getResp, err := p.HandleRequest(ctx, apigwv2Request(t, "GET",
-		"/v2/apis/"+api.APIID+"/deployments/"+depID, nil))
+		"/v2/apis/"+apiID+"/deployments/"+depID, nil))
 	if err != nil {
 		t.Fatalf("GetDeployment: %v", err)
 	}
@@ -530,11 +551,11 @@ func TestAPIGatewayV2Plugin_DeploymentCRUD(t *testing.T) {
 
 func TestAPIGatewayV2Plugin_DomainNameAndApiMapping(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
-	api := createTestV2API(t, p, ctx, "mapping-api")
+	apiID := createTestV2API(t, p, ctx, "mapping-api")
 
 	// Create stage.
 	_, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
-		"/v2/apis/"+api.APIID+"/stages",
+		"/v2/apis/"+apiID+"/stages",
 		map[string]any{"StageName": "$default"},
 	))
 	if err != nil {
@@ -570,7 +591,7 @@ func TestAPIGatewayV2Plugin_DomainNameAndApiMapping(t *testing.T) {
 	mappingResp, err := p.HandleRequest(ctx, apigwv2Request(t, "POST",
 		"/v2/domainnames/v2.example.com/apimappings",
 		map[string]any{
-			"ApiId":         api.APIID,
+			"ApiId":         apiID,
 			"Stage":         "$default",
 			"ApiMappingKey": "",
 		},
@@ -585,7 +606,7 @@ func TestAPIGatewayV2Plugin_DomainNameAndApiMapping(t *testing.T) {
 	if err := json.Unmarshal(mappingResp.Body, &mappingOut); err != nil {
 		t.Fatalf("unmarshal mapping: %v", err)
 	}
-	if _, ok := mappingOut["ApiMappingId"]; !ok {
-		t.Error("ApiMappingId is missing from response")
+	if _, ok := mappingOut["apiMappingId"]; !ok {
+		t.Error("apiMappingId is missing from response")
 	}
 }

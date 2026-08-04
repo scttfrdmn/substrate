@@ -1125,6 +1125,30 @@ func TestCFN_APIGatewayV2RouteAndIntegration(t *testing.T) {
 	result, err := d.Deploy(context.Background(), tmpl, "apigwv2-route-stack", nil)
 	require.NoError(t, err)
 	assert.Len(t, result.Resources, 3)
+
+	// A physical ID assertion, not just a resource count. These handlers read the
+	// created id out of the plugin's response body, so a response whose keys an SDK
+	// cannot parse leaves the physical ID as the fallback — the logical ID or the
+	// route key — and a resource count stays green while every Ref in the stack
+	// points at the wrong thing (#529).
+	byType := make(map[string]emulator.DeployedResource, len(result.Resources))
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+		byType[r.Type] = r
+	}
+
+	api := byType["AWS::ApiGatewayV2::Api"]
+	assert.NotEqual(t, "v2-route-api", api.PhysicalID,
+		"Api physical ID is the fallback name, so apiId was not read from the response")
+	assert.NotEmpty(t, api.ARN)
+
+	route := byType["AWS::ApiGatewayV2::Route"]
+	assert.NotEqual(t, "GET /items", route.PhysicalID,
+		"Route physical ID is the fallback route key, so routeId was not read from the response")
+
+	integration := byType["AWS::ApiGatewayV2::Integration"]
+	assert.NotEqual(t, "MyIntegration", integration.PhysicalID,
+		"Integration physical ID is the fallback logical ID, so integrationId was not read")
 }
 
 func TestCFN_APIGatewayV2Authorizer(t *testing.T) {
@@ -1149,6 +1173,16 @@ func TestCFN_APIGatewayV2Authorizer(t *testing.T) {
 	result, err := d.Deploy(context.Background(), tmpl, "apigwv2-auth-stack", nil)
 	require.NoError(t, err)
 	assert.Len(t, result.Resources, 2)
+
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
+		if r.Type == "AWS::ApiGatewayV2::Authorizer" {
+			// As above: the fallback is the authorizer's name, so an unparseable
+			// response is invisible to a count assertion.
+			assert.NotEqual(t, "cfn-v2-auth", r.PhysicalID,
+				"Authorizer physical ID is the fallback name, so authorizerId was not read")
+		}
+	}
 }
 
 func TestCFN_StepFunctionsStateMachine(t *testing.T) {
