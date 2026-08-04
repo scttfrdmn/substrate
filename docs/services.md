@@ -3539,6 +3539,15 @@ ACM certificates are free.
 **Endpoint:** `apigateway.{region}.amazonaws.com`
 **Protocol:** REST/JSON
 
+**Response shape:** every member is lowerCamel as the service model spells it
+(`id`, `name`, `rootResourceId`, `resourceMethods`, `methodIntegration`, …), and
+collection responses nest their elements under **`item`** — singular, because that
+is the `locationName` of the `items` member. `GetUsage` uses a third spelling,
+`values`, and is not routed. Responses carry no pagination `position`: Substrate
+returns every element in one page and honours no token. Earlier releases sent
+PascalCase members under an `items` envelope, which an AWS SDK parsed to an empty
+result with no error (#529).
+
 ### Supported operations
 
 | Operation | Notes |

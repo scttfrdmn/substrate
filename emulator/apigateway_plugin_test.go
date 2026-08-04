@@ -175,13 +175,14 @@ func TestAPIGatewayPlugin_CreateDeploymentAndStage(t *testing.T) {
 	if err := json.Unmarshal(getStageResp.Body, &stageOut); err != nil {
 		t.Fatalf("unmarshal stage: %v", err)
 	}
-	invokeURL, _ := stageOut["InvokeUrl"].(string)
+	// The key is invokeUrl, lowerCamel like every other member (#529).
+	invokeURL, _ := stageOut["invokeUrl"].(string)
 	if invokeURL == "" {
-		t.Error("InvokeUrl is empty")
+		t.Error("invokeUrl is empty")
 	}
 	expectedURL := "https://" + api.ID + ".execute-api.us-east-1.amazonaws.com/prod"
 	if invokeURL != expectedURL {
-		t.Errorf("want InvokeUrl %q, got %q", expectedURL, invokeURL)
+		t.Errorf("want invokeUrl %q, got %q", expectedURL, invokeURL)
 	}
 }
 
@@ -200,14 +201,25 @@ func TestAPIGatewayPlugin_GetRestApis(t *testing.T) {
 		t.Fatalf("GetRestApis: %v", err)
 	}
 
+	// The envelope is "item" and the members are lowerCamel, so this decodes into
+	// a map rather than a state struct: RestAPIState would silently match nothing
+	// useful, which is how #529 stayed hidden.
 	var out struct {
-		Items []emulator.RestAPIState `json:"items"`
+		Item []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"item"`
 	}
 	if err := json.Unmarshal(listResp.Body, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out.Items) != 2 {
-		t.Errorf("want 2 APIs, got %d", len(out.Items))
+	if len(out.Item) != 2 {
+		t.Errorf("want 2 APIs, got %d", len(out.Item))
+	}
+	for _, api := range out.Item {
+		if api.ID == "" || api.Name == "" {
+			t.Errorf("listed API is empty: %+v", api)
+		}
 	}
 }
 
@@ -330,7 +342,7 @@ func TestAPIGatewayPlugin_GetResources(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body, &out); err != nil {
 		t.Fatalf("unmarshal GetResources: %v", err)
 	}
-	items, _ := out["items"].([]any)
+	items, _ := out["item"].([]any)
 	if len(items) < 2 {
 		t.Errorf("want at least 2 resources (root + child), got %d", len(items))
 	}
@@ -599,7 +611,7 @@ func TestAPIGatewayPlugin_Authorizer(t *testing.T) {
 	if err := json.Unmarshal(createResp.Body, &authOut); err != nil {
 		t.Fatalf("unmarshal authorizer: %v", err)
 	}
-	authID, _ := authOut["Id"].(string)
+	authID, _ := authOut["id"].(string)
 	if authID == "" {
 		t.Fatal("authorizer id is empty")
 	}
@@ -627,7 +639,7 @@ func TestAPIGatewayPlugin_Authorizer(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body, &listOut); err != nil {
 		t.Fatalf("unmarshal authorizers: %v", err)
 	}
-	authItems, _ := listOut["items"].([]any)
+	authItems, _ := listOut["item"].([]any)
 	if len(authItems) != 1 {
 		t.Errorf("want 1 authorizer, got %d", len(authItems))
 	}
@@ -660,7 +672,7 @@ func TestAPIGatewayPlugin_APIKey(t *testing.T) {
 	if err := json.Unmarshal(createResp.Body, &keyOut); err != nil {
 		t.Fatalf("unmarshal api key: %v", err)
 	}
-	keyID, _ := keyOut["Id"].(string)
+	keyID, _ := keyOut["id"].(string)
 	if keyID == "" {
 		t.Fatal("api key id is empty")
 	}
@@ -686,7 +698,7 @@ func TestAPIGatewayPlugin_APIKey(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body, &listOut); err != nil {
 		t.Fatalf("unmarshal api keys: %v", err)
 	}
-	keyItems, _ := listOut["items"].([]any)
+	keyItems, _ := listOut["item"].([]any)
 	if len(keyItems) != 1 {
 		t.Errorf("want 1 api key, got %d", len(keyItems))
 	}
@@ -723,7 +735,7 @@ func TestAPIGatewayPlugin_UsagePlan(t *testing.T) {
 	if err := json.Unmarshal(createResp.Body, &planOut); err != nil {
 		t.Fatalf("unmarshal usage plan: %v", err)
 	}
-	planID, _ := planOut["Id"].(string)
+	planID, _ := planOut["id"].(string)
 	if planID == "" {
 		t.Fatal("usage plan id is empty")
 	}
@@ -749,7 +761,7 @@ func TestAPIGatewayPlugin_UsagePlan(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body, &listOut); err != nil {
 		t.Fatalf("unmarshal usage plans: %v", err)
 	}
-	planItems, _ := listOut["items"].([]any)
+	planItems, _ := listOut["item"].([]any)
 	if len(planItems) != 1 {
 		t.Errorf("want 1 usage plan, got %d", len(planItems))
 	}
@@ -821,7 +833,7 @@ func TestAPIGatewayPlugin_DomainNameAndBasePathMapping(t *testing.T) {
 	if err := json.Unmarshal(listResp.Body, &listOut); err != nil {
 		t.Fatalf("unmarshal base path mappings: %v", err)
 	}
-	bpmItems, _ := listOut["items"].([]any)
+	bpmItems, _ := listOut["item"].([]any)
 	if len(bpmItems) != 1 {
 		t.Errorf("want 1 base path mapping, got %d", len(bpmItems))
 	}
