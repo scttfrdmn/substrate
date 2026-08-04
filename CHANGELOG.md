@@ -51,6 +51,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub label was renamed in place to `area: cloudformation`, which preserves it on
   every issue already carrying it.
 
+### Added
+- **S3 `UploadPartCopy` and `ListParts`** (#532, #551). Both were unroutable, and
+  both for the same reason: `parseS3Operation`'s object-level verb arms had drifted
+  apart on when they test `uploadId`.
+
+  A part copy — a `PUT` carrying `partNumber`, `uploadId` **and**
+  `x-amz-copy-source` — was claimed by `CopyObject`, whose copy-source test came
+  first. The consequence was worse than a missing operation: the request answered
+  `200` with a correctly-shaped `CopyPartResult`, so nothing looked wrong, while it
+  **wrote the destination object** instead of storing a part. A `HeadObject` on the
+  destination mid-upload therefore reported a `ContentLength` real S3 never exposes,
+  and the `CompleteMultipartUpload` that followed failed with `InvalidPart` because
+  no part had been stored. `UploadPartCopy` now stores a part and leaves the
+  destination key absent until Complete assembles it, honors
+  `x-amz-copy-source-range` and the `x-amz-copy-source-if-*` preconditions, and
+  returns the copied part's `ETag` and `LastModified` in a `CopyPartResult` body.
+  Copied and uploaded parts mix in one upload, and a copied part's checksum is
+  computed under the upload's algorithm so Complete still assembles a `COMPOSITE`
+  object checksum over the mixture.
+
+  `ListParts` had no handler at all, and the `GET` arm tested no `uploadId`, so
+  `GET /<bucket>/<key>?uploadId=…` reached `GetObject` and answered `404 NoSuchKey`
+  — for an upload whose parts substrate had stored and could list. A caller polling
+  its own upload could not tell an upload with parts from a key that does not exist.
+  It now returns a `ListPartsResult` with `max-parts`/`part-number-marker` paging,
+  the upload's storage class and checksum configuration, and each part's number,
+  `ETag`, size, `LastModified` and checksum. An upload with **no** parts is a `200`
+  with an empty list, not a `404`; an unknown `uploadId`, or one addressed through
+  the wrong key, is `404 NoSuchUpload` rather than the `NoSuchKey` `GetObject` was
+  answering.
+
+  The asymmetry was the tell: `PUT`, `DELETE` and `POST` all tested `uploadId`;
+  `GET` alone did not. The invariant is now stated once in the router where all four
+  arms are visible — *a multipart request is identified by its `uploadId`, and the
+  general object-verb operation is a fall-through the router must reach only after
+  every multipart test has failed* — because four arms drifting apart is what
+  produced both bugs, and a comment on one arm would not have prevented the other.
+
+  Two refusals are substrate's own choice rather than the API model's. A malformed
+  or out-of-bounds `x-amz-copy-source-range` is `400 InvalidArgument`: the reference
+  documents only `InvalidRequest` for an unsupported byte-range *source*, and unlike
+  a `GET`'s advisory `Range` header — malformed is ignored, past-EOF is clamped — a
+  copy-source range is part of the request's meaning, so a range substrate cannot
+  honor is refused rather than silently turned into a different copy. And
+  `bytes=0-` is refused where a `GET` would accept it, because an open-ended range
+  does not describe the extent of a part.
+
 ## [v0.89.0] - 2026-08-03
 
 ### Added

@@ -40,7 +40,8 @@ const (
 // It handles CreateBucket, HeadBucket, DeleteBucket, ListBuckets,
 // PutObject, GetObject, HeadObject, DeleteObject, CopyObject,
 // ListObjects, ListObjectsV2, CreateMultipartUpload, UploadPart,
-// CompleteMultipartUpload, AbortMultipartUpload, and ListMultipartUploads.
+// UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts,
+// and ListMultipartUploads.
 // Object bodies are stored in an afero.Fs; metadata is stored via StateManager.
 type S3Plugin struct {
 	state      StateManager
@@ -125,6 +126,10 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.createMultipartUpload(ctx, req, bucket, key)
 	case "UploadPart":
 		return p.uploadPart(ctx, req, bucket, key)
+	case "UploadPartCopy":
+		return p.uploadPartCopy(ctx, req, bucket, key)
+	case "ListParts":
+		return p.listParts(ctx, req, bucket, key)
 	case "CompleteMultipartUpload":
 		return p.completeMultipartUpload(ctx, req, bucket, key)
 	case "AbortMultipartUpload":
@@ -323,6 +328,16 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		}
 	} else {
 		// Object-level operations.
+		//
+		// The invariant across all four verb arms below: a multipart request is
+		// identified by its uploadId, and the general object-verb operation is a
+		// fall-through the router must reach only after every multipart test has
+		// failed. PUT/GET/DELETE/POST each address the same key with the same verb
+		// as their multipart counterpart, so nothing but the ordering distinguishes
+		// them. It is stated once here because the four arms drifting apart is
+		// exactly what produced #532 (UploadPartCopy claimed by CopyObject, whose
+		// X-Amz-Copy-Source test came first) and #551 (ListParts claimed by
+		// GetObject, whose arm tested no uploadId at all).
 		switch method {
 		case "PUT":
 			if req.Params["acl"] == "1" {
@@ -331,11 +346,16 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["tagging"]; ok {
 				return bucket, key, "PutObjectTagging"
 			}
+			if req.Params["partNumber"] != "" && req.Params["uploadId"] != "" {
+				// A part carrying a copy source is UploadPartCopy, not UploadPart;
+				// both are parts, so this test precedes the copy-source one below.
+				if req.Headers["X-Amz-Copy-Source"] != "" {
+					return bucket, key, "UploadPartCopy"
+				}
+				return bucket, key, "UploadPart"
+			}
 			if req.Headers["X-Amz-Copy-Source"] != "" {
 				return bucket, key, "CopyObject"
-			}
-			if req.Params["partNumber"] != "" && req.Params["uploadId"] != "" {
-				return bucket, key, "UploadPart"
 			}
 			return bucket, key, "PutObject"
 		case "GET":
@@ -344,6 +364,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["tagging"]; ok {
 				return bucket, key, "GetObjectTagging"
+			}
+			if req.Params["uploadId"] != "" {
+				return bucket, key, "ListParts"
 			}
 			return bucket, key, "GetObject"
 		case "HEAD":
@@ -1254,13 +1277,15 @@ func (p *S3Plugin) deleteObjects(reqCtx *RequestContext, req *AWSRequest, bucket
 	return s3XMLResponse(http.StatusOK, result)
 }
 
-// copyObject handles PUT /<bucket>/<key> with X-Amz-Copy-Source header.
-func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dstKey string) (*AWSResponse, error) {
-	ctx := context.Background()
-
-	copySource := req.Headers["X-Amz-Copy-Source"]
+// parseS3CopySource resolves an X-Amz-Copy-Source header into its bucket and key.
+// A non-nil *AWSResponse is the S3 error to return.
+//
+// Shared by CopyObject and UploadPartCopy, which document the same header with the
+// same `\/?.+\/.+` pattern. It is one function because the two are otherwise
+// unrelated code paths that must agree on what a copy source means (#532).
+func parseS3CopySource(copySource string) (string, string, *AWSResponse) {
 	if copySource == "" {
-		return s3ErrorResponse("InvalidArgument", "Copy Source must be specified.", http.StatusBadRequest), nil
+		return "", "", s3ErrorResponse("InvalidArgument", "Copy Source must be specified.", http.StatusBadRequest)
 	}
 
 	// URL-decode the source path.
@@ -1272,10 +1297,19 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 
 	slashIdx := strings.IndexByte(srcPath, '/')
 	if slashIdx < 0 {
-		return s3ErrorResponse("InvalidArgument", "Copy source must include an object key.", http.StatusBadRequest), nil
+		return "", "", s3ErrorResponse("InvalidArgument", "Copy source must include an object key.", http.StatusBadRequest)
 	}
-	srcBucket := srcPath[:slashIdx]
-	srcKey := srcPath[slashIdx+1:]
+	return srcPath[:slashIdx], srcPath[slashIdx+1:], nil
+}
+
+// copyObject handles PUT /<bucket>/<key> with X-Amz-Copy-Source header.
+func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dstKey string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	srcBucket, srcKey, srcErr := parseS3CopySource(req.Headers["X-Amz-Copy-Source"])
+	if srcErr != nil {
+		return srcErr, nil
+	}
 
 	srcMeta, err := p.state.Get(ctx, s3Namespace, "object:"+srcBucket+"/"+srcKey)
 	if err != nil {
@@ -1760,20 +1794,12 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return s3ErrorResponse("InvalidPart", "The part number must be an integer between 1 and 10000.", http.StatusBadRequest), nil
 	}
 
-	uploadData, err := p.state.Get(ctx, s3Namespace, "multipart:"+uploadID)
+	upload, uploadResp, err := p.loadUploadFor(ctx, uploadID, bucket, key)
 	if err != nil {
-		return nil, fmt.Errorf("get upload metadata: %w", err)
+		return nil, err
 	}
-	if uploadData == nil {
-		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
-	}
-
-	var upload S3MultipartUpload
-	if err := json.Unmarshal(uploadData, &upload); err != nil {
-		return nil, fmt.Errorf("unmarshal upload metadata: %w", err)
-	}
-	if upload.Bucket != bucket || upload.Key != key {
-		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
+	if uploadResp != nil {
+		return uploadResp, nil
 	}
 
 	body, trailers := decodeAWSChunkedWithTrailers(req.Headers, req.Body)
@@ -1791,27 +1817,14 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		return cksErr, nil
 	}
 
-	partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, partNum)
-	if mkdirErr := p.fs.MkdirAll(filepath.Dir(partPath), 0o755); mkdirErr != nil {
-		return nil, fmt.Errorf("mkdir parts dir: %w", mkdirErr)
-	}
-	if writeErr := afero.WriteFile(p.fs, partPath, body, 0o644); writeErr != nil {
-		return nil, fmt.Errorf("write part body: %w", writeErr)
-	}
-
-	part := S3Part{
+	if err := p.writePart(ctx, uploadID, S3Part{
 		PartNumber:   partNum,
 		ETag:         etag,
 		Size:         int64(len(body)),
 		Checksum:     checksum,
 		LastModified: p.tc.Now(),
-	}
-	partData, err := json.Marshal(part)
-	if err != nil {
-		return nil, fmt.Errorf("marshal part metadata: %w", err)
-	}
-	if err := p.state.Put(ctx, s3Namespace, fmt.Sprintf("part:%s/%d", uploadID, partNum), partData); err != nil {
-		return nil, fmt.Errorf("save part metadata: %w", err)
+	}, body); err != nil {
+		return nil, err
 	}
 
 	respHeaders := map[string]string{"ETag": etag}
@@ -1825,6 +1838,351 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 		StatusCode: http.StatusOK,
 		Headers:    respHeaders,
 	}, nil
+}
+
+// uploadPartCopy handles PUT /<bucket>/<key>?partNumber=N&uploadId=ID carrying an
+// X-Amz-Copy-Source header.
+//
+// What makes this a distinct operation rather than a variant of CopyObject is where
+// the bytes land: they become a *part* of an open upload, and the destination key
+// stays absent until CompleteMultipartUpload assembles it. Routing it to CopyObject
+// wrote the destination object instead, so a HeadObject mid-upload reported a
+// ContentLength real S3 never exposes and the Complete that followed failed with
+// InvalidPart because no part had been stored (#532).
+func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	uploadID := req.Params["uploadId"]
+
+	partNum, _ := strconv.Atoi(req.Params["partNumber"]) // non-numeric → 0, fails range check below
+	if partNum < 1 || partNum > 10000 {
+		return s3ErrorResponse("InvalidPart", "The part number must be an integer between 1 and 10000.", http.StatusBadRequest), nil
+	}
+
+	upload, uploadResp, err := p.loadUploadFor(ctx, uploadID, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if uploadResp != nil {
+		return uploadResp, nil
+	}
+
+	srcBucket, srcKey, srcErr := parseS3CopySource(req.Headers["X-Amz-Copy-Source"])
+	if srcErr != nil {
+		return srcErr, nil
+	}
+
+	srcMeta, err := p.state.Get(ctx, s3Namespace, "object:"+srcBucket+"/"+srcKey)
+	if err != nil {
+		return nil, fmt.Errorf("get copy source metadata: %w", err)
+	}
+	if srcMeta == nil {
+		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+	}
+	var srcObj S3Object
+	if err := json.Unmarshal(srcMeta, &srcObj); err != nil {
+		return nil, fmt.Errorf("unmarshal copy source metadata: %w", err)
+	}
+
+	// An archived source has no readable body, exactly as for CopyObject: "you must
+	// restore a copy of this object before you can use it as a source object for the
+	// copy operation."
+	if resp := evaluateStorageClassRead(&srcObj); resp != nil {
+		return resp, nil
+	}
+
+	// The source preconditions gate reading the source. There is no destination
+	// object to guard, so unlike CopyObject there are no unprefixed conditions to
+	// evaluate — UploadPartCopy documents only the x-amz-copy-source-if-* four.
+	if evaluateReadPreconditions(copySourceConditionalHeaders(req.Headers), &srcObj) != nil {
+		return s3PreconditionFailedResponse(), nil
+	}
+
+	var srcBody []byte
+	if s3ObjectHasBody(srcKey) {
+		read, readErr := afero.ReadFile(p.fs, "/"+srcBucket+"/"+srcKey)
+		if readErr != nil {
+			return nil, fmt.Errorf("read copy source body: %w", readErr)
+		}
+		srcBody = read
+	}
+
+	body, rangeResp := s3CopySourceRangeBytes(headerValueFold(req.Headers, "x-amz-copy-source-range"), srcBody)
+	if rangeResp != nil {
+		return rangeResp, nil
+	}
+
+	// The part's checksum is computed over the copied bytes under the upload's
+	// algorithm. An empty header map is passed deliberately: a copy request carries
+	// no per-part checksum for the caller to supply, so there is nothing to verify
+	// and the digest is substrate's own — which is what lets Complete still assemble
+	// a COMPOSITE object checksum over a mix of uploaded and copied parts.
+	checksum, cksErr := resolvePartChecksum(map[string]string{}, body, upload.ChecksumAlgorithm)
+	if cksErr != nil {
+		return cksErr, nil
+	}
+
+	now := p.tc.Now()
+	hash := md5.Sum(body) //nolint:gosec // nosemgrep
+	etag := fmt.Sprintf(`"%x"`, hash)
+
+	if err := p.writePart(ctx, uploadID, S3Part{
+		PartNumber:   partNum,
+		ETag:         etag,
+		Size:         int64(len(body)),
+		Checksum:     checksum,
+		LastModified: now,
+	}, body); err != nil {
+		return nil, err
+	}
+
+	type copyPartResult struct {
+		XMLName      xml.Name        `xml:"CopyPartResult"`
+		LastModified string          `xml:"LastModified"`
+		ETag         string          `xml:"ETag"`
+		Checksum     []s3ChecksumXML `xml:",any"`
+	}
+	// No ETag response header: UploadPartCopy returns the tag in the body only, and a
+	// caller that reads the header instead of the body would silently see none.
+	return s3XMLResponse(http.StatusOK, copyPartResult{
+		LastModified: now.UTC().Format(time.RFC3339),
+		ETag:         etag,
+		Checksum:     checksumXMLElements(checksum),
+	})
+}
+
+// s3CopySourceRangeBytes resolves an x-amz-copy-source-range header against the
+// source body, returning the bytes UploadPartCopy should store. A non-nil
+// *AWSResponse is the S3 error to return.
+//
+// This deliberately does not reuse [parseByteRange]: a GET's Range header is
+// advisory — malformed is ignored and past-EOF is clamped — whereas a copy source
+// range is part of the request's meaning, so a range substrate cannot honor must
+// be refused rather than quietly turned into a different copy. The two error codes
+// come from different places, and the difference is worth stating: InvalidRequest
+// with this message is the reference's own documented special error for a source
+// that is not a valid byte-range copy source ("You can copy a range only if the
+// source object is greater than 5 MB"), while InvalidArgument for a malformed or
+// out-of-bounds range is substrate's choice of the closest documented S3 code.
+func s3CopySourceRangeBytes(header string, srcBody []byte) ([]byte, *AWSResponse) {
+	if strings.TrimSpace(header) == "" {
+		return srcBody, nil
+	}
+
+	total := int64(len(srcBody))
+	if total <= s3MinPartSize {
+		return nil, s3ErrorResponse("InvalidRequest",
+			"The specified copy source is not supported as a byte-range copy source.",
+			http.StatusBadRequest)
+	}
+
+	malformed := s3ErrorResponseWith(s3Error{
+		Code: "InvalidArgument",
+		Message: "The x-amz-copy-source-range value must be of the form bytes=first-last " +
+			"where first and last are the zero-based byte offsets to copy.",
+		Status:  http.StatusBadRequest,
+		Details: []s3ErrorDetail{{Name: "ArgumentName", Value: "x-amz-copy-source-range"}, {Name: "ArgumentValue", Value: header}},
+	})
+
+	spec, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(header)), "bytes=")
+	if !ok {
+		return nil, malformed
+	}
+	first, last, ok := strings.Cut(spec, "-")
+	if !ok {
+		return nil, malformed
+	}
+	start, sErr := strconv.ParseInt(strings.TrimSpace(first), 10, 64)
+	end, eErr := strconv.ParseInt(strings.TrimSpace(last), 10, 64)
+	if sErr != nil || eErr != nil || start < 0 || end < start {
+		// Both offsets are required: unlike a GET, "bytes=500-" names no last byte
+		// and so does not describe the range of a part.
+		return nil, malformed
+	}
+	if end >= total {
+		return nil, s3ErrorResponseWith(s3Error{
+			Code:    "InvalidArgument",
+			Message: fmt.Sprintf("Range specified is not valid for source object of size: %d", total),
+			Status:  http.StatusBadRequest,
+			Details: []s3ErrorDetail{{Name: "ArgumentName", Value: "x-amz-copy-source-range"}, {Name: "ArgumentValue", Value: header}},
+		})
+	}
+	return srcBody[start : end+1], nil
+}
+
+// listParts handles GET /<bucket>/<key>?uploadId=ID.
+//
+// Before #551 the object-level GET arm tested no uploadId, so this request reached
+// GetObject and answered 404 NoSuchKey — for an upload whose parts substrate had
+// stored and could list. A caller polling its own upload's progress therefore could
+// not tell an upload with parts from a key that does not exist.
+func (p *S3Plugin) listParts(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
+	ctx := context.Background()
+
+	uploadID := req.Params["uploadId"]
+
+	upload, uploadResp, err := p.loadUploadFor(ctx, uploadID, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	if uploadResp != nil {
+		return uploadResp, nil
+	}
+
+	// "The ListParts request returns a maximum of 1,000 uploaded parts. The limit of
+	// 1,000 parts is also the default value."
+	maxParts := s3MaxParts
+	if mp := req.Params["max-parts"]; mp != "" {
+		if n, convErr := strconv.Atoi(mp); convErr == nil && n >= 0 && n < s3MaxParts {
+			maxParts = n
+		}
+	}
+	// "Specifies the part after which listing should begin. Only parts with higher
+	// part numbers will be listed." A non-numeric marker lists from the start, which
+	// is how the other list operations treat an unusable token.
+	marker, _ := strconv.Atoi(req.Params["part-number-marker"])
+
+	stored, err := p.loadUploadParts(ctx, uploadID)
+	if err != nil {
+		return nil, err
+	}
+
+	type partEntry struct {
+		PartNumber   int             `xml:"PartNumber"`
+		LastModified string          `xml:"LastModified"`
+		ETag         string          `xml:"ETag"`
+		Size         int64           `xml:"Size"`
+		Checksum     []s3ChecksumXML `xml:",any"`
+	}
+	type listPartsResult struct {
+		XMLName xml.Name `xml:"ListPartsResult"`
+		Bucket  string   `xml:"Bucket"`
+		Key     string   `xml:"Key"`
+		//nolint:revive // matches AWS XML field name
+		UploadId             string      `xml:"UploadId"`
+		PartNumberMarker     int         `xml:"PartNumberMarker"`
+		NextPartNumberMarker int         `xml:"NextPartNumberMarker,omitempty"`
+		MaxParts             int         `xml:"MaxParts"`
+		IsTruncated          bool        `xml:"IsTruncated"`
+		Parts                []partEntry `xml:"Part"`
+		StorageClass         string      `xml:"StorageClass"`
+		ChecksumAlgorithm    string      `xml:"ChecksumAlgorithm,omitempty"`
+		ChecksumType         string      `xml:"ChecksumType,omitempty"`
+	}
+
+	storageClass := upload.StorageClass
+	if storageClass == "" {
+		storageClass = S3StorageClassStandard
+	}
+	result := listPartsResult{
+		Bucket:            bucket,
+		Key:               key,
+		UploadId:          uploadID,
+		PartNumberMarker:  marker,
+		MaxParts:          maxParts,
+		StorageClass:      storageClass,
+		ChecksumAlgorithm: upload.ChecksumAlgorithm,
+		ChecksumType:      upload.ChecksumType,
+	}
+
+	for _, part := range stored {
+		if part.PartNumber <= marker {
+			continue
+		}
+		if len(result.Parts) == maxParts {
+			// A part remains beyond the page, so the caller is told where to resume
+			// rather than left to assume it has seen the whole upload.
+			result.IsTruncated = true
+			result.NextPartNumberMarker = result.Parts[len(result.Parts)-1].PartNumber
+			break
+		}
+		result.Parts = append(result.Parts, partEntry{
+			PartNumber:   part.PartNumber,
+			LastModified: part.LastModified.UTC().Format(time.RFC3339),
+			ETag:         part.ETag,
+			Size:         part.Size,
+			Checksum:     checksumXMLElements(part.Checksum),
+		})
+	}
+
+	// An upload with no parts is a 200 with an empty list, not a 404: the upload
+	// exists, and "a response can contain zero or more Part elements".
+	return s3XMLResponse(http.StatusOK, result)
+}
+
+// s3MaxParts is both the default and the maximum value of ListParts' max-parts.
+const s3MaxParts = 1000
+
+// loadUploadFor loads the multipart upload named by uploadID and confirms it
+// targets bucket/key. A non-nil *AWSResponse is the NoSuchUpload to return.
+//
+// The bucket/key confirmation is the reason this is shared: an upload ID addressed
+// through the wrong key is not that upload, and every multipart operation must
+// answer NoSuchUpload for it rather than act on a different upload's parts.
+func (p *S3Plugin) loadUploadFor(ctx context.Context, uploadID, bucket, key string) (S3MultipartUpload, *AWSResponse, error) {
+	var upload S3MultipartUpload
+
+	uploadData, err := p.state.Get(ctx, s3Namespace, "multipart:"+uploadID)
+	if err != nil {
+		return upload, nil, fmt.Errorf("get upload metadata: %w", err)
+	}
+	if uploadData == nil {
+		return upload, s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
+	}
+	if err := json.Unmarshal(uploadData, &upload); err != nil {
+		return upload, nil, fmt.Errorf("unmarshal upload metadata: %w", err)
+	}
+	if upload.Bucket != bucket || upload.Key != key {
+		return upload, s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
+	}
+	return upload, nil, nil
+}
+
+// loadUploadParts returns an upload's stored parts in ascending part-number order.
+func (p *S3Plugin) loadUploadParts(ctx context.Context, uploadID string) ([]S3Part, error) {
+	partKeys, err := p.state.List(ctx, s3Namespace, "part:"+uploadID+"/")
+	if err != nil {
+		return nil, fmt.Errorf("list parts of %s: %w", uploadID, err)
+	}
+	parts := make([]S3Part, 0, len(partKeys))
+	for _, pk := range partKeys {
+		data, getErr := p.state.Get(ctx, s3Namespace, pk)
+		if getErr != nil {
+			return nil, fmt.Errorf("get %s: %w", pk, getErr)
+		}
+		if data == nil {
+			continue
+		}
+		var part S3Part
+		if unmarshalErr := json.Unmarshal(data, &part); unmarshalErr != nil {
+			return nil, fmt.Errorf("unmarshal %s: %w", pk, unmarshalErr)
+		}
+		parts = append(parts, part)
+	}
+	// State keys sort lexicographically, which puts part 10 before part 2.
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
+	return parts, nil
+}
+
+// writePart stores one part's body and metadata, the write half shared by
+// UploadPart and UploadPartCopy. Both must land in the same place under the same
+// key scheme, or a Complete naming a copied part cannot resolve it.
+func (p *S3Plugin) writePart(ctx context.Context, uploadID string, part S3Part, body []byte) error {
+	partPath := fmt.Sprintf("/.multipart/%s/%d", uploadID, part.PartNumber)
+	if mkdirErr := p.fs.MkdirAll(filepath.Dir(partPath), 0o755); mkdirErr != nil {
+		return fmt.Errorf("mkdir parts dir: %w", mkdirErr)
+	}
+	if writeErr := afero.WriteFile(p.fs, partPath, body, 0o644); writeErr != nil {
+		return fmt.Errorf("write part body: %w", writeErr)
+	}
+	partData, err := json.Marshal(part)
+	if err != nil {
+		return fmt.Errorf("marshal part metadata: %w", err)
+	}
+	if err := p.state.Put(ctx, s3Namespace, fmt.Sprintf("part:%s/%d", uploadID, part.PartNumber), partData); err != nil {
+		return fmt.Errorf("save part metadata: %w", err)
+	}
+	return nil
 }
 
 // s3MinPartSize is the minimum size in bytes of every part in a multipart upload
@@ -1851,20 +2209,12 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 
 	uploadID := req.Params["uploadId"]
 
-	uploadData, err := p.state.Get(ctx, s3Namespace, "multipart:"+uploadID)
+	upload, uploadResp, err := p.loadUploadFor(ctx, uploadID, bucket, key)
 	if err != nil {
-		return nil, fmt.Errorf("get upload metadata: %w", err)
+		return nil, err
 	}
-	if uploadData == nil {
-		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
-	}
-
-	var upload S3MultipartUpload
-	if err := json.Unmarshal(uploadData, &upload); err != nil {
-		return nil, fmt.Errorf("unmarshal upload metadata: %w", err)
-	}
-	if upload.Bucket != bucket || upload.Key != key {
-		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
+	if uploadResp != nil {
+		return uploadResp, nil
 	}
 
 	var cReq s3CompleteMultipartUploadRequest
@@ -2121,20 +2471,12 @@ func (p *S3Plugin) abortMultipartUpload(_ *RequestContext, req *AWSRequest, buck
 
 	uploadID := req.Params["uploadId"]
 
-	uploadData, err := p.state.Get(ctx, s3Namespace, "multipart:"+uploadID)
+	_, uploadResp, err := p.loadUploadFor(ctx, uploadID, bucket, key)
 	if err != nil {
-		return nil, fmt.Errorf("get upload metadata: %w", err)
+		return nil, err
 	}
-	if uploadData == nil {
-		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
-	}
-
-	var upload S3MultipartUpload
-	if err := json.Unmarshal(uploadData, &upload); err != nil {
-		return nil, fmt.Errorf("unmarshal upload metadata: %w", err)
-	}
-	if upload.Bucket != bucket || upload.Key != key {
-		return s3ErrorResponse("NoSuchUpload", s3NoSuchUploadMessage, http.StatusNotFound), nil
+	if uploadResp != nil {
+		return uploadResp, nil
 	}
 
 	if abortErr := p.abortUploadState(ctx, uploadID); abortErr != nil {
