@@ -749,6 +749,8 @@ STS operations are free.
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
 | CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
+| UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
+| ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list |
 | CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
@@ -1139,6 +1141,38 @@ The `EntityTooSmall` body identifies the offending part:
   <PartNumber>1</PartNumber>
 </Error>
 ```
+
+#### Copying into a part
+
+`UploadPartCopy` — a `PUT` to the destination key carrying `partNumber`, `uploadId`
+**and** `x-amz-copy-source` — copies an existing object into a part of an open
+upload. What distinguishes it from `CopyObject` is where the bytes land: **the
+destination key stays absent until `CompleteMultipartUpload` assembles it.** A
+`HeadObject` on the destination mid-upload is a `404`, and `ListParts` is the only
+place the copied bytes are observable. Copied and uploaded parts mix freely in one
+upload, and a copied part's checksum is computed under the upload's algorithm, so
+`CompleteMultipartUpload` still assembles a `COMPOSITE` object checksum over the
+mixture.
+
+`x-amz-copy-source-range` selects a byte range of the source. Unlike a `GET`'s
+`Range` header — which S3 treats as advisory, ignoring a malformed value and
+clamping one that runs past the end — a copy-source range is part of the request's
+meaning, so substrate refuses a range it cannot honor rather than silently copying
+different bytes:
+
+| Condition | Result |
+|---|---|
+| `bytes=first-last`, both offsets within the source | that range is copied |
+| No range header | the whole source object is copied |
+| Malformed, or missing either offset (`bytes=0-`, `bytes=-9`) | `400 InvalidArgument` |
+| `last` at or beyond the source's size | `400 InvalidArgument` |
+| Any range against a source of 5 MB or less | `400 InvalidRequest` — the reference's documented special error, since "you can copy a range only if the source object is greater than 5 MB" |
+| `uploadId` unknown, or for a different bucket or key | `404 NoSuchUpload` |
+| Copy source does not exist | `404 NoSuchKey` |
+
+The `x-amz-copy-source-if-*` preconditions gate reading the source and answer
+`412 PreconditionFailed` on failure. There are no destination preconditions, since
+there is no destination object yet.
 
 #### Metadata carried from CreateMultipartUpload
 
