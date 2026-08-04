@@ -764,8 +764,8 @@ STS operations are free.
 | PutBucketAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
 | GetObjectAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
 | PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
-| GetBucketNotificationConfiguration | |
-| PutBucketNotificationConfiguration | Triggers Lambda/SQS on PutObject/DeleteObject |
+| GetBucketNotificationConfiguration | Reports the stored configuration in the API's element names; an unconfigured bucket is an empty `NotificationConfiguration` — see [Event notifications](#event-notifications) |
+| PutBucketNotificationConfiguration | Dispatches to Lambda, SQS and SNS on `PutObject`/`DeleteObject`; a body naming no recognized element is `400 MalformedXML` — see [Event notifications](#event-notifications) |
 | PutBucketTagging | |
 | GetBucketTagging | |
 | DeleteBucketTagging | |
@@ -1575,6 +1575,37 @@ XML body wins over both.
 substrate has no canonical user IDs: there is one owner per bucket and it owns everything
 in it. An ACL's `Owner` and its `CanonicalUser` `FULL_CONTROL` grantee are therefore
 always the same ID, and an object's owner is its bucket's.
+
+### Event notifications
+
+`PutBucketNotificationConfiguration` accepts the API's XML body and
+`GetBucketNotificationConfiguration` returns it in the same shape. Note the element
+names, which are not the SDK member names:
+
+| Destination | Configuration element | Destination element |
+|---|---|---|
+| SNS topic | `TopicConfiguration` | `Topic` |
+| SQS queue | `QueueConfiguration` | `Queue` |
+| Lambda function | `CloudFunctionConfiguration` | `CloudFunction` |
+| EventBridge | `EventBridgeConfiguration` | — (no members) |
+
+Each configuration takes an optional `Id`, one or more repeated `Event` elements, and
+an optional `Filter` → `S3Key` → repeated `FilterRule` with `Name` (`prefix` or
+`suffix`) and `Value`. Substrate also accepts a JSON body keyed on the SDK's member
+names as a convenience; the response is always XML.
+
+A configured notification is **dispatched**: `PutObject` and `DeleteObject` invoke the
+named Lambda function, send to the named SQS queue, and publish to the named SNS
+topic, with the key filter applied. EventBridge delivery is recorded and reported but
+not dispatched — substrate has no bus-to-target path for S3 events.
+
+An **empty** `NotificationConfiguration` is the documented way to turn notifications
+off, and an unconfigured bucket reads back as one. A non-empty body naming no
+recognized element is `400 MalformedXML` rather than being accepted as a disable: an
+XML decoder reports no error for a body whose elements match no field, so without that
+refusal a body with the wrong element names is indistinguishable from a deliberate
+disable, which is how a configuration could be accepted with a `200` and silently
+never fire (#542).
 
 ### CloudFormation resource types
 

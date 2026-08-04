@@ -310,7 +310,24 @@ type S3Grantee struct {
 	DisplayName string `xml:"DisplayName,omitempty" json:"DisplayName,omitempty"`
 }
 
-// S3NotificationConfiguration holds event notification configurations for an S3 bucket.
+// S3NotificationConfiguration holds event notification configurations for an S3
+// bucket. This is the *state* encoding: it is what S3Plugin persists under
+// "notification:<bucket>" and what fireNotifications reads back to decide where
+// an event goes.
+//
+// It deliberately carries no xml tags. The wire encoding is a different shape —
+// S3 names each configuration element in the singular (TopicConfiguration, not
+// TopicConfigurations), names the destination after the service rather than the
+// field (Topic, Queue, CloudFunction rather than TopicArn, QueueArn,
+// LambdaFunctionArn) and repeats a bare Event element per event — so it lives in
+// the s3Notification*Wire types below with projections both ways, following the
+// remedy #528 established for CloudWatch Logs.
+//
+// Retagging this struct instead would have re-created the conflation that made
+// #542 invisible: xml.Unmarshal falls back to matching Go field *names*, so a
+// real-S3 body matched nothing here, returned no error, and persisted an empty
+// configuration. A round-trip test could not see it, because a struct
+// marshaled and unmarshaled by its own definition agrees with itself.
 type S3NotificationConfiguration struct {
 	// LambdaFunctionConfigurations lists Lambda invocation notification configs.
 	LambdaFunctionConfigurations []S3LambdaFunctionConfiguration `json:"LambdaFunctionConfigurations,omitempty"`
@@ -318,8 +335,14 @@ type S3NotificationConfiguration struct {
 	// QueueConfigurations lists SQS queue notification configs.
 	QueueConfigurations []S3QueueConfiguration `json:"QueueConfigurations,omitempty"`
 
-	// TopicConfigurations lists SNS topic notification configs (stored but not dispatched).
+	// TopicConfigurations lists SNS topic notification configs.
 	TopicConfigurations []S3TopicConfiguration `json:"TopicConfigurations,omitempty"`
+
+	// EventBridgeEnabled records that the bucket asked for delivery to
+	// EventBridge. Substrate stores and reports the choice so a caller can read
+	// back what it configured, but does not dispatch to EventBridge; see
+	// docs/services.md.
+	EventBridgeEnabled bool `json:"EventBridgeEnabled,omitempty"`
 }
 
 // S3LambdaFunctionConfiguration configures event notifications to a Lambda function.
@@ -353,7 +376,6 @@ type S3QueueConfiguration struct {
 }
 
 // S3TopicConfiguration configures event notifications to an SNS topic.
-// The topic is stored but notifications are not dispatched in this emulator.
 type S3TopicConfiguration struct {
 	// ID is the optional unique identifier for this configuration.
 	ID string `json:"Id,omitempty"`
@@ -387,4 +409,192 @@ type S3FilterRule struct {
 
 	// Value is the prefix or suffix string to match against.
 	Value string `json:"Value"`
+}
+
+// The wire encoding of a bucket notification configuration, per the
+// Put/GetBucketNotificationConfiguration references. These types exist only to
+// be marshaled and unmarshaled; the persisted shape is
+// [S3NotificationConfiguration], and the projections below are the one place the
+// two are allowed to meet.
+//
+// Three differences from the state shape are what #542 turned on, and each is a
+// silent failure rather than a parse error:
+//
+//   - Every configuration element is singular. A body carrying
+//     <QueueConfiguration> does not populate a field named QueueConfigurations.
+//   - The destination element is named for the service — <Topic>, <Queue>,
+//     <CloudFunction> — not for the ARN it holds.
+//   - Events repeat as bare <Event> elements rather than nesting under an
+//     <Events> parent.
+//
+// xml.Unmarshal reports no error for a body none of whose elements it
+// recognizes, so all three read as "an empty configuration was submitted".
+
+// s3NotificationConfigurationWire is the wire form of a bucket's notification
+// configuration.
+type s3NotificationConfigurationWire struct {
+	XMLName xml.Name `xml:"NotificationConfiguration"`
+
+	// Xmlns is the S3 namespace, emitted on responses. It is omitted when empty
+	// so an unmarshaled request does not have to carry it.
+	Xmlns string `xml:"xmlns,attr,omitempty"`
+
+	TopicConfigurations  []s3TopicConfigurationWire  `xml:"TopicConfiguration"`
+	QueueConfigurations  []s3QueueConfigurationWire  `xml:"QueueConfiguration"`
+	LambdaConfigurations []s3LambdaConfigurationWire `xml:"CloudFunctionConfiguration"`
+
+	// EventBridge is present-but-empty when the bucket enables EventBridge
+	// delivery, so a pointer distinguishes "the element was there" from "it was
+	// not" — there is no field inside it to test.
+	EventBridge *s3EventBridgeConfigurationWire `xml:"EventBridgeConfiguration"`
+}
+
+// s3TopicConfigurationWire is the wire form of an SNS topic notification config.
+type s3TopicConfigurationWire struct {
+	ID     string                    `xml:"Id,omitempty"`
+	Topic  string                    `xml:"Topic"`
+	Events []string                  `xml:"Event"`
+	Filter *s3NotificationFilterWire `xml:"Filter,omitempty"`
+}
+
+// s3QueueConfigurationWire is the wire form of an SQS queue notification config.
+type s3QueueConfigurationWire struct {
+	ID     string                    `xml:"Id,omitempty"`
+	Queue  string                    `xml:"Queue"`
+	Events []string                  `xml:"Event"`
+	Filter *s3NotificationFilterWire `xml:"Filter,omitempty"`
+}
+
+// s3LambdaConfigurationWire is the wire form of a Lambda notification config.
+// Its element is CloudFunctionConfiguration and its destination CloudFunction:
+// the SDKs call the member LambdaFunctionConfigurations, but the XML kept the
+// original names.
+type s3LambdaConfigurationWire struct {
+	ID            string                    `xml:"Id,omitempty"`
+	CloudFunction string                    `xml:"CloudFunction"`
+	Events        []string                  `xml:"Event"`
+	Filter        *s3NotificationFilterWire `xml:"Filter,omitempty"`
+}
+
+// s3EventBridgeConfigurationWire is the wire form of the EventBridge element,
+// which the reference documents as carrying no members.
+type s3EventBridgeConfigurationWire struct{}
+
+// s3NotificationFilterWire is the wire form of a notification's key filter. The
+// state shape names the inner element Key; the wire names it S3Key.
+type s3NotificationFilterWire struct {
+	Key s3KeyFilterWire `xml:"S3Key"`
+}
+
+// s3KeyFilterWire is the wire form of the key filter's rule list, which is a
+// repeated FilterRule rather than a FilterRules parent.
+type s3KeyFilterWire struct {
+	FilterRules []s3FilterRuleWire `xml:"FilterRule"`
+}
+
+// s3FilterRuleWire is the wire form of one prefix or suffix rule.
+type s3FilterRuleWire struct {
+	Name  string `xml:"Name"`
+	Value string `xml:"Value"`
+}
+
+// isEmpty reports whether the wire configuration named no destination at all.
+// An empty NotificationConfiguration is how the API documents "disable
+// notifications", so it is a legitimate body — but it is also what a body whose
+// elements were all unrecognized parses to, which is why the handler needs to
+// tell the two apart by looking at whether the body was empty to begin with.
+func (w s3NotificationConfigurationWire) isEmpty() bool {
+	return len(w.TopicConfigurations) == 0 && len(w.QueueConfigurations) == 0 &&
+		len(w.LambdaConfigurations) == 0 && w.EventBridge == nil
+}
+
+// s3NotificationState projects a wire configuration onto the persisted shape.
+func s3NotificationState(w s3NotificationConfigurationWire) S3NotificationConfiguration {
+	cfg := S3NotificationConfiguration{EventBridgeEnabled: w.EventBridge != nil}
+	for _, t := range w.TopicConfigurations {
+		cfg.TopicConfigurations = append(cfg.TopicConfigurations, S3TopicConfiguration{
+			ID:       t.ID,
+			TopicArn: t.Topic,
+			Events:   t.Events,
+			Filter:   s3NotificationFilterState(t.Filter),
+		})
+	}
+	for _, q := range w.QueueConfigurations {
+		cfg.QueueConfigurations = append(cfg.QueueConfigurations, S3QueueConfiguration{
+			ID:       q.ID,
+			QueueArn: q.Queue,
+			Events:   q.Events,
+			Filter:   s3NotificationFilterState(q.Filter),
+		})
+	}
+	for _, l := range w.LambdaConfigurations {
+		cfg.LambdaFunctionConfigurations = append(cfg.LambdaFunctionConfigurations, S3LambdaFunctionConfiguration{
+			ID:                l.ID,
+			LambdaFunctionArn: l.CloudFunction,
+			Events:            l.Events,
+			Filter:            s3NotificationFilterState(l.Filter),
+		})
+	}
+	return cfg
+}
+
+// s3NotificationConfigurationWireOf projects a persisted configuration onto its
+// wire form.
+func s3NotificationConfigurationWireOf(cfg S3NotificationConfiguration) s3NotificationConfigurationWire {
+	w := s3NotificationConfigurationWire{Xmlns: s3XMLNamespace}
+	if cfg.EventBridgeEnabled {
+		w.EventBridge = &s3EventBridgeConfigurationWire{}
+	}
+	for _, t := range cfg.TopicConfigurations {
+		w.TopicConfigurations = append(w.TopicConfigurations, s3TopicConfigurationWire{
+			ID:     t.ID,
+			Topic:  t.TopicArn,
+			Events: t.Events,
+			Filter: s3NotificationFilterWireOf(t.Filter),
+		})
+	}
+	for _, q := range cfg.QueueConfigurations {
+		w.QueueConfigurations = append(w.QueueConfigurations, s3QueueConfigurationWire{
+			ID:     q.ID,
+			Queue:  q.QueueArn,
+			Events: q.Events,
+			Filter: s3NotificationFilterWireOf(q.Filter),
+		})
+	}
+	for _, l := range cfg.LambdaFunctionConfigurations {
+		w.LambdaConfigurations = append(w.LambdaConfigurations, s3LambdaConfigurationWire{
+			ID:            l.ID,
+			CloudFunction: l.LambdaFunctionArn,
+			Events:        l.Events,
+			Filter:        s3NotificationFilterWireOf(l.Filter),
+		})
+	}
+	return w
+}
+
+// s3NotificationFilterState projects a wire key filter onto the persisted shape.
+// A nil filter stays nil: "no filter" and "a filter with no rules" mean the same
+// thing to s3KeyFilterMatches, and preserving the distinction would only invite
+// an empty <Filter/> onto the response.
+func s3NotificationFilterState(f *s3NotificationFilterWire) *S3NotificationFilter {
+	if f == nil || len(f.Key.FilterRules) == 0 {
+		return nil
+	}
+	out := &S3NotificationFilter{}
+	for _, r := range f.Key.FilterRules {
+		out.Key.FilterRules = append(out.Key.FilterRules, S3FilterRule(r))
+	}
+	return out
+}
+
+// s3NotificationFilterWireOf projects a persisted key filter onto its wire form.
+func s3NotificationFilterWireOf(f *S3NotificationFilter) *s3NotificationFilterWire {
+	if f == nil || len(f.Key.FilterRules) == 0 {
+		return nil
+	}
+	out := &s3NotificationFilterWire{}
+	for _, r := range f.Key.FilterRules {
+		out.Key.FilterRules = append(out.Key.FilterRules, s3FilterRuleWire(r))
+	}
+	return out
 }

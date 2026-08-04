@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // S3 ETag is defined as MD5; not used for security.
 	"encoding/base64"
@@ -3344,30 +3345,14 @@ func (p *S3Plugin) getBucketNotificationConfiguration(_ *RequestContext, req *AW
 	parts := strings.SplitN(strings.TrimPrefix(req.Path, "/"), "/", 2)
 	bucket := parts[0]
 
-	data, err := p.state.Get(context.Background(), s3Namespace, "notification:"+bucket)
+	cfg, err := p.loadNotificationConfiguration(bucket)
 	if err != nil {
 		return nil, fmt.Errorf("s3 getBucketNotificationConfiguration: %w", err)
 	}
-	if data == nil {
-		// Return empty configuration.
-		empty := S3NotificationConfiguration{}
-		body, marshalErr := xml.Marshal(empty)
-		if marshalErr != nil {
-			return nil, fmt.Errorf("s3 getBucketNotificationConfiguration marshal: %w", marshalErr)
-		}
-		return &AWSResponse{
-			StatusCode: http.StatusOK,
-			Headers:    map[string]string{"Content-Type": "application/xml"},
-			Body:       body,
-		}, nil
-	}
 
-	var cfg S3NotificationConfiguration
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("s3 getBucketNotificationConfiguration unmarshal: %w", err)
-	}
-
-	body, marshalErr := xml.Marshal(cfg)
+	// A bucket with no configuration returns an empty NotificationConfiguration
+	// element, not a 404 — the same body a caller PUTs to turn notifications off.
+	body, marshalErr := xml.Marshal(s3NotificationConfigurationWireOf(cfg))
 	if marshalErr != nil {
 		return nil, fmt.Errorf("s3 getBucketNotificationConfiguration xml marshal: %w", marshalErr)
 	}
@@ -3378,17 +3363,35 @@ func (p *S3Plugin) getBucketNotificationConfiguration(_ *RequestContext, req *AW
 	}, nil
 }
 
+// loadNotificationConfiguration reads a bucket's stored notification
+// configuration, returning a zero configuration when the bucket has none.
+//
+// One reader for both the API read and fireNotifications, so the two cannot end
+// up keyed or decoded differently — a read-back that passes while delivery stays
+// broken is precisely the failure #542 was.
+func (p *S3Plugin) loadNotificationConfiguration(bucket string) (S3NotificationConfiguration, error) {
+	var cfg S3NotificationConfiguration
+	data, err := p.state.Get(context.Background(), s3Namespace, "notification:"+bucket)
+	if err != nil {
+		return cfg, fmt.Errorf("state.Get notification:%s: %w", bucket, err)
+	}
+	if data == nil {
+		return cfg, nil
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("unmarshal notification:%s: %w", bucket, err)
+	}
+	return cfg, nil
+}
+
 // putBucketNotificationConfiguration handles PUT /<bucket>?notification.
 func (p *S3Plugin) putBucketNotificationConfiguration(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	parts := strings.SplitN(strings.TrimPrefix(req.Path, "/"), "/", 2)
 	bucket := parts[0]
 
-	var cfg S3NotificationConfiguration
-	if err := xml.Unmarshal(req.Body, &cfg); err != nil {
-		// Try JSON fallback.
-		if jsonErr := json.Unmarshal(req.Body, &cfg); jsonErr != nil {
-			return nil, &AWSError{Code: "MalformedXML", Message: "invalid notification configuration", HTTPStatus: http.StatusBadRequest}
-		}
+	cfg, errResp := s3ParseNotificationConfiguration(req.Body)
+	if errResp != nil {
+		return nil, errResp
 	}
 
 	data, marshalErr := json.Marshal(cfg)
@@ -3402,6 +3405,72 @@ func (p *S3Plugin) putBucketNotificationConfiguration(_ *RequestContext, req *AW
 	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{}, Body: nil}, nil
 }
 
+// s3ParseNotificationConfiguration decodes a PutBucketNotificationConfiguration
+// body into the persisted shape, refusing a body it recognized nothing in.
+//
+// That refusal is the substantive part. xml.Unmarshal reports no error for a body
+// whose elements match no field, so before #542 a real-S3 body — every element of
+// which the state struct's field names failed to match — was accepted as "an
+// empty configuration was submitted", stored, and silently disabled every
+// notification on the bucket. An empty configuration *is* the documented way to
+// turn notifications off, so the two cases can only be told apart by whether the
+// body named anything at all; a body that did and still parsed to nothing is
+// MalformedXML rather than a quiet no-op.
+func s3ParseNotificationConfiguration(body []byte) (S3NotificationConfiguration, *AWSError) {
+	var cfg S3NotificationConfiguration
+	if len(bytes.TrimSpace(body)) == 0 {
+		// No body at all is the same instruction as an empty configuration.
+		return cfg, nil
+	}
+
+	var wire s3NotificationConfigurationWire
+	if err := xml.Unmarshal(body, &wire); err != nil {
+		// A JSON body is substrate's own convenience, predating the XML path and
+		// keyed on the state shape's json tags, so it decodes straight to state.
+		if jsonErr := json.Unmarshal(body, &cfg); jsonErr != nil {
+			return S3NotificationConfiguration{}, &AWSError{
+				Code:       "MalformedXML",
+				Message:    "The XML you provided was not well-formed or did not validate against our published schema",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		return cfg, nil
+	}
+
+	if wire.isEmpty() && s3XMLHasChildElement(body) {
+		return S3NotificationConfiguration{}, &AWSError{
+			Code:       "MalformedXML",
+			Message:    "The XML you provided was not well-formed or did not validate against our published schema",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return s3NotificationState(wire), nil
+}
+
+// s3XMLHasChildElement reports whether an XML document's root element contains
+// at least one child element. It is how a genuinely empty
+// <NotificationConfiguration/> is distinguished from one full of elements none of
+// which were recognized.
+func s3XMLHasChildElement(body []byte) bool {
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			depth++
+			if depth > 1 {
+				return true
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
+}
+
 // fireNotifications dispatches S3 event notifications to configured Lambda
 // functions and SQS queues. It is a best-effort operation: errors are logged
 // but never returned to the caller.
@@ -3410,14 +3479,9 @@ func (p *S3Plugin) fireNotifications(ctx *RequestContext, bucket, key, eventName
 		return
 	}
 
-	data, err := p.state.Get(context.Background(), s3Namespace, "notification:"+bucket)
-	if err != nil || data == nil {
-		return
-	}
-
-	var notifCfg S3NotificationConfiguration
-	if err := json.Unmarshal(data, &notifCfg); err != nil {
-		p.logger.Warn("s3 fireNotifications: unmarshal error", "err", err)
+	notifCfg, err := p.loadNotificationConfiguration(bucket)
+	if err != nil {
+		p.logger.Warn("s3 fireNotifications: load error", "bucket", bucket, "err", err)
 		return
 	}
 
