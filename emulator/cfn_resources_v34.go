@@ -87,8 +87,10 @@ func (d *StackDeployer) deployMSKCluster(
 	if bi, ok := props["BrokerNodeGroupInfo"].(map[string]interface{}); ok {
 		// Resolved rather than asserted on string: a template names its subnets
 		// with a Ref far more often than as literals, and a string assertion
-		// dropped every one of them (#526). MSK's API is natively PascalCase, so
-		// only the values need attention.
+		// dropped every one of them (#526). The keys here are a CloudFormation
+		// template's property names, which are PascalCase; the kafka API's own wire
+		// members are lowerCamel (#529), so do not read these as evidence of the
+		// wire shape.
 		if it := resolveValue(bi["InstanceType"], cctx); it != "" {
 			brokerInfo["InstanceType"] = it
 		}
@@ -130,8 +132,8 @@ func (d *StackDeployer) deployMSKCluster(
 		dr.PhysicalID = name
 	} else if resp != nil {
 		var result struct {
-			ClusterARN  string `json:"ClusterArn"`
-			ClusterName string `json:"ClusterName"`
+			ClusterARN  string `json:"clusterArn"`
+			ClusterName string `json:"clusterName"`
 		}
 		if json.Unmarshal(resp.Body, &result) == nil {
 			dr.PhysicalID = result.ClusterARN

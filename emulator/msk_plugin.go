@@ -162,9 +162,9 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	updateStringIndex(context.Background(), p.state, mskNamespace, indexKey, input.ClusterName)
 
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"ClusterArn":  clusterARN,
-		"ClusterName": cluster.ClusterName,
-		"State":       cluster.State,
+		"clusterArn":  clusterARN,
+		"clusterName": cluster.ClusterName,
+		"state":       cluster.State,
 	})
 }
 
@@ -177,7 +177,7 @@ func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN
 		return nil, err
 	}
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"ClusterInfo": cluster,
+		"clusterInfo": mskClusterInfoWire(cluster),
 	})
 }
 
@@ -196,7 +196,7 @@ func (p *MSKPlugin) getBootstrapBrokers(_ *RequestContext, _ *AWSRequest, cluste
 		name, region, name, region,
 	)
 	return mskJSONResponse(http.StatusOK, map[string]string{
-		"BootstrapBrokerString": brokers,
+		"bootstrapBrokerString": brokers,
 	})
 }
 
@@ -207,7 +207,7 @@ func (p *MSKPlugin) listClusters(reqCtx *RequestContext, _ *AWSRequest) (*AWSRes
 		return nil, fmt.Errorf("msk listClusters load index: %w", err)
 	}
 
-	var clusters []MSKCluster
+	infos := make([]mskClusterInfoOut, 0, len(names))
 	for _, name := range names {
 		data, getErr := p.state.Get(context.Background(), mskNamespace, "cluster:"+scope+"/"+name)
 		if getErr != nil || data == nil {
@@ -217,14 +217,11 @@ func (p *MSKPlugin) listClusters(reqCtx *RequestContext, _ *AWSRequest) (*AWSRes
 		if json.Unmarshal(data, &c) != nil {
 			continue
 		}
-		clusters = append(clusters, c)
-	}
-	if clusters == nil {
-		clusters = []MSKCluster{}
+		infos = append(infos, mskClusterInfoWire(&c))
 	}
 
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"ClusterInfoList": clusters,
+		"clusterInfoList": infos,
 	})
 }
 
@@ -244,10 +241,11 @@ func (p *MSKPlugin) deleteCluster(reqCtx *RequestContext, _ *AWSRequest, cluster
 	}
 	removeFromStringIndex(context.Background(), p.state, mskNamespace, "cluster_ids:"+scope, cluster.ClusterName)
 
+	// DeleteClusterResponse declares only clusterArn and state; clusterName is not
+	// a member of it, so it is not reported here.
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"ClusterArn":  cluster.ClusterARN,
-		"ClusterName": cluster.ClusterName,
-		"State":       "DELETING",
+		"clusterArn": cluster.ClusterARN,
+		"state":      "DELETING",
 	})
 }
 
@@ -346,7 +344,7 @@ func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterA
 		return nil, err
 	}
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"ClusterInfo": mskV2ClusterInfo(cluster),
+		"clusterInfo": mskClusterWire(cluster),
 	})
 }
 
@@ -358,7 +356,7 @@ func (p *MSKPlugin) listClustersV2(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("msk listClustersV2 load index: %w", err)
 	}
 
-	infos := make([]map[string]interface{}, 0, len(names))
+	infos := make([]mskClusterOut, 0, len(names))
 	for _, name := range names {
 		data, getErr := p.state.Get(context.Background(), mskNamespace, "cluster:"+scope+"/"+name)
 		if getErr != nil || data == nil {
@@ -368,12 +366,13 @@ func (p *MSKPlugin) listClustersV2(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if json.Unmarshal(data, &c) != nil {
 			continue
 		}
-		infos = append(infos, mskV2ClusterInfo(&c))
+		infos = append(infos, mskClusterWire(&c))
 	}
 	_ = req
+	// nextToken is omitted rather than sent empty: substrate returns every cluster
+	// in one page, and an empty token would invite a caller to page on it.
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"ClusterInfoList": infos,
-		"NextToken":       "",
+		"clusterInfoList": infos,
 	})
 }
 
@@ -421,27 +420,13 @@ func (p *MSKPlugin) listNodes(_ *RequestContext, _ *AWSRequest, clusterARN strin
 			NodeType:     "BROKER",
 		}
 	}
-	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"NodeInfoList": nodes,
-	})
-}
-
-// mskV2ClusterInfo converts an MSKCluster to the V2 ClusterInfo wire shape.
-func mskV2ClusterInfo(c *MSKCluster) map[string]interface{} {
-	return map[string]interface{}{
-		"ClusterArn":   c.ClusterARN,
-		"ClusterName":  c.ClusterName,
-		"ClusterType":  "PROVISIONED",
-		"State":        c.State,
-		"CreationTime": c.CreatedAt,
-		"Provisioned": map[string]interface{}{
-			"BrokerNodeGroupInfo": c.BrokerNodeGroupInfo,
-			"CurrentBrokerSoftwareInfo": MSKBrokerSoftwareInfo{
-				KafkaVersion: c.KafkaVersion,
-			},
-			"NumberOfBrokerNodes": c.NumberOfBrokerNodes,
-		},
+	out := make([]mskNodeInfoOut, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, mskNodeInfoWire(n))
 	}
+	return mskJSONResponse(http.StatusOK, map[string]interface{}{
+		"nodeInfoList": out,
+	})
 }
 
 // mskGenerateUUID produces a short deterministic hex string for cluster ARNs.
