@@ -65,21 +65,21 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
 	var created struct {
-		ClusterARN  string `json:"ClusterArn"`
-		ClusterName string `json:"ClusterName"`
-		State       string `json:"State"`
+		ClusterARN  string `json:"clusterArn"`
+		ClusterName string `json:"clusterName"`
+		State       string `json:"state"`
 	}
 	if err := json.Unmarshal(resp.Body, &created); err != nil {
 		t.Fatalf("unmarshal create response: %v", err)
 	}
 	if created.ClusterARN == "" {
-		t.Error("want non-empty ClusterArn")
+		t.Error("want non-empty clusterArn")
 	}
 	if created.ClusterName != "my-kafka" {
-		t.Errorf("want ClusterName=my-kafka, got %q", created.ClusterName)
+		t.Errorf("want clusterName=my-kafka, got %q", created.ClusterName)
 	}
 	if created.State != "ACTIVE" {
-		t.Errorf("want State=ACTIVE, got %q", created.State)
+		t.Errorf("want state=ACTIVE, got %q", created.State)
 	}
 
 	// CreateCluster — duplicate
@@ -108,7 +108,9 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Fatalf("ListClusters: %v", err)
 	}
 	var listed struct {
-		ClusterInfoList []emulator.MSKCluster `json:"ClusterInfoList"`
+		ClusterInfoList []struct {
+			ClusterName string `json:"clusterName"`
+		} `json:"clusterInfoList"`
 	}
 	if err := json.Unmarshal(resp.Body, &listed); err != nil {
 		t.Fatalf("unmarshal list: %v", err)
@@ -117,7 +119,7 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Errorf("want 1 cluster, got %d", len(listed.ClusterInfoList))
 	}
 	if listed.ClusterInfoList[0].ClusterName != "my-kafka" {
-		t.Errorf("want ClusterName=my-kafka, got %q", listed.ClusterInfoList[0].ClusterName)
+		t.Errorf("want clusterName=my-kafka, got %q", listed.ClusterInfoList[0].ClusterName)
 	}
 
 	// DescribeCluster
@@ -126,13 +128,15 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Fatalf("DescribeCluster: %v", err)
 	}
 	var described struct {
-		ClusterInfo emulator.MSKCluster `json:"ClusterInfo"`
+		ClusterInfo struct {
+			ClusterName string `json:"clusterName"`
+		} `json:"clusterInfo"`
 	}
 	if err := json.Unmarshal(resp.Body, &described); err != nil {
 		t.Fatalf("unmarshal describe: %v", err)
 	}
 	if described.ClusterInfo.ClusterName != "my-kafka" {
-		t.Errorf("want ClusterName=my-kafka, got %q", described.ClusterInfo.ClusterName)
+		t.Errorf("want clusterName=my-kafka, got %q", described.ClusterInfo.ClusterName)
 	}
 
 	// DescribeCluster — not found
@@ -154,13 +158,13 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Fatalf("GetBootstrapBrokers: %v", err)
 	}
 	var brokers struct {
-		BootstrapBrokerString string `json:"BootstrapBrokerString"`
+		BootstrapBrokerString string `json:"bootstrapBrokerString"`
 	}
 	if err := json.Unmarshal(resp.Body, &brokers); err != nil {
 		t.Fatalf("unmarshal brokers: %v", err)
 	}
 	if brokers.BootstrapBrokerString == "" {
-		t.Error("want non-empty BootstrapBrokerString")
+		t.Error("want non-empty bootstrapBrokerString")
 	}
 
 	// DeleteCluster
@@ -172,13 +176,13 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
 	var deleted struct {
-		State string `json:"State"`
+		State string `json:"state"`
 	}
 	if err := json.Unmarshal(resp.Body, &deleted); err != nil {
 		t.Fatalf("unmarshal delete: %v", err)
 	}
 	if deleted.State != "DELETING" {
-		t.Errorf("want State=DELETING, got %q", deleted.State)
+		t.Errorf("want state=DELETING, got %q", deleted.State)
 	}
 
 	// DescribeCluster — not found after delete
@@ -235,21 +239,21 @@ func TestMSKPlugin_CreateClusterV2_DescribeListV2(t *testing.T) {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
 	var created struct {
-		ClusterARN  string `json:"ClusterArn"`
-		ClusterName string `json:"ClusterName"`
-		State       string `json:"State"`
+		ClusterARN  string `json:"clusterArn"`
+		ClusterName string `json:"clusterName"`
+		State       string `json:"state"`
 	}
 	if err := json.Unmarshal(resp.Body, &created); err != nil {
 		t.Fatalf("unmarshal create v2 response: %v", err)
 	}
 	if created.ClusterARN == "" {
-		t.Error("want non-empty ClusterArn")
+		t.Error("want non-empty clusterArn")
 	}
 	if created.ClusterName != "v2-kafka" {
-		t.Errorf("want ClusterName=v2-kafka, got %q", created.ClusterName)
+		t.Errorf("want clusterName=v2-kafka, got %q", created.ClusterName)
 	}
 	if created.State != "ACTIVE" {
-		t.Errorf("want State=ACTIVE, got %q", created.State)
+		t.Errorf("want state=ACTIVE, got %q", created.State)
 	}
 
 	// DescribeClusterV2
@@ -259,26 +263,26 @@ func TestMSKPlugin_CreateClusterV2_DescribeListV2(t *testing.T) {
 	}
 	var described struct {
 		ClusterInfo struct {
-			ClusterARN  string `json:"ClusterArn"`
-			ClusterName string `json:"ClusterName"`
-			ClusterType string `json:"ClusterType"`
-			State       string `json:"State"`
+			ClusterARN  string `json:"clusterArn"`
+			ClusterName string `json:"clusterName"`
+			ClusterType string `json:"clusterType"`
+			State       string `json:"state"`
 			Provisioned struct {
-				NumberOfBrokerNodes int `json:"NumberOfBrokerNodes"`
-			} `json:"Provisioned"`
-		} `json:"ClusterInfo"`
+				NumberOfBrokerNodes int `json:"numberOfBrokerNodes"`
+			} `json:"provisioned"`
+		} `json:"clusterInfo"`
 	}
 	if err := json.Unmarshal(resp.Body, &described); err != nil {
 		t.Fatalf("unmarshal describe v2: %v", err)
 	}
 	if described.ClusterInfo.ClusterType != "PROVISIONED" {
-		t.Errorf("want ClusterType=PROVISIONED, got %q", described.ClusterInfo.ClusterType)
+		t.Errorf("want clusterType=PROVISIONED, got %q", described.ClusterInfo.ClusterType)
 	}
 	if described.ClusterInfo.ClusterName != "v2-kafka" {
-		t.Errorf("want ClusterName=v2-kafka, got %q", described.ClusterInfo.ClusterName)
+		t.Errorf("want clusterName=v2-kafka, got %q", described.ClusterInfo.ClusterName)
 	}
 	if described.ClusterInfo.Provisioned.NumberOfBrokerNodes != 2 {
-		t.Errorf("want NumberOfBrokerNodes=2, got %d", described.ClusterInfo.Provisioned.NumberOfBrokerNodes)
+		t.Errorf("want numberOfBrokerNodes=2, got %d", described.ClusterInfo.Provisioned.NumberOfBrokerNodes)
 	}
 
 	// ListClustersV2
@@ -288,9 +292,9 @@ func TestMSKPlugin_CreateClusterV2_DescribeListV2(t *testing.T) {
 	}
 	var listed struct {
 		ClusterInfoList []struct {
-			ClusterName string `json:"ClusterName"`
-			ClusterType string `json:"ClusterType"`
-		} `json:"ClusterInfoList"`
+			ClusterName string `json:"clusterName"`
+			ClusterType string `json:"clusterType"`
+		} `json:"clusterInfoList"`
 	}
 	if err := json.Unmarshal(resp.Body, &listed); err != nil {
 		t.Fatalf("unmarshal list v2: %v", err)
@@ -299,7 +303,7 @@ func TestMSKPlugin_CreateClusterV2_DescribeListV2(t *testing.T) {
 		t.Errorf("want 1 cluster, got %d", len(listed.ClusterInfoList))
 	}
 	if listed.ClusterInfoList[0].ClusterType != "PROVISIONED" {
-		t.Errorf("want ClusterType=PROVISIONED, got %q", listed.ClusterInfoList[0].ClusterType)
+		t.Errorf("want clusterType=PROVISIONED, got %q", listed.ClusterInfoList[0].ClusterType)
 	}
 }
 
@@ -320,7 +324,7 @@ func TestMSKPlugin_ListNodes(t *testing.T) {
 		t.Fatalf("CreateCluster: %v", err)
 	}
 	var created struct {
-		ClusterARN string `json:"ClusterArn"`
+		ClusterARN string `json:"clusterArn"`
 	}
 	if err := json.Unmarshal(resp.Body, &created); err != nil {
 		t.Fatalf("unmarshal create: %v", err)
@@ -331,8 +335,22 @@ func TestMSKPlugin_ListNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListNodes: %v", err)
 	}
+	// nodeARN, not nodeArn: the model spells this member with the acronym
+	// capitalised, and it is the one MSK response member that is not the plain
+	// lowerCamel of its name.
 	var nodes struct {
-		NodeInfoList []emulator.MSKNodeInfo `json:"NodeInfoList"`
+		NodeInfoList []struct {
+			NodeARN        string `json:"nodeARN"`
+			NodeType       string `json:"nodeType"`
+			InstanceType   string `json:"instanceType"`
+			BrokerNodeInfo struct {
+				BrokerID                  float64 `json:"brokerId"`
+				ClientSubnet              string  `json:"clientSubnet"`
+				CurrentBrokerSoftwareInfo struct {
+					KafkaVersion string `json:"kafkaVersion"`
+				} `json:"currentBrokerSoftwareInfo"`
+			} `json:"brokerNodeInfo"`
+		} `json:"nodeInfoList"`
 	}
 	if err := json.Unmarshal(resp.Body, &nodes); err != nil {
 		t.Fatalf("unmarshal nodes: %v", err)
@@ -342,16 +360,16 @@ func TestMSKPlugin_ListNodes(t *testing.T) {
 	}
 	for i, n := range nodes.NodeInfoList {
 		if n.NodeType != "BROKER" {
-			t.Errorf("node[%d] want NodeType=BROKER, got %q", i, n.NodeType)
+			t.Errorf("node[%d] want nodeType=BROKER, got %q", i, n.NodeType)
 		}
 		if n.NodeARN == "" {
-			t.Errorf("node[%d] want non-empty NodeArn", i)
+			t.Errorf("node[%d] want non-empty nodeARN", i)
 		}
 		if n.BrokerNodeInfo.BrokerID == 0 {
-			t.Errorf("node[%d] want non-zero BrokerID", i)
+			t.Errorf("node[%d] want non-zero brokerId", i)
 		}
 		if n.BrokerNodeInfo.CurrentBrokerSoftwareInfo.KafkaVersion == "" {
-			t.Errorf("node[%d] want non-empty KafkaVersion", i)
+			t.Errorf("node[%d] want non-empty kafkaVersion", i)
 		}
 	}
 }

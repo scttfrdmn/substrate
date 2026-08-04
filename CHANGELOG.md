@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **MSK responses are the shape a Kafka SDK parses** (#529). Every `kafka` response
+  substrate sent used PascalCase keys, and botocore matches a response key against
+  the model's `locationName` **case-sensitively** — so `aws kafka list-clusters`
+  returned HTTP 200 with an empty result and no error at all, and
+  `--query 'length(ClusterInfoList)'` failed on a null. The kafka model spells all
+  579 of its response members in lowerCamel, with no exceptions, so nothing
+  substrate returned parsed: not a missing field here and there, nothing.
+
+  This was invisible from every direction. The request side works, because Go's
+  `json.Unmarshal` matches keys case-insensitively and so accepts the lowerCamel
+  body a real SDK sends into a PascalCase-tagged struct. The state was written
+  correctly. And the Go round-trip tests passed, because a struct marshalled and
+  unmarshalled by its own definition agrees with itself whatever its tags say — the
+  reason the new tests decode into `map[string]any` and assert on literal wire keys
+  instead.
+
+  Fixed as #528 fixed CloudWatch Logs: the state types keep their PascalCase tags,
+  and response-only element types tagged from the model are projected from them.
+  `MSKCluster` and its six sibling state types are **untouched**, so **state
+  encoding is unchanged and recorded runs replay** — the wire types are a separate
+  thing from the persisted format, and a comment in `msk_types.go` says so, because
+  the tempting "fix" for a future casing bug is to retag the state struct and
+  silently change the format of every recorded run.
+
+  Corrected envelopes and members: `clusterInfoList`, `clusterInfo`,
+  `bootstrapBrokerString`, `nodeInfoList`, and `CreateCluster`'s
+  `clusterArn`/`clusterName`/`state`. `NodeInfo`'s ARN member is `nodeARN` — the one
+  kafka response member that is not the plain lowerCamel of its name, transcribed
+  from the model rather than lowercased. `DeleteCluster` no longer reports
+  `clusterName`, which is not a member of `DeleteClusterResponse`. `ListClustersV2`
+  no longer sends an empty `nextToken`, which invited a caller to page on nothing.
+  `DescribeClusterV2`/`ListClustersV2` built a hand-written PascalCase map, which was
+  wrong for the same reason the struct path was; both now use the same projection as
+  v1, so the two cannot drift.
+
+  Three consequences worth stating. Substrate's internal `AccountID` and `Region`
+  are gone from every kafka response, and structurally so: no wire type has such a
+  member, so a field added later cannot reintroduce the leak. An unset optional —
+  `securityGroups`, `storageInfo`, `tags` — is now **omitted** rather than sent as
+  `null` or as `volumeSize: 0`, matching real MSK, since a caller distinguishing
+  absent from null is reading a real observable. And an empty `ListClusters` returns
+  `[]`, not `null`.
 - **API Gateway v2 and SSO Admin are reachable from an SDK at all** (#561, #529).
   Both plugins were registered, had test files, and could not be reached by any
   client — every unit test green, the feature absent from a caller's point of view,
