@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **API Gateway v2 and SSO Admin are reachable from an SDK at all** (#561, #529).
+  Both plugins were registered, had test files, and could not be reached by any
+  client — every unit test green, the feature absent from a caller's point of view,
+  because both test files call `HandleRequest` directly and so never exercise the
+  router.
+
+  `APIGatewayV2Plugin` was unreachable because no routing signal distinguishes API
+  Gateway v1 from v2: the v2 client's SigV4 signing name **is** `apigateway`, its
+  hostname is the same `apigateway.<region>.amazonaws.com`, and neither client sends
+  `X-Amz-Target`. So every v2 request landed on `APIGatewayPlugin` and came back
+  `NotFoundException: unknown operation for POST /v2/apis`. `extractService` now
+  refines a resolved `apigateway` to `apigatewayv2` when the path begins with
+  `/v2/`. The two URI spaces make that exact rather than heuristic — all 103
+  requestUris in the apigatewayv2 model are under `/v2/`, and none of v1's are — and
+  the refinement is confined to requests that already resolved to `apigateway`, so
+  another service's `/v2/` endpoint cannot be captured by it.
+
+  `SSOPlugin` was unreachable because `targetServiceAliases` mapped
+  `AWSSSOAdminService`, a prefix derived by guesswork that no client sends. The real
+  `sso-admin` `targetPrefix` is `SWBExternalService`, so `aws sso-admin
+  list-instances` failed with `ServiceNotAvailable: service not emulated:
+  swbexternalservice`. The real prefix is now mapped **alongside** the guessed one,
+  which is retained so any caller that does send it keeps working.
+
+  API Gateway v2 responses are still PascalCase and so still parse to nothing in a
+  real SDK; that is #529's separate defect and is fixed in this release's later
+  changes. This change is what makes it observable.
+
 ## [v0.90.0] - 2026-08-04
 
 ### Deprecated

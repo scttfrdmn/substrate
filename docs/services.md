@@ -3582,6 +3582,14 @@ API Gateway REST API calls: $3.50 per million calls.
 **Endpoint:** `apigateway.{region}.amazonaws.com`
 **Protocol:** REST/JSON (`/v2/` prefix)
 
+**Routing:** v1 and v2 are one endpoint and one SigV4 signing name — an
+apigatewayv2 client signs as `apigateway`, uses the same hostname, and sends no
+`X-Amz-Target` — so Substrate discriminates them by **path**: a request under
+`/v2/` that would otherwise resolve to `apigateway` is routed to the v2 plugin.
+Every requestUri in the apigatewayv2 API is under `/v2/` and none of v1's is, so
+the split is exact. A consumer pointing an `apigatewayv2` client at Substrate needs
+no special configuration.
+
 ### Supported operations
 
 | Operation | Notes |
@@ -4297,6 +4305,35 @@ revision 1.
 ### Cost
 
 Batch itself is free; the compute it launches is not, and substrate launches none.
+
+---
+
+## SSO / Identity Store
+
+**Endpoint:** `sso.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: SWBExternalService.{Op}`)
+
+`SWBExternalService` is the `sso-admin` API's target prefix — not a name that appears
+in any published SDK surface, but what every client sends. Substrate accepts the
+plausible-looking `AWSSSOAdminService` as well, so a caller that constructs the target
+header by hand from the service name also reaches this plugin.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| ListInstances | One instance per account, created on first read |
+| CreatePermissionSet | |
+| DescribePermissionSet | |
+| UpdatePermissionSet | |
+| DeletePermissionSet | |
+| ListPermissionSets | |
+| AttachManagedPolicyToPermissionSet | |
+| DetachManagedPolicyFromPermissionSet | |
+| ListManagedPoliciesInPermissionSet | |
+| CreateAccountAssignment | |
+| DeleteAccountAssignment | |
+| ListAccountAssignments | |
 
 ---
 

@@ -146,8 +146,39 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 
 // extractService determines the AWS service name from available signals, in
 // priority order: X-Amz-Target header, Host header, URL path prefix, SigV4
-// credential scope.
+// credential scope. A resolved "apigateway" is then refined by path, because API
+// Gateway v1 and v2 are indistinguishable by every other signal.
 func extractService(target, host, urlPath, authHeader string) string {
+	return refineAPIGatewayVersion(extractServiceSignals(target, host, urlPath, authHeader), urlPath)
+}
+
+// refineAPIGatewayVersion resolves API Gateway v1 versus v2, which no other
+// routing signal can distinguish: an apigatewayv2 client's SigV4 signing name
+// *is* "apigateway", its Host is the same "apigateway.<region>.amazonaws.com",
+// and neither client sends X-Amz-Target. Every v2 request therefore reached
+// APIGatewayPlugin, which answered NotFoundException for all of them — the v2
+// plugin was registered, tested in-process, and unreachable from any SDK (#529).
+//
+// The path is unambiguous. Every one of the 103 requestUris in the apigatewayv2
+// model lives under "/v2/", and none of the v1 model's URI space does — v1's
+// roots are /account, /apikeys, /clientcertificates, /domainnames,
+// /domainnameaccessassociations, /rejectdomainnameaccessassociations, /restapis,
+// /sdktypes, /tags, /usageplans and /vpclinks. So a "/v2/" path cannot be a v1
+// call, and this cannot misroute one.
+//
+// The check is deliberately confined to requests that already resolved to
+// "apigateway": a bare "/v2/..." path is not evidence of API Gateway by itself,
+// and some other service's endpoint is free to use one.
+func refineAPIGatewayVersion(service, urlPath string) string {
+	if service == "apigateway" && strings.HasPrefix(urlPath, "/v2/") {
+		return "apigatewayv2"
+	}
+	return service
+}
+
+// extractServiceSignals applies the four routing signals in priority order and
+// returns the service they name, or "unknown".
+func extractServiceSignals(target, host, urlPath, authHeader string) string {
 	// 1. X-Amz-Target: "AmazonDynamoDB.GetItem" → "dynamodb"
 	//    or "DynamoDB_20120810.GetItem" → "dynamodb"
 	if target != "" {
@@ -257,8 +288,15 @@ var targetServiceAliases = map[string]string{
 	// "TransferService" → lowercase → "transferservice" → "transfer".
 	// aws-sdk-go-v2 Transfer Family uses X-Amz-Target: TransferService.{Op}.
 	"transferservice": "transfer",
-	// "AWSSSOAdminService" → strip "AWS" → "ssoadminservice" → "sso".
-	// aws-sdk-go-v2 SSO Admin client uses X-Amz-Target: AWSSSOAdminService.{Op}.
+	// "SWBExternalService" → no strip → "swbexternalservice" → "sso".
+	// This is the sso-admin model's targetPrefix, and what both boto3 and
+	// aws-sdk-go-v2 actually send. The "AWSSSOAdminService" prefix below was
+	// derived by guesswork and matches no client, so SSOPlugin was registered,
+	// tested in-process, and unreachable from any SDK — every call fell through
+	// to "service not emulated: swbexternalservice" (#561). Kept alongside the
+	// real prefix rather than replacing it: it costs nothing, and it keeps
+	// working for any caller that does send it.
+	"swbexternalservice": "sso",
 	"awsssoadminservice": "sso",
 	// "RedshiftData_20191217" → strip version → "RedshiftData" → lowercase → "redshiftdata".
 	// Both aws-sdk-go-v2 and boto3 use this X-Amz-Target namespace for the Data API.
