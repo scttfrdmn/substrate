@@ -4091,6 +4091,78 @@ Firehose data ingestion: $0.029 per GB.
 
 ---
 
+## Batch
+
+**Endpoint:** `batch.{region}.amazonaws.com`
+**Protocol:** REST/JSON (`POST /v1/{operation}`)
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateComputeEnvironment | `computeEnvironmentName` and `type` required; an omitted `state` is `ENABLED` |
+| DescribeComputeEnvironments | `computeEnvironments` filter takes [names or full ARNs](#a-describe-filter-takes-a-name-or-an-arn); reports `ecsClusterArn` |
+| CreateJobQueue | `jobQueueName` required; an omitted `state` is `ENABLED` |
+| DescribeJobQueues | `jobQueues` filter takes names or full ARNs |
+| RegisterJobDefinition | `jobDefinitionName` and `type` required; each registration is [the next revision](#a-job-definition-is-versioned) |
+| DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status` |
+| SubmitJob | Returns `jobId`; the job is immediately `SUCCEEDED` |
+| DescribeJobs | |
+| TerminateJob | Reports the job `FAILED` with the supplied `reason` |
+
+Every operation reports a bad request as **`ClientException`** at HTTP 400. The API
+reference declares exactly two errors for each Batch operation, `ClientException` and
+`ServerException`, so substrate does not use the `MissingParameter` or
+`InvalidParameterValue` codes other services return for the same shape of complaint.
+
+### A describe filter takes a name or an ARN
+
+All three resource describes document their filter as "a list of up to 100 … names or
+full Amazon Resource Name (ARN) entries", and both forms resolve. An **absent** filter
+reports every resource of that type in the caller's account and Region.
+
+A filter entry naming a resource that does not exist is **skipped, not refused**: the
+operations describe "one or more of your compute environments" and document no
+not-found error, so an absent name yields an absent result rather than an error. A
+filter in which nothing matches is an empty list at HTTP 200.
+
+`maxResults` and `nextToken` paginate. An absent or out-of-range `maxResults` reports up
+to 100 results, per the reference's "if this parameter isn't used, then Describe…
+returns up to 100 results". `nextToken` is **omitted** once the results are exhausted —
+"this value is null when there are no more results to return" — including when the last
+page is exactly full.
+
+### A job definition is versioned
+
+Each `RegisterJobDefinition` of a name is a distinct revision, numbered from 1, and each
+revision is its own record. `DescribeJobDefinitions` addresses one revision through
+`jobDefinitions` (`${name}:${revision}` or the full ARN) and every revision of a
+definition through `jobDefinitionName`.
+
+`jobDefinitions` **wins outright** when both are sent, rather than being intersected or
+unioned: the reference states it "can't be used with other parameters".
+
+A newly registered definition is `ACTIVE`, and the `status` filter selects on that.
+Nothing yet reports a definition `INACTIVE` — `DeregisterJobDefinition` is not
+implemented (tracked as issue #555) — but the status is recorded on the resource rather
+than synthesised at read time, so a deregistration can set it.
+
+### Resources are scoped to the caller
+
+A compute environment, job queue and job definition is recorded against the account and
+Region of the request that created it, and reported only to a caller in that scope, as
+every other partitioned plugin does. The ARN a create returns therefore names the
+caller's own account and Region, and is an identifier that caller's `SubmitJob` and
+`computeEnvironmentOrder` can use. A job definition's revision counter is scoped the
+same way, so two accounts each registering one definition of the same name both see
+revision 1.
+
+### Cost
+
+Batch itself is free; the compute it launches is not, and substrate launches none.
+
+---
+
 ## Fault injection
 
 Fault injection is cross-service rather than a plugin, so it lives here rather than in a
