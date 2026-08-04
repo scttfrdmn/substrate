@@ -142,6 +142,12 @@ type ec2LTVersionNetIfcXML struct {
 	SubnetID                 string   `xml:"subnetId,omitempty"`
 	AssociatePublicIPAddress string   `xml:"associatePublicIpAddress,omitempty"`
 	Groups                   []string `xml:"groupSet>item,omitempty"`
+	NetworkInterfaceID       string   `xml:"networkInterfaceId,omitempty"`
+	PrivateIPAddress         string   `xml:"privateIpAddress,omitempty"`
+	Description              string   `xml:"description,omitempty"`
+	InterfaceType            string   `xml:"interfaceType,omitempty"`
+	NetworkCardIndex         int      `xml:"networkCardIndex,omitempty"`
+	DeleteOnTermination      bool     `xml:"deleteOnTermination"`
 }
 
 // ec2LTVersionProfileXML is a version's LaunchTemplateIamInstanceProfileSpecification,
@@ -188,14 +194,35 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 		}
 		out.TagSpecifications = []ec2LTVersionTagSpecXML{spec}
 	}
-	// Emit an interface only when the template actually named one, so a template
-	// carrying no networking does not read back with a phantom eth0.
-	if d.SubnetID != "" || d.AssociatePublicIPAddress != "" || len(d.NetworkInterfaceGroups) > 0 {
+	// Every interface the template declared reads back, not just the primary (#455).
+	//
+	// The flat-field fallback below is what a template stored before the slice existed
+	// carries, so a replayed event log still reports its networking rather than
+	// nothing. Either way an interface is emitted only when the template actually
+	// named one, so a template carrying no networking does not read back with a
+	// phantom eth0.
+	for _, ifc := range d.NetworkInterfaces {
+		out.NetworkInterfaces = append(out.NetworkInterfaces, ec2LTVersionNetIfcXML{
+			DeviceIndex:              ifc.DeviceIndex,
+			SubnetID:                 ifc.SubnetID,
+			AssociatePublicIPAddress: ifc.AssociatePublicIPAddress,
+			Groups:                   ifc.SecurityGroupIDs,
+			NetworkInterfaceID:       ifc.NetworkInterfaceID,
+			PrivateIPAddress:         ifc.PrivateIPAddress,
+			Description:              ifc.Description,
+			InterfaceType:            ifc.InterfaceType,
+			NetworkCardIndex:         ifc.NetworkCardIndex,
+			DeleteOnTermination:      ifc.DeleteOnTermination,
+		})
+	}
+	if len(out.NetworkInterfaces) == 0 &&
+		(d.SubnetID != "" || d.AssociatePublicIPAddress != "" || len(d.NetworkInterfaceGroups) > 0) {
 		out.NetworkInterfaces = []ec2LTVersionNetIfcXML{{
 			DeviceIndex:              0,
 			SubnetID:                 d.SubnetID,
 			AssociatePublicIPAddress: d.AssociatePublicIPAddress,
 			Groups:                   d.NetworkInterfaceGroups,
+			DeleteOnTermination:      true,
 		}}
 	}
 	return out

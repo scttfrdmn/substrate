@@ -2254,7 +2254,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateLaunchTemplate | Creates version 1. Networking is read from `NetworkInterface.1.*` — see [Launch template networking](#launch-template-networking) |
+| CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking) |
 | DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters |
 | DeleteLaunchTemplate | |
 | CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
@@ -2442,12 +2442,12 @@ and still describes correctly. No event rewriting is involved.
 ### Launch template networking
 
 A launch template's subnet, security groups and public-IP preference are read from
-its **first network interface**:
+its **primary network interface** — the one whose `DeviceIndex` is lowest:
 
 ```
-LaunchTemplateData.NetworkInterface.1.SubnetId
-LaunchTemplateData.NetworkInterface.1.SecurityGroupId.N
-LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress
+LaunchTemplateData.NetworkInterface.N.SubnetId
+LaunchTemplateData.NetworkInterface.N.SecurityGroupId.N
+LaunchTemplateData.NetworkInterface.N.AssociatePublicIpAddress
 ```
 
 That is not a stylistic choice. AWS's `RequestLaunchTemplateData` has **no
@@ -2464,7 +2464,7 @@ Precedence when the same value is available from several sources, matching AWS:
 
 | Source | Wins over |
 |---|---|
-| The request itself — `SubnetId`, or `NetworkInterface.1.SubnetId` | everything below |
+| The request itself — `SubnetId`, or the primary `NetworkInterface.N.SubnetId` | everything below |
 | A `CreateFleet` override's `SubnetId` | the template (it reaches `RunInstances` as a request-level value) |
 | The launch template's network interface | the default VPC |
 | The auto-created default VPC | — |
@@ -2473,8 +2473,10 @@ Precedence when the same value is available from several sources, matching AWS:
 `MapPublicIPOnLaunch` distinguishes them: **absent** uses the subnet's own
 behavior, **`true`** forces a public IP anyway, and **`false`** suppresses one.
 
-Only interface index **1** is modeled, on both `RunInstances` and launch templates.
-A template declaring a second interface loses it silently.
+Every declared interface is parsed, on both `RunInstances` and launch templates — see
+[Multiple network interfaces](#multiple-network-interfaces). The flat fields above
+describe the **primary** interface, which is what a launch from a multi-interface
+template resolves its subnet and groups from.
 
 ### Security groups on an instance
 
@@ -2484,7 +2486,8 @@ Both `RunInstances` and `DescribeInstances` report an instance's security groups
 source supplied them:
 
 - `SecurityGroupId.N` (or `SecurityGroupIds.N`) on the request, or the nested
-  `NetworkInterface.1.SecurityGroupId.N` / `NetworkInterface.1.Groups.N`.
+  `NetworkInterface.N.SecurityGroupId.N` / `NetworkInterface.N.Groups.N` of the
+  **primary** interface.
 - The launch template's [network interface](#launch-template-networking).
 - The auto-created default VPC's `default` group, when the launch names none.
 
@@ -2492,6 +2495,69 @@ source supplied them:
 the group is deleted while the instance it was launched with still exists. The
 `groupId` is still reported, because that is what the launch actually recorded; a
 name is not invented to fill the field.
+
+The top-level `groupSet` reports the **primary** interface's groups, matching AWS.
+A secondary interface's own groups appear on that interface inside
+[`networkInterfaceSet`](#multiple-network-interfaces).
+
+### Multiple network interfaces
+
+`RunInstances` and `CreateLaunchTemplate` parse **every** declared
+`NetworkInterface.N.*`, contiguously from 1 and stopping at the first missing
+index — the same convention every other indexed list follows. Both `RunInstances`
+and `DescribeInstances` report them as `networkInterfaceSet>item`, which is what
+the `RunInstances` reference's own sample response shows:
+
+```xml
+<networkInterfaceSet>
+  <item>
+    <networkInterfaceId>eni-1a2b3c4d</networkInterfaceId>
+    <subnetId>subnet-0123456789abcdef0</subnetId>
+    <status>in-use</status>
+    <privateIpAddress>172.31.1.10</privateIpAddress>
+    <groupSet><item><groupId>sg-…</groupId><groupName>default</groupName></item></groupSet>
+    <attachment>
+      <deviceIndex>0</deviceIndex>
+      <status>attached</status>
+      <deleteOnTermination>true</deleteOnTermination>
+    </attachment>
+  </item>
+</networkInterfaceSet>
+```
+
+**Identity is `DeviceIndex`, not the parameter index.** AWS documents
+`DeviceIndex` as "the position of the network interface in the attachment order",
+and it is not required to agree with the position the request happens to write it
+at, so `NetworkInterface.1.DeviceIndex=3` and `NetworkInterface.2.DeviceIndex=0`
+makes the *second* one primary. Interfaces are reported in `DeviceIndex` order.
+
+The instance's flat `subnetId`, `privateIpAddress` and `groupSet` describe the
+**primary** interface, as real EC2 does — they are not superseded by the set.
+`AssociatePublicIpAddress` is honored **only on the primary**, which is what the
+reference requires: it "can only be assigned to a network interface for eth0".
+
+`DeleteOnTermination` defaults to `true` for an interface the launch creates and
+`false` for an existing one it attaches by `NetworkInterfaceId` — deleting an
+interface the caller brought would destroy something the launch did not make. An
+explicit value wins over either default.
+
+Substrate's own choices, where the API model does not decide:
+
+- A **secondary** interface that names no `PrivateIpAddress` is given one derived
+  from its instance index and device index, so every interface of every instance
+  in a multi-`Count` launch has a distinct address a test can assert on. The
+  primary's address is the instance's own.
+- There are **no standalone ENI resources** — `CreateNetworkInterface` is not
+  modeled, so an interface exists only as part of the instance that declared it,
+  and an `eni-` ID is minted for one the request did not name. A launch declaring
+  no interface reports an empty `networkInterfaceSet` rather than a synthesized
+  phantom interface.
+- Interfaces report `status: in-use` and attachment `status: attached`
+  immediately, because substrate's instances are already `running` by the time
+  `RunInstances` answers; an `attaching` attachment would contradict the instance
+  state reported beside it.
+- `InterfaceType` defaults to `interface`; `efa` and `efa-only` are recorded as
+  given. `NetworkCardIndex` is recorded as given and defaults to 0.
 
 ### Instance attributes
 

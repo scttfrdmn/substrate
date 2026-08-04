@@ -112,6 +112,75 @@ type EC2Instance struct {
 	// zone — the conservative reading, since it is what a single-zone account
 	// looks like.
 	AvailabilityZone string `json:"availability_zone,omitempty"`
+
+	// NetworkInterfaces holds every interface the launch declared, in DeviceIndex
+	// order, with the primary (DeviceIndex 0) first.
+	//
+	// The flat SubnetID/PrivateIPAddress/SecurityGroupIDs fields above continue to
+	// report the *primary* interface's values, which is what real EC2 puts at the
+	// top level of an instance — they are not superseded by this slice. An instance
+	// unmarshalled from an event log predating this field reads back with an empty
+	// slice, and its flat fields still describe its one interface, so a replayed log
+	// still describes correctly (#455).
+	NetworkInterfaces []EC2NetworkInterface `json:"network_interfaces,omitempty"`
+}
+
+// EC2NetworkInterface is one interface attached to an instance at launch, from a
+// RunInstances NetworkInterface.N specification or a launch template's.
+//
+// Only the members substrate can observe something about are held. AWS's
+// InstanceNetworkInterfaceSpecification has some forty members; recording a value
+// substrate never reports would be a write with no observable, and reporting one it
+// never received would be a claim nothing backs.
+type EC2NetworkInterface struct {
+	// NetworkInterfaceID is the interface's ID, either the one the request attached
+	// by NetworkInterfaceId or one substrate minted for an interface the launch
+	// created.
+	NetworkInterfaceID string `json:"network_interface_id"`
+
+	// DeviceIndex is "the position of the network interface in the attachment
+	// order. A primary network interface has a device index of 0."
+	//
+	// This is the interface's identity, not its position in the request: AWS keys on
+	// DeviceIndex and the two need not agree, so NetworkInterface.1 may perfectly
+	// well declare DeviceIndex 3.
+	DeviceIndex int `json:"device_index"`
+
+	// SubnetID is the subnet the interface is in.
+	SubnetID string `json:"subnet_id,omitempty"`
+
+	// PrivateIPAddress is the interface's primary private IPv4 address, either the
+	// one the request named or one substrate assigned from the subnet's range.
+	PrivateIPAddress string `json:"private_ip_address,omitempty"`
+
+	// PrivateDNSName is the interface's private DNS hostname.
+	PrivateDNSName string `json:"private_dns_name,omitempty"`
+
+	// SecurityGroupIDs holds the interface's security groups.
+	SecurityGroupIDs []string `json:"security_group_ids,omitempty"`
+
+	// AssociatePublicIPAddress is the interface's public-IP preference, stored
+	// verbatim as a string for the same three-state reason
+	// [EC2LaunchTemplateData.AssociatePublicIPAddress] gives: absent, "true" and
+	// "false" are three distinguishable requests and a bool collapses two of them.
+	AssociatePublicIPAddress string `json:"associate_public_ip_address,omitempty"`
+
+	// Description is the interface's description, which "applies only if creating a
+	// network interface when launching an instance".
+	Description string `json:"description,omitempty"`
+
+	// DeleteOnTermination reports whether the interface is deleted with the
+	// instance. AWS defaults a launch-created interface to true; an attached
+	// existing one to false.
+	DeleteOnTermination bool `json:"delete_on_termination"`
+
+	// InterfaceType is "the type of network interface": interface, efa or efa-only.
+	// Absent reads back as "interface", the documented default.
+	InterfaceType string `json:"interface_type,omitempty"`
+
+	// NetworkCardIndex is "the index of the network card", which defaults to 0 and
+	// which "the primary network interface must be assigned to".
+	NetworkCardIndex int `json:"network_card_index,omitempty"`
 }
 
 // EC2KeyPair represents an EC2 key pair (public/private key used for SSH access).
@@ -353,6 +422,12 @@ type EC2RouteTable struct {
 // "i-" followed by 17 hex characters.
 func generateEC2InstanceID() string {
 	return "i-" + randomHex(8)
+}
+
+// generateENIID generates a random elastic network interface ID in the format
+// "eni-" followed by 8 hex characters.
+func generateENIID() string {
+	return "eni-" + randomHex(8)
 }
 
 // generateVPCID generates a random VPC ID in the format "vpc-" followed by
@@ -636,8 +711,8 @@ type EC2LaunchTemplateData struct {
 	// UserData is the base64-encoded user data script.
 	UserData string `json:"userData,omitempty"`
 
-	// SubnetID is the subnet named in the template's first network interface
-	// (LaunchTemplateData.NetworkInterface.1.SubnetId).
+	// SubnetID is the subnet named in the template's primary network interface —
+	// the one whose LaunchTemplateData.NetworkInterface.N.DeviceIndex is lowest.
 	//
 	// This is not a mirror of RunInstances' top-level SubnetId: AWS's
 	// RequestLaunchTemplateData has no top-level SubnetId member at all, so a
@@ -645,19 +720,29 @@ type EC2LaunchTemplateData struct {
 	// only place AssociatePublicIpAddress exists (#444).
 	SubnetID string `json:"subnetId,omitempty"`
 
-	// AssociatePublicIPAddress is the first network interface's public-IP
+	// AssociatePublicIPAddress is the primary network interface's public-IP
 	// preference, stored verbatim as a string rather than a bool because three
 	// states are observable: absent (use the subnet's own default), "true" (force
 	// a public IP even on a non-default subnet), and "false" (suppress one). A
 	// bool would collapse the first two.
 	AssociatePublicIPAddress string `json:"associatePublicIpAddress,omitempty"`
 
-	// NetworkInterfaceGroups is the security groups named in the template's first
+	// NetworkInterfaceGroups is the security groups named in the template's primary
 	// network interface, kept separate from SecurityGroupIDs so a template
 	// carrying both is not silently merged. AWS rejects that combination; see
 	// [EC2LaunchTemplateData.NetworkSecurityGroupIDs] for how substrate resolves
 	// which list applies.
 	NetworkInterfaceGroups []string `json:"networkInterfaceGroups,omitempty"`
+
+	// NetworkInterfaces holds every interface the template declares, in DeviceIndex
+	// order (#455).
+	//
+	// SubnetID, AssociatePublicIPAddress and NetworkInterfaceGroups above hold the
+	// *primary* interface's values and are not superseded by this slice: they are
+	// what a template stored before this field existed carries, so a replayed event
+	// log still launches into the right subnet with the right groups. A launch reads
+	// this slice when it has one and those fields otherwise.
+	NetworkInterfaces []EC2NetworkInterface `json:"networkInterfaces,omitempty"`
 
 	// TagSpecifications is the template's instance-scoped tag-on-create tags, from
 	// LaunchTemplateData.TagSpecification.N with ResourceType=instance.

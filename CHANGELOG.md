@@ -99,6 +99,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not describe the extent of a part.
 
 ### Fixed
+- **Every network interface a launch declares is parsed and reported** (#455).
+  `NetworkInterface.N.*` was read for **N=1 only**, in both `runInstances` and
+  `createLaunchTemplate`, and `EC2Instance` had no interface list to hold a second
+  one — so a launch or a template declaring two interfaces was answered `200` and
+  quietly became a one-interface instance, with no error and nothing in the response
+  to reveal the loss.
+
+  Both sites now parse all N, following the same convention every other indexed list
+  in the plugin follows: contiguously from 1, stopping at the first missing index.
+  **Identity is keyed on `DeviceIndex`, not the parameter index** — the reference
+  defines `DeviceIndex` as the position in the attachment order and does not require
+  it to agree with the position the request writes the interface at, so
+  `NetworkInterface.1.DeviceIndex=3` with `NetworkInterface.2.DeviceIndex=0` makes the
+  *second* one primary. An implementation that used the parameter index would name the
+  wrong interface primary and put the wrong subnet on the instance.
+
+  `RunInstances` and `DescribeInstances` now both report `networkInterfaceSet>item` —
+  emitted because the `RunInstances` reference's own sample response carries it, so a
+  caller parsing the documented shape found a member missing. The instance's flat
+  `subnetId`, `privateIpAddress` and `groupSet` continue to describe the **primary**
+  interface, which is what real EC2 puts at the top level; they are not superseded by
+  the new set, and `AssociatePublicIpAddress` is still honored only on the primary, as
+  the reference requires ("can only be assigned to a network interface for eth0").
+
+  `DeleteOnTermination` defaults per the reference's reasoning rather than to a single
+  value: `true` for an interface the launch creates, `false` for an existing one it
+  attaches by `NetworkInterfaceId`, since deleting an interface the caller brought
+  would destroy something the launch did not make. An explicit value wins over either.
+
+  The state and template shapes both grew a slice, so both keep their flat fields as
+  the primary's values: an instance or a launch-template version stored by an earlier
+  substrate reads back with an empty slice, and the single-interface synthesis from
+  the flat fields still runs for it, so a replayed event log still describes
+  correctly. `docs/services.md` loses its "only interface index 1 is modeled" limit
+  and gains a section stating what substrate decides where the API model does not —
+  how a secondary interface's address is assigned, that there are no standalone ENI
+  resources so a launch declaring none reports an empty set rather than a phantom
+  interface, and that interfaces report `in-use`/`attached` immediately because
+  substrate's instances are already `running` when `RunInstances` answers.
 - **A Lambda function reports the size and digest of the package it was deployed
   from** (#545). `CodeSize` was `0` and `CodeSha256` empty for every function whose
   code did not arrive as an inline base64 `ZipFile` on a direct `CreateFunction` — so

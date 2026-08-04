@@ -340,25 +340,39 @@ func (p *EC2Plugin) runInstancesWithTags(
 	}
 
 	// Networking can be specified either at the top level (above) or nested in a
-	// NetworkInterface spec (NetworkInterface.1.*). The AWS SDK puts SubnetId,
-	// security groups, and AssociatePublicIpAddress inside the network interface
-	// whenever a public-IP preference is set — which spawn always does. Fall back
-	// to the nested form so that subnet/SG/public-IP aren't silently dropped.
-	if subnetID == "" {
-		subnetID = req.Params["NetworkInterface.1.SubnetId"]
+	// NetworkInterface.N spec. The AWS SDK puts SubnetId, security groups, and
+	// AssociatePublicIpAddress inside the network interface whenever a public-IP
+	// preference is set — which spawn always does. Read the nested form so that
+	// subnet/SG/public-IP aren't silently dropped.
+	//
+	// Every declared interface is parsed, not just index 1 (#455). The top-level
+	// fallbacks below read the *primary* interface, which is the one whose values
+	// real EC2 reports at the top level of an instance — see [ec2PrimaryInterface]
+	// for why that is the lowest device index rather than the first parameter index.
+	networkInterfaces := ec2ParseNetworkInterfaces(req.Params, "")
+	ec2SortInterfacesByDeviceIndex(networkInterfaces)
+	primaryIfc := ec2PrimaryInterface(networkInterfaces)
+	if subnetID == "" && primaryIfc != nil {
+		subnetID = primaryIfc.SubnetID
 	}
 	// AssociatePublicIpAddress=true forces a public IP even on a non-default
 	// subnet; "" means "use the subnet default". A launch template can also carry
 	// this preference, so the call-level value is kept as the raw string and only
 	// resolved to a bool once the template has had its chance to supply one.
-	publicIPPref := req.Params["NetworkInterface.1.AssociatePublicIpAddress"]
+	//
+	// Read from the primary alone: AWS documents the public IP as assignable "to a
+	// network interface for eth0" only, so a secondary interface's preference is not
+	// a statement about the instance's public IP.
+	var publicIPPref string
+	if primaryIfc != nil {
+		publicIPPref = primaryIfc.AssociatePublicIPAddress
+	}
 
 	// Security groups named at call level, from either the top-level params or the
-	// nested NetworkInterface.1.* form (SecurityGroupId.M or Groups.M).
+	// primary interface's nested form (SecurityGroupId.M or Groups.M).
 	securityGroupIDs := indexedParams(req.Params, "SecurityGroupId.%d", "SecurityGroupIds.%d")
-	if len(securityGroupIDs) == 0 {
-		securityGroupIDs = indexedParams(req.Params,
-			"NetworkInterface.1.SecurityGroupId.%d", "NetworkInterface.1.Groups.%d")
+	if len(securityGroupIDs) == 0 && primaryIfc != nil {
+		securityGroupIDs = primaryIfc.SecurityGroupIDs
 	}
 
 	// Merge a named launch template into the request, per field.
@@ -409,6 +423,14 @@ func (p *EC2Plugin) runInstancesWithTags(
 		}
 		if len(securityGroupIDs) == 0 {
 			securityGroupIDs = ltData.NetworkSecurityGroupIDs()
+		}
+		// The template's interfaces apply only when the request declared none, the
+		// same all-or-nothing rule the reference's "any additional parameters that you
+		// specify for the new instance overwrite the corresponding parameters included
+		// in the launch template" gives every other field. Merging per device index
+		// would let a request that named one interface silently inherit a second.
+		if len(networkInterfaces) == 0 {
+			networkInterfaces = ltData.NetworkInterfaces
 		}
 		if sgID == "" && len(securityGroupIDs) > 0 {
 			sgID = securityGroupIDs[0]
@@ -582,6 +604,10 @@ func (p *EC2Plugin) runInstancesWithTags(
 			inst.AvailabilityZone = reqCtx.Region + "a"
 		}
 
+		// Record the interfaces last, since the primary's address and DNS name are
+		// the instance's own and those were only just resolved.
+		p.ec2AttachInterfaces(&inst, networkInterfaces, i, reqCtx.Region)
+
 		data, err := json.Marshal(inst)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 runInstances marshal: %w", err)
@@ -614,6 +640,90 @@ type ec2GroupItem struct {
 
 	// GroupName is the group's name, omitted when it cannot be resolved.
 	GroupName string `xml:"groupName,omitempty"`
+}
+
+// ec2NetworkInterfaceItem is one networkInterfaceSet>item, the shape both
+// RunInstances and DescribeInstances report an instance's interfaces in.
+//
+// Declared once at package level for the reason [ec2GroupItem] is: the two responses
+// carrying their own copies is what let their instance items drift apart before.
+// Only the members substrate records are emitted — see [EC2NetworkInterface].
+type ec2NetworkInterfaceItem struct {
+	NetworkInterfaceID string                    `xml:"networkInterfaceId"`
+	SubnetID           string                    `xml:"subnetId,omitempty"`
+	VpcID              string                    `xml:"vpcId,omitempty"`
+	Description        string                    `xml:"description,omitempty"`
+	OwnerID            string                    `xml:"ownerId"`
+	Status             string                    `xml:"status"`
+	PrivateIPAddress   string                    `xml:"privateIpAddress,omitempty"`
+	PrivateDNSName     string                    `xml:"privateDnsName,omitempty"`
+	Groups             []ec2GroupItem            `xml:"groupSet>item,omitempty"`
+	Attachment         ec2NetworkAttachmentItem  `xml:"attachment"`
+	InterfaceType      string                    `xml:"interfaceType,omitempty"`
+	PrivateIPAddresses []ec2NetworkPrivateIPItem `xml:"privateIpAddressesSet>item,omitempty"`
+}
+
+// ec2NetworkAttachmentItem is an interface's attachment element, which is where AWS
+// reports the device index rather than on the interface itself.
+type ec2NetworkAttachmentItem struct {
+	DeviceIndex         int    `xml:"deviceIndex"`
+	Status              string `xml:"status"`
+	DeleteOnTermination bool   `xml:"deleteOnTermination"`
+	NetworkCardIndex    int    `xml:"networkCardIndex"`
+}
+
+// ec2NetworkPrivateIPItem is one entry in an interface's privateIpAddressesSet.
+//
+// Substrate records a single address per interface, so exactly one entry is emitted
+// and it is always primary. The set is still reported rather than omitted, because a
+// caller reading privateIpAddressesSet to find the primary address should find it
+// there rather than have to know substrate models no secondary addresses.
+type ec2NetworkPrivateIPItem struct {
+	PrivateIPAddress string `xml:"privateIpAddress"`
+	PrivateDNSName   string `xml:"privateDnsName,omitempty"`
+	Primary          bool   `xml:"primary"`
+}
+
+// ec2NetworkInterfaceItems builds the networkInterfaceSet entries for an instance.
+//
+// status is "in-use" and the attachment's is "attached" rather than the "attaching"
+// a real launch reports mid-attachment: substrate's instances are running by the time
+// RunInstances answers, so an interface still attaching would contradict the instance
+// state alongside it.
+func (p *EC2Plugin) ec2NetworkInterfaceItems(reqCtx *RequestContext, inst EC2Instance) []ec2NetworkInterfaceItem {
+	if len(inst.NetworkInterfaces) == 0 {
+		return nil
+	}
+	items := make([]ec2NetworkInterfaceItem, 0, len(inst.NetworkInterfaces))
+	for _, ifc := range inst.NetworkInterfaces {
+		item := ec2NetworkInterfaceItem{
+			NetworkInterfaceID: ifc.NetworkInterfaceID,
+			SubnetID:           ifc.SubnetID,
+			VpcID:              inst.VPCID,
+			Description:        ifc.Description,
+			OwnerID:            reqCtx.AccountID,
+			Status:             "in-use",
+			PrivateIPAddress:   ifc.PrivateIPAddress,
+			PrivateDNSName:     ifc.PrivateDNSName,
+			Groups:             p.ec2GroupItems(reqCtx, ifc.SecurityGroupIDs),
+			Attachment: ec2NetworkAttachmentItem{
+				DeviceIndex:         ifc.DeviceIndex,
+				Status:              "attached",
+				DeleteOnTermination: ifc.DeleteOnTermination,
+				NetworkCardIndex:    ifc.NetworkCardIndex,
+			},
+			InterfaceType: ifc.InterfaceType,
+		}
+		if ifc.PrivateIPAddress != "" {
+			item.PrivateIPAddresses = []ec2NetworkPrivateIPItem{{
+				PrivateIPAddress: ifc.PrivateIPAddress,
+				PrivateDNSName:   ifc.PrivateDNSName,
+				Primary:          true,
+			}}
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 // ec2GroupItems builds the groupSet entries for an instance's security groups.
@@ -668,8 +778,9 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 			Code int    `xml:"code"`
 			Name string `xml:"name"`
 		} `xml:"instanceState"`
-		Groups []ec2GroupItem `xml:"groupSet>item"`
-		Tags   []tagItem      `xml:"tagSet>item"`
+		Groups            []ec2GroupItem            `xml:"groupSet>item"`
+		Tags              []tagItem                 `xml:"tagSet>item"`
+		NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
 	}
 	type response struct {
 		XMLName       xml.Name          `xml:"RunInstancesResponse"`
@@ -702,6 +813,10 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
 		item.Groups = p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)
+		// RunInstances reports networkInterfaceSet, not only DescribeInstances — the
+		// reference's own sample response carries it — so a caller can read back the
+		// interfaces it declared without a follow-up describe (#455).
+		item.NetworkInterfaces = p.ec2NetworkInterfaceItems(reqCtx, inst)
 		// Echo launch-time tags (from TagSpecifications) — real EC2 populates
 		// tagSet in the RunInstances response, not just DescribeInstances (#351).
 		for _, t := range inst.Tags {
@@ -822,6 +937,8 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		Placement          placementItem   `xml:"placement"`
 		Groups             []ec2GroupItem  `xml:"groupSet>item"`
 		Tags               []tagItem       `xml:"tagSet>item"`
+
+		NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
 	}
 	type reservationItem struct {
 		ReservationID string            `xml:"reservationId"`
@@ -872,6 +989,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		item.State.Code = inst.State.Code
 		item.State.Name = inst.State.Name
 		item.Groups = p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)
+		item.NetworkInterfaces = p.ec2NetworkInterfaceItems(reqCtx, inst)
 		// Echo the IAM instance profile set at launch (#331). The stored value is
 		// the name or ARN supplied; surface it as the ARN and derive an id so a
 		// caller can read back the profile it attached.
@@ -4275,8 +4393,11 @@ func (p *EC2Plugin) resolveLaunchTemplate(goCtx context.Context, ctx *RequestCon
 // params and stored none of them, so an instance launched from a template
 // configured the way AWS requires landed in a substrate-chosen subnet (#444).
 //
-// Only interface index 1 is modeled, matching runInstances' own NetworkInterface.1
-// handling: a template declaring a second interface silently loses it.
+// Every declared interface is parsed (#455). The flat SubnetID,
+// AssociatePublicIPAddress and NetworkInterfaceGroups fields hold the primary
+// interface's values, so a launch from this template lands where it did before and a
+// template stored before the slice existed still reads correctly; the slice carries
+// the rest, which used to be silently dropped.
 //
 // The interface's security groups are read from SecurityGroupId.N first, which is
 // what real SDKs send — the AWS model gives that member the locationName
@@ -4289,16 +4410,24 @@ func (p *EC2Plugin) resolveLaunchTemplate(goCtx context.Context, ctx *RequestCon
 // say so, and a tag: filter simply returning nothing (#471).
 func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
 	const ltPrefix = "LaunchTemplateData."
-	const niPrefix = ltPrefix + "NetworkInterface.1."
+
+	interfaces := ec2ParseNetworkInterfaces(params, ltPrefix)
+	ec2SortInterfacesByDeviceIndex(interfaces)
 
 	data := EC2LaunchTemplateData{
-		ImageID:                  params[ltPrefix+"ImageId"],
-		InstanceType:             params[ltPrefix+"InstanceType"],
-		KeyName:                  params[ltPrefix+"KeyName"],
-		UserData:                 params[ltPrefix+"UserData"],
-		SubnetID:                 params[niPrefix+"SubnetId"],
-		AssociatePublicIPAddress: params[niPrefix+"AssociatePublicIpAddress"],
-		TagSpecifications:        ec2TagSpecificationTags(params, ltPrefix, "instance"),
+		ImageID:           params[ltPrefix+"ImageId"],
+		InstanceType:      params[ltPrefix+"InstanceType"],
+		KeyName:           params[ltPrefix+"KeyName"],
+		UserData:          params[ltPrefix+"UserData"],
+		TagSpecifications: ec2TagSpecificationTags(params, ltPrefix, "instance"),
+		NetworkInterfaces: interfaces,
+	}
+	// The flat fields hold the primary interface's values; see
+	// [EC2LaunchTemplateData.NetworkInterfaces].
+	if primary := ec2PrimaryInterface(interfaces); primary != nil {
+		data.SubnetID = primary.SubnetID
+		data.AssociatePublicIPAddress = primary.AssociatePublicIPAddress
+		data.NetworkInterfaceGroups = primary.SecurityGroupIDs
 	}
 	// Name before Arn, mirroring runInstances' own precedence for the call-level
 	// pair; see [EC2LaunchTemplateData.IamInstanceProfile].
@@ -4309,8 +4438,6 @@ func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
 	if sg1 := params[ltPrefix+"SecurityGroupId.1"]; sg1 != "" {
 		data.SecurityGroupIDs = []string{sg1}
 	}
-	data.NetworkInterfaceGroups = indexedParams(params,
-		niPrefix+"SecurityGroupId.%d", niPrefix+"Groups.%d")
 	return data
 }
 
