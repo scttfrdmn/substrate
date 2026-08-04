@@ -183,6 +183,9 @@ func (p *CloudFormationPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 // --- Stack operations ---
 
 func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Not run through [cfnStackName], and deliberately: CreateStack's StackName is
+	// "the name that's associated with the stack" with no unique-stack-ID
+	// alternative, because the ID does not exist until this call mints it.
 	name := req.Params["StackName"]
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
@@ -252,7 +255,11 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 }
 
 func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	name := req.Params["StackName"]
+	// "The name or unique stack ID of the stack to update."
+	name, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
@@ -295,7 +302,17 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 }
 
 func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	name := req.Params["StackName"]
+	// "The name or the unique stack ID that's associated with the stack."
+	//
+	// Resolving here, ahead of the deployer, is the whole fix for #544's silent
+	// success: DeleteStack's absent-stack tolerance below is right for a stack that
+	// is genuinely gone and wrong for an identifier the lookup merely failed to
+	// parse, and an ARN reaching the deployer verbatim matches no record, sweeps
+	// nothing, and answers 200.
+	name, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
@@ -373,7 +390,13 @@ type cfnOutputXML struct {
 }
 
 func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	name := req.Params["StackName"]
+	// "Running stacks: You can specify either the stack's name or its unique stack
+	// ID." Substrate keeps no record of a deleted stack, so the deleted-stack case —
+	// where the API requires the ID — reports the same not-found either way.
+	name, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	var stacks []CFNStackState
 	if name == "" {
@@ -475,6 +498,13 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 	if name == "" && physicalID == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
+	// "Running stacks: You can specify either the stack's name or its unique stack
+	// ID." Resolved after the two parameter-shape checks above, which are about
+	// which parameters were sent rather than what they contain.
+	name, arnErr := cfnStackName(reqCtx, name)
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	var stacks []CFNStackState
 	if name != "" {
@@ -552,7 +582,13 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 }
 
 func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	stackName := req.Params["StackName"]
+	// "Running stacks: You can specify either the stack's name or its unique stack
+	// ID." The change-set branch takes a name or ARN too, which cfnChangeSetName
+	// already handled; this is the stack half of the same courtesy.
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	changeSetName := cfnChangeSetName(req.Params["ChangeSetName"])
 
 	var body string
@@ -601,7 +637,12 @@ func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSReque
 // --- Change-set operations ---
 
 func (p *CloudFormationPlugin) createChangeSet(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	stackName := req.Params["StackName"]
+	// "The name or the unique ID of the stack for which you are creating a change
+	// set", and the parameter's own pattern admits an arn: form.
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	changeSetName := req.Params["ChangeSetName"]
 	if changeSetName == "" {
 		return nil, cfnMissingParameter("ChangeSetName")
@@ -675,7 +716,14 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 	if changeSetName == "" {
 		return nil, cfnMissingParameter("ChangeSetName")
 	}
-	cs, err := p.findChangeSet(req.Params["StackName"], changeSetName)
+	// "If you specified the name of a change set, specify the stack name or Amazon
+	// Resource Name (ARN)". An empty StackName searches every stack, which
+	// findChangeSet already supports.
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	cs, err := p.findChangeSet(stackName, changeSetName)
 	if err != nil {
 		return nil, err
 	}
@@ -746,7 +794,13 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	if changeSetName == "" {
 		return nil, cfnMissingParameter("ChangeSetName")
 	}
-	cs, err := p.findChangeSet(req.Params["StackName"], changeSetName)
+	// "If you specified the name of a change set, specify the stack name or Amazon
+	// Resource Name (ARN) that's associated with the change set you want to execute."
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	cs, err := p.findChangeSet(stackName, changeSetName)
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +823,12 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 }
 
 func (p *CloudFormationPlugin) listChangeSets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	stackName := req.Params["StackName"]
+	// "The name or the Amazon Resource Name (ARN) of the stack for which you want to
+	// list change sets."
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
@@ -821,10 +880,16 @@ func (p *CloudFormationPlugin) deleteChangeSet(reqCtx *RequestContext, req *AWSR
 	if changeSetName == "" {
 		return nil, cfnMissingParameter("ChangeSetName")
 	}
+	// "If you specified the name of a change set to delete, specify the stack name or
+	// ID (ARN) that's associated with it."
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	// DeleteChangeSet documents no not-found error, so deleting an absent change
 	// set succeeds; only a wrong-status change set is refused, and substrate has
 	// no in-progress status to refuse.
-	if cs, err := p.findChangeSet(req.Params["StackName"], changeSetName); err != nil {
+	if cs, err := p.findChangeSet(stackName, changeSetName); err != nil {
 		return nil, err
 	} else if cs != nil {
 		if err := p.deployer.DeleteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
@@ -923,7 +988,12 @@ func (p *CloudFormationPlugin) listImports(reqCtx *RequestContext, req *AWSReque
 // --- Drift operations ---
 
 func (p *CloudFormationPlugin) detectStackDrift(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	stackName := req.Params["StackName"]
+	// The parameter's pattern admits an arn: form even though its prose says only
+	// "the name of the stack for which you want to detect drift".
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
@@ -953,7 +1023,12 @@ func (p *CloudFormationPlugin) detectStackDrift(reqCtx *RequestContext, req *AWS
 }
 
 func (p *CloudFormationPlugin) describeStackResourceDrifts(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	stackName := req.Params["StackName"]
+	// Same pattern as DetectStackDrift, and the pair is usually called together with
+	// whichever identifier the caller already has.
+	stackName, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
@@ -1129,6 +1204,19 @@ func cfnStackNotFound(name string) *AWSError {
 	}
 }
 
+// cfnStackARNNotInScope refuses a stack ARN that is not one substrate would have
+// minted for this caller — a foreign account or Region, a foreign partition, or a
+// UUID that does not match the name it is attached to.
+//
+// It reports exactly what an absent stack reports, and deliberately so: a stack
+// outside the caller's account and Region is a stack the caller cannot observe, so
+// telling the two cases apart would disclose whether some other scope holds a
+// stack by that name. Real CloudFormation answers a cross-account stack ID the
+// same way, since credentials scope the request before the identifier is read.
+func cfnStackARNNotInScope(nameOrARN string) *AWSError {
+	return cfnStackNotFound(nameOrARN)
+}
+
 // cfnChangeSetNotFound reports an unknown change set. ChangeSetNotFound is
 // documented at HTTP 404, unlike the stack case.
 func cfnChangeSetNotFound(name string) *AWSError {
@@ -1266,6 +1354,49 @@ func cfnDeterministicUUID(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "/")))
 	h := hex.EncodeToString(sum[:])
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// cfnStackName resolves the StackName a caller sent — a bare stack name, or the
+// stack ARN CreateStack handed back as its StackId — to the name StackDeployer
+// keys stacks by.
+//
+// Every stack-scoped operation documents both forms: "The name or the unique
+// stack ID that's associated with the stack", and CreateChangeSet, ExecuteChangeSet,
+// ListChangeSets, DetectStackDrift and DescribeStackResourceDrifts spell the ARN
+// alternative out in the parameter's own pattern,
+// ([a-zA-Z][-a-zA-Z0-9]*)|(arn:\b(aws|aws-us-gov|aws-cn)\b:[-a-zA-Z0-9:/._+]*).
+// Until #544 substrate looked the caller's string up verbatim, so the identifier
+// it had just minted resolved to nothing.
+//
+// The ARN is verified, not merely parsed. [cfnStackARN] builds it from the
+// partition, Region, account and a [cfnDeterministicUUID] over those plus the
+// name, so all of it is recomputable here — and comparing the whole string
+// against the one substrate would have minted checks every component at once,
+// with no way for a later field to be forgotten. Lifting the name out without
+// that check would let a caller reach, and DeleteStack tear down, a stack in
+// another account or Region by hand-writing an ARN: a worse defect than the
+// silent no-op #544 reported.
+//
+// CreateStack deliberately does not use this. Its StackName is documented as "The
+// name that's associated with the stack", with no ARN alternative — a stack ID
+// does not exist yet at the moment the stack is created.
+func cfnStackName(reqCtx *RequestContext, nameOrARN string) (string, *AWSError) {
+	const token = ":stack/"
+	idx := strings.Index(nameOrARN, token)
+	if idx < 0 {
+		// A stack name is "only alphanumeric characters (case sensitive) and
+		// hyphens", so no name can be mistaken for an ARN. An empty StackName stays
+		// empty: whether it is required is each operation's business, not this one.
+		return nameOrARN, nil
+	}
+	name := nameOrARN[idx+len(token):]
+	if slash := strings.IndexByte(name, '/'); slash >= 0 {
+		name = name[:slash]
+	}
+	if name == "" || nameOrARN != cfnStackARN(reqCtx.Region, reqCtx.AccountID, name) {
+		return "", cfnStackARNNotInScope(nameOrARN)
+	}
+	return name, nil
 }
 
 // cfnChangeSetName accepts either a bare change-set name or a change-set ARN and
