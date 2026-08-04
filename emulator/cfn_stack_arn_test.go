@@ -247,6 +247,74 @@ func TestCFNStackARN_OutOfScopeARNIsRefused(t *testing.T) {
 	assert.Contains(t, body, "<StackStatus>CREATE_COMPLETE</StackStatus>")
 }
 
+// TestCFNStackARN_EveryOperationRefusesAnOutOfScopeARN is the mirror of
+// TestCFNStackARN_StackScopedOperations: the same twelve operations, offered an ARN
+// that is not this caller's.
+//
+// Resolving is only half of what each handler has to do — it also has to *return*
+// the refusal rather than ignore it and carry on with an empty name, which in
+// DeleteStack's case would land straight back in the absent-is-success tolerance.
+// TestCFNStackARN_OutOfScopeARNIsRefused proves the resolver refuses; this proves
+// every call site propagates.
+func TestCFNStackARN_EveryOperationRefusesAnOutOfScopeARN(t *testing.T) {
+	ts := newCFNTestServer(t)
+	arn := cfnCreateStackARN(t, ts, "propagates", cfnBucketTemplate)
+
+	// A real change set, so a refusal cannot be the change set merely being absent.
+	code, body := cfnAction(t, ts, "CreateChangeSet", map[string]string{
+		"StackName":     "propagates",
+		"ChangeSetName": "cs-propagates",
+		"TemplateBody":  cfnBucketTemplate,
+	})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+	// Another account's ARN for a stack that really exists here under that name.
+	foreign := strings.Replace(arn, cfnTestAccount, "999999999999", 1)
+	require.NotEqual(t, arn, foreign)
+
+	cases := []struct {
+		action string
+		params map[string]string
+	}{
+		{action: "DescribeStacks"},
+		{action: "DescribeStackResources"},
+		{action: "GetTemplate"},
+		{action: "ListChangeSets"},
+		{action: "DetectStackDrift"},
+		{action: "DescribeStackResourceDrifts"},
+		{action: "UpdateStack", params: map[string]string{"TemplateBody": cfnBucketTemplate}},
+		{
+			action: "CreateChangeSet",
+			params: map[string]string{"ChangeSetName": "cs-new", "TemplateBody": cfnBucketTemplate},
+		},
+		{action: "DescribeChangeSet", params: map[string]string{"ChangeSetName": "cs-propagates"}},
+		{action: "ExecuteChangeSet", params: map[string]string{"ChangeSetName": "cs-propagates"}},
+		{action: "DeleteChangeSet", params: map[string]string{"ChangeSetName": "cs-propagates"}},
+		{action: "DeleteStack"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			params := map[string]string{"StackName": foreign}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			code, body := cfnAction(t, ts, tc.action, params)
+			require.Equal(t, http.StatusBadRequest, code, "body was %s", body)
+			assert.Equal(t, "ValidationError", cfnErrorCode(t, body))
+		})
+	}
+
+	// Twelve refused operations later, the stack, its change set and its resources
+	// are all exactly as they were.
+	assert.Equal(t, http.StatusOK, cfnHeadBucket(t, ts, "cfn-wire-bucket"))
+	code, body = cfnAction(t, ts, "DescribeStacks", map[string]string{"StackName": "propagates"})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Contains(t, body, "<StackStatus>CREATE_COMPLETE</StackStatus>")
+	code, body = cfnAction(t, ts, "ListChangeSets", map[string]string{"StackName": "propagates"})
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Contains(t, body, "<ChangeSetName>cs-propagates</ChangeSetName>")
+}
+
 // TestCFNStackARN_AnotherCallersARNIsRefused is the scope check's sharpest case,
 // and the one that needs two callers to state.
 //
