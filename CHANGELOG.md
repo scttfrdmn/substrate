@@ -99,6 +99,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not describe the extent of a part.
 
 ### Fixed
+- **A Lambda function reports the size and digest of the package it was deployed
+  from** (#545). `CodeSize` was `0` and `CodeSha256` empty for every function whose
+  code did not arrive as an inline base64 `ZipFile` on a direct `CreateFunction` — so
+  a consumer polling `CodeSize` to decide whether a deploy took effect was told
+  nothing had, whatever it deployed.
+
+  **The issue's premise was confounded, and correcting it doubled the change.** It was
+  filed as a CloudFormation problem. Measuring all four combinations against v0.89.0
+  showed the axis is **inline vs. S3 source**, not CFN vs. direct:
+  direct + `ZipFile` = **156** (correct), direct + S3 = **0**, CFN + S3 = **0**, and
+  CFN + inline `ZipFile` = **0** — the row the report never tested, and the one that
+  proves there were two independent gaps rather than one.
+
+  **CloudFormation sent no `Code` at all.** `deployLambdaFunction` built a
+  `CreateFunction` body carrying `FunctionName`, `Runtime`, `Role`, `Handler`,
+  `Description`, `Timeout` and `MemorySize` and no `Code` key of any kind, so every
+  CFN-deployed function reported size 0 and an empty digest however its template
+  declared its code, a container-image function lost both its image and its
+  `PackageType`, and `UpdateFunctionCode` drift was undetectable. All of `ZipFile`,
+  `S3Bucket`, `S3Key`, `S3ObjectVersion` and `ImageUri` are now forwarded, each
+  through the template's `Ref` and pseudo-parameter resolution like any other
+  property.
+
+  **An inline template needed more than forwarding, which is why fixing it was not a
+  one-line change.** The resource type's `Code.ZipFile` is "the source code of your
+  Lambda function" — "CloudFormation places it in a file named `index` and zips it to
+  create a deployment package" — while the API's `Code.ZipFile` is "the base64-encoded
+  contents of the deployment package". Forwarding the template's string would have
+  handed Lambda something that is not a package and usually not valid base64, leaving
+  `CodeSize` at 0 exactly as before. Substrate now builds the archive CloudFormation
+  would have built: one entry named `index` with the extension the runtime reads
+  (`.js` for `nodejs*` per the reference, `.py` for `python*`, bare `index`
+  otherwise). The archive carries no timestamps, so the same template deployed twice
+  yields the same package and the same digest — a digest that moved on every deploy
+  would not be worth comparing.
+
+  **An S3-sourced package is now sized.** Both `createFunction` and
+  `updateFunctionCode` read the object's recorded length out of substrate's own S3
+  state, honouring `S3ObjectVersion`. `ZipStored` stays `false` — the bytes are still
+  not staged for execution, which is a separate and correct fact from knowing the
+  size.
+
+  **`UpdateFunctionCode` stopped randomising the digest.** It assigned `CodeSha256` a
+  fresh random value on every call, so a caller asking "did the code change?" was
+  always told yes. The digest is now derived from the package, and an update carrying
+  no package at all changes neither the size nor the digest. `RevisionId` is not a
+  digest of anything and still advances on every call. An image-packaged function's
+  digest tracks its image URI, and is now reported from creation rather than only after
+  the first update — appearing on one path and not the other was a difference a caller
+  had no way to account for.
+
+  Two decisions here are substrate's own rather than the API model's, and
+  `docs/services.md` states both. The digest of an **S3-sourced** package is the
+  object's **ETag**, not a SHA256: substrate never fetches the bytes, and for a
+  single-part upload the ETag is the MD5 of the body, so it changes exactly when the
+  package changes — the question a caller comparing digests is actually asking. And an
+  **absent** S3 object does not fail the create the way real Lambda would; substrate's
+  S3 and Lambda state are independent and a template may legitimately name an object a
+  test never uploaded, so it logs and reports size 0. A deleted object — one hidden by
+  a delete marker — counts as absent rather than as a zero-length package.
+
+  Two adjacent gaps surfaced while fixing this and are fixed with it, since leaving
+  either would have made the change a write with no observable — the shape this whole
+  release is about. `Code.ImageUri`, the documented spelling, was accepted only at the
+  top level, and now wins over the legacy field and infers `PackageType: Image`. And
+  `GetFunction` reported `RepositoryType: S3` with a stub presigned URL for an
+  image-packaged function, which is a claim a caller can act on and be wrong about; it
+  now reports `RepositoryType: ECR` with `ImageUri` and `ResolvedImageUri` and no
+  `Location`.
+
 - **A Batch compute environment, job queue and job definition can be read back after
   it is created** (#530). `DescribeComputeEnvironments`, `DescribeJobQueues` and
   `DescribeJobDefinitions` were unrouted, so each answered an unknown-operation error

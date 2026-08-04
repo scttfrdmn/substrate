@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -2668,6 +2669,12 @@ func (d *StackDeployer) deployLambdaFunction(
 			body["MemorySize"] = n
 		}
 	}
+	// Code is what the function is. Omitting it — as this deployer did — meant every
+	// CloudFormation-deployed function reported CodeSize 0 and an empty CodeSha256
+	// however its template declared its code, and a container-image function lost
+	// both its image and its package type. Called after Runtime is set, because an
+	// inline package's file name depends on it.
+	cfnLambdaCode(body, props, cctx)
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -2702,6 +2709,99 @@ func (d *StackDeployer) deployLambdaFunction(
 	}
 
 	return dr, cost, nil
+}
+
+// cfnLambdaCode carries an AWS::Lambda::Function resource's Code property into a
+// CreateFunction request body.
+//
+// The resource type and CreateFunction spell the S3 and image forms identically, so
+// S3Bucket/S3Key/S3ObjectVersion and ImageUri are forwarded as they are. An ImageUri
+// also implies PackageType: Image, which the resource type declares separately but a
+// template need not state — real CloudFormation rejects an ImageUri alongside
+// PackageType: Zip, so inferring it cannot contradict a valid template.
+//
+// ZipFile is the one form where the two spellings differ and the difference matters.
+// The resource type's ZipFile is "the source code of your Lambda function", plain
+// text: "CloudFormation places it in a file named index and zips it to create a
+// deployment package". CreateFunction's ZipFile is "the base64-encoded contents of
+// the deployment package". Forwarding the template's string verbatim would therefore
+// hand Lambda something that is not a package and usually not even valid base64,
+// which is why this builds the archive CloudFormation would have built — one entry
+// named index plus the runtime's extension — and sends that. The consequence is
+// visible: CodeSize is the archive's byte count and CodeSha256 a digest of real
+// bytes, where an unzipped forward would have left both empty.
+//
+// A resource with no Code at all is left alone rather than sent an empty Code
+// object: substrate's CreateFunction treats an absent Code as a function with no
+// stored package, which is the same outcome and one fewer thing to explain.
+func cfnLambdaCode(body, props map[string]interface{}, cctx *cfnContext) {
+	code, ok := props["Code"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	out := map[string]interface{}{}
+	for _, key := range []string{"S3Bucket", "S3Key", "S3ObjectVersion"} {
+		if v := resolveStringProp(code, key, "", cctx); v != "" {
+			out[key] = v
+		}
+	}
+	if src := resolveStringProp(code, "ZipFile", "", cctx); src != "" {
+		runtime, _ := body["Runtime"].(string)
+		pkg, err := cfnInlineZipPackage(src, runtime)
+		if err == nil {
+			out["ZipFile"] = base64.StdEncoding.EncodeToString(pkg)
+		}
+	}
+	if uri := resolveStringProp(code, "ImageUri", "", cctx); uri != "" {
+		out["ImageUri"] = uri
+		body["PackageType"] = "Image"
+	}
+	if len(out) > 0 {
+		body["Code"] = out
+	}
+	// PackageType may also be declared outright, for a template that says Image
+	// without a Code.ImageUri or states Zip explicitly.
+	if pt := resolveStringProp(props, "PackageType", "", cctx); pt != "" {
+		body["PackageType"] = pt
+	}
+}
+
+// cfnInlineZipPackage builds the deployment package CloudFormation builds for an
+// inline Code.ZipFile: a ZIP archive holding the source as a single file named
+// index, with the extension the runtime reads.
+//
+// The reference names the extension for one runtime family only — "when you specify
+// source code inline for a Node.js function, the index file that CloudFormation
+// creates uses the extension .js" — and inline code is documented as "(Node.js and
+// Python)", so Python's .py is the only other case. An unrecognized runtime gets a
+// bare index rather than a guess; the archive's size and digest, which is what this
+// exists to make right, do not depend on the name being executable, and substrate
+// does not run an inline package unless Docker is present.
+func cfnInlineZipPackage(source, runtime string) ([]byte, error) {
+	name := "index"
+	switch {
+	case strings.HasPrefix(runtime, "nodejs"):
+		name = "index.js"
+	case strings.HasPrefix(runtime, "python"):
+		name = "index.py"
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	// A zero timestamp keeps the archive deterministic: the same template deployed
+	// twice has to produce the same CodeSize and CodeSha256, which is the whole
+	// point of reporting a digest rather than a random value.
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})
+	if err != nil {
+		return nil, fmt.Errorf("create inline lambda package entry: %w", err)
+	}
+	if _, err := w.Write([]byte(source)); err != nil {
+		return nil, fmt.Errorf("write inline lambda package entry: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("close inline lambda package: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // deploySQSQueue creates an SQS queue for the given CFN resource.

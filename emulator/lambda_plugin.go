@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -244,9 +245,11 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		Tags          map[string]string `json:"Tags"`
 		ImageURI      string            `json:"ImageUri"`
 		Code          struct {
-			ZipFile  string `json:"ZipFile"`
-			S3Bucket string `json:"S3Bucket"`
-			S3Key    string `json:"S3Key"`
+			ZipFile         string `json:"ZipFile"`
+			S3Bucket        string `json:"S3Bucket"`
+			S3Key           string `json:"S3Key"`
+			S3ObjectVersion string `json:"S3ObjectVersion"`
+			ImageURI        string `json:"ImageUri"`
 		} `json:"Code"`
 		Environment struct {
 			Variables map[string]string `json:"Variables"`
@@ -280,6 +283,18 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	if pkgType == "" {
 		pkgType = "Zip"
 	}
+	// The API declares ImageUri inside Code, not at the top level; the top-level
+	// field substrate also accepts predates this and is kept so an existing caller
+	// keeps working. Code.ImageUri wins, being the documented spelling.
+	imageURI := body.ImageURI
+	if body.Code.ImageURI != "" {
+		imageURI = body.Code.ImageURI
+	}
+	if imageURI != "" && body.PackageType == "" {
+		// "PackageType: Image" is required alongside an ImageUri, and real Lambda
+		// rejects the pair with Zip, so an unstated package type cannot conflict.
+		pkgType = "Image"
+	}
 	archs := body.Architectures
 	if len(archs) == 0 {
 		archs = []string{"x86_64"}
@@ -303,7 +318,7 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		PackageType:   pkgType,
 		Architectures: archs,
 		Tags:          body.Tags,
-		ImageURI:      body.ImageURI,
+		ImageURI:      imageURI,
 		LastModified:  now,
 		CreateDate:    now,
 	}
@@ -313,9 +328,21 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		decoded, decErr := base64.StdEncoding.DecodeString(body.Code.ZipFile)
 		if decErr == nil && len(decoded) > 0 {
 			fn.CodeSize = int64(len(decoded))
+			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
 			_ = p.state.Put(context.Background(), lambdaNamespace, "function_zip:"+body.FunctionName, decoded)
 		}
+	} else if body.Code.S3Bucket != "" {
+		// The bytes are not staged for execution — that is what ZipStored records and
+		// it stays false — but the object is usually in substrate's own S3, so its
+		// length is knowable even though the package is not fetched.
+		fn.CodeSize, fn.CodeSha256 = p.sizeS3Package(body.Code.S3Bucket, body.Code.S3Key, body.Code.S3ObjectVersion)
+	} else if imageURI != "" {
+		// The same rule UpdateFunctionCode applies: an image function's package is the
+		// image, so its digest tracks the URI. Reporting one here and only there would
+		// mean a function created from an image had no digest until it was updated,
+		// which is a difference between two paths a caller cannot see a reason for.
+		fn.CodeSha256 = lambdaCodeSha256([]byte(imageURI))
 	}
 
 	data, err := json.Marshal(fn)
@@ -341,19 +368,35 @@ func (p *LambdaPlugin) getFunction(_ *RequestContext, name string) (*AWSResponse
 	}
 
 	type codeLocation struct {
-		RepositoryType string `json:"RepositoryType"`
-		Location       string `json:"Location"`
+		RepositoryType   string `json:"RepositoryType"`
+		Location         string `json:"Location,omitempty"`
+		ImageURI         string `json:"ImageUri,omitempty"`
+		ResolvedImageURI string `json:"ResolvedImageUri,omitempty"`
 	}
 	type response struct {
 		Configuration interface{}  `json:"Configuration"`
 		Code          codeLocation `json:"Code"`
 	}
+	// FunctionCodeLocation reports "the service that's hosting the file", so an
+	// image-packaged function is hosted by ECR and reports ImageUri rather than a
+	// presigned Location — reporting an S3 URL for one is a claim a caller can act
+	// on and be wrong about. A function created with a Code.ImageUri had nowhere to
+	// surface it before, so the deployer forwarding one would otherwise have been a
+	// write with no observable.
+	loc := codeLocation{
+		RepositoryType: "S3",
+		Location:       "https://lambda-stub.localhost/code/" + name,
+	}
+	if fn.PackageType == "Image" && fn.ImageURI != "" {
+		loc = codeLocation{
+			RepositoryType:   "ECR",
+			ImageURI:         fn.ImageURI,
+			ResolvedImageURI: fn.ImageURI,
+		}
+	}
 	return lambdaJSONResponse(http.StatusOK, response{
 		Configuration: buildFunctionConfig(fn),
-		Code: codeLocation{
-			RepositoryType: "S3",
-			Location:       "https://lambda-stub.localhost/code/" + name,
-		},
+		Code:          loc,
 	})
 }
 
@@ -364,34 +407,48 @@ func (p *LambdaPlugin) updateFunctionCode(_ *RequestContext, req *AWSRequest, na
 	}
 
 	var body struct {
-		ZipFile  string `json:"ZipFile"`
-		S3Bucket string `json:"S3Bucket"`
-		S3Key    string `json:"S3Key"`
-		ImageURI string `json:"ImageUri"`
+		ZipFile         string `json:"ZipFile"`
+		S3Bucket        string `json:"S3Bucket"`
+		S3Key           string `json:"S3Key"`
+		S3ObjectVersion string `json:"S3ObjectVersion"`
+		ImageURI        string `json:"ImageUri"`
 	}
 	_ = json.Unmarshal(req.Body, &body)
 
-	fn.CodeSha256 = generateLambdaRevisionID()
+	// CodeSha256 is "the SHA256 hash of the function's deployment package", so it is
+	// derived from the package below when there are bytes to hash rather than being a
+	// fresh random value on every update — a caller comparing it across two updates
+	// is asking whether the code changed, and a random value answers "always". A
+	// RevisionID is not a digest of anything and stays random.
 	fn.RevisionID = generateLambdaRevisionID()
 	fn.LastModified = p.tc.Now()
 
-	if body.ZipFile != "" {
+	switch {
+	case body.ZipFile != "":
 		decoded, decErr := base64.StdEncoding.DecodeString(body.ZipFile)
 		if decErr == nil && len(decoded) > 0 {
 			fn.CodeSize = int64(len(decoded))
+			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
 			_ = p.state.Put(context.Background(), lambdaNamespace, "function_zip:"+name, decoded)
 		}
-	} else if body.S3Bucket != "" {
-		// S3-sourced ZIP — we don't have the bytes; log and continue.
-		p.logger.Warn("lambda updateFunctionCode: S3 source not fetched; Docker execution unavailable for this function",
-			"bucket", body.S3Bucket, "key", body.S3Key)
+	case body.S3Bucket != "":
+		// The bytes are not staged for execution — that is what ZipStored records and
+		// it stays false — but the object is usually in substrate's own S3, so its
+		// length is knowable even though the package is not fetched.
+		fn.CodeSize, fn.CodeSha256 = p.sizeS3Package(body.S3Bucket, body.S3Key, body.S3ObjectVersion)
 		fn.ZipStored = false
 	}
 
 	if body.ImageURI != "" {
 		fn.ImageURI = body.ImageURI
 		fn.PackageType = "Image"
+		// An image function's package is the image, so its digest tracks the URI: it
+		// changes when the function is pointed at a different image and not otherwise.
+		// Substrate never pulls the image, so this is not the digest real Lambda
+		// reports, for the same reason the S3 path reports an ETag — see
+		// docs/services.md.
+		fn.CodeSha256 = lambdaCodeSha256([]byte(body.ImageURI))
 	}
 
 	return p.saveFunctionAndRespond(fn, http.StatusOK)
@@ -965,6 +1022,60 @@ func (p *LambdaPlugin) autoCreateLambdaLogGroup(ctx *RequestContext, name string
 	}
 	idxKey := cwLogGroupNamesKey(ctx.AccountID, ctx.Region)
 	updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, lgName)
+}
+
+// lambdaCodeSha256 reports the CodeSha256 for a deployment package: "the SHA256 hash
+// of the function's deployment package", base64-encoded as Lambda returns it.
+func lambdaCodeSha256(pkg []byte) string {
+	sum := sha256.Sum256(pkg)
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// sizeS3Package reports the CodeSize and CodeSha256 of an S3-sourced deployment
+// package by reading the object's recorded metadata out of substrate's own S3 state.
+//
+// Lambda reports CodeSize as "the size of the function's deployment package, in
+// bytes", which for an S3 source is the length of the object — a fact substrate
+// already holds, since a template that references an object a test uploaded is the
+// ordinary case. Substrate does not fetch the bytes (nothing executes them unless
+// they arrived inline), so the digest comes from the object's own ETag rather than
+// from a hash of the package: for a single-part upload that ETag *is* the MD5 of the
+// body, which makes it change exactly when the package changes, which is the
+// question a caller comparing CodeSha256 across deploys is asking. It is not the
+// SHA256 real Lambda would report, and docs/services.md says so.
+//
+// An absent object is not an error. Real Lambda would refuse the create, but
+// substrate's S3 and Lambda namespaces are independent and a template may
+// legitimately name an object a test never uploaded — failing the create would make
+// a stack undeployable for a reason unrelated to what the test is checking. It logs
+// and reports size 0, which is what the function did for every S3 source before.
+func (p *LambdaPlugin) sizeS3Package(bucket, key, versionID string) (int64, string) {
+	stateKey := "object:" + bucket + "/" + key
+	if versionID != "" {
+		stateKey = "object_version:" + bucket + "/" + key + "/" + versionID
+	}
+	data, err := p.state.Get(context.Background(), s3Namespace, stateKey)
+	if err != nil || data == nil {
+		p.logger.Warn("lambda: S3 deployment package not found in substrate's S3 state; "+
+			"reporting CodeSize 0 and no execution package",
+			"bucket", bucket, "key", key, "versionId", versionID)
+		return 0, ""
+	}
+	var obj S3Object
+	if err := json.Unmarshal(data, &obj); err != nil {
+		p.logger.Warn("lambda: S3 deployment package metadata is unreadable; reporting CodeSize 0",
+			"bucket", bucket, "key", key, "error", err)
+		return 0, ""
+	}
+	// A delete marker lives at the same key as the object it hides, so reading the
+	// record is not the same as the object being there. A deleted package is absent,
+	// not a zero-length one.
+	if obj.IsDeleteMarker {
+		p.logger.Warn("lambda: S3 deployment package is a delete marker; reporting CodeSize 0",
+			"bucket", bucket, "key", key)
+		return 0, ""
+	}
+	return obj.Size, strings.Trim(obj.ETag, `"`)
 }
 
 // generateLambdaRevisionID generates a unique revision/code ID.
