@@ -1334,22 +1334,25 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		return nil
 	}
 
-	entityType, entityName := parsePrincipalARN(reqCtx.Principal.ARN)
-	if entityName == "" {
-		return &AWSError{Code: "AccessDeniedException", Message: "access denied", HTTPStatus: 403}
+	// The same resolver AuthController.CheckAccess uses, so one ARN gets one
+	// answer. These two disagreed: an entity type outside user/role was denied
+	// here and allowed there, and an assumed-role session — the shape STS mints —
+	// hit that arm on both paths. An IAM call by such a session now evaluates
+	// against the role it assumed instead of being refused outright.
+	entity, exists, err := resolveIAMEntity(goCtx, p.state, reqCtx.Principal.ARN)
+	if err != nil {
+		return fmt.Errorf("resolve principal for authorization: %w", err)
 	}
-
-	var listKey string
-	switch entityType {
-	case "user":
-		listKey = "user_policies:" + entityName
-	case "role":
-		listKey = "role_policies:" + entityName
-	default:
-		return &AWSError{Code: "AccessDeniedException", Message: "access denied", HTTPStatus: 403}
+	if !exists {
+		// Not enforced, matching CheckAccess: enforcement is opt-in by creating the
+		// principal. Denying here instead would refuse every IAM call made with a
+		// credential that has no IAM entity behind it — which is how substrate's own
+		// documented credentials bootstrap the users these policies are attached to.
+		return nil
 	}
+	entityType, entityName := entity.Kind, entity.Name
 
-	arns, err := p.loadPolicyList(goCtx, listKey)
+	arns, err := p.loadPolicyList(goCtx, entityType+"_policies:"+entityName)
 	if err != nil {
 		return fmt.Errorf("load policies for authorization: %w", err)
 	}
@@ -1415,20 +1418,17 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		}
 	}
 
-	// If a permission boundary is set it must also allow the action.
-	var entityRaw []byte
-	switch entityType {
-	case "user":
-		entityRaw, _ = p.state.Get(goCtx, iamNamespace, "user:"+entityName)
-	case "role":
-		entityRaw, _ = p.state.Get(goCtx, iamNamespace, "role:"+entityName)
-	}
+	// If a permission boundary is set it must also allow the action. The resolver
+	// above guarantees Kind is "user" or "role" and that the record exists, so this
+	// is one read rather than a switch that had to repeat the same entity-type
+	// decision a third time.
+	entityRaw, _ := p.state.Get(goCtx, iamNamespace, entityType+":"+entityName)
 	if entityRaw != nil {
-		var entity struct {
+		var stored struct {
 			PermissionsBoundary *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
 		}
-		if unmarshalErr := json.Unmarshal(entityRaw, &entity); unmarshalErr == nil && entity.PermissionsBoundary != nil {
-			boundaryDocs := p.loadBoundaryPolicyDocs(goCtx, entity.PermissionsBoundary.PolicyARN)
+		if unmarshalErr := json.Unmarshal(entityRaw, &stored); unmarshalErr == nil && stored.PermissionsBoundary != nil {
+			boundaryDocs := p.loadBoundaryPolicyDocs(goCtx, stored.PermissionsBoundary.PolicyARN)
 			if len(boundaryDocs) > 0 {
 				boundaryResult := Evaluate(boundaryDocs, EvaluationRequest{
 					Principal: reqCtx.Principal.ARN,
