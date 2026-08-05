@@ -107,7 +107,14 @@ configured address will have their requests emulated and recorded.`,
 
 			initCtx := context.Background()
 
-			if err := substrate.RegisterDefaultPlugins(initCtx, registry, state, tc, logger, store, cfg); err != nil {
+			// Built before the plugins because CloudFormation takes it: a stack's
+			// resource calls are dispatched in process rather than through the server,
+			// so they are authorized by the controller the plugin holds rather than by
+			// the one ServerOptions.Auth names. It is the same controller either way.
+			authCtrl := substrate.NewAuthController(state, logger)
+
+			if err := substrate.RegisterDefaultPlugins(initCtx, registry, state, tc, logger, store, cfg,
+				substrate.WithPluginAuth(authCtrl)); err != nil {
 				return err
 			}
 
@@ -147,8 +154,6 @@ configured address will have their requests emulated and recorded.`,
 			if cfg.Fault.Enabled || len(cfg.Fault.Rules) > 0 {
 				faultCtrl = substrate.NewFaultController(cfg.Fault.ToFaultConfig(), time.Now().UnixNano())
 			}
-
-			authCtrl := substrate.NewAuthController(state, logger)
 
 			var metricsCollector *substrate.MetricsCollector
 			if cfg.Metrics.Enabled {

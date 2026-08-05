@@ -65,8 +65,21 @@ func StartTestServer(t *testing.T) *TestServer {
 
 	store := NewEventStore(cfg.EventStore.ToEventStoreConfig(), WithTimeController(tc))
 
+	// An IAM-enforcing composition test is the reason the authorization chain
+	// exists, and TestServer is how a consumer writes one, so a test server
+	// authorizes: a call made with a key minted by CreateAccessKey, or with STS
+	// session credentials, is evaluated against that principal's policies, and a
+	// stack's resource calls are evaluated against its service role or its creator.
+	//
+	// This changes nothing for a test that does not create an IAM principal.
+	// Enforcement keys off whether the caller resolves to an IAM entity present in
+	// state, so an unsigned request, substrate's documented credentials, and any
+	// key that was never minted here are all unenforced.
+	auth := NewAuthController(state, logger)
+
 	ctx := context.Background()
-	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, nil); err != nil {
+	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, nil,
+		WithPluginAuth(auth)); err != nil {
 		t.Fatalf("StartTestServer: register plugins: %v", err)
 	}
 
@@ -87,7 +100,8 @@ func StartTestServer(t *testing.T) *TestServer {
 	// ts.Store().GetCostSummary returns non-zero costs out of the box.
 	costs := NewCostController(CostConfig{Enabled: true})
 
-	srv := NewServer(*cfg, registry, store, state, tc, logger, ServerOptions{Fault: fault, Costs: costs})
+	srv := NewServer(*cfg, registry, store, state, tc, logger,
+		ServerOptions{Fault: fault, Costs: costs, Auth: auth})
 
 	srvCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
