@@ -1,9 +1,11 @@
 package emulator
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -85,8 +87,77 @@ func extractAccessKeyFromAuth(authHeader string) string {
 
 // buildCallerARN derives a principal ARN from an account ID and access key ID.
 // AKIA-prefixed keys are treated as long-term IAM user credentials.
+//
+// This names the *access key*, not the IAM user holding it, so the ARN it
+// produces resolves to no policies: nothing is stored under
+// user_policies:AKIA…. That makes it the right answer only for a credential the
+// registry knows and IAM does not — a caller who has an account but no IAM
+// identity, who is therefore not authorized against anything. Use
+// [resolvePrincipal] for a credential that may have an IAM entity behind it;
+// see #411 for the enforcement that could not work while this was the only
+// answer.
 func buildCallerARN(accountID, accessKeyID string) string {
 	return fmt.Sprintf("arn:aws:iam::%s:user/%s", accountID, accessKeyID)
+}
+
+// resolvePrincipal returns the principal an access key identifies, or nil when
+// the key belongs to no IAM entity or STS session.
+//
+// Resolution is from *state*, not from a [CredentialRegistry], and that
+// separation is the point. A registry entry answers "which account, and is this
+// signature valid"; only IAM's own records answer "which principal", because the
+// access key ID and the user's name are different strings. Deriving the ARN from
+// the key (see [buildCallerARN]) yielded arn:aws:iam::123456789012:user/AKIA…,
+// which matches no user_policies key, so a user with a perfectly good inline
+// policy evaluated as though it had none.
+//
+// Keeping this independent of ServerOptions.Credentials is deliberate: the
+// registry also gates SigV4 verification, and an access key it does not hold is
+// rejected with InvalidClientTokenId. Wiring a registry in order to identify
+// callers would therefore 403 every credential substrate documents
+// (AKIAIOSFODNN7EXAMPLE, test/test). Reading state instead costs one Get on a
+// request that carries an Authorization header and refuses nothing.
+//
+// A nil principal means "no IAM identity", which [AuthController.CheckAccess]
+// treats as unenforced rather than denied — enforcement is opt-in by creating
+// the principal, so a caller who never touched IAM is unaffected.
+//
+// The second return is an account ID to adopt, or "" to keep the one already
+// resolved. Only an STS session supplies one: extractAccount recognizes AKIA as
+// substrate's test account and maps everything else — ASIA session keys
+// included — to the fallback account, so a caller using AssumeRole credentials
+// was placed in a different partition from the resources it went on to create.
+// The session record names the account it was issued for, which is the one the
+// role's caller was in.
+func resolvePrincipal(ctx context.Context, state StateManager, accountID, accessKeyID string) (*Principal, string) {
+	if state == nil || accessKeyID == "" {
+		return nil, ""
+	}
+
+	// A long-term key: IAMPlugin.CreateAccessKey stores the owning user's name
+	// beside it, which is the link from a signed request to a set of policies.
+	if raw, err := state.Get(ctx, iamNamespace, "accesskey:"+accessKeyID); err == nil && raw != nil {
+		var key IAMAccessKey
+		if unmarshalErr := json.Unmarshal(raw, &key); unmarshalErr == nil && key.UserName != "" {
+			return &Principal{
+				ARN:  fmt.Sprintf("arn:aws:iam::%s:user/%s", accountID, key.UserName),
+				Type: "IAMUser",
+			}, ""
+		}
+	}
+
+	// A temporary key: STSPlugin.assumeRole records the session under its own
+	// access key ID, already carrying the assumed-role ARN it minted. Substrate
+	// wrote that record from the beginning and nothing read it until #411, which
+	// is why STS credentials authorized as nothing in particular.
+	if raw, err := state.Get(ctx, stsNamespace, "session:"+accessKeyID); err == nil && raw != nil {
+		var sess STSSessionCredentials
+		if unmarshalErr := json.Unmarshal(raw, &sess); unmarshalErr == nil && sess.PrincipalARN != "" {
+			return &Principal{ARN: sess.PrincipalARN, Type: "AssumedRole"}, sess.AccountID
+		}
+	}
+
+	return nil, ""
 }
 
 // VerifySigV4 validates the SigV4 signature on r using secret keys from reg.

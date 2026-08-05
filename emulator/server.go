@@ -457,7 +457,8 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 // handleAWSRequest is the single catch-all handler for all AWS API requests.
 // Pipeline:
 //  1. Parse → AWSRequest + RequestContext
-//     1.5. Credential resolution (when Credentials != nil)
+//     1.5. Credential resolution — account from Credentials (when non-nil),
+//     principal from state (always; see [resolvePrincipal])
 //     1.6. SigV4 signature verification (when Credentials != nil)
 //  2. auth.CheckAccess()        → 403 AccessDeniedException
 //  3. quota.CheckQuota()        → 429 ThrottlingException
@@ -531,14 +532,40 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 1.5: credential resolution — enrich RequestContext with account and
-	// principal derived from the registry.
-	if s.opts.Credentials != nil {
-		accessKey := extractAccessKeyFromAuth(r.Header.Get("Authorization"))
-		if entry, ok := s.opts.Credentials.Lookup(accessKey); ok {
-			reqCtx.AccountID = entry.AccountID
+	// Step 1.5: credential resolution — enrich RequestContext with the caller's
+	// account and principal.
+	//
+	// The two are resolved from different places on purpose. The account comes
+	// from the registry, which is also what gates SigV4 below. The *principal*
+	// comes from state, because only IAM's own records map an access key to the
+	// entity holding it — and because coupling identity to the registry would mean
+	// a server that identifies callers is a server that rejects every access key
+	// it was not pre-loaded with. See [resolvePrincipal] and #411.
+	if accessKey := extractAccessKeyFromAuth(r.Header.Get("Authorization")); accessKey != "" {
+		registryHit := false
+		if s.opts.Credentials != nil {
+			if entry, ok := s.opts.Credentials.Lookup(accessKey); ok {
+				reqCtx.AccountID = entry.AccountID
+				registryHit = true
+			}
+		}
+		if principal, sessionAccount := resolvePrincipal(ctx, s.state, reqCtx.AccountID, accessKey); principal != nil {
+			reqCtx.Principal = principal
+			// An STS session names the account it was issued for. Adopt it unless
+			// the registry already spoke: parser.extractAccount recognizes only an
+			// AKIA prefix as substrate's test account, so an ASIA session key was
+			// otherwise filed under the fallback account — a different partition
+			// from the resources the role's caller had just created.
+			if sessionAccount != "" && !registryHit {
+				reqCtx.AccountID = sessionAccount
+			}
+		} else if registryHit {
+			// A registered key with no IAM entity behind it. The ARN names the key
+			// rather than a user, so it resolves to no policies and authorizes
+			// nothing — which is the pre-#411 behavior every existing caller of a
+			// credential-wired server relies on, and what GetCallerIdentity reports.
 			reqCtx.Principal = &Principal{
-				ARN:  buildCallerARN(entry.AccountID, accessKey),
+				ARN:  buildCallerARN(reqCtx.AccountID, accessKey),
 				Type: "IAMUser",
 			}
 		}
