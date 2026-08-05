@@ -97,10 +97,10 @@ here.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStack | Deploys every resource in `TemplateBody` and returns the stack ARN |
-| UpdateStack | Re-deploys the template; an omitted `TemplateBody` re-uses the stored one |
-| DeleteStack | Sweeps the resources the stack deployed, then removes the stack record (see below); deleting an absent stack succeeds |
-| DescribeStacks | One stack by `StackName`, or every stack when omitted |
+| CreateStack | Deploys every resource in `TemplateBody` and returns the stack ARN; honours `RoleARN` |
+| UpdateStack | Re-deploys the template; an omitted `TemplateBody` re-uses the stored one, and an omitted `RoleARN` the stored role |
+| DeleteStack | Sweeps the resources the stack deployed, then removes the stack record (see below); deleting an absent stack succeeds; `RoleARN` applies to this operation only |
+| DescribeStacks | One stack by `StackName`, or every stack when omitted; reports `RoleARN` when the stack has one |
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
 | GetTemplate | Returns the stored `TemplateBody` byte-for-byte |
@@ -200,6 +200,59 @@ The in-process `emulator.Client` deploys into substrate's default partition
 (`123456789012` / `us-east-1`). Its callers never sign a request, so there is no
 caller identity to take; an in-process caller that needs another partition can set
 one on the deployer with `emulator.WithDeployerIdentity`.
+
+### A stack's resource calls are authorized
+
+CloudFormation does not create resources as itself. With a service role it "always
+uses this role for all future operations on the stack"; without one it uses "a
+temporary session that's generated from your user credentials". Substrate models
+both, so a template asking for a permission the deploying identity does not have
+fails the way it fails on AWS instead of deploying cleanly.
+
+`RoleARN` is accepted on `CreateStack`, `UpdateStack` and `DeleteStack` and reported
+by `DescribeStacks`. Its lifetime differs by operation, following the reference
+rather than convenience:
+
+- `UpdateStack` **without** `RoleARN` keeps the role the stack already has, and one
+  that supplies it replaces the role for that update and every operation after.
+- `DeleteStack`'s `RoleARN` applies to **that delete only** and is not persisted, so
+  a delete refused by its override leaves the stack's own role intact and a retry
+  runs as the identity the stack was created with.
+- A stack with no service role reports no `RoleARN` at all rather than an empty
+  string.
+
+Absent a service role, the calls are attributed to the principal that created the
+stack — so `CreateStack` cannot be used to obtain a permission the caller does not
+have. The same resolution covers teardown: a resource created by a role is deleted
+by that role, not by whoever asks for the delete, and a rollback's sweep runs as the
+identity that created what it is tearing down.
+
+A refused resource call surfaces as `CREATE_FAILED` with the denial —
+`AccessDeniedException`, naming the action and the resource ARN — as that resource's
+`ResourceStatusReason` in `DescribeStackResources`, and the stack rolls back:
+
+```
+aws cloudformation create-stack --stack-name s --template-body file://bucket.json \
+  --role-arn arn:aws:iam::123456789012:role/narrow
+aws cloudformation describe-stacks --stack-name s \
+  --query 'Stacks[0].[StackStatus,RoleARN]'
+# ROLLBACK_COMPLETE   arn:aws:iam::123456789012:role/narrow
+aws cloudformation describe-stack-resources --stack-name s \
+  --query 'StackResources[0].ResourceStatusReason'
+# AccessDeniedException: User: arn:aws:iam::123456789012:role/narrow is not
+# authorized to perform: s3:CreateBucket on resource: arn:aws:s3:::...
+```
+
+The denial is **not** reported as a `StackEvent`: `DescribeStackEvents` is still
+refused with `UnsupportedOperation`, because substrate models stack status rather
+than per-resource stack events. Deriving events from the event log is tracked in
+[#501](https://github.com/scttfrdmn/substrate/issues/501); until then
+`DescribeStackResources` is where a per-resource reason is observable.
+
+Enforcement is opt-in by creating the principal: a stack deployed with a credential
+that resolves to no IAM user or role in state is not authorized at all, which is
+every in-process `emulator.Client` caller and every credential that never touched
+IAM. See the testing guide's "Testing IAM permissions".
 
 ### DeleteStack deletes the stack's resources
 

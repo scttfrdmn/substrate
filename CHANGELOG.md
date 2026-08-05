@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Documentation for testing IAM permissions** (#411, #562). A "Testing IAM
+  Permissions" section in the testing guide — create a principal, attach a scoped
+  policy, mint an access key, assert the denial — and the one rule a reader would
+  otherwise get wrong: **existence in state is the opt-in**, so a policy attached to
+  a user that was never created denies nothing, while a principal that *does* exist
+  with no policy is denied. The CloudFormation service reference gains `RoleARN` on
+  the three operations and on `DescribeStacks`, the lifetime rules that differ per
+  operation, and a note that a denied resource call surfaces as `CREATE_FAILED` with
+  the denial as `ResourceStatusReason` rather than as a `StackEvent` (#501).
+
 - **A CloudFormation stack's service role** (#562). `RoleARN` is now accepted on
   `CreateStack`, `UpdateStack` and `DeleteStack`, stored on the stack, and reported
   by `DescribeStacks` — the four places the API model carries it. A stack's resource

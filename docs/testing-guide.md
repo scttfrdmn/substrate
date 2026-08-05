@@ -450,6 +450,63 @@ errors use, so an SDK recovers the code rather than falling back to the HTTP sta
 
 <!-- TODO(#178): document server.WithFaultController option once stabilised -->
 
+## Testing IAM Permissions
+
+Substrate evaluates IAM policies, so "the policy is too narrow" and "we forgot a
+permission" are failures a test can catch instead of a real deployment finding them.
+The class is worth naming: a worker launched with an instance profile granting no SQS
+permissions passes every mocked test, and then never drains a queue.
+
+Create a principal, attach a scoped policy, mint an access key, and call as it:
+
+```bash
+aws iam create-user --user-name alice
+aws iam put-user-policy --user-name alice --policy-name ro --policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket","Resource":"*"}]}'
+aws iam create-access-key --user-name alice   # returns the ID and secret
+
+AWS_ACCESS_KEY_ID=<id> AWS_SECRET_ACCESS_KEY=<secret> aws sqs list-queues
+# AccessDeniedException: User: arn:aws:iam::123456789012:user/alice is not
+# authorized to perform: sqs:ListQueues on resource: *
+
+AWS_ACCESS_KEY_ID=<id> AWS_SECRET_ACCESS_KEY=<secret> aws s3api list-objects --bucket b
+# 200 — s3:ListBucket is what a listing authorizes against
+```
+
+STS session credentials work the same way. `AssumeRole` mints an `ASIA` key whose
+calls are evaluated against the **role**, as real IAM resolves a session, so
+`assume-role` then call is how a test exercises a role's policy.
+
+### A principal that does not exist is not enforced
+
+This is the one thing to know before writing such a test. **Existence in state is
+the opt-in**: enforcement runs only when the access key resolves to an IAM user or
+role substrate actually holds. An unregistered key, a key whose user was deleted, and
+the credentials this guide uses elsewhere (`test`/`test`, `AKIAIOSFODNN7EXAMPLE`) all
+resolve to no principal and are authorized against nothing.
+
+There is no configuration flag. A test that never touches IAM is unaffected, and a
+test that asserts a denial must create the principal first — a `put-user-policy`
+against a user that was never created denies nothing, because there is no user to
+evaluate.
+
+Two consequences follow from the same rule. A principal that exists with **no**
+policy is **denied** (an implicit deny, as on AWS), so a freshly created role with
+nothing attached is the "forgot to attach the policy" case rather than a pass. And a
+role named by a session but absent from state is not enforced, so `assume-role`
+against a role substrate does not hold proves nothing.
+
+In-process `emulator.Client` callers never sign a request, so they carry no principal
+and are never authorized. Enforcement is reached over the wire.
+
+### CloudFormation stacks
+
+A stack's resource calls are authorized too, as the stack's service role when it has
+one and as the creating principal otherwise. A refused resource call rolls the stack
+back and names the denial in `DescribeStackResources`' `ResourceStatusReason` — not
+as a `StackEvent`. See the CloudFormation section of
+[the service reference](services.md) for the `RoleARN` semantics.
+
 ## Multi-Region
 
 Substrate supports multiple regions. Resources are scoped by `(account, region)`
