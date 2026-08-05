@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A CloudFormation stack's service role** (#562). `RoleARN` is now accepted on
+  `CreateStack`, `UpdateStack` and `DeleteStack`, stored on the stack, and reported
+  by `DescribeStacks` — the four places the API model carries it. A stack's resource
+  calls are made as that role, which is what makes "the deploy role is missing a
+  permission" a failure a composition test can observe rather than something a real
+  deployment discovers.
+
+  The documented lifetime rules are modelled rather than the convenient ones. A
+  service role governs "all future operations on the stack", so an `UpdateStack`
+  that omits `RoleARN` keeps the stored role instead of clearing it. A
+  `DeleteStack`'s `RoleARN` applies to **that operation only** and is not persisted
+  — otherwise a delete refused by its override would silently re-attribute the
+  stack, and a retried delete would run as a different identity than the first
+  attempt. A stack with no role reports none at all (`omitempty`, per the model),
+  and `RoleARN` is length-validated as the model specifies.
+
+  Absent a service role, CloudFormation uses "a temporary session that's generated
+  from your user credentials", so the creating principal is recorded on the stack
+  and its resource calls are attributed to it. Without that, `CreateStack` would be
+  a way to launder a permission the caller does not have. Resolution order is
+  service role → creating principal → nothing, in one place, so create, update,
+  rollback and delete cannot disagree: a resource created by a role is deleted by
+  that role, and a rollback's sweep runs as the identity that created what it is
+  tearing down.
+
+  Both new fields are `omitempty`, so recorded runs replay.
+
 ### Fixed
 - **A REST service is no longer named after its HTTP method, so a correct policy
   is no longer denied** (#572). A REST-JSON or REST-XML service carries its
@@ -149,6 +177,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A role that the session names but that does not exist in state is still not
   enforced, so this reaches only sessions minted against a role substrate actually
   holds.
+
+- **A CloudFormation stack's resource calls are now authorized** (#411, #562). They
+  were dispatched with no principal at all, and `PluginRegistry.RouteRequest` — the
+  path every in-process deploy routes through — never authorized anything. So a
+  template asking for a permission the deploying identity did not have deployed
+  cleanly. This is the release's other half, and no amount of principal resolution
+  reached it: authorization now happens in the deployer, which every create, update,
+  rollback and delete sweep passes through, so there is no second path to keep in
+  step.
+
+  A denial is reported through the existing machinery with no new model: the
+  resource records the error, `DescribeStackResources` renders it as `CREATE_FAILED`
+  with the denial — naming the action that was refused — as
+  `ResourceStatusReason`, and the stack rolls back. It is **not** yet a
+  `StackEvent`; `DescribeStackEvents` is still refused with `UnsupportedOperation`,
+  and deriving events from the event store is #501's question.
+
+  A stack with no service role and no resolvable creating principal deploys exactly
+  as before, which is every existing test and every in-process `Client` caller.
 
 ## [v0.91.0] - 2026-08-04
 

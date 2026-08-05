@@ -51,18 +51,31 @@ type CloudFormationPlugin struct {
 	registry *PluginRegistry
 	store    *EventStore
 	costs    *CostController
+
+	// auth authorizes each resource call a deployment dispatches, or is nil to
+	// authorize nothing. Held at the plugin because it is a server-lifetime
+	// dependency, unlike the per-request identity and per-stack attribution beside
+	// it in deployerFor.
+	auth *AuthController
 }
 
 // deployerFor returns a [StackDeployer] that deploys into the requesting
-// caller's account and region.
+// caller's account and region, attributing its resource calls to att.
 //
 // Identity is a property of the request, not of the plugin, so it cannot be fixed
 // at Initialize time. A caller signing for another account used to get a stack
 // whose ARN named that account while the resources inside it were written into
 // substrate's defaults, which put them in a partition that caller could not read.
-func (p *CloudFormationPlugin) deployerFor(reqCtx *RequestContext) *StackDeployer {
+//
+// Attribution is a property of the request *and* of the stack — a service role
+// outlives the operation that set it — so every caller passes it explicitly rather
+// than having one derived here. A zero cfnAttribution dispatches unauthorized,
+// which is right for the paths that touch no resource of the stack's own.
+func (p *CloudFormationPlugin) deployerFor(reqCtx *RequestContext, att cfnAttribution) *StackDeployer {
 	return NewStackDeployer(p.registry, p.store, p.state, p.tc, p.logger, p.costs,
-		WithDeployerIdentity(reqCtx.AccountID, reqCtx.Region))
+		WithDeployerIdentity(reqCtx.AccountID, reqCtx.Region),
+		WithDeployerAttribution(att.roleARN, att.creator),
+		WithDeployerAuth(p.auth))
 }
 
 // Name returns the service name "cloudformation".
@@ -80,6 +93,10 @@ func (p *CloudFormationPlugin) Name() string { return "cloudformation" }
 // substituted with disabled instances when absent, never left nil:
 // [StackDeployer.dispatch] dereferences both on every resource it deploys, and
 // callers of [RegisterDefaultPlugins] are permitted to pass a nil *EventStore.
+//
+// Options["auth_controller"] is optional and, unlike those two, is left nil when
+// absent: a nil controller authorizes nothing, which is what every caller that does
+// not pass one got before a stack's resource calls carried a principal at all.
 func (p *CloudFormationPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	p.state = cfg.State
 	p.logger = cfg.Logger
@@ -103,9 +120,14 @@ func (p *CloudFormationPlugin) Initialize(_ context.Context, cfg PluginConfig) e
 		costs = NewCostController(CostConfig{Enabled: false})
 	}
 
+	// Not substituted when absent: nil is the "authorize nothing" case, and there is
+	// no disabled AuthController to stand in for it.
+	auth, _ := cfg.Options["auth_controller"].(*AuthController)
+
 	p.registry = registry
 	p.store = store
 	p.costs = costs
+	p.auth = auth
 	p.deployer = NewStackDeployer(registry, store, cfg.State, p.tc, cfg.Logger, costs)
 	return nil
 }
@@ -233,7 +255,15 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 	// status, which is where the API puts it — real CreateStack has returned its
 	// StackId before any rollback happens — so a rolled-back stack answers 200 and
 	// says ROLLBACK_COMPLETE through DescribeStacks.
-	if _, err := p.deployerFor(reqCtx).DeployWithOptions(context.Background(), body, name,
+	// The stack's resource calls are attributed to its service role if it has one
+	// and to the creating caller otherwise, which is CloudFormation's own rule.
+	// Both are persisted by the deployer, so every later operation on this stack
+	// resolves the same identity — see [cfnAttribution].
+	if roleErr := cfnValidateRoleARN(req.Params["RoleARN"]); roleErr != nil {
+		return nil, roleErr
+	}
+	att := cfnAttribution{roleARN: req.Params["RoleARN"], creator: reqCtx.Principal}
+	if _, err := p.deployerFor(reqCtx, att).DeployWithOptions(context.Background(), body, name,
 		cfnRequestParameters(req.Params, nil), opts); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -280,7 +310,19 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 		// UsePreviousTemplate is the documented way to change only parameters.
 		body = stack.TemplateBody
 	}
-	if _, err := p.deployerFor(reqCtx).UpdateStack(context.Background(), body, name,
+	// "If you don't specify a value, CloudFormation uses the role that was
+	// previously associated with the stack." So an omitted RoleARN keeps the stored
+	// one rather than reverting the stack to the caller's own permissions, and a
+	// supplied one replaces it for this update and every operation after it. The
+	// creator is not reassigned: an update does not change who created the stack.
+	att := stack.attribution()
+	if roleARN := req.Params["RoleARN"]; roleARN != "" {
+		if roleErr := cfnValidateRoleARN(roleARN); roleErr != nil {
+			return nil, roleErr
+		}
+		att.roleARN = roleARN
+	}
+	if _, err := p.deployerFor(reqCtx, att).UpdateStack(context.Background(), body, name,
 		cfnRequestParameters(req.Params, stack.Parameters)); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -323,7 +365,26 @@ func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSReque
 	// unpartitioned: the delete is refused when another stack imports one of this
 	// stack's exports, and export visibility is scoped per account and Region, so
 	// the default identity would consult the wrong namespace.
-	if err := p.deployerFor(reqCtx).DeleteStack(context.Background(), name); err != nil {
+	//
+	// The sweep is attributed to the stack's own service role or creator, not to
+	// whoever asked for the delete: a resource created by a role is deleted by that
+	// role. DeleteStack's RoleARN overrides for this operation only — "CloudFormation
+	// uses the role's credentials to make calls on your behalf" for this delete —
+	// and is deliberately not persisted, which is the one place a stack's stored role
+	// is not updated by an operation that names one. A stack the lookup cannot find
+	// contributes no attribution and still succeeds, since deleting an absent stack
+	// is a success.
+	att := cfnAttribution{}
+	if stack, findErr := p.findStack(name); findErr == nil && stack != nil {
+		att = stack.attribution()
+	}
+	if roleARN := req.Params["RoleARN"]; roleARN != "" {
+		if roleErr := cfnValidateRoleARN(roleARN); roleErr != nil {
+			return nil, roleErr
+		}
+		att.roleARN = roleARN
+	}
+	if err := p.deployerFor(reqCtx, att).DeleteStack(context.Background(), name); err != nil {
 		// A sweep that could not remove a resource is reported the way the API
 		// reports it: DeleteStack "returns success" and the stack reaches
 		// DELETE_FAILED, which the caller learns by polling DescribeStacks. Raising
@@ -369,6 +430,13 @@ type cfnStackItem struct {
 	DisableRollback bool              `xml:"DisableRollback"`
 	Parameters      []cfnParameterXML `xml:"Parameters>member,omitempty"`
 	Outputs         []cfnOutputXML    `xml:"Outputs>member,omitempty"`
+
+	// RoleARN is "the ARN of an IAM role that's associated with the stack", omitted
+	// for a stack with none. Omitted rather than empty because the member is not
+	// required and a stack without a service role has no role to report: an empty
+	// string would have a caller checking `Stacks[0].RoleARN` read "" where AWS
+	// gives it nothing at all.
+	RoleARN string `xml:"RoleARN,omitempty"`
 }
 
 // cfnParameterXML is a resolved template parameter as DescribeStacks reports it.
@@ -437,6 +505,7 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 			DisableRollback:   cfnStackDisablesRollback(s.OnFailure),
 			Parameters:        cfnParametersXML(s.Parameters),
 			Outputs:           cfnOutputsXML(s.Outputs, s.ExportNames),
+			RoleARN:           s.RoleARN,
 		})
 	}
 	return cfnXMLResponse(http.StatusOK, resp)
@@ -809,7 +878,17 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	}
 	// ExecuteChangeSet routes through UpdateStack to Deploy, so it deploys
 	// resources and takes the executing caller's identity like the other two.
-	if _, err := p.deployerFor(reqCtx).ExecuteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
+	//
+	// Attribution comes from the stack, for the same reason UpdateStack's does: the
+	// stack's service role governs "all future operations on the stack", and
+	// executing a change set is one. A change set against a stack that does not yet
+	// exist has none to inherit, so its resource calls are attributed to the caller
+	// executing it — which is CloudFormation's no-service-role case.
+	att := cfnAttribution{creator: reqCtx.Principal}
+	if stack, findErr := p.findStack(cs.StackName); findErr == nil && stack != nil {
+		att = stack.attribution()
+	}
+	if _, err := p.deployerFor(reqCtx, att).ExecuteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -918,7 +997,7 @@ func (p *CloudFormationPlugin) deleteChangeSet(reqCtx *RequestContext, req *AWSR
 // exports; substrate returns them all in one page and emits no NextToken, which is
 // the documented answer for a result that fits.
 func (p *CloudFormationPlugin) listExports(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	exports, err := p.deployerFor(reqCtx).Exports(context.Background())
+	exports, err := p.deployerFor(reqCtx, cfnAttribution{}).Exports(context.Background())
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -962,7 +1041,7 @@ func (p *CloudFormationPlugin) listImports(reqCtx *RequestContext, req *AWSReque
 	if exportName == "" {
 		return nil, cfnMissingParameter("ExportName")
 	}
-	importers, err := p.deployerFor(reqCtx).Imports(context.Background(), exportName)
+	importers, err := p.deployerFor(reqCtx, cfnAttribution{}).Imports(context.Background(), exportName)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1001,7 +1080,7 @@ func (p *CloudFormationPlugin) detectStackDrift(reqCtx *RequestContext, req *AWS
 	// region, so detection has to look where the resources were actually
 	// deployed. On the default identity it would report every resource of another
 	// caller's stack as DELETED.
-	detectionID, err := p.deployerFor(reqCtx).StartStackDriftDetection(context.Background(), stackName)
+	detectionID, err := p.deployerFor(reqCtx, cfnAttribution{}).StartStackDriftDetection(context.Background(), stackName)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1035,7 +1114,7 @@ func (p *CloudFormationPlugin) describeStackResourceDrifts(reqCtx *RequestContex
 	filters := extractIndexedParams(req.Params, "StackResourceDriftStatusFilters.member")
 	// Recomputes drift, so it needs the caller's identity for the same reason
 	// detectStackDrift does.
-	drifts, err := p.deployerFor(reqCtx).DescribeStackResourceDrifts(context.Background(), stackName, filters)
+	drifts, err := p.deployerFor(reqCtx, cfnAttribution{}).DescribeStackResourceDrifts(context.Background(), stackName, filters)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1192,6 +1271,39 @@ func cfnMissingParameter(name string) *AWSError {
 		Message:    "Missing required parameter " + name,
 		HTTPStatus: http.StatusBadRequest,
 	}
+}
+
+// cfnRoleARNLimits are the RoleARN shape's documented bounds: "min": 20,
+// "max": 2048.
+const (
+	cfnRoleARNMinLen = 20
+	cfnRoleARNMaxLen = 2048
+)
+
+// cfnValidateRoleARN reports a RoleARN outside the length the model constrains it
+// to, or nil when there is none to check.
+//
+// Only the length is checked, which is all the model constrains: the shape is a
+// bare string with min and max, so refusing anything else here would invent a
+// validation AWS does not document. A role that does not exist is deliberately not
+// an error either — CloudFormation "uses this role even if the users don't have
+// permission to pass it", and a nonexistent role resolves to no policies, which the
+// evaluator already treats as unenforced.
+func cfnValidateRoleARN(roleARN string) *AWSError {
+	if roleARN == "" {
+		return nil
+	}
+	if n := len(roleARN); n < cfnRoleARNMinLen || n > cfnRoleARNMaxLen {
+		return &AWSError{
+			Code: "ValidationError",
+			Message: fmt.Sprintf(
+				"1 validation error detected: Value '%s' at 'roleARN' failed to satisfy constraint: "+
+					"Member must have length greater than or equal to %d and less than or equal to %d",
+				roleARN, cfnRoleARNMinLen, cfnRoleARNMaxLen),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return nil
 }
 
 // cfnStackNotFound reports an unknown stack. DescribeStacks and GetTemplate both

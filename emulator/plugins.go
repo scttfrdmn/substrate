@@ -8,6 +8,33 @@ import (
 
 //go:generate go run ../cmd/gen-service-reference -out ../docs/services.md
 
+// RegisterPluginsOption configures optional dependencies passed to the plugins
+// [RegisterDefaultPlugins] registers.
+//
+// Variadic rather than another positional parameter because the function is
+// exported and called from six places, most of which have nothing to pass: a new
+// parameter would make every one of them say so explicitly.
+type RegisterPluginsOption func(*registerPluginsSettings)
+
+// registerPluginsSettings accumulates what the options set.
+type registerPluginsSettings struct {
+	auth *AuthController
+}
+
+// WithPluginAuth gives the CloudFormation plugin the controller that authorizes the
+// resource calls a stack deployment makes.
+//
+// Only CloudFormation takes it, and only because it is the one plugin that
+// dispatches requests of its own: every other plugin's calls arrive through the
+// server, which authorizes them before routing. Without this a stack's resource
+// calls are dispatched unauthorized, which is what they always were — the gap that
+// made a template asking for a permission it did not have deploy cleanly.
+func WithPluginAuth(auth *AuthController) RegisterPluginsOption {
+	return func(s *registerPluginsSettings) {
+		s.auth = auth
+	}
+}
+
 // RegisterDefaultPlugins initializes and registers all built-in service plugins
 // into registry. This function is called by both the server binary and
 // [StartTestServer] so the same plugin set is always available.
@@ -17,6 +44,8 @@ import (
 // Docker execution, RDS container engine).
 // Adding a plugin here also requires a metadata entry in cmd/gen-service-reference
 // (enforced by `make docs-reference-check` in CI).
+//
+// opts carry the dependencies only some callers have; see [WithPluginAuth].
 func RegisterDefaultPlugins(
 	ctx context.Context,
 	registry *PluginRegistry,
@@ -25,7 +54,12 @@ func RegisterDefaultPlugins(
 	logger Logger,
 	store *EventStore,
 	cfg *Config,
+	opts ...RegisterPluginsOption,
 ) error {
+	var settings registerPluginsSettings
+	for _, opt := range opts {
+		opt(&settings)
+	}
 	// Resolve optional Docker-backed executors from cfg.
 	var lambdaExec *LambdaExecutor
 	var rdsExec *RDSExecutor
@@ -134,6 +168,9 @@ func RegisterDefaultPlugins(
 	}
 	if store != nil {
 		cfnOpts["event_store"] = store
+	}
+	if settings.auth != nil {
+		cfnOpts["auth_controller"] = settings.auth
 	}
 	if err := cfnPlugin.Initialize(ctx, PluginConfig{
 		State:   state,

@@ -298,6 +298,79 @@ type CFNStackState struct {
 	// ROLLBACK_FAILED with the resources gone. So its presence does not by itself
 	// mean failure — the Status says which.
 	ResourceDeletions []CFNResourceDeletion `json:"ResourceDeletions,omitempty"`
+
+	// RoleARN is the IAM service role CloudFormation assumes to make the stack's
+	// resource calls, empty when the stack has none.
+	//
+	// Persisted because it outlives the operation that set it: CloudFormation
+	// "always uses this role for all future operations on the stack", and an
+	// UpdateStack that omits RoleARN "uses the role that was previously associated
+	// with the stack" rather than reverting to the caller's own permissions. A
+	// DeleteStack's RoleARN is the exception and is deliberately not written here —
+	// it applies to that operation only.
+	RoleARN string `json:"RoleARN,omitempty"`
+
+	// CreatorPrincipalARN is the principal that created the stack, empty when the
+	// creating call had none.
+	//
+	// This is the principal a resource call runs as when the stack has no service
+	// role, which is CloudFormation's own model: absent a role it uses "a temporary
+	// session that's generated from your user credentials". Recording it is what
+	// makes a rollback's deletes run as the identity that created the stack rather
+	// than unauthorized — the alternative, an exempt service principal, would
+	// reintroduce exactly the blind spot #411 exists to remove, since a rollback
+	// would then be able to delete what the creator could not.
+	CreatorPrincipalARN string `json:"CreatorPrincipalARN,omitempty"`
+}
+
+// attribution returns who the stack's resource calls are made as, from what was
+// persisted about the stack.
+//
+// This is the reader that makes a later operation on a stack — an update that omits
+// RoleARN, a delete, a rollback's sweep — run as whatever the stack was created
+// with rather than as whoever happens to be asking now.
+func (s CFNStackState) attribution() cfnAttribution {
+	att := cfnAttribution{roleARN: s.RoleARN}
+	if s.CreatorPrincipalARN != "" {
+		att.creator = &Principal{
+			ARN:  s.CreatorPrincipalARN,
+			Type: cfnPrincipalType(s.CreatorPrincipalARN),
+		}
+	}
+	return att
+}
+
+// setAttribution records the attribution a deployment ran under, so a later
+// operation on the stack resolves the same one.
+//
+// The inverse of [CFNStackState.attribution], and paired with it so the two fields
+// are written in one place: a stack whose RoleARN was persisted but whose creator
+// was not would silently fall back to unauthorized the moment its role was removed.
+func (s *CFNStackState) setAttribution(att cfnAttribution) {
+	s.RoleARN = att.roleARN
+	if att.creator != nil {
+		s.CreatorPrincipalARN = att.creator.ARN
+	}
+}
+
+// cfnPrincipalType labels an ARN with the Principal.Type it describes.
+//
+// Nothing evaluates Type — authorization resolves the ARN — so this exists to keep
+// a recorded event readable rather than to decide anything. Deriving it beats
+// storing it: the type is a property of the ARN, and a stored one could disagree
+// with the ARN it sits beside after a replay of a run recorded by an older build.
+func cfnPrincipalType(arn string) string {
+	entityType, _ := parsePrincipalARN(arn)
+	switch entityType {
+	case "role":
+		return "Role"
+	case "assumed-role":
+		return "AssumedRole"
+	case "user":
+		return "User"
+	default:
+		return "Service"
+	}
 }
 
 // exports returns the stack's export name → resolved value map, joining
@@ -801,9 +874,12 @@ var typePriority = map[string]int{
 //
 // Two strings rather than a whole *RequestContext: a deployer that carried one
 // would carry a single request's ID and timestamp across every resource it
-// deploys, which is wrong — each dispatch generates its own — and would invite a
-// future reader to propagate Principal, which is a separate decision about how
-// stack-deployed requests are authorized.
+// deploys, which is wrong — each dispatch generates its own. The separate
+// decision this comment used to defer — how a stack-deployed request is
+// authorized — is now [WithDeployerPrincipal], which is deliberately its own
+// option: identity says which partition a resource is written into, the principal
+// says whose permissions creating it required, and a stack can change the second
+// per operation (a service role) without touching the first.
 type cfnIdentity struct {
 	accountID string
 	region    string
@@ -824,6 +900,16 @@ type StackDeployer struct {
 	// pseudo-parameters resolve to. It defaults to substrate's own defaults; see
 	// WithDeployerIdentity for why a caller would set it.
 	identity cfnIdentity
+
+	// attribution is who every request this deployer dispatches is made as. Zero
+	// means unauthorized, which is what every in-process caller was before it
+	// existed. See WithDeployerAttribution.
+	attribution cfnAttribution
+
+	// auth evaluates each dispatched request against principal's policies, or is
+	// nil to authorize nothing. Taken from PluginConfig.Options["auth_controller"]
+	// the same way event_store and cost_controller are.
+	auth *AuthController
 }
 
 // StackDeployerOption configures optional behavior of a [StackDeployer].
@@ -849,10 +935,76 @@ func WithDeployerIdentity(accountID, region string) StackDeployerOption {
 	}
 }
 
+// cfnAttribution is who a stack's resource calls are made as: a service role if
+// the stack has one, otherwise the identity that created it.
+//
+// Both are carried rather than one resolved principal because they are not
+// interchangeable and the difference is observable. A roleARN is the answer for
+// every future operation on the stack whoever asks for it, while creator is only
+// the answer while the stack has no role — so an update that attaches a role must
+// change what the stack's calls are attributed to, and one that omits it must not.
+// Resolving in one place ([cfnAttribution.resolve]) is what keeps that rule from
+// being restated at each call site.
+type cfnAttribution struct {
+	roleARN string
+	creator *Principal
+}
+
+// resolve returns the principal to dispatch as, or nil for unauthorized.
+//
+// The service role wins, because that is what a service role is: CloudFormation
+// "always uses this role for all future operations on the stack". A roleARN is used
+// directly as a role principal — the evaluator's role path resolves it — rather
+// than run through AssumeRole, since the observation being modeled is that a call
+// was denied, not role-assumption machinery.
+func (a cfnAttribution) resolve() *Principal {
+	if a.roleARN != "" {
+		return &Principal{ARN: a.roleARN, Type: cfnPrincipalType(a.roleARN)}
+	}
+	return a.creator
+}
+
+// WithDeployerAttribution sets who the deployer's resource calls are made as, and
+// therefore whose policies they are authorized against.
+//
+// CloudFormation does not create resources as itself: absent a service role it uses
+// "a temporary session that's generated from your user credentials", and with one it
+// "always uses this role for all future operations on the stack". So a stack's
+// resource calls have an answerable principal, and modeling it is what makes a
+// template asking for something the deploying identity cannot do fail the way it
+// fails on AWS — the failure class ("forgot a permission / policy too narrow") that
+// a green composition test could not catch, because a stack's calls carried no
+// principal at all and PluginRegistry.RouteRequest never authorizes.
+//
+// Both zero, the default, dispatches unauthorized, which is what every in-process
+// caller did before this option existed. That default is deliberate rather than
+// conservative: authorization only means something once a caller has said which
+// identity a deployment is on behalf of, and a deployer a test constructs directly
+// has not.
+func WithDeployerAttribution(roleARN string, creator *Principal) StackDeployerOption {
+	return func(d *StackDeployer) {
+		d.attribution = cfnAttribution{roleARN: roleARN, creator: creator}
+	}
+}
+
+// WithDeployerAuth sets the controller that authorizes each dispatched request.
+//
+// Separate from [WithDeployerAttribution] because the two arrive from different
+// places: attribution is a property of one stack operation, while the controller is
+// a server-lifetime dependency the CloudFormation plugin receives in its
+// PluginConfig. Nil authorizes nothing, so a deployer given an attribution and no
+// controller records who deployed a stack without enforcing it.
+func WithDeployerAuth(auth *AuthController) StackDeployerOption {
+	return func(d *StackDeployer) {
+		d.auth = auth
+	}
+}
+
 // NewStackDeployer creates a StackDeployer wired to the provided dependencies.
 //
 // The deployer deploys into substrate's default account and region unless
-// [WithDeployerIdentity] says otherwise.
+// [WithDeployerIdentity] says otherwise, and dispatches unauthorized unless both
+// [WithDeployerPrincipal] and [WithDeployerAuth] say otherwise.
 func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateManager, tc *TimeController, logger Logger, costs *CostController, opts ...StackDeployerOption) *StackDeployer {
 	d := &StackDeployer{
 		registry: registry,
@@ -1040,6 +1192,7 @@ func (d *StackDeployer) DeployWithOptions(
 			CreatedAt:    start,
 			UpdatedAt:    d.tc.Now(),
 		}
+		state.setAttribution(d.attribution)
 		d.persistStack(ctx, state)
 	}
 
@@ -3927,6 +4080,7 @@ func (d *StackDeployer) dispatch(
 		AccountID: d.identity.accountID,
 		Region:    d.identity.region,
 		Timestamp: d.tc.Now(),
+		Principal: d.attribution.resolve(),
 		Metadata:  map[string]interface{}{"stream_id": streamID},
 	}
 
@@ -3938,7 +4092,32 @@ func (d *StackDeployer) dispatch(
 	// which no policy granting s3:CreateBucket matches. Resolving here reaches
 	// every dispatch site at once, and is a no-op for a request that already
 	// carries a real operation name.
+	//
+	// This must precede the authorization below: the action a policy is evaluated
+	// against is derived from req.Operation, so authorizing first would ask whether
+	// the stack's role may perform "s3:PUT" — a question no correct policy answers
+	// yes to.
 	resolveOperationName(req)
+
+	// Authorize here rather than in RouteRequest, which no caller's requests pass
+	// an authorization check through. Doing it at the deployer covers create,
+	// update, rollback and delete at once: every one of those sweeps reaches a
+	// resource through this function, so there is no second path to keep in step.
+	//
+	// A denial is returned as the dispatch error, which is exactly what a refused
+	// call from the resource's own service would have produced. The existing
+	// machinery then reports it with no new model: the resource records the error,
+	// DescribeStackResources renders it as CREATE_FAILED with the denial as
+	// ResourceStatusReason, and the stack rolls back.
+	if d.auth != nil && reqCtx.Principal != nil {
+		if err := d.auth.CheckAccess(reqCtx, req); err != nil {
+			// Record the refusal before returning it, so a denied call is in the
+			// event log beside the ones that succeeded and a replay shows where the
+			// deployment stopped and why.
+			_ = d.store.RecordRequest(ctx, reqCtx, req, nil, 0, 0, err)
+			return nil, 0, err
+		}
+	}
 
 	start := d.tc.Now()
 	resp, routeErr := d.registry.RouteRequest(reqCtx, req)

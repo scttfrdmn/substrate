@@ -337,6 +337,12 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 		CreatedAt:    fc.start,
 		UpdatedAt:    d.tc.Now(),
 	}
+	// A stack that failed to create still records who created it. Its rollback's
+	// deletes are dispatched by this same deployer, so they already run as the right
+	// principal; persisting matters for what comes after — a caller that inspects a
+	// ROLLBACK_FAILED stack and then deletes it gets a sweep attributed to the same
+	// identity as the one that could not finish.
+	state.setAttribution(d.attribution)
 
 	if fc.onFailure == CFNOnFailureDoNothing {
 		// The resources stay, including the ones deployed after the failure.
