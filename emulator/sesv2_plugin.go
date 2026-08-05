@@ -40,7 +40,7 @@ func (p *SESv2Plugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an SES v2 REST/JSON request to the appropriate handler.
 func (p *SESv2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, identityName := parseSESv2Operation(req.Operation, req.Path)
+	op, identityName := parseSESv2Operation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateEmailIdentity":
 		return p.createEmailIdentity(ctx, req)

@@ -105,7 +105,7 @@ func (p *SchedulerPlugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches an EventBridge Scheduler REST/JSON request to the
 // appropriate handler using path-based operation routing.
 func (p *SchedulerPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op := parseSchedulerOperation(req.Operation, req.Path)
+	op := parseSchedulerOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateSchedule":
 		return p.createSchedule(ctx, req)

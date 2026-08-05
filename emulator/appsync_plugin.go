@@ -38,7 +38,7 @@ func (p *AppSyncPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an AppSync REST/JSON request to the appropriate handler.
 func (p *AppSyncPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, apiID, segment, resourceID := parseAppSyncOperation(req.Operation, req.Path)
+	op, apiID, segment, resourceID := parseAppSyncOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateGraphqlApi":
 		return p.createGraphqlAPI(ctx, req)

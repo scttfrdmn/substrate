@@ -44,7 +44,7 @@ func (p *OmicsPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a HealthOmics REST/JSON request to the appropriate handler.
 func (p *OmicsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, runID := parseOmicsOperation(req.Operation, req.Path)
+	op, runID := parseOmicsOperation(requestMethod(req), req.Path)
 	switch op {
 	case "StartRun":
 		return p.startRun(ctx, req)

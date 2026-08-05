@@ -43,7 +43,7 @@ func (p *CloudFrontPlugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches a CloudFront REST/XML request to the appropriate handler.
 // The operation is derived from the HTTP method and URL path.
 func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, distID := parseCloudFrontOperation(req.Operation, req.Path, req.Params)
+	op, distID := parseCloudFrontOperation(requestMethod(req), req.Path, req.Params)
 	// Handle GetInvalidation (op includes invID after colon).
 	if strings.HasPrefix(op, "GetInvalidation:") {
 		invID := strings.TrimPrefix(op, "GetInvalidation:")

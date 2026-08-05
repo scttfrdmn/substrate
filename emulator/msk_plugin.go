@@ -37,7 +37,7 @@ func (p *MSKPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an MSK REST/JSON request to the appropriate handler.
 func (p *MSKPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, clusterARN := parseKafkaOperation(req.Operation, req.Path)
+	op, clusterARN := parseKafkaOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateCluster":
 		return p.createCluster(ctx, req)

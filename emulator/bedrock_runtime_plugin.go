@@ -57,7 +57,7 @@ func (p *BedrockRuntimePlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a Bedrock Runtime request to the appropriate handler.
 func (p *BedrockRuntimePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, resourceID, version := parseBedrockRuntimeOperation(req.Operation, req.Path)
+	op, resourceID, version := parseBedrockRuntimeOperation(requestMethod(req), req.Path)
 	switch op {
 	case "ApplyGuardrail":
 		return p.applyGuardrail(ctx, req, resourceID, version)

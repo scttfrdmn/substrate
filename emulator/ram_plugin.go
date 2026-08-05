@@ -38,7 +38,7 @@ func (p *RAMPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a RAM REST/JSON request to the appropriate handler.
 func (p *RAMPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op := parseRAMOperation(req.Operation, req.Path)
+	op := parseRAMOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateResourceShare":
 		return p.createResourceShare(reqCtx, req)

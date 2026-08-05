@@ -111,27 +111,26 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	account := extractAccount(authHeader)
 
 	req := &AWSRequest{
-		Service:   service,
-		Operation: operation,
-		Headers:   headers,
-		Params:    params,
-		Path:      effectivePath,
+		Service:    service,
+		Operation:  operation,
+		HTTPMethod: r.Method,
+		Headers:    headers,
+		Params:     params,
+		Path:       effectivePath,
 	}
 
-	// S3 supplies none of extractOperation's first three signals, so it fell
-	// through to the HTTP-method fallback and every S3 request entered the
-	// pipeline named "PUT"/"GET"/"POST"/"DELETE"/"HEAD". The plugin resolved the
-	// semantic name, but not until it handled the request — one step after fault
-	// injection, cost and consistency had already read req.Operation. A fault
-	// rule naming PutObject therefore matched nothing while a rule naming PUT
-	// took out UploadPart too (#480). parseS3Operation is pure and depends only
-	// on fields already populated above, so resolving here makes the canonical
-	// name available to every step.
-	if service == "s3" {
-		if _, _, op := parseS3Operation(req); op != "" {
-			req.Operation = op
-		}
-	}
+	// A REST service supplies none of extractOperation's first three signals, so
+	// it fell through to the HTTP-method fallback and every request entered the
+	// pipeline named "PUT"/"GET"/"POST"/"DELETE"/"HEAD"/"PATCH". The plugin
+	// resolved the semantic name, but not until it handled the request — one step
+	// after authorization, fault injection, cost and consistency had already read
+	// req.Operation. A fault rule naming PutObject therefore matched nothing while
+	// a rule naming PUT took out UploadPart too (#480), and a policy granting
+	// lambda:InvokeFunction was refused because the action evaluated was
+	// lambda:POST (#572). The resolvers are pure and depend only on the fields
+	// populated above, so resolving here makes the canonical name available to
+	// every step. #480 did this for S3 alone; #572 generalized it to the rest.
+	resolveOperationName(req)
 
 	reqCtx := &RequestContext{
 		RequestID: generateRequestID(),

@@ -46,7 +46,7 @@ func (p *BatchPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a Batch REST/JSON request to the appropriate handler.
 func (p *BatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, jobID := parseBatchOperation(req.Operation, req.Path)
+	op, jobID := parseBatchOperation(requestMethod(req), req.Path)
 	switch op {
 	case "SubmitJob":
 		return p.submitJob(ctx, req)
