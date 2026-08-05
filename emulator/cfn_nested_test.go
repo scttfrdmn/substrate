@@ -61,6 +61,11 @@ func newECSDynamoTestDeployer(t *testing.T) (*emulator.StackDeployer, *emulator.
 // read-back through the plugin cannot substitute for it when the question is a
 // member's *name*, because the plugin unmarshals the name it was sent and
 // re-marshals the name its own struct is tagged with.
+//
+// operation is the semantic API operation ("CreateCluster"), not the HTTP verb.
+// A recorded REST event was named after its method until #572 resolved the name
+// before the pipeline read it, which is what made an event log greppable by
+// operation at all.
 func dispatchedBody(t *testing.T, store *emulator.EventStore, service, operation string) []byte {
 	t.Helper()
 	events, err := store.GetEvents(context.Background(), emulator.EventFilter{
@@ -821,7 +826,7 @@ func TestCFN_MSKClientSubnets_Resolved(t *testing.T) {
 			ClientSubnets []string `json:"ClientSubnets"`
 		} `json:"BrokerNodeGroupInfo"`
 	}
-	require.NoError(t, json.Unmarshal(dispatchedBody(t, store, "msk", "POST"), &sent))
+	require.NoError(t, json.Unmarshal(dispatchedBody(t, store, "msk", "CreateCluster"), &sent))
 	assert.Equal(t, "kafka.m5.xlarge", sent.BrokerNodeGroupInfo.InstanceType)
 	assert.Equal(t, []string{"subnet-a", "subnet-b"}, sent.BrokerNodeGroupInfo.ClientSubnets)
 }
@@ -850,7 +855,7 @@ func TestCFN_MSKClientSubnets_AbsentStaysEmptyList(t *testing.T) {
 	_, err := d.Deploy(context.Background(), tmpl, "msk-bare", nil)
 	require.NoError(t, err)
 
-	sent := string(dispatchedBody(t, store, "msk", "POST"))
+	sent := string(dispatchedBody(t, store, "msk", "CreateCluster"))
 	assert.Contains(t, sent, `"ClientSubnets":[]`)
 	assert.NotContains(t, sent, `"ClientSubnets":null`)
 }

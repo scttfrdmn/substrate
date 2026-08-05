@@ -42,7 +42,7 @@ func (p *EMRServerlessPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an EMR Serverless REST/JSON request to the appropriate handler.
 func (p *EMRServerlessPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, appID, runID := parseEMRServerlessOperation(req.Operation, req.Path)
+	op, appID, runID := parseEMRServerlessOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateApplication":
 		return p.createApplication(ctx, req)

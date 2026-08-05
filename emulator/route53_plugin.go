@@ -51,7 +51,7 @@ func (p *Route53Plugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches a Route 53 REST/XML request to the appropriate handler.
 // The operation is derived from the HTTP method and URL path.
 func (p *Route53Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, zoneID := parseRoute53Operation(req.Operation, req.Path)
+	op, zoneID := parseRoute53Operation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateHostedZone":
 		return p.createHostedZone(ctx, req)

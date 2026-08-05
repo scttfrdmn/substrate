@@ -8,6 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A REST service is no longer named after its HTTP method, so a correct policy
+  is no longer denied** (#572). A REST-JSON or REST-XML service carries its
+  operation in the shape of its URL and nowhere else, so request parsing fell
+  through to its last-resort fallback and the request entered the pipeline named
+  `POST`. Authorization, fault injection, cost and consistency all read the
+  operation before any plugin runs, so every one of them saw the verb. Measured on
+  the parent commit: **17 of 18 REST services** were affected — S3 was the only
+  exception, because #480 had wired its resolver in for exactly this reason.
+
+  This was inert while the evaluator was unreachable and stopped being inert with
+  #411. A user holding `lambda:InvokeFunction` was refused an invoke, because the
+  action evaluated was `lambda:POST`; a wildcard masked it, so precisely the
+  scoped policy #411 exists to let a consumer test got a false
+  `AccessDeniedException`. Left unfixed, the release would have reported denials
+  for policies that are correct — the inverse of its claim.
+
+  The operation name is now resolved once, before the pipeline reads it,
+  generalising #480 instead of repeating it 17 times. Each service's resolver
+  already existed and is reused rather than reimplemented, so the name that is
+  authorized, metered and recorded cannot drift from the name its plugin routes
+  on. `AWSRequest` gains `HTTPMethod`: the verb and the operation had been sharing
+  one field, and resolving the operation destroyed the verb a REST resolver needs
+  — `POST` and `DELETE` on the same path are different operations.
+
+  **The IAM action is not always the operation name**, and treating it as such
+  denies a caller whose policy is right, so the mapping is now explicit and
+  sourced per operation. Lambda's `Invoke` requires `lambda:InvokeFunction`. S3's
+  listings authorize against the bucket: `ListObjects`/`ListObjectsV2` and
+  `HeadBucket` require `s3:ListBucket`, `ListBuckets` requires
+  `s3:ListAllMyBuckets`, and the versioned and multipart listings have their own
+  bucket-scoped actions. API Gateway v1 is the sharper case: its IAM actions
+  genuinely *are* HTTP verbs (`apigateway:POST`, and no `apigateway:CreateRestApi`
+  exists), so for that service the verb remains the action — while `apigatewayv2`
+  is a separate prefix that does use operation names. Conflating them would have
+  broken v1 in the act of fixing the others.
+
+  Two consequences beyond authorization, both pre-existing and now fixed: a fault
+  rule can name a REST operation, closing #480's gap for the 17 services its
+  S3-only fix never reached (a rule naming `POST` used to take out every call to
+  the service at once); and a recorded event carries its operation, so an event log
+  is greppable by operation. CloudFormation's resource calls are built in-process
+  and never parsed off the wire, so they are resolved at dispatch too — a stack's
+  bucket is recorded and authorized as `CreateBucket`, not `PUT`.
 - **A signed request now resolves to the principal it actually is** (#411). The
   server derived a caller's principal ARN from its *access key ID*, yielding
   `arn:aws:iam::123456789012:user/AKIATEST12345678901` — a name nothing is ever

@@ -47,6 +47,9 @@ func S3PersistedContentEncodingForTest(headers map[string]string) string {
 // ExtractRegionFromHostForTest wraps extractRegionFromHost for external tests.
 func ExtractRegionFromHostForTest(host string) string { return extractRegionFromHost(host) }
 
+// ResolveOperationNameForTest wraps resolveOperationName for external tests.
+func ResolveOperationNameForTest(req *AWSRequest) { resolveOperationName(req) }
+
 // ExtractAccessKeyFromAuthForTest wraps extractAccessKeyFromAuth for external tests.
 func ExtractAccessKeyFromAuthForTest(authHeader string) string {
 	return extractAccessKeyFromAuth(authHeader)

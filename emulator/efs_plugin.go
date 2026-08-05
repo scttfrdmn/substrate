@@ -38,7 +38,7 @@ func (p *EFSPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an EFS REST/JSON request to the appropriate handler.
 func (p *EFSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, resourceID := parseEFSOperation(req.Operation, req.Path)
+	op, resourceID := parseEFSOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateFileSystem":
 		return p.createFileSystem(ctx, req)

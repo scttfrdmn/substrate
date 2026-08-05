@@ -43,7 +43,7 @@ func (p *QuickSightPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a QuickSight REST/JSON request to the appropriate handler.
 func (p *QuickSightPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, accountID, resourceID, secondaryID := parseQuickSightOperation(req.Operation, req.Path)
+	op, accountID, resourceID, secondaryID := parseQuickSightOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateDataSource":
 		return p.createDataSource(ctx, req, accountID)

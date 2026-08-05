@@ -71,7 +71,7 @@ func (p *LambdaPlugin) Shutdown(_ context.Context) error {
 
 // HandleRequest dispatches a Lambda REST API request to the appropriate handler.
 func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, name, subResource := parseLambdaOperation(req.Operation, req.Path)
+	op, name, subResource := parseLambdaOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateFunction":
 		return p.createFunction(ctx, req)

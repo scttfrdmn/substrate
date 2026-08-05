@@ -39,7 +39,7 @@ func (p *BackupPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an AWS Backup REST/JSON request to the appropriate handler.
 func (p *BackupPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, vaultName, planID, selectionID := parseBackupOperation(req.Operation, req.Path)
+	op, vaultName, planID, selectionID := parseBackupOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateBackupVault":
 		return p.createBackupVault(reqCtx, req, vaultName)

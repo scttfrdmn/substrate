@@ -31,7 +31,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		return nil
 	}
 
-	action := serviceToAction(req.Service, req.Operation)
+	action := serviceToAction(req, req.Service, req.Operation)
 	if authzNoPermissionsRequired[action] {
 		return nil
 	}
@@ -316,10 +316,78 @@ var authzNoPermissionsRequired = map[string]bool{
 	"sts:GetSessionToken":   true,
 }
 
-// serviceToAction maps (service, operation) to an IAM action string,
+// verbActionServices are the services whose IAM actions are HTTP verbs rather
+// than operation names.
+//
+// API Gateway v1 is the case that matters: its Service Authorization Reference
+// defines apigateway:GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS and no
+// apigateway:CreateRestApi, because permissions map to the HTTP method used
+// against a management resource. API Gateway v2 is a different service prefix
+// (apigatewayv2) and does use operation names, so it is deliberately absent.
+//
+// For these services the verb ParseAWSRequest started with is the correct action,
+// which is why authorization reads HTTPMethod rather than the resolved
+// Operation. See serviceToAction.
+var verbActionServices = map[string]bool{
+	"apigateway": true,
+}
+
+// operationActionOverrides maps a (service, operation) pair whose IAM action is
+// not its operation name to the action a policy must actually name.
+//
+// The IAM action is usually the operation name, but "usually" is not "always",
+// and a wrong action string denies a caller whose policy is correct. Every entry
+// is from the operation's own API reference or its Service Authorization
+// Reference:
+//
+//   - Lambda's Invoke requires lambda:InvokeFunction — the one rename in Lambda's
+//     otherwise identical mapping.
+//   - S3's list operations authorize against the bucket, not the listing:
+//     ListObjects/ListObjectsV2 and HeadBucket require s3:ListBucket ("You must
+//     have permission to perform the s3:ListBucket action"), ListBuckets requires
+//     s3:ListAllMyBuckets, and the versioned and multipart listings have their own
+//     bucket-scoped actions.
+//   - DeleteObjects is the batch form of DeleteObject and requires that action.
+//
+// Keyed by "service:operation" so the lookup is one map access on the string
+// serviceToAction was going to build anyway.
+var operationActionOverrides = map[string]string{
+	"lambda:Invoke": "lambda:InvokeFunction",
+
+	"s3:ListObjects":          "s3:ListBucket",
+	"s3:ListObjectsV2":        "s3:ListBucket",
+	"s3:HeadBucket":           "s3:ListBucket",
+	"s3:ListBuckets":          "s3:ListAllMyBuckets",
+	"s3:ListObjectVersions":   "s3:ListBucketVersions",
+	"s3:ListMultipartUploads": "s3:ListBucketMultipartUploads",
+	"s3:DeleteObjects":        "s3:DeleteObject",
+}
+
+// serviceToAction maps a request to the IAM action a policy must allow,
 // e.g. ("s3", "PutObject") → "s3:PutObject".
-func serviceToAction(service, operation string) string {
-	return service + ":" + operation
+//
+// It is not simply service + ":" + operation. Two things break that identity, and
+// both produce a denial for a caller whose policy is right:
+//
+//   - a handful of operations authorize under a different action name
+//     (operationActionOverrides);
+//   - a few services authorize by HTTP verb instead of operation name
+//     (verbActionServices), so for those the resolved operation name must be
+//     ignored in favor of the verb.
+//
+// req carries the HTTP verb a verb-action service needs; a nil req falls back to
+// the operation name, which is what an in-process caller that never set one has.
+func serviceToAction(req *AWSRequest, service, operation string) string {
+	if verbActionServices[service] {
+		if method := requestMethod(req); method != "" {
+			return service + ":" + method
+		}
+	}
+	action := service + ":" + operation
+	if override, ok := operationActionOverrides[action]; ok {
+		return override
+	}
+	return action
 }
 
 // buildResourceARN constructs a best-effort IAM resource ARN for the request.

@@ -3930,6 +3930,16 @@ func (d *StackDeployer) dispatch(
 		Metadata:  map[string]interface{}{"stream_id": streamID},
 	}
 
+	// A template's resource calls are built in this package rather than parsed off
+	// the wire, and 40 of those construction sites name a bare HTTP method ("PUT"
+	// for a bucket, "POST" for a function). ParseAWSRequest resolves the semantic
+	// name for everything arriving over HTTP (#480, #572), but these never pass
+	// through it, so they would be metered, recorded and authorized as "s3:PUT" —
+	// which no policy granting s3:CreateBucket matches. Resolving here reaches
+	// every dispatch site at once, and is a no-op for a request that already
+	// carries a real operation name.
+	resolveOperationName(req)
+
 	start := d.tc.Now()
 	resp, routeErr := d.registry.RouteRequest(reqCtx, req)
 	duration := time.Since(start)

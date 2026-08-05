@@ -14,7 +14,23 @@ type AWSRequest struct {
 	Service string
 
 	// Operation is the API operation name (e.g., "PutObject", "CreateUser").
+	//
+	// For a REST service the operation is carried by the shape of the URL and
+	// nothing else, so ParseAWSRequest derives it from Method and Path (#480,
+	// #572). Until that resolution succeeds — and for an in-process caller that
+	// builds an AWSRequest by hand — this may still hold a bare HTTP method, which
+	// is why HTTPMethod exists separately: resolving Operation must not destroy the
+	// verb the resolvers need.
 	Operation string
+
+	// HTTPMethod is the verb of the underlying HTTP request ("GET", "PUT", …).
+	//
+	// It is set by ParseAWSRequest and is what a REST plugin's path resolver keys
+	// on, because a REST operation is identified by verb *and* path: POST and
+	// DELETE on /v1/apis/{id} are different operations. Empty for an in-process
+	// AWSRequest built by hand, in which case Operation carries the verb; use
+	// requestMethod to read whichever holds it.
+	HTTPMethod string
 
 	// Headers contains HTTP request headers, including AWS authentication headers.
 	Headers map[string]string

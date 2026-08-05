@@ -40,7 +40,7 @@ func (p *APIGatewayPlugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches an API Gateway v1 request to the appropriate handler
 // using path-based operation routing.
 func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, params := parseAPIGatewayOperation(req.Operation, req.Path)
+	op, params := parseAPIGatewayOperation(requestMethod(req), req.Path)
 	switch op {
 	case "CreateRestApi":
 		return p.createRestAPI(ctx, req)
