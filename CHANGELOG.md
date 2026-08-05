@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A signed request now resolves to the principal it actually is** (#411). The
+  server derived a caller's principal ARN from its *access key ID*, yielding
+  `arn:aws:iam::123456789012:user/AKIATEST12345678901` — a name nothing is ever
+  stored under. So a user `alice` holding an inline `sqs:*` Allow was allowed when
+  evaluated as `user/alice` and denied when evaluated as `user/AKIATEST…`:
+  authorization could not find any real principal's policies even where it ran, and
+  #411's own acceptance ("create a role with a scoped policy, make a call as that
+  role") was unreachable in principle rather than merely unwired.
+
+  A caller is now resolved from **state**: `iam:accesskey:<id>` names the user whose
+  policies apply, which is the record `CreateAccessKey` has always written, and
+  `sts:session:<id>` names the assumed-role ARN `AssumeRole` mints — a key substrate
+  wrote from the beginning and nothing had ever read, which is why STS session
+  credentials authorized as nothing in particular.
+
+  Resolution is deliberately independent of `ServerOptions.Credentials`. That
+  registry also gates SigV4 verification, and an access key absent from it is
+  rejected with `InvalidClientTokenId`; identifying callers through it would
+  therefore have 403'd every credential substrate documents, `AKIAIOSFODNN7EXAMPLE`
+  included. Reading state instead costs one `Get` on a request that carries an
+  `Authorization` header, and refuses nothing.
+
+  A key that belongs to no IAM entity — an unregistered key, the built-in test key,
+  a deleted key — resolves to **no principal** and is therefore still enforced
+  against nothing. Existence in state is the opt-in, so no configuration flag turns
+  this on and every caller that never touched IAM is unaffected, including
+  `AKIAIOSFODNN7EXAMPLE` and `test`/`test`. `Credentials`-wired servers keep
+  reporting the access-key ARN for a key with no IAM entity behind it, which is what
+  `GetCallerIdentity` has always shown.
+
+  An STS session also now carries the account it was issued for. Account resolution
+  recognises only an `AKIA` prefix as substrate's test account, so an `ASIA` session
+  key was filed under `000000000000` — a different partition from the resources the
+  caller who assumed the role had just created.
+
+- **`sts:GetCallerIdentity` and `sts:GetSessionToken` no longer require
+  permissions** (#411). AWS documents both as needing none — `GetCallerIdentity`
+  answers "even if an administrator attaches a policy to your identity that
+  explicitly denies access", because a denial would return the same information, and
+  `GetSessionToken`'s purpose is to authenticate a user via MFA, which "you cannot
+  use policies to control". Substrate evaluated both like any other action.
+
+  This was unreachable until the fix above: with every caller resolving to no
+  principal, the evaluator never ran. The first credential that named a real IAM user
+  had `aws sts get-caller-identity` answer `AccessDeniedException`. A sweep of every
+  botocore service model finds the phrase on these two operations and nothing else,
+  so the exemption is that pair rather than a general carve-out.
+
+### Changed
+- **A call made as an IAM user that exists is now authorized against that user's
+  policies** (#411). This follows from principal resolution above and is the point of
+  the release: a key minted by `CreateAccessKey` for a user with no policy, or with a
+  policy that does not allow the call, now returns `AccessDeniedException` where it
+  previously succeeded — which is real IAM behaviour, and the failure class
+  ("forgot a permission / policy too narrow") that composition tests could not catch.
+
+  Nothing else changes. A nil principal still passes, so every in-process `Client`
+  call, every unregistered access key, and every test that does not create an IAM
+  principal behaves exactly as before. An `assumed-role` principal is not yet
+  enforced either; that fail-open is tracked in #411's remaining work.
+
 ## [v0.91.0] - 2026-08-04
 
 ### Fixed

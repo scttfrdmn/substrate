@@ -32,6 +32,9 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	}
 
 	action := serviceToAction(req.Service, req.Operation)
+	if authzNoPermissionsRequired[action] {
+		return nil
+	}
 	resource := buildResourceARN(reqCtx, req)
 
 	docs, err := a.loadPoliciesForPrincipal(reqCtx)
@@ -220,6 +223,29 @@ func (a *AuthController) loadPermissionBoundary(reqCtx *RequestContext) (*Policy
 		return nil, fmt.Errorf("unmarshal boundary policy: %w", err)
 	}
 	return &pol.Document, nil
+}
+
+// authzNoPermissionsRequired holds the actions AWS documents as requiring no
+// permissions at all, so a policy — including an explicit Deny — cannot block
+// them.
+//
+// These two are the whole set: a sweep of every botocore service model finds the
+// phrase "no permissions are required" on nothing else. Both are STS operations
+// whose purpose is to answer a question about the caller itself.
+// GetCallerIdentity is the stronger case — "if an administrator attaches a policy
+// to your identity that explicitly denies access to the sts:GetCallerIdentity
+// action, you can still perform this operation", because the same information is
+// returned when access is denied — and GetSessionToken's purpose is to
+// authenticate a user via MFA, which a policy cannot gate ("you cannot use
+// policies to control authentication operations").
+//
+// This matters here because it is only reachable now. Before principal
+// resolution (#411) a caller identified as nobody and the evaluator never ran, so
+// substrate denied neither; the first credential that resolved to a real IAM user
+// was denied `aws sts get-caller-identity`, which on AWS always answers.
+var authzNoPermissionsRequired = map[string]bool{
+	"sts:GetCallerIdentity": true,
+	"sts:GetSessionToken":   true,
 }
 
 // serviceToAction maps (service, operation) to an IAM action string,

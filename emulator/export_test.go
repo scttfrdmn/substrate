@@ -57,6 +57,17 @@ func BuildCallerARNForTest(accountID, accessKeyID string) string {
 	return buildCallerARN(accountID, accessKeyID)
 }
 
+// ResolvePrincipalForTest wraps resolvePrincipal for external tests.
+//
+// The HTTP path can only reach the records IAM and STS themselves write, so the
+// arms that matter most are unreachable from it: a nil state manager, a stored
+// record that fails to unmarshal, and a session record carrying no PrincipalArn.
+// Each must resolve to no principal rather than to a partly-built one — an ARN
+// assembled from a corrupt record would name some *other* entity's policies.
+func ResolvePrincipalForTest(state StateManager, accountID, accessKeyID string) (*Principal, string) {
+	return resolvePrincipal(context.Background(), state, accountID, accessKeyID)
+}
+
 // VerifySigV4ForTest wraps VerifySigV4 for external tests.
 func VerifySigV4ForTest(r *http.Request, body []byte, reg *CredentialRegistry) error {
 	return VerifySigV4(r, body, reg)
