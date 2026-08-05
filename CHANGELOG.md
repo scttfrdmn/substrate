@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.92.0] - 2026-08-05
+
 ### Added
 - **Documentation for testing IAM permissions** (#411, #562). A "Testing IAM
   Permissions" section in the testing guide — create a principal, attach a scoped
@@ -5342,7 +5344,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.91.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.92.0...HEAD
+[v0.92.0]: https://github.com/scttfrdmn/substrate/compare/v0.91.0...v0.92.0
 [v0.91.0]: https://github.com/scttfrdmn/substrate/compare/v0.90.0...v0.91.0
 [v0.90.0]: https://github.com/scttfrdmn/substrate/compare/v0.89.0...v0.90.0
 [v0.89.0]: https://github.com/scttfrdmn/substrate/compare/v0.88.0...v0.89.0
