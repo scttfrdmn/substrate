@@ -37,7 +37,27 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	}
 	resource := buildResourceARN(reqCtx, req)
 
-	docs, err := a.loadPoliciesForPrincipal(reqCtx)
+	goCtx := context.Background()
+	entity, exists, err := resolveIAMEntity(goCtx, a.state, reqCtx.Principal.ARN)
+	if err != nil {
+		// A state read that actually failed — a broken backend, not an unknown
+		// caller. Fail open and say so loudly: substrate cannot decide, and denying
+		// on a storage error would turn an infrastructure fault into a
+		// misleading AccessDeniedException.
+		a.logger.Warn("authz: failed to resolve principal", "principal", reqCtx.Principal.ARN, "err", err)
+		return nil
+	}
+	if !exists {
+		// Enforcement is opt-in by creating the principal. A credential that
+		// resolves to no IAM entity is not enforced — Debug rather than Warn,
+		// because this is the normal case for every caller that never touched IAM
+		// and warning on each would bury the signal it is meant to carry.
+		a.logger.Debug("authz: principal has no IAM entity, not enforced",
+			"principal", reqCtx.Principal.ARN, "action", action)
+		return nil
+	}
+
+	docs, err := a.loadPoliciesForPrincipal(entity)
 	if err != nil {
 		// Fail open: if we cannot load policies we cannot block the caller.
 		a.logger.Warn("authz: failed to load policies", "principal", reqCtx.Principal.ARN, "err", err)
@@ -63,7 +83,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	}
 
 	// If a permission boundary is set it must also allow the action.
-	boundary, err := a.loadPermissionBoundary(reqCtx)
+	boundary, err := a.loadPermissionBoundary(entity)
 	if err != nil {
 		a.logger.Warn("authz: failed to load permission boundary", "principal", reqCtx.Principal.ARN, "err", err)
 	}
@@ -87,23 +107,80 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	return nil
 }
 
-// loadPoliciesForPrincipal loads attached managed + inline policies for the
-// principal identified by reqCtx.Principal.ARN.
-func (a *AuthController) loadPoliciesForPrincipal(reqCtx *RequestContext) ([]PolicyDocument, error) {
-	entityType, entityName := parsePrincipalARN(reqCtx.Principal.ARN)
+// iamEntity is the IAM entity a principal ARN names, in the terms the policy
+// keys are written under.
+//
+// Kind is "user" or "role" — never "assumed-role", because a session holds no
+// policies of its own: IAM resolves an assumed-role's permissions against the
+// role it assumed, so a session's Kind is "role" and its Name is the role's.
+type iamEntity struct {
+	// Kind is the entity type, matching the prefix IAM stores policies under.
+	Kind string
+
+	// Name is the entity name, which is the policy-key suffix.
+	Name string
+}
+
+// resolveIAMEntity maps a principal ARN onto the IAM entity whose policies apply,
+// reporting separately whether that entity exists in state.
+//
+// Splitting "which entity" from "does it exist" is the point. Before #411 both
+// loaders folded them into one error and then disagreed about what to do with it:
+// [AuthController.loadPoliciesForPrincipal] returned "unsupported entity type"
+// for anything outside user/role and [AuthController.CheckAccess] failed *open*
+// on that error, so an arn:aws:sts::…:assumed-role/worker/sess1 — the exact shape
+// STS mints — was allowed with no policies at all, while IAMPlugin.authorize
+// *denied* it. One ARN, two loaders, two opposite answers.
+//
+// Existence is what makes enforcement opt-in. An entity present in state is
+// evaluated, and having no policies is an implicit deny, which is real IAM
+// behavior. An ARN that names nothing in state is not enforced at all, so the
+// thousands of calls made with a credential that never touched IAM are
+// unaffected. A read that genuinely *fails* is neither: see the error return.
+func resolveIAMEntity(ctx context.Context, state StateManager, principalARN string) (entity iamEntity, exists bool, err error) {
+	entityType, entityName := parsePrincipalARN(principalARN)
 	if entityName == "" {
-		return nil, fmt.Errorf("cannot parse principal ARN %q", reqCtx.Principal.ARN)
+		return iamEntity{}, false, nil
 	}
 
-	var listKey string
 	switch entityType {
-	case "user":
-		listKey = "user_policies:" + entityName
-	case "role":
-		listKey = "role_policies:" + entityName
+	case "user", "role":
+		entity = iamEntity{Kind: entityType, Name: entityName}
+	case "assumed-role":
+		// arn:aws:sts::<acct>:assumed-role/<RoleName>/<SessionName>. Only the role
+		// carries policies, and parsePrincipalARN splits on the first slash — so
+		// without dropping the session the lookup would be
+		// role_policies:worker/sess1, a key nothing is ever stored under. Every
+		// session of the same role would then evaluate as a distinct nameless
+		// entity.
+		roleName := entityName
+		if slash := strings.IndexByte(roleName, '/'); slash >= 0 {
+			roleName = roleName[:slash]
+		}
+		if roleName == "" {
+			return iamEntity{}, false, nil
+		}
+		entity = iamEntity{Kind: "role", Name: roleName}
 	default:
-		return nil, fmt.Errorf("unsupported entity type %q in ARN", entityType)
+		// A principal substrate does not model as a policy-holding entity — a
+		// service principal, a federated user, the account root. Not enforced,
+		// rather than denied: refusing a caller whose policies cannot be looked up
+		// would deny requests that pass today for a reason no test could fix.
+		return iamEntity{}, false, nil
 	}
+
+	raw, err := state.Get(ctx, iamNamespace, entity.Kind+":"+entity.Name)
+	if err != nil {
+		return entity, false, fmt.Errorf("load %s %q: %w", entity.Kind, entity.Name, err)
+	}
+	return entity, raw != nil, nil
+}
+
+// loadPoliciesForPrincipal loads attached managed + inline policies for the
+// entity resolved from reqCtx.Principal.ARN.
+func (a *AuthController) loadPoliciesForPrincipal(entity iamEntity) ([]PolicyDocument, error) {
+	entityType, entityName := entity.Kind, entity.Name
+	listKey := entityType + "_policies:" + entityName
 
 	goCtx := context.Background()
 
@@ -176,41 +253,32 @@ func (a *AuthController) loadPoliciesForPrincipal(reqCtx *RequestContext) ([]Pol
 }
 
 // loadPermissionBoundary loads the permission boundary PolicyDocument for the
-// principal, or nil if none is set.
-func (a *AuthController) loadPermissionBoundary(reqCtx *RequestContext) (*PolicyDocument, error) {
-	entityType, entityName := parsePrincipalARN(reqCtx.Principal.ARN)
-	if entityName == "" {
-		return nil, nil
-	}
-
+// resolved entity, or nil if none is set.
+//
+// It takes the same resolved entity the policy load did, so a boundary applies to
+// an assumed-role session through the role it assumed. Reading the ARN again here
+// is what silently stopped boundaries applying to exactly the principals #411
+// made enforceable.
+func (a *AuthController) loadPermissionBoundary(entity iamEntity) (*PolicyDocument, error) {
 	goCtx := context.Background()
 
-	var entityRaw []byte
-	var err error
-	switch entityType {
-	case "user":
-		entityRaw, err = a.state.Get(goCtx, iamNamespace, "user:"+entityName)
-	case "role":
-		entityRaw, err = a.state.Get(goCtx, iamNamespace, "role:"+entityName)
-	default:
-		return nil, nil
-	}
+	entityRaw, err := a.state.Get(goCtx, iamNamespace, entity.Kind+":"+entity.Name)
 	if err != nil || entityRaw == nil {
 		return nil, err
 	}
 
-	var entity struct {
+	var stored struct {
 		PermissionsBoundary *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
 	}
-	if err := json.Unmarshal(entityRaw, &entity); err != nil {
+	if err := json.Unmarshal(entityRaw, &stored); err != nil {
 		return nil, fmt.Errorf("unmarshal entity for boundary: %w", err)
 	}
-	if entity.PermissionsBoundary == nil {
+	if stored.PermissionsBoundary == nil {
 		return nil, nil
 	}
 
 	// Resolve the boundary policy document.
-	arn := entity.PermissionsBoundary.PolicyARN
+	arn := stored.PermissionsBoundary.PolicyARN
 	if mp, ok := GetManagedPolicy(arn); ok {
 		return &mp.Document, nil
 	}

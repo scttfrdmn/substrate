@@ -43,6 +43,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key was filed under `000000000000` — a different partition from the resources the
   caller who assumed the role had just created.
 
+- **An `assumed-role` principal is no longer allowed with no policies at all**
+  (#411). `arn:aws:sts::123456789012:assumed-role/worker/sess1` — the principal shape
+  STS itself mints, and therefore what every "call as a role" reduces to — was
+  **allowed unconditionally**. The policy loader treated any entity type outside
+  `user`/`role` as an error, and the evaluator failed open on an error, so the safe
+  default inverted for exactly the callers a scoped role is meant to constrain. A
+  session is now resolved to its **role**, as real IAM resolves one: the session name
+  is split off (`assumed-role/worker/sess1` → role `worker`) so managed and inline
+  role policies are found under the keys IAM writes, rather than under a per-session
+  name nothing is stored beneath.
+
+  A permission boundary resolves through the same path, else switching enforcement on
+  for these principals would have switched their boundaries off.
+
+- **The two policy loaders no longer disagree about one ARN** (#411).
+  `IAMPlugin.authorize` **denied** an entity type it did not handle where
+  `AuthController.CheckAccess` **allowed** it, so the same caller's permission
+  depended on which service it happened to call. Both now resolve through one
+  function, and an entity type neither models — an account root, a service
+  principal, a federated user — is consistently *not enforced* rather than denied by
+  one and allowed by the other.
+
+  This distinguishes two cases the loader had conflated: an entity that resolves and
+  exists is evaluated (no policies is an implicit deny, as on AWS) and one that
+  resolves to nothing is unenforced and logged at debug, while a state read that
+  genuinely *fails* still fails open with a warning. That last case is a broken
+  backend, not an unknown caller, and it is the only one that should be loud.
+
 - **`sts:GetCallerIdentity` and `sts:GetSessionToken` no longer require
   permissions** (#411). AWS documents both as needing none — `GetCallerIdentity`
   answers "even if an administrator attaches a policy to your identity that
@@ -66,8 +94,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Nothing else changes. A nil principal still passes, so every in-process `Client`
   call, every unregistered access key, and every test that does not create an IAM
-  principal behaves exactly as before. An `assumed-role` principal is not yet
-  enforced either; that fail-open is tracked in #411's remaining work.
+  principal behaves exactly as before.
+
+- **A call made with STS session credentials is now authorized against the assumed
+  role's policies** (#411). Same consequence as above, for the principal shape
+  `AssumeRole` mints: a session of a role holding no policy, or a policy that does
+  not allow the call, now returns `AccessDeniedException` where it previously
+  succeeded — see the fail-open under **Fixed** for why "previously succeeded" meant
+  *unconditionally*.
+
+  A role that the session names but that does not exist in state is still not
+  enforced, so this reaches only sessions minted against a role substrate actually
+  holds.
 
 ## [v0.91.0] - 2026-08-04
 

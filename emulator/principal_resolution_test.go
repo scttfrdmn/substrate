@@ -249,7 +249,10 @@ func TestCheckAccess_NoPermissionsRequiredActions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := emulator.NewMemoryStateManager()
+			// alice has to exist for anything to be evaluated at all: a principal
+			// absent from state is unenforced, so a jointly-empty state manager
+			// would make every case pass for the wrong reason.
+			state := newAuthTestState(t, "alice", "", emulator.PolicyDocument{})
 			auth := emulator.NewAuthController(state, emulator.NewDefaultLogger(slog.LevelError, false))
 
 			reqCtx := &emulator.RequestContext{
