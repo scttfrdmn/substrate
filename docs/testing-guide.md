@@ -438,11 +438,12 @@ Four things are worth knowing before writing a fixture (all four are #480):
   `fired` member of `GET /v1/fault/rules` over the wire, is what tells them apart.
   Arming rules again resets the counts, so a fixture that re-arms between phases
   gets its full budget back.
-- **`Probability` depends on request ordering.** The PRNG is shared by every rule in
-  a `FaultConfig` and is rolled once per matching rule per request, so a fixed seed
-  reproduces a run only while the sequence of requests is unchanged — adding a
-  request upstream, or a retry, shifts every later roll. Prefer `Times` for a
-  bounded outcome: it needs no roll at all. See #510.
+- **`Probability` draws from a per-rule PRNG.** Each rule has its own stream, so its
+  outcome sequence depends only on how many requests *that* rule matched — adding an
+  unrelated rule, or a retry that another rule handles, does not shift it. Streams
+  are keyed by a rule's index and reset when a config is armed, so reordering rules
+  does change their outcomes. Prefer `Times` for a bounded outcome regardless: it
+  needs no roll at all.
 
 An injected error is serialized in the same wire shape the target service's own
 errors use, so an SDK recovers the code rather than falling back to the HTTP status

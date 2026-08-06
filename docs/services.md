@@ -4571,12 +4571,16 @@ apart can tell a fixture from production.
 `cloudfront` and `route53` are REST-XML like S3 but keep the `<ErrorResponse>` shape:
 their real error documents genuinely are wrapped, so they were already correct.
 
-### `probability` determinism depends on request ordering
+### `probability` draws from a per-rule PRNG
 
-The PRNG behind `probability` is shared by every rule in a configuration and is rolled
-once per *matching* rule per request, so a fixed seed reproduces a run only while the
-whole sequence of requests is unchanged. Adding a request upstream, or a retry, shifts
-every later roll — including for rules that request never touched. Prefer `times` for a
-bounded outcome: it needs no roll at all. Per-rule PRNGs would fix this and would change
-the outcome of existing seeded runs, so it is tracked separately as
-[#510](https://github.com/scttfrdmn/substrate/issues/510).
+Each rule draws from its own PRNG stream, seeded from the controller's seed and the
+rule's index. A rule's outcome sequence therefore depends only on how many requests
+that rule itself matched: adding an unrelated rule, or changing how often one matches,
+leaves the others' rolls unchanged. Streams are re-derived whenever a configuration is
+armed, so re-arming resets them exactly as it resets each rule's `fired` count.
+
+The stream is keyed by a rule's **index**, so reordering rules does change their
+outcomes. That is deliberate — two rules with identical matchers are legitimate and
+useful, and keying by the matchers instead would make them share a stream and would
+make editing a path suffix silently reshuffle results. Prefer `times` for a bounded
+outcome regardless: it needs no roll at all.
