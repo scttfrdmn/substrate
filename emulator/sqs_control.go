@@ -4,51 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"net/http"
 	"strings"
-	"sync"
 )
 
 // sqsCtrlNamespace is the state namespace for SQS control-plane (seed) data.
 const sqsCtrlNamespace = "sqs-ctrl"
-
-// sqsQueueLockStripes is the number of mutexes in [SQSPlugin]'s per-queue stripe
-// set. A power of two well above the concurrency any test drives, so distinct
-// queues almost never contend.
-const sqsQueueLockStripes = 64
-
-// sqsQueueMutex is a striped mutex set serializing seed consumption per queue.
-//
-// It deliberately mirrors [s3KeyMutex] rather than reusing it: that type's API is
-// two-part (bucket, key) and its documentation is written entirely in S3 terms, so
-// sharing would mean either changing a signature used at every S3
-// conditional-write call site or adding a joined-string API that reads worse at
-// both. Roughly twenty lines of FNV striping is the cheaper duplication; extract a
-// common type on the third caller.
-//
-// The hazard is the same one s3KeyMutex exists for. Consuming a seeded miss is a
-// read-modify-write, and [StateManager] offers no compare-and-swap — Get/Put/
-// Delete/List only, with [MemoryStateManager] last-write-wins. Two concurrent
-// lookups could both read misses=1 and both write 0, consuming one miss where two
-// were seeded, so a test asserting "exactly N calls fail" would flake. Holding a
-// per-queue lock across read→decrement→Put closes that window.
-//
-// The guarantee is bounded the same way, and for the same reason: it is
-// process-local. That is airtight for substrate's single-process topology and
-// would not hold across two emulator processes sharing one state backend.
-type sqsQueueMutex struct {
-	stripes [sqsQueueLockStripes]sync.Mutex
-}
-
-// lock acquires the stripe guarding a queue name and returns its unlock function.
-func (m *sqsQueueMutex) lock(queueName string) func() {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(queueName))
-	mu := &m.stripes[h.Sum32()%sqsQueueLockStripes]
-	mu.Lock()
-	return mu.Unlock
-}
 
 // sqsConsistencySeed is a seeded create→lookup eventual-consistency window. AWS
 // documents that a caller "must wait at least one second after the queue is
@@ -155,9 +116,26 @@ func (op sqsConsistencyOp) counter(seed *sqsConsistencySeed) *int {
 // burn budget the test meant to spend on the window, leaving the later retry
 // assertion meaningless. [sqsConsistencyDeletedRecently] is the deliberate
 // exception — the queue is absent by definition in that case.
+//
+// Consumption takes one dedicated mutex, not a mutex keyed by the queue name.
+// Decrementing a counter is a read-modify-write and [StateManager] offers no
+// compare-and-swap — Get/Put/Delete/List only, with [MemoryStateManager]
+// last-write-wins — so two concurrent lookups could both read a budget of 1, both
+// decrement to 0 and both Put, consuming one seeded miss twice and making a test
+// that asserts "exactly N calls fail" flake. A per-queue lock closed that window
+// only for the name-scoped seed: the "*" wildcard is shared across every queue, so
+// two lookups on *different* names took different locks and raced on the one seed
+// they both consumed (#582). Seed consumption is a harness-frequency operation, so
+// a single mutex costs nothing, and having exactly one lock here means there is no
+// lock order to get wrong. [S3Plugin.consumeConditionalConflict] holds the same
+// shape for the same reason.
+//
+// The guarantee is bounded the way that one is, too: it is process-local, which
+// covers substrate's single-process topology and would not hold across two emulator
+// processes sharing one state backend.
 func (p *SQSPlugin) consumeQueueMiss(queueName string, op sqsConsistencyOp) (bool, error) {
-	unlock := p.queueMu.lock(queueName)
-	defer unlock()
+	p.seedMu.Lock()
+	defer p.seedMu.Unlock()
 
 	goCtx := context.Background()
 	for _, key := range []string{sqsCtrlKey(queueName), sqsCtrlKey("*")} {

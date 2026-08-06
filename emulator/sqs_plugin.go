@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,10 +28,10 @@ type SQSPlugin struct {
 	logger Logger
 	tc     *TimeController
 
-	// queueMu serializes consumption of a seeded consistency window per queue,
-	// since decrementing the miss counter is a read-modify-write and StateManager
-	// offers no compare-and-swap. See [sqsQueueMutex].
-	queueMu sqsQueueMutex
+	// seedMu serializes consumption of a seeded consistency window. It is one lock
+	// rather than one per queue because the "*" wildcard seed is shared across every
+	// queue name; see [SQSPlugin.consumeQueueMiss].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "sqs".

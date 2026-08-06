@@ -73,6 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance profile will now see `DeleteConflict`/409. That refusal is real IAM
   behavior, and the permissive success was the defect.
 
+- **The SQS wildcard consistency seed cannot be double-consumed** (#582). Consuming a
+  seeded miss is a read-modify-write and `StateManager` has no compare-and-swap, so
+  the decrement was serialized under a mutex striped by *queue name*. That covered a
+  name-scoped seed and left the `"*"` wildcard unguarded: the wildcard is shared
+  across every queue, so two lookups on different names took different stripes and
+  raced on the one budget they were both spending. A seed of 16 misses driven from 32
+  concurrent lookups on distinct queues was measured reporting 27 and then 32 misses
+  — a harness seeding "the next N lookups miss" saw more than N, and only sometimes.
+
+  Consumption now takes one dedicated mutex covering the whole read-decrement-write.
+  The striped type is **replaced** rather than supplemented, since its only caller was
+  the seed path itself; one lock also means there is no lock order to get wrong. This
+  is the shape the S3 conditional-conflict seed already uses, for the same reason. The
+  guarantee remains process-local, which covers substrate's single-process topology.
+
 ## [v0.93.0] - 2026-08-06
 
 ### Fixed
