@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Each fault rule draws from its own PRNG** (#510). `FaultController` rolled
+  `probability` from one PRNG shared by every rule, so a rule's outcomes depended on
+  how many rolls the rules before it had taken. A fixed seed therefore reproduced a
+  run only while the whole sequence of requests was unchanged: adding a request
+  upstream, or a retry, shifted every later roll — including for rules that request
+  never touched. A rule now has its own stream, so its outcome sequence depends only
+  on how many requests *that* rule matched.
+
+  Streams are seeded from the controller's seed and the rule's **index**, mixed
+  through FNV, and re-derived whenever a config is armed — so re-arming resets them
+  exactly as it resets each rule's `fired` count. Keying by index rather than by the
+  rule's matchers is deliberate: two rules with identical matchers are legitimate and
+  must not share a stream, and a matcher hash would make editing a path suffix
+  silently reshuffle outcomes. The cost is that **reordering rules changes their
+  outcomes**, which the field's documentation now states.
+
+  **Compatibility:** a consumer asserting on specific outcomes of a seeded
+  intermediate `probability` will see different results and must re-record them.
+  Nothing changes for `probability` of 0 or 1, or for a rule bounded by `times`,
+  which needs no roll at all.
+
 ### Added
 - **A seedable `409 ConditionalRequestConflict` on S3 conditional writes** (#540).
   `PutObject`, `CopyObject` and `CompleteMultipartUpload` could reach two of the

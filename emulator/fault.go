@@ -1,8 +1,10 @@
 package emulator
 
 import (
+	"hash/fnv"
 	"math/rand" // nosemgrep
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,11 +73,16 @@ type FaultRule struct {
 	// fault, in the range [0.0, 1.0]. A value of 1.0 (the default) fires on
 	// every matching request.
 	//
-	// The PRNG behind this is shared by every rule in a FaultConfig and is
-	// rolled once per matching rule per request, so a fixed seed reproduces a
-	// run only while the sequence of requests is unchanged. Adding a request
-	// upstream, or a retry, shifts every later roll. Prefer Times for a bounded
-	// outcome: it needs no roll at all. See #510.
+	// Each rule draws from its own PRNG stream, so a rule's outcome sequence
+	// depends only on how many requests that rule itself matched — not on what
+	// any other rule in the config matched. Adding an unrelated rule, or
+	// changing how often one matches, leaves the others' rolls unchanged.
+	// Streams are re-derived whenever the config is armed, so re-arming a config
+	// resets them exactly as it resets [FaultRule.Fired].
+	//
+	// A rule's stream is derived from its **index** in the config, so reordering
+	// rules does change their outcomes. Prefer Times for a bounded outcome: it
+	// needs no roll at all.
 	Probability float64 `json:"probability,omitempty"`
 
 	// Times bounds how many matching requests the rule fires on. Zero means
@@ -125,23 +132,70 @@ type FaultConfig struct {
 }
 
 // FaultController injects configurable faults (errors and latency) into the
-// Substrate request pipeline. It uses a seeded, non-global PRNG for
-// deterministic fault firing in tests.
+// Substrate request pipeline. It uses seeded, non-global PRNGs for deterministic
+// fault firing in tests.
 type FaultController struct {
 	mu     sync.Mutex
 	config FaultConfig
-	rng    *rand.Rand
+
+	// seed is kept so the per-rule streams can be re-derived when the config is
+	// replaced.
+	seed int64
+
+	// rngs holds one PRNG per rule in config.Rules, parallel to that slice.
+	// Per-rule streams are what make a seeded run reproducible: with one shared
+	// PRNG, rule 2's outcomes depended on how many rolls rule 1 had taken, so
+	// adding a request upstream or an unrelated rule shifted every later roll
+	// and a fixed seed reproduced a run only while request ordering was
+	// unchanged (#510).
+	rngs []*rand.Rand
 }
 
 // NewFaultController creates a FaultController with the given configuration.
-// seed controls the PRNG used for probabilistic fault firing; use a fixed seed
-// in tests for determinism, subject to the caveat on [FaultRule.Probability]
-// that makes a bounded [FaultRule.Times] the more reproducible choice.
+// seed controls the PRNGs used for probabilistic fault firing; use a fixed seed
+// in tests for determinism.
 func NewFaultController(cfg FaultConfig, seed int64) *FaultController {
+	owned := cfg.withOwnedRules()
 	return &FaultController{
-		config: cfg.withOwnedRules(),
-		rng:    rand.New(rand.NewSource(seed)), //nolint:gosec // not used for cryptography
+		config: owned,
+		seed:   seed,
+		rngs:   ruleRNGs(seed, len(owned.Rules)),
 	}
+}
+
+// ruleRNGs returns n PRNGs, one per rule, each seeded from the controller's seed
+// and the rule's index.
+//
+// The index is what identifies a stream, deliberately, rather than a hash of the
+// rule's matchers. Two rules with identical matchers are legitimate and useful —
+// fail with one error, then with another — and a matcher hash would make them
+// share a stream, which is the coupling this change exists to remove. A matcher
+// hash would also make a rule's outcomes depend on its matcher *text*, so editing
+// a path suffix would silently reshuffle results; that is a worse surprise than
+// reordering rules, which is at least visible in the config. The cost is that
+// reordering rules does change their streams, which [FaultRule.Probability]
+// documents.
+//
+// The seed and index are mixed through FNV rather than added. Measured, both
+// schemes decorrelate adjacent rules equally well on this scale — Go's source
+// scrambles nearby seeds on its own — so this buys no measurable independence.
+// It is used because that scrambling is an unspecified property of math/rand
+// rather than a documented one: mixing first means the streams do not depend on
+// it, and a rule's independence from its neighbors does not become a thing a Go
+// release can quietly change. Mixing also keeps a controller's seed from
+// colliding with an adjacent controller's, since seed+i and (seed+1)+(i-1) are
+// the same source.
+func ruleRNGs(seed int64, n int) []*rand.Rand {
+	rngs := make([]*rand.Rand, n)
+	for i := range rngs {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(strconv.FormatInt(seed, 10)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strconv.Itoa(i)))
+		//nolint:gosec // not used for cryptography
+		rngs[i] = rand.New(rand.NewSource(int64(h.Sum64())))
+	}
+	return rngs
 }
 
 // withOwnedRules returns cfg with a private copy of its rule slice, so the
@@ -184,7 +238,7 @@ func (f *FaultController) InjectFault(_ *RequestContext, req *AWSRequest) (*AWSE
 		if p <= 0 {
 			p = 1.0
 		}
-		if f.rng.Float64() >= p {
+		if f.ruleRNG(i).Float64() >= p {
 			continue
 		}
 		switch rule.FaultType {
@@ -215,13 +269,32 @@ func (f *FaultController) InjectFault(_ *RequestContext, req *AWSRequest) (*AWSE
 	return nil, 0
 }
 
+// ruleRNG returns the PRNG for the rule at index i, which the caller must hold
+// f.mu to use.
+//
+// rngs is built parallel to config.Rules and rebuilt with it, so the index is
+// always in range in practice. The fallback covers a FaultController that reached
+// InjectFault without going through [NewFaultController] or
+// [FaultController.UpdateConfig] — a panic there would surface as a broken
+// emulator rather than as the misconfiguration it is.
+func (f *FaultController) ruleRNG(i int) *rand.Rand {
+	if i < len(f.rngs) {
+		return f.rngs[i]
+	}
+	f.rngs = append(f.rngs, ruleRNGs(f.seed, i+1)[len(f.rngs):]...)
+	return f.rngs[i]
+}
+
 // UpdateConfig replaces the fault injection configuration. It is safe to call
 // concurrently with InjectFault. Arming a rule again starts its Times bound
-// over, because the incoming rules carry their own fired counts.
+// over, because the incoming rules carry their own fired counts — and resets the
+// per-rule PRNG streams for the same reason, so an armed config behaves
+// identically whether it is the first one or the fifth.
 func (f *FaultController) UpdateConfig(cfg FaultConfig) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.config = cfg.withOwnedRules()
+	f.rngs = ruleRNGs(f.seed, len(f.config.Rules))
 }
 
 // GetConfig returns a snapshot of the current fault injection configuration,
