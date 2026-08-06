@@ -2647,7 +2647,8 @@ func (d *StackDeployer) deployS3Bucket(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	bucketName := strings.ToLower(resolveStringProp(props, "BucketName", logicalID, cctx))
+	bucketName := strings.ToLower(resolveStringProp(props, "BucketName",
+		cfnGeneratedName(cctx, "AWS::S3::Bucket", logicalID), cctx))
 
 	req := &AWSRequest{
 		Service:   "s3",
@@ -2700,7 +2701,8 @@ func (d *StackDeployer) deployIAMRole(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	roleName := resolveStringProp(props, "RoleName", logicalID, cctx)
+	roleName := resolveStringProp(props, "RoleName",
+		cfnGeneratedName(cctx, "AWS::IAM::Role", logicalID), cctx)
 
 	body := map[string]string{
 		"RoleName":                 roleName,
@@ -2750,7 +2752,8 @@ func (d *StackDeployer) deployIAMPolicy(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	policyName := resolveStringProp(props, "PolicyName", logicalID, cctx)
+	policyName := resolveStringProp(props, "PolicyName",
+		cfnGeneratedName(cctx, "AWS::IAM::Policy", logicalID), cctx)
 
 	body := map[string]string{
 		"PolicyName":     policyName,
@@ -2800,7 +2803,8 @@ func (d *StackDeployer) deployLambdaFunction(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	fnName := resolveStringProp(props, "FunctionName", logicalID, cctx)
+	fnName := resolveStringProp(props, "FunctionName",
+		cfnGeneratedName(cctx, "AWS::Lambda::Function", logicalID), cctx)
 
 	body := map[string]interface{}{
 		"FunctionName": fnName,
@@ -2965,7 +2969,8 @@ func (d *StackDeployer) deploySQSQueue(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	queueName := resolveStringProp(props, "QueueName", logicalID, cctx)
+	queueName := resolveStringProp(props, "QueueName",
+		cfnGeneratedName(cctx, "AWS::SQS::Queue", logicalID), cctx)
 
 	params := map[string]string{
 		"Action":    "CreateQueue",
@@ -3018,7 +3023,8 @@ func (d *StackDeployer) deployDynamoDBTable(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	tableName := resolveStringProp(props, "TableName", logicalID, cctx)
+	tableName := resolveStringProp(props, "TableName",
+		cfnGeneratedName(cctx, "AWS::DynamoDB::Table", logicalID), cctx)
 
 	// Build the CreateTable body from CFN properties.
 	body := map[string]interface{}{
@@ -3771,7 +3777,8 @@ func (d *StackDeployer) deploySNSTopic(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	topicName := resolveStringProp(props, "TopicName", logicalID, cctx)
+	topicName := resolveStringProp(props, "TopicName",
+		cfnGeneratedName(cctx, "AWS::SNS::Topic", logicalID), cctx)
 	params := map[string]string{
 		"Action": "CreateTopic",
 		"Name":   topicName,
@@ -3884,7 +3891,8 @@ func (d *StackDeployer) deployLogsLogGroup(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	lgName := resolveStringProp(props, "LogGroupName", logicalID, cctx)
+	lgName := resolveStringProp(props, "LogGroupName",
+		cfnGeneratedName(cctx, "AWS::Logs::LogGroup", logicalID), cctx)
 	body := map[string]interface{}{
 		"logGroupName": lgName,
 	}

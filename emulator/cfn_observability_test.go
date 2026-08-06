@@ -88,8 +88,12 @@ func TestCFN_LogGroupDefaultName(t *testing.T) {
 	result, err := d.Deploy(context.Background(), tmpl, "test-lg-default", nil)
 	require.NoError(t, err)
 	require.Len(t, result.Resources, 1)
-	// Falls back to logicalID when LogGroupName not specified.
-	assert.Equal(t, "LogGroupResource", result.Resources[0].PhysicalID)
+	// A log group name is unique within a Region, so an omitted LogGroupName gets
+	// a generated per-stack name rather than the logical ID — before #560 two
+	// stacks from this template could not coexist.
+	got := result.Resources[0].PhysicalID
+	assert.NotEqual(t, "LogGroupResource", got)
+	assert.Equal(t, "test-lg-default-LogGroupResource-", got[:len(got)-emulator.CFNGeneratedNameSuffixLenForTest])
 }
 
 func TestCFN_EventsRuleDeployment(t *testing.T) {

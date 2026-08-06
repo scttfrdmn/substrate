@@ -84,7 +84,8 @@ func (d *StackDeployer) deployIAMInstanceProfile(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "InstanceProfileName", logicalID, cctx)
+	name := resolveStringProp(props, "InstanceProfileName",
+		cfnGeneratedName(cctx, "AWS::IAM::InstanceProfile", logicalID), cctx)
 	path := resolveStringProp(props, "Path", "/", cctx)
 
 	bodyBytes, err := json.Marshal(map[string]string{

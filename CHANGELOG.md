@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A stack whose template omits a resource's physical name can be deployed twice**
+  (#560). A resource with no explicit name got the **logical ID verbatim** as its
+  physical name. A logical ID is unique only *within* a stack, while an IAM role
+  name, bucket, table or log group is unique across an account or a Region — so any
+  second stack from the same template collided (`EntityAlreadyExists`,
+  `BucketAlreadyExists`, `ResourceAlreadyExistsException`, `ResourceInUseException`).
+  Omitting the name is the *recommended* practice, so the templates most likely
+  written correctly were exactly the ones that could not deploy twice.
+
+  `AWS::SQS::Queue` and `AWS::SNS::Topic` failed worse, and silently: their creates
+  are idempotent, so two stacks both reported `CREATE_COMPLETE` while pointing at
+  **one** resource. Deleting either stack then destroyed the other's queue —
+  measured as `QueueDoesNotExist` while the surviving stack still reported
+  `CREATE_COMPLETE`. No error was reported to anyone.
+
+  An omitted name now becomes `{stack}-{logical ID}-{suffix}`, the shape
+  CloudFormation documents for its own generated physical IDs, fitted to each
+  service's length and case constraints. The suffix is **derived** — FNV-64a over
+  the account, Region, stack name and logical ID — where AWS randomizes. That
+  divergence is deliberate: `UpdateStack` in substrate re-deploys the whole
+  template, so a per-deploy random name would mint a fresh resource on every update
+  and leak the one it replaced; deriving it keeps an unchanged update a no-op and
+  every name reproducible from its inputs.
+
+  The fix is a **table of nine resource types** whose names are account- or
+  Region-unique, not a blanket rewrite of every property that falls back to the
+  logical ID. `PathPart`, `Domain`, `SecretId`, `ClusterId` and `ReplicationGroupId`
+  are deliberately excluded — they are not account-unique names, and generating them
+  would change URLs and identifiers a template legitimately controls.
+
+  **Compatibility:** every stack whose template omits a physical name now gets a
+  different physical name, so a fixture asserting a resource name equal to its
+  logical ID must be re-recorded. A template that sets the name explicitly is
+  unaffected and still gets that name verbatim, and `Ref`/`GetAtt` resolve to
+  whichever name was used.
+
 ## [v0.93.0] - 2026-08-06
 
 ### Fixed

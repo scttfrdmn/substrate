@@ -593,3 +593,19 @@ func (d *StackDeployer) DeleteStackResourcesForTest(
 	}
 	return d.deleteStackResources(ctx, stack, stackName, cfnDeleteStackOp)
 }
+
+// CFNGeneratedNameSuffixLenForTest is the width of the derived suffix on a
+// generated physical name, so an external test can split a name into its
+// {stack}-{logical} prefix and its suffix without hard-coding the width.
+const CFNGeneratedNameSuffixLenForTest = cfnGeneratedNameSuffixLen
+
+// CFNGeneratedNameForTest exposes cfnGeneratedName so the constraint arithmetic
+// (truncation, charset, lowercasing) can be asserted directly, rather than only
+// through the resource types that happen to reach it from a template.
+func CFNGeneratedNameForTest(accountID, region, stackName, resType, logicalID string) string {
+	return cfnGeneratedName(&cfnContext{
+		accountID: accountID,
+		region:    region,
+		stackName: stackName,
+	}, resType, logicalID)
+}
