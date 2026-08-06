@@ -424,6 +424,53 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::SES::EmailIdentity": pathDeleter("sesv2", "/v2/email/identities/"),
 }
 
+// cfnDeletePreStepFunc builds the requests that must succeed before a resource's own
+// delete is dispatched, in the order they are returned. An empty or nil return means
+// there is nothing to do, which is the common case.
+type cfnDeletePreStepFunc func(d *StackDeployer, dr DeployedResource,
+	props map[string]interface{}, cctx *cfnContext) []*AWSRequest
+
+// cfnDeletePreSteps holds the detach-before-delete calls a resource needs, for the
+// types whose delete is refused while a subordinate entity still references them.
+//
+// This is a separate hook rather than a change to [cfnDeleteRequestFunc] because that
+// contract is deliberately one request per resource — that is what keeps every entry
+// in [cfnResourceDeleters] a data declaration the sweep can inspect without
+// dispatching. A pre-step keeps that property: the main request is still the one the
+// table declares, and the steps run through [StackDeployer.dispatchResourceDelete] so
+// absent-resource tolerance and event recording are identical for both.
+//
+// A pre-step failure fails the resource. That is the right outcome — a delete
+// dispatched after a failed detach would be refused anyway, and reporting the detach's
+// own error names what actually went wrong.
+var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
+	// DeleteInstanceProfile is refused while the profile holds a role, and DeleteRole
+	// is now refused while a profile holds it — correctly, per both references. So the
+	// stack could not converge from either side until something made the detach call
+	// (#581). The roles come from the template's Roles list, the same list
+	// deployIAMInstanceProfile attached, resolved through the same context so a
+	// !Ref to a role in the stack yields the role's generated physical name.
+	"AWS::IAM::InstanceProfile": func(_ *StackDeployer, dr DeployedResource,
+		props map[string]interface{}, cctx *cfnContext,
+	) []*AWSRequest {
+		roles := resolveStringList(props["Roles"], cctx)
+		steps := make([]*AWSRequest, 0, len(roles))
+		for _, roleName := range roles {
+			body, err := json.Marshal(map[string]string{
+				"InstanceProfileName": dr.PhysicalID,
+				"RoleName":            roleName,
+			})
+			if err != nil {
+				continue
+			}
+			steps = append(steps, &AWSRequest{Service: "iam",
+				Operation: "RemoveRoleFromInstanceProfile", Body: body,
+				Headers: map[string]string{}, Params: map[string]string{}})
+		}
+		return steps
+	},
+}
+
 // cfnStubDeleteTypes are the resource types whose deploy writes properties into
 // cfnStubNamespace and dispatches no API call.
 //
@@ -773,6 +820,13 @@ func (d *StackDeployer) deleteViaTable(
 		result.Status = cfnDeleteSkipped
 		result.Reason = "the delete request for " + dr.Type + " could not be built"
 		return result
+	}
+	if pre, ok := cfnDeletePreSteps[dr.Type]; ok {
+		for _, step := range pre(d, dr, props, cctx) {
+			if failure := d.dispatchResourceDelete(ctx, dr, step, streamID); failure != nil {
+				return *failure
+			}
+		}
 	}
 	if failure := d.dispatchResourceDelete(ctx, dr, req, streamID); failure != nil {
 		return *failure

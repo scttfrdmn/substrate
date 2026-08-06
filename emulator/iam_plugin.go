@@ -493,6 +493,27 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			http.StatusConflict), nil
 	}
 
+	// An instance profile holding the role is the other subordinate entity the
+	// DeleteRole reference requires be removed first — "Before attempting to delete a
+	// role, remove the following attached items: … Instance profile
+	// (RemoveRoleFromInstanceProfile)". Without this the delete succeeded and left the
+	// profile listing a role that no longer exists, and DeleteInstanceProfile then
+	// refused with DeleteConflict — so the failure surfaced on the resource that was
+	// still present rather than on the one that broke the invariant (#581).
+	holders, err := p.instanceProfilesHoldingRole(goCtx, params.RoleName)
+	if err != nil {
+		return nil, err
+	}
+	if len(holders) > 0 {
+		// The reference says "The error message describes these entities", so name
+		// them: a caller has to know which profiles to detach from, and a stack that
+		// wedges here needs the reason to say what held it.
+		return iamErrorResponse("DeleteConflict",
+			fmt.Sprintf("Cannot delete entity, must remove roles from instance profile first. "+
+				"Instance profiles holding %s: %s", params.RoleName, strings.Join(holders, ", ")),
+			http.StatusConflict), nil
+	}
+
 	if err := p.state.Delete(goCtx, iamNamespace, "role:"+params.RoleName); err != nil {
 		return nil, fmt.Errorf("delete role: %w", err)
 	}
@@ -2620,6 +2641,43 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("put instance profile: %w", err)
 	}
 	return iamXMLEmptyResponse("RemoveRoleFromInstanceProfile"), nil
+}
+
+// instanceProfilesHoldingRole returns the names of the instance profiles that list
+// roleName, in state order, so [IAMPlugin.deleteRole] can refuse and name them.
+//
+// It sweeps the instance_profile: prefix the same way listInstanceProfiles does,
+// rather than maintaining a reverse index: a profile's roles are already stored on
+// the profile, and a second index would be a consistency problem of its own for a
+// read that happens once per role delete. An unreadable or unparsable profile is
+// skipped, matching listInstanceProfiles — one corrupt record must not make a role
+// undeletable.
+func (p *IAMPlugin) instanceProfilesHoldingRole(
+	ctx context.Context, roleName string,
+) ([]string, error) {
+	keys, err := p.state.List(ctx, iamNamespace, "instance_profile:")
+	if err != nil {
+		return nil, fmt.Errorf("list instance profiles: %w", err)
+	}
+
+	var holders []string
+	for _, k := range keys {
+		data, getErr := p.state.Get(ctx, iamNamespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var profile IAMInstanceProfile
+		if err := json.Unmarshal(data, &profile); err != nil {
+			continue
+		}
+		for _, r := range profile.Roles {
+			if r.RoleName == roleName {
+				holders = append(holders, profile.InstanceProfileName)
+				break
+			}
+		}
+	}
+	return holders, nil
 }
 
 // listInstanceProfiles returns persisted IAM instance profiles.

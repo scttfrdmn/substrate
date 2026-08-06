@@ -362,6 +362,26 @@ aws cloudformation describe-stacks --stack-name stuck \
   --query 'Stacks[0].StackStatus'                           # DELETE_FAILED
 ```
 
+#### A resource whose delete needs a detach first gets one
+
+Some deletes are refused while a subordinate entity still references the resource.
+`AWS::IAM::InstanceProfile` is the case substrate models: the sweep dispatches one
+`RemoveRoleFromInstanceProfile` for each role in the profile's declared `Roles`
+before `DeleteInstanceProfile`, resolving each `!Ref` through the same context the
+deploy used — so a role whose name was generated is detached by its generated name.
+
+Without it the stack could not converge from either side
+([#581](https://github.com/scttfrdmn/substrate/issues/581)): `DeleteRole` succeeded
+while the profile still held the role, leaving the profile listing a role that no
+longer existed, and `DeleteInstanceProfile` then refused with `DeleteConflict`. The
+failure therefore landed on the resource that was still *present*, and a retry failed
+identically — with no `RetainResources` escape, since retaining the profile leaves it
+behind for good.
+
+A pre-step failure fails that resource: a delete dispatched after a failed detach
+would be refused anyway, and reporting the detach's own error names what went wrong.
+A profile declaring no roles dispatches only its own delete.
+
 Coverage is stated rather than implied. Of the 109 resource types the deployer
 dispatches, 89 have a delete request and 11 are state-only types whose stub record
 is removed. The remaining 9 sweep to a no-op and are reported as `DELETE_SKIPPED`
@@ -744,7 +764,7 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | ListUsers | |
 | CreateRole | Supports trust policy document |
 | GetRole | |
-| DeleteRole | |
+| DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles |
 | ListRoles | |
 | CreateGroup | |
 | GetGroup | |
