@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +53,12 @@ type S3Plugin struct {
 	registry   *PluginRegistry // nil = notifications disabled
 	versionSeq int64           // monotonic counter for unique version IDs
 	keyLocks   s3KeyMutex      // serializes conditional writes per object key
+
+	// seedMu serializes consumption of a seeded conditional conflict. It is
+	// deliberately not the per-key stripe set above; see
+	// [S3Plugin.consumeConditionalConflict] for why the wildcard seed needs a
+	// lock that is not keyed by the object it applies to.
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "s3".
@@ -815,6 +822,19 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 			// stored object byte-identical.
 			return resp, nil
 		}
+
+		// The preconditions hold, so this write would succeed — which is the only
+		// point at which a seeded conflict is the right answer. A 412 or 404 above
+		// is a determinate observation of state and must not be masked, and a
+		// budget spent on a request that was going to fail anyway is a budget the
+		// test cannot spend on the conflict (#540).
+		conflict, cfErr := p.consumeConditionalConflict(ctx, bucket, key, s3ConflictPut)
+		if cfErr != nil {
+			return nil, cfErr
+		}
+		if conflict {
+			return s3ConditionalConflictResponse(), nil
+		}
 	}
 
 	body, trailers := decodeAWSChunkedWithTrailers(req.Headers, req.Body)
@@ -1400,6 +1420,17 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		}
 		if resp := evaluateWritePreconditions(cond, current); resp != nil {
 			return resp, nil
+		}
+
+		// Seeded conflicts are consumed after the preconditions pass, for the
+		// reasons on [S3Plugin.consumeConditionalConflict]. CopyObject has its own
+		// counter, so seeding a copy conflict does not perturb plain writes.
+		conflict, cfErr := p.consumeConditionalConflict(ctx, dstBucket, dstKey, s3ConflictCopy)
+		if cfErr != nil {
+			return nil, cfErr
+		}
+		if conflict {
+			return s3ConditionalConflictResponse(), nil
 		}
 	}
 
@@ -2264,6 +2295,35 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		if resp := evaluateWritePreconditions(cond, current); resp != nil {
 			// The upload stays open: a caller that lost the race can abort it.
 			return resp, nil
+		}
+
+		// A seeded conflict on Complete additionally *invalidates the upload*, which
+		// the 412 above deliberately does not. That asymmetry is the whole reason
+		// this arm is seedable separately: AWS documents the recovery from a 412 as
+		// retrying the compare-and-swap, and the recovery from a 409 as
+		// re-initiating with CreateMultipartUpload and re-uploading every part —
+		// advice that is only meaningful if the old upload ID can no longer
+		// complete. A CAS loop that answers a 409 by re-sending Complete with the
+		// same ID spins until it gives up, and that bug is invisible unless the ID
+		// really dies here (#540).
+		//
+		// The inference from that documented advice to "the ID is dead" is
+		// Substrate's; AWS documents the recovery, not the state of the upload.
+		//
+		// This is also why the seed lives here rather than in a FaultController
+		// rule, which is what #540 originally proposed: faults are evaluated before
+		// a request reaches its plugin, so a faulted Complete writes no state and
+		// its upload ID stays completable — reproducing the code but not the
+		// consequence, and passing the very loop the code exists to catch.
+		conflict, cfErr := p.consumeConditionalConflict(ctx, bucket, key, s3ConflictComplete)
+		if cfErr != nil {
+			return nil, cfErr
+		}
+		if conflict {
+			if abortErr := p.abortUploadState(ctx, uploadID); abortErr != nil {
+				return nil, fmt.Errorf("invalidate upload after seeded conflict: %w", abortErr)
+			}
+			return s3ConditionalConflictResponse(), nil
 		}
 	}
 
