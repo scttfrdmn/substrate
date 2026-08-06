@@ -2031,6 +2031,15 @@ A name-scoped seed is consulted before the wildcard. When a name-scoped seed is
 exhausted the lookup falls through to the wildcard, so an empty named seed does not
 mask a wildcard that still has budget.
 
+**A budget is consumed exactly once per miss, including under concurrency.** That
+matters most for a wildcard seed, which is shared across every queue: seeding
+`{"getUrlMisses":16}` and then driving concurrent lookups on sixteen *different*
+queues reports exactly sixteen misses, not more. Substrate serializes the
+read-decrement-write on one lock, the same way it does for the
+[S3 conditional-conflict seed](#seeding-conditionalrequestconflict). The guarantee
+is process-local, so it covers a single `substrate server` and not two of them
+sharing one state backend.
+
 **The window is counted in misses, not measured as a duration.** Substrate's
 simulated clock advances with wall time from its baseline, so a duration-based
 window would expire partway through a test and make "still missing" assertions

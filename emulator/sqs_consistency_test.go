@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -323,10 +324,13 @@ func TestSQS_Consistency_RejectsNegative(t *testing.T) {
 	}
 }
 
-// TestSQS_Consistency_ConcurrentGetQueueUrl is the test that fails without the
-// striped mutex in sqsQueueMutex. Consuming a miss is a read-modify-write and
-// StateManager has no compare-and-swap, so concurrent lookups could each read the
-// same count and each write count-1, consuming one miss where several were seeded.
+// TestSQS_Consistency_ConcurrentGetQueueUrl is the test that fails without the seed
+// mutex. Consuming a miss is a read-modify-write and StateManager has no
+// compare-and-swap, so concurrent lookups could each read the same count and each
+// write count-1, consuming one miss where several were seeded.
+//
+// It drives one queue name, which the per-queue stripe this once used also covered;
+// TestSQS_Consistency_ConcurrentWildcardAcrossQueues is the case it did not.
 //
 // Run with -race. If this ever passes with the lock removed, it is not driving
 // enough concurrency — check that before trusting it.
@@ -368,6 +372,63 @@ func TestSQS_Consistency_ConcurrentGetQueueUrl(t *testing.T) {
 	// The budget is now spent, so the next lookup resolves.
 	status, _ := getQueueURL(t, srv, "conc-q", false)
 	assert.Equal(t, http.StatusOK, status)
+}
+
+// TestSQS_Consistency_ConcurrentWildcardAcrossQueues is #582. Seed consumption used
+// to take a mutex striped by queue name, which serialized the name-scoped seed
+// correctly and left the "*" wildcard unguarded: the wildcard is shared across every
+// queue, so lookups on *different* names hashed to different stripes and raced on the
+// one budget they were both spending. A double-spend decrements once for two
+// consumed misses, so the count observed here comes out *above* the seeded budget —
+// a harness seeding "the next 16 lookups in this suite miss" would see 17 or more,
+// and only sometimes.
+//
+// More queues than budget on purpose: the overspend has to be observable as a count,
+// which needs lookups left over to be refused. Run with -race.
+func TestSQS_Consistency_ConcurrentWildcardAcrossQueues(t *testing.T) {
+	const (
+		queues = 32
+		budget = 16
+	)
+
+	srv, _ := newSQSTestServer(t)
+	names := make([]string, queues)
+	for i := range queues {
+		names[i] = fmt.Sprintf("wild-conc-%d", i)
+		createSQSQueue(t, srv, names[i])
+	}
+	// No queueName: one wildcard seed every one of those queues consumes from.
+	seedSQSConsistency(t, srv, map[string]any{"getUrlMisses": budget})
+
+	var (
+		mu     sync.Mutex
+		misses int
+		start  = make(chan struct{})
+		wg     sync.WaitGroup
+	)
+	for _, name := range names {
+		wg.Add(1)
+		go func(queue string) {
+			defer wg.Done()
+			<-start // maximize the overlap on the read-modify-write
+			status, _ := getQueueURL(t, srv, queue, false)
+			if status == http.StatusBadRequest {
+				mu.Lock()
+				misses++
+				mu.Unlock()
+			}
+		}(name)
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, budget, misses,
+		"a wildcard seed shared across queues must be consumed exactly once per miss")
+
+	// And the budget really is spent, rather than the count having come out right
+	// because misses were lost instead of double-spent.
+	status, _ := getQueueURL(t, srv, names[0], false)
+	assert.Equal(t, http.StatusOK, status, "the wildcard budget must be exhausted")
 }
 
 // TestSQS_Consistency_ResetClearsSeeds pins that seeds live in the state store and
