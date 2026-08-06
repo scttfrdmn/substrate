@@ -44,6 +44,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected and still gets that name verbatim, and `Ref`/`GetAtt` resolve to
   whichever name was used.
 
+- **A stack holding an IAM instance profile can be deleted** (#581). `DeleteStack` on
+  a stack with an `AWS::IAM::Role` and an `AWS::IAM::InstanceProfile` that references
+  it could never converge, and failed *inverted from both directions*: the role
+  reached `DELETE_COMPLETE` while still attached, and the profile that referenced it
+  failed with `DeleteConflict`. So the failure landed on the resource that was still
+  **present**, a retry failed identically, and there was no `RetainResources` escape —
+  retaining the profile leaves it behind for good. Two independent defects:
+
+  - **`DeleteRole` now enforces the instance-profile constraint.** It previously
+    succeeded on a role an instance profile held, leaving the profile listing a role
+    that no longer existed. The `DeleteRole` reference requires the instance profile be
+    removed first (`RemoveRoleFromInstanceProfile`), so substrate now refuses with
+    `DeleteConflict` / **409** — the code, status and shape it already used for the
+    attached-policies case — and the message names the profiles holding the role, as
+    the reference specifies ("The error message describes these entities"). A role held
+    by two profiles is refused until both release it.
+  - **The CloudFormation delete of an instance profile detaches its roles first.** The
+    sweep dispatches one `RemoveRoleFromInstanceProfile` per role in the profile's
+    declared `Roles` before `DeleteInstanceProfile`, resolving each `!Ref` through the
+    deploy's own context so a role whose name was generated is detached by that name.
+    It lands as a pre-step hook rather than by weakening the one-request-per-resource
+    deleter contract, which is what keeps each entry in that table a data declaration.
+
+  Fixing either alone flips the symptom rather than fixing it, so both are here.
+
+  **Compatibility:** a test asserting that `DeleteRole` succeeds on a role held by an
+  instance profile will now see `DeleteConflict`/409. That refusal is real IAM
+  behavior, and the permissive success was the defect.
+
 ## [v0.93.0] - 2026-08-06
 
 ### Fixed
