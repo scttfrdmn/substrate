@@ -254,6 +254,65 @@ that resolves to no IAM user or role in state is not authorized at all, which is
 every in-process `emulator.Client` caller and every credential that never touched
 IAM. See the testing guide's "Testing IAM permissions".
 
+### A resource with no name in the template gets a per-stack name
+
+Omitting a resource's physical name is the **recommended** practice — it is what
+makes a template deployable more than once, and AWS documents that naming a
+resource explicitly costs you replacement updates. So substrate generates a name
+for the omitted case, in the shape CloudFormation documents for its own generated
+physical IDs (`MyStack-MyBucket-abcdefghijk1`):
+
+```
+{stack name}-{logical ID}-{12-character suffix}
+```
+
+The omitted case previously used the **logical ID verbatim**, which is unique
+only *within* a stack. Every name below is unique across an account or a Region, so
+a second stack from the same template either collided outright or — for `SQS::Queue`
+and `SNS::Topic`, whose creates are idempotent — silently shared one resource with
+the first, and deleting either stack destroyed the other's resource with no error
+reported to anyone ([#560](https://github.com/scttfrdmn/substrate/issues/560)).
+
+- **An explicit name still wins, verbatim.** A template that sets `BucketName` gets
+  exactly that bucket, un-repeatability included, because that is what it asked for.
+- **The suffix is derived, not random** — FNV-64a over the account, Region, stack
+  name and logical ID, base36. This is substrate's own divergence: AWS randomizes.
+  `UpdateStack` here re-deploys the whole template, so a name regenerated per deploy
+  would mint a fresh resource on every update and leak the one it replaced. Deriving
+  it keeps an unchanged update a no-op and every name reproducible from its inputs.
+  The account and Region are in the hash because two same-named stacks in different
+  Regions are different stacks.
+- **The name fits the service.** The stack and logical-ID segments are truncated
+  proportionally to fit the service's limit and lowercased where the service demands
+  it; the suffix is never truncated, since it is the only part that makes the name
+  unique. A generated name always begins with a letter and holds only ASCII letters,
+  digits and hyphens, with no trailing or doubled hyphen.
+
+The types that get a generated name, with the limit each is fitted to:
+
+| Resource type | Name property | Limit |
+|---|---|---|
+| `AWS::IAM::Role` | `RoleName` | 64 |
+| `AWS::IAM::InstanceProfile` | `InstanceProfileName` | 128 |
+| `AWS::IAM::Policy` | `PolicyName` | 128 |
+| `AWS::S3::Bucket` | `BucketName` | 63, lowercase |
+| `AWS::DynamoDB::Table` | `TableName` | 255 |
+| `AWS::SQS::Queue` | `QueueName` | 80 |
+| `AWS::SNS::Topic` | `TopicName` | 256 |
+| `AWS::Logs::LogGroup` | `LogGroupName` | 512 |
+| `AWS::Lambda::Function` | `FunctionName` | 64 |
+
+**A type absent from that table still uses its logical ID.** The list is names that
+are account- or Region-unique, not every property that falls back to the logical ID:
+an `AWS::ApiGateway::Resource`'s `PathPart` is a URL segment unique only within its
+parent, and `Domain`, `SecretId`, `ClusterId` and `ReplicationGroupId` are
+identifiers a template legitimately controls. Generating those would change the URLs
+and identifiers a consumer wrote the template to get.
+
+`Ref` and `GetAtt` resolve to the generated name and ARN, and the delete sweep
+deletes by it, so a template that wires its resources together needs no change —
+and two stacks from one template can now be torn down independently.
+
 ### DeleteStack deletes the stack's resources
 
 `DeleteStack` sweeps the resources the stack deployed before removing the stack
