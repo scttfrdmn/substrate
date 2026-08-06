@@ -303,6 +303,8 @@ func (s *Server) buildRouter() *chi.Mux {
 
 	// S3 control-plane endpoints.
 	r.Post("/v1/s3/presign", s.handleS3Presign)
+	r.Post("/v1/s3/conditional-conflict", s.handleS3SeedConditionalConflict)
+	r.Delete("/v1/s3/conditional-conflict", s.handleS3ClearConditionalConflict)
 
 	r.Get("/ui", s.handleDebugUI)
 	r.Get("/v1/debug/events", s.handleDebugEvents)

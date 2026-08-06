@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A seedable `409 ConditionalRequestConflict` on S3 conditional writes** (#540).
+  `PutObject`, `CopyObject` and `CompleteMultipartUpload` could reach two of the
+  three outcomes AWS documents for a conditional write — `412 PreconditionFailed`
+  and `404 NoSuchKey` — but never the `409` S3 returns when a concurrent operation
+  interferes. The three are not interchangeable: a `412` means re-read, recompute
+  and retry the compare-and-swap, a `409` on `PutObject` means retry the request
+  as-is, and a `409` on `CompleteMultipartUpload` means the upload ID is finished
+  and the caller must re-do `CreateMultipartUpload` and every `UploadPart`. A CAS
+  loop that answers the third case like the first spins until it gives up, and
+  against substrate that loop looked correct.
+
+  `POST /v1/s3/conditional-conflict` seeds how many subsequent conditional writes
+  to a key report the code, keyed by `bucket`/`key` or the `*` wildcard, with
+  independent counters per operation (`putConflicts`, `copyConflicts`,
+  `completeConflicts`); `DELETE` clears one or all. A key-scoped seed is consulted
+  before the wildcard and falls through when exhausted, and conflicts are counted
+  in occurrences rather than measured as a duration, so a test is never wall-clock
+  dependent.
+
+  **Consuming a seeded multipart conflict invalidates the upload**, so a same-ID
+  retry gets `404 NoSuchUpload` and `ListParts` on that ID is gone — which is the
+  asymmetry that makes the broken loop fail. Reaching that required a plugin-level
+  seed rather than a fault-injection rule: faults are evaluated before a request
+  reaches its plugin, so a faulted `Complete` writes no state and its upload ID
+  stays completable.
+
+  Nothing changes for an unseeded caller. A conflict is consumed only *after* the
+  preconditions pass, so a `412` or `404` is still reported as itself and does not
+  spend the budget, and an unconditional write to a seeded key is untouched — AWS
+  documents the code only on the two conditional headers.
+
 ## [v0.92.0] - 2026-08-05
 
 ### Added

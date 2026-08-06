@@ -820,18 +820,18 @@ STS operations are free.
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | |
-| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
+| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes, including a seedable `409 ConditionalRequestConflict` — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | DeleteObject | Fires S3 notifications if configured |
-| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
 | CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
 | UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
 | ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list |
-| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists) |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes, including a seedable `409 ConditionalRequestConflict` that invalidates the upload — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
@@ -1117,11 +1117,12 @@ Retrieving a specific part by `?partNumber=N` is not implemented.
 | `If-Match: "<etag>"` | ETag matches | `200` — the write proceeds |
 | `If-Match: "<etag>"` | ETag differs | `412 PreconditionFailed` |
 | `If-Match: "<etag>"` | Key absent, or the current version is a delete marker | `404 NoSuchKey` |
+| either header | A conflict is [seeded](#seeding-conditionalrequestconflict) on the key | `409 ConditionalRequestConflict` |
 
 A rejected conditional write is a no-op: the stored object is byte-identical
 afterwards — body, ETag, size, `Content-Type` and user metadata all unchanged — and
-a rejected `CompleteMultipartUpload` additionally leaves its upload open to be
-retried or aborted.
+a `412`-rejected `CompleteMultipartUpload` additionally leaves its upload open to be
+retried or aborted. A `409`-rejected one does not; see below.
 
 **Concurrency.** N concurrent `If-None-Match: *` writes to one key yield exactly one
 `200` and N-1 `412`s; the same holds for N concurrent `If-Match` writes asserting
@@ -1132,12 +1133,83 @@ compare-and-swap; it therefore holds for any number of goroutines or HTTP client
 against one emulator process, but would not hold across two emulator processes
 sharing one state backend.
 
-Two outcomes real S3 documents are deliberately not emulated: the `409
-ConditionalRequestConflict` returned when a concurrent operation interferes, and the
-`404` returned when a concurrent delete lands mid-write. Both are races against
-wall-clock timing rather than states a deterministic emulator can reach, so
-substrate resolves every conditional write to one of the rows above. A consumer
-that must exercise its 409 handler needs a fault-injection tier, not this one.
+#### Seeding `ConditionalRequestConflict`
+
+S3 returns `409 ConditionalRequestConflict` when a concurrent operation — in the
+documented case, a delete — interferes with a conditional write between its
+evaluation and its completion. It is a timing accident rather than a state a
+request can assert, so substrate cannot derive it the way it derives a `412` from
+the current object. Seeding is what makes the branch reachable.
+
+**The branch matters because the three outcomes select different recovery paths,
+and they are not interchangeable:**
+
+| Outcome | What it means | The recovery AWS documents |
+|---|---|---|
+| `412 PreconditionFailed` | Another writer won the race | Re-read, recompute, retry the compare-and-swap |
+| `404 NoSuchKey` on `If-Match` | The object is gone | Re-upload rather than retry the CAS |
+| `409` on `PutObject` / `CopyObject` | A delete interleaved | Retry the request as-is (for `If-Match`, fetch the current ETag first) |
+| `409` on `CompleteMultipartUpload` | A delete interleaved | **Abandon the upload ID** — re-do `CreateMultipartUpload` and re-upload every part |
+
+A compare-and-swap loop that answers the last case like the first re-sends
+`CompleteMultipartUpload` with an upload ID that can never complete again, and
+spins until it gives up. **Substrate models that consequence: consuming a seeded
+multipart conflict invalidates the upload, so a same-ID retry gets
+`404 NoSuchUpload` and `ListParts` on it is gone too.** That inference is
+substrate's — AWS documents the recovery advice, not the ID's fate — but without it
+the broken loop passes.
+
+```bash
+# The next conditional PutObject on cond/k reports ConditionalRequestConflict.
+curl -X POST http://localhost:4566/v1/s3/conditional-conflict \
+  -d '{"bucket":"cond","key":"k","putConflicts":1}'
+
+# CopyObject (evaluated against the destination key) and
+# CompleteMultipartUpload have their own independent counters.
+curl -X POST http://localhost:4566/v1/s3/conditional-conflict \
+  -d '{"bucket":"cond","key":"dst","copyConflicts":1}'
+curl -X POST http://localhost:4566/v1/s3/conditional-conflict \
+  -d '{"bucket":"cond","key":"big","completeConflicts":1}'
+
+# Apply to any key (wildcard).
+curl -X POST http://localhost:4566/v1/s3/conditional-conflict -d '{"putConflicts":3}'
+
+# Clear one, or all.
+curl -X DELETE 'http://localhost:4566/v1/s3/conditional-conflict?bucket=cond&key=k'
+curl -X DELETE http://localhost:4566/v1/s3/conditional-conflict
+```
+
+`bucket` and `key` must be given together; supplying one alone is a `400`, because
+such a seed would be stored under a key no write can match — it would look armed
+and never fire. A key-scoped seed is consulted before the wildcard, and when it is
+exhausted the write falls through to the wildcard, so a spent key-scoped seed does
+not mask a wildcard that still has budget.
+
+**Conflicts are counted in occurrences, not measured as a duration**, for the same
+reason as [the SQS consistency window](#seeding-the-create-then-lookup-consistency-window):
+substrate's simulated clock advances with wall time from its baseline, so a
+duration-based window would expire partway through a test and make assertions
+wall-clock dependent. A counter is exactly reproducible.
+
+Two ordering rules make the seed usable from a harness:
+
+- A conflict is consumed **only after the preconditions pass**. A `412` or `404` is
+  a determinate observation of the destination's current state and is reported as
+  itself rather than replaced by a seeded race — and it does not spend the budget,
+  so a request that was going to fail anyway cannot silently consume what the test
+  armed for the conflict.
+- An **unconditional** write to a seeded key is untouched and spends nothing. AWS
+  documents this code only on the `If-Match` and `If-None-Match` members, so a
+  plain `PutObject` never reports it.
+
+The code and the `409` status are documented in those member docs and in the S3
+user guide's conditional-writes page; **no message text is documented anywhere**,
+and the API model carries no `ConditionalRequestConflict` shape, so substrate's
+message is its own. Assert on the code and the status.
+
+The `404` real S3 can return when a concurrent delete lands mid-write is still not
+modeled as a race: substrate reaches that outcome deterministically, from an
+`If-Match` against a key that is genuinely absent (the row above).
 
 #### Conditional reads
 
