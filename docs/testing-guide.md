@@ -393,7 +393,7 @@ func TestRetryOnS3Error(t *testing.T) {
     _ = substrate.RegisterDefaultPlugins(ctx, registry, state, tc, logger, store)
 
     srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
-        substrate.WithFaultController(fc),
+        substrate.ServerOptions{Fault: fc},
     )
 
     // Start and test...
@@ -449,7 +449,26 @@ An injected error is serialized in the same wire shape the target service's own
 errors use, so an SDK recovers the code rather than falling back to the HTTP status
 (an injected S3 `SlowDown` used to arrive as `ServiceUnavailable`).
 
-<!-- TODO(#178): document server.WithFaultController option once stabilised -->
+### Arming rules over the wire
+
+A server started with `substrate server` always has a fault controller, whether or
+not the config file has a `fault:` block, so a harness can arm rules through
+`POST /v1/fault/rules` without restarting anything. A controller with `enabled:
+false` makes injection a no-op until a rule is armed; only a `Server` constructed
+in-process with no controller at all answers `501`.
+
+```yaml
+fault:
+  enabled: false
+  # Seeds the per-rule PRNGs behind `probability`. Default 0 — deterministic, so
+  # the same config produces the same run every time. Set it to vary
+  # probabilistic outcomes between runs deliberately.
+  seed: 0
+```
+
+Rules armed over the wire replace the configured set and reset each rule's `fired`
+count and PRNG stream, so a fixture that re-arms between phases starts each phase
+from the same place.
 
 ## Testing IAM Permissions
 

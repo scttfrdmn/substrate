@@ -325,7 +325,17 @@ type PricingCfg struct {
 // Use [FaultCfg.ToFaultConfig] to convert it for use with [NewFaultController].
 type FaultCfg struct {
 	// Enabled gates fault injection. Default false.
+	//
+	// A disabled controller is still constructed, so the /v1/fault/rules
+	// endpoints work and a harness can arm rules over the wire on a server whose
+	// config file says nothing about faults.
 	Enabled bool `mapstructure:"enabled"`
+
+	// Seed controls the per-rule PRNGs behind [FaultRule.Probability]. Default 0,
+	// which is deterministic — the same config produces the same run every time,
+	// which is what Substrate is for. Set it to vary probabilistic outcomes
+	// between runs deliberately.
+	Seed int64 `mapstructure:"seed"`
 
 	// Rules is the ordered list of fault injection rules.
 	Rules []FaultRuleCfg `mapstructure:"rules"`
@@ -563,6 +573,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("tracing.exporter", defaults.Tracing.Exporter)
 	v.SetDefault("tracing.service_name", defaults.Tracing.ServiceName)
 	v.SetDefault("fault.enabled", defaults.Fault.Enabled)
+	v.SetDefault("fault.seed", defaults.Fault.Seed)
 	v.SetDefault("region.default", defaults.Region.Default)
 	v.SetDefault("lambda.docker_enabled", defaults.Lambda.DockerEnabled)
 	v.SetDefault("lambda.replay_mode", defaults.Lambda.ReplayMode)
