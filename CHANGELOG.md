@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A default server can arm fault rules, and its PRNG seed is pinnable.** `substrate
+  server` built a `FaultController` only when the config file had `fault.enabled` or
+  at least one rule, so on a default server all three `/v1/fault/rules` endpoints
+  answered `501 fault injection not enabled on this server` — a harness could not
+  arm a rule at all, which is the remedy the docs point at. The controller is now
+  always constructed; a disabled one makes injection a no-op, so behavior is
+  unchanged for a run that never touches the endpoint. A `Server` constructed
+  in-process with no controller still answers `501`.
+
+  The seed came from `time.Now().UnixNano()`, so a probabilistic rule loaded from a
+  config file produced a different run every time. `fault.seed` now supplies it,
+  defaulting to `0` — deterministic, which is what this emulator is for.
+
+- **The testing guide's fault example compiles.** It called
+  `substrate.WithFaultController(fc)`, a symbol that exists nowhere in the repo; the
+  option is `substrate.ServerOptions{Fault: fc}`. The guide also gains a section on
+  arming rules over the wire and on `fault.seed`, replacing a `TODO` that pointed at
+  a closed issue and at that same non-existent symbol.
+
 ### Changed
 - **Each fault rule draws from its own PRNG** (#510). `FaultController` rolled
   `probability` from one PRNG shared by every rule, so a rule's outcomes depended on

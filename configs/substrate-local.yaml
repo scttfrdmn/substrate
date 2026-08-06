@@ -44,7 +44,12 @@ tracing:
   enabled: false
 
 fault:
+  # A fault controller is always constructed, so POST /v1/fault/rules works even
+  # with this false; disabling only makes injection a no-op until a rule is armed.
   enabled: false
+  # Seeds the per-rule PRNGs behind a rule's `probability`. Default 0 —
+  # deterministic, so the same config produces the same run every time.
+  seed: 0
 
 region:
   default: "us-east-1"

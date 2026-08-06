@@ -76,6 +76,25 @@ of CDK, CloudFormation, and Terraform infrastructure code.`,
 	return root
 }
 
+// newFaultController builds the server's fault controller from configuration.
+//
+// It is always non-nil, even with no fault: block in the config. A disabled
+// controller makes InjectFault a no-op, so behavior is unchanged for every run
+// that never arms a rule — but the /v1/fault/rules endpoints answered 501 without
+// a controller, so a harness could not arm one on a default server at all, which
+// is the remedy the docs point at. Only a Server constructed in-process without
+// one still answers 501.
+//
+// The seed comes from configuration rather than time.Now().UnixNano(): a
+// wall-clock seed makes a probabilistic rule irreproducible between runs, which is
+// the one thing this emulator exists to avoid.
+//
+// This is a function rather than three inline lines so a test can assert both
+// halves without starting a server.
+func newFaultController(cfg substrate.FaultCfg) *substrate.FaultController {
+	return substrate.NewFaultController(cfg.ToFaultConfig(), cfg.Seed)
+}
+
 func newServerCmd() *cobra.Command {
 	var configPath string
 	var address string
@@ -150,10 +169,7 @@ configured address will have their requests emulated and recorded.`,
 			costCtrl := substrate.NewCostController(cfg.Costs.ToCostConfig(),
 				substrate.WithPricingProvider(pricingProvider))
 
-			var faultCtrl *substrate.FaultController
-			if cfg.Fault.Enabled || len(cfg.Fault.Rules) > 0 {
-				faultCtrl = substrate.NewFaultController(cfg.Fault.ToFaultConfig(), time.Now().UnixNano())
-			}
+			faultCtrl := newFaultController(cfg.Fault)
 
 			var metricsCollector *substrate.MetricsCollector
 			if cfg.Metrics.Enabled {
