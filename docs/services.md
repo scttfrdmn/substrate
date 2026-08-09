@@ -793,7 +793,8 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteUser | |
 | ListUsers | |
 | CreateRole | Supports trust policy document |
-| GetRole | |
+| GetRole | Reports `AssumeRolePolicyDocument`, re-marshalled from the stored document rather than returned verbatim, so an equivalent form can come back (a `{"AWS":"1234"}` principal reads back as `"1234"`) |
+| UpdateAssumeRolePolicy | Replaces the trust policy in place; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
 | DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles |
 | ListRoles | |
 | CreateGroup | |
@@ -945,6 +946,12 @@ that never wrote a trust policy is unaffected. Enforcement is also skipped for a
 unauthenticated caller, who resolves to no principal for a `Principal` element to
 be true of; this is the same rule described in
 [Testing IAM permissions](./testing-guide.md#testing-iam-permissions).
+
+`iam:UpdateAssumeRolePolicy` replaces the document in place, which is how a test
+exercises the update-in-place shape IaC emits: assume, tighten, and be refused on
+the same role. The replacement takes effect on the **next** `AssumeRole`; sessions
+already minted under the old policy stay valid, as on AWS. `GetRole` reports the
+stored document, so a test can assert what it set.
 
 ### Cost
 

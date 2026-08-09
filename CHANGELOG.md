@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`iam:UpdateAssumeRolePolicy`, so a role's trust policy can be changed after
+  `CreateRole`** (#594). The operation was absent from the IAM switch, making
+  `CreateRole` the only way to set an `AssumeRolePolicyDocument`. That cost nothing
+  while nothing read the document; #593 made it load-bearing, and from then on IaC
+  that creates a role and narrows its trust policy in a second pass — the
+  update-in-place shape CDK and Terraform both emit — silently kept the original
+  policy, so the tightening a test was written to verify was unobservable. The
+  replacement takes effect on the **next** `AssumeRole` and does not revoke sessions
+  already minted under the old policy, matching AWS: the gate runs at assumption
+  time, so a credential in hand keeps working. `PolicyDocument` is **required**,
+  unlike `CreateRole`'s optional `AssumeRolePolicyDocument` — the API model lists it
+  under `required`, so there is no "clear the trust policy" form of this call and an
+  absent one is a `ValidationError` rather than a silently unenforced role.
+  Errors are the model's: `NoSuchEntity` (404) for an unknown role,
+  `MalformedPolicyDocument` (400) for a document that does not parse.
+
+  **`GetRole` and `ListRoles` now report `AssumeRolePolicyDocument`**, which they
+  did not before — substrate's `Role` rendering omitted the member entirely, so a
+  caller had no way to confirm what it had just set, and #594's read-back criterion
+  could not be met without it. The document is emitted as plain JSON rather than
+  URL-encoded JSON: botocore's `after-call.iam` handler unquotes and then
+  `json.loads` every `policyDocumentType` member, and unquoting plain JSON is a
+  no-op, so both botocore and aws-sdk-go-v2 hand a consumer valid JSON. It is
+  re-marshaled from the stored parsed form rather than returned verbatim, the same
+  normalization `GetRolePolicy` and `GetUserPolicy` already apply to inline
+  policies, so a semantically equivalent form can come back — a `Principal`
+  submitted as `{"AWS":"123456789012"}` reads back as `"123456789012"`, the bare
+  string AWS also accepts for the same meaning. Real IAM stores the text and returns
+  the submitted bytes, so a consumer comparing the read-back byte-for-byte against
+  what it sent sees a difference; one parsing the document does not. A role created
+  without a trust policy reports no member at all rather than an empty document,
+  which is the same emptiness test the STS gate uses to decide a role is unenforced.
+
 ## [v0.95.0] - 2026-08-08
 
 ### Added
