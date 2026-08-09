@@ -62,6 +62,14 @@ https://github.com/scttfrdmn/substrate/issues.
 Milestones map directly to semver releases:
 https://github.com/scttfrdmn/substrate/milestones
 
+Merge with `gh pr merge <N> --squash --delete-branch`. **Do not pass
+`--delete-branch=false`** — the repository's `delete_branch_on_merge` is `false`, so
+the flag is the only thing that removes the branch, and omitting it leaves the merged
+branch on the remote indefinitely. That is how 45 merged branches accumulated through
+v0.97.0 before being swept; none of them had been kept for a reason. A branch is
+recoverable from its PR page after deletion, so keeping it buys nothing that a squash
+merge has not already recorded on `main`.
+
 ## Code conventions
 
 - Idiomatic Go 1.26; target A+ on https://goreportcard.com/report/github.com/scttfrdmn/substrate
