@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`DescribeStackEvents` answers, derived from the stack record** (#501, #562).
+  The operation returned `UnsupportedOperation` (400), so a consumer's deployment
+  wrapper — which polls events, because that is where a CloudFormation failure is
+  conventionally read from — could not run against substrate at all. Events are now
+  reported for every stack, newest first, paginated at 100 with a `NextToken`.
+
+  **The events are derived from the stack record, not from the event log**, which
+  is a departure from the route #501 filed as its preferred one. Two measurements
+  ruled the event log out. A recorded `Event` carries no `LogicalResourceId` —
+  `EventStore.RecordRequest` builds one from the request context and operation and
+  never copies the per-resource metadata across — and every `StackEvent` requires
+  one, so the log knows `s3:CreateBucket at T` but not which logical resource that
+  was. And the event store is disabled for in-process `emulator.Client` callers, who
+  would have seen an empty list for a stack that plainly deployed. The stack record
+  carries the logical ID, physical ID, type and error for each resource, so deriving
+  from it invents strictly less. `emulator/cfn_events_test.go` pins the second
+  reason: a plugin initialized with no event store still reports events.
+
+  **Resource events are terminal only, and a deploy's events share one timestamp.**
+  Substrate deploys synchronously, so it never observed a resource mid-create and
+  holds no record that one existed; a per-resource `CREATE_IN_PROGRESS` would be
+  fabricated. The stack's own bracketing events are different — the record's status
+  names the operation that ran and its timestamps say when — so those are reported.
+  Spacing the events apart was considered and rejected for a reason already recorded
+  in `emulator/sqs_control.go`: simulated time advances with wall time, so any
+  interval substrate manufactured would make a consumer's assertions wall-clock
+  dependent. Order is carried by position instead, reverse-deployment within an
+  instant, which is what real CloudFormation shows. `EventId` is deterministic in
+  the form AWS's own sample response returns
+  (`{LogicalId}-{ResourceStatus}-{Timestamp}`), so a replayed stack reports
+  byte-identical events.
+
+  **This closes #562's fifth acceptance criterion**, which had deferred that issue
+  across four releases: a stack whose service role is missing one permission reaches
+  `ROLLBACK_COMPLETE` **and** reports a `StackEvent` whose `ResourceStatusReason`
+  names the `AccessDeniedException` and the action refused. `DescribeStackResources`
+  already reported the same fact, and the two now share one derivation
+  (`cfnResourceStatus`) so they cannot disagree about whether a resource failed.
+
+  A stack deleted successfully is removed from the record, so `DescribeStackEvents`
+  on it reports `ValidationError` — the same answer `DescribeStacks` gives. A stack
+  whose delete *failed* remains, and its events name the resource holding it.
+
 ### Fixed
 - **`AssumeRole` evaluates the role's trust policy, so `sts:ExternalId` is enforced**
   (#593). `AssumeRole` loaded the role only to read its `RoleID` for the
