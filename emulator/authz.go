@@ -36,7 +36,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	if authzNoPermissionsRequired[action] {
 		return nil
 	}
-	resource := buildResourceARN(reqCtx, req)
+	resource := a.buildResourceARN(reqCtx, req)
 
 	goCtx := context.Background()
 	entity, exists, err := resolveIAMEntity(goCtx, a.state, reqCtx.Principal.ARN)
@@ -397,7 +397,11 @@ func serviceToAction(req *AWSRequest, service, operation string) string {
 }
 
 // buildResourceARN constructs a best-effort IAM resource ARN for the request.
-func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
+//
+// It is a method rather than a free function because some services cannot name
+// their resources without reading them: an Organizations ARN embeds the
+// organization's own ID, which only the stored record knows.
+func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 	acct := reqCtx.AccountID
 	region := reqCtx.Region
 	switch req.Service {
@@ -505,6 +509,12 @@ func buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 			return "arn:aws:glue:" + region + ":" + acct + ":database/" + name
 		}
 		return "*"
+	case organizationsNamespace:
+		// Organizations ARNs carry the organization's own ID as a segment, so the
+		// real ARN is read from the stored record rather than reassembled here; see
+		// orgAuthzResourceARN. Falling through to "*" would make a policy scoped to
+		// one OU or policy apply to every one of them.
+		return orgAuthzResourceARN(a.state, reqCtx, req)
 	default:
 		return "*"
 	}
@@ -659,6 +669,13 @@ func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *Requ
 		}
 		tags = t.Tags
 
+	case organizationsNamespace:
+		// The request names one Organizations resource — an account, root, OU, or
+		// policy — under whichever member the operation uses. Only that one is read;
+		// see orgAuthzResourceID for why merging the tags of two named resources
+		// would be a false allow rather than a convenience.
+		tags = orgAuthzResourceTags(a.state, req)
+
 	default:
 		return
 	}
@@ -717,6 +734,15 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 			for k, v := range body.Tags {
 				condCtx["aws:RequestTag/"+k] = v
 			}
+		}
+
+	case organizationsNamespace:
+		// Organizations tags arrive in the JSON body as "Tags": [{"Key":…,"Value":…}],
+		// the same shape IAM uses. Reading them here is what lets a policy gate
+		// TagResource or a tagged CreatePolicy on the tag the caller is trying to
+		// apply, rather than only on tags already stored.
+		for k, v := range orgAuthzRequestTags(req) {
+			condCtx["aws:RequestTag/"+k] = v
 		}
 
 	case "s3":
