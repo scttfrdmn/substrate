@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.97.0] - 2026-08-09
+
 ### Fixed
 - **The organization root now has one stable identity** (#577). `ListRoots` minted
   a fresh `r-` ID on every call and never persisted it, so two calls disagreed and
@@ -5907,7 +5909,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.96.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.97.0...HEAD
+[v0.97.0]: https://github.com/scttfrdmn/substrate/compare/v0.96.0...v0.97.0
 [v0.96.0]: https://github.com/scttfrdmn/substrate/compare/v0.95.0...v0.96.0
 [v0.95.0]: https://github.com/scttfrdmn/substrate/compare/v0.94.0...v0.95.0
 [v0.94.0]: https://github.com/scttfrdmn/substrate/compare/v0.93.0...v0.94.0
