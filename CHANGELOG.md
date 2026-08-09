@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `CLAUDE.md` now specifies the merge command, `gh pr merge <N> --squash
+  --delete-branch`, and forbids `--delete-branch=false`. The repository's
+  `delete_branch_on_merge` is `false`, so the flag is the only thing that removes a
+  merged branch; 45 of them had accumulated by v0.97.0, none deliberately kept.
+  Contributor process only — no emulator behaviour changes.
+
 ## [v0.97.0] - 2026-08-09
 
 ### Fixed
