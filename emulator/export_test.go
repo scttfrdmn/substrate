@@ -260,6 +260,7 @@ const (
 	ErrProtoJSONRPCForTest  = "json-rpc"
 	ErrProtoRESTJSONForTest = "rest-json"
 	ErrProtoS3XMLForTest    = "s3-xml"
+	ErrProtoEC2XMLForTest   = "ec2-xml"
 	ErrProtoUnknownForTest  = "unknown"
 )
 
@@ -275,6 +276,8 @@ func ErrorProtocolForTest(service, contentType string) string {
 		return ErrProtoRESTJSONForTest
 	case errProtoS3XML:
 		return ErrProtoS3XMLForTest
+	case errProtoEC2XML:
+		return ErrProtoEC2XMLForTest
 	default:
 		return ErrProtoUnknownForTest
 	}
@@ -292,6 +295,8 @@ func MarshalAWSErrorForTest(code, message, proto, jsonContentType string, status
 		p = errProtoRESTJSON
 	case ErrProtoS3XMLForTest:
 		p = errProtoS3XML
+	case ErrProtoEC2XMLForTest:
+		p = errProtoEC2XML
 	}
 	return marshalAWSError(&AWSError{Code: code, Message: message, HTTPStatus: status}, p, jsonContentType)
 }

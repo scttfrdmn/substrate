@@ -3098,7 +3098,7 @@ func (p *S3Plugin) bucketMissingResponse(ctx context.Context, bucket string) (*A
 // error-specific child elements and response headers described by e. Details
 // with an empty Name are skipped.
 func s3ErrorResponseWith(e s3Error) *AWSResponse {
-	doc := s3ErrorXML{Code: e.Code, Message: e.Message, RequestID: "SUBSTRATE"}
+	doc := s3ErrorXML{Code: e.Code, Message: e.Message, RequestID: substrateRequestID}
 	for _, d := range e.Details {
 		if d.Name == "" {
 			continue

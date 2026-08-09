@@ -4656,8 +4656,34 @@ plugin uses, so an injected `NoSuchKey` and a genuine one are byte-identical —
 the one property a fault injector must not lack, since a caller who can tell the two
 apart can tell a fixture from production.
 
+EC2 is the second such service, and it was broken more widely than S3: it is the only
+service on the `ec2` protocol, whose error document wraps the error in a **plural**
+`<Errors>` element and spells the request id `<RequestID>` with a capital D.
+
+```xml
+<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code><Message>…</Message></Error></Errors><RequestID>SUBSTRATE</RequestID></Response>
+```
+
+The AWS SDKs read the code at the XPath `Errors>Error>Code`, which finds nothing in a
+`<ErrorResponse><Error>` document, so every EC2 error — organic as much as injected —
+arrived at an SDK caller as `UnknownError`. That made a consumer's
+`InvalidInstanceID.NotFound` branch unreachable and its test vacuous, the same failure
+S3 had, one service over and on both paths rather than just the injected one.
+
+**This is also a lesson about which tests can catch a wire-shape bug.** Neither case was
+caught by substrate's own coverage, because botocore is lenient where the SDKs are
+strict: its EC2 parser falls back to the document root when `<Errors>` is absent, so the
+AWS CLI reported the correct code out of the wrong document the entire time, and every
+CLI-driven test passed. Only a real SDK client is a gate here — see
+`test/e2e/journey_ec2_errors_test.go`.
+
 `cloudfront` and `route53` are REST-XML like S3 but keep the `<ErrorResponse>` shape:
-their real error documents genuinely are wrapped, so they were already correct.
+their real error documents genuinely are wrapped, so they were already correct. Every
+other XML service is on the Query protocol and keeps that wrapper too; S3 and EC2 are
+the only two carve-outs.
+
+The `<RequestID>` is the fixed string `SUBSTRATE` rather than a generated value, as it is
+in S3's document, so two replays of one recorded run produce byte-identical error bodies.
 
 ### `probability` draws from a per-rule PRNG
 

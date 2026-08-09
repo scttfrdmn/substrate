@@ -96,9 +96,46 @@ func TestRESTJSONError_IsNotXML(t *testing.T) {
 
 // TestQueryXMLError_UsesErrorDocument asserts query-protocol services still get
 // the <ErrorResponse><Error><Code> document their parser expects, including the
-// <Type> element real AWS sends. EC2 rejects an unknown action, which is the
-// simplest error the plugin raises through the server's writeError path.
+// <Type> element real AWS sends. CloudFormation rejects an unknown action, which
+// is the simplest error a plugin raises through the server's writeError path.
+//
+// This used EC2 as its vehicle until #591, on the premise that EC2 was a Query
+// service. It is not — EC2 is the sole service on the "ec2" protocol, whose error
+// document the SDK parses at a different XPath entirely — so the vehicle moved to
+// a genuinely Query service rather than the assertion being loosened to accept
+// both shapes, which would have retired the #392 gate this test exists to be.
 func TestQueryXMLError_UsesErrorDocument(t *testing.T) {
+	t.Parallel()
+	ts := newCFNTestServer(t)
+	status, body := cfnRequest(t, ts, map[string]string{"Action": "NoSuchActionAtAll"})
+	assert.Equal(t, http.StatusBadRequest, status)
+
+	var doc struct {
+		XMLName xml.Name `xml:"ErrorResponse"`
+		Error   struct {
+			Type string `xml:"Type"`
+			Code string `xml:"Code"`
+		} `xml:"Error"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &doc), "body was %s", body)
+	assert.NotEmpty(t, doc.Error.Code)
+	assert.Equal(t, "Sender", doc.Error.Type)
+}
+
+// TestEC2Error_UsesEC2Document is #591. EC2 is on the "ec2" protocol, not Query:
+// its error document wraps the error in a *plural* <Errors> element, and the SDK's
+// ec2query.ErrorComponents reads the code at the XPath "Errors>Error>Code". A Query
+// document has no <Errors>, so Code decoded empty and the EC2 deserializer kept its
+// "UnknownError" default — every consumer branching on a specific EC2 error code got
+// UnknownError instead, for organic errors as much as injected faults.
+//
+// The struct below deliberately uses the SDK's own XPaths so this test fails for
+// the same reason a real SDK caller does. The real-SDK gate is in
+// test/e2e/journey_ec2_errors_test.go; this is the unit-level half.
+//
+// Shape verified against the EC2 error reference:
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html
+func TestEC2Error_UsesEC2Document(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 	resp := ec2Request(t, ts, map[string]string{"Action": "NoSuchActionAtAll"})
@@ -108,16 +145,107 @@ func TestQueryXMLError_UsesErrorDocument(t *testing.T) {
 	require.NoError(t, err)
 
 	var doc struct {
-		XMLName xml.Name `xml:"ErrorResponse"`
-		Error   struct {
-			Type string `xml:"Type"`
-			Code string `xml:"Code"`
-		} `xml:"Error"`
+		XMLName xml.Name `xml:"Response"`
+		Code    string   `xml:"Errors>Error>Code"`
+		Message string   `xml:"Errors>Error>Message"`
+		// Capital D, which is the "ec2" protocol's spelling and not the Query
+		// protocol's <RequestId>.
+		RequestID string `xml:"RequestID"`
 	}
 	require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
-	assert.NotEmpty(t, doc.Error.Code)
-	assert.Equal(t, "Sender", doc.Error.Type)
+	assert.Equal(t, "Response", doc.XMLName.Local)
+	assert.NotEmpty(t, doc.Code, "the SDK reads the code at Errors>Error>Code")
+	assert.NotEmpty(t, doc.Message)
+	assert.Equal(t, "SUBSTRATE", doc.RequestID)
 	assert.Equal(t, "text/xml; charset=UTF-8", resp.Header.Get("Content-Type"))
+
+	// The wrapper is what the SDK keys on, so assert it literally: a document with
+	// a singular <Error> child of <Response> satisfies every assertion above once
+	// encoding/xml's path matching is given a nested struct, but not the SDK.
+	assert.Contains(t, string(body), "<Errors>")
+	assert.NotContains(t, string(body), "<ErrorResponse>")
+}
+
+// TestEC2Error_IsNotTheQueryDocument pins the mutual exclusivity the fix rests on.
+// The "ec2" protocol reads Errors>Error>Code and the shared Query parser reads
+// Error>Code, so no single document satisfies both — which is why EC2 needed its
+// own arm rather than the Query shape being widened, and why the two arms must not
+// drift back together.
+func TestEC2Error_IsNotTheQueryDocument(t *testing.T) {
+	t.Parallel()
+
+	ec2Body, _, _ := emulator.MarshalAWSErrorForTest(
+		"InvalidInstanceID.NotFound", "not found",
+		emulator.ErrProtoEC2XMLForTest, "", http.StatusBadRequest)
+	queryBody, _, _ := emulator.MarshalAWSErrorForTest(
+		"InvalidInstanceID.NotFound", "not found",
+		emulator.ErrProtoQueryXMLForTest, "", http.StatusBadRequest)
+
+	// The Query parser's XPath, applied to the EC2 document, recovers nothing.
+	var asQuery struct {
+		Code string `xml:"Error>Code"`
+	}
+	require.NoError(t, xml.Unmarshal(ec2Body, &asQuery))
+	assert.Empty(t, asQuery.Code, "the EC2 document must not parse as a Query one")
+
+	// And symmetrically: the SDK's EC2 XPath recovers nothing from a Query document,
+	// which is exactly the bug #591 reported.
+	var asEC2 struct {
+		Code string `xml:"Errors>Error>Code"`
+	}
+	require.NoError(t, xml.Unmarshal(queryBody, &asEC2))
+	assert.Empty(t, asEC2.Code, "a Query document must not parse as an EC2 one")
+}
+
+// TestErrorProtocolFor_EC2 asserts the classification itself, so a map entry moved
+// back to the Query arm fails here and not only in a wire-shape assertion.
+func TestErrorProtocolFor_EC2(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, emulator.ErrProtoEC2XMLForTest, emulator.ErrorProtocolForTest("ec2", ""))
+	// The carve-out is EC2 alone: ec2 is the only service on that protocol, so
+	// every other XML service must keep the shape it had.
+	for _, svc := range []string{"cloudformation", "iam", "sns", "sts", "rds", "route53"} {
+		assert.Equal(t, emulator.ErrProtoQueryXMLForTest, emulator.ErrorProtocolForTest(svc, ""),
+			"%s must stay on the Query arm", svc)
+	}
+	assert.Equal(t, emulator.ErrProtoS3XMLForTest, emulator.ErrorProtocolForTest("s3", ""))
+}
+
+// TestMarshalAWSError_EC2EscapesMessage is the EC2 arm's half of the escaping
+// property: a message carrying XML metacharacters must still produce a document
+// the caller can parse.
+func TestMarshalAWSError_EC2EscapesMessage(t *testing.T) {
+	t.Parallel()
+	body, ct, headers := emulator.MarshalAWSErrorForTest(
+		"InvalidParameterValue", `a<b&c>"d"`, emulator.ErrProtoEC2XMLForTest, "",
+		http.StatusBadRequest)
+	assert.Equal(t, "text/xml; charset=UTF-8", ct)
+	assert.Empty(t, headers)
+
+	var doc struct {
+		Code    string `xml:"Errors>Error>Code"`
+		Message string `xml:"Errors>Error>Message"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
+	assert.Equal(t, "InvalidParameterValue", doc.Code)
+	assert.Equal(t, `a<b&c>"d"`, doc.Message)
+}
+
+// TestMarshalAWSError_RequestIDIsDeterministic guards the reason the request id is a
+// fixed string rather than generateRequestID(), which derives from
+// time.Now().UnixNano(): two replays of one recorded run must produce byte-identical
+// error bodies, and a caller diffing responses must not see a field that moves on its
+// own. Both XML arms that carry a request id are checked.
+func TestMarshalAWSError_RequestIDIsDeterministic(t *testing.T) {
+	t.Parallel()
+	for _, proto := range []string{emulator.ErrProtoEC2XMLForTest, emulator.ErrProtoS3XMLForTest} {
+		first, _, _ := emulator.MarshalAWSErrorForTest("Throttling", "slow down", proto, "",
+			http.StatusServiceUnavailable)
+		second, _, _ := emulator.MarshalAWSErrorForTest("Throttling", "slow down", proto, "",
+			http.StatusServiceUnavailable)
+		assert.Equal(t, string(first), string(second), "%s must be byte-stable", proto)
+		assert.Contains(t, string(first), "SUBSTRATE", "%s must carry the fixed request id", proto)
+	}
 }
 
 // TestIAMError_DropsExceptionSuffix covers the IAM half of #392: the wire error

@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+// substrateRequestID is the request id every error document carries. It is a fixed
+// string rather than generateRequestID(), which derives from time.Now().UnixNano():
+// an error body has to be byte-identical across two replays of one recorded run, and
+// a caller diffing responses must not see a field that changes on its own.
+const substrateRequestID = "SUBSTRATE"
+
 // awsErrorProtocol identifies how a service serializes an error response on the
 // wire. AWS SDKs parse errors per-protocol, and each protocol carries the error
 // code in a different place, so an emulator that picks the wrong one hands the
@@ -35,6 +41,22 @@ const (
 	// distinguishable from a genuine S3 error by the client, which is the one
 	// property a fault injector must not have (#480).
 	errProtoS3XML
+
+	// errProtoEC2XML is the "ec2" protocol's error document:
+	// <Response><Errors><Error><Code>…</Code><Message>…</Message></Error></Errors>
+	// <RequestID>…</RequestID></Response>. Two details separate it from the Query
+	// shape and both matter. The <Errors> wrapper is plural — the SDK's
+	// ec2query.ErrorComponents reads the code at the XPath "Errors>Error>Code",
+	// which finds nothing in a Query document, and the EC2 deserializer then keeps
+	// its "UnknownError" default. And the request id is spelled <RequestID> with a
+	// capital D where the Query protocol writes <RequestId>.
+	//
+	// EC2 was classified as Query until #591 because botocore tolerates both:
+	// EC2QueryParser._get_error_root falls back to the document root when <Errors>
+	// is absent, so the AWS CLI read the code correctly out of the wrong shape and
+	// every CLI-driven test passed. Only an SDK caller saw UnknownError, for
+	// injected and organic errors alike.
+	errProtoEC2XML
 )
 
 // serviceErrorProtocols maps a service name (as reported by Plugin.Name) to the
@@ -48,27 +70,35 @@ const (
 // model in botocore/data/<service>/<version>/service-2.json, which is the same
 // value that selects the SDK's error parser. Two classes read as one here:
 //
-//   - errProtoQueryXML covers the query, ec2 and rest-xml protocols. Their
-//     on-the-wire error documents differ in the root element (ErrorResponse,
-//     Response/Errors and Error respectively), but every one of their parsers
-//     recovers the code from an <ErrorResponse><Error><Code> document, so a
-//     single shape serves all three. S3 is the exception and has its own arm:
-//     its parser does not read a code out of the wrapped form at all, so an
-//     error leaving the pipeline before the plugin runs lost its code (#480).
-//     errProtoS3XML delegates to s3ErrorResponseWith, which stays the single
-//     source of truth for the byte shape.
+//   - errProtoQueryXML covers the query and rest-xml protocols, whose parsers
+//     both recover the code from an <ErrorResponse><Error><Code> document. The
+//     other two XML protocols each need their own arm, because their parsers read
+//     a different XPath and recover nothing from the wrapped form: S3's bare
+//     <Error> document (errProtoS3XML, #480, delegating to s3ErrorResponseWith so
+//     that function stays the single source of truth for those bytes) and the
+//     "ec2" protocol's plural <Response><Errors><Error> (errProtoEC2XML, #591).
+//     In both cases an error left the pipeline with a code the SDK could not
+//     read, which is the one property a fault injector must not have — and for
+//     EC2 that hit organic errors too, since every writeError call site shares
+//     this serializer.
+//
+//     Neither was caught by substrate's own coverage because botocore is lenient
+//     where the SDKs are strict: it recovers the code from the wrapped form in
+//     both cases, so the AWS CLI reported the right error while an SDK caller saw
+//     UnknownError or a bare HTTP status. A real-SDK test is the only kind that
+//     can hold these arms honest; see test/e2e.
+//
 //   - "monitoring" (CloudWatch) models as smithy-rpc-v2-cbor today, but query
 //     remains in its supported protocol list and substrate's CloudWatch plugin
 //     answers successes in query XML, so its errors match that.
 var serviceErrorProtocols = map[string]awsErrorProtocol{
-	// Query, ec2 and REST-XML.
+	// Query and REST-XML.
 	//
 	// cloudfront and route53 are REST-XML like S3 but stay here deliberately:
 	// their real error documents are <ErrorResponse>, so the Query shape is
 	// already byte-correct for them. Only S3 returns a bare <Error>.
 	"cloudformation":       errProtoQueryXML,
 	"cloudfront":           errProtoQueryXML,
-	"ec2":                  errProtoQueryXML,
 	"elasticache":          errProtoQueryXML,
 	"elasticloadbalancing": errProtoQueryXML,
 	"iam":                  errProtoQueryXML,
@@ -81,6 +111,11 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 
 	// S3's own REST-XML error document.
 	"s3": errProtoS3XML,
+
+	// The "ec2" protocol's own error document. ec2 is the only service that uses
+	// that protocol — checked against the "protocol" field of every service model
+	// in botocore — so this arm has exactly one member and is expected to keep it.
+	"ec2": errProtoEC2XML,
 
 	// JSON RPC (x-amz-json-1.0 / 1.1).
 	"acm":              errProtoJSONRPC,
@@ -161,6 +196,9 @@ func errorProtocolFor(service, contentType string) awsErrorProtocol {
 //   - S3: a bare <Error><Code>…</Code><RequestId>…</RequestId></Error> document
 //     with an XML declaration, built by the same function the S3 plugin uses so
 //     an error the pipeline raises is byte-identical to one the plugin raises.
+//   - ec2: <Response><Errors><Error><Code>…</Code></Error></Errors>
+//     <RequestID>…</RequestID></Response> — plural <Errors>, and <RequestID> with
+//     a capital D. See errProtoEC2XML for why neither detail is cosmetic.
 //   - JSON RPC: {"__type":"Code","message":"…"} — "__type" is the member
 //     botocore reads; a body carrying only "Code" leaves the SDK to fall back to
 //     the stringified HTTP status.
@@ -175,6 +213,35 @@ func marshalAWSError(e *AWSError, proto awsErrorProtocol, jsonContentType string
 	case errProtoS3XML:
 		resp := s3ErrorResponseWith(s3Error{Code: e.Code, Message: e.Message, Status: e.HTTPStatus})
 		return resp.Body, resp.Headers["Content-Type"], nil
+
+	case errProtoEC2XML:
+		payload, err := xml.Marshal(struct {
+			XMLName xml.Name `xml:"Response"`
+			Errors  struct {
+				Error struct {
+					Code    string `xml:"Code"`
+					Message string `xml:"Message"`
+				} `xml:"Error"`
+			} `xml:"Errors"`
+			RequestID string `xml:"RequestID"`
+		}{
+			Errors: struct {
+				Error struct {
+					Code    string `xml:"Code"`
+					Message string `xml:"Message"`
+				} `xml:"Error"`
+			}{
+				Error: struct {
+					Code    string `xml:"Code"`
+					Message string `xml:"Message"`
+				}{Code: e.Code, Message: e.Message},
+			},
+			RequestID: substrateRequestID,
+		})
+		if err != nil {
+			return nil, "text/xml; charset=UTF-8", nil
+		}
+		return payload, "text/xml; charset=UTF-8", nil
 
 	case errProtoJSONRPC:
 		ct := jsonContentType
