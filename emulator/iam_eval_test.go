@@ -522,3 +522,216 @@ func TestEvaluate_MatchedStatements(t *testing.T) {
 	assert.Equal(t, emulator.DecisionAllow, result.Decision)
 	assert.Contains(t, result.MatchedStatements, "AllowS3")
 }
+
+// --- Principal matching (#593) ---------------------------------------------
+
+// TestEvaluate_PrincipalMatching covers the Principal element, which the evaluator
+// accepted and ignored until #593: EvaluationRequest.Principal was populated by
+// every call site and read by none, so a role's trust policy could name one
+// account and still admit every caller.
+//
+// Every case here uses a resource-policy shape — a trust policy's, with no
+// Resource element — because that is the only shape where Principal is legal.
+// The identity-policy direction is covered by every other test in this file: they
+// pass no Principal at all and must keep matching, which is what the nil case
+// below asserts deliberately rather than incidentally.
+func TestEvaluate_PrincipalMatching(t *testing.T) {
+	const caller = "arn:aws:iam::123456789012:user/alice"
+
+	tests := []struct {
+		name      string
+		principal *emulator.PolicyPrincipal
+		// notPrincipal is set instead of principal for the exclusion cases.
+		notPrincipal *emulator.PolicyPrincipal
+		caller       string
+		want         string
+	}{
+		{
+			// The load-bearing case: an identity policy has no Principal element,
+			// and reading its absence as "matches nobody" would deny every user,
+			// role and permission-boundary evaluation in the codebase.
+			name:   "absent principal matches any caller",
+			caller: caller,
+			want:   emulator.DecisionAllow,
+		},
+		{
+			name:      "wildcard matches any caller",
+			principal: &emulator.PolicyPrincipal{All: true},
+			caller:    caller,
+			want:      emulator.DecisionAllow,
+		},
+		{
+			name:      "exact ARN matches",
+			principal: &emulator.PolicyPrincipal{AWS: []string{caller}},
+			caller:    caller,
+			want:      emulator.DecisionAllow,
+		},
+		{
+			name:      "a different user in the same account does not match",
+			principal: &emulator.PolicyPrincipal{AWS: []string{"arn:aws:iam::123456789012:user/bob"}},
+			caller:    caller,
+			want:      emulator.DecisionImplicitDeny,
+		},
+		{
+			// The form AWS's own ExternalId guide uses for a third-party trust
+			// policy: a bare account ID delegates to the whole account.
+			name:      "bare account ID matches any principal in that account",
+			principal: &emulator.PolicyPrincipal{AWS: []string{"123456789012"}},
+			caller:    caller,
+			want:      emulator.DecisionAllow,
+		},
+		{
+			name:      "root ARN matches any principal in that account",
+			principal: &emulator.PolicyPrincipal{AWS: []string{"arn:aws:iam::123456789012:root"}},
+			caller:    caller,
+			want:      emulator.DecisionAllow,
+		},
+		{
+			// #593's cross-account case: the confused-deputy scenario is a policy
+			// naming the *partner's* account, which must not admit the local caller.
+			name:      "another account does not match",
+			principal: &emulator.PolicyPrincipal{AWS: []string{"111111111111"}},
+			caller:    caller,
+			want:      emulator.DecisionImplicitDeny,
+		},
+		{
+			name:      "root ARN of another account does not match",
+			principal: &emulator.PolicyPrincipal{AWS: []string{"arn:aws:iam::111111111111:root"}},
+			caller:    caller,
+			want:      emulator.DecisionImplicitDeny,
+		},
+		{
+			name:      "an assumed-role session matches its account",
+			principal: &emulator.PolicyPrincipal{AWS: []string{"123456789012"}},
+			caller:    "arn:aws:sts::123456789012:assumed-role/worker/sess1",
+			want:      emulator.DecisionAllow,
+		},
+		{
+			// A service principal is never a caller substrate mints, so it can only
+			// be satisfied literally. It must not admit an IAM user.
+			name:      "service principal does not match an IAM user",
+			principal: &emulator.PolicyPrincipal{Service: []string{"lambda.amazonaws.com"}},
+			caller:    caller,
+			want:      emulator.DecisionImplicitDeny,
+		},
+		{
+			name:      "service principal matches itself",
+			principal: &emulator.PolicyPrincipal{Service: []string{"lambda.amazonaws.com"}},
+			caller:    "lambda.amazonaws.com",
+			want:      emulator.DecisionAllow,
+		},
+		{
+			name:      "federated principal matches itself",
+			principal: &emulator.PolicyPrincipal{Federated: []string{"cognito-identity.amazonaws.com"}},
+			caller:    "cognito-identity.amazonaws.com",
+			want:      emulator.DecisionAllow,
+		},
+		{
+			// An unauthenticated caller resolves to no ARN, so there is nothing for
+			// a named principal to be true of. Callers that must stay unenforced are
+			// skipped before evaluation, not admitted by the matcher.
+			name:      "an empty caller never matches a named principal",
+			principal: &emulator.PolicyPrincipal{AWS: []string{caller}},
+			caller:    "",
+			want:      emulator.DecisionImplicitDeny,
+		},
+		{
+			name:      "an empty caller does not match the wildcard either",
+			principal: &emulator.PolicyPrincipal{All: true},
+			caller:    "",
+			want:      emulator.DecisionImplicitDeny,
+		},
+		{
+			name:         "NotPrincipal excludes the named caller",
+			notPrincipal: &emulator.PolicyPrincipal{AWS: []string{caller}},
+			caller:       caller,
+			want:         emulator.DecisionImplicitDeny,
+		},
+		{
+			name:         "NotPrincipal admits everyone else",
+			notPrincipal: &emulator.PolicyPrincipal{AWS: []string{"arn:aws:iam::123456789012:user/bob"}},
+			caller:       caller,
+			want:         emulator.DecisionAllow,
+		},
+		{
+			name:         "NotPrincipal on an account excludes the whole account",
+			notPrincipal: &emulator.PolicyPrincipal{AWS: []string{"123456789012"}},
+			caller:       caller,
+			want:         emulator.DecisionImplicitDeny,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := emulator.PolicyDocument{
+				Version: "2012-10-17",
+				Statement: []emulator.PolicyStatement{{
+					Effect:       emulator.IAMEffectAllow,
+					Principal:    tt.principal,
+					NotPrincipal: tt.notPrincipal,
+					Action:       emulator.StringOrSlice{"sts:AssumeRole"},
+				}},
+			}
+			result := emulator.Evaluate([]emulator.PolicyDocument{doc}, emulator.EvaluationRequest{
+				Principal: tt.caller,
+				Action:    "sts:AssumeRole",
+			})
+			assert.Equal(t, tt.want, result.Decision)
+		})
+	}
+}
+
+// TestEvaluate_PrincipalNotPrincipalWinsOverPrincipal pins the reading of a
+// statement carrying both elements. IAM forbids the combination, so there is no
+// correct answer; taking the exclusion is the direction that cannot widen access,
+// and leaving it untested would make it an accident.
+func TestEvaluate_PrincipalNotPrincipalWinsOverPrincipal(t *testing.T) {
+	const caller = "arn:aws:iam::123456789012:user/alice"
+	doc := emulator.PolicyDocument{
+		Version: "2012-10-17",
+		Statement: []emulator.PolicyStatement{{
+			Effect:       emulator.IAMEffectAllow,
+			Principal:    &emulator.PolicyPrincipal{All: true},
+			NotPrincipal: &emulator.PolicyPrincipal{AWS: []string{caller}},
+			Action:       emulator.StringOrSlice{"sts:AssumeRole"},
+		}},
+	}
+	result := emulator.Evaluate([]emulator.PolicyDocument{doc}, emulator.EvaluationRequest{
+		Principal: caller,
+		Action:    "sts:AssumeRole",
+	})
+	assert.Equal(t, emulator.DecisionImplicitDeny, result.Decision)
+}
+
+// TestEvaluate_PrincipalDenyStatement checks that the principal gate applies to a
+// Deny statement too. A Deny whose Principal does not name the caller must not
+// fire — otherwise "Deny everyone else" would deny everyone.
+func TestEvaluate_PrincipalDenyStatement(t *testing.T) {
+	doc := emulator.PolicyDocument{
+		Version: "2012-10-17",
+		Statement: []emulator.PolicyStatement{
+			{
+				Effect:    emulator.IAMEffectAllow,
+				Principal: &emulator.PolicyPrincipal{All: true},
+				Action:    emulator.StringOrSlice{"sts:AssumeRole"},
+			},
+			{
+				Effect:    emulator.IAMEffectDeny,
+				Principal: &emulator.PolicyPrincipal{AWS: []string{"arn:aws:iam::123456789012:user/bob"}},
+				Action:    emulator.StringOrSlice{"sts:AssumeRole"},
+			},
+		},
+	}
+
+	alice := emulator.Evaluate([]emulator.PolicyDocument{doc}, emulator.EvaluationRequest{
+		Principal: "arn:aws:iam::123456789012:user/alice",
+		Action:    "sts:AssumeRole",
+	})
+	assert.Equal(t, emulator.DecisionAllow, alice.Decision, "the Deny names bob, so alice is still allowed")
+
+	bob := emulator.Evaluate([]emulator.PolicyDocument{doc}, emulator.EvaluationRequest{
+		Principal: "arn:aws:iam::123456789012:user/bob",
+		Action:    "sts:AssumeRole",
+	})
+	assert.Equal(t, emulator.DecisionDeny, bob.Decision)
+}

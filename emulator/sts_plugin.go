@@ -114,6 +114,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	roleARN := req.Params["RoleArn"]
 	sessionName := req.Params["RoleSessionName"]
 	durationStr := req.Params["DurationSeconds"]
+	externalID := req.Params["ExternalId"]
 
 	if roleARN == "" {
 		return nil, &AWSError{
@@ -149,6 +150,15 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+	// ExternalId's documented bounds. An absent one is legal — it is only required
+	// when a trust policy conditions on it, which the evaluation below decides.
+	if externalID != "" && (len(externalID) < 2 || len(externalID) > 1224) {
+		return nil, &AWSError{
+			Code:       "ValidationError",
+			Message:    "ExternalId must be between 2 and 1224 characters",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 
 	// Look up the role in IAM state.
 	_, roleName := parsePrincipalARN(roleARN)
@@ -176,6 +186,12 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	var role IAMRole
 	if err := json.Unmarshal(raw, &role); err != nil {
 		return nil, fmt.Errorf("unmarshal role: %w", err)
+	}
+
+	// The trust policy decides *before* a credential exists. Minting first and
+	// checking after would leave a usable session in state behind a 403.
+	if err := p.checkTrustPolicy(ctx, role, roleARN, externalID); err != nil {
+		return nil, err
 	}
 
 	now := p.now()
@@ -240,6 +256,79 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 
 	return stsXMLResponse(http.StatusOK, resp)
+}
+
+// checkTrustPolicy evaluates a role's trust policy against the caller, returning
+// an *AWSError when the policy refuses them and nil when it admits them or is not
+// enforced.
+//
+// A trust policy is a *resource* policy: it answers "who may become this role",
+// which is a different question from the permissions policy [AuthController.CheckAccess]
+// already evaluates ("what may the role do"). Both gates apply to AssumeRole, and
+// this is the second one — a caller must be allowed to call sts:AssumeRole *and*
+// be admitted by the role they name. Without this, sts:ExternalId — the
+// confused-deputy defense, whose whole purpose is refusing a caller who cannot
+// present a shared secret — did nothing at all (#593).
+//
+// Enforcement is opt-in by writing a trust policy, mirroring the rule authz
+// already follows for principals: a role with no statements is "not configured"
+// rather than "trusts nobody". Real IAM requires a trust policy at CreateRole and
+// would read an empty document as an implicit deny, but substrate permits creating
+// a role without one, so denying here would refuse roles that cannot exist on AWS
+// and would break every caller who never wrote a policy. A nil principal is
+// skipped for the same reason CheckAccess skips one: an unauthenticated request
+// resolves to no ARN, so there is nothing for a Principal element to be true of.
+func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN, externalID string) error {
+	if len(role.AssumeRolePolicyDocument.Statement) == 0 {
+		p.logger.Debug("sts: role has no trust policy, not enforced", "role", roleARN)
+		return nil
+	}
+	if ctx.Principal == nil {
+		p.logger.Debug("sts: unauthenticated caller, trust policy not enforced", "role", roleARN)
+		return nil
+	}
+
+	// A condition key absent from the context is not the same as one set to "":
+	// conditionMatches reads a missing key as the empty string, so a policy
+	// requiring StringEquals sts:ExternalId correctly fails when none was sent.
+	condCtx := make(map[string]string, 1)
+	if externalID != "" {
+		condCtx["sts:ExternalId"] = externalID
+	}
+
+	// Resource is empty because a trust policy carries no Resource element — the
+	// role it is attached to *is* the resource. resourceMatches treats an empty
+	// resource as a match, so a statement stands or falls on its principal,
+	// action and conditions.
+	result := Evaluate([]PolicyDocument{role.AssumeRolePolicyDocument}, EvaluationRequest{
+		Principal: ctx.Principal.ARN,
+		Action:    "sts:AssumeRole",
+		Resource:  "",
+		Context:   condCtx,
+	})
+	if result.Decision == DecisionAllow {
+		return nil
+	}
+
+	// AWS reports both refusals under the same code and distinguishes them only in
+	// the message, which is the distinction substrate's two deny decisions already
+	// draw. The code is AccessDenied — observed from the API, which documents no
+	// access-denied error for AssumeRole at all.
+	msg := fmt.Sprintf(
+		"User: %s is not authorized to perform: sts:AssumeRole because no role trust policy allows the sts:AssumeRole action",
+		ctx.Principal.ARN)
+	if result.Decision == DecisionDeny {
+		msg = fmt.Sprintf(
+			"User: %s is not authorized to perform: sts:AssumeRole with an explicit deny in the role trust policy",
+			ctx.Principal.ARN)
+	}
+	p.logger.Debug("sts: trust policy denied AssumeRole",
+		"role", roleARN, "principal", ctx.Principal.ARN, "decision", result.Decision)
+	return &AWSError{
+		Code:       "AccessDenied",
+		Message:    msg,
+		HTTPStatus: http.StatusForbidden,
+	}
 }
 
 func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

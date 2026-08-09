@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`AssumeRole` evaluates the role's trust policy, so `sts:ExternalId` is enforced**
+  (#593). `AssumeRole` loaded the role only to read its `RoleID` for the
+  `AssumedRoleUser` ARN and never read `AssumeRolePolicyDocument` at all, so a trust
+  policy was inert: a caller presenting no `ExternalId`, a wrong one, a policy naming a
+  different account, and an outright `{"Effect":"Deny","Principal":"*"}` all minted
+  working `ASIA` credentials. The consequence was that the confused-deputy defense — the
+  entire purpose of `sts:ExternalId` — could not be tested. A consumer's "a caller
+  without the secret cannot assume this role" test passed while verifying nothing, and
+  passed identically with the trust policy deleted.
+
+  Two gates now apply to `AssumeRole`, answering different questions: the caller's own
+  policies must allow `sts:AssumeRole` (already the case, #411), and the role's trust
+  policy must admit the caller. A refusal is `AccessDenied` (403), with AWS's two
+  messages distinguishing no matching statement ("because no role trust policy allows
+  the sts:AssumeRole action") from an explicit `Deny` ("with an explicit deny in the role
+  trust policy"). `ExternalId` is parsed for the first time and validated at 2–1224
+  characters.
+
+  **The evaluator had to learn about principals to do this.** `Evaluate` accepted an
+  `EvaluationRequest.Principal` that every call site populated and nothing read, and no
+  principal matcher existed anywhere — a trust policy naming one account admitted every
+  caller because the `Principal` element was never consulted. `Principal`/`NotPrincipal`
+  are now matched, covering `"*"`, an exact ARN, and the account-delegating forms (a bare
+  account ID and an `…:root` ARN, which IAM treats as equivalent). A statement carrying
+  *neither* element still matches every caller: that is what an identity policy looks
+  like, so reading its absence as "matches nobody" would have denied every user, role and
+  permission-boundary evaluation in the codebase.
+
+  **Writing a trust policy is the opt-in.** A role created without one — which substrate
+  permits, though AWS's `CreateRole` does not — is unenforced rather than denied, so a
+  test that never wrote a trust policy is unaffected. Enforcement is likewise skipped for
+  an unauthenticated caller, who resolves to no principal for a `Principal` element to be
+  true of; this mirrors the rule `CheckAccess` already followed. Anyone whose role *does*
+  carry a trust policy that does not admit the caller will see a call that previously
+  succeeded now fail — which is the fix, and the escape hatch is above.
+
 - **An EC2 error reaches an AWS SDK caller with the code substrate sent** (#591). EC2 is
   the only service on the `ec2` protocol, whose error document wraps the error in a
   **plural** `<Errors>` element and spells the request id `<RequestID>` with a capital D.
