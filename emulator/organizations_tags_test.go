@@ -698,6 +698,115 @@ func TestOrganizations_TagResource_MaxTagLimit(t *testing.T) {
 	}
 }
 
+// TestOrganizations_CreateOperationsShareTagValidation asserts the three
+// operations that accept inline Tags — CreateOrganizationalUnit, CreatePolicy and
+// CreateAccount — refuse exactly what TagResource refuses. A create that is more
+// permissive than TagResource lets a caller plant a tag it could never set
+// afterwards, and an "aws:"-prefixed one is the case that matters: it would then
+// be readable as aws:ResourceTag by a policy condition, so a tag-gated boundary
+// could be crossed by a key AWS reserves for itself and never lets a caller write.
+// The refusal has to be synchronous even for CreateAccount, whose success is
+// asynchronous — the request is malformed, so there is nothing to vend.
+func TestOrganizations_CreateOperationsShareTagValidation(t *testing.T) {
+	// Each entry names a create and a body builder taking the tag list, so the same
+	// refusal table runs against all three without a per-operation copy of it.
+	creates := []struct {
+		op   string
+		body func(root string, tags []map[string]any) map[string]any
+	}{
+		{
+			op: "CreateOrganizationalUnit",
+			body: func(root string, tags []map[string]any) map[string]any {
+				return map[string]any{"ParentId": root, "Name": "Rejected", "Tags": tags}
+			},
+		},
+		{
+			op: "CreatePolicy",
+			body: func(_ string, tags []map[string]any) map[string]any {
+				return map[string]any{
+					"Name": "rejected", "Description": "d", "Type": emulator.OrgPolicyTypeSCPForTest,
+					"Content": orgPolicyDoc, "Tags": tags,
+				}
+			},
+		},
+		{
+			op: "CreateAccount",
+			body: func(_ string, tags []map[string]any) map[string]any {
+				return map[string]any{"AccountName": "rejected", "Email": "rejected@example.com", "Tags": tags}
+			},
+		},
+	}
+	refusals := []struct {
+		name   string
+		tags   []map[string]any
+		code   string
+		reason string
+	}{
+		{
+			"a system tag key", []map[string]any{orgTag("aws:cloudformation:stack-name", "x")},
+			"InvalidInputException", "INVALID_SYSTEM_TAGS_PARAMETER",
+		},
+		{
+			"a duplicate tag key", []map[string]any{orgTag("Owner", "a"), orgTag("Owner", "b")},
+			"InvalidInputException", "DUPLICATE_TAG_KEY",
+		},
+		{"an empty tag key", []map[string]any{orgTag("", "a")}, "InvalidInputException", "MIN_LENGTH_EXCEEDED"},
+		{
+			"a key past the length limit", []map[string]any{orgTag(strings.Repeat("k", 129), "a")},
+			"InvalidInputException", "MAX_LENGTH_EXCEEDED",
+		},
+		{
+			"a key outside the allowed pattern", []map[string]any{orgTag("Own%er", "a")},
+			"InvalidInputException", "INVALID_PATTERN",
+		},
+		{
+			"a value past the length limit", []map[string]any{orgTag("Owner", strings.Repeat("v", 257))},
+			"InvalidInputException", "MAX_LENGTH_EXCEEDED",
+		},
+	}
+
+	for _, c := range creates {
+		t.Run(c.op, func(t *testing.T) {
+			for _, r := range refusals {
+				t.Run(r.name, func(t *testing.T) {
+					// A fresh fixture per case, so a refusal that wrongly created something
+					// cannot be mistaken for a name collision with an earlier subtest.
+					f := newOrgTagsFixture(t)
+					status, code := orgTagCall(t, f.ts, c.op, c.body(f.root, r.tags))
+					if status != http.StatusBadRequest ||
+						!strings.Contains(code, r.code) || !strings.Contains(code, r.reason) {
+						t.Fatalf("expected %s/%s, got %d (%s)", r.code, r.reason, status, code)
+					}
+				})
+			}
+
+			t.Run("more tags than the quota allows", func(t *testing.T) {
+				f := newOrgTagsFixture(t)
+				tags := make([]map[string]any, 0, emulator.OrgMaxTagsPerResourceForTest+1)
+				for i := range emulator.OrgMaxTagsPerResourceForTest + 1 {
+					tags = append(tags, orgTag(fmt.Sprintf("Key%02d", i), "v"))
+				}
+				status, code := orgTagCall(t, f.ts, c.op, c.body(f.root, tags))
+				if status != http.StatusBadRequest ||
+					!strings.Contains(code, "ConstraintViolationException") ||
+					!strings.Contains(code, "MAX_TAG_LIMIT_EXCEEDED") {
+					t.Errorf("expected ConstraintViolationException/MAX_TAG_LIMIT_EXCEEDED, got %d (%s)", status, code)
+				}
+			})
+
+			// The same tag list TagResource accepts has to be accepted here, or the
+			// shared validation would be refusing more than it should.
+			t.Run("a legal tag is accepted", func(t *testing.T) {
+				f := newOrgTagsFixture(t)
+				status, code := orgTagCall(t, f.ts, c.op, c.body(f.root, []map[string]any{orgTag("Owner", "platform")}))
+				if status != http.StatusOK {
+					t.Errorf("expected 200, got %d (%s)", status, code)
+				}
+			})
+		})
+	}
+}
+
 // TestOrganizations_Tagging_FullAWSAccessIsImmutable asserts the AWS-managed SCP
 // cannot be tagged. Its ARN is owned by the "aws" account, not by the
 // organization, so a tag stored against it would be visible in one organization

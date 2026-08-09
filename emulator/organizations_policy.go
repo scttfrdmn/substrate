@@ -121,13 +121,21 @@ func (p *OrganizationsPlugin) loadVisiblePolicy(ctx context.Context, acct, polic
 func (p *OrganizationsPlugin) createPolicy(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
-		Content     string   `json:"Content"`
-		Description *string  `json:"Description"`
-		Name        string   `json:"Name"`
-		Type        string   `json:"Type"`
-		Tags        []OrgTag `json:"Tags"`
+		Content     string        `json:"Content"`
+		Description *string       `json:"Description"`
+		Name        string        `json:"Name"`
+		Type        string        `json:"Type"`
+		Tags        []orgTagInput `json:"Tags"`
 	}
 	if err := orgUnmarshal(req.Body, &input); err != nil {
+		return nil, err
+	}
+	// Tags go through the same validation TagResource applies, before anything is
+	// written: a key that operation refuses must not be plantable through a create,
+	// and a half-created policy would make the caller's retry collide with a
+	// DuplicatePolicyException for a policy it does not believe it created.
+	tags, err := validateOrgCreateTags(input.Tags)
+	if err != nil {
 		return nil, err
 	}
 
@@ -215,10 +223,9 @@ func (p *OrganizationsPlugin) createPolicy(reqCtx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("createPolicy save: %w", err)
 	}
 	// Tags supplied at creation are stored so ListTagsForResource can read them
-	// back; their validation and their part in the authorization decision belong to
-	// the tagging operations.
-	if len(input.Tags) > 0 {
-		if err := p.saveTags(goCtx, policyID, input.Tags); err != nil {
+	// back, and so a policy condition on aws:ResourceTag sees them.
+	if len(tags) > 0 {
+		if err := p.saveTags(goCtx, policyID, tags); err != nil {
 			return nil, fmt.Errorf("createPolicy save tags: %w", err)
 		}
 	}

@@ -59,6 +59,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the beginning — a paginating caller that restarts sees duplicates instead of an
   error, which is the harder failure to notice.
 
+- **Organizations resource tagging, and the condition keys that read those tags**
+  (#578). `TagResource`, `UntagResource` and `ListTagsForResource` work on all four
+  taggable kinds — the root, an OU, an account and a policy — and the tags they
+  write now reach the authorization decision: `aws:ResourceTag/*` resolves against
+  the tagged entity and `aws:RequestTag/*` against a request's inline `Tags`, so a
+  tag-gated privilege boundary (`CreatePolicy` only when `aws:RequestTag/Owner`
+  matches, `UpdatePolicy` only when `aws:ResourceTag/Owner` does) is actually
+  enforceable rather than silently open. An Organizations resource ARN is now built
+  from state instead of falling through to `"*"`, since the ARN embeds the
+  organization ID.
+
+  The tag shapes are refused exactly where AWS refuses them: an unknown resource is
+  `TargetNotFoundException`, a malformed ID is
+  `InvalidInputException`/`INVALID_PATTERN`, a repeated key in one request is
+  `DUPLICATE_TAG_KEY`, the 51st key on a resource is
+  `ConstraintViolationException`/`MAX_TAG_LIMIT_EXCEEDED`, and an `aws:`-prefixed
+  key is `INVALID_SYSTEM_TAGS_PARAMETER`. The same validation gates the inline
+  `Tags` of `CreateOrganizationalUnit`, `CreatePolicy` and `CreateAccount`, so a key
+  `TagResource` refuses cannot be planted through a create instead — an
+  `aws:`-prefixed one would otherwise be readable as `aws:ResourceTag` by a policy
+  condition, letting a boundary be crossed with a key AWS never lets a caller write.
+  An invalid tag fails the whole create and leaves nothing behind, so a retry does
+  not collide with a duplicate-name refusal for a resource the caller does not
+  believe it created. `CreateAccount`'s refusal is synchronous even though its
+  success is not: the request is malformed, so there is nothing to vend.
+
+  Tags go with the resource they are on: deleting an OU or a policy deletes its
+  tags, so a later entity that reused the ID cannot inherit them and answer a
+  tag-gated decision with someone else's tag set. `p-FullAWSAccess` cannot be
+  tagged — its ARN is owned by `aws`, not by the organization — though reading its
+  tags answers empty rather than failing. A store fault on a tag read is a 500, not
+  an empty tag set: answering "no tags" would fail open on every tag-gated policy.
+
 ## [v0.96.0] - 2026-08-08
 
 ### Added
