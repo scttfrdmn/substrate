@@ -17,14 +17,18 @@ import (
 // orgCreateStatus is the CreateAccountStatus shape, named exactly as the model
 // spells its members so a rename in the plugin fails the decode rather than
 // silently reading back a zero value.
+// The timestamps decode as numbers, not strings: the JSON 1.1 protocol carries a
+// timestamp as epoch seconds, and aws-sdk-go-v2 fails the whole response on an
+// RFC3339 string. Decoding them as float64 here is what makes this test able to
+// catch that — a string field would accept the wire form the SDK rejects.
 type orgCreateStatus struct {
-	ID                 string  `json:"Id"`
-	AccountName        string  `json:"AccountName"`
-	State              string  `json:"State"`
-	RequestedTimestamp string  `json:"RequestedTimestamp"`
-	CompletedTimestamp *string `json:"CompletedTimestamp"`
-	AccountID          string  `json:"AccountId"`
-	FailureReason      string  `json:"FailureReason"`
+	ID                 string   `json:"Id"`
+	AccountName        string   `json:"AccountName"`
+	State              string   `json:"State"`
+	RequestedTimestamp *float64 `json:"RequestedTimestamp"`
+	CompletedTimestamp *float64 `json:"CompletedTimestamp"`
+	AccountID          string   `json:"AccountId"`
+	FailureReason      string   `json:"FailureReason"`
 }
 
 // orgCreateAccount posts CreateAccount and returns the status and the HTTP code.
@@ -342,8 +346,8 @@ func TestOrganizations_CreateAccountIsAsynchronous(t *testing.T) {
 	if status.AccountName != "dev-account" {
 		t.Errorf("expected AccountName=dev-account, got %q", status.AccountName)
 	}
-	if status.RequestedTimestamp == "" {
-		t.Error("expected a RequestedTimestamp on the in-progress request")
+	if status.RequestedTimestamp == nil || *status.RequestedTimestamp <= 0 {
+		t.Errorf("expected a RequestedTimestamp in epoch seconds, got %v", status.RequestedTimestamp)
 	}
 	// The model's CreateAccountRequestId pattern is ^car-[a-z0-9]{8,32}$.
 	if !orgMatchesCreateRequestID(status.ID) {

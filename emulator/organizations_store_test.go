@@ -267,8 +267,10 @@ func TestOrganizations_CreateAccountStatusStore(t *testing.T) {
 		t.Fatalf("expected no requests in a fresh organization, got %v", ids)
 	}
 
-	requested := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	completed := requested.Add(time.Minute)
+	// EpochSeconds, because that is what the wire form of a JSON 1.1 timestamp
+	// requires; the store round-trips whatever the API shape carries.
+	requested := emulator.EpochSeconds(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	completed := emulator.EpochSeconds(requested.Time().Add(time.Minute))
 	for _, st := range []emulator.OrgCreateAccountStatus{
 		{ID: "car-bbbbbbbb", AccountName: "prod", State: "IN_PROGRESS", RequestedTimestamp: requested},
 		{
@@ -299,7 +301,7 @@ func TestOrganizations_CreateAccountStatusStore(t *testing.T) {
 	if failed.State != "FAILED" || failed.FailureReason != "EMAIL_ALREADY_EXISTS" || failed.AccountID != "" {
 		t.Errorf("expected a FAILED status carrying no AccountId, got %+v", failed)
 	}
-	if failed.CompletedTimestamp == nil || !failed.CompletedTimestamp.Equal(completed) {
+	if failed.CompletedTimestamp == nil || !failed.CompletedTimestamp.Time().Equal(completed.Time()) {
 		t.Errorf("expected the completion timestamp preserved, got %v", failed.CompletedTimestamp)
 	}
 

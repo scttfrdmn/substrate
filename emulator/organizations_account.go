@@ -143,7 +143,7 @@ func (p *OrganizationsPlugin) createAccount(reqCtx *RequestContext, req *AWSRequ
 		ID:                 "car-" + randomLowerAlphanum(8),
 		AccountName:        input.AccountName,
 		State:              orgCreateStateInProgress,
-		RequestedTimestamp: p.tc.Now(),
+		RequestedTimestamp: EpochSeconds(p.tc.Now()),
 	}
 	if err := p.orgPutJSON(goCtx, orgCreatePendingKey(status.ID), outcome); err != nil {
 		return nil, fmt.Errorf("createAccount save outcome: %w", err)
@@ -174,7 +174,7 @@ func (p *OrganizationsPlugin) vendAccount(ctx context.Context, masterAcct, orgID
 		Email:        email,
 		Status:       "ACTIVE",
 		JoinedMethod: "CREATED",
-		JoinedAt:     p.tc.Now(),
+		JoinedAt:     EpochSeconds(p.tc.Now()),
 	}
 	if err := p.saveAccount(ctx, masterAcct, a); err != nil {
 		return fmt.Errorf("createAccount save account: %w", err)
@@ -347,7 +347,7 @@ func (p *OrganizationsPlugin) resolveCreateAccountStatus(ctx context.Context, ac
 		return fmt.Errorf("organizations: create-account request %s has no recorded outcome", st.ID)
 	}
 
-	completed := p.tc.Now()
+	completed := EpochSeconds(p.tc.Now())
 	st.CompletedTimestamp = &completed
 	if pending.FailureReason != "" {
 		st.State = orgCreateStateFailed

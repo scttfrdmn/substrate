@@ -368,7 +368,7 @@ func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct strin
 		Email:        "master@example.com",
 		Status:       "ACTIVE",
 		JoinedMethod: "INVITED",
-		JoinedAt:     p.tc.Now(),
+		JoinedAt:     EpochSeconds(p.tc.Now()),
 	}
 	if err := p.saveAccount(ctx, acct, masterAccount); err != nil {
 		return nil, err

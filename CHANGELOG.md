@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the model's `InvalidInputExceptionReason` enum is carried in the message,
   since the JSON-RPC error document has nowhere else to put it.
 
+- **Organizations calls reach the plugin at all** (#610). Every `aws-sdk-go-v2`
+  and `boto3` Organizations call fell through to
+  `ServiceNotAvailable: service not emulated: awsorganizationsv20161128`, while
+  the plugin sat registered and fully unit-tested behind it — the unit tests build
+  an `AWSRequest` directly and so never exercised the routing. The SDKs send
+  `X-Amz-Target: AWSOrganizationsV20161128.{Op}`, and that prefix reduces through
+  neither of `extractServiceFromTarget`'s rules: there is no leading `Amazon` to
+  strip, and the version rides inside the prefix rather than after an underscore,
+  so nothing shortened it. An explicit alias now maps it, and the new parser test
+  goes through `ParseAWSRequest` rather than around it. Same class of bug as #561.
+
+- **Organizations timestamps are JSON numbers, as the wire protocol requires.**
+  `JoinedTimestamp`, `RequestedTimestamp` and `CompletedTimestamp` were RFC3339
+  strings. The JSON 1.1 protocol carries a timestamp as epoch seconds, and
+  aws-sdk-go-v2 calls `ParseEpochSeconds` on the member: a string failed the whole
+  response, so `ListAccounts`, `CreateAccount` and `DescribeCreateAccountStatus`
+  raised `deserialization failed` at every SDK caller — the operations were correct
+  and unreachable. Found by the new SDK-level journey; the unit tests decoded the
+  timestamps as strings and so asserted the broken form. They now assert the
+  number.
+
 ### Added
 - **The Organizations plugin's shared storage layer, and two control-plane seed
   endpoints** (#578, foundation). The plugin now persists the hierarchy (each
@@ -58,6 +79,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidInputException`/`INVALID_NEXT_TOKEN` rather than a silent restart from
   the beginning — a paginating caller that restarts sees duplicates instead of an
   error, which is the harder failure to notice.
+
+- **The Organizations organizational-unit tree** (#578).
+  `CreateOrganizationalUnit`, `DescribeOrganizationalUnit`,
+  `UpdateOrganizationalUnit`, `DeleteOrganizationalUnit`,
+  `ListOrganizationalUnitsForParent`, `ListChildren`, `ListParents` and
+  `ListAccountsForParent`, so an organization can be *built* rather than only read.
+  An OU ID is `ou-{root suffix}-{8}`, and the middle segment is the containing
+  root's suffix whatever the immediate parent is — nesting does not extend the ID.
+  `UpdateOrganizationalUnit` renames in place: the ID, ARN, children and attached
+  policies all survive, so a caller holding any of them keeps a valid handle.
+
+  The refusals are what a landing-zone tool's re-run actually hits: a name already
+  used among a parent's children is `DuplicateOrganizationalUnitException` (scoped
+  to the parent, so "Sandbox" under two business units is legal), a sixth nesting
+  level is `OU_DEPTH_LIMIT_EXCEEDED`, and an OU still holding anything is
+  `OrganizationalUnitNotEmptyException` rather than a delete that orphans its
+  children. Deleting an OU deletes its tags with it.
+
+  `OrganizationalUnit` carries no `Path` member — the API model does not declare
+  one, though the reference's prose mentions a path — so substrate does not invent
+  it. A caller needing the path walks `ListParents`.
+
+- **Asynchronous Organizations account vending** (#578). `CreateAccount` now
+  returns HTTP 200 with `State: IN_PROGRESS` and a `car-` request ID, as AWS does,
+  and `DescribeCreateAccountStatus`/`ListCreateAccountStatus`/`MoveAccount` are
+  implemented. A synchronous `SUCCEEDED` let a consumer with no poll loop pass its
+  tests — and the poll loop is the part that has to survive an interruption.
+
+  The status resolves on the **first** `DescribeCreateAccountStatus`, so a waiter
+  converges in one observation with no wall-clock dependence, and the terminal
+  status never moves afterwards: a re-minted `AccountId` or a fresh
+  `CompletedTimestamp` would make a waiter comparing successive polls loop forever.
+  This is advance-on-observation rather than clock-driven deliberately — #514 is the
+  open design issue for transitions over the simulated clock, and choosing a shape
+  here would front-run it. `ListAccounts` reports the account while its request is
+  still `IN_PROGRESS`, matching AWS.
+
+  New accounts land in the **root**; `MoveAccount` is the only way into an OU, which
+  is where policies attach, so a tool that assumes otherwise leaves accounts
+  ungoverned. A move to the account's current parent is `DuplicateAccountException`,
+  not a no-op — that is what makes a vending run re-runnable: the second pass fails
+  loudly and distinguishably instead of appearing to succeed while doing nothing.
+  The destination is validated before the source on purpose, so a re-run hears
+  "already present in the destination" rather than "your source does not exist".
+
+- **The Organizations service control policy lifecycle** (#578). `CreatePolicy`,
+  `UpdatePolicy`, `DeletePolicy`, `DescribePolicy`, `ListPolicies`, `AttachPolicy`,
+  `DetachPolicy`, `ListPoliciesForTarget`, `ListTargetsForPolicy`,
+  `EnablePolicyType` and `DisablePolicyType`.
+
+  `DisablePolicyType` detaches every SCP from every entity in the root, and
+  `EnablePolicyType` restores only `p-FullAWSAccess` — attachments from before the
+  disable are lost, per the User Guide. That round trip is the state #578's point 6
+  is about, and it is only reachable because `DisablePolicyType` exists: AWS creates
+  an all-features organization with SCPs already enabled. The state is dangerous
+  precisely because it does not look like a failure — `CreatePolicy` **succeeds**
+  and only `AttachPolicy` is refused, with `PolicyTypeNotEnabledException`.
+
+  That is distinct from SCPs not being *available*, which is what a
+  `CONSOLIDATED_BILLING` organization has. Availability is modeled as visibility:
+  while SCPs are unavailable no policy is visible, so each operation answers with
+  its own documented not-found code, and only `CreatePolicy` and `EnablePolicyType`
+  name the feature set as the reason
+  (`PolicyTypeNotAvailableForOrganizationException`) — they are the two operations
+  whose model error list declares it, and emitting it elsewhere would hand a caller
+  an exception its SDK cannot catch by type.
+
+  Quotas are enforced with the User Guide's values, not the frequently misquoted
+  ones: **10** SCPs per root/OU/account and **10,240** characters per policy (5 and
+  5,120 are the *RCP* numbers), 10,000 policies per organization. The minimum of one
+  SCP per target is enforced too, so the last policy on a target cannot be detached
+  — which is what makes `p-FullAWSAccess` load-bearing rather than decorative.
+  `p-FullAWSAccess` itself is `IMMUTABLE_POLICY` on any modification, an attached
+  policy is `PolicyInUseException` on delete, and detaching something not attached
+  is `PolicyNotAttachedException`.
 
 - **Organizations resource tagging, and the condition keys that read those tags**
   (#578). `TagResource`, `UntagResource` and `ListTagsForResource` work on all four

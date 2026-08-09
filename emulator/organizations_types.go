@@ -1,7 +1,5 @@
 package emulator
 
-import "time"
-
 // organizationsNamespace is the service name used by OrganizationsPlugin.
 const organizationsNamespace = "organizations"
 
@@ -56,8 +54,12 @@ type OrgAccount struct {
 	// values, and the management account is not created by Organizations.
 	JoinedMethod string `json:"JoinedMethod"`
 
-	// JoinedAt is the time the account joined the organization.
-	JoinedAt time.Time `json:"JoinedTimestamp"`
+	// JoinedAt is the time the account joined the organization. It is an
+	// EpochSeconds rather than a time.Time because the JSON 1.1 protocol carries a
+	// timestamp as a JSON number: aws-sdk-go-v2's decoder calls ParseEpochSeconds
+	// on the member and fails the whole response on an RFC3339 string, so an
+	// SDK caller would get a deserialization error instead of an account.
+	JoinedAt EpochSeconds `json:"JoinedTimestamp"`
 }
 
 // OrgRoot is the root container of the organization hierarchy.
@@ -175,11 +177,14 @@ type OrgCreateAccountStatus struct {
 	State string `json:"State"`
 
 	// RequestedTimestamp is when CreateAccount was called, on the simulated clock.
-	RequestedTimestamp time.Time `json:"RequestedTimestamp"`
+	// EpochSeconds for the same reason Account.JoinedAt is: the JSON 1.1 wire form
+	// of a timestamp is a number, and the SDK refuses a string.
+	RequestedTimestamp EpochSeconds `json:"RequestedTimestamp"`
 
-	// CompletedTimestamp is when the request reached a terminal state; the zero
-	// value while IN_PROGRESS.
-	CompletedTimestamp *time.Time `json:"CompletedTimestamp,omitempty"`
+	// CompletedTimestamp is when the request reached a terminal state, and is
+	// omitted entirely while IN_PROGRESS — a waiter reads State, and a completion
+	// time on a request that has not completed would contradict it.
+	CompletedTimestamp *EpochSeconds `json:"CompletedTimestamp,omitempty"`
 
 	// AccountID is the created account, set only when State is SUCCEEDED.
 	AccountID string `json:"AccountId,omitempty"`
