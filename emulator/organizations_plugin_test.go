@@ -163,6 +163,10 @@ func TestOrganizations_CreateAccount_DescribeAccount(t *testing.T) {
 	}
 }
 
+// TestOrganizations_DescribeAccount_NotFound pins the status at 400. Every
+// Organizations exception is 400 — the API model declares no 404 for any of
+// them, AccountNotFoundException included — so the 404 this returned before
+// v0.97.0 was a response a caller could not reproduce against AWS.
 func TestOrganizations_DescribeAccount_NotFound(t *testing.T) {
 	ts := newOrganizationsTestServer(t)
 
@@ -170,8 +174,15 @@ func TestOrganizations_DescribeAccount_NotFound(t *testing.T) {
 		"AccountId": "999999999999",
 	})
 	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	var out map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if code, _ := out["__type"].(string); code != "AccountNotFoundException" {
+		t.Errorf("expected __type=AccountNotFoundException, got %q", code)
 	}
 }
 
