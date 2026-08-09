@@ -1259,13 +1259,14 @@ func TestCFNPlugin_DescribeStackResources(t *testing.T) {
 	})
 }
 
-// TestCFNPlugin_DescribeStackEvents pins the scope decision deliberately rather
-// than leaving it incidental.
+// TestCFNPlugin_DescribeStackEvents asserts the operation answers on the wire.
 //
-// CFNStackState carries one Status string; there is no per-resource event model,
-// so a plausible CREATE_IN_PROGRESS/CREATE_COMPLETE sequence would be invented
-// observations. A caller gets a refusal they can see instead. If someone later
-// adds a real event model, this test is the one that must be changed knowingly.
+// It used to assert the opposite. Until #501 this pinned a deliberate refusal —
+// UnsupportedOperation, on the grounds that substrate had no per-resource event
+// model and a synthesized CREATE_IN_PROGRESS/CREATE_COMPLETE pair would be
+// invented observations. The events are now derived from the stack record, which
+// invents nothing, so the refusal is gone and this is the knowing change the old
+// test asked for.
 func TestCFNPlugin_DescribeStackEvents(t *testing.T) {
 	ts := newCFNTestServer(t)
 	code, body := cfnAction(t, ts, "CreateStack", map[string]string{
@@ -1275,8 +1276,93 @@ func TestCFNPlugin_DescribeStackEvents(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
 	code, body = cfnAction(t, ts, "DescribeStackEvents", map[string]string{"StackName": "eventful"})
-	assert.Equal(t, http.StatusBadRequest, code)
-	assert.Equal(t, "UnsupportedOperation", cfnErrorCode(t, body))
+	require.Equal(t, http.StatusOK, code, "body was %s", body)
+
+	events := cfnStackEvents(t, body)
+	// An empty template still brackets itself: the deploy started and finished,
+	// both recorded on the stack. Newest first, as the API documents.
+	require.Len(t, events, 2, "body was %s", body)
+	assert.Equal(t, "CREATE_COMPLETE", events[0].ResourceStatus)
+	assert.Equal(t, "CREATE_IN_PROGRESS", events[1].ResourceStatus)
+	assert.Equal(t, "eventful", events[0].StackName)
+	assert.Equal(t, "AWS::CloudFormation::Stack", events[0].ResourceType)
+	assert.NotEmpty(t, events[0].EventID, "EventId is a required member")
+	assert.Empty(t, cfnNextToken(t, body), "two events do not fill a page")
+
+	t.Run("the stack ID is accepted in place of the name", func(t *testing.T) {
+		// Every stack-scoped operation documents both forms, and DescribeStackEvents
+		// spells the ARN out as the way to address a deleted stack.
+		_, describeBody := cfnAction(t, ts, "DescribeStacks", map[string]string{"StackName": "eventful"})
+		stackID := cfnStackIDOf(t, describeBody)
+		require.NotEmpty(t, stackID)
+
+		code, byIDBody := cfnAction(t, ts, "DescribeStackEvents", map[string]string{"StackName": stackID})
+		require.Equal(t, http.StatusOK, code, "body was %s", byIDBody)
+		assert.Len(t, cfnStackEvents(t, byIDBody), 2)
+	})
+
+	t.Run("an unknown stack is a ValidationError", func(t *testing.T) {
+		// The same answer DescribeStacks gives, which is also the answer for a stack
+		// deleted successfully: the record is gone, and the events were derived from
+		// it.
+		code, notFoundBody := cfnAction(t, ts, "DescribeStackEvents", map[string]string{"StackName": "nope"})
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Equal(t, "ValidationError", cfnErrorCode(t, notFoundBody))
+	})
+
+	t.Run("no StackName is a MissingParameter", func(t *testing.T) {
+		// StackName is the operation's only required parameter.
+		code, missingBody := cfnAction(t, ts, "DescribeStackEvents", nil)
+		assert.Equal(t, http.StatusBadRequest, code)
+		assert.Equal(t, "MissingParameter", cfnErrorCode(t, missingBody))
+	})
+}
+
+// cfnEventMember is the subset of a StackEvent the wire tests assert over.
+type cfnEventMember struct {
+	EventID              string `xml:"EventId"`
+	StackID              string `xml:"StackId"`
+	StackName            string `xml:"StackName"`
+	LogicalResourceID    string `xml:"LogicalResourceId"`
+	PhysicalResourceID   string `xml:"PhysicalResourceId"`
+	ResourceType         string `xml:"ResourceType"`
+	Timestamp            string `xml:"Timestamp"`
+	ResourceStatus       string `xml:"ResourceStatus"`
+	ResourceStatusReason string `xml:"ResourceStatusReason"`
+}
+
+// cfnStackEvents parses a DescribeStackEvents body's members, in order.
+func cfnStackEvents(t *testing.T, body string) []cfnEventMember {
+	t.Helper()
+	var parsed struct {
+		Events []cfnEventMember `xml:"DescribeStackEventsResult>StackEvents>member"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &parsed), "body was %s", body)
+	return parsed.Events
+}
+
+// cfnNextToken reads a DescribeStackEvents body's pagination token, empty when the
+// page was the last.
+func cfnNextToken(t *testing.T, body string) string {
+	t.Helper()
+	var parsed struct {
+		NextToken string `xml:"DescribeStackEventsResult>NextToken"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &parsed), "body was %s", body)
+	return parsed.NextToken
+}
+
+// cfnStackIDOf reads the StackId off a DescribeStacks body.
+func cfnStackIDOf(t *testing.T, body string) string {
+	t.Helper()
+	var parsed struct {
+		Stacks []struct {
+			StackID string `xml:"StackId"`
+		} `xml:"DescribeStacksResult>Stacks>member"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &parsed), "body was %s", body)
+	require.Len(t, parsed.Stacks, 1, "body was %s", body)
+	return parsed.Stacks[0].StackID
 }
 
 // TestCFNPlugin_UnknownAction asserts an unmodelled action is InvalidAction, not

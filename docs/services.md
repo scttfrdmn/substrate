@@ -243,11 +243,19 @@ aws cloudformation describe-stack-resources --stack-name s \
 # authorized to perform: s3:CreateBucket on resource: arn:aws:s3:::...
 ```
 
-The denial is **not** reported as a `StackEvent`: `DescribeStackEvents` is still
-refused with `UnsupportedOperation`, because substrate models stack status rather
-than per-resource stack events. Deriving events from the event log is tracked in
-[#501](https://github.com/scttfrdmn/substrate/issues/501); until then
-`DescribeStackResources` is where a per-resource reason is observable.
+The denial is also reported as a `StackEvent`, which is where a deployment wrapper
+conventionally reads a CloudFormation failure from:
+
+```bash
+aws cloudformation describe-stack-events --stack-name s \
+  --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].ResourceStatusReason'
+# AccessDeniedException: User: arn:aws:iam::123456789012:role/narrow is not
+# authorized to perform: s3:CreateBucket on resource: arn:aws:s3:::...
+```
+
+Both views share one derivation, so they cannot disagree about whether a resource
+failed. See "Stack events are derived from the stack record" below for what the
+event model does and does not contain.
 
 Enforcement is opt-in by creating the principal: a stack deployed with a credential
 that resolves to no IAM user or role in state is not authorized at all, which is
@@ -712,20 +720,42 @@ the stack family, which reports `ValidationError` at 400).
 `REVIEW_IN_PROGRESS`, a state the stack model has no representation for. Create
 the stack, then change-set the update.
 
-### DescribeStackEvents is not supported
+### Stack events are derived from the stack record
 
-`DescribeStackEvents` returns `UnsupportedOperation` (400). This is deliberate,
-and `UnsupportedOperation` is substrate's own signal rather than a documented
-CloudFormation code — real CloudFormation has no error for an operation it
-implements.
+`DescribeStackEvents` answers from the stack's recorded state rather than from a
+separately maintained event stream, which is what keeps every value in it a real
+observation. Four consequences are worth knowing before writing an assertion.
 
-A stack carries one status string; there is no per-resource event model behind
-it. Answering the call would mean synthesizing a plausible
-`CREATE_IN_PROGRESS → CREATE_COMPLETE` pair per resource with invented
-timestamps, which is inventing observations — the opposite of what an emulator
-that exists to be trusted should do. A consumer polling events for completion
-should poll `DescribeStacks` for `StackStatus` instead. Tracked in
-[#501](https://github.com/scttfrdmn/substrate/issues/501).
+**Resource events are terminal only.** A stack's own events bracket the operation
+— an opening `CREATE_IN_PROGRESS` / `UPDATE_IN_PROGRESS` / `DELETE_IN_PROGRESS`
+and the terminal status — because the record says the deploy started and how it
+finished. Its *resources* get one event each, the terminal one. Substrate deploys
+synchronously and never observed a resource mid-create, so emitting a per-resource
+`CREATE_IN_PROGRESS` would be inventing an observation. A consumer counting two
+events per resource will find one.
+
+**A deploy's events share one timestamp.** They come from the record's creation
+and update times, and a synchronous deploy is one instant. Manufacturing an
+interval is not available: simulated time advances with wall time, so any spacing
+substrate invented would make a test's assertions wall-clock dependent. Order is
+carried by position instead — newest first, as the API documents, with the
+last-deployed resource above the one before it.
+
+**`EventId` is deterministic.** A resource event's is
+`{LogicalId}-{ResourceStatus}-{Timestamp}`, the form real CloudFormation is
+observed to return; a stack event's is a UUID derived from the stack ARN, status
+and timestamp. So a replayed stack reports byte-identical events.
+
+**Only the most recent operation is reported.** An update overwrites the record's
+status and time, so the create that preceded it left nothing to report. And a
+stack deleted successfully is removed from the record entirely, so
+`DescribeStackEvents` on it reports `ValidationError` — the same answer
+`DescribeStacks` gives. A stack whose *delete failed* remains, and its events name
+the resource holding it.
+
+Responses paginate at 100 events with a `NextToken`. `DescribeStackEvents` has no
+`MaxResults` parameter (the CLI's `--max-items` is applied client-side), so a
+`NextToken` loop is the only way to page.
 
 ### Stack status is terminal on return
 

@@ -178,21 +178,7 @@ func (p *CloudFormationPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	case "DescribeStackDriftDetectionStatus":
 		return p.describeStackDriftDetectionStatus(ctx, req)
 	case "DescribeStackEvents":
-		// Scoped out deliberately rather than fabricated. CFNStackState carries a
-		// single Status string; there is no per-resource event model behind it, so
-		// synthesizing a plausible CREATE_IN_PROGRESS/CREATE_COMPLETE pair per
-		// resource would invent observations a real stack never produced — the
-		// opposite of the provenance rule in docs/fidelity.md. A caller polling
-		// events gets a clear refusal instead and can poll DescribeStacks. See #501.
-		//
-		// UnsupportedOperation is not a documented CloudFormation error code; it is
-		// substrate's own signal that the operation exists but is unmodelled, chosen
-		// over inventing a stack-event stream.
-		return nil, &AWSError{
-			Code:       "UnsupportedOperation",
-			Message:    "CloudFormation DescribeStackEvents is not emulated: substrate models stack status, not per-resource stack events",
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return p.describeStackEvents(ctx, req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -550,6 +536,53 @@ func (p *CloudFormationPlugin) listStacks(reqCtx *RequestContext, req *AWSReques
 	return cfnXMLResponse(http.StatusOK, resp)
 }
 
+// describeStackEvents reports a stack's events, newest first (#501).
+//
+// StackName is the operation's only required parameter and takes a name or a
+// stack ID, so an unknown one is the ValidationError DescribeStacks already
+// gives. A stack deleted successfully is gone from the record, so it answers that
+// way too: the API's note that a deleted stack must be addressed by ID is about
+// name reuse, and substrate keeps no events past the record they were derived
+// from. A stack whose delete *failed* remains, and reports its sweep's outcome.
+//
+// [cfnDeriveStackEvents] holds the model and the reasoning behind it.
+func (p *CloudFormationPlugin) describeStackEvents(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	if name == "" {
+		return nil, cfnMissingParameter("StackName")
+	}
+	stack, err := p.findStack(name)
+	if err != nil {
+		return nil, err
+	}
+	if stack == nil {
+		return nil, cfnStackNotFound(name)
+	}
+
+	page, nextToken := cfnPaginateEvents(
+		cfnDeriveStackEvents(*stack, cfnStackID(reqCtx, stack.StackName)),
+		req.Params["NextToken"])
+
+	type result struct {
+		Events    []cfnStackEvent `xml:"StackEvents>member"`
+		NextToken string          `xml:"NextToken,omitempty"`
+	}
+	type response struct {
+		XMLName  xml.Name            `xml:"DescribeStackEventsResponse"`
+		XMLNS    string              `xml:"xmlns,attr"`
+		Result   result              `xml:"DescribeStackEventsResult"`
+		Metadata cfnResponseMetadata `xml:"ResponseMetadata"`
+	}
+	return cfnXMLResponse(http.StatusOK, response{
+		XMLNS:    cfnXMLNS,
+		Result:   result{Events: page, NextToken: nextToken},
+		Metadata: cfnMetadata(reqCtx),
+	})
+}
+
 func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["StackName"]
 	physicalID := req.Params["PhysicalResourceId"]
@@ -622,19 +655,10 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 				continue
 			}
 			// The per-resource status is derived from whether the resource actually
-			// deployed, not invented: DeployedResource.Error is set when a resource
-			// failed, and empty when it succeeded.
-			status, reason := "CREATE_COMPLETE", ""
-			if r.Error != "" {
-				status, reason = "CREATE_FAILED", r.Error
-			}
-			// A rollback swept the resources the failed create had created, so
-			// reporting CREATE_COMPLETE for one would claim a resource that is gone.
-			// The sweep's own record is what says which, and why.
-			if del := cfnDeletionFor(s.ResourceDeletions, r.LogicalID); del != nil && r.Error == "" {
-				status = del.Status
-				reason = del.Reason
-			}
+			// deployed, not invented. DescribeStackEvents renders the same derivation
+			// as an event (#501), so it lives in cfnResourceStatus: the two views must
+			// not be able to disagree about whether a resource failed.
+			status, reason := cfnResourceStatus(s, r)
 			resp.Result.Resources = append(resp.Result.Resources, resourceItem{
 				StackID:              cfnStackID(reqCtx, s.StackName),
 				StackName:            s.StackName,

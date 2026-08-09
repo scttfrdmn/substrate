@@ -190,11 +190,76 @@ func TestCFN_ServiceRoleAuthorizesResourceCalls(t *testing.T) {
 	}
 }
 
+func TestCFN_DeniedResourceNamesTheDenialInStackEvents(t *testing.T) {
+	// #562's fifth criterion, which was blocked on #501 for four releases: "a stack
+	// whose role is missing one permission reaches ROLLBACK_COMPLETE with a
+	// StackEvent reason naming the denial". DescribeStackEvents was refused with
+	// UnsupportedOperation until #501, so this could not be written at all.
+	//
+	// It is a distinct assertion from the DescribeStackResources one below, not a
+	// duplicate of it: polling events is what a consumer's deployment wrapper
+	// actually does, and it is where a CloudFormation failure is conventionally read
+	// from. Both views share one derivation (cfnResourceStatus) so they cannot
+	// disagree, which is exactly why the second assertion is cheap to keep.
+	ts := emulator.StartTestServer(t)
+	cfnSeedRole(t, ts.StateManager(), "narrow", []string{"s3:ListBucket"})
+	client := &cfnRoleTestClient{t: t, baseURL: ts.URL}
+
+	code, body := client.call("CreateStack", map[string]string{
+		"StackName":    "eventstack",
+		"TemplateBody": cfnRoleBucketTemplate,
+		"RoleARN":      "arn:aws:iam::123456789012:role/narrow",
+	})
+	require.Equal(t, http.StatusOK, code, "body: %s", body)
+
+	_, body = client.call("DescribeStacks", map[string]string{"StackName": "eventstack"})
+	status, _, _ := cfnStackStatus(t, body)
+	require.Equal(t, "ROLLBACK_COMPLETE", status, "the criterion's premise")
+
+	_, body = client.call("DescribeStackEvents", map[string]string{"StackName": "eventstack"})
+	var parsed struct {
+		Events []struct {
+			LogicalResourceID    string `xml:"LogicalResourceId"`
+			ResourceType         string `xml:"ResourceType"`
+			ResourceStatus       string `xml:"ResourceStatus"`
+			ResourceStatusReason string `xml:"ResourceStatusReason"`
+		} `xml:"DescribeStackEventsResult>StackEvents>member"`
+	}
+	require.NoError(t, xml.Unmarshal([]byte(body), &parsed), "body: %s", body)
+	require.NotEmpty(t, parsed.Events, "body: %s", body)
+
+	// Newest first: the stack's own ROLLBACK_COMPLETE heads the list, which is what
+	// a consumer polling for a terminal status reads.
+	assert.Equal(t, "ROLLBACK_COMPLETE", parsed.Events[0].ResourceStatus)
+	assert.Equal(t, "AWS::CloudFormation::Stack", parsed.Events[0].ResourceType)
+
+	// The criterion itself: some event names the denial, and names the action, so a
+	// consumer learns which permission to add rather than only that something failed.
+	var denial string
+	for _, e := range parsed.Events {
+		if e.LogicalResourceID == "Data" && e.ResourceStatus == "CREATE_FAILED" {
+			denial = e.ResourceStatusReason
+		}
+	}
+	require.NotEmpty(t, denial, "no CREATE_FAILED event for the refused resource: %s", body)
+	assert.Contains(t, denial, "AccessDeniedException")
+	assert.Contains(t, denial, "s3:CreateBucket",
+		"the event names the action that was refused")
+
+	// And the opening event is a real observation, not a fabricated per-resource
+	// one: the deploy did start, at the time the stack records.
+	last := parsed.Events[len(parsed.Events)-1]
+	assert.Equal(t, "CREATE_IN_PROGRESS", last.ResourceStatus,
+		"a rollback is the tail of the CreateStack the caller made")
+	assert.Equal(t, "AWS::CloudFormation::Stack", last.ResourceType,
+		"substrate emits no per-resource CREATE_IN_PROGRESS — it never observed one")
+}
+
 func TestCFN_DeniedResourceNamesTheDenialInStackResources(t *testing.T) {
-	// #562's reporting criterion, minus the StackEvent one that is blocked by #501.
-	// A caller has to be able to learn *which* resource was refused and *why*, not
-	// only that the stack rolled back — that is the difference between a test
-	// failure a consumer can act on and one that sends them to real AWS to find out.
+	// The same fact through DescribeStackResources. A caller has to be able to learn
+	// *which* resource was refused and *why*, not only that the stack rolled back —
+	// that is the difference between a test failure a consumer can act on and one
+	// that sends them to real AWS to find out.
 	ts := emulator.StartTestServer(t)
 	cfnSeedRole(t, ts.StateManager(), "narrow", []string{"s3:ListBucket"})
 	client := &cfnRoleTestClient{t: t, baseURL: ts.URL}

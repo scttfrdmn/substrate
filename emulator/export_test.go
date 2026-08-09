@@ -599,6 +599,34 @@ func (d *StackDeployer) DeleteStackResourcesForTest(
 	return d.deleteStackResources(ctx, stack, stackName, cfnDeleteStackOp)
 }
 
+// CFNStackEventForTest is the derived stack event, aliased so an external test can
+// read its members. The type stays unexported in the package proper: it is a wire
+// shape, and the only supported way to reach one is DescribeStackEvents.
+type CFNStackEventForTest = cfnStackEvent
+
+// CFNDeriveStackEventsForTest wraps cfnDeriveStackEvents (#501).
+//
+// The derivation is a pure function of a stack record, and exercising it directly
+// is what pins the parts the wire cannot vary: a rollback whose sweep left some
+// resources deleted and others failed, an UPDATE_ROLLBACK_FAILED stack, and a
+// record restored from a snapshot that has no Status at all. Reaching those
+// through CreateStack would mean engineering a failure for each.
+func CFNDeriveStackEventsForTest(s CFNStackState, stackID string) []CFNStackEventForTest {
+	return cfnDeriveStackEvents(s, stackID)
+}
+
+// CFNPaginateEventsForTest wraps cfnPaginateEvents, so the page boundary can be
+// asserted without deploying a template of more than CFNStackEventsPageSizeForTest
+// resources.
+func CFNPaginateEventsForTest(events []CFNStackEventForTest, token string) ([]CFNStackEventForTest, string) {
+	return cfnPaginateEvents(events, token)
+}
+
+// CFNStackEventsPageSizeForTest is the DescribeStackEvents page size, so a test
+// builds a page boundary from the value the code uses rather than a second copy of
+// it.
+const CFNStackEventsPageSizeForTest = cfnStackEventsPageSize
+
 // CFNGeneratedNameSuffixLenForTest is the width of the derived suffix on a
 // generated physical name, so an external test can split a name into its
 // {stack}-{logical} prefix and its suffix without hard-coding the width.
