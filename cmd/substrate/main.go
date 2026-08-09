@@ -121,7 +121,11 @@ configured address will have their requests emulated and recorded.`,
 
 			registry := substrate.NewPluginRegistry()
 			tc := substrate.NewTimeController(time.Now())
-			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig(), substrate.WithTimeController(tc))
+			// The logger is what makes an automatic flush failure visible: the store
+			// records the event either way and does not fail the caller's request, so
+			// without it a persistence problem would be silent (#599).
+			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig(),
+				substrate.WithTimeController(tc), substrate.WithEventStoreLogger(logger))
 			state := substrate.NewMemoryStateManager()
 
 			initCtx := context.Background()

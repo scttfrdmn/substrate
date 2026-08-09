@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // register the sqlite3 driver
@@ -37,9 +38,17 @@ CREATE INDEX IF NOT EXISTS idx_events_operation ON events(operation);
 `
 
 // sqliteBackend persists events and snapshots to a SQLite database.
+//
+// flush and load both write flushCursor while the EventStore holds only its read
+// lock, which permits concurrent holders and so does not serialize them — the same
+// hazard fileBackend has, and it became live for the same reason (#599). mu guards
+// the cursor and the write it decides.
 type sqliteBackend struct {
-	db          *sql.DB
-	serializer  Serializer
+	db         *sql.DB
+	serializer Serializer
+
+	// mu guards flushCursor, which flush advances and load rebuilds.
+	mu          sync.Mutex
 	flushCursor int64 // count of events already flushed
 }
 
@@ -61,7 +70,14 @@ func newSQLiteBackend(dsn string, s Serializer) (*sqliteBackend, error) {
 
 // flush writes events and snapshots that have not yet been persisted.
 // INSERT OR IGNORE ensures idempotency.
+//
+// Held under sb.mu for the whole transaction, so a concurrent flush cannot read
+// the cursor this one is about to advance. INSERT OR IGNORE would absorb the
+// duplicate rows, but the cursor write itself is still a race.
 func (sb *sqliteBackend) flush(ctx context.Context, events []*Event, snapshots map[string]*Snapshot) error {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
 	tx, err := sb.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -177,7 +193,12 @@ func (sb *sqliteBackend) load(ctx context.Context) ([]*Event, map[string]*Snapsh
 		return nil, nil, fmt.Errorf("close snapshot rows: %w", closeErr)
 	}
 
+	// Under the same lock flush takes, so a load concurrent with a flush cannot
+	// write the cursor while flush is reading it.
+	sb.mu.Lock()
 	sb.flushCursor = int64(len(events))
+	sb.mu.Unlock()
+
 	return events, snapshots, nil
 }
 

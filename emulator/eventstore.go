@@ -34,6 +34,8 @@ type EventStore struct {
 	fileBE       *fileBackend    // file NDJSON backend, non-nil when backend=="file"
 	sqliteBE     *sqliteBackend  // SQLite backend, lazily initialized
 	sqliteInitMu sync.Mutex      // guards lazy sqliteBE init
+	logger       Logger          // reports an automatic flush failure; nil means silent
+	flushMu      sync.Mutex      // serializes automatic flushes; see maybeFlush
 }
 
 // EventStoreConfig controls the behavior of an [EventStore].
@@ -45,8 +47,24 @@ type EventStoreConfig struct {
 	// Zero disables automatic snapshots.
 	SnapshotInterval int
 
-	// MaxEventsInMemory is the maximum number of events held in memory before
-	// the store flushes to the configured backend. Zero means unlimited.
+	// MaxEventsInMemory is the event count at which [EventStore.RecordEvent]
+	// automatically flushes to the configured backend. Zero disables the trigger.
+	//
+	// It is a *flush* threshold, not a cap: events are never dropped from memory,
+	// so replay, [EventStore.GetStream] and time-travel debugging see the full
+	// history whether a flush has happened or not. Flushing only makes the events
+	// durable earlier than an explicit [EventStore.Flush] would. That is the point
+	// — a run that ends without one (a crash, a killed process, a test binary that
+	// never calls it) still has its events on disk up to the last threshold
+	// crossing.
+	//
+	// The flush fires each time the count crosses a multiple of the value, the same
+	// shape as SnapshotInterval, so a long run flushes repeatedly rather than once.
+	// A flush error does not fail the caller's API call — a recorded observation
+	// must not turn a persistence hiccup into a request failure — so it is reported
+	// through the logger given to [WithEventStoreLogger] and otherwise silent.
+	//
+	// A no-op for Backend "memory", which has nowhere to flush to.
 	MaxEventsInMemory int
 
 	// Backend selects the storage driver: "memory", "sqlite", or "file".
@@ -87,6 +105,13 @@ func WithStateManager(sm StateManager) EventStoreOption {
 // event timestamps use the controlled clock rather than time.Now().
 func WithTimeController(tc *TimeController) EventStoreOption {
 	return func(e *EventStore) { e.tc = tc }
+}
+
+// WithEventStoreLogger attaches a [Logger] the store uses to report a failure it
+// deliberately does not propagate — an automatic flush that could not write (see
+// [EventStoreConfig.MaxEventsInMemory]). Without one such a failure is silent.
+func WithEventStoreLogger(l Logger) EventStoreOption {
+	return func(e *EventStore) { e.logger = l }
 }
 
 // now returns the current time from the controlled clock, or time.Now() when
@@ -293,7 +318,42 @@ func (e *EventStore) RecordEvent(_ context.Context, event *Event) error {
 		}
 	}
 
+	e.maybeFlush(n)
+
 	return nil
+}
+
+// maybeFlush persists to the backend when the recorded count n has crossed a
+// multiple of [EventStoreConfig.MaxEventsInMemory] (#599). n is read under the
+// write lock by the caller and passed in, so two concurrent recorders cannot both
+// compute the same n and flush twice.
+//
+// Called after RecordEvent releases e.mu, because Flush takes e.mu.RLock() and Go's
+// RWMutex is not upgradable — the same reason the SnapshotInterval hint above is
+// sent outside the lock.
+//
+// A flush error is logged, not returned. RecordEvent's contract is that the
+// observation was recorded, and it was: the events are in memory and a later flush
+// will still write them. Failing the caller's API call because the disk hiccuped
+// would report an infrastructure fault as an AWS-level error, which is the same
+// reasoning AuthController applies to a failed state read.
+func (e *EventStore) maybeFlush(n int) {
+	threshold := e.config.MaxEventsInMemory
+	if threshold <= 0 || n%threshold != 0 {
+		return
+	}
+
+	// Serialized so two crossings cannot interleave inside the backends. Both track
+	// a flush cursor they advance after writing, and Flush holds only a read lock,
+	// which permits concurrent holders — so without this two flushes could read the
+	// same cursor and write the same events twice.
+	e.flushMu.Lock()
+	defer e.flushMu.Unlock()
+
+	if err := e.Flush(context.Background()); err != nil && e.logger != nil {
+		e.logger.Warn("eventstore: automatic flush failed",
+			"backend", e.config.Backend, "events", n, "err", err)
+	}
 }
 
 // RecordRequest is a convenience wrapper that builds an [Event] from a
@@ -601,8 +661,19 @@ func (i *ReplayIterator) Reset() {
 	i.position = 0
 }
 
-// Flush persists in-memory events to the configured backend.
-// It is a no-op for the "memory" backend.
+// Flush persists in-memory events to the configured backend, appending only those
+// written since the last flush.
+//
+// It never discards anything: the store keeps every event in memory afterwards, so
+// replay, [EventStore.GetStream] and time-travel debugging are unaffected by
+// whether a flush has run. Calling it repeatedly is safe and does not duplicate
+// events — each backend tracks how far it has written.
+//
+// A no-op for the "memory" backend, which has nowhere to persist to. Since #599 it
+// is also called automatically by [EventStore.RecordEvent] when
+// [EventStoreConfig.MaxEventsInMemory] is set, so an explicit call is only needed
+// to force a flush at a point of the caller's choosing (before reading the files,
+// or at shutdown).
 func (e *EventStore) Flush(ctx context.Context) error {
 	switch e.config.Backend {
 	case "memory":
