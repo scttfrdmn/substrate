@@ -187,6 +187,49 @@ func errorProtocolFor(service, contentType string) awsErrorProtocol {
 	return errProtoQueryXML
 }
 
+// accessDeniedCodeFor returns the error code AWS uses to refuse an authorization
+// check on the given service: "AccessDenied" for the XML protocols, and
+// "AccessDeniedException" for the JSON ones.
+//
+// The suffix tracks the wire protocol rather than the individual service (#595).
+// Audited across every botocore model, deduplicated by service (botocore ships
+// many versioned models per service, so counting files inflates the XML side
+// nineteen-fold) and restricted to shapes carrying "exception": true:
+//
+//	family                                  bare AccessDenied  AccessDeniedException
+//	XML   (query 17, rest-xml 4, ec2 1)     1 (cloudfront)     0
+//	JSON  (json 149, rest-json 242, cbor 2) 0                  233
+//
+// The two halves rest on very different evidence. On the JSON side all 233
+// services that model the shape use the suffixed form and none use the bare one,
+// so that arm is settled by the models. On the XML side only CloudFront models
+// the shape at all, so n=1.
+//
+// What decides the XML arm instead is that **no query-protocol service models an
+// access-denied shape** — all 17, including STS, IAM, CloudFormation and SNS —
+// and neither do S3 (rest-xml) or EC2 (ec2), which declare no exception shapes
+// whatsoever. Every service where this code is observable in substrate is in that
+// set, so the value is *observed AWS behavior, not modeled*: AWS's own CLI
+// output for a refused sts:AssumeRole reports "AccessDenied" (quoted in #595),
+// and s3ErrorResponseWith's callers already rely on the same for S3 (see
+// s3_publicaccess.go). CloudFront and the unanimous JSON column corroborate the
+// split; they are not its basis.
+//
+// contentType is only consulted for services absent from serviceErrorProtocols,
+// via errorProtocolFor's fallback — callers that do not have it may pass "".
+func accessDeniedCodeFor(service, contentType string) string {
+	switch errorProtocolFor(service, contentType) {
+	case errProtoJSONRPC, errProtoRESTJSON:
+		return "AccessDeniedException"
+	case errProtoQueryXML, errProtoS3XML, errProtoEC2XML:
+		return "AccessDenied"
+	}
+	// Unreachable: errorProtocolFor returns one of the constants above. Defaulting
+	// to the suffixed form keeps a hypothetical new protocol on the value the
+	// overwhelming majority of AWS services use.
+	return "AccessDeniedException"
+}
+
 // marshalAWSError serializes err in the wire format the given protocol uses,
 // returning the body, the Content-Type to send, and any extra response headers.
 //

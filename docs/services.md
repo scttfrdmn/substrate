@@ -228,7 +228,7 @@ by that role, not by whoever asks for the delete, and a rollback's sweep runs as
 identity that created what it is tearing down.
 
 A refused resource call surfaces as `CREATE_FAILED` with the denial —
-`AccessDeniedException`, naming the action and the resource ARN — as that resource's
+`AccessDenied`, naming the action and the resource ARN — as that resource's
 `ResourceStatusReason` in `DescribeStackResources`, and the stack rolls back:
 
 ```
@@ -239,7 +239,7 @@ aws cloudformation describe-stacks --stack-name s \
 # ROLLBACK_COMPLETE   arn:aws:iam::123456789012:role/narrow
 aws cloudformation describe-stack-resources --stack-name s \
   --query 'StackResources[0].ResourceStatusReason'
-# AccessDeniedException: User: arn:aws:iam::123456789012:role/narrow is not
+# AccessDenied: User: arn:aws:iam::123456789012:role/narrow is not
 # authorized to perform: s3:CreateBucket on resource: arn:aws:s3:::...
 ```
 
@@ -249,7 +249,7 @@ conventionally reads a CloudFormation failure from:
 ```bash
 aws cloudformation describe-stack-events --stack-name s \
   --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].ResourceStatusReason'
-# AccessDeniedException: User: arn:aws:iam::123456789012:role/narrow is not
+# AccessDenied: User: arn:aws:iam::123456789012:role/narrow is not
 # authorized to perform: s3:CreateBucket on resource: arn:aws:s3:::...
 ```
 
@@ -917,7 +917,15 @@ IAM operations are free.
 session, so a caller the trust policy does not admit is refused with
 `AccessDenied` (403). Two gates apply, and they answer different questions: the
 caller's own policies must allow `sts:AssumeRole` ("what may this caller do"), and
-the role's trust policy must admit the caller ("who may become this role").
+the role's trust policy must admit the caller ("who may become this role"). Both
+report the same code, so a consumer cannot tell them apart by code alone — the
+message says which one refused.
+
+That code follows the service's **wire protocol** rather than which gate refused or
+which service was called: `AccessDenied` on the XML protocols (Query, REST-XML and
+EC2 — so STS, IAM, CloudFormation, SNS, S3, EC2) and `AccessDeniedException` on the
+JSON ones (so SQS, DynamoDB, Lambda, SSM). That is what AWS does, and it is the
+same split every AWS service model shows.
 
 That makes the confused-deputy pattern testable. A trust policy conditioning on
 `sts:ExternalId` refuses a caller who cannot present the secret:

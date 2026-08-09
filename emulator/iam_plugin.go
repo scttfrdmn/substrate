@@ -190,7 +190,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:CreateUser", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	key := "user:" + params.UserName
@@ -238,7 +238,7 @@ func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:GetUser", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	userName := params.UserName
@@ -279,7 +279,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DeleteUser", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	user, err := p.loadUser(goCtx, params.UserName)
@@ -323,7 +323,7 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListUsers", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	keys, err := p.state.List(goCtx, iamNamespace, "user:")
@@ -377,7 +377,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:CreateRole", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	key := "role:" + params.RoleName
@@ -442,7 +442,7 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:GetRole", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)
@@ -487,7 +487,7 @@ func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest)
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:UpdateAssumeRolePolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)
@@ -532,7 +532,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DeleteRole", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)
@@ -596,7 +596,7 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListRoles", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	keys, err := p.state.List(goCtx, iamNamespace, "role:")
@@ -646,7 +646,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:CreateGroup", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	key := "group:" + params.GroupName
@@ -698,7 +698,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:GetGroup", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, "group:"+params.GroupName)
@@ -732,7 +732,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DeleteGroup", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	existing, err := p.state.Get(goCtx, iamNamespace, "group:"+params.GroupName)
@@ -765,7 +765,7 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListGroups", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	keys, err := p.state.List(goCtx, iamNamespace, "group:")
@@ -812,7 +812,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:AttachUserPolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	user, err := p.loadUser(goCtx, params.UserName)
@@ -858,7 +858,7 @@ func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DetachUserPolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	listKey := "user_policies:" + params.UserName
@@ -904,7 +904,7 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListAttachedUserPolicies", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	arns, err := p.loadPolicyList(goCtx, "user_policies:"+params.UserName)
@@ -938,7 +938,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:AttachRolePolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)
@@ -984,7 +984,7 @@ func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DetachRolePolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	listKey := "role_policies:" + params.RoleName
@@ -1030,7 +1030,7 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListAttachedRolePolicies", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	arns, err := p.loadPolicyList(goCtx, "role_policies:"+params.RoleName)
@@ -1066,7 +1066,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:CreatePolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	if params.Path == "" {
@@ -1131,7 +1131,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:GetPolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	// Check managed policies first.
@@ -1170,7 +1170,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DeletePolicy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+params.PolicyArn)
@@ -1204,7 +1204,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListPolicies", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	keys, err := p.state.List(goCtx, iamNamespace, "policy:")
@@ -1247,7 +1247,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:CreateAccessKey", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	userName := params.UserName
@@ -1315,7 +1315,7 @@ func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DeleteAccessKey", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, "accesskey:"+params.AccessKeyID)
@@ -1368,7 +1368,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListAccessKeys", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	userName := params.UserName
@@ -1409,6 +1409,15 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 }
 
 // --- Authorization ---------------------------------------------------------
+
+// iamAccessDeniedCode is the code every IAM denial reports.
+//
+// IAM speaks the query protocol, so this is the bare form — the same value
+// [accessDeniedCodeFor] derives for the service, and the plugin's denials must
+// agree with the generic gate's or substrate would report two codes for one
+// outcome on the same service (#595). Written as a constant rather than a call
+// because the answer is fixed for this plugin: its service is always "iam".
+const iamAccessDeniedCode = "AccessDenied"
 
 // authorize checks whether the caller (reqCtx.Principal) is allowed to perform
 // action on resource. A nil Principal always passes (bootstrap/test mode).
@@ -1495,7 +1504,7 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 
 	if result.Decision != DecisionAllow {
 		return &AWSError{
-			Code:       "AccessDeniedException",
+			Code:       iamAccessDeniedCode,
 			Message:    "User: " + reqCtx.Principal.ARN + " is not authorized to perform: " + action,
 			HTTPStatus: http.StatusForbidden,
 		}
@@ -1521,7 +1530,7 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 				})
 				if boundaryResult.Decision != DecisionAllow {
 					return &AWSError{
-						Code:       "AccessDeniedException",
+						Code:       iamAccessDeniedCode,
 						Message:    "User: " + reqCtx.Principal.ARN + " is not authorized to perform: " + action + " (blocked by permission boundary)",
 						HTTPStatus: http.StatusForbidden,
 					}
@@ -1592,7 +1601,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"Policy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	// Verify the entity exists.
@@ -1677,7 +1686,7 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:Get"+actionSuffix+"Policy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, entityType+"_inline:"+entityName+":"+params.PolicyName)
@@ -1721,7 +1730,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"Policy", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	stateKey := entityType + "_inline:" + entityName + ":" + params.PolicyName
@@ -1781,7 +1790,7 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:List"+actionSuffix+"Policies", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	names, err := p.loadStringList(goCtx, entityType+"_inline_names:"+entityName)
@@ -1840,7 +1849,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"PermissionsBoundary", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	boundary := &IAMAttachedPolicy{
@@ -1913,7 +1922,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"PermissionsBoundary", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	stateKey := entityType + ":" + entityName
@@ -1976,7 +1985,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:TagUser", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	user, err := p.loadUser(goCtx, params.UserName)
@@ -2030,7 +2039,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:UntagUser", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	user, err := p.loadUser(goCtx, params.UserName)
@@ -2082,7 +2091,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListUserTags", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	user, err := p.loadUser(goCtx, params.UserName)
@@ -2147,7 +2156,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:TagRole", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)
@@ -2201,7 +2210,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:UntagRole", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)
@@ -2253,7 +2262,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListRoleTags", "*"); err != nil {
-		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
 	role, err := p.loadRole(goCtx, params.RoleName)

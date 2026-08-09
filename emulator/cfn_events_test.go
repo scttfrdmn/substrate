@@ -96,13 +96,13 @@ func TestCFNEvents_DeriveShape(t *testing.T) {
 				Resources: []emulator.DeployedResource{
 					{LogicalID: "Role", Type: "AWS::IAM::Role", PhysicalID: "demo-role"},
 					{LogicalID: "Bucket", Type: "AWS::S3::Bucket",
-						Error: "AccessDeniedException: not authorized to perform: s3:CreateBucket"},
+						Error: "AccessDenied: not authorized to perform: s3:CreateBucket"},
 				},
 			},
 			want: []want{
 				{"demo", "CREATE_FAILED", "resource Bucket failed"},
 				{"Bucket", "CREATE_FAILED",
-					"AccessDeniedException: not authorized to perform: s3:CreateBucket"},
+					"AccessDenied: not authorized to perform: s3:CreateBucket"},
 				{"Role", "CREATE_COMPLETE", ""},
 				{"demo", "CREATE_IN_PROGRESS", "User Initiated"},
 			},
@@ -116,21 +116,21 @@ func TestCFNEvents_DeriveShape(t *testing.T) {
 			stack: emulator.CFNStackState{
 				StackName:    "demo",
 				Status:       "ROLLBACK_COMPLETE",
-				StatusReason: "AccessDeniedException on Bucket",
+				StatusReason: "AccessDenied on Bucket",
 				CreatedAt:    cfnEventsAt,
 				UpdatedAt:    cfnEventsAt,
 				Resources: []emulator.DeployedResource{
 					{LogicalID: "Role", Type: "AWS::IAM::Role", PhysicalID: "demo-role"},
 					{LogicalID: "Bucket", Type: "AWS::S3::Bucket",
-						Error: "AccessDeniedException on s3:CreateBucket"},
+						Error: "AccessDenied on s3:CreateBucket"},
 				},
 				ResourceDeletions: []emulator.CFNResourceDeletion{
 					{LogicalID: "Role", Type: "AWS::IAM::Role", Status: "DELETE_COMPLETE"},
 				},
 			},
 			want: []want{
-				{"demo", "ROLLBACK_COMPLETE", "AccessDeniedException on Bucket"},
-				{"Bucket", "CREATE_FAILED", "AccessDeniedException on s3:CreateBucket"},
+				{"demo", "ROLLBACK_COMPLETE", "AccessDenied on Bucket"},
+				{"Bucket", "CREATE_FAILED", "AccessDenied on s3:CreateBucket"},
 				{"Role", "DELETE_COMPLETE", ""},
 				// A rollback is the tail of the CreateStack the caller made, so the
 				// opening event is still CREATE_IN_PROGRESS.

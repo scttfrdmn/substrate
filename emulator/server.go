@@ -462,7 +462,8 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //     1.5. Credential resolution — account from Credentials (when non-nil),
 //     principal from state (always; see [resolvePrincipal])
 //     1.6. SigV4 signature verification (when Credentials != nil)
-//  2. auth.CheckAccess()        → 403 AccessDeniedException
+//  2. auth.CheckAccess()        → 403 AccessDenied / AccessDeniedException
+//     (per the service's wire protocol; see accessDeniedCodeFor)
 //  3. quota.CheckQuota()        → 429 ThrottlingException
 //  4. consistency.CheckRead()   → 409 InconsistentStateException
 //  5. registry.RouteRequest()   (plugin dispatch)

@@ -526,10 +526,14 @@ aws sts assume-role --role-arn arn:aws:iam::123456789012:role/broker \
 # 200 — an ASIA session key
 ```
 
-The code is `AccessDenied`, where the identity-policy denial above reports
-`AccessDeniedException`; both match what AWS returns. An explicit `Deny` in the
-trust policy is reported with a different message ("with an explicit deny in the
-role trust policy") under the same code.
+The code is `AccessDenied`, and so is an identity-policy denial *on the same
+service* — the two gates agree. The `sqs list-queues` denial above reports
+`AccessDeniedException` because the code follows the service's **wire protocol**,
+not which gate refused: AWS sends the bare form on the XML protocols (Query,
+REST-XML, EC2 — so STS, IAM, CloudFormation, S3) and the suffixed form on the JSON
+ones (so SQS, DynamoDB, Lambda). An explicit `Deny` in the trust policy is
+reported with a different message ("with an explicit deny in the role trust
+policy") under the same code.
 
 **Writing a trust policy is the opt-in**, the same shape as the rule below one
 level down. A role created without one is not enforced, so every test that never

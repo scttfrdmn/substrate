@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"time"
 )
 
@@ -282,6 +283,30 @@ func ErrorProtocolForTest(service, contentType string) string {
 		return ErrProtoUnknownForTest
 	}
 }
+
+// AccessDeniedCodeForTest wraps accessDeniedCodeFor so an external test can pin
+// the protocol-to-code mapping directly, rather than only through the two
+// AuthController denial arms that consume it.
+func AccessDeniedCodeForTest(service, contentType string) string {
+	return accessDeniedCodeFor(service, contentType)
+}
+
+// RegisteredErrorProtocolServicesForTest returns every service name in
+// serviceErrorProtocols, so a test can assert a property over the whole table
+// rather than over a sample that goes stale as plugins are added.
+func RegisteredErrorProtocolServicesForTest() []string {
+	names := make([]string, 0, len(serviceErrorProtocols))
+	for svc := range serviceErrorProtocols {
+		names = append(names, svc)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// IAMAccessDeniedCodeForTest is the code the IAM plugin's own gate reports, so a
+// test can assert it agrees with what accessDeniedCodeFor derives for "iam"
+// instead of restating the literal.
+const IAMAccessDeniedCodeForTest = iamAccessDeniedCode
 
 // MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
 // the ErrProto*ForTest names. status is the HTTP status the error carries, which

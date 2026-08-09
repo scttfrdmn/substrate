@@ -141,7 +141,7 @@ func TestCFN_ServiceRoleAuthorizesResourceCalls(t *testing.T) {
 			roleName:   "narrow",
 			actions:    []string{"s3:ListBucket"},
 			wantStatus: "ROLLBACK_COMPLETE",
-			wantReason: "AccessDeniedException",
+			wantReason: "AccessDenied",
 		},
 		{
 			name:       "a role that can create the bucket deploys",
@@ -157,7 +157,7 @@ func TestCFN_ServiceRoleAuthorizesResourceCalls(t *testing.T) {
 			name:       "a role with no policy at all rolls the stack back",
 			roleName:   "empty",
 			wantStatus: "ROLLBACK_COMPLETE",
-			wantReason: "AccessDeniedException",
+			wantReason: "AccessDenied",
 		},
 	}
 
@@ -242,7 +242,7 @@ func TestCFN_DeniedResourceNamesTheDenialInStackEvents(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, denial, "no CREATE_FAILED event for the refused resource: %s", body)
-	assert.Contains(t, denial, "AccessDeniedException")
+	assert.Contains(t, denial, "AccessDenied")
 	assert.Contains(t, denial, "s3:CreateBucket",
 		"the event names the action that was refused")
 
@@ -284,7 +284,7 @@ func TestCFN_DeniedResourceNamesTheDenialInStackResources(t *testing.T) {
 
 	res := parsed.Resources[0]
 	assert.Equal(t, "Data", res.LogicalResourceID)
-	assert.Contains(t, res.ResourceStatusReason, "AccessDeniedException")
+	assert.Contains(t, res.ResourceStatusReason, "AccessDenied")
 	assert.Contains(t, res.ResourceStatusReason, "s3:CreateBucket",
 		"the reason names the action that was refused")
 }
@@ -597,5 +597,5 @@ func TestCFN_CreatorPrincipalDeploysWhenThereIsNoRole(t *testing.T) {
 	status, roleARN, reason := cfnStackStatus(t, body)
 	assert.Equal(t, "ROLLBACK_COMPLETE", status)
 	assert.Empty(t, roleARN, "the stack has no service role; the creator is not one")
-	assert.Contains(t, reason, "AccessDeniedException")
+	assert.Contains(t, reason, "AccessDenied")
 }
