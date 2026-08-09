@@ -50,9 +50,9 @@ const orgMaxOUNameChars = 128
 func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
-		ParentID string   `json:"ParentId"`
-		Name     string   `json:"Name"`
-		Tags     []OrgTag `json:"Tags"`
+		ParentID string        `json:"ParentId"`
+		Name     string        `json:"Name"`
+		Tags     []orgTagInput `json:"Tags"`
 	}
 	if err := orgUnmarshal(req.Body, &input); err != nil {
 		return nil, err
@@ -64,12 +64,12 @@ func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *RequestContext, r
 		return nil, orgInvalidInput("MAX_LENGTH_EXCEEDED",
 			fmt.Sprintf("the Name value must be at most %d characters", orgMaxOUNameChars))
 	}
-	// Tags are validated before anything is written, because the operation
-	// documents that an invalid tag fails the whole request and leaves no OU
-	// behind. A partially created OU would be worse than the refusal: the caller's
-	// retry would then hit DuplicateOrganizationalUnitException for an OU it does
-	// not believe it created.
-	if err := orgValidateOUTags(input.Tags); err != nil {
+	// Tags go through the same validation TagResource applies, so a key that
+	// operation refuses cannot be planted through a create instead. A partially
+	// created OU would be worse than the refusal: the caller's retry would then hit
+	// DuplicateOrganizationalUnitException for an OU it does not believe it created.
+	tags, err := validateOrgCreateTags(input.Tags)
+	if err != nil {
 		return nil, err
 	}
 
@@ -136,8 +136,8 @@ func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *RequestContext, r
 	if err := p.attachFullAWSAccess(goCtx, reqCtx.AccountID, ouID); err != nil {
 		return nil, fmt.Errorf("createOrganizationalUnit attach FullAWSAccess: %w", err)
 	}
-	if len(input.Tags) > 0 {
-		if err := p.saveTags(goCtx, ouID, input.Tags); err != nil {
+	if len(tags) > 0 {
+		if err := p.saveTags(goCtx, ouID, tags); err != nil {
 			return nil, fmt.Errorf("createOrganizationalUnit save tags: %w", err)
 		}
 	}
@@ -611,28 +611,4 @@ func isOrgAccountID(id string) bool {
 		}
 	}
 	return true
-}
-
-// orgValidateOUTags checks the tags on CreateOrganizationalUnit against the two
-// limits the model documents for them. Both refusals are in the operation's
-// declared error list, and both have to fire before the OU is written: the
-// operation documents that an invalid tag fails the entire request.
-func orgValidateOUTags(tags []OrgTag) error {
-	if len(tags) > orgMaxTagsPerResource {
-		return orgConstraintViolation("MAX_TAG_LIMIT_EXCEEDED",
-			fmt.Sprintf("you have exceeded the number of tags you can attach to a resource (%d)", orgMaxTagsPerResource))
-	}
-	seen := make(map[string]bool, len(tags))
-	for _, tag := range tags {
-		if tag.Key == "" {
-			return orgInvalidInput("INPUT_REQUIRED", "every tag must specify a Key")
-		}
-		// A repeated key would otherwise silently keep whichever value sorted last,
-		// so the caller's second value would win with nothing to say it had.
-		if seen[tag.Key] {
-			return orgInvalidInput("DUPLICATE_TAG_KEY", "the tag key "+tag.Key+" appears more than once")
-		}
-		seen[tag.Key] = true
-	}
-	return nil
 }

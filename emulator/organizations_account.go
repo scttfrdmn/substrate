@@ -76,9 +76,9 @@ func (p *OrganizationsPlugin) accountOperation(op string) (orgHandler, bool) {
 func (p *OrganizationsPlugin) createAccount(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
-		AccountName string   `json:"AccountName"`
-		Email       string   `json:"Email"`
-		Tags        []OrgTag `json:"Tags"`
+		AccountName string        `json:"AccountName"`
+		Email       string        `json:"Email"`
+		Tags        []orgTagInput `json:"Tags"`
 
 		// RoleName and IamUserAccessToBilling are accepted and recorded nowhere:
 		// no Organizations API observation exposes either, so modeling them would
@@ -92,6 +92,14 @@ func (p *OrganizationsPlugin) createAccount(reqCtx *RequestContext, req *AWSRequ
 	if input.AccountName == "" || input.Email == "" {
 		return nil, orgInvalidInput("INPUT_REQUIRED",
 			"you must specify both AccountName and Email to create an account")
+	}
+	// Tags go through the same validation TagResource applies, so a key that
+	// operation refuses cannot be planted through a create instead. The refusal is
+	// synchronous — it is the request that is malformed, not the vend that failed,
+	// so it must not arrive later as a FAILED status the caller has to poll for.
+	tags, err := validateOrgCreateTags(input.Tags)
+	if err != nil {
+		return nil, err
 	}
 
 	org, err := p.ensureOrganization(goCtx, reqCtx.AccountID)
@@ -126,7 +134,7 @@ func (p *OrganizationsPlugin) createAccount(reqCtx *RequestContext, req *AWSRequ
 	// is the state most likely to make a consumer's cleanup path look correct
 	// while it deletes nothing.
 	if outcome.AccountID != "" {
-		if err := p.vendAccount(goCtx, reqCtx.AccountID, org.ID, root.ID, outcome.AccountID, input.AccountName, input.Email, input.Tags); err != nil {
+		if err := p.vendAccount(goCtx, reqCtx.AccountID, org.ID, root.ID, outcome.AccountID, input.AccountName, input.Email, tags); err != nil {
 			return nil, err
 		}
 	}

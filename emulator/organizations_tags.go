@@ -367,6 +367,28 @@ func validateOrgTags(inputs []orgTagInput) ([]OrgTag, error) {
 	return tags, nil
 }
 
+// validateOrgCreateTags checks the inline Tags of a create operation —
+// CreateOrganizationalUnit, CreatePolicy, CreateAccount — and returns them.
+//
+// It is the same validation TagResource applies, plus the count quota, because
+// the tags are the same tags: a key TagResource refuses has to be refused here
+// too, or a caller can plant a tag through a create that it could never set
+// afterwards, and an "aws:"-prefixed one would then be readable as
+// aws:ResourceTag by a policy condition. The count is checked against the request
+// alone rather than a merge, since a resource being created carries no tags yet.
+//
+// Every refusal fires before the resource is written: each of these operations
+// documents that an invalid tag fails the whole request, and a partially created
+// resource would make the caller's retry collide with something it does not
+// believe it created.
+func validateOrgCreateTags(inputs []orgTagInput) ([]OrgTag, error) {
+	if len(inputs) > orgMaxTagsPerResource {
+		return nil, orgConstraintViolation("MAX_TAG_LIMIT_EXCEEDED",
+			fmt.Sprintf("you have exceeded the number of tags allowed on this resource (%d)", orgMaxTagsPerResource))
+	}
+	return validateOrgTags(inputs)
+}
+
 // validateOrgTagKey enforces the TagKey shape and the reservation of the "aws:"
 // prefix.
 func validateOrgTagKey(key string) error {
