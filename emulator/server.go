@@ -104,6 +104,12 @@ func NewServer(
 // Start binds the listener and begins accepting requests. It blocks until ctx
 // is canceled or an unrecoverable error occurs. A nil error is returned only
 // when shutdown is initiated via ctx cancellation or [Server.Stop].
+//
+// All three server timeouts are parsed up front, so an unusable duration is a
+// startup error rather than a surprise later. shutdown_timeout in particular is only
+// read by Stop, and a Stop that failed on it returned before closing the listener —
+// which left Start blocked forever on a canceled context, and now with the flush wait
+// would have blocked there too.
 func (s *Server) Start(ctx context.Context) error {
 	readTimeout, err := time.ParseDuration(s.config.Server.ReadTimeout)
 	if err != nil {
@@ -112,6 +118,9 @@ func (s *Server) Start(ctx context.Context) error {
 	writeTimeout, err := time.ParseDuration(s.config.Server.WriteTimeout)
 	if err != nil {
 		return fmt.Errorf("parse write_timeout: %w", err)
+	}
+	if _, err := time.ParseDuration(s.config.Server.ShutdownTimeout); err != nil {
+		return fmt.Errorf("parse shutdown_timeout: %w", err)
 	}
 
 	s.httpSrv = &http.Server{
@@ -144,6 +153,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	writeTimeout, err := time.ParseDuration(s.config.Server.WriteTimeout)
 	if err != nil {
 		return fmt.Errorf("parse write_timeout: %w", err)
+	}
+	if _, err := time.ParseDuration(s.config.Server.ShutdownTimeout); err != nil {
+		return fmt.Errorf("parse shutdown_timeout: %w", err)
 	}
 
 	s.httpSrv = &http.Server{
@@ -193,12 +205,12 @@ func (s *Server) awaitStop(ctx context.Context, done <-chan struct{}) {
 	if ctx.Err() == nil {
 		return
 	}
+	// Start and Serve both parse this before reaching here, so the error cannot
+	// happen; the fallback keeps a wedge from becoming an unbounded wait if that ever
+	// stops being true.
 	timeout, err := time.ParseDuration(s.config.Server.ShutdownTimeout)
 	if err != nil {
-		// Unparseable: Stop will have failed on the same value and logged it, so
-		// there is nothing left to wait for. Bound the wait anyway rather than
-		// blocking forever on a channel that will not close.
-		timeout = time.Second
+		timeout = 30 * time.Second
 	}
 	select {
 	case <-done:

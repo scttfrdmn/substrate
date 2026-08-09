@@ -372,6 +372,168 @@ func TestEventStore_MaxEventsInMemory_SQLiteFlushesToo(t *testing.T) {
 		"the automatic flush must reach sqlite, and four crossings must not duplicate")
 }
 
+// warnCollector is a [emulator.Logger] that keeps the Warn messages it is given, so
+// a test can assert on a failure the store deliberately does not return.
+type warnCollector struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *warnCollector) Debug(_ string, _ ...any) {}
+func (l *warnCollector) Info(_ string, _ ...any)  {}
+func (l *warnCollector) Error(_ string, _ ...any) {}
+
+func (l *warnCollector) Warn(msg string, _ ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, msg)
+}
+
+func (l *warnCollector) messages() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.warns...)
+}
+
+// TestEventStore_MaxEventsInMemory_FlushFailureIsLoggedNotReturned pins the contract
+// that decides where a persistence failure surfaces. RecordEvent promises the
+// observation was recorded, and it was — the events are in memory and a later flush
+// still writes them — so failing the caller's API call because the disk hiccuped
+// would report an infrastructure fault as an AWS-level error. It is reported through
+// the logger instead, which is what [emulator.WithEventStoreLogger] exists for:
+// without one the failure is silent, and that silence is what #599 was.
+func TestEventStore_MaxEventsInMemory_FlushFailureIsLoggedNotReturned(t *testing.T) {
+	// A regular file where the store expects to create its directory, so the flush
+	// fails on every attempt for a reason that has nothing to do with the caller.
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	require.NoError(t, os.WriteFile(blocked, []byte("not a directory"), 0o600))
+
+	logger := &warnCollector{}
+	store := emulator.NewEventStore(emulator.EventStoreConfig{
+		Enabled:           true,
+		Backend:           "file",
+		PersistPath:       blocked,
+		MaxEventsInMemory: 2,
+	}, emulator.WithEventStoreLogger(logger))
+	ctx := context.Background()
+
+	// The record itself must succeed even though its flush cannot.
+	for range 4 {
+		require.NoError(t, store.RecordEvent(ctx, &emulator.Event{
+			StreamID: "blocked", Service: "s3", Operation: "Put", Timestamp: time.Now(),
+		}))
+	}
+
+	assert.NotEmpty(t, logger.messages(),
+		"a flush that could not write must be reported through the logger")
+
+	// And the events are still there to be flushed later, which is why failing the
+	// caller would have been the wrong trade.
+	events, err := store.GetEvents(ctx, emulator.EventFilter{})
+	require.NoError(t, err)
+	assert.Len(t, events, 4)
+
+	// An explicit Flush, by contrast, does return the error — its caller asked for
+	// the write and can act on it.
+	require.Error(t, store.Flush(ctx))
+}
+
+// TestEventStore_MaxEventsInMemory_FlushFailureWithoutALoggerIsSilent is the other
+// half: the logger is optional, so a store built without one must degrade to silence
+// rather than panicking on a nil interface.
+func TestEventStore_MaxEventsInMemory_FlushFailureWithoutALoggerIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	require.NoError(t, os.WriteFile(blocked, []byte("not a directory"), 0o600))
+
+	store := emulator.NewEventStore(emulator.EventStoreConfig{
+		Enabled:           true,
+		Backend:           "file",
+		PersistPath:       blocked,
+		MaxEventsInMemory: 2,
+	})
+
+	recordN(t, store, "blocked", 4)
+
+	events, err := store.GetEvents(context.Background(), emulator.EventFilter{})
+	require.NoError(t, err)
+	assert.Len(t, events, 4)
+}
+
+// TestServer_Stop_ReportsAFailedFlush pins the opposite choice at shutdown. An
+// automatic flush failure is logged because a request is waiting on it; at shutdown
+// nothing is, and the events are about to be lost with the process, so the error goes
+// to Stop's caller.
+func TestServer_Stop_ReportsAFailedFlush(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	require.NoError(t, os.WriteFile(blocked, []byte("not a directory"), 0o600))
+
+	cfg := emulator.DefaultConfig()
+	cfg.EventStore.Enabled = true
+	cfg.EventStore.Backend = "file"
+	cfg.EventStore.PersistPath = blocked
+
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	srv := emulator.NewServer(*cfg, emulator.NewPluginRegistry(), store,
+		emulator.NewMemoryStateManager(), emulator.NewTimeController(time.Now()),
+		emulator.NewDefaultLogger(slog.LevelError, false))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	baseURL := fmt.Sprintf("http://%s", ln.Addr().String())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+
+	waitForHealth(t, baseURL)
+	recordN(t, store, "blocked", 1)
+
+	err = srv.Stop(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "flush event store")
+
+	cancel()
+	require.NoError(t, <-served)
+}
+
+// TestServer_UnparseableShutdownTimeoutIsAStartupError covers a hang found while
+// testing the shutdown flush, and present on main before this change: shutdown_timeout
+// was parsed only inside Stop, and a Stop that failed on it returned *before* closing
+// the listener — so Serve never unblocked and the process hung on SIGTERM instead of
+// exiting. Adding the flush wait would have compounded it.
+//
+// Start and Serve already parse read_timeout and write_timeout up front; this one is
+// now parsed with them, so an unusable value fails at startup where it is visible.
+func TestServer_UnparseableShutdownTimeoutIsAStartupError(t *testing.T) {
+	cfg := emulator.DefaultConfig()
+	cfg.Server.ShutdownTimeout = "not-a-duration"
+
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	srv := emulator.NewServer(*cfg, emulator.NewPluginRegistry(), store,
+		emulator.NewMemoryStateManager(), emulator.NewTimeController(time.Now()),
+		emulator.NewDefaultLogger(slog.LevelError, false))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// Returns immediately rather than serving, so there is no hang to wait out.
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(context.Background(), ln) }()
+
+	select {
+	case serveErr := <-served:
+		require.Error(t, serveErr)
+		assert.Contains(t, serveErr.Error(), "parse shutdown_timeout")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve neither served nor reported the bad shutdown_timeout")
+	}
+}
+
 // TestEventStore_MaxEventsInMemory_ConcurrentRecordersDoNotRace is why the file and
 // sqlite backends gained their own mutexes. Their flush methods advance a cursor
 // while the EventStore holds only its *read* lock, which permits concurrent

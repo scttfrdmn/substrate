@@ -97,6 +97,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test calling `Stop` directly cannot see it, so there is now one that goes through
   cancellation and asserts the ordering.
 
+- **An unparseable `server.shutdown_timeout` fails at startup instead of hanging the
+  process** (found while testing #599). The value was parsed only inside `Stop`, and a
+  `Stop` that failed on it returned **before** closing the listener — so `Start`/`Serve`
+  never unblocked and a `SIGTERM`'d server hung rather than exiting. `read_timeout` and
+  `write_timeout` were already validated up front; `shutdown_timeout` now is too, so an
+  unusable duration is reported where it is visible. Pre-existing, and independent of
+  the flush work, but the shutdown flush waits on `Stop` and would have compounded it.
+
 - **The event-store flush no longer races its own cursor** (#599). Both persisting
   backends track how far they have written — `fileBackend` a per-stream map,
   `sqliteBackend` a single counter — and both wrote it while holding only the event
