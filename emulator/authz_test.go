@@ -117,7 +117,7 @@ func TestAuthController_Deny(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 	assert.Equal(t, 403, awsErr.HTTPStatus)
 }
 
@@ -134,7 +134,7 @@ func TestAuthController_ImplicitDeny(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 }
 
 func TestAuthController_CrossService_S3Deny(t *testing.T) {
@@ -159,7 +159,7 @@ func TestAuthController_CrossService_S3Deny(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 }
 
 func TestAuthController_InlinePolicy_Allow(t *testing.T) {
@@ -254,7 +254,7 @@ func TestAuthController_PermissionBoundary_Deny(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 	assert.Contains(t, awsErr.Message, "permission boundary")
 }
 
@@ -322,7 +322,7 @@ func TestABAC_ResourceTag_Deny(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 }
 
 func TestABAC_ResourceTag_Missing(t *testing.T) {
@@ -343,7 +343,7 @@ func TestABAC_ResourceTag_Missing(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 }
 
 func TestABAC_RequestTag_Allow(t *testing.T) {
@@ -386,7 +386,7 @@ func TestABAC_RequestTag_Deny(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 }
 
 func TestABAC_IAMRole_ResourceTag(t *testing.T) {

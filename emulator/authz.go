@@ -24,8 +24,9 @@ func NewAuthController(state StateManager, logger Logger) *AuthController {
 }
 
 // CheckAccess returns nil when the caller is allowed or when reqCtx.Principal
-// is nil. Returns an *AWSError with code "AccessDeniedException" (HTTP 403)
-// when access is denied.
+// is nil. Returns an *AWSError with HTTP 403 and the denial code the requested
+// service's wire protocol uses — "AccessDenied" for the XML protocols,
+// "AccessDeniedException" for the JSON ones; see [accessDeniedCodeFor] (#595).
 func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) error {
 	if reqCtx.Principal == nil {
 		return nil
@@ -73,9 +74,14 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		Context:   condCtx,
 	})
 
+	// Both denial arms take their code from the same helper, so an identity-policy
+	// refusal and a boundary refusal cannot drift apart — and neither can drift from
+	// the trust-policy gate #593 added, which resolves the same way for STS.
+	deniedCode := accessDeniedCodeFor(req.Service, "")
+
 	if result.Decision != DecisionAllow {
 		return &AWSError{
-			Code: "AccessDeniedException",
+			Code: deniedCode,
 			Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
 				reqCtx.Principal.ARN, action, resource),
 			HTTPStatus: http.StatusForbidden,
@@ -96,7 +102,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		})
 		if boundaryResult.Decision != DecisionAllow {
 			return &AWSError{
-				Code: "AccessDeniedException",
+				Code: deniedCode,
 				Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by permission boundary)",
 					reqCtx.Principal.ARN, action),
 				HTTPStatus: http.StatusForbidden,

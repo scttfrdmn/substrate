@@ -705,6 +705,6 @@ func TestIAMPlugin_Authorize_WithBoundary(t *testing.T) {
 	require.Error(t, err)
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, err, &awsErr)
-	assert.Equal(t, "AccessDeniedException", awsErr.Code)
+	assert.Equal(t, "AccessDenied", awsErr.Code)
 	assert.Contains(t, awsErr.Message, "permission boundary")
 }

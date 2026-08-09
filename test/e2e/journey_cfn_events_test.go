@@ -167,7 +167,7 @@ func TestJourney_StackEventsNameARoleDenial(t *testing.T) {
 	}
 	// Naming the action is what makes the event actionable: a consumer learns which
 	// permission to add, rather than only that something failed.
-	for _, want := range []string{"AccessDeniedException", "s3:CreateBucket"} {
+	for _, want := range []string{"AccessDenied", "s3:CreateBucket"} {
 		if !strings.Contains(denial, want) {
 			t.Errorf("ResourceStatusReason = %q, want it to name %q", denial, want)
 		}

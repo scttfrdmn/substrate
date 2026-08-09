@@ -41,6 +41,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a trust policy reports no member at all rather than an empty document,
   which is the same emptiness test the STS gate uses to decide a role is unenforced.
 
+### Fixed
+- **An authorization denial reports the code the service's wire protocol uses, so
+  substrate no longer answers one outcome with two codes** (#595). The generic
+  authorization gate returned `AccessDeniedException` for every service, while
+  #593's trust-policy gate returned the bare `AccessDenied` AWS actually sends for
+  STS. Two gates therefore reported different codes for one conceptual outcome, and
+  a consumer matching on the code got a denial it could not identify — the case IaC
+  error handling is most likely to branch on. The code now follows the requested
+  service's error protocol: `AccessDenied` for the XML protocols (Query, REST-XML
+  and EC2 — STS, IAM, CloudFormation, SNS, S3, EC2) and `AccessDeniedException` for
+  the JSON ones (SQS, DynamoDB, Lambda, SSM and the rest), which is the split every
+  AWS service model shows. Keying on protocol rather than on a per-service table
+  means a newly registered plugin gets the right code from its existing
+  classification, with no second table to keep in step; a test asserts the property
+  over every registered service rather than over a sample.
+
+  The IAM plugin's own gate is fixed with it. It runs a separate `authorize()` and
+  built its ~40 denials from a hardcoded `AccessDeniedException`, so fixing only the
+  generic controller would have left substrate reporting two codes for **one
+  service** — #595's complaint restated one level down. IAM speaks the Query
+  protocol, so its denials are now `AccessDenied` too.
+
+  Because the CloudFormation deployer surfaces a denial as a resource's error, and
+  #501 renders that as a `StackEvent` `ResourceStatusReason`, the denial text in
+  stack events and `DescribeStackResources` changes with it.
+
 ## [v0.95.0] - 2026-08-08
 
 ### Added

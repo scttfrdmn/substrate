@@ -111,8 +111,10 @@ func trustAssumeRole(t *testing.T, srv *emulator.Server, accessKeyID, roleARN, s
 // gate passes, and returns its access key ID.
 //
 // The grant matters: without it every case below would fail at the *identity*
-// gate with AccessDeniedException, and a test asserting only "denied" would pass
-// while the trust policy stayed unread — which is exactly the #593 defect.
+// gate instead, and a test asserting only "denied" would pass while the trust
+// policy stayed unread — which is exactly the #593 defect. Since #595 the two
+// gates report the same code, so the assertion cannot even be told apart by code
+// alone; TestAccessDenied_BothGatesAgree pins that deliberately.
 func trustSetupCaller(t *testing.T, srv *emulator.Server, userName string) string {
 	t.Helper()
 	require.Equal(t, http.StatusOK,
