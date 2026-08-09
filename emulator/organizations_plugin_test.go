@@ -134,12 +134,28 @@ func TestOrganizations_CreateAccount_DescribeAccount(t *testing.T) {
 	if !ok {
 		t.Fatal("expected CreateAccountStatus")
 	}
-	if state, _ := status["State"].(string); state != "SUCCEEDED" {
-		t.Errorf("expected State=SUCCEEDED, got %q", state)
+	// CreateAccount is asynchronous, so the call itself reports IN_PROGRESS and
+	// carries no AccountId; the account ID arrives from the first
+	// DescribeCreateAccountStatus. See TestOrganizations_FullVend.
+	if state, _ := status["State"].(string); state != "IN_PROGRESS" {
+		t.Errorf("expected State=IN_PROGRESS, got %q", state)
 	}
-	newAccountID, _ := status["AccountId"].(string)
+	requestID, _ := status["Id"].(string)
+	resolved := orgsRequest(t, ts, "DescribeCreateAccountStatus", map[string]interface{}{
+		"CreateAccountRequestId": requestID,
+	})
+	defer resolved.Body.Close() //nolint:errcheck
+	var resolvedOut struct {
+		CreateAccountStatus struct {
+			AccountID string `json:"AccountId"`
+		} `json:"CreateAccountStatus"`
+	}
+	if err := json.NewDecoder(resolved.Body).Decode(&resolvedOut); err != nil {
+		t.Fatalf("DescribeCreateAccountStatus decode: %v", err)
+	}
+	newAccountID := resolvedOut.CreateAccountStatus.AccountID
 	if newAccountID == "" {
-		t.Fatal("expected non-empty AccountId in CreateAccountStatus")
+		t.Fatal("expected non-empty AccountId once the request resolved")
 	}
 
 	// DescribeAccount.

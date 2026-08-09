@@ -833,6 +833,33 @@ func TestParseAWSRequest_SSOAdminTargetPrefix(t *testing.T) {
 	}
 }
 
+// TestParseAWSRequest_OrganizationsTargetPrefix pins the Organizations target
+// prefix. "AWSOrganizationsV20161128" carries its API version inside the prefix
+// rather than after an underscore, so the generic version-suffix strip never
+// fires and the name never reduces to "organizations" on its own. Without the
+// alias the plugin was registered and unit-tested but unreachable from any SDK,
+// the same failure #561 found in sso-admin: every call answered
+// "service not emulated: awsorganizationsv20161128".
+func TestParseAWSRequest_OrganizationsTargetPrefix(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{
+		"AWSOrganizationsV20161128.ListRoots",
+		"AWSOrganizationsV20161128.CreateAccount",
+		"AWSOrganizationsV20161128.MoveAccount",
+	} {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+			r.Host = "localhost:4566"
+			r.Header.Set("X-Amz-Target", target)
+
+			req, _, err := emulator.ParseAWSRequest(r)
+			require.NoError(t, err)
+			assert.Equal(t, "organizations", req.Service)
+		})
+	}
+}
+
 func TestNormalizeS3VirtualHost(t *testing.T) {
 	tests := []struct {
 		host       string

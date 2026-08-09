@@ -304,6 +304,15 @@ var targetServiceAliases = map[string]string{
 	// Both aws-sdk-go-v2 and boto3 use X-Amz-Target: AWSPriceListService.{Op}
 	// for the Price List Query API, whose SigV4 signing name is "pricing".
 	"awspricelistservice": "pricing",
+	// "AWSOrganizationsV20161128" → no "Amazon" to strip, no "_" version suffix
+	// → lowercase → "awsorganizationsv20161128" → "organizations". The version
+	// rides in the prefix itself rather than after an underscore, so the generic
+	// suffix strip above never fires and the name never reduces on its own.
+	// Without this alias OrganizationsPlugin was registered and unit-tested but
+	// unreachable from any SDK, exactly as SSOPlugin was in #561: every
+	// aws-sdk-go-v2 and boto3 call fell through to
+	// "service not emulated: awsorganizationsv20161128".
+	"awsorganizationsv20161128": "organizations",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
