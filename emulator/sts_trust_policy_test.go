@@ -152,6 +152,38 @@ func trustCreateRole(t *testing.T, srv *emulator.Server, roleName, trustPolicy s
 	}).StatusCode)
 }
 
+// trustSessionKeyFrom extracts the minted session's access key ID from an
+// AssumeRole response, so a later call can be made *as* that session.
+func trustSessionKeyFrom(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	var parsed struct {
+		AccessKeyID string `xml:"AssumeRoleResult>Credentials>AccessKeyId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &parsed), "body: %s", body)
+	require.NotEmpty(t, parsed.AccessKeyID)
+	return parsed.AccessKeyID
+}
+
+// trustGetCallerIdentity calls GetCallerIdentity as accessKeyID. Whether a
+// credential still works is only answerable by making a request with it, which is
+// why this exists rather than a state read.
+func trustGetCallerIdentity(t *testing.T, srv *emulator.Server, accessKeyID string) *http.Response {
+	t.Helper()
+	q := url.Values{}
+	q.Set("Action", "GetCallerIdentity")
+	q.Set("Version", "2011-06-15")
+	r := httptest.NewRequest(http.MethodPost, "/?"+q.Encode(), nil)
+	r.Host = "sts.amazonaws.com"
+	r.Header.Set("Authorization", trustAuthHeader(accessKeyID, "sts"))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w.Result()
+}
+
 // trustErrorFrom decodes the query-protocol error document.
 func trustErrorFrom(t *testing.T, resp *http.Response) (code, message string) {
 	t.Helper()

@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -135,6 +136,34 @@ func iamRoleXMLFields(r *IAMRole) string {
 		b.WriteString("<Description>")
 		b.WriteString(xmlEsc(r.Description))
 		b.WriteString("</Description>")
+	}
+	// The Role shape carries AssumeRolePolicyDocument, so a role's trust policy is
+	// readable through GetRole/ListRoles — which is the only way a caller can
+	// confirm what UpdateAssumeRolePolicy stored (#594). Emitted as JSON rather
+	// than URL-encoded JSON, matching how GetRolePolicy already returns an inline
+	// document: botocore's after-call.iam handler unquotes then json.loads every
+	// policyDocumentType member, and unquoting plain JSON is a no-op.
+	//
+	// The document is *re-marshaled from the parsed form*, not returned verbatim,
+	// because that is what substrate stores — the same normalization GetRolePolicy
+	// and GetUserPolicy already apply to inline policies. So a semantically
+	// equivalent form can come back: a Principal submitted as {"AWS":"1234"}
+	// reports as "1234", since PolicyPrincipal marshals a lone AWS entry as the
+	// bare string AWS also accepts. Real IAM stores the document as text and
+	// returns the submitted bytes, so a consumer comparing byte-for-byte sees a
+	// difference; one parsing the document does not.
+	//
+	// Omitted when there are no statements, because a role created without a trust
+	// policy has a zero PolicyDocument, and marshaling that would report a
+	// document ({"Version":"","Statement":null}) where AWS reports none. The
+	// emptiness test is the same one the STS gate uses to decide the role is
+	// unenforced.
+	if len(r.AssumeRolePolicyDocument.Statement) > 0 {
+		if doc, err := json.Marshal(r.AssumeRolePolicyDocument); err == nil {
+			b.WriteString("<AssumeRolePolicyDocument>")
+			b.WriteString(xmlEsc(string(doc)))
+			b.WriteString("</AssumeRolePolicyDocument>")
+		}
 	}
 	if r.PermissionsBoundary != nil {
 		b.WriteString("<PermissionsBoundary><PolicyArn>")

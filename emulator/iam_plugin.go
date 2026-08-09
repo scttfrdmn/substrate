@@ -66,6 +66,8 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.createRole(ctx, req)
 	case "GetRole":
 		return p.getRole(ctx, req)
+	case "UpdateAssumeRolePolicy":
+		return p.updateAssumeRolePolicy(ctx, req)
 	case "DeleteRole":
 		return p.deleteRole(ctx, req)
 	case "ListRoles":
@@ -454,6 +456,66 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	}
 
 	return iamXMLResponse(http.StatusOK, "GetRole", iamSingleRoleXML(role))
+}
+
+// updateAssumeRolePolicy replaces a role's trust policy in place.
+//
+// The document is stored the same way createRole stores it — unmarshalled into a
+// [PolicyDocument] — so the trust-policy gate STS applies (#593) and GetRole's
+// read-back both see the new document with no further plumbing. That gate reads
+// the stored policy at AssumeRole time, which is what makes the replacement take
+// effect on the *next* assume and leave already-minted sessions alone: AWS does
+// not revoke them either.
+//
+// PolicyDocument is required here, unlike CreateRole's AssumeRolePolicyDocument —
+// the UpdateAssumeRolePolicy model lists both RoleName and PolicyDocument under
+// "required", so there is no "clear the policy" form of this call. An absent one
+// is a validation error rather than an unenforced role.
+func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var params struct {
+		RoleName       string `json:"RoleName"`
+		PolicyDocument string `json:"PolicyDocument"`
+	}
+	if err := parseIAMBody(req.Body, &params); err != nil {
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+	if params.RoleName == "" || params.PolicyDocument == "" {
+		return iamErrorResponse("ValidationError",
+			"RoleName and PolicyDocument are required", http.StatusBadRequest), nil
+	}
+
+	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:UpdateAssumeRolePolicy", "*"); err != nil {
+		return iamErrorResponse("AccessDeniedException", err.Error(), http.StatusForbidden), nil
+	}
+
+	role, err := p.loadRole(goCtx, params.RoleName)
+	if err != nil {
+		return nil, err
+	}
+	if role == nil {
+		return iamErrorResponse("NoSuchEntity",
+			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
+			http.StatusNotFound), nil
+	}
+
+	var trustPolicy PolicyDocument
+	if err := json.Unmarshal([]byte(params.PolicyDocument), &trustPolicy); err != nil {
+		return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
+			"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
+	}
+	role.AssumeRolePolicyDocument = trustPolicy
+
+	raw, err := json.Marshal(role)
+	if err != nil {
+		return nil, fmt.Errorf("marshal role: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, "role:"+params.RoleName, raw); err != nil {
+		return nil, fmt.Errorf("put role: %w", err)
+	}
+
+	return iamXMLEmptyResponse("UpdateAssumeRolePolicy"), nil
 }
 
 func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
