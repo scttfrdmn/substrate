@@ -235,8 +235,13 @@ func TestServer_Stop_FlushesTheEventStore(t *testing.T) {
 	require.NoError(t, err)
 	baseURL := fmt.Sprintf("http://%s", ln.Addr().String())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Served on an uncancelable context deliberately. Stop is called directly below,
+	// and a cancelable one would fire Serve's shutdown goroutine when the deferred
+	// cancel ran — a *second* Stop, whose flush re-created the events directory while
+	// t.TempDir's cleanup was removing it ("directory not empty"). That flaked in CI
+	// on the release PR. The cancellation path is covered by the test below, which
+	// waits for it to finish.
+	ctx := context.Background()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -484,10 +489,10 @@ func TestServer_Stop_ReportsAFailedFlush(t *testing.T) {
 	require.NoError(t, err)
 	baseURL := fmt.Sprintf("http://%s", ln.Addr().String())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Uncancelable for the same reason as TestServer_Stop_FlushesTheEventStore: Stop
+	// is called directly, and a cancel would fire a second one during cleanup.
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ctx, ln) }()
+	go func() { served <- srv.Serve(context.Background(), ln) }()
 
 	waitForHealth(t, baseURL)
 	recordN(t, store, "blocked", 1)
@@ -496,7 +501,6 @@ func TestServer_Stop_ReportsAFailedFlush(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "flush event store")
 
-	cancel()
 	require.NoError(t, <-served)
 }
 
