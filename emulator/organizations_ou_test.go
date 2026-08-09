@@ -572,20 +572,7 @@ func TestOrganizations_ListAccountsForParent(t *testing.T) {
 	rootID := orgListRootsID(t, ts)
 	ouID := createOU(t, ts, rootID, "Workloads")
 
-	createResp := orgsRequest(t, ts, "CreateAccount", map[string]interface{}{
-		"AccountName": "dev", "Email": "dev@example.com",
-	})
-	var created struct {
-		CreateAccountStatus struct {
-			AccountID string `json:"AccountId"`
-		} `json:"CreateAccountStatus"`
-	}
-	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
-		createResp.Body.Close() //nolint:errcheck
-		t.Fatalf("decode CreateAccount: %v", err)
-	}
-	createResp.Body.Close() //nolint:errcheck
-	newAccount := created.CreateAccountStatus.AccountID
+	newAccount := orgVendAccount(t, ts, "dev", "dev@example.com")
 
 	// Both accounts start in the root; the OU has none.
 	if got := orgListAccountsForParent(t, ts, rootID); len(got) != 2 {
