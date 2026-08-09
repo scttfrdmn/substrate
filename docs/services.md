@@ -877,8 +877,44 @@ IAM operations are free.
 | Operation | Notes |
 |-----------|-------|
 | GetCallerIdentity | Returns account 123456789012 by default |
-| AssumeRole | Returns stub temporary credentials |
+| AssumeRole | Evaluates the role's trust policy, then returns temporary credentials |
 | GetSessionToken | Returns stub temporary credentials |
+
+### A role's trust policy is enforced, and `sts:ExternalId` with it
+
+`AssumeRole` evaluates the role's `AssumeRolePolicyDocument` before minting a
+session, so a caller the trust policy does not admit is refused with
+`AccessDenied` (403). Two gates apply, and they answer different questions: the
+caller's own policies must allow `sts:AssumeRole` ("what may this caller do"), and
+the role's trust policy must admit the caller ("who may become this role").
+
+That makes the confused-deputy pattern testable. A trust policy conditioning on
+`sts:ExternalId` refuses a caller who cannot present the secret:
+
+```json
+{"Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow",
+  "Principal": {"AWS": "123456789012"},
+  "Action": "sts:AssumeRole",
+  "Condition": {"StringEquals": {"sts:ExternalId": "secret-123"}}
+}]}
+```
+
+A `Principal` naming a bare account ID or an account-root ARN
+(`arn:aws:iam::123456789012:root`) admits any principal in that account; an exact
+ARN admits only that entity. `ExternalId` is validated at 2–1224 characters.
+
+AWS distinguishes the two refusals only in the message, and substrate matches:
+"because no role trust policy allows the sts:AssumeRole action" for no matching
+statement, and "with an explicit deny in the role trust policy" for an explicit
+`Deny`.
+
+**Writing a trust policy is the opt-in.** A role created without one — which
+substrate permits, though AWS's `CreateRole` does not — is not enforced, so a test
+that never wrote a trust policy is unaffected. Enforcement is also skipped for an
+unauthenticated caller, who resolves to no principal for a `Principal` element to
+be true of; this is the same rule described in
+[Testing IAM permissions](./testing-guide.md#testing-iam-permissions).
 
 ### Cost
 

@@ -29,6 +29,12 @@ type EvaluationResult struct {
 // EvaluationRequest contains the inputs for an IAM policy evaluation.
 type EvaluationRequest struct {
 	// Principal is the ARN of the caller.
+	//
+	// It is matched against a statement's Principal/NotPrincipal element, so it
+	// only affects the outcome for a *resource* policy — an identity policy has
+	// no Principal element and matches any caller. Before #593 this field was
+	// populated by every call site and read by none, which is why a role's trust
+	// policy could name one account and still admit every caller.
 	Principal string
 
 	// Action is the AWS API action being requested (e.g., "s3:GetObject").
@@ -89,9 +95,12 @@ func Evaluate(documents []PolicyDocument, req EvaluationRequest) EvaluationResul
 	}
 }
 
-// statementMatches returns true if stmt covers the action, resource, and
-// conditions specified in req.
+// statementMatches returns true if stmt covers the principal, action, resource,
+// and conditions specified in req.
 func statementMatches(stmt PolicyStatement, req EvaluationRequest) bool {
+	if !principalMatches(stmt, req.Principal) {
+		return false
+	}
 	if !actionMatches(stmt, req.Action) {
 		return false
 	}
@@ -102,6 +111,107 @@ func statementMatches(stmt PolicyStatement, req EvaluationRequest) bool {
 		return false
 	}
 	return true
+}
+
+// principalMatches reports whether principal is covered by stmt's Principal
+// element, or for a NotPrincipal statement, whether it is NOT covered.
+//
+// A statement carrying neither element always matches. That is what makes this
+// safe to run over an *identity* policy: Principal is meaningless in one — the
+// principal is whoever the policy is attached to — and IAM rejects the element
+// there, so an absent element cannot mean "matches nobody" without breaking every
+// user, role and boundary evaluation. The element only appears in a *resource*
+// policy, which is the case #593 needed: a role's trust policy answers "who may
+// become this role", and until now nothing read the answer.
+//
+// A caller with no ARN never matches a statement that does name principals. An
+// unauthenticated request resolves to no identity, so there is nothing for
+// "Principal: {AWS: …}" to be true of; callers that must stay unenforced are
+// skipped before evaluation rather than admitted here (see STSPlugin.assumeRole).
+func principalMatches(stmt PolicyStatement, principal string) bool {
+	// NotPrincipal is authoritative when both appear. IAM forbids the
+	// combination, so there is no correct reading of it; taking the exclusion is
+	// the direction that cannot widen access.
+	if stmt.NotPrincipal != nil {
+		return !principalCovered(stmt.NotPrincipal, principal)
+	}
+	if stmt.Principal == nil {
+		return true
+	}
+	return principalCovered(stmt.Principal, principal)
+}
+
+// principalCovered reports whether p names principal.
+func principalCovered(p *PolicyPrincipal, principal string) bool {
+	if principal == "" {
+		return false
+	}
+	if p.All {
+		return true
+	}
+	for _, want := range p.AWS {
+		if awsPrincipalCovers(want, principal) {
+			return true
+		}
+	}
+	// Service and Federated principals match literally. Substrate mints no
+	// service-principal caller — a service ARN never appears as reqCtx.Principal
+	// — so these entries can only be satisfied by a caller naming one exactly,
+	// and pretending otherwise would let "Service: lambda.amazonaws.com" admit an
+	// IAM user.
+	for _, want := range p.Service {
+		if want == principal {
+			return true
+		}
+	}
+	for _, want := range p.Federated {
+		if want == principal {
+			return true
+		}
+	}
+	return false
+}
+
+// awsPrincipalCovers reports whether one "AWS" principal entry names principal.
+//
+// Three forms are accepted, all documented by IAM. An exact ARN matches itself. A
+// bare 12-digit account ID and the equivalent root ARN
+// ("arn:aws:iam::<account>:root") both delegate to the whole account: IAM treats
+// them as identical, and "the account ID" form is what the ExternalId guide uses
+// for a third-party trust policy.
+func awsPrincipalCovers(want, principal string) bool {
+	if want == principal {
+		return true
+	}
+	account := want
+	if strings.HasPrefix(want, "arn:") {
+		if entityType, _ := parsePrincipalARN(want); entityType != "root" {
+			// Any other ARN form is a specific entity, already handled by the
+			// exact match above.
+			return false
+		}
+		account = arnAccountID(want)
+	} else if strings.ContainsAny(want, ":/") {
+		// Not an ARN and not a bare account ID.
+		return false
+	}
+	if account == "" {
+		return false
+	}
+	return arnAccountID(principal) == account
+}
+
+// arnAccountID returns the account field of an ARN, or "" if arn is not one.
+//
+// The field is empty for the ARNs of account-less services (S3 buckets, for
+// one), and an empty account must never be read as "same account" — every such
+// ARN would then match every other.
+func arnAccountID(arn string) string {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) < 6 || parts[0] != "arn" {
+		return ""
+	}
+	return parts[4]
 }
 
 // actionMatches returns true when req.Action is covered by stmt.Action or,

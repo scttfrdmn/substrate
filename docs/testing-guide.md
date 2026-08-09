@@ -497,6 +497,46 @@ STS session credentials work the same way. `AssumeRole` mints an `ASIA` key whos
 calls are evaluated against the **role**, as real IAM resolves a session, so
 `assume-role` then call is how a test exercises a role's policy.
 
+### The assumption itself is gated, by the role's trust policy
+
+Two policies decide an `AssumeRole` call, and they answer different questions. The
+caller's own policies answer "what may this caller do" — that is the check above,
+and it is why `alice` needs `sts:AssumeRole`. The role's **trust policy**
+(`AssumeRolePolicyDocument`) answers "who may become this role", and it is a
+*resource* policy: it names principals.
+
+Both must hold, so a test can pin the confused-deputy defense — a role shared with
+a third party that only admits a caller presenting a shared secret:
+
+```bash
+aws iam create-role --role-name broker --assume-role-policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+    "Principal":{"AWS":"123456789012"},"Action":"sts:AssumeRole",
+    "Condition":{"StringEquals":{"sts:ExternalId":"secret-123"}}}]}'
+
+# as alice, who is allowed to call sts:AssumeRole:
+aws sts assume-role --role-arn arn:aws:iam::123456789012:role/broker \
+  --role-session-name s1
+# AccessDenied: User: arn:aws:iam::123456789012:user/alice is not authorized to
+# perform: sts:AssumeRole because no role trust policy allows the
+# sts:AssumeRole action
+
+aws sts assume-role --role-arn arn:aws:iam::123456789012:role/broker \
+  --role-session-name s1 --external-id secret-123
+# 200 — an ASIA session key
+```
+
+The code is `AccessDenied`, where the identity-policy denial above reports
+`AccessDeniedException`; both match what AWS returns. An explicit `Deny` in the
+trust policy is reported with a different message ("with an explicit deny in the
+role trust policy") under the same code.
+
+**Writing a trust policy is the opt-in**, the same shape as the rule below one
+level down. A role created without one is not enforced, so every test that never
+wrote a trust policy keeps working — see
+[the STS service reference](services.md#a-role-s-trust-policy-is-enforced-and-sts-externalid-with-it)
+for the `Principal` forms that match.
+
 ### A principal that does not exist is not enforced
 
 This is the one thing to know before writing such a test. **Existence in state is
@@ -517,7 +557,9 @@ role named by a session but absent from state is not enforced, so `assume-role`
 against a role substrate does not hold proves nothing.
 
 In-process `emulator.Client` callers never sign a request, so they carry no principal
-and are never authorized. Enforcement is reached over the wire.
+and are never authorized. Enforcement is reached over the wire. A trust policy is
+skipped for the same caller and the same reason: with no principal there is nothing
+for its `Principal` element to be true of.
 
 ### CloudFormation stacks
 
