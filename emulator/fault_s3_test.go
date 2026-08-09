@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -70,14 +71,74 @@ func newFaultOnlyServer(t *testing.T, cfg emulator.FaultConfig) *httptest.Server
 	return ts
 }
 
+// queryRequest posts a form-encoded query-protocol request to a fault-only server,
+// addressed to the named service. Faults are evaluated before routing, so no plugin
+// need be registered and the service name — carried by the Host header, which is
+// what the parser reads — is the only thing that varies.
+func queryRequest(t *testing.T, ts *httptest.Server, service string, params map[string]string) *http.Response {
+	t.Helper()
+	form := url.Values{}
+	for k, v := range params {
+		form.Set(k, v)
+	}
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/", strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	req.Host = service + ".us-east-1.amazonaws.com"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
 // TestFault_OtherProtocolsAreUnchanged is the regression guard on #480's error-shape
 // fix: only S3's document was wrong, so every other service must serialize an injected
-// error exactly as it did before. EC2 is the Query protocol and SQS is JSON RPC, which
-// are the two shapes the S3 arm was carved out of and beside.
+// error exactly as it did before. CloudFormation is the Query protocol and SQS is JSON
+// RPC, which are the two shapes the S3 arm was carved out of and beside.
+//
+// EC2 was this test's Query vehicle until #591 found EC2 is not a Query service at
+// all — it is the sole member of the "ec2" protocol — so the Query case moved to
+// CloudFormation and EC2 got its own subtest asserting its own document.
 func TestFault_OtherProtocolsAreUnchanged(t *testing.T) {
 	t.Parallel()
 
-	t.Run("ec2 stays query xml", func(t *testing.T) {
+	t.Run("cloudformation stays query xml", func(t *testing.T) {
+		t.Parallel()
+		ts := newFaultOnlyServer(t, emulator.FaultConfig{
+			Enabled: true,
+			Rules: []emulator.FaultRule{{
+				Service:    "cloudformation",
+				FaultType:  "error",
+				ErrorCode:  "Throttling",
+				HTTPStatus: http.StatusServiceUnavailable,
+				ErrorMsg:   "Rate exceeded.",
+				Times:      -1,
+			}},
+		})
+
+		resp := queryRequest(t, ts, "cloudformation", map[string]string{"Action": "DescribeStacks"})
+		defer resp.Body.Close() //nolint:errcheck
+		require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		assert.Equal(t, "text/xml; charset=UTF-8", resp.Header.Get("Content-Type"))
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		var doc struct {
+			XMLName xml.Name `xml:"ErrorResponse"`
+			Error   struct {
+				Type string `xml:"Type"`
+				Code string `xml:"Code"`
+			} `xml:"Error"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
+		assert.Equal(t, "Throttling", doc.Error.Code)
+		assert.Equal(t, "Sender", doc.Error.Type)
+	})
+
+	// An injected EC2 error must carry the code where the SDK reads it, which is the
+	// #591 half of the property #480 established for S3: a fault the client cannot
+	// match on is a fault the consumer's error branch never sees.
+	t.Run("ec2 uses the ec2 document", func(t *testing.T) {
 		t.Parallel()
 		ts := newFaultOnlyServer(t, emulator.FaultConfig{
 			Enabled: true,
@@ -100,15 +161,15 @@ func TestFault_OtherProtocolsAreUnchanged(t *testing.T) {
 		require.NoError(t, err)
 
 		var doc struct {
-			XMLName xml.Name `xml:"ErrorResponse"`
-			Error   struct {
-				Type string `xml:"Type"`
-				Code string `xml:"Code"`
-			} `xml:"Error"`
+			XMLName   xml.Name `xml:"Response"`
+			Code      string   `xml:"Errors>Error>Code"`
+			Message   string   `xml:"Errors>Error>Message"`
+			RequestID string   `xml:"RequestID"`
 		}
 		require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
-		assert.Equal(t, "RequestLimitExceeded", doc.Error.Code)
-		assert.Equal(t, "Sender", doc.Error.Type)
+		assert.Equal(t, "RequestLimitExceeded", doc.Code)
+		assert.Equal(t, "Request limit exceeded.", doc.Message)
+		assert.Equal(t, "SUBSTRATE", doc.RequestID)
 	})
 
 	t.Run("sqs stays json rpc", func(t *testing.T) {

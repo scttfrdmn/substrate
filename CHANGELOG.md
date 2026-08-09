@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An EC2 error reaches an AWS SDK caller with the code substrate sent** (#591). EC2 is
+  the only service on the `ec2` protocol, whose error document wraps the error in a
+  **plural** `<Errors>` element and spells the request id `<RequestID>` with a capital D.
+  Substrate served the Query protocol's `<ErrorResponse><Error>` instead, so
+  aws-sdk-go-v2's `ec2query` deserializer — which reads the code at the XPath
+  `Errors>Error>Code` — recovered an empty string and fell back to
+  `smithy.GenericAPIError{Code: "UnknownError"}`. A consumer branching on
+  `InsufficientInstanceCapacity` or `InvalidInstanceID.NotFound` never saw either code,
+  so every EC2 retry/wait loop written against the SDK was untestable.
+
+  **Organic errors were affected as much as injected faults.** The issue reported a
+  seeded capacity fault and predicted the rest; both paths share `writeError`'s single
+  serializer, so `DescribeInstances` on an absent instance ID arrived as `UnknownError`
+  too. Both are fixed together.
+
+  EC2 now has its own error-protocol arm, alongside the one S3 got for the same class of
+  bug in #480, and it is the sole member: `ec2` is the only service using that protocol.
+  Every other XML service keeps the `<ErrorResponse>` wrapper it had — the two documents
+  are mutually exclusive, since the Query parser reads `Error>Code` where the EC2 parser
+  reads `Errors>Error>Code`, so this could not be a shared shape.
+
+  Worth recording why substrate's own coverage missed this for so long: botocore is
+  lenient where the SDKs are strict. Its EC2 parser falls back to the document root when
+  `<Errors>` is absent, so the AWS CLI read the correct code out of the wrong document
+  and every CLI-driven test passed. The regression gate is therefore a real-SDK one,
+  `test/e2e/journey_ec2_errors_test.go`, and `test/e2e` now depends on
+  `aws-sdk-go-v2/service/ec2` to host it.
+
 ## [v0.94.0] - 2026-08-06
 
 ### Fixed

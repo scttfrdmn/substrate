@@ -663,10 +663,13 @@ func instanceState(t *testing.T, ts *httptest.Server, instID string) string {
 // ec2ErrorCodeOf extracts the code from an already-read EC2 error document. It is
 // the sibling of ec2ErrorCode, which sends the request itself — TerminateInstances
 // tests need the body as well as the code, so the two steps are separate here.
+//
+// The XPath is the SDK's, with the "ec2" protocol's plural <Errors> wrapper; see
+// ec2ErrorCode for why it is not the Query protocol's Error>Code (#591).
 func ec2ErrorCodeOf(t *testing.T, body string) string {
 	t.Helper()
 	var out struct {
-		Code string `xml:"Error>Code"`
+		Code string `xml:"Errors>Error>Code"`
 	}
 	require.NoError(t, xml.Unmarshal([]byte(body), &out), "body was %s", body)
 	return out.Code

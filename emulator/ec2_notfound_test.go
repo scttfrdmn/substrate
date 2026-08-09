@@ -11,8 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ec2ErrorCode sends params and returns the HTTP status plus the Error/Code from
-// the EC2 query-protocol error document.
+// ec2ErrorCode sends params and returns the HTTP status plus the error code from
+// the "ec2" protocol's error document.
+//
+// The XPath is the SDK's own — ec2query.ErrorComponents reads
+// "Errors>Error>Code", with the plural <Errors> wrapper — so a regression in the
+// wire shape empties the code here for the same reason it does in a real SDK
+// caller (#591). It is not the Query protocol's Error>Code, which is what this
+// helper read while EC2 was misclassified.
 func ec2ErrorCode(t *testing.T, ts *httptest.Server, params map[string]string) (int, string) {
 	t.Helper()
 	resp := ec2Request(t, ts, params)
@@ -20,16 +26,17 @@ func ec2ErrorCode(t *testing.T, ts *httptest.Server, params map[string]string) (
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	var doc struct {
-		XMLName xml.Name `xml:"ErrorResponse"`
-		Error   struct {
-			Code    string `xml:"Code"`
-			Message string `xml:"Message"`
-		} `xml:"Error"`
+		XMLName xml.Name `xml:"Response"`
+		Code    string   `xml:"Errors>Error>Code"`
+		Message string   `xml:"Errors>Error>Message"`
 	}
+	// An empty code on a body that is not an error document is the contract callers
+	// rely on: a table pinning refusals usually carries an accepted row too, whose
+	// success document this cannot and should not decode.
 	if xml.Unmarshal(body, &doc) != nil {
 		return resp.StatusCode, ""
 	}
-	return resp.StatusCode, doc.Error.Code
+	return resp.StatusCode, doc.Code
 }
 
 // TestEC2_DescribeByExplicitID_NotFound covers #391: naming a resource ID

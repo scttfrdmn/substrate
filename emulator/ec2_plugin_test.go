@@ -3863,10 +3863,14 @@ func TestEC2_RunInstances_ReturnsTagSet(t *testing.T) {
 	assert.Equal(t, "true", tags["spawn:managed"])
 }
 
-// ec2ErrorDetail sends params and returns the HTTP status plus the Error/Code and
-// Error/Message from the EC2 query-protocol error document. It differs from
-// ec2ErrorCode in also returning the message, so a test can pin AWS's exact
-// wording and catch a silent drift in it.
+// ec2ErrorDetail sends params and returns the HTTP status plus the code and message
+// from the "ec2" protocol's error document. It differs from ec2ErrorCode in also
+// returning the message, so a test can pin AWS's exact wording and catch a silent
+// drift in it.
+//
+// Like ec2ErrorCode, it decodes at the SDK's own XPath — the plural
+// "Errors>Error>..." of the "ec2" protocol, not the Query protocol's "Error>..."
+// this read while EC2 was misclassified (#591).
 func ec2ErrorDetail(t *testing.T, ts *httptest.Server, params map[string]string) (int, string, string) {
 	t.Helper()
 	resp := ec2Request(t, ts, params)
@@ -3874,16 +3878,16 @@ func ec2ErrorDetail(t *testing.T, ts *httptest.Server, params map[string]string)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	var doc struct {
-		XMLName xml.Name `xml:"ErrorResponse"`
-		Error   struct {
-			Code    string `xml:"Code"`
-			Message string `xml:"Message"`
-		} `xml:"Error"`
+		XMLName xml.Name `xml:"Response"`
+		Code    string   `xml:"Errors>Error>Code"`
+		Message string   `xml:"Errors>Error>Message"`
 	}
+	// Tolerant for the same reason as ec2ErrorCode: a table pinning refusals usually
+	// carries an accepted row, whose success document this must not fail on.
 	if xml.Unmarshal(body, &doc) != nil {
 		return resp.StatusCode, "", ""
 	}
-	return resp.StatusCode, doc.Error.Code, doc.Error.Message
+	return resp.StatusCode, doc.Code, doc.Message
 }
 
 // TestEC2_RunInstances_MissingImageId covers #412: RunInstances never validated
