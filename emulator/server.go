@@ -123,17 +123,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.logger.Info("substrate server starting", "address", s.config.Server.Address)
 
-	// Shutdown when context is canceled.
-	go func() {
-		<-ctx.Done()
-		if stopErr := s.Stop(context.Background()); stopErr != nil {
-			s.logger.Error("graceful shutdown error", "err", stopErr)
-		}
-	}()
+	done := s.stopOnCancel(ctx)
 
 	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("listen and serve: %w", err)
 	}
+	s.awaitStop(ctx, done)
 	return nil
 }
 
@@ -159,21 +154,64 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 
 	s.logger.Info("substrate server starting", "address", ln.Addr().String())
 
+	done := s.stopOnCancel(ctx)
+
+	if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("serve: %w", err)
+	}
+	s.awaitStop(ctx, done)
+	return nil
+}
+
+// stopOnCancel calls [Server.Stop] when ctx is canceled, returning a channel closed
+// once that Stop has returned. Pass it to [Server.awaitStop].
+func (s *Server) stopOnCancel(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-ctx.Done()
 		if stopErr := s.Stop(context.Background()); stopErr != nil {
 			s.logger.Error("graceful shutdown error", "err", stopErr)
 		}
 	}()
+	return done
+}
 
-	if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("serve: %w", err)
+// awaitStop waits for a cancellation-triggered [Server.Stop] to finish before Start
+// or Serve returns.
+//
+// Necessary because http.Server.Shutdown makes Serve return as soon as the listener
+// closes, while the rest of Stop — notably the event-store flush (#599) — is still
+// running on the goroutine. Without this wait, main returns and the process exits
+// first, so a SIGTERM'd server dropped everything recorded since the last automatic
+// flush. The unit test for Stop could not catch that: it calls Stop directly.
+//
+// Bounded by the same ShutdownTimeout Stop honors, so a wedged flush delays exit
+// rather than hanging it. Only waits when ctx is what ended the serve loop; a Stop
+// called directly by the caller has already completed by the time it returns.
+func (s *Server) awaitStop(ctx context.Context, done <-chan struct{}) {
+	if ctx.Err() == nil {
+		return
 	}
-	return nil
+	timeout, err := time.ParseDuration(s.config.Server.ShutdownTimeout)
+	if err != nil {
+		// Unparseable: Stop will have failed on the same value and logged it, so
+		// there is nothing left to wait for. Bound the wait anyway rather than
+		// blocking forever on a channel that will not close.
+		timeout = time.Second
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.logger.Warn("shutdown did not finish within shutdown_timeout",
+			"timeout", timeout)
+	}
 }
 
 // Stop initiates graceful shutdown, waiting up to the configured
-// ShutdownTimeout for active connections to finish.
+// ShutdownTimeout for active connections to finish, then flushing the event store
+// so events recorded since the last automatic flush are persisted rather than lost
+// on exit.
 func (s *Server) Stop(ctx context.Context) error {
 	if s.httpSrv == nil {
 		return nil
@@ -186,7 +224,30 @@ func (s *Server) Stop(ctx context.Context) error {
 	defer cancel()
 
 	s.logger.Info("substrate server shutting down")
-	return s.httpSrv.Shutdown(shutCtx)
+	if err := s.httpSrv.Shutdown(shutCtx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+
+	// Persist what the automatic threshold has not reached yet (#599). Without this
+	// the events recorded since the last crossing are lost on exit, and with the
+	// default max_in_memory of 1000 a short run would persist nothing at all despite
+	// a file or sqlite backend being configured. Run after Shutdown returns, so no
+	// request is still recording. A failure here loses recorded history rather than
+	// breaking a request, so unlike an automatic flush it is reported to the caller.
+	//
+	// On its own deadline rather than shutCtx, which Shutdown may have already
+	// consumed — a flush that inherited an expired context would fail every time the
+	// drain used its full budget, which is exactly when there is most to write. And
+	// detached from ctx's cancellation, because the usual caller is the signal
+	// handler, whose ctx is canceled by definition.
+	if s.store != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer flushCancel()
+		if err := s.store.Flush(flushCtx); err != nil {
+			return fmt.Errorf("flush event store: %w", err)
+		}
+	}
+	return nil
 }
 
 // ServeHTTP implements [http.Handler], allowing the server to be used directly

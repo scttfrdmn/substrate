@@ -67,6 +67,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #501 renders that as a `StackEvent` `ResourceStatusReason`, the denial text in
   stack events and `DescribeStackResources` changes with it.
 
+- **A configured event-store backend actually persists: `max_in_memory` triggers a
+  flush, and the server flushes on shutdown** (#599). `MaxEventsInMemory` was
+  declared, documented as *"the maximum number of events held in memory before the
+  store flushes"*, plumbed through config and pinned by a config test — and read
+  nowhere. `EventStore.Flush` had **zero callers** anywhere in the repo, tests and
+  CLI included: the two halves of one unfinished feature. So a run configured with
+  `backend: file` or `backend: sqlite` wrote nothing at all, and because the setting
+  parsed and round-tripped cleanly there was no signal short of grepping for readers.
+  The file and sqlite write paths were, correspondingly, unexercised.
+
+  `RecordEvent` now flushes each time the recorded count crosses a multiple of
+  `max_in_memory`, guarded the same way the adjacent `SnapshotInterval` hint is.
+  **It is a flush threshold, not a cap**: events are never dropped from memory, so
+  replay, `GetStream` and time-travel debugging still see the full history — the
+  distinction #599 flagged as the one that had to be got right, since "flush" meaning
+  *discard* would have broken the derivations that read back over a stream. A flush
+  failure is logged rather than returned, so a disk problem does not turn into an
+  AWS-level error on a caller's request; `substrate server` passes a logger in for
+  exactly that, via the new `WithEventStoreLogger`.
+
+  **`Server.Stop` flushes too**, which the threshold alone does not cover: everything
+  recorded since the last crossing sits in memory until something writes it, and with
+  the default `max_in_memory` of 1000 a short run crossed nothing, so a cleanly
+  terminated server still persisted zero events. `Start` and `Serve` now wait for
+  that flush before returning — `http.Server.Shutdown` releases the serve loop as
+  soon as the listener closes, so without the wait `main` returned and the process
+  exited while the flush was still running. A live `SIGTERM` is what caught this; a
+  test calling `Stop` directly cannot see it, so there is now one that goes through
+  cancellation and asserts the ordering.
+
+- **The event-store flush no longer races its own cursor** (#599). Both persisting
+  backends track how far they have written — `fileBackend` a per-stream map,
+  `sqliteBackend` a single counter — and both wrote it while holding only the event
+  store's **read** lock, which permits concurrent holders and so serializes nothing.
+  `fileBackend`'s struct comment asserted the opposite ("*flush is called while the
+  EventStore read-lock is held so flushCursors can be accessed without a separate
+  lock*"). It was unreachable while `Flush` had no callers; wiring the automatic
+  flush made it live, and `Flush` is exported, so a consumer calling it while
+  requests are still recording hits it too. Each backend now guards its cursor with
+  its own mutex, and the race detector reproduces the old behavior in a few hundred
+  iterations against the tests added with the fix.
+
 ## [v0.95.0] - 2026-08-08
 
 ### Added

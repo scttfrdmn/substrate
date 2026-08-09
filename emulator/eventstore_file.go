@@ -7,18 +7,27 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // fileBackend persists events as NDJSON files under a directory tree.
 // Each stream is stored in its own file: <persistPath>/events/<stream_id>.ndjson
 // Files are rotated to <stream_id>.ndjson.1, .2, … when they exceed
-// maxFileSizeMB. flush is called while the EventStore read-lock is held so
-// flushCursors can be accessed without a separate lock.
+// maxFileSizeMB.
+//
+// flush and load both write flushCursors, and both run while the EventStore holds
+// only its *read* lock — which permits concurrent holders, so that lock does not
+// serialize them. This struct's comment previously claimed it did. That was
+// harmless while Flush had no callers; wiring the automatic flush (#599) made it a
+// live data race, so the map has its own mutex.
 type fileBackend struct {
 	persistPath   string
 	maxFileSizeMB int
 	serializer    Serializer
-	flushCursors  map[string]int64 // stream_id → count already flushed
+
+	// mu guards flushCursors, which flush advances and load rebuilds.
+	mu           sync.Mutex
+	flushCursors map[string]int64 // stream_id → count already flushed
 }
 
 // newFileBackend creates a fileBackend that stores events under path.
@@ -32,9 +41,14 @@ func newFileBackend(path string, maxMB int, s Serializer) *fileBackend {
 }
 
 // flush appends any events not yet persisted to their respective NDJSON files.
-// streams is the EventStore's stream map; it is accessed under the store's
-// read-lock so this method needs no additional locking.
+// streams is the EventStore's stream map, read under the store's read-lock by the
+// caller. f.mu guards this backend's own cursor map for the whole write, so a
+// concurrent flush cannot read a cursor this one is about to advance and write the
+// same events a second time.
 func (f *fileBackend) flush(streams map[string][]*Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	eventsDir := filepath.Join(f.persistPath, "events")
 	if err := os.MkdirAll(eventsDir, 0o750); err != nil {
 		return fmt.Errorf("create events dir: %w", err)
@@ -119,12 +133,16 @@ func (f *fileBackend) load() ([]*Event, error) {
 		events = append(events, evs...)
 	}
 
-	// Update flush cursors so a subsequent flush only appends new events.
+	// Update flush cursors so a subsequent flush only appends new events. Under the
+	// same lock flush takes, because a load concurrent with a flush would otherwise
+	// write this map while flush was reading it.
+	f.mu.Lock()
 	for _, ev := range events {
 		if ev.StreamID != "" {
 			f.flushCursors[ev.StreamID]++
 		}
 	}
+	f.mu.Unlock()
 
 	return events, nil
 }
