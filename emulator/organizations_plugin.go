@@ -6,18 +6,33 @@ import (
 	"fmt"
 	"math/rand" // nosemgrep
 	"net/http"
-	"sort"
 	"time"
 )
 
 // OrganizationsPlugin emulates the AWS Organizations service.
-// It supports CRUD operations on organizations and accounts using the
-// Organizations JSON-target protocol (X-Amz-Target: Organizations_20161128.{Op}).
+// It supports the organization, root, OU, policy, account and tagging
+// operations using the Organizations JSON-target protocol
+// (X-Amz-Target: Organizations_20161128.{Op}).
+//
+// The organization, its root, and its management account are auto-created on
+// first observation, and all three keep one identity for the life of the state
+// store — a caller can attach a policy to the root, re-read it, and find the
+// same root (#577).
+//
+// Asynchronous CreateAccount requests resolve on first observation rather than
+// after an interval of the simulated clock: DescribeCreateAccountStatus reports
+// IN_PROGRESS at most once and then a terminal state, so a waiter converges in
+// one poll with no dependence on wall-clock or simulated time. Transitions
+// driven by the simulated clock are the subject of #514, which is still open;
+// picking a shape for them here would front-run that design.
 type OrganizationsPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
 }
+
+// orgHandler handles one Organizations operation.
+type orgHandler func(*RequestContext, *AWSRequest) (*AWSResponse, error)
 
 // Name returns the service name "organizations".
 func (p *OrganizationsPlugin) Name() string { return organizationsNamespace }
@@ -37,289 +52,169 @@ func (p *OrganizationsPlugin) Initialize(_ context.Context, cfg PluginConfig) er
 // Shutdown is a no-op for OrganizationsPlugin.
 func (p *OrganizationsPlugin) Shutdown(_ context.Context) error { return nil }
 
-// HandleRequest dispatches an Organizations JSON-target request to the appropriate handler.
+// HandleRequest dispatches an Organizations JSON-target request to the first
+// operation cluster that claims it. The clusters live in separate files
+// (organizations_ou.go, organizations_policy.go, and so on) and each owns its own
+// claim function, so adding an operation touches one file rather than a shared
+// switch.
 func (p *OrganizationsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	switch req.Operation {
+	for _, claim := range []func(string) (orgHandler, bool){
+		p.coreOperation,
+		p.ouOperation,
+		p.policyOperation,
+		p.accountOperation,
+		p.tagOperation,
+	} {
+		if h, ok := claim(req.Operation); ok {
+			return h(ctx, req)
+		}
+	}
+	return nil, orgInvalidAction(req.Operation)
+}
+
+// coreOperation claims the organization- and root-level reads.
+func (p *OrganizationsPlugin) coreOperation(op string) (orgHandler, bool) {
+	switch op {
 	case "DescribeOrganization":
-		return p.describeOrganization(ctx, req)
+		return p.describeOrganization, true
 	case "ListAccounts":
-		return p.listAccounts(ctx, req)
+		return p.listAccounts, true
 	case "DescribeAccount":
-		return p.describeAccount(ctx, req)
+		return p.describeAccount, true
 	case "ListRoots":
-		return p.listRoots(ctx, req)
-	case "CreateAccount":
-		return p.createAccount(ctx, req)
+		return p.listRoots, true
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "OrganizationsPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, false
 	}
-}
-
-// --- state keys ---
-
-func orgKey(acct string) string           { return "org:" + acct }
-func orgAccountKey(id string) string      { return "account:" + id }
-func orgAccountIDsKey(acct string) string { return "account_ids:" + acct }
-
-// --- auto-create helpers ---
-
-// ensureOrganization returns the organization for acct, creating it on first call.
-func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct string) (*Organization, error) {
-	data, err := p.state.Get(ctx, organizationsNamespace, orgKey(acct))
-	if err != nil {
-		return nil, fmt.Errorf("get org: %w", err)
-	}
-	if data != nil {
-		var org Organization
-		if unmarshalErr := json.Unmarshal(data, &org); unmarshalErr != nil {
-			return nil, fmt.Errorf("unmarshal org: %w", unmarshalErr)
-		}
-		return &org, nil
-	}
-
-	// Auto-create.
-	orgID := "o-" + randomLowerAlphanum(10)
-	org := Organization{
-		ID:                 orgID,
-		Arn:                fmt.Sprintf("arn:aws:organizations::%s:organization/%s", acct, orgID),
-		FeatureSet:         "ALL",
-		MasterAccountID:    acct,
-		MasterAccountArn:   fmt.Sprintf("arn:aws:organizations::%s:account/%s/%s", acct, orgID, acct),
-		MasterAccountEmail: "master@example.com",
-	}
-	if saveErr := p.saveOrg(ctx, acct, org); saveErr != nil {
-		return nil, saveErr
-	}
-
-	// Auto-create the master account entry.
-	masterAccount := OrgAccount{
-		ID:       acct,
-		Arn:      org.MasterAccountArn,
-		Name:     "master",
-		Email:    "master@example.com",
-		Status:   "ACTIVE",
-		JoinedAt: p.tc.Now(),
-	}
-	if saveErr := p.saveAccount(ctx, acct, masterAccount); saveErr != nil {
-		return nil, saveErr
-	}
-
-	return &org, nil
-}
-
-func (p *OrganizationsPlugin) saveOrg(ctx context.Context, acct string, org Organization) error {
-	data, err := json.Marshal(org)
-	if err != nil {
-		return fmt.Errorf("marshal org: %w", err)
-	}
-	return p.state.Put(ctx, organizationsNamespace, orgKey(acct), data)
-}
-
-func (p *OrganizationsPlugin) saveAccount(ctx context.Context, masterAcct string, a OrgAccount) error {
-	data, err := json.Marshal(a)
-	if err != nil {
-		return fmt.Errorf("marshal account: %w", err)
-	}
-	if err := p.state.Put(ctx, organizationsNamespace, orgAccountKey(a.ID), data); err != nil {
-		return fmt.Errorf("put account: %w", err)
-	}
-	// Update account IDs index.
-	ids, _ := p.loadAccountIDs(ctx, masterAcct)
-	for _, id := range ids {
-		if id == a.ID {
-			return nil
-		}
-	}
-	ids = append(ids, a.ID)
-	sort.Strings(ids)
-	return p.saveAccountIDs(ctx, masterAcct, ids)
-}
-
-func (p *OrganizationsPlugin) loadAccount(ctx context.Context, accountID string) (*OrgAccount, error) {
-	data, err := p.state.Get(ctx, organizationsNamespace, orgAccountKey(accountID))
-	if err != nil {
-		return nil, fmt.Errorf("get account: %w", err)
-	}
-	if data == nil {
-		return nil, nil
-	}
-	var a OrgAccount
-	if err := json.Unmarshal(data, &a); err != nil {
-		return nil, fmt.Errorf("unmarshal account: %w", err)
-	}
-	return &a, nil
-}
-
-func (p *OrganizationsPlugin) loadAccountIDs(ctx context.Context, masterAcct string) ([]string, error) {
-	data, err := p.state.Get(ctx, organizationsNamespace, orgAccountIDsKey(masterAcct))
-	if err != nil {
-		return nil, fmt.Errorf("get account ids: %w", err)
-	}
-	if data == nil {
-		return nil, nil
-	}
-	var ids []string
-	if err := json.Unmarshal(data, &ids); err != nil {
-		return nil, fmt.Errorf("unmarshal account ids: %w", err)
-	}
-	return ids, nil
-}
-
-func (p *OrganizationsPlugin) saveAccountIDs(ctx context.Context, masterAcct string, ids []string) error {
-	data, err := json.Marshal(ids)
-	if err != nil {
-		return fmt.Errorf("marshal account ids: %w", err)
-	}
-	return p.state.Put(ctx, organizationsNamespace, orgAccountIDsKey(masterAcct), data)
 }
 
 // --- operations ---
 
 func (p *OrganizationsPlugin) describeOrganization(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	org, err := p.ensureOrganization(context.Background(), reqCtx.AccountID)
+	goCtx := context.Background()
+	org, err := p.ensureOrganization(goCtx, reqCtx.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("describeOrganization: %w", err)
 	}
-	out := map[string]interface{}{"Organization": org}
-	body, err := json.Marshal(out)
+	// The feature set is read through the control plane so a seed set after the
+	// organization was created still governs what the caller observes.
+	featureSet, err := p.effectiveFeatureSet(goCtx, reqCtx.AccountID)
 	if err != nil {
-		return nil, fmt.Errorf("describeOrganization marshal: %w", err)
+		return nil, fmt.Errorf("describeOrganization feature set: %w", err)
 	}
-	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
+	org.FeatureSet = featureSet
+	if featureSet == orgFeatureSetAll {
+		org.AvailablePolicyTypes = []OrgPolicyTypeSummary{{Type: orgPolicyTypeSCP, Status: "ENABLED"}}
+	}
+	return orgJSONResponse(map[string]interface{}{"Organization": org}, "describeOrganization")
 }
 
-func (p *OrganizationsPlugin) listAccounts(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	// Ensure org exists so master account is always present.
-	if _, err := p.ensureOrganization(context.Background(), reqCtx.AccountID); err != nil {
+func (p *OrganizationsPlugin) listAccounts(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	// Ensure org exists so the management account is always present.
+	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("listAccounts ensure org: %w", err)
 	}
 
-	ids, err := p.loadAccountIDs(context.Background(), reqCtx.AccountID)
+	var input struct {
+		NextToken  string `json:"NextToken"`
+		MaxResults int    `json:"MaxResults"`
+	}
+	if err := orgUnmarshal(req.Body, &input); err != nil {
+		return nil, err
+	}
+
+	ids, err := p.loadAccountIDs(goCtx, reqCtx.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("listAccounts load ids: %w", err)
 	}
+	page, next, err := orgPaginate(ids, input.NextToken, input.MaxResults)
+	if err != nil {
+		return nil, err
+	}
 
-	accounts := make([]OrgAccount, 0, len(ids))
-	for _, id := range ids {
-		a, loadErr := p.loadAccount(context.Background(), id)
-		if loadErr != nil || a == nil {
+	accounts := make([]OrgAccount, 0, len(page))
+	for _, id := range page {
+		a, loadErr := p.loadAccount(goCtx, id)
+		if loadErr != nil {
+			return nil, fmt.Errorf("listAccounts load account: %w", loadErr)
+		}
+		if a == nil {
 			continue
 		}
 		accounts = append(accounts, *a)
 	}
 
-	out := map[string]interface{}{
-		"Accounts":  accounts,
-		"NextToken": "",
+	out := map[string]interface{}{"Accounts": accounts}
+	if next != "" {
+		out["NextToken"] = next
 	}
-	body, err := json.Marshal(out)
-	if err != nil {
-		return nil, fmt.Errorf("listAccounts marshal: %w", err)
-	}
-	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
+	return orgJSONResponse(out, "listAccounts")
 }
 
-func (p *OrganizationsPlugin) describeAccount(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) describeAccount(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
+	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
+		return nil, fmt.Errorf("describeAccount ensure org: %w", err)
+	}
+
 	var input struct {
 		AccountID string `json:"AccountId"`
 	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+	if err := orgUnmarshal(req.Body, &input); err != nil {
+		return nil, err
 	}
 
-	a, err := p.loadAccount(context.Background(), input.AccountID)
+	a, err := p.loadAccount(goCtx, input.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("describeAccount load: %w", err)
 	}
 	if a == nil {
-		return nil, &AWSError{
-			Code:       "AccountNotFoundException",
-			Message:    "Account not found: " + input.AccountID,
-			HTTPStatus: http.StatusNotFound,
-		}
+		return nil, orgErr("AccountNotFoundException",
+			"We can't find an Amazon Web Services account with the AccountId "+input.AccountID)
 	}
-
-	out := map[string]interface{}{"Account": a}
-	body, err := json.Marshal(out)
-	if err != nil {
-		return nil, fmt.Errorf("describeAccount marshal: %w", err)
-	}
-	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
+	return orgJSONResponse(map[string]interface{}{"Account": a}, "describeAccount")
 }
 
-func (p *OrganizationsPlugin) listRoots(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	// Ensure org is initialized.
-	org, err := p.ensureOrganization(context.Background(), reqCtx.AccountID)
-	if err != nil {
-		return nil, fmt.Errorf("listRoots ensure org: %w", err)
-	}
-
-	rootID := "r-" + randomLowerHex(4)
-	root := OrgRoot{
-		ID:   rootID,
-		Arn:  fmt.Sprintf("arn:aws:organizations::%s:root/%s/%s", reqCtx.AccountID, org.ID, rootID),
-		Name: "Root",
-		PolicyTypes: []OrgPolicyTypeSummary{
-			{Type: "SERVICE_CONTROL_POLICY", Status: "ENABLED"},
-		},
-	}
-
-	out := map[string]interface{}{
-		"Roots":     []OrgRoot{root},
-		"NextToken": "",
-	}
-	body, err := json.Marshal(out)
-	if err != nil {
-		return nil, fmt.Errorf("listRoots marshal: %w", err)
-	}
-	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
-}
-
-func (p *OrganizationsPlugin) createAccount(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listRoots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	goCtx := context.Background()
 	var input struct {
-		AccountName string `json:"AccountName"`
-		Email       string `json:"Email"`
+		NextToken  string `json:"NextToken"`
+		MaxResults int    `json:"MaxResults"`
 	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+	if err := orgUnmarshal(req.Body, &input); err != nil {
+		return nil, err
+	}
+	// The token is validated even though an organization has exactly one root, so
+	// a caller passing a stale token learns it rather than silently restarting.
+	if _, _, err := orgPaginate([]string{"root"}, input.NextToken, input.MaxResults); err != nil {
+		return nil, err
 	}
 
-	// Ensure org exists.
-	org, err := p.ensureOrganization(context.Background(), reqCtx.AccountID)
+	root, err := p.loadRoot(goCtx, reqCtx.AccountID)
 	if err != nil {
-		return nil, fmt.Errorf("createAccount ensure org: %w", err)
+		return nil, fmt.Errorf("listRoots: %w", err)
 	}
+	if root.PolicyTypes == nil {
+		root.PolicyTypes = []OrgPolicyTypeSummary{}
+	}
+	return orgJSONResponse(map[string]interface{}{"Roots": []OrgRoot{*root}}, "listRoots")
+}
 
-	newAcctID := generateOrganizationAccountID()
-	a := OrgAccount{
-		ID:       newAcctID,
-		Arn:      fmt.Sprintf("arn:aws:organizations::%s:account/%s/%s", reqCtx.AccountID, org.ID, newAcctID),
-		Name:     input.AccountName,
-		Email:    input.Email,
-		Status:   "ACTIVE",
-		JoinedAt: p.tc.Now(),
-	}
-	if saveErr := p.saveAccount(context.Background(), reqCtx.AccountID, a); saveErr != nil {
-		return nil, fmt.Errorf("createAccount save: %w", saveErr)
-	}
-
-	out := map[string]interface{}{
-		"CreateAccountStatus": map[string]interface{}{
-			"Id":          "car-" + randomLowerAlphanum(8),
-			"AccountName": a.Name,
-			"AccountId":   a.ID,
-			"State":       "SUCCEEDED",
-		},
-	}
+// orgJSONResponse marshals an Organizations response body.
+func orgJSONResponse(out interface{}, op string) (*AWSResponse, error) {
 	body, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("createAccount marshal: %w", err)
+		return nil, fmt.Errorf("%s marshal: %w", op, err)
 	}
 	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
+}
+
+// orgEmptyResponse is the body of an operation the API model gives no output
+// shape — AttachPolicy, MoveAccount, TagResource and the like answer 200 with an
+// empty JSON object.
+func orgEmptyResponse() *AWSResponse {
+	return &AWSResponse{Body: []byte(`{}`), StatusCode: http.StatusOK}
 }
 
 // --- ID generation helpers ---

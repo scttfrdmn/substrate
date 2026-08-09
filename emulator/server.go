@@ -330,6 +330,12 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
 	r.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
 
+	// Organizations control-plane endpoints (#578).
+	r.Post("/v1/organizations/feature-set", s.handleOrganizationsSeedFeatureSet)
+	r.Delete("/v1/organizations/feature-set", s.handleOrganizationsClearFeatureSet)
+	r.Post("/v1/organizations/create-account-failure", s.handleOrganizationsSeedCreateAccountFailure)
+	r.Delete("/v1/organizations/create-account-failure", s.handleOrganizationsClearCreateAccountFailure)
+
 	// Lambda control-plane endpoints (#393).
 	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
 	r.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)

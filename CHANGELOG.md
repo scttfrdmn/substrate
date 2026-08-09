@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The organization root now has one stable identity** (#577). `ListRoots` minted
+  a fresh `r-` ID on every call and never persisted it, so two calls disagreed and
+  the ARN built from it moved with them. Nothing could reference the root: a caller
+  that attached a policy to it, re-read, and saw a different ID would conclude the
+  attachment had vanished — a determinism defect in the one property substrate
+  exists to provide, and not one that surfaces as an error. The root is now created
+  once alongside the organization and the management account, persisted under
+  `root:<account>`, and returned unchanged for the life of the state store.
+
+- **Every Organizations exception is now HTTP 400.** `DescribeAccount` answered
+  `AccountNotFoundException` at 404. The API model declares no 404 for any
+  Organizations error, `AccountNotFoundException` included, so the status was one a
+  caller could not reproduce against AWS — and a consumer that branched on the
+  status rather than the code took a path AWS never sends it down.
+
+- **An unparseable Organizations request body is now `InvalidInputException`**,
+  not the `MalformedData` code substrate shares with twenty other plugins.
+  `MalformedData` is not in the Organizations model, so an SDK caller's catch
+  branch — written against `InvalidInputException` — never matched it. The reason
+  from the model's `InvalidInputExceptionReason` enum is carried in the message,
+  since the JSON-RPC error document has nowhere else to put it.
+
+### Added
+- **The Organizations plugin's shared storage layer, and two control-plane seed
+  endpoints** (#578, foundation). The plugin now persists the hierarchy (each
+  entity's parent and children), organizational units, policies, policy
+  attachments in both directions, tags, and `CreateAccount` request statuses; the
+  operations over them land per cluster. New accounts and the management account
+  are placed in the root, so a `ListParents` walk has somewhere to start.
+
+  `p-FullAWSAccess`, the AWS-managed SCP that allows everything, is synthesized
+  rather than stored — so it cannot be updated or deleted — and attached to the
+  root and to every account and OU while the SCP type is enabled, as AWS does.
+  Without it a fresh organization reports no attached policies, which is wrong, and
+  the minimum-one-SCP rule has nothing to hold.
+
+  `POST`/`DELETE /v1/organizations/feature-set` sets the organization's feature
+  set, making a `CONSOLIDATED_BILLING` organization — one in which no service
+  control policy can exist at all — reachable. `POST`/`DELETE
+  /v1/organizations/create-account-failure` seeds the *asynchronous* outcome of
+  `CreateAccount`, keyed by account name or `"*"`. An unknown `failureReason` is
+  refused with a 400: a typo'd value would seed a `FAILED` status carrying
+  something no SDK catch branch matches, so the caller's fallback path would go
+  untested while the test still passed.
+
+  Paginated Organizations listings now honor `MaxResults` (clamped to the model's
+  1–20) and `NextToken`, and an unreadable token is
+  `InvalidInputException`/`INVALID_NEXT_TOKEN` rather than a silent restart from
+  the beginning — a paginating caller that restarts sees duplicates instead of an
+  error, which is the harder failure to notice.
+
 ## [v0.96.0] - 2026-08-08
 
 ### Added
