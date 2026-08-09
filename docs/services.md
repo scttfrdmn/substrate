@@ -4476,19 +4476,204 @@ Price List API calls are free.
 **Endpoint:** `organizations.us-east-1.amazonaws.com`
 **Protocol:** JSON (`X-Amz-Target: Organizations_20161128.{Op}`)
 
-On the first `DescribeOrganization` call, the plugin auto-creates an
-organization and master account.
+On the first call, the plugin auto-creates an organization, its management
+account, and its root. All three are persisted, so the root's ID and ARN are
+stable for the life of the state store — an organization whose root ID moved
+between calls could not be governed at all, since nothing could reference the
+thing policies attach to.
+
+**Every Organizations exception is HTTP 400.** The API model declares no 404 for
+any of them, `AccountNotFoundException` included, so a consumer that branches on
+the status rather than the code takes a path AWS never sends it down. The
+`InvalidInputException` and `ConstraintViolationException` reasons ride at the
+front of the message (`"OU_DEPTH_LIMIT_EXCEEDED: …"`), because the JSON-RPC error
+document has no `Reason` member to put them in.
 
 ### Supported operations
 
 | Operation | Notes |
 |-----------|-------|
-| CreateOrganization | |
-| DescribeOrganization | Auto-creates org on first call |
-| ListRoots | |
-| CreateAccount | |
-| DescribeAccount | `AccountNotFoundException` if missing |
-| ListAccounts | |
+| DescribeOrganization | Auto-creates the organization, its management account and its root on first call |
+| ListRoots | The same root ID on every call; `PolicyTypes` is empty under `CONSOLIDATED_BILLING` |
+| ListAccounts | Reports a vending account immediately, before its status resolves |
+| DescribeAccount | `AccountNotFoundException` |
+| CreateAccount | **Asynchronous** — returns `IN_PROGRESS` and a `car-` request ID |
+| DescribeCreateAccountStatus | Resolves the request on first observation; `CreateAccountStatusNotFoundException` |
+| ListCreateAccountStatus | Filterable by `States` |
+| MoveAccount | The only way an account leaves the root |
+| CreateOrganizationalUnit | `Name` 1–128 characters; accepts inline `Tags` |
+| DescribeOrganizationalUnit | `OrganizationalUnitNotFoundException` |
+| UpdateOrganizationalUnit | Renames in place — ID, ARN, children and attachments all survive |
+| DeleteOrganizationalUnit | `OrganizationalUnitNotEmptyException` while it holds anything; deletes its tags |
+| ListOrganizationalUnitsForParent | |
+| ListChildren | `ChildType` is required |
+| ListParents | Walks up to the root `ListRoots` reports |
+| ListAccountsForParent | |
+| CreatePolicy | `Content`, `Description`, `Name` and `Type` are **all** required; accepts inline `Tags` |
+| UpdatePolicy | Any of `Name`/`Description`/`Content`; `IMMUTABLE_POLICY` on `p-FullAWSAccess` |
+| DeletePolicy | `PolicyInUseException` while attached; deletes its tags |
+| DescribePolicy | `PolicyNotFoundException` |
+| ListPolicies | `Filter` is required; includes `p-FullAWSAccess` |
+| AttachPolicy | `DuplicatePolicyAttachmentException`; refused while the type is disabled |
+| DetachPolicy | `PolicyNotAttachedException`; the last SCP on a target cannot be detached |
+| ListPoliciesForTarget | `Filter` is required |
+| ListTargetsForPolicy | Reports the root, OU and account targets of one policy |
+| EnablePolicyType | `PolicyTypeAlreadyEnabledException`; restores only `p-FullAWSAccess` |
+| DisablePolicyType | Detaches every SCP from every entity in the root |
+| TagResource | Roots, OUs, accounts and policies |
+| UntagResource | Validates key shape on the removal path too |
+| ListTagsForResource | Paginated by `NextToken`; no `MaxResults` |
+
+`CreateOrganization` is not implemented: the organization already exists on first
+contact, so there is nothing for it to create.
+
+### `p-FullAWSAccess`
+
+AWS attaches the managed allow-everything SCP to the root, every OU and every
+account while the SCP type is enabled, and substrate does the same. It is
+**synthesized rather than stored**, so it cannot be updated or deleted, and its
+ARN is owned by `aws` (`arn:aws:organizations::aws:policy/service_control_policy/p-FullAWSAccess`)
+rather than by the organization — which is also why it cannot be tagged, though
+reading its tags answers empty.
+
+Without it a fresh organization reports no attached policies, which is wrong, and
+the minimum-one-SCP rule below has nothing to hold.
+
+### Account vending is asynchronous
+
+`CreateAccount` returns HTTP 200 with `State: IN_PROGRESS` and a `car-` request
+ID, as AWS does. The status resolves — to `SUCCEEDED` with an `AccountId` and a
+`CompletedTimestamp`, or to the seeded `FAILED` — on the **first**
+`DescribeCreateAccountStatus`, so a waiter converges in one poll with no
+wall-clock dependence. `ListAccounts` reports the account immediately, before the
+status resolves, matching AWS.
+
+This is advance-on-observation rather than clock-driven on purpose: transitions
+over the simulated clock are the open design question in #514, and picking a shape
+here would front-run it.
+
+New accounts land in the **root**. `MoveAccount` is the only way into an OU, and
+a move to the account's current parent is `DuplicateAccountException`, not a
+no-op — which is what makes a vending script's re-run testable: the second run
+hits the refusal rather than silently duplicating.
+
+### The disabled-SCP state
+
+An all-features organization whose root has had `DisablePolicyType` called on it
+is the state a governance tool is most likely to get wrong, because it looks
+nothing like a failure:
+
+- `CreatePolicy` **succeeds**.
+- `AttachPolicy` is refused with `PolicyTypeNotEnabledException`.
+- `EnablePolicyType` restores **only** `p-FullAWSAccess`. Attachments from before
+  the disable are lost, per the User Guide.
+
+That is different from SCPs not being *available* at all, which is what a
+`CONSOLIDATED_BILLING` organization has: there no SCP exists, no policy is
+visible, and every operation naming one answers with its own documented not-found
+code. Only `CreatePolicy` and `EnablePolicyType` name the feature set as the
+reason (`PolicyTypeNotAvailableForOrganizationException`), because those are the
+two operations whose model error list declares it — emitting it elsewhere would
+hand a caller an exception its SDK cannot catch by type.
+
+### Tags reach the authorization decision
+
+Tags written through `TagResource` resolve as `aws:ResourceTag/*` on the tagged
+entity, and a request's inline `Tags` as `aws:RequestTag/*`, so a tag-gated
+privilege boundary — `CreatePolicy` only when `aws:RequestTag/Owner` matches,
+`UpdatePolicy` on that policy only when `aws:ResourceTag/Owner` does — is
+actually enforced rather than silently open.
+
+The inline `Tags` of `CreateOrganizationalUnit`, `CreatePolicy` and
+`CreateAccount` go through the same validation `TagResource` applies, so a key
+that operation refuses cannot be planted through a create instead; an
+`aws:`-prefixed one would otherwise be readable as `aws:ResourceTag` by a policy
+condition. An invalid tag fails the whole create and leaves nothing behind, and
+`CreateAccount`'s refusal is synchronous even though its success is not — the
+request is malformed, so there is nothing to vend. Deleting an OU or a policy
+deletes its tags, so an entity that reused the ID cannot inherit them.
+
+### Refusals
+
+| Condition | Answer |
+|---|---|
+| Unknown account | `AccountNotFoundException` |
+| Unknown OU | `OrganizationalUnitNotFoundException` |
+| Unknown parent / child / root | `ParentNotFoundException` / `ChildNotFoundException` / `RootNotFoundException` |
+| Unknown policy / attachment target | `PolicyNotFoundException` / `TargetNotFoundException` |
+| Duplicate OU name under one parent | `DuplicateOrganizationalUnitException` |
+| Duplicate policy name | `DuplicatePolicyException` |
+| Already attached | `DuplicatePolicyAttachmentException` |
+| Detaching something not attached | `PolicyNotAttachedException` |
+| Deleting an attached policy | `PolicyInUseException` |
+| Deleting a non-empty OU | `OrganizationalUnitNotEmptyException` |
+| Enabling an enabled policy type | `PolicyTypeAlreadyEnabledException` |
+| Attaching while the type is disabled | `PolicyTypeNotEnabledException` |
+| `CreatePolicy`/`EnablePolicyType` under `CONSOLIDATED_BILLING` | `PolicyTypeNotAvailableForOrganizationException` |
+| Unparseable policy content | `MalformedPolicyDocumentException` |
+| Modifying `p-FullAWSAccess` | `InvalidInputException`/`IMMUTABLE_POLICY` |
+| Moving to the current parent | `DuplicateAccountException` |
+| A source that is not the account's parent | `SourceParentNotFoundException` |
+| Unknown move destination | `DestinationParentNotFoundException` |
+| A move across roots | `InvalidInputException`/`MOVING_ACCOUNT_BETWEEN_DIFFERENT_ROOTS` |
+| A repeated tag key in one request | `InvalidInputException`/`DUPLICATE_TAG_KEY` |
+| An `aws:`-prefixed tag key | `InvalidInputException`/`INVALID_SYSTEM_TAGS_PARAMETER` |
+| An unreadable pagination token | `InvalidInputException`/`INVALID_NEXT_TOKEN` |
+| An unparseable request body | `InvalidInputException` |
+| An unimplemented operation | `InvalidAction` |
+
+### Quotas
+
+Each is the value in [Quotas for AWS Organizations](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_reference_limits.html),
+and each is enforced rather than merely documented.
+
+| Quota | Value | Refusal reason |
+|---|---|---|
+| Accounts in an organization | 10 | `ACCOUNT_NUMBER_LIMIT_EXCEEDED` |
+| OU nesting levels below the root | 5 | `OU_DEPTH_LIMIT_EXCEEDED` |
+| OUs in an organization | 2,000 | `OU_NUMBER_LIMIT_EXCEEDED` |
+| SCPs in an organization | 10,000 | `POLICY_NUMBER_LIMIT_EXCEEDED` |
+| SCPs attached to one root, OU or account | 10 max, **1 min** | `MAX_POLICY_TYPE_ATTACHMENT_LIMIT_EXCEEDED` / `MIN_POLICY_TYPE_ATTACHMENT_LIMIT_EXCEEDED` |
+| Characters in an SCP | 10,240 | `POLICY_CONTENT_LIMIT_EXCEEDED` |
+| Tags on one resource | 50 | `MAX_TAG_LIMIT_EXCEEDED` |
+
+The 5-per-target and 5,120-character figures often quoted are the **RCP** values,
+not the SCP ones.
+
+### Pagination
+
+Paginated listings honor `MaxResults` — clamped to the model's 1–20, so a caller
+asking for more gets a truncated page and a token rather than everything — and
+`NextToken`. An unreadable token is `InvalidInputException`/`INVALID_NEXT_TOKEN`
+rather than a silent restart from the beginning: a paginating caller that restarts
+sees duplicates instead of an error, which is the harder failure to notice.
+
+### Seeding
+
+```bash
+# An organization in which no service control policy can exist at all.
+curl -X POST http://localhost:4566/v1/organizations/feature-set \
+  -d '{"featureSet":"CONSOLIDATED_BILLING"}'
+curl -X DELETE http://localhost:4566/v1/organizations/feature-set
+
+# The asynchronous outcome of CreateAccount, by account name or "*".
+curl -X POST http://localhost:4566/v1/organizations/create-account-failure \
+  -d '{"accountName":"dev","failureReason":"EMAIL_ALREADY_EXISTS"}'
+curl -X DELETE 'http://localhost:4566/v1/organizations/create-account-failure?accountName=dev'
+curl -X DELETE http://localhost:4566/v1/organizations/create-account-failure
+```
+
+A name-scoped seed takes precedence over the wildcard. The feature-set seed wins
+over the stored value, so an already observed organization can be flipped without
+recreating it.
+
+`failureReason` must be a member of the model's `CreateAccountFailureReason`
+enum; anything else is a 400. A typo'd reason would seed a `FAILED` status
+carrying a value no SDK catch branch matches, so the caller's fallback path would
+go untested while the seed appeared to work. The seeded failure is the case worth
+testing: `CreateAccount` still returns **200**, and only
+`DescribeCreateAccountStatus` reveals `FAILED`, the reason, and the absence of an
+`AccountId`.
 
 ### Cost
 

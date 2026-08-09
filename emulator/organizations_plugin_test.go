@@ -112,6 +112,24 @@ func TestOrganizations_ListAccounts(t *testing.T) {
 	if !ok || len(accounts) == 0 {
 		t.Fatalf("expected at least 1 account, got %v", out["Accounts"])
 	}
+
+	// JoinedTimestamp is a JSON number, not a string. The JSON 1.1 protocol carries
+	// a timestamp as epoch seconds, and aws-sdk-go-v2's decoder calls
+	// ParseEpochSeconds on the member: an RFC3339 string fails the whole response,
+	// so an SDK caller gets a deserialization error instead of an account list. This
+	// is asserted on the raw decode rather than through a typed struct, because a
+	// struct field would coerce and hide the wire form.
+	account, ok := accounts[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected an account object, got %v", accounts[0])
+	}
+	joined, ok := account["JoinedTimestamp"].(float64)
+	if !ok {
+		t.Fatalf("JoinedTimestamp = %#v, want a JSON number of epoch seconds", account["JoinedTimestamp"])
+	}
+	if joined <= 0 {
+		t.Errorf("JoinedTimestamp = %v, want a positive epoch-seconds value", joined)
+	}
 }
 
 func TestOrganizations_CreateAccount_DescribeAccount(t *testing.T) {
