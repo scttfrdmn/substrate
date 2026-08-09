@@ -105,6 +105,21 @@ func (p *OrganizationsPlugin) ResolveSeededCreateFailureForTest(ctx context.Cont
 	return seed.FailureReason, true, nil
 }
 
+// SaveAccountForTest wraps saveAccount for external tests.
+func (p *OrganizationsPlugin) SaveAccountForTest(ctx context.Context, acct string, a OrgAccount) error {
+	return p.saveAccount(ctx, acct, a)
+}
+
+// LoadAccountForTest wraps loadAccount for external tests.
+func (p *OrganizationsPlugin) LoadAccountForTest(ctx context.Context, accountID string) (*OrgAccount, error) {
+	return p.loadAccount(ctx, accountID)
+}
+
+// LoadAccountIDsForTest wraps loadAccountIDs for external tests.
+func (p *OrganizationsPlugin) LoadAccountIDsForTest(ctx context.Context, acct string) ([]string, error) {
+	return p.loadAccountIDs(ctx, acct)
+}
+
 // PlaceChildForTest wraps placeChild for external tests.
 func (p *OrganizationsPlugin) PlaceChildForTest(ctx context.Context, parent, child string) error {
 	return p.placeChild(ctx, parent, child)
