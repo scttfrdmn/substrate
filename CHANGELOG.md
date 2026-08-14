@@ -81,6 +81,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract is opt-in. Decoupling the two is #630. Each account's access key and
   secret are **derived from the account ID** rather than generated, so a recorded run
   replays with the same credentials in it.
+- **`CloseAccount` is now emulated** (#625), completing the account lifecycle v0.97.0
+  began with vending, placement and governance. A success is an empty 200 — the model
+  gives the operation no output shape — and the closure is read through
+  `DescribeAccount`, which AWS documents as the way to watch it: `PENDING_CLOSURE`
+  while in flight, `SUSPENDED` when done.
+
+  **A closed account does not leave the organization**, which is the reason this is
+  worth modelling rather than a detail of it. It keeps its place in the hierarchy,
+  stays in `ListAccounts` and `ListAccountsForParent`, and keeps counting against
+  `L-E619E033` — "when an account is closed it does not stop counting against this
+  quota until it is permanently closed". So a cleanup path that closes accounts to
+  make room for new ones gets no room, and `CreateAccount` still refuses. Removing the
+  account instead would make that broken script pass.
+
+  The transition **resolves on observation**, not off the clock (#514 remains the
+  subject of clock-driven transitions), and reports `PENDING_CLOSURE` on the *first*
+  observation for the same reason `EnableRegion` does: with no output shape, a poll is
+  the only place the in-flight status is ever visible. Only the three operations that
+  put an account's `Status` on the wire advance it. The concurrency count deliberately
+  does **not** — counting through an observation would let closing a fourth account
+  converge the first three, and the quota below could then never be reached.
+
+  Refusals come from the model's declared list and are each distinguishable, because
+  the JSON-RPC error document carries only a code and a message: the management
+  account is `ConstraintViolationException` / `CANNOT_CLOSE_MANAGEMENT_ACCOUNT` ("you
+  can't close the management account with this API"); an account of another
+  organization is `AccountNotFoundException`, and a malformed ID is
+  `InvalidInputException` / `INVALID_PATTERN` rather than the same not-found, so a
+  caller that passed a name where an ID belongs is not sent looking for an account it
+  never named; a `CONSOLIDATED_BILLING` organization is
+  `ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` ("you can close an account when all features
+  are enabled"), and the account is left untouched so a retry after enabling all
+  features does not start from half-applied state. A member account calling it at all
+  is `AccessDeniedException` (403), checked before any state read so a member cannot
+  use the other refusals to probe the organization it belongs to.
+
+  The model declares both `ConflictException` and `AccountAlreadyClosedException` and
+  does not say which applies to a closure already in flight. Substrate reads "already
+  closed" as the terminal state and answers the conflict for `PENDING_CLOSURE`, so a
+  re-run of a teardown script can tell "this is finishing" from "this was done" — one
+  code for both collapses that distinction.
+
+  One of the three published closure quotas is modelled: **3 concurrent closures**
+  (`CLOSE_ACCOUNT_REQUESTS_LIMIT_EXCEEDED`), which is a count of accounts currently in
+  `PENDING_CLOSURE` and therefore exact. The rolling-30-day allowance (250 or 20% of
+  member accounts, capped at 1,000) and the four-day minimum age for removing a created
+  account are not, and the docs say why: both are bounded by a wall-clock window, and
+  substrate's clock is simulated and freely advanced, so such a refusal would fire or
+  not depending on unrelated `AdvanceTime` calls elsewhere in a test.
+
+### Changed
+- **Organization-wide email uniqueness stays reachable only through a seed** (#625),
+  now recorded as a decision rather than left as an open question. AWS surfaces a
+  collision asynchronously, as `CreateAccount` answering 200 and
+  `DescribeCreateAccountStatus` later reporting `FAILED` / `EMAIL_ALREADY_EXISTS`;
+  substrate models that shape but does not infer the collision from stored accounts.
+  Inferring it would *remove* a path rather than add one — every existing fixture that
+  vends two accounts with one email would start failing without asking to — and the
+  named cost is that a consumer wanting the collision must seed it. The stale
+  `TODO(#578)` pointing at a closed issue is gone.
+- The shared Organizations helpers now live in `organizations_state.go` beside the rest
+  of the foundation, rather than in whichever of v0.97.0's five per-lane files happened
+  to need them first (#625): `orgDeleteKey`, `isOrgAccountID`, `isOrgParentID`,
+  `orgOUNamesRoot`, `policyTypeAvailable`, `loadVisiblePolicy`, `rootSubtree` and the
+  `orgCheck*` validators. Behaviour-preserving — no test changed — and the point is the
+  next Organizations feature not reimplementing a near-duplicate because the original
+  was not where it looked.
 
 ### Fixed
 - **A Service Quotas increase is now filed under the account that requested it**

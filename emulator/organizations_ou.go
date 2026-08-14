@@ -439,9 +439,11 @@ func (p *OrganizationsPlugin) listAccountsForParent(reqCtx *orgCaller, req *AWSR
 		return nil, err
 	}
 
+	// observeAccount, like ListAccounts: this operation reports Status too, and two
+	// listings of one account must not disagree about whether its closure finished.
 	accounts := make([]OrgAccount, 0, len(page))
 	for _, id := range page {
-		a, loadErr := p.loadAccount(goCtx, id)
+		a, loadErr := p.observeAccount(goCtx, id)
 		if loadErr != nil {
 			return nil, fmt.Errorf("listAccountsForParent load account: %w", loadErr)
 		}
@@ -587,28 +589,4 @@ func (p *OrganizationsPlugin) forgetOU(ctx context.Context, acct, ouID string) e
 		}
 	}
 	return nil
-}
-
-// orgDeleteKey removes a state key outright. Deletion is the one thing the
-// foundation's storage helpers do not cover, and an emptied-but-present index key
-// would keep a deleted entity's shadow in a state dump.
-func (p *OrganizationsPlugin) orgDeleteKey(ctx context.Context, key string) error {
-	if err := p.state.Delete(ctx, organizationsNamespace, key); err != nil {
-		return fmt.Errorf("delete %s: %w", key, err)
-	}
-	return nil
-}
-
-// isOrgAccountID reports whether id has the exactly-12-digits shape the model's
-// AccountId pattern requires.
-func isOrgAccountID(id string) bool {
-	if len(id) != 12 {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		if id[i] < '0' || id[i] > '9' {
-			return false
-		}
-	}
-	return true
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 )
 
 // CreateAccountState values, the model's CreateAccountState enum in full.
@@ -49,11 +48,13 @@ type orgPendingAccountOutcome struct {
 	FailureReason string `json:"failureReason,omitempty"`
 }
 
-// accountOperation claims the account vending and placement operations.
+// accountOperation claims the account vending, placement and closure operations.
 func (p *OrganizationsPlugin) accountOperation(op string) (orgHandler, bool) {
 	switch op {
 	case "CreateAccount":
 		return p.createAccount, true
+	case "CloseAccount":
+		return p.closeAccount, true
 	case "DescribeCreateAccountStatus":
 		return p.describeCreateAccountStatus, true
 	case "ListCreateAccountStatus":
@@ -172,7 +173,7 @@ func (p *OrganizationsPlugin) vendAccount(ctx context.Context, masterAcct, orgID
 		Arn:          fmt.Sprintf("arn:aws:organizations::%s:account/%s/%s", masterAcct, orgID, newAcctID),
 		Name:         name,
 		Email:        email,
-		Status:       "ACTIVE",
+		Status:       orgAccountStatusActive,
 		JoinedMethod: "CREATED",
 		JoinedAt:     EpochSeconds(p.tc.Now()),
 	}
@@ -201,11 +202,22 @@ func (p *OrganizationsPlugin) vendAccount(ctx context.Context, masterAcct, orgID
 // succeeds, which is the nominal path a new operation defaults to.
 //
 // The organization-wide email uniqueness AWS enforces — surfaced asynchronously
-// as EMAIL_ALREADY_EXISTS, not as an error from CreateAccount — is deliberately
-// not inferred from the stored accounts here. It stays reachable only through the
-// seed (TODO(#578)): inferring it would make a duplicate email fail whether the
-// test asked for it or not, which changes the outcome of an existing fixture
-// rather than adding a path a test can opt into.
+// as EMAIL_ALREADY_EXISTS, not as an error from CreateAccount — is **not**
+// inferred from the stored accounts, and that is a settled decision rather than a
+// pending one (#625). The seed is the only route to it.
+//
+// Inferring it would remove a path rather than add one: a fixture that vends two
+// accounts under one email succeeds today, and every such fixture would start
+// failing at a point it never asked to test. Seeding keeps the failure opt-in,
+// which is what CLAUDE.md's seeding rule asks for — a new operation defaults to
+// its nominal path and the alternate outcome is something a test reaches for
+// deliberately.
+//
+// The cost is real and worth naming: a consumer whose own logic depends on the
+// uniqueness constraint has to seed the collision rather than provoke it, so
+// substrate will not catch a caller that reuses an email by accident. That is the
+// trade — a false negative a test can opt out of, against a false positive it
+// cannot.
 func (p *OrganizationsPlugin) pendingCreateOutcome(ctx context.Context, accountName string) (orgPendingAccountOutcome, error) {
 	seed, err := p.resolveSeededCreateFailure(ctx, accountName)
 	if err != nil {
@@ -455,23 +467,4 @@ func (p *OrganizationsPlugin) moveAccount(reqCtx *orgCaller, req *AWSRequest) (*
 		return nil, fmt.Errorf("moveAccount place: %w", err)
 	}
 	return orgEmptyResponse(), nil
-}
-
-// isOrgParentID reports whether id has the shape of a ParentId — a root or an OU
-// — which is the pattern the model puts on both of MoveAccount's parent members.
-func isOrgParentID(id string) bool { return isOrgRootID(id) || isOrgOUID(id) }
-
-// orgOUNamesRoot reports whether an OU ID's embedded root segment is rootID. An
-// OU ID is "ou-" plus the containing root's suffix, a dash, and the OU's own
-// suffix, so the root an OU belongs to is readable from its ID alone.
-func orgOUNamesRoot(ouID, rootID string) bool {
-	if !isOrgOUID(ouID) || !isOrgRootID(rootID) {
-		return false
-	}
-	rest := ouID[len("ou-"):]
-	dash := strings.Index(rest, "-")
-	if dash <= 0 {
-		return false
-	}
-	return rest[:dash] == rootID[len("r-"):]
 }
