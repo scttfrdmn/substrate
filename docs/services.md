@@ -4502,6 +4502,7 @@ document has no `Reason` member to put them in.
 | DescribeCreateAccountStatus | Resolves the request on first observation; `CreateAccountStatusNotFoundException` |
 | ListCreateAccountStatus | Filterable by `States` |
 | MoveAccount | The only way an account leaves the root |
+| CloseAccount | **Asynchronous**, no output shape; management-only; the account stays in the organization |
 | CreateOrganizationalUnit | `Name` 1–128 characters; accepts inline `Tags` |
 | DescribeOrganizationalUnit | `OrganizationalUnitNotFoundException` |
 | UpdateOrganizationalUnit | Renames in place — ID, ARN, children and attachments all survive |
@@ -4563,11 +4564,45 @@ document's *meaning*, and the sets AWS accepts are not in the model, so emitting
 them would mean guessing at their boundaries. A guessed refusal is worse than a
 missing one: it fails a document AWS would have accepted.
 
-**Not modelled:** the asymmetry itself. Organizations state is keyed by the
-**calling** account, so a member account calling `DescribeResourcePolicy` reads its
-own organization rather than management's, and there is no
-`AccessDeniedException` for a caller outside the organization. Both need a
-member→organization reverse index, tracked in #623.
+### A member account sees its management account's organization
+
+Organizations state is keyed by the management account, and every account
+substrate knows is indexed to the organization it belongs to. So a **member**
+account calling any Organizations operation reads management's organization — the
+same organization ID, the same root, the same accounts — rather than a private one
+of its own. A vended account signing its own requests is a real member, which is
+what makes a two-account governance flow testable at all.
+
+An account substrate has never seen still gets an organization auto-created for
+it on first contact. That no-setup path is what makes a fresh emulator usable
+without a `CreateOrganization` call, and it is only reachable for an account that
+is not a known member of anything.
+
+The reads are **not** uniform across the three resource-policy operations, because
+AWS's own permissions are not:
+
+| Caller | `DescribeResourcePolicy` | `Put`/`DeleteResourcePolicy` |
+|---|---|---|
+| The management account | The policy, or `ResourcePolicyNotFoundException` | Allowed |
+| A member the policy names | The **same** policy management set | `AccessDeniedException` (403) |
+| A member the policy does not name | `AccessDeniedException` (403) | `AccessDeniedException` (403) |
+
+`DescribeOrganization` stays readable by every account in the organization, per
+"can be called from any account in the organization"; `DescribeResourcePolicy` is
+documented as callable from the management account *or a member account that is a
+delegated administrator*, and for Organizations itself that delegation comes from
+the resource policy substrate already stores. Making the two uniform would erase a
+distinction a governance tool depends on.
+
+`AccessDeniedException` is HTTP **403** here, not the 400 every declared
+Organizations exception uses. It is a *common* error the service model does not
+declare at all, and the API Reference's Common Errors page gives it 403 — which is
+what an SDK's retry classifier reads.
+
+A caller in **no** relationship to the organization is not reachable through this
+API: none of the three operations takes an input naming an organization, so there
+is nowhere to put another organization's ID. The reachable third case is a member
+the policy does not name.
 
 ### `p-FullAWSAccess`
 
@@ -4598,6 +4633,66 @@ New accounts land in the **root**. `MoveAccount` is the only way into an OU, and
 a move to the account's current parent is `DuplicateAccountException`, not a
 no-op — which is what makes a vending script's re-run testable: the second run
 hits the refusal rather than silently duplicating.
+
+Organization-wide **email uniqueness is reachable only through the seed**. AWS
+enforces it and surfaces a collision asynchronously — `CreateAccount` answers 200
+and `DescribeCreateAccountStatus` later reports `FAILED` /
+`EMAIL_ALREADY_EXISTS` — and substrate models that shape without inferring the
+collision from the accounts it holds. Inferring it would *remove* a path rather
+than add one: every fixture that vends two accounts with one email would start
+failing without having asked to. The cost is that a consumer wanting the collision
+must seed it, which is the trade taken deliberately.
+
+### Closing an account does not remove it
+
+`CloseAccount` has **no output shape** — a success is an empty 200 — and the
+closure is read through `DescribeAccount`, which is how AWS documents watching it:
+`PENDING_CLOSURE` while the request is in flight, `SUSPENDED` when it completes.
+There is no `CLOSED` status; the model's `AccountStatus` enum is exactly those
+three values.
+
+The closed account **stays in the organization**. It keeps its place in the
+hierarchy, still appears in `ListAccounts` and `ListAccountsForParent`, and keeps
+counting against the accounts-per-organization quota — "when an account is closed
+it does not stop counting against this quota until it is permanently closed". So a
+cleanup path that closes accounts to make room for new ones **gets no room**, and
+`CreateAccount` still answers `ACCOUNT_NUMBER_LIMIT_EXCEEDED`. Removing the
+account instead would make that broken script look correct, which is the reason
+this operation is modelled at all.
+
+The status advances **on observation**, like `DescribeCreateAccountStatus`, with
+one difference: the in-flight status is reported on the *first* observation and the
+terminal one from the second. `CloseAccount` returns no body, so a poll is the only
+place `PENDING_CLOSURE` is ever visible — resolving on the first read would leave a
+consumer's in-flight branch unexecutable. Only the operations that put an account's
+`Status` on the wire advance it; the concurrency count below deliberately does not,
+since counting through an observation would let closing a fourth account converge
+the first three.
+
+The operation is **management-only** (`AccessDeniedException`, 403), checked before
+any state is read so a member cannot use the other refusals to probe the
+organization it belongs to — and a member cannot close itself either, since the
+guard is on the caller rather than on the caller's relationship to the target. It
+also requires the **ALL** feature set, per "you can close an account when all
+features are enabled"; under `CONSOLIDATED_BILLING` the account is left untouched,
+so a retry after enabling all features does not start from half-applied state.
+
+A closure already in flight and one already finished are **different** refusals.
+The model declares both `ConflictException` and `AccountAlreadyClosedException`
+without saying which applies to a `PENDING_CLOSURE` target; substrate reads
+"already closed" as the terminal state and answers the conflict for the in-flight
+one, so a re-run of a teardown script can tell "this is finishing" from "this was
+done".
+
+Of the three published closure quotas, only **3 concurrent closures** is enforced
+— it is a count of accounts currently in `PENDING_CLOSURE`, so it is exact.
+Observing all three to `SUSPENDED` frees the slots, which is the "as soon as one
+finishes, you can close another" half of the quota. The rolling-30-day allowance
+(250 or 20% of member accounts, capped at 1,000) and the four-day minimum age
+before a created account can be removed are **not** modelled: both are bounded by a
+wall-clock window, and substrate's clock is simulated and freely advanced, so such
+a refusal would fire or not depending on unrelated `AdvanceTime` calls elsewhere in
+a test. A limit a test can skip past is not a limit.
 
 ### The disabled-SCP state
 
@@ -4659,6 +4754,14 @@ deletes its tags, so an entity that reused the ID cannot inherit them.
 | Unparseable policy content | `MalformedPolicyDocumentException` |
 | Modifying `p-FullAWSAccess` | `InvalidInputException`/`IMMUTABLE_POLICY` |
 | Moving to the current parent | `DuplicateAccountException` |
+| Closing the management account | `ConstraintViolationException`/`CANNOT_CLOSE_MANAGEMENT_ACCOUNT` |
+| Closing an account already `SUSPENDED` | `AccountAlreadyClosedException` |
+| Closing an account already `PENDING_CLOSURE` | `ConflictException` |
+| Closing a malformed account ID | `InvalidInputException`/`INVALID_PATTERN` — shape is checked before existence |
+| `CloseAccount` under `CONSOLIDATED_BILLING` | `ConstraintViolationException`/`ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` |
+| A member account calling `CloseAccount` | `AccessDeniedException`, **403** |
+| A member account calling `Put`/`DeleteResourcePolicy` | `AccessDeniedException`, **403** |
+| A member the resource policy does not name calling `DescribeResourcePolicy` | `AccessDeniedException`, **403** |
 | A source that is not the account's parent | `SourceParentNotFoundException` |
 | Unknown move destination | `DestinationParentNotFoundException` |
 | A move across roots | `InvalidInputException`/`MOVING_ACCOUNT_BETWEEN_DIFFERENT_ROOTS` |
@@ -4683,9 +4786,16 @@ and each is enforced rather than merely documented.
 | Characters in an SCP | 10,240 | `POLICY_CONTENT_LIMIT_EXCEEDED` |
 | Characters in the resource policy | 40,000 | `MAX_LENGTH_EXCEEDED` |
 | Tags on one resource | 50 | `MAX_TAG_LIMIT_EXCEEDED` |
+| Member-account closures in progress at once | 3 | `CLOSE_ACCOUNT_REQUESTS_LIMIT_EXCEEDED` |
 
 The 5-per-target and 5,120-character figures often quoted are the **RCP** values,
 not the SCP ones.
+
+Two published closure quotas are deliberately **not** enforced — the rolling
+30-day allowance (250 or 20% of member accounts, capped at 1,000) and the four-day
+minimum age before a created account can be removed. Both require a wall-clock
+window, which a freely advanced simulated clock makes meaningless; see
+[Closing an account does not remove it](#closing-an-account-does-not-remove-it).
 
 Three of these are also readable through Service Quotas — accounts, OUs and SCPs
 per organization — at the same values, so a consumer that reads a ceiling and a
@@ -4877,8 +4987,17 @@ than an empty result — see below.
 | GetServiceQuota | `ServiceCode` **and** `QuotaCode` required |
 | GetAWSDefaultServiceQuota | The same answer as `GetServiceQuota` — nothing here mutates a quota, so the applied value and the AWS default never diverge |
 | RequestServiceQuotaIncrease | Records a `PENDING` request; the published value does not move |
-| ListRequestedServiceQuotaChangesByService | Filterable by `ServiceCode` |
+| ListRequestedServiceQuotaChangeHistory | The caller's own requests; filterable by `ServiceCode` and `Status` |
 | GetRequestedServiceQuotaChange | `NoSuchResourceException` for an unknown request ID |
+
+The history operation also answers to `ListRequestedServiceQuotaChangesByService`,
+which is the name it shipped under and which the Service Quotas API does not have —
+the 2019-06-24 model declares `ListRequestedServiceQuotaChangeHistory` and
+`ListRequestedServiceQuotaChangeHistoryByQuota` and nothing else of that shape. So
+for one release the handler was reachable only by a hand-built `X-Amz-Target`, and
+every SDK or CLI call answered `InvalidAction`. The invented name is kept as an
+alias so a fixture that already drives it keeps working; new code should use the
+real one. `…ChangeHistoryByQuota` is not modelled.
 
 ### An unknown service is a refusal, not an empty list
 
@@ -4906,6 +5025,14 @@ absent would be misleading.
 keeps reading its old value, because AWS grants nothing synchronously — a consumer
 that read the quota back expecting its `DesiredValue` would be asserting on a
 state real Service Quotas never reaches on that call.
+
+A request is filed under **the account that made it**, and the two history
+operations report only that account's requests. Increase requests were previously
+filed under the literal `000000000000` regardless of the caller, so two accounts
+sharing one emulator shared one pile of requests — and a consumer reading the
+history to decide whether it had already asked would see a sibling's request as its
+own. A fixture that asserted on `000000000000` will now see the caller's real
+account.
 
 ### Organizations quotas
 
