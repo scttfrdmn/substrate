@@ -358,7 +358,7 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	var params struct {
 		PathPrefix string `json:"PathPrefix"`
 		Marker     string `json:"Marker"`
-		MaxItems   int    `json:"MaxItems"`
+		MaxItems   iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -375,7 +375,7 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
 
 	users := make([]*IAMUser, 0, len(page))
 	for _, k := range page {
@@ -408,7 +408,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		AssumeRolePolicyDocument string   `json:"AssumeRolePolicyDocument"`
 		Path                     string   `json:"Path"`
 		Description              string   `json:"Description"`
-		MaxSessionDuration       int      `json:"MaxSessionDuration"`
+		MaxSessionDuration       iamInt   `json:"MaxSessionDuration"`
 		Tags                     []IAMTag `json:"Tags"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
@@ -460,7 +460,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		ARN:                      iamRoleARN(ctx.AccountID, params.Path, params.RoleName),
 		Path:                     params.Path,
 		Description:              params.Description,
-		MaxSessionDuration:       params.MaxSessionDuration,
+		MaxSessionDuration:       params.MaxSessionDuration.Int(),
 		CreateDate:               p.now().UTC(),
 		AssumeRolePolicyDocument: trustPolicy,
 		Tags:                     params.Tags,
@@ -636,7 +636,7 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	var params struct {
 		PathPrefix string `json:"PathPrefix"`
 		Marker     string `json:"Marker"`
-		MaxItems   int    `json:"MaxItems"`
+		MaxItems   iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -653,7 +653,7 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
 
 	roles := make([]*IAMRole, 0, len(page))
 	for _, k := range page {
@@ -735,7 +735,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	var params struct {
 		GroupName string `json:"GroupName"`
 		Marker    string `json:"Marker"`
-		MaxItems  int    `json:"MaxItems"`
+		MaxItems  iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -772,7 +772,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	if err != nil {
 		return nil, err
 	}
-	page, nextMarker, isTruncated := paginateIAMKeys(memberNames, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(memberNames, params.Marker, params.MaxItems.Int())
 
 	users := make([]*IAMUser, 0, len(page))
 	for _, name := range page {
@@ -859,7 +859,7 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	var params struct {
 		PathPrefix string `json:"PathPrefix"`
 		Marker     string `json:"Marker"`
-		MaxItems   int    `json:"MaxItems"`
+		MaxItems   iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -876,7 +876,7 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
 
 	groups := make([]*IAMGroup, 0, len(page))
 	for _, k := range page {
@@ -995,7 +995,7 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 	var params struct {
 		UserName string `json:"UserName"`
 		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		MaxItems iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -1121,7 +1121,7 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 	var params struct {
 		RoleName string `json:"RoleName"`
 		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		MaxItems iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -1298,7 +1298,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		Scope      string `json:"Scope"`
 		PathPrefix string `json:"PathPrefix"`
 		Marker     string `json:"Marker"`
-		MaxItems   int    `json:"MaxItems"`
+		MaxItems   iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -1315,7 +1315,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("list policies: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
 
 	policies := make([]*IAMPolicy, 0, len(page))
 	for _, k := range page {
@@ -1462,7 +1462,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	var params struct {
 		UserName string `json:"UserName"`
 		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		MaxItems iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -1903,7 +1903,7 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 		RoleName  string `json:"RoleName"`
 		GroupName string `json:"GroupName"`
 		Marker    string `json:"Marker"`
-		MaxItems  int    `json:"MaxItems"`
+		MaxItems  iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -1924,7 +1924,7 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 		return nil, err
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems.Int())
 
 	xmlStr := iamStringListXML("PolicyNames", page) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
@@ -2217,7 +2217,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	var params struct {
 		UserName string `json:"UserName"`
 		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		MaxItems iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -2247,7 +2247,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		tags = []IAMTag{}
 	}
 
-	maxItems := params.MaxItems
+	maxItems := params.MaxItems.Int()
 	if maxItems <= 0 {
 		maxItems = 100
 	}
@@ -2396,7 +2396,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	var params struct {
 		RoleName string `json:"RoleName"`
 		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		MaxItems iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -2426,7 +2426,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		tags = []IAMTag{}
 	}
 
-	maxItems := params.MaxItems
+	maxItems := params.MaxItems.Int()
 	if maxItems <= 0 {
 		maxItems = 100
 	}
@@ -2569,12 +2569,18 @@ func (p *IAMPlugin) saveStringList(goCtx context.Context, key string, list []str
 
 // parseIAMBody unmarshals an IAM JSON request body into dst.
 // An empty body is treated as an empty JSON object.
+//
+// A failure is reported through iamParamMessage, so a bad scalar names its
+// parameter — "MaxItems must be an integer, got \"abc\"". Every handler surfaces
+// this as a ValidationError, and before #642 the message a caller got for a
+// perfectly valid `MaxItems=1` was an encoding/json internal about a Go struct
+// field.
 func parseIAMBody(body []byte, dst any) error {
 	if len(body) == 0 {
 		return nil
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("invalid request body: %w", err)
+		return fmt.Errorf("invalid request body: %s", iamParamMessage(err))
 	}
 	return nil
 }

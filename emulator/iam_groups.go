@@ -98,7 +98,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 	var params struct {
 		UserName string `json:"UserName"`
 		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		MaxItems iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
@@ -127,7 +127,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems)
+	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems.Int())
 
 	groups := make([]*IAMGroup, 0, len(page))
 	for _, name := range page {
@@ -249,7 +249,7 @@ func (p *IAMPlugin) listAttachedGroupPolicies(ctx *RequestContext, req *AWSReque
 	var params struct {
 		GroupName string `json:"GroupName"`
 		Marker    string `json:"Marker"`
-		MaxItems  int    `json:"MaxItems"`
+		MaxItems  iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil

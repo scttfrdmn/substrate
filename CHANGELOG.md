@@ -99,6 +99,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #610 / #636 blind spot again: an operation no client can reach, with passing tests
   over it. Both new test files close it — `journey_iam_tags_test.go` at the SDK level and
   `iam_query_wire_test.go` posting a genuine urlencoded form body one layer down.
+- **`MaxItems` no longer fails every paginated IAM operation** (#642). The same root
+  cause as #639, one layer along and louder. The query protocol has no types, so
+  `MaxItems=1` reaches a handler inside a JSON body as `{"MaxItems":"1"}`, and a field
+  declared `int` made `encoding/json` refuse the whole request: any caller who passed
+  `MaxItems` at all got `400 ValidationError` — "cannot unmarshal string into Go struct
+  field .MaxItems of type int" — instead of a page. `CreateRole`'s
+  `MaxSessionDuration` failed the same way, so a role could not be created with a
+  session duration through any SDK. Where #639's lists unmarshaled to nil in silence,
+  an integer took the request down with it.
+
+  Two scalar types in `emulator/iam_query.go` accept either a JSON number or a numeric
+  JSON string, and every IAM integer field now uses one. A boolean equivalent lands with
+  them, unused for now, so `ListPolicies`' `OnlyAttached` (#497) is not built with the
+  defect already in it. An empty value is the zero value rather than an error — a client
+  that sent `MaxItems=` expressed no limit, and refusing it would fail a request AWS
+  accepts. A malformed value now names its parameter (`MaxItems must be an integer, got
+  "abc"`) rather than leaking a Go struct field.
+
+  Found by probing `ListUsers(MaxItems: 1)` through the SDK while building #579 — not by
+  any test, and this is the third defect of the class. The unit suite could not see it
+  for the reason it could not see #639: `iamRequest` hand-marshals a body holding a real
+  JSON *number*, the one shape no AWS client produces, and the IAM journeys that do go
+  through the SDK never passed `MaxItems`, because pagination was asserted at the unit
+  level where the number is real. `journey_iam_numbers_test.go` drives `MaxItems` across
+  two pages and round-trips `MaxSessionDuration` through `GetRole`; it fails against the
+  code before this fix.
 
 ## [v0.99.0] - 2026-08-14
 

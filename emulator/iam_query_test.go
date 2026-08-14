@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/scttfrdmn/substrate/emulator"
 )
@@ -281,4 +282,131 @@ func TestIAMMemberTags(t *testing.T) {
 			assert.Equal(t, tc.want, emulator.IAMMemberTagsForTest(tc.params))
 		})
 	}
+}
+
+// TestIAMScalarParams covers the string-tolerant integer and boolean decoders
+// (#642).
+//
+// Both forms must work, and the reason is the defect: the query protocol has no
+// types, so every real client sends "1", while the unit suite's iamRequest
+// hand-marshals a real JSON number. Accepting only one of the two shapes is exactly
+// how MaxItems came to answer 400 to every SDK caller while the unit tests stayed
+// green.
+func TestIAMScalarParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		body      string
+		wantCount int
+		wantFlag  bool
+		wantErr   string
+	}{
+		{
+			name:      "the wire form: every value is a string",
+			body:      `{"Count":"25","Flag":"true"}`,
+			wantCount: 25,
+			wantFlag:  true,
+		},
+		{
+			// The shape iamRequest sends. It must keep working, or every existing unit
+			// test that passes MaxItems breaks.
+			name:      "the unit-test form: real JSON scalars",
+			body:      `{"Count":25,"Flag":true}`,
+			wantCount: 25,
+			wantFlag:  true,
+		},
+		{
+			name:      "absent members stay zero",
+			body:      `{"UserName":"jill"}`,
+			wantCount: 0,
+			wantFlag:  false,
+		},
+		{
+			// A client that sent "MaxItems=" expressed no limit. Refusing it would fail
+			// a request AWS accepts.
+			name:      "an empty string is the zero value, not an error",
+			body:      `{"Count":"","Flag":""}`,
+			wantCount: 0,
+			wantFlag:  false,
+		},
+		{
+			name:      "explicit null is the zero value",
+			body:      `{"Count":null,"Flag":null}`,
+			wantCount: 0,
+			wantFlag:  false,
+		},
+		{
+			name:      "a negative integer decodes, so a range check can refuse it",
+			body:      `{"Count":"-1"}`,
+			wantCount: -1,
+		},
+		{
+			name:     "false decodes as false, not as absent",
+			body:     `{"Flag":"false"}`,
+			wantFlag: false,
+		},
+		{
+			// The query protocol lower-cases neither, and the CLI sends "true".
+			name:     "a boolean is case-insensitive",
+			body:     `{"Flag":"True"}`,
+			wantFlag: true,
+		},
+		{
+			// The message must name the parameter. Before this, a caller saw
+			// "cannot unmarshal string into Go struct field .MaxItems of type int".
+			name:    "a non-numeric integer names its parameter",
+			body:    `{"Count":"abc"}`,
+			wantErr: `invalid request body: Count must be an integer, got "abc"`,
+		},
+		{
+			name:    "a non-boolean names its parameter",
+			body:    `{"Flag":"yes"}`,
+			wantErr: `invalid request body: Flag must be true or false, got "yes"`,
+		},
+		{
+			// 1/0 is not a boolean in any AWS client, and accepting it would mean
+			// guessing at a value the caller never wrote.
+			name:    "a numeric boolean is refused",
+			body:    `{"Flag":"1"}`,
+			wantErr: `invalid request body: Flag must be true or false, got "1"`,
+		},
+		{
+			// A malformed body has no parameter to name, so it must still report
+			// something a caller can act on rather than an empty message.
+			name:    "a malformed body still reports an error",
+			body:    `{"Count":`,
+			wantErr: "invalid request body: unexpected end of JSON input",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var params emulator.IAMScalarParamsForTest
+			err := emulator.ParseIAMBodyForTest([]byte(tc.body), &params)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Equal(t, tc.wantErr, err.Error())
+				return
+			}
+			require.NoError(t, err)
+			count, flag := params.IAMScalarValuesForTest()
+			assert.Equal(t, tc.wantCount, count)
+			assert.Equal(t, tc.wantFlag, flag)
+		})
+	}
+}
+
+// TestIAMScalarParams_EmptyBodyIsNotAnError pins parseIAMBody's contract that an
+// absent body decodes to the zero value, which is what lets an operation with only
+// optional parameters be called with nothing at all.
+func TestIAMScalarParams_EmptyBodyIsNotAnError(t *testing.T) {
+	t.Parallel()
+
+	var params emulator.IAMScalarParamsForTest
+	require.NoError(t, emulator.ParseIAMBodyForTest(nil, &params))
+	count, flag := params.IAMScalarValuesForTest()
+	assert.Zero(t, count)
+	assert.False(t, flag)
 }
