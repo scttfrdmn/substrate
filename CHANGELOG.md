@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped the `toolchain` directive in both modules from `go1.26.5` to `go1.26.6`,
+  clearing seven standard-library vulnerabilities `govulncheck` reports as reachable
+  from substrate's own call paths — among them recursion-depth guards in
+  `encoding/xml` (reached from `putBucketVersioning` and CloudFront's `tagResource`)
+  and `encoding/asn1`, and the `net/http` Punycode-label rejection failure. CI
+  resolves its Go version from `go.mod` via `setup-go`'s `go-version-file`, so the
+  directive is what pinned the vulnerable toolchain. No code changes; the daily
+  Security workflow first caught this on 2026-08-14 when the advisories were
+  published against go1.26.5.
+
 ### Changed
 - `CLAUDE.md` now specifies the merge command, `gh pr merge <N> --squash
   --delete-branch`, and forbids `--delete-branch=false`. The repository's
