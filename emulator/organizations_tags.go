@@ -285,9 +285,10 @@ func validateOrgTaggableResourceID(id string) error {
 }
 
 // isOrgTaggableResourceID reports whether id has one of the six forms the
-// model's TaggableResourceId pattern accepts. Two of them — rp- (resource
-// policy) and rt- (responsibility transfer) — are well-formed but name resources
-// substrate does not model, so they are admitted here and refused as absent by
+// model's TaggableResourceId pattern accepts. rp- names the organization's
+// resource policy, which is taggable because PutResourcePolicy accepts Tags.
+// rt- (responsibility transfer) is well-formed but names a resource substrate
+// does not model, so it is admitted here and refused as absent by
 // resolveOrgTarget, which is the same answer AWS gives for an ID in an
 // organization that has no such resource.
 func isOrgTaggableResourceID(id string) bool {
@@ -549,6 +550,16 @@ func orgAuthzResourceARN(state StateManager, reqCtx *RequestContext, req *AWSReq
 		var ou OrgOrganizationalUnit
 		if orgAuthzGetJSON(goCtx, state, orgOUKey(id), &ou) {
 			arn = ou.Arn
+		}
+	case strings.HasPrefix(id, "rp-"):
+		// Keyed by the management account rather than by the ID, like the root: the
+		// organization holds exactly one resource policy. The stored ID must match,
+		// so a well-formed rp- ID that is not the current policy falls through to "*"
+		// rather than borrowing the real policy's ARN.
+		var rp OrgResourcePolicy
+		if orgAuthzGetJSON(goCtx, state, orgResourcePolicyKey(reqCtx.AccountID), &rp) &&
+			rp.ResourcePolicySummary.ID == id {
+			arn = rp.ResourcePolicySummary.Arn
 		}
 	case strings.HasPrefix(id, "p-"):
 		if id == orgFullAWSAccessID {

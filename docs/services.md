@@ -4520,12 +4520,53 @@ document has no `Reason` member to put them in.
 | ListTargetsForPolicy | Reports the root, OU and account targets of one policy |
 | EnablePolicyType | `PolicyTypeAlreadyEnabledException`; restores only `p-FullAWSAccess` |
 | DisablePolicyType | Detaches every SCP from every entity in the root |
-| TagResource | Roots, OUs, accounts and policies |
+| PutResourcePolicy | `Content` is required, 1–40,000 characters; `Tags` only on the first call |
+| DescribeResourcePolicy | `ResourcePolicyNotFoundException` when none is set — the usual case |
+| DeleteResourcePolicy | `ResourcePolicyNotFoundException` when none is set, so a re-run is a refusal |
+| TagResource | Roots, OUs, accounts, policies and the resource policy |
 | UntagResource | Validates key shape on the removal path too |
 | ListTagsForResource | Paginated by `NextToken`; no `MaxResults` |
 
 `CreateOrganization` is not implemented: the organization already exists on first
 contact, so there is nothing for it to create.
+
+### The resource policy
+
+An organization holds **exactly one** resource policy — the delegation document
+that lets a member account make a read management would otherwise have to make.
+That shape is unlike everything else here: there is no list, no per-statement
+update, and `PutResourcePolicy` replaces the document wholesale.
+
+The `rp-` ID and its ARN are minted once and **survive every replacement**. A
+re-mint would tell a caller holding the ARN that its policy had been replaced by a
+different one, when the same single policy was updated — and with only one per
+organization, there is nothing a new ID could distinguish it from.
+
+`DescribeResourcePolicy`'s refusal is the **normal** answer, not an edge case: most
+organizations have no resource policy. A caller checking whether anything was
+delegated to it has to tell `ResourcePolicyNotFoundException` apart from
+`AccessDeniedException`, so answering an empty policy would collapse "no
+delegation" and "delegation I cannot read" into one observation.
+
+`Tags` apply only to the initial creation, per the API model; a `Put` carrying
+tags against an existing policy is refused rather than silently dropping them,
+which would leave a tag-gated decision reading a tag set the caller believes it
+just wrote. Deleting the policy deletes its tags.
+
+Content must **parse as JSON**, refused as
+`InvalidInputException`/`INVALID_RESOURCE_POLICY_JSON`. The evidence is that enum
+member in the API model, not the shape's own pattern — which is `[\s\S]*`, any text
+at all. Only parseability is checked: the enum's `INVALID_PRINCIPAL`,
+`UNSUPPORTED_ACTION_IN_RESOURCE_POLICY` and the two like them are refusals about the
+document's *meaning*, and the sets AWS accepts are not in the model, so emitting
+them would mean guessing at their boundaries. A guessed refusal is worse than a
+missing one: it fails a document AWS would have accepted.
+
+**Not modelled:** the asymmetry itself. Organizations state is keyed by the
+**calling** account, so a member account calling `DescribeResourcePolicy` reads its
+own organization rather than management's, and there is no
+`AccessDeniedException` for a caller outside the organization. Both need a
+member→organization reverse index, tracked in #623.
 
 ### `p-FullAWSAccess`
 
@@ -4601,6 +4642,10 @@ deletes its tags, so an entity that reused the ID cannot inherit them.
 | Unknown OU | `OrganizationalUnitNotFoundException` |
 | Unknown parent / child / root | `ParentNotFoundException` / `ChildNotFoundException` / `RootNotFoundException` |
 | Unknown policy / attachment target | `PolicyNotFoundException` / `TargetNotFoundException` |
+| Describing or deleting an unset resource policy | `ResourcePolicyNotFoundException` |
+| Resource-policy content outside 1–40,000 characters | `InvalidInputException`/`MIN_LENGTH_EXCEEDED` or `MAX_LENGTH_EXCEEDED` |
+| Unparseable resource-policy content | `InvalidInputException`/`INVALID_RESOURCE_POLICY_JSON` |
+| `PutResourcePolicy` with `Tags` on an existing policy | `InvalidInputException`, with no reason prefix — the model's enum has no member for it |
 | Duplicate OU name under one parent | `DuplicateOrganizationalUnitException` |
 | Duplicate policy name | `DuplicatePolicyException` |
 | Already attached | `DuplicatePolicyAttachmentException` |
@@ -4635,6 +4680,7 @@ and each is enforced rather than merely documented.
 | SCPs in an organization | 10,000 | `POLICY_NUMBER_LIMIT_EXCEEDED` |
 | SCPs attached to one root, OU or account | 10 max, **1 min** | `MAX_POLICY_TYPE_ATTACHMENT_LIMIT_EXCEEDED` / `MIN_POLICY_TYPE_ATTACHMENT_LIMIT_EXCEEDED` |
 | Characters in an SCP | 10,240 | `POLICY_CONTENT_LIMIT_EXCEEDED` |
+| Characters in the resource policy | 40,000 | `MAX_LENGTH_EXCEEDED` |
 | Tags on one resource | 50 | `MAX_TAG_LIMIT_EXCEEDED` |
 
 The 5-per-target and 5,120-character figures often quoted are the **RCP** values,

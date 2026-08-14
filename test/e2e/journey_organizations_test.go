@@ -380,6 +380,110 @@ func TestJourney_OrganizationsDisabledSCPState(t *testing.T) {
 	}
 }
 
+// TestJourney_OrganizationsResourcePolicy is #619 through the SDK: the delegation
+// lifecycle a tool that reads the organization's resource policy performs.
+//
+// This level is what #619 actually needed. The operation was implemented nowhere,
+// so it fell through to InvalidAction — and an unrouted operation is invisible to
+// unit tests of the operations that *are* routed. It is the same class of failure as
+// #610, and a journey through the real client is the cheapest thing that catches it.
+//
+// The journey also pins the two properties a caller depends on and no single
+// operation shows: the not-found refusal is the ordinary answer, and the policy's
+// identity survives a replacement.
+func TestJourney_OrganizationsResourcePolicy(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	cfg, err := journeyConfig(ts)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	ctx := context.Background()
+	orgs := organizations.NewFromConfig(cfg, func(o *organizations.Options) { o.RetryMaxAttempts = 1 })
+
+	// --- the normal case: nothing is delegated ---
+	//
+	// A caller has to reach the typed exception, not just a 400: its branch for "no
+	// delegation" and its branch for "delegation I cannot read" are different, and
+	// errors.As on the type is how it tells them apart.
+	var notFound *orgtypes.ResourcePolicyNotFoundException
+	if _, err := orgs.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{}); err == nil {
+		t.Fatal("DescribeResourcePolicy on a fresh organization: expected ResourcePolicyNotFoundException")
+	} else if !errors.As(err, &notFound) {
+		t.Fatalf("expected *ResourcePolicyNotFoundException, got %T: %v", err, err)
+	}
+
+	const delegation = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
+		`"Principal":{"AWS":"111122223333"},"Action":"organizations:DescribeOrganization","Resource":"*"}]}`
+
+	put, err := orgs.PutResourcePolicy(ctx, &organizations.PutResourcePolicyInput{
+		Content: aws.String(delegation),
+		Tags:    []orgtypes.Tag{{Key: aws.String("Owner"), Value: aws.String("platform")}},
+	})
+	if err != nil {
+		t.Fatalf("PutResourcePolicy: %v", err)
+	}
+	policyID := aws.ToString(put.ResourcePolicy.ResourcePolicySummary.Id)
+	policyARN := aws.ToString(put.ResourcePolicy.ResourcePolicySummary.Arn)
+
+	got, err := orgs.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{})
+	if err != nil {
+		t.Fatalf("DescribeResourcePolicy after a put: %v", err)
+	}
+	if content := aws.ToString(got.ResourcePolicy.Content); content != delegation {
+		t.Fatalf("DescribeResourcePolicy Content = %q, want the document that was put", content)
+	}
+	if id := aws.ToString(got.ResourcePolicy.ResourcePolicySummary.Id); id != policyID {
+		t.Fatalf("the resource policy ID moved between calls: %q then %q", policyID, id)
+	}
+
+	// The create-time tag is readable through the same operation every other
+	// Organizations resource's tags are, or nothing can gate on it.
+	tags, err := orgs.ListTagsForResource(ctx, &organizations.ListTagsForResourceInput{
+		ResourceId: aws.String(policyID),
+	})
+	if err != nil {
+		t.Fatalf("ListTagsForResource on the resource policy: %v", err)
+	}
+	if len(tags.Tags) != 1 || aws.ToString(tags.Tags[0].Key) != "Owner" {
+		t.Fatalf("expected the resource policy's create-time tag readable, got %+v", tags.Tags)
+	}
+
+	// --- a replacement updates the one policy in place ---
+	//
+	// A re-minted ID would tell a caller holding policyARN that its policy had been
+	// replaced by a different one, when the same single policy was updated.
+	replaced, err := orgs.PutResourcePolicy(ctx, &organizations.PutResourcePolicyInput{
+		Content: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("replacing the resource policy: %v", err)
+	}
+	if id := aws.ToString(replaced.ResourcePolicy.ResourcePolicySummary.Id); id != policyID {
+		t.Fatalf("a replacement re-minted the ID: %q then %q", policyID, id)
+	}
+	if arn := aws.ToString(replaced.ResourcePolicy.ResourcePolicySummary.Arn); arn != policyARN {
+		t.Fatalf("a replacement re-minted the ARN: %q then %q", policyARN, arn)
+	}
+
+	// --- teardown, and the re-run ---
+	if _, err := orgs.DeleteResourcePolicy(ctx, &organizations.DeleteResourcePolicyInput{}); err != nil {
+		t.Fatalf("DeleteResourcePolicy: %v", err)
+	}
+	if _, err := orgs.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{}); err == nil {
+		t.Fatal("DescribeResourcePolicy after a delete: expected ResourcePolicyNotFoundException")
+	} else if !errors.As(err, &notFound) {
+		t.Fatalf("expected *ResourcePolicyNotFoundException, got %T: %v", err, err)
+	}
+	// A second teardown pass is a refusal it can branch on rather than an outcome
+	// indistinguishable from having done the work.
+	if _, err := orgs.DeleteResourcePolicy(ctx, &organizations.DeleteResourcePolicyInput{}); err == nil {
+		t.Fatal("a second DeleteResourcePolicy: expected ResourcePolicyNotFoundException")
+	} else if !errors.As(err, &notFound) {
+		t.Fatalf("expected *ResourcePolicyNotFoundException, got %T: %v", err, err)
+	}
+}
+
 // journeyOrgParents walks every page of ListParents and returns the parent IDs.
 func journeyOrgParents(t *testing.T, ctx context.Context, orgs *organizations.Client, childID string) []string {
 	t.Helper()

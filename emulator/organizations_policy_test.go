@@ -1726,7 +1726,10 @@ func TestOrganizations_PolicyOperationsAreClaimed(t *testing.T) {
 		}
 	}
 
-	resp := orgsRequest(t, ts, "DescribeResourcePolicy", map[string]interface{}{})
+	// A policy operation substrate does not implement, so the fallthrough is
+	// asserted against this lane's own subject area rather than a distant one.
+	// DescribeResourcePolicy stood here until v0.98.0 implemented it (#619).
+	resp := orgsRequest(t, ts, "DescribeEffectivePolicy", map[string]interface{}{})
 	var out struct {
 		Type string `json:"__type"`
 	}
