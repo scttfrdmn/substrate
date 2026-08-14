@@ -680,3 +680,23 @@ func IAMMemberStructsForTest(params map[string]string, prefix string) []map[stri
 
 // IAMMemberTagsForTest wraps iamMemberTags for external tests.
 func IAMMemberTagsForTest(params map[string]string) []IAMTag { return iamMemberTags(params) }
+
+// IAMScalarParamsForTest is a struct holding one of each string-tolerant IAM scalar,
+// for external tests of the query-protocol scalar decoding (#642).
+type IAMScalarParamsForTest struct {
+	// Count is an integer parameter, standing in for MaxItems.
+	Count iamInt `json:"Count"`
+
+	// Flag is a boolean parameter, standing in for OnlyAttached.
+	Flag iamBool `json:"Flag"`
+}
+
+// IAMScalarValuesForTest returns the decoded scalars as plain Go values.
+func (p IAMScalarParamsForTest) IAMScalarValuesForTest() (int, bool) {
+	return p.Count.Int(), p.Flag.Bool()
+}
+
+// ParseIAMBodyForTest wraps parseIAMBody for external tests, so the whole
+// body-decoding path — including the parameter-naming error message — is testable
+// from package emulator_test.
+func ParseIAMBodyForTest(body []byte, dst any) error { return parseIAMBody(body, dst) }
