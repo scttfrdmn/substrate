@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **IAM list parameters sent by a real client now reach the handler** (#639). IAM speaks
+  the AWS query protocol, in which a list travels as numbered form parameters —
+  `Tags.member.1.Key=env&Tags.member.1.Value=prod`. Nothing decoded that encoding.
+  `ParseAWSRequest` flattens a form body into `AWSRequest.Params`, a
+  `map[string]string`, and the server rebuilds `req.Body` for the query-protocol
+  services as `json.Marshal(req.Params)` — so a handler field declared `Tags []IAMTag`
+  was matched by a JSON key *literally named* `"Tags.member.1.Key"` and unmarshaled to
+  nil. `TagUser`, `UntagUser`, `TagRole`, `UntagRole` and the create-time `Tags` on
+  `CreateUser`/`CreateRole` all answered `200 OK` and stored nothing: a tag call that
+  reported success and did not happen, which is worse than a refusal, because a
+  consumer's assertion on its own tagging silently became an assertion about an empty
+  set.
+
+  The decoder is new (`emulator/iam_query.go`) and follows the pattern CloudWatch's
+  `parseMemberList` already established, with two rules made explicit. Indices are
+  walked from 1 and the first gap ends the list — AWS numbers members contiguously, and
+  guessing at the intended length would invent members a client never sent. A
+  present-but-empty value is a member holding `""` rather than the end of the list, the
+  same present-vs-absent distinction the parser is careful about for `ImageId` (#412),
+  because a required-member check has to be able to see what was sent. A member map
+  keeps its suffix verbatim, so a list nested inside a struct member —
+  `ContextEntries.member.1.ContextKeyValues.member.1`, which
+  `SimulatePrincipalPolicy` needs — decodes by applying the flat decoder to the map.
+
+  Each affected handler reads `req.Params` and falls back to its JSON body when no
+  member list was sent. That dual read is deliberate: the JSON path is how a unit test
+  drives the plugin, the params path is how every real client does, and **only the first
+  was ever exercised** — which is why a fully green suite shipped four broken
+  operations. `iamRequest` hand-marshals real JSON arrays, a shape no AWS client
+  produces, and no e2e journey drove a list-valued IAM parameter. This is the #561 /
+  #610 / #636 blind spot again: an operation no client can reach, with passing tests
+  over it. Both new test files close it — `journey_iam_tags_test.go` at the SDK level and
+  `iam_query_wire_test.go` posting a genuine urlencoded form body one layer down.
+
 ## [v0.99.0] - 2026-08-14
 
 ### Added
