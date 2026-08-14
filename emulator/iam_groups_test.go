@@ -1,7 +1,12 @@
 package emulator_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -167,6 +172,43 @@ func TestIAMGroups_MembersAreSortedAndPaginated(t *testing.T) {
 	assert.Equal(t, false, page["IsTruncated"])
 }
 
+// TestIAMGroups_GroupsForUserArePaginated is the same cursor on the other side of
+// the index. Both directions page, so both need the assertion — a user in many
+// groups is the realistic shape, and a caller that follows the Marker must see each
+// group exactly once.
+func TestIAMGroups_GroupsForUserArePaginated(t *testing.T) {
+	t.Parallel()
+	srv := newIAMTestServer(t)
+	resp := iamRequest(t, srv, "CreateUser", map[string]any{"UserName": "jill"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	for _, name := range []string{"sre", "devs", "oncall"} {
+		resp = iamRequest(t, srv, "CreateGroup", map[string]any{"GroupName": name})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
+		resp = iamRequest(t, srv, "AddUserToGroup", map[string]any{"GroupName": name, "UserName": "jill"})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
+	}
+	assert.Equal(t, []string{"devs", "oncall", "sre"}, iamGroupNamesForUser(t, srv, "jill"))
+
+	resp = iamRequest(t, srv, "ListGroupsForUser", map[string]any{"UserName": "jill", "MaxItems": 2})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var page map[string]any
+	decodeIAMXML(t, resp, &page)
+	require.Len(t, page["Groups"], 2)
+	assert.Equal(t, true, page["IsTruncated"])
+	marker, ok := page["Marker"].(string)
+	require.True(t, ok, "a truncated page must carry a Marker")
+
+	resp = iamRequest(t, srv, "ListGroupsForUser", map[string]any{"UserName": "jill", "Marker": marker})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	decodeIAMXML(t, resp, &page)
+	require.Len(t, page["Groups"], 1, "the second page holds the remaining group")
+	assert.Equal(t, false, page["IsTruncated"])
+}
+
 // TestIAMGroups_MembershipRefusesUnknownEntities covers the two NoSuchEntity arms
 // the model declares for both membership operations.
 func TestIAMGroups_MembershipRefusesUnknownEntities(t *testing.T) {
@@ -290,6 +332,88 @@ func TestIAMGroups_ManagedPolicyAttachment(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	decodeIAMXML(t, resp, &result)
 	assert.Equal(t, "NoSuchEntity", result["__type"])
+}
+
+// TestIAMGroups_DetachKeepsTheOtherPolicies pins that a detach removes one entry
+// rather than rewriting the list: the filter reuses the backing array, so an
+// off-by-one there would drop a policy the caller never named.
+func TestIAMGroups_DetachKeepsTheOtherPolicies(t *testing.T) {
+	t.Parallel()
+	srv := newIAMTestServer(t)
+	resp := iamRequest(t, srv, "CreateGroup", map[string]any{"GroupName": "devs"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	const (
+		s3ARN  = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+		ec2ARN = "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+	)
+	for _, arn := range []string{s3ARN, ec2ARN} {
+		resp = iamRequest(t, srv, "AttachGroupPolicy", map[string]any{"GroupName": "devs", "PolicyArn": arn})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	resp = iamRequest(t, srv, "DetachGroupPolicy", map[string]any{"GroupName": "devs", "PolicyArn": s3ARN})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	resp = iamRequest(t, srv, "ListAttachedGroupPolicies", map[string]any{"GroupName": "devs"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
+	attached, ok := result["AttachedPolicies"].([]any)
+	require.True(t, ok)
+	require.Len(t, attached, 1, "detaching one policy must leave the other attached")
+	entry, ok := attached[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, ec2ARN, entry["PolicyArn"])
+}
+
+// TestIAMGroups_RequiredParameters covers the ValidationError arm of every new
+// operation. AWS refuses a missing required member before it looks anything up, so
+// a handler that skipped the check would report NoSuchEntity for a call that named
+// no entity at all.
+func TestIAMGroups_RequiredParameters(t *testing.T) {
+	t.Parallel()
+	srv := newIAMTestServer(t)
+
+	tests := []struct {
+		operation string
+		body      map[string]any
+	}{
+		{"RemoveUserFromGroup", map[string]any{"GroupName": "devs"}},
+		{"RemoveUserFromGroup", map[string]any{"UserName": "jill"}},
+		{"ListGroupsForUser", map[string]any{}},
+		{"AttachGroupPolicy", map[string]any{"GroupName": "devs"}},
+		{"AttachGroupPolicy", map[string]any{"PolicyArn": "arn:aws:iam::aws:policy/ReadOnlyAccess"}},
+		{"DetachGroupPolicy", map[string]any{"GroupName": "devs"}},
+		{"DetachGroupPolicy", map[string]any{"PolicyArn": "arn:aws:iam::aws:policy/ReadOnlyAccess"}},
+		{"ListAttachedGroupPolicies", map[string]any{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.operation+"/"+iamMissingParamName(tt.body), func(t *testing.T) {
+			resp := iamRequest(t, srv, tt.operation, tt.body)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			var result map[string]any
+			decodeIAMXML(t, resp, &result)
+			assert.Equal(t, "ValidationError", result["__type"])
+		})
+	}
+}
+
+// iamMissingParamName names a subtest by what the body does carry, since what it
+// omits is the point and listing every present key keeps the names unique.
+func iamMissingParamName(body map[string]any) string {
+	if len(body) == 0 {
+		return "empty"
+	}
+	keys := make([]string, 0, len(body))
+	for k := range body {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return "only" + strings.Join(keys, "+")
 }
 
 // TestIAMGroups_InlinePolicyRoundTrip drives the inline family with entityType
@@ -428,6 +552,64 @@ func TestIAMGroups_DeleteRefusesWhileSubordinatesExist(t *testing.T) {
 	resp = iamRequest(t, srv, "DeleteGroup", map[string]any{"GroupName": "devs"})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NoError(t, resp.Body.Close())
+}
+
+// TestIAMGroups_OperationsAreAuthorized covers the gate on every new operation. A
+// group is where permissions come from, so an operation that mutates one must be
+// refused to a caller who was not granted it — an unauthorized AddUserToGroup would
+// be a privilege escalation, not just a fidelity gap.
+//
+// The caller here is a real IAM user holding a policy that grants something else, so
+// every group action lands on the implicit-deny arm.
+func TestIAMGroups_OperationsAreAuthorized(t *testing.T) {
+	t.Parallel()
+	srv := newTrustPolicyTestServer(t)
+	accessKey := trustSetupCallerWithoutAssume(t, srv, "ungranted")
+
+	// Setup runs unenforced through the AKIA header, so the entities exist before the
+	// gate is exercised.
+	iamCreateGroupAndUser(t, srv, "devs", "jill")
+
+	operations := []struct {
+		operation string
+		body      map[string]any
+	}{
+		{"AddUserToGroup", map[string]any{"GroupName": "devs", "UserName": "jill"}},
+		{"RemoveUserFromGroup", map[string]any{"GroupName": "devs", "UserName": "jill"}},
+		{"ListGroupsForUser", map[string]any{"UserName": "jill"}},
+		{"AttachGroupPolicy", map[string]any{
+			"GroupName": "devs", "PolicyArn": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+		}},
+		{"DetachGroupPolicy", map[string]any{
+			"GroupName": "devs", "PolicyArn": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+		}},
+		{"ListAttachedGroupPolicies", map[string]any{"GroupName": "devs"}},
+	}
+	for _, op := range operations {
+		t.Run(op.operation, func(t *testing.T) {
+			resp := iamCallAs(t, srv, accessKey, op.operation, op.body)
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+			var result map[string]any
+			decodeIAMXML(t, resp, &result)
+			assert.Equal(t, "AccessDenied", result["__type"])
+		})
+	}
+}
+
+// iamCallAs issues an IAM request signed with accessKeyID, so the gate resolves a
+// real principal rather than the unenforced fallback trustIAMCall relies on.
+func iamCallAs(t *testing.T, srv *emulator.Server, accessKeyID, operation string, body any) *http.Response {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	r.Host = "iam.amazonaws.com"
+	r.Header.Set("X-Amz-Target", "AmazonIdentityManagementService."+operation)
+	r.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	r.Header.Set("Authorization", trustAuthHeader(accessKeyID, "iam"))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w.Result()
 }
 
 // TestIAMGroupsWire_MembershipOverTheQueryProtocol drives the new operations the
