@@ -20,10 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `CLAUDE.md` now specifies the merge command, `gh pr merge <N> --squash
-  --delete-branch`, and forbids `--delete-branch=false`. The repository's
-  `delete_branch_on_merge` is `false`, so the flag is the only thing that removes a
-  merged branch; 45 of them had accumulated by v0.97.0, none deliberately kept.
-  Contributor process only — no emulator behaviour changes.
+  --delete-branch`, and forbids `--delete-branch=false`. 45 merged branches had
+  accumulated by v0.97.0, none deliberately kept. The repository's
+  `delete_branch_on_merge` has also been enabled, so a merged branch is now removed
+  even when the flag is forgotten. Contributor process only — no emulator behaviour
+  changes.
+- Bumped the OpenTelemetry SDK to v1.45.0 and, with it, the semantic-convention
+  import in `emulator/tracing.go` from `semconv/v1.41.0` to `semconv/v1.43.0`. The
+  SDK's `resource.Default()` carries whichever schema URL its own internal semconv
+  uses, and `resource.Merge` refuses two different ones outright, so the stale import
+  made `NewTracer` fail with `conflicting Schema URL` for every non-noop exporter —
+  tracing was wholly unusable on the new SDK rather than degraded. The version must
+  therefore move in lockstep with the SDK; the existing `TestNewTracer_*` cases catch
+  it, which is why the dependabot PR went red instead of merging green.
 
 ## [v0.97.0] - 2026-08-09
 
