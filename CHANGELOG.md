@@ -7,7 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **IAM groups have an observable effect** (#579 prerequisite). Substrate routed
+  `CreateGroup`, `GetGroup`, `DeleteGroup` and `ListGroups` and nothing else, so a group
+  could be created and then did nothing: no user could join it, no policy could be put on
+  it, and `GetGroup` passed `iamUserListXML(nil)` unconditionally — a group was
+  observably always empty no matter what state held. Eleven operations close that gap:
+  `AddUserToGroup`, `RemoveUserFromGroup`, `ListGroupsForUser`, `AttachGroupPolicy`,
+  `DetachGroupPolicy`, `ListAttachedGroupPolicies`, `PutGroupPolicy`, `GetGroupPolicy`,
+  `DeleteGroupPolicy` and `ListGroupPolicies`.
+
+  Membership is stored on **both** sides of the index — `group_users:<group>` and
+  `user_groups:<user>` — because both directions are read by an API: `GetGroup` lists a
+  group's users and `ListGroupsForUser` lists a user's groups. Every write goes through
+  one pair of functions so the two sides cannot come to disagree, which is the v0.99.0
+  `saveAccount` lesson applied before it could bite: a membership visible to one call and
+  denied by the other is a state invariant broken by a missing line. Both writes are
+  idempotent, matching the reference, which declares `NoSuchEntity` for the group and the
+  user but nothing for the membership itself.
+
+  Group policies reuse the existing storage exactly. Managed attachments land in
+  `group_policies:<name>` through the same `loadPolicyList`/`savePolicyList` pair the user
+  and role handlers use, and inline documents go through the already entity-type
+  parameterized `putInlinePolicy` family. Nothing here invents a second way to store a
+  policy — that is what lets `loadPoliciesForPrincipal` read a group's policies with the
+  code it already had for a user's.
+
+  `DeleteGroup` now refuses with `DeleteConflict` 409 while the group holds members or
+  attached policies ("The group must not contain any users or have any attached
+  policies"), and `DeleteUser` refuses while the user belongs to a group, naming which
+  one. Both refusals exist for the same reason: a delete that skipped them would leave one
+  side of the membership index naming an entity that no longer exists, and that dangling
+  membership is read by `loadPoliciesForPrincipal` on every request.
+
+### Changed
+- **A group's policies now apply to its members' requests** through `CheckAccess`. AWS
+  applies group policies to every request a member makes; substrate evaluated none of
+  them, and the word "group" did not appear in `authz.go`. Both policy loaders learned
+  this arm — `AuthController.loadPoliciesForPrincipal` *and* `IAMPlugin.authorize`, which
+  loads its own document set independently. Teaching only one would have recreated #411
+  exactly: one ARN, two loaders, two opposite answers. A test asserts the two agree on the
+  same input, so the arms cannot drift apart later.
+
+  This is a behaviour change for any fixture whose user belongs to a group carrying a
+  policy: that user starts being allowed — or denied — by it. Nothing else moves, because
+  before this release no operation could put a policy on a group at all, so an existing
+  fixture can only be affected if it wrote group policy state directly.
+
 ### Fixed
+- **`GetGroup` reports its actual members**, paginated by `Marker`/`MaxItems` and sorted,
+  instead of an empty list. A group-based simulation is untestable through the API that
+  reports it if that API always answers "empty".
+- **The inline-policy handlers no longer treat an unknown entity type as a user.** All
+  four of `putInlinePolicy`/`getInlinePolicy`/`deleteInlinePolicy`/`listInlinePolicies`
+  branched on `entityType == "role"` with a `default:` arm that read `role:` state for the
+  existence check while reporting `UserName` in the response — so a third entity type
+  would have looked itself up under the wrong prefix and answered with the wrong element
+  name. One helper now maps the type to its entity name and operation suffix, and an
+  unrecognized type yields an empty name, which every caller already refuses with
+  `ValidationError`.
 - **IAM list parameters sent by a real client now reach the handler** (#639). IAM speaks
   the AWS query protocol, in which a list travels as numbered form parameters —
   `Tags.member.1.Key=env&Tags.member.1.Value=prod`. Nothing decoded that encoding.

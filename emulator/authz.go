@@ -182,80 +182,142 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 	return entity, raw != nil, nil
 }
 
+// authzAdministratorAccessARN is the managed policy whose presence short-circuits
+// evaluation, since it allows every action on every resource.
+const authzAdministratorAccessARN = "arn:aws:iam::aws:policy/AdministratorAccess"
+
 // loadPoliciesForPrincipal loads attached managed + inline policies for the
 // entity resolved from reqCtx.Principal.ARN.
+//
+// For a user this includes the policies of every group the user belongs to, which
+// is how IAM works — "a group's permissions apply to all of its users" — and what
+// makes group membership have any effect at all. Before this, authz.go read only
+// the entity's own "<kind>_policies:" and "<kind>_inline*:" keys, so a user whose
+// sole grant came from a group was implicitly denied.
+//
+// A group is never itself a principal: nothing can call AWS *as* a group, so the
+// group arm is reached only through a user.
 func (a *AuthController) loadPoliciesForPrincipal(entity iamEntity) ([]PolicyDocument, error) {
-	entityType, entityName := entity.Kind, entity.Name
-	listKey := entityType + "_policies:" + entityName
-
 	goCtx := context.Background()
 
-	// Load attached managed policy ARNs.
-	raw, err := a.state.Get(goCtx, iamNamespace, listKey)
-	if err != nil {
-		return nil, fmt.Errorf("load policy list: %w", err)
-	}
-
-	var arns []string
-	if raw != nil {
-		if err := json.Unmarshal(raw, &arns); err != nil {
-			return nil, fmt.Errorf("unmarshal policy list: %w", err)
+	// The entity's own policies come first, then each group's, so the order a
+	// document appears in is stable — Evaluate is order-independent (an explicit Deny
+	// wins wherever it sits), but a stable order keeps MatchedStatements reproducible
+	// for the callers that report them.
+	sources := []iamEntity{entity}
+	if entity.Kind == "user" {
+		groups, err := a.loadAuthzStringList(goCtx, iamUserGroupsKey(entity.Name))
+		if err != nil {
+			return nil, fmt.Errorf("load group memberships: %w", err)
+		}
+		for _, name := range groups {
+			sources = append(sources, iamEntity{Kind: "group", Name: name})
 		}
 	}
 
-	// Fast path: AdministratorAccess grants all actions.
-	for _, arn := range arns {
-		if arn == "arn:aws:iam::aws:policy/AdministratorAccess" {
-			return []PolicyDocument{{
-				Version: "2012-10-17",
-				Statement: []PolicyStatement{{
-					Effect:   IAMEffectAllow,
-					Action:   StringOrSlice{"*"},
-					Resource: StringOrSlice{"*"},
-				}},
-			}}, nil
+	arnsBySource := make([][]string, 0, len(sources))
+	for _, source := range sources {
+		arns, err := a.loadAuthzStringList(goCtx, source.Kind+"_policies:"+source.Name)
+		if err != nil {
+			return nil, fmt.Errorf("load policy list: %w", err)
 		}
-	}
+		arnsBySource = append(arnsBySource, arns)
 
-	var docs []PolicyDocument
-
-	// Load managed policy documents.
-	for _, arn := range arns {
-		if mp, ok := GetManagedPolicy(arn); ok {
-			docs = append(docs, mp.Document)
-			continue
-		}
-		polRaw, err := a.state.Get(goCtx, iamNamespace, "policy:"+arn)
-		if err != nil || polRaw == nil {
-			continue
-		}
-		var pol IAMPolicy
-		if err := json.Unmarshal(polRaw, &pol); err != nil {
-			continue
-		}
-		docs = append(docs, pol.Document)
-	}
-
-	// Load inline policies.
-	namesRaw, err := a.state.Get(goCtx, iamNamespace, entityType+"_inline_names:"+entityName)
-	if err == nil && namesRaw != nil {
-		var names []string
-		if err := json.Unmarshal(namesRaw, &names); err == nil {
-			for _, name := range names {
-				docRaw, err := a.state.Get(goCtx, iamNamespace, entityType+"_inline:"+entityName+":"+name)
-				if err != nil || docRaw == nil {
-					continue
-				}
-				var doc PolicyDocument
-				if err := json.Unmarshal(docRaw, &doc); err != nil {
-					continue
-				}
-				docs = append(docs, doc)
+		// Fast path: AdministratorAccess grants all actions, from whichever source it
+		// is attached to.
+		for _, arn := range arns {
+			if arn == authzAdministratorAccessARN {
+				return []PolicyDocument{{
+					Version: "2012-10-17",
+					Statement: []PolicyStatement{{
+						Effect:   IAMEffectAllow,
+						Action:   StringOrSlice{"*"},
+						Resource: StringOrSlice{"*"},
+					}},
+				}}, nil
 			}
 		}
 	}
 
+	var docs []PolicyDocument
+	for i, source := range sources {
+		for _, arn := range arnsBySource[i] {
+			if doc, ok := a.resolveManagedPolicyDoc(goCtx, arn); ok {
+				docs = append(docs, doc)
+			}
+		}
+		docs = append(docs, a.loadInlinePolicyDocs(goCtx, source)...)
+	}
+
 	return docs, nil
+}
+
+// loadAuthzStringList reads a JSON string list from IAM state, treating an absent
+// key as an empty list.
+func (a *AuthController) loadAuthzStringList(goCtx context.Context, key string) ([]string, error) {
+	raw, err := a.state.Get(goCtx, iamNamespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("unmarshal %s: %w", key, err)
+	}
+	return list, nil
+}
+
+// resolveManagedPolicyDoc resolves a managed policy ARN to its document, checking
+// the bundled catalog before state — the same order every other IAM caller uses, so
+// a bundled and a customer-managed policy behave alike.
+//
+// An ARN that resolves to neither is reported as not found rather than as an
+// error: substrate bundles 52 of the ~1,200 AWS managed policies, so an attachment
+// naming an unbundled one is expected and must not fail the whole load.
+func (a *AuthController) resolveManagedPolicyDoc(goCtx context.Context, arn string) (PolicyDocument, bool) {
+	if mp, ok := GetManagedPolicy(arn); ok {
+		return mp.Document, true
+	}
+	polRaw, err := a.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	if err != nil || polRaw == nil {
+		return PolicyDocument{}, false
+	}
+	var pol IAMPolicy
+	if err := json.Unmarshal(polRaw, &pol); err != nil {
+		return PolicyDocument{}, false
+	}
+	return pol.Document, true
+}
+
+// loadInlinePolicyDocs returns the inline policy documents embedded in an entity.
+//
+// A read that fails yields no document rather than an error, matching the
+// behavior this replaced: an unreadable inline policy must not turn into a
+// blanket deny, and CheckAccess already fails open on the errors it does see.
+func (a *AuthController) loadInlinePolicyDocs(goCtx context.Context, entity iamEntity) []PolicyDocument {
+	namesRaw, err := a.state.Get(goCtx, iamNamespace, entity.Kind+"_inline_names:"+entity.Name)
+	if err != nil || namesRaw == nil {
+		return nil
+	}
+	var names []string
+	if err := json.Unmarshal(namesRaw, &names); err != nil {
+		return nil
+	}
+	var docs []PolicyDocument
+	for _, name := range names {
+		docRaw, err := a.state.Get(goCtx, iamNamespace, entity.Kind+"_inline:"+entity.Name+":"+name)
+		if err != nil || docRaw == nil {
+			continue
+		}
+		var doc PolicyDocument
+		if err := json.Unmarshal(docRaw, &doc); err != nil {
+			continue
+		}
+		docs = append(docs, doc)
+	}
+	return docs
 }
 
 // loadPermissionBoundary loads the permission boundary PolicyDocument for the
