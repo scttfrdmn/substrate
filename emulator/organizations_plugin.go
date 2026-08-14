@@ -64,6 +64,7 @@ func (p *OrganizationsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 		p.policyOperation,
 		p.accountOperation,
 		p.tagOperation,
+		p.resourcePolicyOperation,
 	} {
 		if h, ok := claim(req.Operation); ok {
 			return h(ctx, req)

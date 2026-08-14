@@ -201,3 +201,27 @@ type OrgTag struct {
 	// Value is the tag value; the empty string is permitted, null is not.
 	Value string `json:"Value"`
 }
+
+// OrgResourcePolicySummary identifies the organization's resource policy.
+type OrgResourcePolicySummary struct {
+	// ID is the policy identifier, "rp-" followed by 4-128 alphanumerics or
+	// underscores.
+	ID string `json:"Id"`
+
+	// Arn is the ARN of the resource policy, which embeds the organization ID.
+	Arn string `json:"Arn"`
+}
+
+// OrgResourcePolicy is the organization's resource-based delegation policy, as
+// DescribeResourcePolicy and PutResourcePolicy return it.
+//
+// An organization holds exactly one, so this is not stored in a list keyed by ID
+// the way OrgPolicy is: PutResourcePolicy replaces the document wholesale and
+// there is no per-statement update.
+type OrgResourcePolicy struct {
+	// ResourcePolicySummary is the policy's identity.
+	ResourcePolicySummary OrgResourcePolicySummary `json:"ResourcePolicySummary"`
+
+	// Content is the policy document text.
+	Content string `json:"Content"`
+}

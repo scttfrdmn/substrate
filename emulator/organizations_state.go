@@ -62,6 +62,14 @@ const (
 	// orgKindPolicy is not a ParentType or ChildType — it exists because a policy
 	// is taggable, so resolveOrgTarget has to be able to name one.
 	orgKindPolicy = "POLICY"
+
+	// orgKindResourcePolicy exists for the same reason as orgKindPolicy: the
+	// organization's resource policy is taggable, because PutResourcePolicy accepts
+	// Tags. It is not a ParentType or ChildType either, and every caller that
+	// resolves a hierarchy target checks against an allowlist of ROOT/
+	// ORGANIZATIONAL_UNIT/ACCOUNT, so naming it here cannot make it attachable or
+	// movable.
+	orgKindResourcePolicy = "RESOURCE_POLICY"
 )
 
 // Organizations policy types substrate models.
@@ -118,6 +126,12 @@ func orgTagsKey(resource string) string { return "tags:" + resource }
 
 func orgCreateStatusKey(id string) string      { return "car:" + id }
 func orgCreateStatusIDsKey(acct string) string { return "car_ids:" + acct }
+
+// orgResourcePolicyKey holds the organization's single resource policy. It is
+// keyed by the management account, like orgKey, because an organization has
+// exactly one — not a list keyed by ID, which is what makes this cluster's shape
+// unlike the rest of the service.
+func orgResourcePolicyKey(acct string) string { return "resource_policy:" + acct }
 
 // --- errors ---
 //
@@ -744,6 +758,18 @@ func (p *OrganizationsPlugin) resolveOrgTarget(ctx context.Context, acct, id str
 		}
 		if pol != nil {
 			return orgKindPolicy, nil
+		}
+		return "", nil
+	case len(id) > 3 && id[:3] == "rp-":
+		// The organization holds at most one resource policy, so the ID has to match
+		// the stored one rather than index into a collection. A well-formed rp- ID
+		// that is not it names nothing, which is the same answer AWS gives.
+		policy, found, err := p.loadResourcePolicy(ctx, acct)
+		if err != nil {
+			return "", err
+		}
+		if found && policy.ResourcePolicySummary.ID == id {
+			return orgKindResourcePolicy, nil
 		}
 		return "", nil
 	default:

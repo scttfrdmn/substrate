@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The organization's resource policy is now readable, writable and deletable**
+  (#619). `PutResourcePolicy`, `DescribeResourcePolicy` and `DeleteResourcePolicy`
+  were claimed by no operation cluster, so every one of them fell through to
+  `InvalidAction` — which a consumer reads as "no such API" rather than "substrate
+  has not implemented it", sending it to hunt a bug in its own request. Found by
+  driving a read-only Organizations consumer against `substrate server` at v0.97.0,
+  not by reading the API model.
+
+  The cluster's shape is unlike every other one in Organizations: an organization
+  holds exactly **one** resource policy, `Put` replaces it wholesale, and `Describe`
+  and `Delete` take no input at all. Three consequences a consumer depends on:
+  - The `rp-` ID and its ARN are minted once and **survive every replacement**. A
+    re-mint would tell a caller holding the ARN that its policy had been replaced by
+    a different one, when the same single policy was updated — and with one per
+    organization, a new ID distinguishes nothing.
+  - `DescribeResourcePolicy`'s `ResourcePolicyNotFoundException` is the **normal**
+    answer, since most organizations have no resource policy. Answering an empty
+    policy would collapse "nothing was delegated to me" and "something was delegated
+    that I cannot read" into one observation, and those are different branches in a
+    caller's error handling. `DeleteResourcePolicy` refuses the same way, so a second
+    teardown pass is a refusal it can branch on rather than an outcome
+    indistinguishable from the first.
+  - Inline `Tags` apply only to the initial creation, per the API model's note, and
+    go through the same `validateOrgCreateTags` every other Organizations create
+    uses — so an `aws:`-prefixed key cannot be planted here and then read as
+    `aws:ResourceTag` by a policy condition. A `Put` carrying tags against an
+    existing policy is refused rather than silently dropping them, which would leave
+    a tag-gated authorization decision reading a tag set the caller believes it just
+    wrote. Deleting the policy deletes its tags.
+
+  Content is bounded at the model's 1–40,000 characters and must parse as JSON,
+  refused as `INVALID_RESOURCE_POLICY_JSON`. That the document is parsed at all comes
+  from that member of the model's `InvalidInputExceptionReason` enum, not from the
+  shape's pattern, which is `[\s\S]*` — any text. Only parseability is checked: the
+  same enum's `INVALID_PRINCIPAL` and `UNSUPPORTED_ACTION_IN_RESOURCE_POLICY` are
+  refusals about the document's meaning, and the sets AWS accepts are not in the
+  model, so emitting them would mean guessing at their boundaries — and a guessed
+  refusal fails a document AWS would have accepted. For the same reason the
+  tags-on-update refusal carries **no** reason prefix, unlike every other
+  `InvalidInputException` here: no enum member describes it, and borrowing one would
+  read as documented behaviour while matching no branch a consumer could write.
+
+  The policy is also a tagging target, so
+  `TagResource`/`UntagResource`/`ListTagsForResource` reach it and its ARN resolves in
+  the authorization path instead of falling through to `*`.
+
+  Not modelled, and tracked in #623: the asymmetry itself. Organizations state is
+  keyed by the **calling** account, so a member account reading the policy sees its
+  own organization rather than management's, and there is no `AccessDeniedException`
+  for a caller outside the organization. Both need a member→organization reverse
+  index that does not exist yet.
+
 ### Security
 - Bumped the `toolchain` directive in both modules from `go1.26.5` to `go1.26.6`,
   clearing seven standard-library vulnerabilities `govulncheck` reports as reachable
