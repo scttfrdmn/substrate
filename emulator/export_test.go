@@ -667,3 +667,16 @@ func CFNGeneratedNameForTest(accountID, region, stackName, resType, logicalID st
 		stackName: stackName,
 	}, resType, logicalID)
 }
+
+// IAMMemberListForTest wraps iamMemberList for external tests.
+func IAMMemberListForTest(params map[string]string, prefix string) []string {
+	return iamMemberList(params, prefix)
+}
+
+// IAMMemberStructsForTest wraps iamMemberStructs for external tests.
+func IAMMemberStructsForTest(params map[string]string, prefix string) []map[string]string {
+	return iamMemberStructs(params, prefix)
+}
+
+// IAMMemberTagsForTest wraps iamMemberTags for external tests.
+func IAMMemberTagsForTest(params map[string]string) []IAMTag { return iamMemberTags(params) }

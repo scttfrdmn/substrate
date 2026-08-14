@@ -186,6 +186,11 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if params.UserName == "" {
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
+	// Tags is a query-protocol list; see tagUser and iam_query.go (#639). A user
+	// created with tags kept none of them.
+	if tags := iamMemberTags(req.Params); tags != nil {
+		params.Tags = tags
+	}
 
 	goCtx := context.Background()
 
@@ -372,6 +377,11 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	if params.RoleName == "" {
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
+	}
+	// Tags is a query-protocol list; see tagUser and iam_query.go (#639). A role
+	// created with tags kept none of them.
+	if tags := iamMemberTags(req.Params); tags != nil {
+		params.Tags = tags
 	}
 
 	goCtx := context.Background()
@@ -1981,6 +1991,14 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if params.UserName == "" {
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
+	// Tags is a query-protocol list, so it arrives as Tags.member.N.Key/Value and
+	// the JSON unmarshal above leaves it nil. Reading req.Params is how every real
+	// client's tags reach this handler; the JSON path is how a unit test drives it.
+	// Only the second was ever exercised, which is why this shipped storing nothing
+	// (#639). See iam_query.go.
+	if tags := iamMemberTags(req.Params); tags != nil {
+		params.Tags = tags
+	}
 
 	goCtx := context.Background()
 
@@ -2034,6 +2052,10 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 	if params.UserName == "" {
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
+	}
+	// TagKeys is a flat query-protocol list; see tagUser above and iam_query.go (#639).
+	if keys := iamMemberList(req.Params, "TagKeys"); keys != nil {
+		params.TagKeys = keys
 	}
 
 	goCtx := context.Background()
@@ -2152,6 +2174,10 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if params.RoleName == "" {
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
 	}
+	// Tags is a query-protocol list; see tagUser and iam_query.go (#639).
+	if tags := iamMemberTags(req.Params); tags != nil {
+		params.Tags = tags
+	}
 
 	goCtx := context.Background()
 
@@ -2205,6 +2231,10 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 	if params.RoleName == "" {
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
+	}
+	// TagKeys is a flat query-protocol list; see tagUser and iam_query.go (#639).
+	if keys := iamMemberList(req.Params, "TagKeys"); keys != nil {
+		params.TagKeys = keys
 	}
 
 	goCtx := context.Background()
