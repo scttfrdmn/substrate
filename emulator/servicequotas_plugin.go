@@ -132,13 +132,19 @@ func (p *ServiceQuotasPlugin) listServiceQuotas(req *AWSRequest) (*AWSResponse, 
 	var input struct {
 		ServiceCode string `json:"ServiceCode"`
 	}
-	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+	if err := sqUnmarshal(req.Body, &input); err != nil {
+		return nil, err
+	}
+	if input.ServiceCode == "" {
+		return nil, sqIllegalArgument("ServiceCode is required")
 	}
 
+	// An unrecognized service is NoSuchResourceException, which the model declares
+	// for this operation. Answering 200 with an empty list instead claims the
+	// service exists and has no quotas — a different, and false, statement.
 	quotas, ok := defaultServiceQuotas[input.ServiceCode]
 	if !ok {
-		quotas = []ServiceQuota{}
+		return nil, sqNoSuchService(input.ServiceCode)
 	}
 
 	return sqJSONResponse(http.StatusOK, map[string]interface{}{
@@ -151,17 +157,16 @@ func (p *ServiceQuotasPlugin) getServiceQuota(req *AWSRequest) (*AWSResponse, er
 		ServiceCode string `json:"ServiceCode"`
 		QuotaCode   string `json:"QuotaCode"`
 	}
-	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+	if err := sqUnmarshal(req.Body, &input); err != nil {
+		return nil, err
+	}
+	if input.ServiceCode == "" || input.QuotaCode == "" {
+		return nil, sqIllegalArgument("ServiceCode and QuotaCode are required")
 	}
 
-	quota := p.findQuota(input.ServiceCode, input.QuotaCode)
-	if quota == nil {
-		return nil, &AWSError{
-			Code:       "NoSuchResourceException",
-			Message:    fmt.Sprintf("No quota found for service %q quota %q", input.ServiceCode, input.QuotaCode),
-			HTTPStatus: http.StatusBadRequest,
-		}
+	quota, awsErr := p.findQuota(input.ServiceCode, input.QuotaCode)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 	return sqJSONResponse(http.StatusOK, map[string]interface{}{
 		"Quota": quota,
@@ -283,15 +288,65 @@ func (p *ServiceQuotasPlugin) getRequestedServiceQuotaChange(req *AWSRequest) (*
 // --- Helpers -----------------------------------------------------------------
 
 // findQuota returns the quota matching serviceCode and quotaCode from the
-// built-in table, or nil if not found.
-func (p *ServiceQuotasPlugin) findQuota(serviceCode, quotaCode string) *ServiceQuota {
+// built-in table.
+//
+// The refusal distinguishes an unknown service from an unknown quota code on a
+// known service. Both are NoSuchResourceException — that is the only code the
+// model declares — so the message is the only place the two can be told apart,
+// and a caller that cannot tell them apart goes looking for a wrong quota code
+// when the service name is what was wrong.
+func (p *ServiceQuotasPlugin) findQuota(serviceCode, quotaCode string) (*ServiceQuota, *AWSError) {
 	quotas, ok := defaultServiceQuotas[serviceCode]
 	if !ok {
-		return nil
+		return nil, sqNoSuchService(serviceCode)
 	}
 	for i := range quotas {
 		if quotas[i].QuotaCode == quotaCode {
-			return &quotas[i]
+			return &quotas[i], nil
+		}
+	}
+	return nil, &AWSError{
+		Code: "NoSuchResourceException",
+		Message: fmt.Sprintf("No quota code %q for service %q. Use ListServiceQuotas to find the quota codes "+
+			"a service publishes.", quotaCode, serviceCode),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqNoSuchService is the refusal for a service code that is not in the built-in
+// table. It names the service so a caller does not read it as a bad quota code.
+func sqNoSuchService(serviceCode string) *AWSError {
+	return &AWSError{
+		Code: "NoSuchResourceException",
+		Message: fmt.Sprintf("No such service %q. Use ListServices to find the service codes substrate emulates "+
+			"quotas for.", serviceCode),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqIllegalArgument is the refusal for a missing or malformed request member.
+// IllegalArgumentException is the code the model declares for it on every
+// Service Quotas operation.
+func sqIllegalArgument(message string) *AWSError {
+	return &AWSError{
+		Code:       "IllegalArgumentException",
+		Message:    message,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqUnmarshal decodes a request body, treating an absent body as an empty one so
+// the required-member check below reports the missing member rather than a
+// serialization failure.
+func sqUnmarshal(body []byte, out interface{}) *AWSError {
+	if len(body) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return &AWSError{
+			Code:       "SerializationException",
+			Message:    err.Error(),
+			HTTPStatus: http.StatusBadRequest,
 		}
 	}
 	return nil

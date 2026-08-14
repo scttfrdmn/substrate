@@ -201,9 +201,57 @@ var defaultServiceQuotas = map[string][]ServiceQuota{
 			Unit:        "None",
 		},
 	},
+	// Organizations quotas. Each value is the one substrate's Organizations plugin
+	// actually enforces, so a consumer that reads the ceiling here and a consumer
+	// that runs into it get the same number — a quota table disagreeing with the
+	// limit it describes is worse than a missing one, because the disagreement is
+	// silent.
+	//
+	// GlobalQuota is true for all three: Organizations is a global service hosted in
+	// us-east-1, so its quotas are not per-region.
+	"organizations": {
+		{
+			ServiceCode: "organizations",
+			ServiceName: "AWS Organizations",
+			// The only one of the three whose code is confirmable from AWS docs. The
+			// endpoints-and-quotas page publishes a quota code only for adjustable
+			// quotas, and this is the adjustable one.
+			QuotaCode:   "L-E619E033",
+			QuotaName:   "Maximum number of accounts",
+			Value:       10, // Matches orgMaxAccounts.
+			Adjustable:  true,
+			GlobalQuota: true,
+			Unit:        "None",
+		},
+		{
+			ServiceCode: "organizations",
+			ServiceName: "AWS Organizations",
+			QuotaCode:   "L-29A0C5DF",
+			QuotaName:   "Service control policies in an organization",
+			Value:       10000, // Matches orgMaxSCPsPerOrg.
+			Adjustable:  false,
+			GlobalQuota: true,
+			Unit:        "None",
+		},
+		{
+			ServiceCode: "organizations",
+			ServiceName: "AWS Organizations",
+			QuotaCode:   "L-0F0F51F4",
+			QuotaName:   "Organizational units in an organization",
+			Value:       2000, // Matches orgMaxOUsPerOrg.
+			Adjustable:  false,
+			GlobalQuota: true,
+			Unit:        "None",
+		},
+	},
 }
 
 // defaultServiceList is the list of services returned by ListServices.
+//
+// It must name exactly the services keyed in defaultServiceQuotas: ListServices
+// reads only this table and ListServiceQuotas only the other, so a service present
+// in one and absent from the other is discoverable but has no quotas, or has quotas
+// nothing can discover. TestServiceQuotas_TheTwoTablesAgree pins the two together.
 var defaultServiceList = []map[string]string{
 	{"ServiceCode": "lambda", "ServiceName": "AWS Lambda"},
 	{"ServiceCode": "s3", "ServiceName": "Amazon S3"},
@@ -215,4 +263,5 @@ var defaultServiceList = []map[string]string{
 	{"ServiceCode": "cloudwatch", "ServiceName": "Amazon CloudWatch"},
 	{"ServiceCode": "sns", "ServiceName": "Amazon Simple Notification Service"},
 	{"ServiceCode": "rds", "ServiceName": "Amazon Relational Database Service"},
+	{"ServiceCode": "organizations", "ServiceName": "AWS Organizations"},
 }
