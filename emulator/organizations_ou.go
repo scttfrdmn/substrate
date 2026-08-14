@@ -47,7 +47,7 @@ const orgMaxOUNameChars = 128
 // parent that is not there, DuplicateOrganizationalUnit for a name already used
 // among the parent's children, ConstraintViolation for the depth and count
 // quotas, and InvalidInput for a malformed request.
-func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ParentID string        `json:"ParentId"`
@@ -145,7 +145,7 @@ func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *RequestContext, r
 	return orgJSONResponse(map[string]interface{}{"OrganizationalUnit": ou}, "createOrganizationalUnit")
 }
 
-func (p *OrganizationsPlugin) describeOrganizationalUnit(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) describeOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		OrganizationalUnitID string `json:"OrganizationalUnitId"`
@@ -163,7 +163,7 @@ func (p *OrganizationsPlugin) describeOrganizationalUnit(reqCtx *RequestContext,
 // updateOrganizationalUnit implements UpdateOrganizationalUnit, which renames an
 // OU in place: the ID, the ARN, the children, and the attached policies all
 // survive it, so a caller holding any of those keeps a valid handle.
-func (p *OrganizationsPlugin) updateOrganizationalUnit(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) updateOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	// Name is optional in the model, and an omitted name is not the same request as
 	// an empty one: the first leaves the OU alone, the second asks for a name the
@@ -218,7 +218,7 @@ func (p *OrganizationsPlugin) updateOrganizationalUnit(reqCtx *RequestContext, r
 // OU be emptied first, and the refusal is what makes a teardown script's ordering
 // bug visible: deleting an OU that still holds accounts would otherwise orphan
 // them somewhere no listing reaches.
-func (p *OrganizationsPlugin) deleteOrganizationalUnit(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) deleteOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		OrganizationalUnitID string `json:"OrganizationalUnitId"`
@@ -251,7 +251,7 @@ func (p *OrganizationsPlugin) deleteOrganizationalUnit(reqCtx *RequestContext, r
 	return orgEmptyResponse(), nil
 }
 
-func (p *OrganizationsPlugin) listOrganizationalUnitsForParent(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listOrganizationalUnitsForParent(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ParentID   string `json:"ParentId"`
@@ -303,7 +303,7 @@ func (p *OrganizationsPlugin) listOrganizationalUnitsForParent(reqCtx *RequestCo
 // listParents implements ListParents. A child has exactly one parent in the
 // current API, so the list has one entry — but it is still a list, and it is the
 // step a caller walks upward with until it reaches the root ListRoots reports.
-func (p *OrganizationsPlugin) listParents(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listParents(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ChildID    string `json:"ChildId"`
@@ -365,7 +365,7 @@ func (p *OrganizationsPlugin) listParents(reqCtx *RequestContext, req *AWSReques
 // listChildren implements ListChildren. ChildType is required by the model, so
 // the operation never mixes accounts and OUs in one answer — a caller walking the
 // tree downward asks twice.
-func (p *OrganizationsPlugin) listChildren(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listChildren(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ParentID   string `json:"ParentId"`
@@ -413,7 +413,7 @@ func (p *OrganizationsPlugin) listChildren(reqCtx *RequestContext, req *AWSReque
 	return orgJSONResponse(out, "listChildren")
 }
 
-func (p *OrganizationsPlugin) listAccountsForParent(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listAccountsForParent(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ParentID   string `json:"ParentId"`

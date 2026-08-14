@@ -133,6 +133,17 @@ func orgCreateStatusIDsKey(acct string) string { return "car_ids:" + acct }
 // unlike the rest of the service.
 func orgResourcePolicyKey(acct string) string { return "resource_policy:" + acct }
 
+// orgMemberOwnerKey holds the management account of the organization an account
+// belongs to. Every other index here runs the other way — orgAccountIDsKey lists
+// the members of one management account — so before this key existed there was no
+// way to answer "whose organization is this caller in", and a member calling any
+// operation was given a private organization of its own (#623).
+//
+// The management account is indexed to itself, so the lookup has one answer for
+// every account substrate knows rather than two cases the callers have to
+// distinguish.
+func orgMemberOwnerKey(id string) string { return "member_owner:" + id }
+
 // --- errors ---
 //
 // Every Organizations exception is HTTP 400. The API model declares no 404 for
@@ -317,10 +328,40 @@ func orgPaginate(ids []string, nextToken string, maxResults int) (page []string,
 
 // --- organization, root and feature set ---
 
+// organizationOwner returns the management account of the organization acct
+// belongs to, or "" when substrate has never seen acct.
+//
+// "" is not an error and not a default: it is the answer for an account that has
+// joined no organization, and the auto-create path depends on being able to tell
+// it from a real answer. Collapsing the two — returning acct itself for an
+// unknown account — would make a member of a *deleted* organization look like a
+// management account.
+func (p *OrganizationsPlugin) organizationOwner(ctx context.Context, acct string) (string, error) {
+	var owner string
+	if _, err := p.orgGetJSON(ctx, orgMemberOwnerKey(acct), &owner); err != nil {
+		return "", err
+	}
+	return owner, nil
+}
+
 // ensureOrganization returns the organization for acct, creating it — along with
 // its root, its management account, and the FullAWSAccess attachments AWS makes
 // — on first call.
+//
+// A known member account resolves to the organization it belongs to rather than
+// getting one of its own. Handlers reach here with an already-resolved management
+// account (see orgCaller), so on the request path the reverse-index lookup below
+// is a no-op; it is what makes the function correct for any caller, including a
+// direct one, rather than only for the resolved path (#623).
 func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct string) (*Organization, error) {
+	owner, err := p.organizationOwner(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	if owner != "" {
+		acct = owner
+	}
+
 	var org Organization
 	found, err := p.orgGetJSON(ctx, orgKey(acct), &org)
 	if err != nil {
@@ -467,6 +508,15 @@ func (p *OrganizationsPlugin) scpEnabled(ctx context.Context, acct string) (bool
 
 // --- accounts ---
 
+// saveAccount persists an account and records both directions of its membership:
+// the management account's list of members, and the member's own pointer back at
+// the management account.
+//
+// Both writes live here rather than at the call sites because every path that
+// creates or joins an account already goes through this one function —
+// ensureOrganization's management account, vendAccount's member — so an index
+// written by one operation and not another, which is worse than no index at all,
+// is not a state this can reach.
 func (p *OrganizationsPlugin) saveAccount(ctx context.Context, masterAcct string, a OrgAccount) error {
 	if err := p.orgPutJSON(ctx, orgAccountKey(a.ID), a); err != nil {
 		return err
@@ -474,7 +524,7 @@ func (p *OrganizationsPlugin) saveAccount(ctx context.Context, masterAcct string
 	if _, err := p.orgAddID(ctx, orgAccountIDsKey(masterAcct), a.ID); err != nil {
 		return err
 	}
-	return nil
+	return p.orgPutJSON(ctx, orgMemberOwnerKey(a.ID), masterAcct)
 }
 
 // loadAccount returns the account, or (nil, nil) when there is no such account.

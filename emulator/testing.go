@@ -25,6 +25,7 @@ type TestServer struct {
 	state    StateManager
 	store    *EventStore
 	registry *PluginRegistry
+	creds    map[string]CredentialEntry
 }
 
 // Store returns the [EventStore] backing the server, for cost summaries
@@ -47,7 +48,46 @@ func (ts *TestServer) Registry() *PluginRegistry { return ts.registry }
 // registers all default plugins, and schedules t.Cleanup to shut it down.
 // The returned [TestServer] is ready to accept requests when this function
 // returns.
+//
+// No [CredentialRegistry] is wired, so SigV4 signatures are not verified and any
+// access key is accepted: an AKIA-prefixed one resolves to account 123456789012
+// and everything else to 000000000000. Use [StartTestServerWithAccounts] when a
+// test needs to call as more than one account.
 func StartTestServer(t *testing.T) *TestServer {
+	t.Helper()
+	return startTestServer(t, nil)
+}
+
+// StartTestServerWithAccounts starts a test server that can be called as any of
+// the given accounts, in addition to the built-in 123456789012.
+//
+// Each account gets its own signing credential, readable with
+// [TestServer.CredentialsFor]. Because the accounts are named up front, a test
+// that needs to sign as an account Organizations vends — whose ID is not known
+// until CreateAccount returns — should call [TestServer.RegisterAccount] instead.
+//
+// This is a separate entry point from [StartTestServer] rather than an option on
+// it because wiring a registry also switches SigV4 verification on: the server
+// verifies signatures exactly when [ServerOptions.Credentials] is non-nil, and an
+// access key the registry does not hold is refused with InvalidClientTokenId 403.
+// Every request made against the returned server must therefore be signed with one
+// of these credentials, which is a stricter contract than [StartTestServer]'s and
+// is why it is opt-in. Decoupling the two is #630.
+func StartTestServerWithAccounts(t testing.TB, accounts ...string) *TestServer {
+	t.Helper()
+
+	registry := NewCredentialRegistry()
+	ts := startTestServer(t, registry)
+	for _, account := range accounts {
+		ts.RegisterAccount(t, account)
+	}
+	return ts
+}
+
+// startTestServer is the shared body of [StartTestServer] and
+// [StartTestServerWithAccounts]. A nil registry leaves SigV4 verification off,
+// which is [StartTestServer]'s documented behavior.
+func startTestServer(t testing.TB, creds *CredentialRegistry) *TestServer {
 	t.Helper()
 
 	cfg := DefaultConfig()
@@ -101,7 +141,7 @@ func StartTestServer(t *testing.T) *TestServer {
 	costs := NewCostController(CostConfig{Enabled: true})
 
 	srv := NewServer(*cfg, registry, store, state, tc, logger,
-		ServerOptions{Fault: fault, Costs: costs, Auth: auth})
+		ServerOptions{Fault: fault, Costs: costs, Auth: auth, Credentials: creds})
 
 	srvCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -130,7 +170,55 @@ func StartTestServer(t *testing.T) *TestServer {
 		<-done
 	})
 
-	return &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv, state: state, store: store, registry: registry}
+	ts := &TestServer{URL: baseURL, Port: port, tc: tc, srv: srv, state: state, store: store, registry: registry}
+	if creds != nil {
+		ts.creds = map[string]CredentialEntry{}
+		if entry, ok := creds.Lookup(defaultTestAccessKeyID); ok {
+			ts.creds[entry.AccountID] = entry
+		}
+	}
+	return ts
+}
+
+// RegisterAccount mints a signing credential for an account and returns it, so a
+// test can call as an account whose ID it did not know at startup — an account
+// Organizations vended, for one.
+//
+// The server must have been started by [StartTestServerWithAccounts]; a server with
+// no credential registry has nowhere to put the entry, and registering one after
+// the fact could not turn signature verification on for a server already running.
+//
+// The access key and secret are derived from the account ID rather than generated,
+// so a recorded run replays with the same credentials in it. AWS access key IDs are
+// 20 characters of uppercase alphanumerics; a 12-digit account ID padded after
+// "AKIA" fits exactly, which keeps the key one that resolvePrincipal and
+// extractAccount both recognize.
+func (ts *TestServer) RegisterAccount(t testing.TB, accountID string) CredentialEntry {
+	t.Helper()
+	if ts.creds == nil {
+		t.Fatalf("RegisterAccount(%s): this server has no credential registry; start it with StartTestServerWithAccounts", accountID)
+	}
+	if existing, ok := ts.creds[accountID]; ok {
+		return existing
+	}
+	if len(accountID) != 12 {
+		t.Fatalf("RegisterAccount(%q): an AWS account ID is 12 digits", accountID)
+	}
+	entry := CredentialEntry{
+		AccessKeyID:     "AKIA" + accountID + "TEST",
+		SecretAccessKey: "substrate-secret-" + accountID,
+		AccountID:       accountID,
+	}
+	ts.srv.opts.Credentials.Register(entry)
+	ts.creds[accountID] = entry
+	return entry
+}
+
+// CredentialsFor returns the signing credential for an account registered with
+// this server, and whether one exists.
+func (ts *TestServer) CredentialsFor(accountID string) (CredentialEntry, bool) {
+	entry, ok := ts.creds[accountID]
+	return entry, ok
 }
 
 // ResetState wipes all server state. Call this between test cases that share

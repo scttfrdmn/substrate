@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -29,6 +31,14 @@ const (
 // exactly one resource policy rather than a list keyed by ID, PutResourcePolicy
 // replaces it wholesale, and there is no per-statement update. Describe and Delete
 // take no input at all, which is why neither reads req.Body.
+//
+// That absence of input is also what bounds the authorization model below. None of
+// the three operations names an organization, so a caller can only ever ask about
+// its own — the "caller outside the organization" case #619 and #623 both describe
+// is not reachable through this API, because there is no member to put an outside
+// organization's ID in. The asymmetry that *is* reachable is the documented one:
+// Describe is callable "from the management account or a member account that is a
+// delegated administrator", Put and Delete "only from the management account".
 func (p *OrganizationsPlugin) resourcePolicyOperation(op string) (orgHandler, bool) {
 	switch op {
 	case "PutResourcePolicy":
@@ -52,8 +62,11 @@ func (p *OrganizationsPlugin) resourcePolicyOperation(op string) (orgHandler, bo
 // different one, when in fact the same single policy was updated — and since an
 // organization has exactly one, there is nothing the new ID could distinguish it
 // from.
-func (p *OrganizationsPlugin) putResourcePolicy(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) putResourcePolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
+	if reqCtx.isMember() {
+		return nil, orgResourcePolicyAccessDenied("PutResourcePolicy")
+	}
 	org, err := p.ensureOrganization(goCtx, reqCtx.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("putResourcePolicy ensure org: %w", err)
@@ -128,14 +141,23 @@ func (p *OrganizationsPlugin) putResourcePolicy(reqCtx *RequestContext, req *AWS
 
 // describeResourcePolicy returns the organization's resource policy.
 //
-// The refusal is the normal case, not an edge case: most organizations have no
-// resource policy, and a caller checking whether management delegated anything to
-// it has to tell ResourcePolicyNotFoundException apart from AccessDeniedException.
-// Answering an empty policy instead would make "no delegation" and "delegation I
-// cannot read" the same observation.
+// A member account reads the document management set, provided that document names
+// it as a principal — which is what makes it a delegated administrator. That is
+// the asymmetry #619 asked for, and the three answers it produces are all
+// distinguishable:
+//
+//   - management: the policy, or ResourcePolicyNotFoundException
+//   - a member the policy names: the identical Content, Id and Arn
+//   - a member it does not name: AccessDeniedException
+//
+// The refusal is the normal case for management, not an edge case: most
+// organizations have no resource policy, and a caller checking whether management
+// delegated anything has to tell ResourcePolicyNotFoundException apart from
+// AccessDeniedException. Answering an empty policy instead would make "no
+// delegation" and "delegation I cannot read" the same observation.
 //
 // The operation takes no input, so req.Body is not read.
-func (p *OrganizationsPlugin) describeResourcePolicy(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) describeResourcePolicy(reqCtx *orgCaller, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("describeResourcePolicy ensure org: %w", err)
@@ -144,6 +166,14 @@ func (p *OrganizationsPlugin) describeResourcePolicy(reqCtx *RequestContext, _ *
 	policy, found, err := p.loadResourcePolicy(goCtx, reqCtx.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("describeResourcePolicy load: %w", err)
+	}
+	// A member is refused before the absence is reported, so a member cannot use
+	// this operation to learn whether the organization has a policy at all: the two
+	// answers it can get are the document that names it and a denial. Reporting
+	// ResourcePolicyNotFoundException to a member of an organization that does have
+	// one would leak the policy's existence to a caller not permitted to read it.
+	if reqCtx.isMember() && !orgPolicyDelegatesTo(policy, found, reqCtx.callerAccount) {
+		return nil, orgResourcePolicyAccessDenied("DescribeResourcePolicy")
 	}
 	if !found {
 		return nil, orgResourcePolicyNotFound()
@@ -159,8 +189,11 @@ func (p *OrganizationsPlugin) describeResourcePolicy(reqCtx *RequestContext, _ *
 // re-runnability property MoveAccount's DuplicateAccountException provides.
 //
 // The operation takes no input and the model gives it no output shape.
-func (p *OrganizationsPlugin) deleteResourcePolicy(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) deleteResourcePolicy(reqCtx *orgCaller, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
+	if reqCtx.isMember() {
+		return nil, orgResourcePolicyAccessDenied("DeleteResourcePolicy")
+	}
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("deleteResourcePolicy ensure org: %w", err)
 	}
@@ -202,6 +235,81 @@ func (p *OrganizationsPlugin) loadResourcePolicy(ctx context.Context, acct strin
 func orgResourcePolicyNotFound() *AWSError {
 	return orgErr("ResourcePolicyNotFoundException",
 		"we can't find a resource policy for this organization")
+}
+
+// orgResourcePolicyAccessDenied returns AccessDeniedException for a member account
+// calling an operation reserved to the management account.
+//
+// This is HTTP 403, not the 400 every other Organizations error here uses:
+// AccessDeniedException is a *common* error rather than one the service's model
+// declares, and the Organizations API reference's Common Errors page gives it 403.
+// The distinction is what an SDK's retry classifier reads, so answering 400 would
+// make a denial look like a malformed request.
+//
+// The message names the operation because all three refuse in the same place: a
+// caller that logged only the message would otherwise not know which of its calls
+// was the one management reserved.
+func orgResourcePolicyAccessDenied(op string) *AWSError {
+	return &AWSError{
+		Code: "AccessDeniedException",
+		Message: fmt.Sprintf(
+			"You don't have permissions to perform the requested operation. %s can be called only from the management account%s",
+			op, orgResourcePolicyCallerScope(op)),
+		HTTPStatus: http.StatusForbidden,
+	}
+}
+
+// orgResourcePolicyCallerScope completes the denial message with the set of
+// callers the operation does admit, which differs between the read and the writes.
+func orgResourcePolicyCallerScope(op string) string {
+	if op == "DescribeResourcePolicy" {
+		return " or a member account that is a delegated administrator."
+	}
+	return "."
+}
+
+// orgPolicyDelegatesTo reports whether the organization's resource policy makes
+// account a delegated administrator.
+//
+// Naming the account as a Principal is the test, and it is the whole test. Every
+// delegation policy AWS documents names the member as
+// "arn:aws:iam::<account>:root" in the Principal of each statement, so the
+// principal is what distinguishes a delegated administrator from any other member.
+//
+// The Action element deliberately is not consulted. DescribeResourcePolicy appears
+// in none of AWS's example delegation policies — the actions delegated are the
+// *policy-management* ones a delegated administrator goes on to call — so
+// requiring an Allow for it would deny every member that AWS's own examples
+// intend to admit. Evaluating the document as an authorization decision per
+// operation is a larger design than #619 asks for and would need the
+// organizations:PolicyType condition key substrate does not model; the reason
+// it is not attempted here is that a guessed denial fails a request AWS accepts.
+//
+// An unparseable document delegates to nobody. PutResourcePolicy already refuses
+// content that is not JSON, so this is reachable only from a hand-seeded state
+// store, and treating garbage as a grant would be the wrong direction to fail.
+func orgPolicyDelegatesTo(policy OrgResourcePolicy, found bool, account string) bool {
+	if !found || account == "" {
+		return false
+	}
+	var doc PolicyDocument
+	if err := json.Unmarshal([]byte(policy.Content), &doc); err != nil {
+		return false
+	}
+	principal := fmt.Sprintf("arn:aws:iam::%s:root", account)
+	for _, stmt := range doc.Statement {
+		// Only an Allow delegates. A Deny naming the account is the opposite, and a
+		// statement with no Principal at all names nobody in a resource policy —
+		// principalMatches treats an absent Principal as matching every caller,
+		// which is right for an identity policy and wrong here.
+		if !strings.EqualFold(stmt.Effect, "Allow") || stmt.Principal == nil {
+			continue
+		}
+		if principalCovered(stmt.Principal, principal) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateOrgResourcePolicyContent enforces ResourcePolicyContent's bounds and
