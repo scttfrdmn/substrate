@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **65 built-in service plugins**. This section is generated
+Substrate ships **66 built-in service plugins**. This section is generated
 from the plugin registry (`make docs-reference`), so the count and plugin list
 cannot drift from the implementation. The live count is also available from the
 `/ready` endpoint (`curl http://localhost:4566/ready`). Per-service operation,
@@ -11,71 +11,72 @@ CloudFormation, and cost detail follows below the matrix.
 
 | # | Service | Plugin name | Protocol |
 |---|---------|-------------|----------|
-| 1 | ACM | `acm` | JSON |
-| 2 | API Gateway (REST) | `apigateway` | REST/JSON |
-| 3 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON |
-| 4 | AppSync | `appsync` | REST/JSON |
-| 5 | Athena | `athena` | JSON |
-| 6 | Backup | `backup` | REST/JSON |
-| 7 | Batch | `batch` | REST/JSON |
-| 8 | Bedrock Runtime | `bedrock-runtime` | REST/JSON |
-| 9 | Budgets | `budgets` | JSON |
-| 10 | Cost Explorer | `ce` | JSON |
-| 11 | CloudFormation | `cloudformation` | Query |
-| 12 | CloudFront | `cloudfront` | REST/XML |
-| 13 | CloudTrail | `cloudtrail` | JSON |
-| 14 | CodeBuild | `codebuild` | JSON |
-| 15 | CodeDeploy | `codedeploy` | JSON |
-| 16 | CodePipeline | `codepipeline` | JSON |
-| 17 | Cognito Identity | `cognito-identity` | JSON |
-| 18 | Cognito Identity Provider | `cognito-idp` | JSON |
-| 19 | DynamoDB | `dynamodb` | JSON |
-| 20 | EC2 / VPC | `ec2` | Query |
-| 21 | ECR | `ecr` | JSON |
-| 22 | ECS | `ecs` | JSON |
-| 23 | EFS | `efs` | REST/JSON |
-| 24 | ElastiCache | `elasticache` | Query |
-| 25 | ELBv2 | `elasticloadbalancing` | Query |
-| 26 | EMR Serverless | `emrserverless` | REST/JSON |
-| 27 | EventBridge | `eventbridge` | JSON |
-| 28 | API Gateway (execute-api) | `execute-api` | REST/JSON |
-| 29 | Kinesis Data Firehose | `firehose` | JSON |
-| 30 | FSx | `fsx` | JSON |
-| 31 | Glue | `glue` | JSON |
-| 32 | Health | `health` | JSON |
-| 33 | IAM | `iam` | Query |
-| 34 | Kinesis Data Streams | `kinesis` | JSON |
-| 35 | KMS | `kms` | JSON |
-| 36 | Lambda | `lambda` | REST/JSON |
-| 37 | CloudWatch Logs | `logs` | JSON |
-| 38 | CloudWatch | `monitoring` | Query |
-| 39 | MSK | `msk` | REST/JSON |
-| 40 | HealthOmics | `omics` | REST/JSON |
-| 41 | OpenSearch | `opensearch` | REST/JSON |
-| 42 | Organizations | `organizations` | JSON |
-| 43 | Price List Query API | `pricing` | JSON |
-| 44 | QuickSight | `quicksight` | REST/JSON |
-| 45 | RAM | `ram` | REST/JSON |
-| 46 | RDS | `rds` | Query |
-| 47 | Redshift | `redshift` | Query |
-| 48 | Redshift Data API | `redshift-data` | JSON |
-| 49 | Route 53 | `route53` | REST/XML |
-| 50 | S3 | `s3` | REST/XML |
-| 51 | SageMaker | `sagemaker` | JSON |
-| 52 | EventBridge Scheduler | `scheduler` | REST/JSON |
-| 53 | Secrets Manager | `secretsmanager` | JSON |
-| 54 | Service Quotas | `servicequotas` | JSON |
-| 55 | SES v2 | `sesv2` | REST/JSON |
-| 56 | SNS | `sns` | Query |
-| 57 | SQS | `sqs` | JSON |
-| 58 | SSM | `ssm` | JSON |
-| 59 | SSO / Identity Store | `sso` | REST/JSON |
-| 60 | Step Functions | `states` | JSON |
-| 61 | STS | `sts` | Query |
-| 62 | Resource Groups Tagging | `tagging` | JSON |
-| 63 | Timestream | `timestream` | JSON |
-| 64 | Transfer Family | `transfer` | JSON |
-| 65 | WAFv2 | `wafv2` | JSON |
+| 1 | Account Management | `account` | REST/JSON |
+| 2 | ACM | `acm` | JSON |
+| 3 | API Gateway (REST) | `apigateway` | REST/JSON |
+| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON |
+| 5 | AppSync | `appsync` | REST/JSON |
+| 6 | Athena | `athena` | JSON |
+| 7 | Backup | `backup` | REST/JSON |
+| 8 | Batch | `batch` | REST/JSON |
+| 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON |
+| 10 | Budgets | `budgets` | JSON |
+| 11 | Cost Explorer | `ce` | JSON |
+| 12 | CloudFormation | `cloudformation` | Query |
+| 13 | CloudFront | `cloudfront` | REST/XML |
+| 14 | CloudTrail | `cloudtrail` | JSON |
+| 15 | CodeBuild | `codebuild` | JSON |
+| 16 | CodeDeploy | `codedeploy` | JSON |
+| 17 | CodePipeline | `codepipeline` | JSON |
+| 18 | Cognito Identity | `cognito-identity` | JSON |
+| 19 | Cognito Identity Provider | `cognito-idp` | JSON |
+| 20 | DynamoDB | `dynamodb` | JSON |
+| 21 | EC2 / VPC | `ec2` | Query |
+| 22 | ECR | `ecr` | JSON |
+| 23 | ECS | `ecs` | JSON |
+| 24 | EFS | `efs` | REST/JSON |
+| 25 | ElastiCache | `elasticache` | Query |
+| 26 | ELBv2 | `elasticloadbalancing` | Query |
+| 27 | EMR Serverless | `emrserverless` | REST/JSON |
+| 28 | EventBridge | `eventbridge` | JSON |
+| 29 | API Gateway (execute-api) | `execute-api` | REST/JSON |
+| 30 | Kinesis Data Firehose | `firehose` | JSON |
+| 31 | FSx | `fsx` | JSON |
+| 32 | Glue | `glue` | JSON |
+| 33 | Health | `health` | JSON |
+| 34 | IAM | `iam` | Query |
+| 35 | Kinesis Data Streams | `kinesis` | JSON |
+| 36 | KMS | `kms` | JSON |
+| 37 | Lambda | `lambda` | REST/JSON |
+| 38 | CloudWatch Logs | `logs` | JSON |
+| 39 | CloudWatch | `monitoring` | Query |
+| 40 | MSK | `msk` | REST/JSON |
+| 41 | HealthOmics | `omics` | REST/JSON |
+| 42 | OpenSearch | `opensearch` | REST/JSON |
+| 43 | Organizations | `organizations` | JSON |
+| 44 | Price List Query API | `pricing` | JSON |
+| 45 | QuickSight | `quicksight` | REST/JSON |
+| 46 | RAM | `ram` | REST/JSON |
+| 47 | RDS | `rds` | Query |
+| 48 | Redshift | `redshift` | Query |
+| 49 | Redshift Data API | `redshift-data` | JSON |
+| 50 | Route 53 | `route53` | REST/XML |
+| 51 | S3 | `s3` | REST/XML |
+| 52 | SageMaker | `sagemaker` | JSON |
+| 53 | EventBridge Scheduler | `scheduler` | REST/JSON |
+| 54 | Secrets Manager | `secretsmanager` | JSON |
+| 55 | Service Quotas | `servicequotas` | JSON |
+| 56 | SES v2 | `sesv2` | REST/JSON |
+| 57 | SNS | `sns` | Query |
+| 58 | SQS | `sqs` | JSON |
+| 59 | SSM | `ssm` | JSON |
+| 60 | SSO / Identity Store | `sso` | REST/JSON |
+| 61 | Step Functions | `states` | JSON |
+| 62 | STS | `sts` | Query |
+| 63 | Resource Groups Tagging | `tagging` | JSON |
+| 64 | Timestream | `timestream` | JSON |
+| 65 | Transfer Family | `transfer` | JSON |
+| 66 | WAFv2 | `wafv2` | JSON |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---
@@ -4729,6 +4730,131 @@ testing: `CreateAccount` still returns **200**, and only
 ### Cost
 
 Organizations API calls are free.
+
+---
+
+## Account Management
+
+**Endpoint:** `account.{region}.amazonaws.com`
+**Protocol:** REST/JSON (`POST /listRegions`, `/enableRegion`, `/disableRegion`,
+`/getRegionOptStatus` — the operation is in the URL; there is no `X-Amz-Target`)
+
+Substrate emulates the **Region opt-in** half of the Account Management API: which
+Regions an account may use, and the asynchronous opt in and out of the ones that
+are off by default. The other eleven operations in the model — alternate contacts,
+the primary contact, the account name and the primary email — are not emulated.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| ListRegions | All 34 Regions with their opt status; `RegionOptStatusContains` filters, `MaxResults` 1–50 |
+| GetRegionOptStatus | The poll target; reports the Region name back alongside the status |
+| EnableRegion | **Asynchronous**, empty 200, no output shape; idempotent against the target state |
+| DisableRegion | The same, and refused for a Region that is enabled by default |
+
+### The two Region tables
+
+The 17 **default** Regions — those launched before 2019-03-20 — report
+`ENABLED_BY_DEFAULT` and can be neither enabled nor disabled. The 17 **opt-in**
+Regions report `DISABLED` until an account enables them.
+
+| | Regions |
+|---|---|
+| Default (`ENABLED_BY_DEFAULT`) | `ap-northeast-1`, `ap-northeast-2`, `ap-northeast-3`, `ap-south-1`, `ap-southeast-1`, `ap-southeast-2`, `ca-central-1`, `eu-central-1`, `eu-north-1`, `eu-west-1`, `eu-west-2`, `eu-west-3`, `sa-east-1`, `us-east-1`, `us-east-2`, `us-west-1`, `us-west-2` |
+| Opt-in (`DISABLED` until enabled) | `af-south-1`, `ap-east-1`, `ap-east-2`, `ap-south-2`, `ap-southeast-3`, `ap-southeast-4`, `ap-southeast-5`, `ap-southeast-6`, `ap-southeast-7`, `ca-west-1`, `eu-central-2`, `eu-south-1`, `eu-south-2`, `il-central-1`, `me-central-1`, `me-south-1`, `mx-central-1` |
+
+Both tables come from the
+[Account Management Reference Guide](https://docs.aws.amazon.com/accounts/latest/reference/manage-acct-regions.html)
+rather than from the API model, which publishes the `RegionOptStatus` enum but no
+Region list.
+
+**`ec2SeededRegions` is a separate, smaller list** and stays that way. EC2's
+`DescribeRegions` seeds three Regions and answers a different question — which
+Regions EC2 reports, not which ones an account has opted into. Unifying them would
+make every EC2 fixture's Region list depend on this table.
+
+### An opt resolves on observation
+
+`EnableRegion` answers an empty 200 and moves the Region to `ENABLING`. The **first**
+`GetRegionOptStatus` reports `ENABLING`; the next reports `ENABLED`, and it never
+moves again. `DisableRegion` behaves the same way through `DISABLING` to `DISABLED`.
+`ListRegions` resolves identically, so a caller polling through the listing and one
+polling a single Region cannot contradict each other.
+
+Advancing on observation rather than after an interval of the simulated clock is
+what makes the wait testable: enabling a Region takes "a few minutes to several
+hours" in AWS, and a waiter here converges in two polls with no dependence on
+wall-clock or simulated time. The first observation reports the in-flight status
+deliberately — `EnableRegion` has no output shape, so a poll is the only place
+`ENABLING` is ever visible, and resolving before the first report would leave a
+consumer's in-flight branch unexecutable.
+
+An opt is **not** an observation: a redundant `EnableRegion` neither advances the
+record nor rewrites it. Enabling a Region that is already `ENABLED` or `ENABLING`
+succeeds silently, which is what makes an "ensure these Regions are on" routine
+safe to re-run.
+
+### Refusals
+
+Every 400 is `ValidationException`, the only one these operations declare, with the
+reason at the front of the message (`"invalidRegionOptTarget: …"`) — the REST-JSON
+error document has no `reason` member to put it in. `ValidationExceptionReason` has
+exactly two members, and both are used:
+
+| Case | Code | Reason |
+|---|---|---|
+| Enabling or disabling a default Region | `ValidationException` (400) | `invalidRegionOptTarget` |
+| A Region code in neither table | `ValidationException` (400) | `invalidRegionOptTarget` |
+| An `AccountId` that is not a member of the caller's organization, or is the caller itself | `ValidationException` (400) | `invalidRegionOptTarget` / `fieldValidationFailed` |
+| `MaxResults` outside 1–50, a bad `RegionOptStatusContains` member, a missing `RegionName`, an unreadable `NextToken` | `ValidationException` (400) | `fieldValidationFailed` |
+| The opposite opt is still in flight | `ConflictException` (409) | — |
+
+Disabling a default Region is **`ValidationException`, not
+`ConstraintViolationException`** — the `account/2021-02-01` model declares no such
+error for any operation, so a consumer catching one would never match.
+
+### Targeting a member account
+
+`AccountId` names a member account of the caller's organization, resolved through
+the same member→management index Organizations uses; there is no second copy of it.
+The management account cannot specify its own `AccountId` — omit the parameter to
+operate in standalone context — and an account outside the caller's organization is
+refused. Trusted access and a delegated administrator for Account Management are
+not modelled, so the caller must be the management account itself.
+
+### Two limits are deliberately not modelled
+
+AWS documents a limit of **6** region-opt requests in progress per account, and a
+per-organization limit that the same guide gives as **50** in one section and **20**
+in another. Neither is enforced here. A guessed `TooManyRequestsException` boundary
+would refuse requests AWS accepts, and there is no way to pick between two
+published numbers without making one of them wrong.
+
+### Seeding
+
+```bash
+# Pin what every observation of a Region reports, by Region code or "*".
+curl -X POST http://localhost:4566/v1/account/region-opt-status \
+  -d '{"regionName":"af-south-1","status":"ENABLING"}'
+curl -X DELETE 'http://localhost:4566/v1/account/region-opt-status?regionName=af-south-1'
+curl -X DELETE http://localhost:4566/v1/account/region-opt-status
+```
+
+A Region-scoped seed takes precedence over the wildcard, and a seeded status does
+not resolve — that is the point of it. Because an in-flight opt otherwise advances
+on the first observation, the seed is the only way to hold a Region *stuck* in
+`ENABLING`, which is what a waiter's timeout branch and the `ConflictException` an
+opposite opt gets mid-flight both need.
+
+`status` must be a member of the `RegionOptStatus` enum, and a **default** Region
+cannot be seeded: its status is fixed before a seed is ever consulted, so the seed
+would be silently ignored and the test using it would pass while asserting nothing.
+Both are a 400.
+
+### Cost
+
+Account Management API calls are free.
 
 ---
 

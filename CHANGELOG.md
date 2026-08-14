@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The Account Management Region opt-in API is now emulated** (#629): `ListRegions`,
+  `GetRegionOptStatus`, `EnableRegion` and `DisableRegion`. There was no `account`
+  namespace at all, so every one of them fell through to "service not emulated" and a
+  consumer that baselines an account's usable Regions before deploying anything could
+  not be tested against substrate. Found by driving a shipped consumer against
+  `substrate server`, not by reading the API model.
+
+  `ListRegions` reports all 34 Regions: 17 `ENABLED_BY_DEFAULT` and 17 `DISABLED`
+  until enabled, with `RegionOptStatusContains` filtering and `MaxResults`/`NextToken`
+  paging (bounds 1–50, from the model's own shape). `AccountId` targets a member
+  account of the caller's organization, resolved through the **same** member→management
+  index #623 added rather than a second copy of it — two answers to "who manages this
+  account" is one too many.
+
+  An opt is asynchronous and **resolves on observation**, following
+  `resolveCreateAccountStatus`: the first `GetRegionOptStatus` reports `ENABLING`, the
+  next reports `ENABLED`, and it never moves again. `ListRegions` resolves identically,
+  so a caller polling the listing and one polling a single Region cannot contradict
+  each other. Reporting the in-flight status on the *first* observation is deliberate
+  and differs from `CreateAccount`: `EnableRegion` has no output shape, so a poll is
+  the only place `ENABLING` is ever visible, and resolving sooner would leave a
+  consumer's in-flight branch — the branch that exists because AWS takes "a few
+  minutes to several hours" here — unexecutable. Clock-driven transitions remain #514's
+  subject.
+
+  An opt is **not** an observation. Enabling a Region that is already `ENABLED` or
+  `ENABLING` succeeds silently and rewrites nothing, which is what makes an "ensure
+  these Regions are on" routine safe to re-run; writing `ENABLING` over `ENABLED` would
+  make the Region go backwards for a waiter that had already finished.
+
+  One correction to the issue's own framing: disabling a default Region is
+  `ValidationException` with reason `invalidRegionOptTarget`, **not** the
+  `ConstraintViolationException` #629 named — the `account/2021-02-01` model declares
+  no such error for any operation, so a consumer catching one could never match. The
+  reason rides at the front of the message, because the REST-JSON error document has
+  no `reason` member to put it in, and the message also distinguishes a default Region
+  from an unknown one: the code and the reason are identical for both, so the message
+  is the only thing that tells them apart.
+
+  A control-plane seed (`POST`/`DELETE /v1/account/region-opt-status`, Region code or
+  `"*"`) pins what an observation reports. It is the only route to a status a sequence
+  of API calls cannot produce — a Region held in `ENABLING`, and with it a waiter's
+  timeout branch and the `ConflictException` (409) an opposite opt gets mid-flight. A
+  seed naming a **default** Region is refused rather than ignored: that status is fixed
+  before a seed is consulted, so an accepted seed would leave the test asserting
+  nothing.
+
+  Two published limits are deliberately not modelled and the docs say why: the 6
+  in-progress requests per account, and a per-organization limit the same guide gives
+  as 50 in one section and 20 in another. A guessed `TooManyRequestsException` boundary
+  refuses requests AWS accepts, and there is no way to choose between two published
+  numbers without making one wrong. The remaining eleven operations in the model —
+  alternate contacts, the primary contact, the account name, the primary email — are
+  out of scope.
+
+  `ec2SeededRegions` stays a separate, smaller list. It answers a different question —
+  which Regions EC2 reports, not which ones an account has opted into — and unifying
+  them would make every EC2 fixture's Region list depend on this table.
 - **A test server can now be called as more than one account**
   (`StartTestServerWithAccounts`, `TestServer.RegisterAccount`,
   `TestServer.CredentialsFor`) (#623). No in-repo test could authenticate as a

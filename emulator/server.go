@@ -336,6 +336,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/organizations/create-account-failure", s.handleOrganizationsSeedCreateAccountFailure)
 	r.Delete("/v1/organizations/create-account-failure", s.handleOrganizationsClearCreateAccountFailure)
 
+	// Account Management control-plane endpoints (#629).
+	r.Post("/v1/account/region-opt-status", s.handleAccountSeedRegionOptStatus)
+	r.Delete("/v1/account/region-opt-status", s.handleAccountClearRegionOptStatus)
+
 	// Lambda control-plane endpoints (#393).
 	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
 	r.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)

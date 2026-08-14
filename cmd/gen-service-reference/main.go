@@ -50,6 +50,7 @@ type pluginMeta struct {
 // meta maps each registered plugin name to its documentation metadata. Adding a
 // plugin to the registry without a matching entry here fails generation (and CI).
 var meta = map[string]pluginMeta{
+	"account":              {"Account Management", "REST/JSON"},
 	"acm":                  {"ACM", "JSON"},
 	"apigateway":           {"API Gateway (REST)", "REST/JSON"},
 	"apigatewayv2":         {"API Gateway (HTTP)", "REST/JSON"},

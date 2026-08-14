@@ -78,7 +78,7 @@ func signedRequest(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarge
 	req.Header.Set("X-Amz-Target", tgt.target+"."+op)
 	req.Header.Set("X-Amz-Date", dateTime)
 	req.Header.Set("Authorization", sigV4Header(
-		tgt.host, tgt.signingName, dateTime, data, creds.AccessKeyID, creds.SecretAccessKey))
+		"/", tgt.host, tgt.signingName, dateTime, data, creds.AccessKeyID, creds.SecretAccessKey))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -87,9 +87,14 @@ func signedRequest(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarge
 	return resp
 }
 
-// sigV4Header computes a valid SigV4 Authorization header for a POST to "/" with
+// sigV4Header computes a valid SigV4 Authorization header for a POST to path with
 // the host and x-amz-date headers signed.
-func sigV4Header(host, signingName, dateTime string, body []byte, accessKey, secretKey string) string {
+//
+// path is a parameter because a rest-json service carries its operation in the URL
+// — the account service posts to /listRegions and the like — and the canonical
+// request covers the path, so signing "/" for a request sent elsewhere produces a
+// signature the server correctly refuses.
+func sigV4Header(path, host, signingName, dateTime string, body []byte, accessKey, secretKey string) string {
 	const (
 		region        = "us-east-1"
 		signedHeaders = "host;x-amz-date"
@@ -99,7 +104,7 @@ func sigV4Header(host, signingName, dateTime string, body []byte, accessKey, sec
 	bodyHash := sha256.Sum256(body)
 	canonicalReq := strings.Join([]string{
 		http.MethodPost,
-		"/",
+		path,
 		"",
 		"host:" + host + "\n" + "x-amz-date:" + dateTime + "\n",
 		signedHeaders,
