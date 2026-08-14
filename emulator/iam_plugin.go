@@ -81,6 +81,28 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteGroup(ctx, req)
 	case "ListGroups":
 		return p.listGroups(ctx, req)
+	case "AddUserToGroup":
+		return p.addUserToGroup(ctx, req)
+	case "RemoveUserFromGroup":
+		return p.removeUserFromGroup(ctx, req)
+	case "ListGroupsForUser":
+		return p.listGroupsForUser(ctx, req)
+
+	case "AttachGroupPolicy":
+		return p.attachGroupPolicy(ctx, req)
+	case "DetachGroupPolicy":
+		return p.detachGroupPolicy(ctx, req)
+	case "ListAttachedGroupPolicies":
+		return p.listAttachedGroupPolicies(ctx, req)
+
+	case "PutGroupPolicy":
+		return p.putGroupPolicy(ctx, req)
+	case "GetGroupPolicy":
+		return p.getGroupPolicy(ctx, req)
+	case "DeleteGroupPolicy":
+		return p.deleteGroupPolicy(ctx, req)
+	case "ListGroupPolicies":
+		return p.listGroupPolicies(ctx, req)
 
 	case "AttachUserPolicy":
 		return p.attachUserPolicy(ctx, req)
@@ -305,6 +327,23 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if len(arns) > 0 {
 		return iamErrorResponse("DeleteConflict",
 			"Cannot delete entity, must detach all policies first.",
+			http.StatusConflict), nil
+	}
+
+	// "Before attempting to delete a user, remove the following items: … Group
+	// memberships (RemoveUserFromGroup)" — the DeleteUser reference. Deleting a
+	// member would otherwise leave the group's side of the index naming a user that
+	// no longer exists, and GetGroup would silently skip it.
+	groups, err := p.loadStringList(goCtx, iamUserGroupsKey(params.UserName))
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) > 0 {
+		// Name them, for the same reason DeleteRole names the instance profiles: a
+		// caller that wedges here needs to know what to detach from.
+		return iamErrorResponse("DeleteConflict",
+			fmt.Sprintf("Cannot delete entity, must remove user from all groups first. "+
+				"Groups containing %s: %s", params.UserName, strings.Join(groups, ", ")),
 			http.StatusConflict), nil
 	}
 
@@ -725,7 +764,36 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, fmt.Errorf("unmarshal group: %w", err)
 	}
 
-	return iamXMLResponse(http.StatusOK, "GetGroup", iamSingleGroupXML(&group)+iamUserListXML(nil)+"<IsTruncated>false</IsTruncated>")
+	// GetGroup's whole purpose is the member list — "Returns a list of IAM users
+	// that are in the specified IAM group" — and this passed iamUserListXML(nil)
+	// unconditionally, so every group was observably empty. Nothing noticed because
+	// no operation could add a member until now.
+	memberNames, err := p.loadStringList(goCtx, iamGroupUsersKey(params.GroupName))
+	if err != nil {
+		return nil, err
+	}
+	page, nextMarker, isTruncated := paginateIAMKeys(memberNames, params.Marker, params.MaxItems)
+
+	users := make([]*IAMUser, 0, len(page))
+	for _, name := range page {
+		user, err := p.loadUser(goCtx, name)
+		if err != nil {
+			return nil, err
+		}
+		// A member naming no stored user can only come from a state edit outside the
+		// API: DeleteUser refuses while the user is in a group.
+		if user == nil {
+			continue
+		}
+		users = append(users, user)
+	}
+
+	xmlStr := iamSingleGroupXML(&group) + iamUserListXML(users) +
+		"<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
+	if nextMarker != "" {
+		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
+	}
+	return iamXMLResponse(http.StatusOK, "GetGroup", xmlStr)
 }
 
 func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -753,6 +821,31 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The group with name %s cannot be found.", params.GroupName),
 			http.StatusNotFound), nil
+	}
+
+	// "The group must not contain any users or have any attached policies" — the
+	// DeleteGroup reference. Both refusals are DeleteConflict, matching DeleteUser
+	// and DeleteRole. Without them a delete would leave a user_groups entry naming a
+	// group that no longer exists, and that membership would still be read by
+	// loadPoliciesForPrincipal.
+	members, err := p.loadStringList(goCtx, iamGroupUsersKey(params.GroupName))
+	if err != nil {
+		return nil, err
+	}
+	if len(members) > 0 {
+		return iamErrorResponse("DeleteConflict",
+			fmt.Sprintf("Cannot delete entity, must remove users from group first. "+
+				"Users in %s: %s", params.GroupName, strings.Join(members, ", ")),
+			http.StatusConflict), nil
+	}
+	arns, err := p.loadPolicyList(goCtx, iamGroupPoliciesKey(params.GroupName))
+	if err != nil {
+		return nil, err
+	}
+	if len(arns) > 0 {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must detach all policies first.",
+			http.StatusConflict), nil
 	}
 
 	if err := p.state.Delete(goCtx, iamNamespace, "group:"+params.GroupName); err != nil {
@@ -1454,18 +1547,36 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	}
 	entityType, entityName := entity.Kind, entity.Name
 
-	arns, err := p.loadPolicyList(goCtx, entityType+"_policies:"+entityName)
-	if err != nil {
-		return fmt.Errorf("load policies for authorization: %w", err)
+	// A user's groups carry policies too, and this gate loads its own documents
+	// rather than calling AuthController — so the group arm has to exist on both
+	// paths or an IAM call granted through a group would be refused here and allowed
+	// there. That is the #411 split exactly: one ARN, two loaders, two answers.
+	sources := []iamEntity{entity}
+	if entityType == "user" {
+		groups, err := p.loadStringList(goCtx, iamUserGroupsKey(entityName))
+		if err != nil {
+			return fmt.Errorf("load group memberships for authorization: %w", err)
+		}
+		for _, name := range groups {
+			sources = append(sources, iamEntity{Kind: "group", Name: name})
+		}
 	}
 
 	// Check for AdministratorAccess: substitute a synthetic allow-all document
 	// so that permission boundary evaluation still runs below.
+	arnsBySource := make([][]string, 0, len(sources))
 	hasAdminAccess := false
-	for _, arn := range arns {
-		if arn == "arn:aws:iam::aws:policy/AdministratorAccess" {
-			hasAdminAccess = true
-			break
+	for _, source := range sources {
+		arns, err := p.loadPolicyList(goCtx, source.Kind+"_policies:"+source.Name)
+		if err != nil {
+			return fmt.Errorf("load policies for authorization: %w", err)
+		}
+		arnsBySource = append(arnsBySource, arns)
+		for _, arn := range arns {
+			if arn == authzAdministratorAccessARN {
+				hasAdminAccess = true
+				break
+			}
 		}
 	}
 
@@ -1480,28 +1591,30 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 			}},
 		}}
 	}
-	for _, arn := range arns {
-		if mp, ok := GetManagedPolicy(arn); ok {
-			docs = append(docs, mp.Document)
-			continue
+	for i, source := range sources {
+		for _, arn := range arnsBySource[i] {
+			if mp, ok := GetManagedPolicy(arn); ok {
+				docs = append(docs, mp.Document)
+				continue
+			}
+			raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+			if err != nil || raw == nil {
+				continue
+			}
+			var pol IAMPolicy
+			if err := json.Unmarshal(raw, &pol); err != nil {
+				continue
+			}
+			docs = append(docs, pol.Document)
 		}
-		raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
-		if err != nil || raw == nil {
-			continue
-		}
-		var pol IAMPolicy
-		if err := json.Unmarshal(raw, &pol); err != nil {
-			continue
-		}
-		docs = append(docs, pol.Document)
-	}
 
-	// Also load inline policies for the entity.
-	inlineNames, _ := p.loadInlinePolicyNames(goCtx, entityType, entityName)
-	for _, name := range inlineNames {
-		doc, _ := p.loadInlinePolicyDoc(goCtx, entityType, entityName, name)
-		if doc != nil {
-			docs = append(docs, *doc)
+		// Also load inline policies for the entity.
+		inlineNames, _ := p.loadInlinePolicyNames(goCtx, source.Kind, source.Name)
+		for _, name := range inlineNames {
+			doc, _ := p.loadInlinePolicyDoc(goCtx, source.Kind, source.Name, name)
+			if doc != nil {
+				docs = append(docs, *doc)
+			}
 		}
 	}
 
@@ -1586,11 +1699,34 @@ func (p *IAMPlugin) listRolePolicies(ctx *RequestContext, req *AWSRequest) (*AWS
 	return p.listInlinePolicies(ctx, req, "role")
 }
 
-// putInlinePolicy stores an inline policy document for a user or role.
+// iamInlineEntity selects which of an inline-policy request's mutually exclusive
+// name parameters applies, and returns the operation-name suffix for the entity
+// type: Put*Policy, Get*Policy, Delete*Policy and List*Policies all differ only in
+// that word, as does the entity-name element in a Get response.
+//
+// The four inline handlers previously each carried a two-arm branch defaulting to
+// role, so an unrecognized entity type read a role's state and reported a role's
+// operation name. One helper means a type is either known here or produces an
+// empty name, which every caller already refuses with ValidationError.
+func iamInlineEntity(entityType, userName, roleName, groupName string) (entityName, actionSuffix string) {
+	switch entityType {
+	case "role":
+		return roleName, "Role"
+	case "group":
+		return groupName, "Group"
+	case "user":
+		return userName, "User"
+	default:
+		return "", ""
+	}
+}
+
+// putInlinePolicy stores an inline policy document for a user, role or group.
 func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
 	var params struct {
 		UserName       string `json:"UserName"`
 		RoleName       string `json:"RoleName"`
+		GroupName      string `json:"GroupName"`
 		PolicyName     string `json:"PolicyName"`
 		PolicyDocument string `json:"PolicyDocument"`
 	}
@@ -1598,12 +1734,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	entityName := params.UserName
-	actionSuffix := "User"
-	if entityType == "role" {
-		entityName = params.RoleName
-		actionSuffix = "Role"
-	}
+	entityName, actionSuffix := iamInlineEntity(entityType, params.UserName, params.RoleName, params.GroupName)
 	if entityName == "" || params.PolicyName == "" || params.PolicyDocument == "" {
 		return iamErrorResponse("ValidationError",
 			"EntityName, PolicyName, and PolicyDocument are required", http.StatusBadRequest), nil
@@ -1614,15 +1745,10 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	// Verify the entity exists.
-	var entityRaw []byte
-	var getErr error
-	switch entityType {
-	case "user":
-		entityRaw, getErr = p.state.Get(goCtx, iamNamespace, "user:"+entityName)
-	default:
-		entityRaw, getErr = p.state.Get(goCtx, iamNamespace, "role:"+entityName)
-	}
+	// Verify the entity exists. The key prefix is the entity type itself, so a new
+	// type needs no arm here — the previous form branched on "user" with a default
+	// arm reading "role:", which would have silently looked a group up as a role.
+	entityRaw, getErr := p.state.Get(goCtx, iamNamespace, entityType+":"+entityName)
 	if getErr != nil {
 		return nil, fmt.Errorf("get %s: %w", entityType, getErr)
 	}
@@ -1672,23 +1798,19 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	return iamXMLEmptyResponse("Put" + actionSuffix + "Policy"), nil
 }
 
-// getInlinePolicy retrieves an inline policy document for a user or role.
+// getInlinePolicy retrieves an inline policy document for a user, role or group.
 func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
 	var params struct {
 		UserName   string `json:"UserName"`
 		RoleName   string `json:"RoleName"`
+		GroupName  string `json:"GroupName"`
 		PolicyName string `json:"PolicyName"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	entityName := params.UserName
-	actionSuffix := "User"
-	if entityType == "role" {
-		entityName = params.RoleName
-		actionSuffix = "Role"
-	}
+	entityName, actionSuffix := iamInlineEntity(entityType, params.UserName, params.RoleName, params.GroupName)
 	if entityName == "" || params.PolicyName == "" {
 		return iamErrorResponse("ValidationError",
 			"EntityName and PolicyName are required", http.StatusBadRequest), nil
@@ -1709,30 +1831,27 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 			http.StatusNotFound), nil
 	}
 
-	entityKey := entityName
-	if entityType == "role" {
-		return iamXMLResponse(http.StatusOK, "GetRolePolicy", "<RoleName>"+xmlEsc(entityKey)+"</RoleName><PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName><PolicyDocument>"+xmlEsc(string(raw))+"</PolicyDocument>")
-	}
-	return iamXMLResponse(http.StatusOK, "GetUserPolicy", "<UserName>"+xmlEsc(entityKey)+"</UserName><PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName><PolicyDocument>"+xmlEsc(string(raw))+"</PolicyDocument>")
+	// The entity-name element is named for the entity type, and the operation name is
+	// the same suffix, so both come from one place rather than a branch per type.
+	return iamXMLResponse(http.StatusOK, "Get"+actionSuffix+"Policy",
+		"<"+actionSuffix+"Name>"+xmlEsc(entityName)+"</"+actionSuffix+"Name>"+
+			"<PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName>"+
+			"<PolicyDocument>"+xmlEsc(string(raw))+"</PolicyDocument>")
 }
 
-// deleteInlinePolicy removes an inline policy from a user or role.
+// deleteInlinePolicy removes an inline policy from a user, role or group.
 func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
 	var params struct {
 		UserName   string `json:"UserName"`
 		RoleName   string `json:"RoleName"`
+		GroupName  string `json:"GroupName"`
 		PolicyName string `json:"PolicyName"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	entityName := params.UserName
-	actionSuffix := "User"
-	if entityType == "role" {
-		entityName = params.RoleName
-		actionSuffix = "Role"
-	}
+	entityName, actionSuffix := iamInlineEntity(entityType, params.UserName, params.RoleName, params.GroupName)
 	if entityName == "" || params.PolicyName == "" {
 		return iamErrorResponse("ValidationError",
 			"EntityName and PolicyName are required", http.StatusBadRequest), nil
@@ -1776,24 +1895,21 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 	return iamXMLEmptyResponse("Delete" + actionSuffix + "Policy"), nil
 }
 
-// listInlinePolicies returns the names of all inline policies for a user or role.
+// listInlinePolicies returns the names of all inline policies for a user, role or
+// group.
 func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
 	var params struct {
-		UserName string `json:"UserName"`
-		RoleName string `json:"RoleName"`
-		Marker   string `json:"Marker"`
-		MaxItems int    `json:"MaxItems"`
+		UserName  string `json:"UserName"`
+		RoleName  string `json:"RoleName"`
+		GroupName string `json:"GroupName"`
+		Marker    string `json:"Marker"`
+		MaxItems  int    `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	entityName := params.UserName
-	actionSuffix := "User"
-	if entityType == "role" {
-		entityName = params.RoleName
-		actionSuffix = "Role"
-	}
+	entityName, actionSuffix := iamInlineEntity(entityType, params.UserName, params.RoleName, params.GroupName)
 	if entityName == "" {
 		return iamErrorResponse("ValidationError", "EntityName is required", http.StatusBadRequest), nil
 	}
