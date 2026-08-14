@@ -186,9 +186,12 @@ func (p *OrganizationsPlugin) listAccounts(reqCtx *orgCaller, req *AWSRequest) (
 		return nil, err
 	}
 
+	// Each account is read the way DescribeAccount reads it, so a caller polling
+	// through the listing sees a closure converge rather than watching
+	// PENDING_CLOSURE forever while a Describe of the same account reports SUSPENDED.
 	accounts := make([]OrgAccount, 0, len(page))
 	for _, id := range page {
-		a, loadErr := p.loadAccount(goCtx, id)
+		a, loadErr := p.observeAccount(goCtx, id)
 		if loadErr != nil {
 			return nil, fmt.Errorf("listAccounts load account: %w", loadErr)
 		}
@@ -218,7 +221,10 @@ func (p *OrganizationsPlugin) describeAccount(reqCtx *orgCaller, req *AWSRequest
 		return nil, err
 	}
 
-	a, err := p.loadAccount(goCtx, input.AccountID)
+	// observeAccount rather than loadAccount: DescribeAccount is the operation AWS
+	// documents as the way to watch a closure finish, so it is one of the reads that
+	// advances PENDING_CLOSURE to SUSPENDED.
+	a, err := p.observeAccount(goCtx, input.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("describeAccount load: %w", err)
 	}

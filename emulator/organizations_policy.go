@@ -2,11 +2,9 @@ package emulator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
-	"unicode/utf8"
 )
 
 // orgPolicyTypes is the PolicyType enum from the Organizations API model. A value
@@ -67,53 +65,6 @@ func (p *OrganizationsPlugin) policyOperation(op string) (orgHandler, bool) {
 	default:
 		return nil, false
 	}
-}
-
-// --- availability, the outermost gate ---
-//
-// Two different conditions stop an SCP being useful, and they are not the same
-// refusal:
-//
-//   - Not *available*: the organization is in CONSOLIDATED_BILLING mode, where the
-//     policy type does not exist at all. Nothing can create, read, attach or enable
-//     one, and the fix is a migration to all features.
-//   - Available but not *enabled*: an all-features organization whose root has had
-//     DisablePolicyType called on it. Policies still exist and can be created; only
-//     attachment is refused, and the fix is one EnablePolicyType call.
-//
-// The second is the dangerous state issue #578 point 6 is about, and it is only
-// distinguishable from the first if the two report differently. Availability is
-// modeled as visibility: while SCPs are unavailable no policy is visible, so every
-// operation that names one answers with its own documented not-found code. Only
-// CreatePolicy and EnablePolicyType name the feature set as the reason, because
-// those are the two operations whose error list in the API model declares
-// PolicyTypeNotAvailableForOrganizationException — emitting it from an operation
-// that does not declare it would hand a caller an exception its SDK cannot catch
-// by type, which is worse than a truthful "no such policy".
-
-// policyTypeAvailable reports whether service control policies exist at all for
-// the organization, which is true only under the ALL feature set.
-func (p *OrganizationsPlugin) policyTypeAvailable(ctx context.Context, acct string) (bool, error) {
-	featureSet, err := p.effectiveFeatureSet(ctx, acct)
-	if err != nil {
-		return false, err
-	}
-	return featureSet == orgFeatureSetAll, nil
-}
-
-// loadVisiblePolicy returns the policy only when service control policies are
-// available to the organization, and (nil, nil) otherwise. p-FullAWSAccess is
-// synthesized by loadPolicy rather than stored, so without this gate it would stay
-// readable in a CONSOLIDATED_BILLING organization that can hold no SCP at all.
-func (p *OrganizationsPlugin) loadVisiblePolicy(ctx context.Context, acct, policyID string) (*OrgPolicy, error) {
-	available, err := p.policyTypeAvailable(ctx, acct)
-	if err != nil {
-		return nil, err
-	}
-	if !available {
-		return nil, nil //nolint:nilnil // (nil, nil) = "no visible policy", handled by caller.
-	}
-	return p.loadPolicy(ctx, policyID)
 }
 
 // --- CreatePolicy ---
@@ -929,26 +880,6 @@ func scpEnabledOnStoredRoot(root OrgRoot) bool {
 	})
 }
 
-// rootSubtree returns every entity a policy can be attached to: the root, every
-// OU, and every account. DisablePolicyType clears the attachments of all of them
-// and EnablePolicyType restores FullAWSAccess to all of them, which is what AWS
-// does — an OU or account created while the type was off would otherwise come back
-// with no SCP at all, and the minimum-attachment rule would then be unenforceable
-// for it.
-func (p *OrganizationsPlugin) rootSubtree(ctx context.Context, acct, rootID string) ([]string, error) {
-	entities := []string{rootID}
-	ouIDs, err := p.loadOUIDs(ctx, acct)
-	if err != nil {
-		return nil, err
-	}
-	entities = append(entities, ouIDs...)
-	accountIDs, err := p.loadAccountIDs(ctx, acct)
-	if err != nil {
-		return nil, err
-	}
-	return append(entities, accountIDs...), nil
-}
-
 // orgRootWithPolicyTypes returns the root with PolicyTypes as an empty list rather
 // than null when nothing is enabled. The model's member is a list, and a caller
 // ranging over a null gets a nil-pointer panic in a typed SDK rather than an empty
@@ -1003,94 +934,6 @@ func orgPolicyNumberLimitExceeded(count int) bool { return count >= orgMaxSCPsPe
 // account; see orgFullAWSAccessArn.
 func orgPolicyArn(acct, orgID, policyID string) string {
 	return fmt.Sprintf("arn:aws:organizations::%s:policy/%s/service_control_policy/%s", acct, orgID, policyID)
-}
-
-// orgCheckPolicyType validates a PolicyType or a ListPolicies Filter against the
-// model's enum. A value outside the enum is a caller typo and gets
-// INVALID_ENUM_POLICY_TYPE; a valid value substrate does not model is refused
-// separately by each operation, because what the caller should do about it differs.
-func orgCheckPolicyType(policyType string) error {
-	if !slices.Contains(orgPolicyTypes, policyType) {
-		return orgInvalidInput("INVALID_ENUM_POLICY_TYPE", "You specified an invalid policy type string: "+policyType)
-	}
-	return nil
-}
-
-// orgCheckPolicyID validates a PolicyId against the model's pattern. A malformed ID
-// is INVALID_SYNTAX_POLICY_ID rather than PolicyNotFoundException, so a caller that
-// passed a policy name where an ID belongs learns that instead of concluding the
-// policy was deleted.
-func orgCheckPolicyID(policyID string) error {
-	if policyID == "" {
-		return orgInvalidInput("INPUT_REQUIRED", "You must specify a value for the parameter PolicyId.")
-	}
-	if !isOrgPolicyIDSyntax(policyID) {
-		return orgInvalidInput("INVALID_SYNTAX_POLICY_ID", "You specified an invalid policy ID: "+policyID)
-	}
-	return nil
-}
-
-// orgCheckTargetID validates a TargetId against the model's pattern, which admits
-// a root, a 12-digit account, or an OU — and not a policy ID.
-func orgCheckTargetID(targetID string) error {
-	if targetID == "" {
-		return orgInvalidInput("INPUT_REQUIRED", "You must specify a value for the parameter TargetId.")
-	}
-	if !isOrgTargetIDSyntax(targetID) {
-		return orgInvalidInput("INVALID_PATTERN_TARGET_ID", "You specified a target that doesn't match the required pattern: "+targetID)
-	}
-	return nil
-}
-
-// orgCheckPolicyName validates a policy name against the model's PolicyName shape
-// (1 to 128 characters).
-func orgCheckPolicyName(name string) error {
-	switch {
-	case name == "":
-		return orgInvalidInput("MIN_LENGTH_EXCEEDED", "You provided a name that is shorter than the minimum of 1 character")
-	case utf8.RuneCountInString(name) > orgMaxPolicyNameChars:
-		return orgInvalidInput("MAX_LENGTH_EXCEEDED",
-			fmt.Sprintf("You provided a name longer than the maximum of %d characters", orgMaxPolicyNameChars))
-	default:
-		return nil
-	}
-}
-
-// orgCheckPolicyDescription validates a description against the model's
-// PolicyDescription shape (up to 512 characters; empty is permitted).
-func orgCheckPolicyDescription(description string) error {
-	if utf8.RuneCountInString(description) > orgMaxPolicyDescriptionChars {
-		return orgInvalidInput("MAX_LENGTH_EXCEEDED",
-			fmt.Sprintf("You provided a description longer than the maximum of %d characters", orgMaxPolicyDescriptionChars))
-	}
-	return nil
-}
-
-// orgCheckPolicyContent validates an SCP document: the size quota first, then
-// whether it parses at all. The two are different refusals because they call for
-// different fixes — a document over the limit has to be split across policies,
-// while an unparseable one has to be corrected — and a caller cannot tell them
-// apart from one code.
-func orgCheckPolicyContent(content string) error {
-	if content == "" {
-		return orgInvalidInput("MIN_LENGTH_EXCEEDED", "You provided a policy document that is shorter than the minimum of 1 character")
-	}
-	// The quota is stated in characters, so a multi-byte document is measured in
-	// runes: counting bytes would refuse a document AWS accepts.
-	if utf8.RuneCountInString(content) > orgMaxSCPBytes {
-		return orgConstraintViolation("POLICY_CONTENT_LIMIT_EXCEEDED",
-			fmt.Sprintf("You have exceeded the maximum size of a policy document (%d characters)", orgMaxSCPBytes))
-	}
-	// Substrate does not evaluate an SCP, so it checks only that the document is a
-	// JSON object — the boundary between "the caller sent something a policy engine
-	// could read" and "the caller sent a string it never templated". Judging the
-	// statement semantics would be modeling the authorization engine, not the API.
-	var doc map[string]interface{}
-	if err := json.Unmarshal([]byte(content), &doc); err != nil {
-		return orgErr("MalformedPolicyDocumentException",
-			"The provided policy document doesn't meet the requirements of the specified policy type: "+err.Error())
-	}
-	return nil
 }
 
 // Policy string-length quotas, from the model's PolicyName and PolicyDescription
