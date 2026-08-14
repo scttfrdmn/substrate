@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A test server can now be called as more than one account**
+  (`StartTestServerWithAccounts`, `TestServer.RegisterAccount`,
+  `TestServer.CredentialsFor`) (#623). No in-repo test could authenticate as a
+  second account before this: `StartTestServer` wires no `CredentialRegistry`, and
+  `extractAccount` maps every `AKIA…` key to `123456789012`. That is why #623
+  survived every Organizations test — all of them are one caller by construction.
+
+  It is a **separate entry point** rather than an option on `StartTestServer`,
+  because wiring a registry also switches SigV4 verification on: the server
+  verifies signatures exactly when `ServerOptions.Credentials` is non-nil, and a key
+  the registry does not hold is `InvalidClientTokenId` 403. Turning that on
+  repository-wide inside a feature change is not a trade worth making, so the strict
+  contract is opt-in. Decoupling the two is #630. Each account's access key and
+  secret are **derived from the account ID** rather than generated, so a recorded run
+  replays with the same credentials in it.
+
+### Fixed
+- **A member account now sees the organization it belongs to** (#623). All
+  Organizations state is keyed by the caller's account, and `ensureOrganization`
+  auto-created an entire organization — root, management account, `FullAWSAccess` —
+  for any account it had not seen. So a member account calling *any* Organizations
+  operation was silently handed a private organization of its own: a different `o-`
+  ID, a different `r-` root, and a member list holding only itself. A consumer
+  walking the hierarchy from a member credential saw an organization management had
+  never created, and nothing in the response said so.
+
+  `saveAccount` now writes a member→management reverse index, and the caller's
+  organization is resolved **once at dispatch** rather than per read. Resolving per
+  read would let two reads in one request disagree about which organization they
+  concern — a member's `ListRoots` would hard-error on a root that resolution had
+  not reached — and would leave every future handler having to remember to do it.
+  Both directions of the index are written in the one function every create-or-join
+  path already goes through, so an index written by one operation and not another is
+  not a reachable state.
+
+  An account the index does not name still auto-creates its own organization. That
+  is not a fallback: it is what keeps a fresh emulator usable with no
+  `CreateOrganization` call, and the distinction the index preserves is "a member of
+  that organization" versus "a member of nothing" — not "known" versus "unknown".
+- **`DescribeResourcePolicy` now answers a member account, and the writes refuse
+  one** (#619). The two bullets v0.98.0 left open. The AWS reference is specific
+  that this asymmetry is real: `DescribeResourcePolicy` is callable "from the
+  management account or a member account that is a delegated administrator", while
+  `Put`/`DeleteResourcePolicy` are callable "only from the management account" —
+  whereas `DescribeOrganization` is callable "from any account in a organization", so
+  the two reads must not be made uniform.
+
+  Three answers, all distinguishable, which is the whole point of #619 — a tool has
+  to tell "nothing was delegated to me" from "something was, and I cannot read it":
+  - management: the policy, or `ResourcePolicyNotFoundException` (400)
+  - a member the policy names: the **identical** `Content`, `Id` and `Arn`
+  - a member it does not name: `AccessDeniedException` (**403**)
+
+  Delegation is decided by the `Principal`, not the `Action`. Every delegation policy
+  AWS documents names the member as `arn:aws:iam::<account>:root`, and
+  `organizations:DescribeResourcePolicy` appears in **none** of their `Action` lists —
+  the delegated actions are the policy-management ones a delegated administrator goes
+  on to call. Requiring an `Allow` for the read itself would deny every member AWS's
+  own examples intend to admit, and a guessed denial fails a request AWS accepts.
+
+  A member is refused **before** the absence is reported, so it cannot use the
+  operation to learn whether the organization has a policy at all. And the refusal is
+  403 rather than the 400 every other Organizations error carries:
+  `AccessDeniedException` is a *common* error the service model does not declare, and
+  the API Reference's Common Errors page gives it 403 — which is what an SDK's retry
+  classifier reads.
+
+  One correction to the issue's own framing: none of the three operations takes an
+  input naming an organization, so "a caller outside the organization" is **not
+  reachable** through this API — there is nowhere to put another organization's ID. The
+  reachable third case is a member the policy does not name, which is what is
+  modelled.
+
 ## [v0.98.0] - 2026-08-14
 
 ### Added

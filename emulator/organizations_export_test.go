@@ -70,6 +70,13 @@ func (p *OrganizationsPlugin) EnsureOrganizationForTest(ctx context.Context, acc
 	return p.ensureOrganization(ctx, acct)
 }
 
+// OrganizationOwnerForTest wraps organizationOwner for external tests, so the
+// reverse index #623 added can be asserted directly rather than only through the
+// organization a handler happens to answer with.
+func (p *OrganizationsPlugin) OrganizationOwnerForTest(ctx context.Context, acct string) (string, error) {
+	return p.organizationOwner(ctx, acct)
+}
+
 // LoadRootForTest wraps loadRoot for external tests.
 func (p *OrganizationsPlugin) LoadRootForTest(ctx context.Context, acct string) (*OrgRoot, error) {
 	return p.loadRoot(ctx, acct)

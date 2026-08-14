@@ -31,8 +31,34 @@ type OrganizationsPlugin struct {
 	tc     *TimeController
 }
 
+// orgCaller is the request context an Organizations handler runs against: the
+// caller's own account, and the organization that account belongs to.
+//
+// The embedded *RequestContext is a copy whose AccountID has been resolved to the
+// **management account** of the caller's organization, because that is the key
+// every Organizations record is stored under — the organization, its root, its
+// member list, its policies, its resource policy. A handler that keyed state by
+// the account that signed the request would answer a member account with a
+// private organization of its own, which is #623.
+//
+// For a management account, or for an account substrate has never seen, the
+// resolved account and the signing account are the same, so nothing changes for a
+// single-caller test. Only callerAccount tells them apart, and only the handlers
+// that model a management-versus-member asymmetry read it.
+type orgCaller struct {
+	*RequestContext
+
+	// callerAccount is the account that signed the request, which is not
+	// necessarily the one AccountID now names.
+	callerAccount string
+}
+
+// isMember reports whether the caller is a member of the organization rather than
+// its management account.
+func (c *orgCaller) isMember() bool { return c.callerAccount != c.AccountID }
+
 // orgHandler handles one Organizations operation.
-type orgHandler func(*RequestContext, *AWSRequest) (*AWSResponse, error)
+type orgHandler func(*orgCaller, *AWSRequest) (*AWSResponse, error)
 
 // Name returns the service name "organizations".
 func (p *OrganizationsPlugin) Name() string { return organizationsNamespace }
@@ -57,6 +83,10 @@ func (p *OrganizationsPlugin) Shutdown(_ context.Context) error { return nil }
 // (organizations_ou.go, organizations_policy.go, and so on) and each owns its own
 // claim function, so adding an operation touches one file rather than a shared
 // switch.
+//
+// The caller's organization is resolved once, here, rather than in each handler:
+// resolving per read would let two reads in one request disagree about which
+// organization they are about, and every handler would have to remember to do it.
 func (p *OrganizationsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	for _, claim := range []func(string) (orgHandler, bool){
 		p.coreOperation,
@@ -67,10 +97,32 @@ func (p *OrganizationsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 		p.resourcePolicyOperation,
 	} {
 		if h, ok := claim(req.Operation); ok {
-			return h(ctx, req)
+			caller, err := p.resolveOrgCaller(context.Background(), ctx)
+			if err != nil {
+				return nil, fmt.Errorf("organizations resolve caller: %w", err)
+			}
+			return h(caller, req)
 		}
 	}
 	return nil, orgInvalidAction(req.Operation)
+}
+
+// resolveOrgCaller builds the orgCaller for a request, resolving the signing
+// account to the management account of the organization it belongs to.
+//
+// An account the reverse index does not know resolves to itself, which is what
+// keeps the no-setup auto-create working: the first caller of a fresh emulator is
+// in no organization yet, and it must still get one rather than a refusal.
+func (p *OrganizationsPlugin) resolveOrgCaller(ctx context.Context, reqCtx *RequestContext) (*orgCaller, error) {
+	owner, err := p.organizationOwner(ctx, reqCtx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	resolved := *reqCtx
+	if owner != "" {
+		resolved.AccountID = owner
+	}
+	return &orgCaller{RequestContext: &resolved, callerAccount: reqCtx.AccountID}, nil
 }
 
 // coreOperation claims the organization- and root-level reads.
@@ -91,7 +143,7 @@ func (p *OrganizationsPlugin) coreOperation(op string) (orgHandler, bool) {
 
 // --- operations ---
 
-func (p *OrganizationsPlugin) describeOrganization(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) describeOrganization(reqCtx *orgCaller, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	org, err := p.ensureOrganization(goCtx, reqCtx.AccountID)
 	if err != nil {
@@ -110,7 +162,7 @@ func (p *OrganizationsPlugin) describeOrganization(reqCtx *RequestContext, _ *AW
 	return orgJSONResponse(map[string]interface{}{"Organization": org}, "describeOrganization")
 }
 
-func (p *OrganizationsPlugin) listAccounts(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listAccounts(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	// Ensure org exists so the management account is always present.
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
@@ -153,7 +205,7 @@ func (p *OrganizationsPlugin) listAccounts(reqCtx *RequestContext, req *AWSReque
 	return orgJSONResponse(out, "listAccounts")
 }
 
-func (p *OrganizationsPlugin) describeAccount(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) describeAccount(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("describeAccount ensure org: %w", err)
@@ -177,7 +229,7 @@ func (p *OrganizationsPlugin) describeAccount(reqCtx *RequestContext, req *AWSRe
 	return orgJSONResponse(map[string]interface{}{"Account": a}, "describeAccount")
 }
 
-func (p *OrganizationsPlugin) listRoots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listRoots(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		NextToken  string `json:"NextToken"`

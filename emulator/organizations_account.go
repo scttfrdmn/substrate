@@ -73,7 +73,7 @@ func (p *OrganizationsPlugin) accountOperation(op string) (orgHandler, bool) {
 // consumer with no poll loop pass its tests, and the poll loop is the part that
 // has to survive being interrupted: the request ID is the only handle a resumed
 // run has on an account that may or may not exist yet.
-func (p *OrganizationsPlugin) createAccount(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) createAccount(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		AccountName string        `json:"AccountName"`
@@ -219,7 +219,7 @@ func (p *OrganizationsPlugin) pendingCreateOutcome(ctx context.Context, accountN
 
 // describeCreateAccountStatus reports the current state of a vending request,
 // resolving it on first observation.
-func (p *OrganizationsPlugin) describeCreateAccountStatus(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) describeCreateAccountStatus(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("describeCreateAccountStatus ensure org: %w", err)
@@ -253,7 +253,7 @@ func (p *OrganizationsPlugin) describeCreateAccountStatus(reqCtx *RequestContext
 }
 
 // listCreateAccountStatus lists vending requests, optionally filtered by state.
-func (p *OrganizationsPlugin) listCreateAccountStatus(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listCreateAccountStatus(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("listCreateAccountStatus ensure org: %w", err)
@@ -367,7 +367,7 @@ func (p *OrganizationsPlugin) resolveCreateAccountStatus(ctx context.Context, ac
 // in MoveAccount's declared errors list, and each one distinguishes a case a
 // re-run of a governance script hits: nothing here is idempotent, which is the
 // property such a script has to be built on.
-func (p *OrganizationsPlugin) moveAccount(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) moveAccount(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		AccountID           string `json:"AccountId"`

@@ -69,7 +69,7 @@ func (p *OrganizationsPlugin) tagOperation(op string) (orgHandler, bool) {
 // partially applied batch would leave the caller unable to tell which tags
 // landed, and a retry of the same request would then behave differently from the
 // first attempt.
-func (p *OrganizationsPlugin) tagResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) tagResource(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ResourceID string        `json:"ResourceId"`
@@ -120,7 +120,7 @@ func (p *OrganizationsPlugin) tagResource(reqCtx *RequestContext, req *AWSReques
 // A key that is not on the resource is not an error: UntagResource "removes any
 // tags with the specified keys", so the operation is idempotent, and a cleanup
 // path that runs twice must not fail the second time.
-func (p *OrganizationsPlugin) untagResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) untagResource(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ResourceID string   `json:"ResourceId"`
@@ -177,7 +177,7 @@ func (p *OrganizationsPlugin) untagResource(reqCtx *RequestContext, req *AWSRequ
 // is the ceiling orgPaginate applies to every Organizations listing. That is
 // below the 50-tag limit, so a heavily tagged resource really does page, and a
 // consumer that reads only the first page is caught here rather than against AWS.
-func (p *OrganizationsPlugin) listTagsForResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *OrganizationsPlugin) listTagsForResource(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var input struct {
 		ResourceID string `json:"ResourceId"`
