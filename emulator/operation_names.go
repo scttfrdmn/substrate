@@ -50,6 +50,9 @@ func requestMethod(req *AWSRequest) string {
 // ParseAWSRequest has populated by the time it consults this table — which is
 // what makes resolving there safe. See resolveOperationName.
 var operationResolvers = map[string]func(req *AWSRequest) string{
+	"account": func(req *AWSRequest) string {
+		return parseAccountOperation(requestMethod(req), req.Path)
+	},
 	"s3": func(req *AWSRequest) string {
 		_, _, op := parseS3Operation(req)
 		return op

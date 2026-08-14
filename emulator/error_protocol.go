@@ -153,6 +153,7 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"wafv2":            errProtoJSONRPC,
 
 	// REST-JSON.
+	"account":         errProtoRESTJSON,
 	"apigateway":      errProtoRESTJSON,
 	"apigatewayv2":    errProtoRESTJSON,
 	"appsync":         errProtoRESTJSON,
