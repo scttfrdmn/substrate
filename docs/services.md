@@ -4686,6 +4686,11 @@ and each is enforced rather than merely documented.
 The 5-per-target and 5,120-character figures often quoted are the **RCP** values,
 not the SCP ones.
 
+Three of these are also readable through Service Quotas — accounts, OUs and SCPs
+per organization — at the same values, so a consumer that reads a ceiling and a
+consumer that runs into one get the same number. See
+[Service Quotas](#service-quotas).
+
 ### Pagination
 
 Paginated listings honor `MaxResults` — clamped to the model's 1–20, so a caller
@@ -4724,6 +4729,86 @@ testing: `CreateAccount` still returns **200**, and only
 ### Cost
 
 Organizations API calls are free.
+
+---
+
+## Service Quotas
+
+**Endpoint:** `servicequotas.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: ServiceQuotasV20190624.{Op}`)
+
+Service Quotas answers from a **built-in table of representative default quotas**,
+not from the plugins that enforce them. It covers eleven services rather than
+AWS's full catalog, which is why an unrecognised service code is an error rather
+than an empty result — see below.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| ListServices | The service codes substrate publishes quotas for |
+| ListServiceQuotas | `ServiceCode` required; `NoSuchResourceException` for a service not in the table |
+| GetServiceQuota | `ServiceCode` **and** `QuotaCode` required |
+| GetAWSDefaultServiceQuota | The same answer as `GetServiceQuota` — nothing here mutates a quota, so the applied value and the AWS default never diverge |
+| RequestServiceQuotaIncrease | Records a `PENDING` request; the published value does not move |
+| ListRequestedServiceQuotaChangesByService | Filterable by `ServiceCode` |
+| GetRequestedServiceQuotaChange | `NoSuchResourceException` for an unknown request ID |
+
+### An unknown service is a refusal, not an empty list
+
+`ListServiceQuotas` for a service code that is not in the table answers
+`NoSuchResourceException`, which the API model declares for this operation. It
+previously answered HTTP 200 with `{"Quotas": []}`, and that is a different claim:
+*this service exists and publishes no quotas*, rather than *there is no such
+service*. Only the second is true of a code substrate does not carry, and the
+first sends a caller looking for a missing quota rather than a wrong service name.
+
+`GetServiceQuota` distinguishes the two cases it can refuse for. Both are
+`NoSuchResourceException` — the only code the model declares — so the **message**
+is the only place they differ: an unknown service names the service and points at
+`ListServices`, while a known service with an unknown quota code names the code
+and points at `ListServiceQuotas`. Conflating them is what makes a missing service
+look like a bad quota code.
+
+A missing required member is `IllegalArgumentException` rather than
+`NoSuchResourceException`: the request never named a resource, so reporting one as
+absent would be misleading.
+
+### An increase request does not grant anything
+
+`RequestServiceQuotaIncrease` stores a `PENDING` record and returns it. The quota
+keeps reading its old value, because AWS grants nothing synchronously — a consumer
+that read the quota back expecting its `DesiredValue` would be asserting on a
+state real Service Quotas never reaches on that call.
+
+### Organizations quotas
+
+The three ceilings the Organizations plugin enforces are readable here at the
+values it enforces them at. A quota table that disagreed with its own emulator
+would be worse than a missing one: a test written against the published number
+would fail for a reason that has nothing to do with the code under test.
+
+| Quota code | Name | Value | Adjustable |
+|---|---|---|---|
+| `L-E619E033` | Maximum number of accounts | 10 | **yes** |
+| `L-29A0C5DF` | Service control policies in an organization | 10,000 | no |
+| `L-0F0F51F4` | Organizational units in an organization | 2,000 | no |
+
+All three are `GlobalQuota: true` — Organizations is a global service hosted in
+`us-east-1`, so its quotas are not per-region.
+
+Only `L-E619E033`'s code is confirmable from AWS documentation:
+[Endpoints and quotas](https://docs.aws.amazon.com/general/latest/gr/ao.html)
+publishes a quota code only for the **adjustable** quotas, and that is the
+adjustable one. The other two codes are best-effort, and the User Guide notes that
+quota codes may change — use `ListServiceQuotas` to discover them rather than
+hard-coding. The *values* are documented in
+[Quotas for AWS Organizations](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_reference_limits.html)
+and match the [Organizations quotas](#quotas) above.
+
+### Cost
+
+Service Quotas API calls are free.
 
 ---
 

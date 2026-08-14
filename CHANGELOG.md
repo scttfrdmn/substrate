@@ -60,6 +60,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a caller outside the organization. Both need a member→organization reverse
   index that does not exist yet.
 
+- **`organizations` quotas are now readable through Service Quotas** (#620). The
+  service was in neither seed table, so `L-E619E033` — the accounts-per-organization
+  ceiling — answered `NoSuchResourceException`: `CreateAccount` worked, but nothing
+  could read the limit it runs into. Also found by driving a consumer against
+  v0.97.0 rather than by reading the API model.
+
+  | Quota code | Name | Value | Adjustable |
+  |---|---|---|---|
+  | `L-E619E033` | Maximum number of accounts | 10 | **yes** |
+  | `L-29A0C5DF` | Service control policies in an organization | 10,000 | no |
+  | `L-0F0F51F4` | Organizational units in an organization | 2,000 | no |
+
+  The values are the ones substrate's Organizations plugin actually enforces
+  (`orgMaxAccounts`, `orgMaxSCPsPerOrg`, `orgMaxOUsPerOrg`), asserted against those
+  constants directly. A quota table that disagreed with its own emulator would be
+  worse than a missing one: a test written against the published number would fail
+  for a reason unrelated to the code under test. #620 reported the last two as 1,000
+  each; both AWS pages and substrate's own constants say **10,000** and **2,000**,
+  the same class of error as #578's RCP-for-SCP mixup. All three are
+  `GlobalQuota: true`, Organizations being global.
+
+  The two seed tables — `defaultServiceQuotas`, which `ListServiceQuotas` reads, and
+  `defaultServiceList`, which `ListServices` reads — are maintained by hand, so a
+  service added to one and not the other is either undiscoverable or discoverable
+  with no quotas, and neither is visible in any single response. A test now asserts
+  the two agree on every service code and name, which closes that drift for the
+  existing ten as well.
+
+### Fixed
+- **`ListServiceQuotas` for an unknown service is a refusal, not an empty list**
+  (#620). It answered HTTP 200 with `{"Quotas": []}`, which claims *this service
+  exists and publishes no quotas* — a different statement from *there is no such
+  service*, and only the second is true of a code substrate does not carry. The
+  first sends a caller to audit a quota code when the service name was wrong, which
+  is what happened here. It now answers `NoSuchResourceException`, the error the API
+  model declares for the operation.
+
+  `GetServiceQuota` and `GetAWSDefaultServiceQuota` now distinguish their two
+  refusals in the **message**: an unknown service names the service and points at
+  `ListServices`, an unknown quota code on a known service names the code and points
+  at `ListServiceQuotas`. The code stays `NoSuchResourceException` for both because
+  that is the only one the model declares, so the message is the sole place they can
+  differ. A missing required member is now `IllegalArgumentException` — also from the
+  model's error list — rather than a not-found for a resource the request never
+  named.
+
 ### Security
 - Bumped the `toolchain` directive in both modules from `go1.26.5` to `go1.26.6`,
   clearing seven standard-library vulnerabilities `govulncheck` reports as reachable
