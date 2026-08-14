@@ -143,3 +143,88 @@ func TestJourney_ServiceQuotasOrganizations(t *testing.T) {
 		t.Errorf("a pending increase moved the quota to %v; it must still read 10", v)
 	}
 }
+
+// TestJourney_ServiceQuotasCallerIsolation is #624 at the SDK level: two accounts
+// filing increases against one emulator, each seeing only its own.
+//
+// The plugin discarded its request context and filed every increase under the
+// literal 000000000000, so this is the leak that fix closed. It needs two signing
+// identities, which is why it lives here rather than in a single-caller journey: a
+// consumer that reads its request history to decide whether it has already asked
+// would otherwise see a sibling's request and skip filing its own.
+func TestJourney_ServiceQuotasCallerIsolation(t *testing.T) {
+	const otherAccount = "210987654321"
+	ts := emulator.StartTestServerWithAccounts(t, journeyAccountID, otherAccount)
+
+	ctx := context.Background()
+	clients := make(map[string]*servicequotas.Client, 2)
+	for _, account := range []string{journeyAccountID, otherAccount} {
+		cfg, err := journeyConfigAs(ts, account)
+		if err != nil {
+			t.Fatalf("config for %s: %v", account, err)
+		}
+		clients[account] = servicequotas.NewFromConfig(cfg,
+			func(o *servicequotas.Options) { o.RetryMaxAttempts = 1 })
+	}
+
+	// Each account asks for a different value, so the records are distinguishable by
+	// content and not only by count.
+	wanted := map[string]float64{journeyAccountID: 50, otherAccount: 75}
+	for account, client := range clients {
+		if _, err := client.RequestServiceQuotaIncrease(ctx, &servicequotas.RequestServiceQuotaIncreaseInput{
+			ServiceCode:  aws.String("organizations"),
+			QuotaCode:    aws.String("L-E619E033"),
+			DesiredValue: aws.Float64(wanted[account]),
+		}); err != nil {
+			t.Fatalf("RequestServiceQuotaIncrease as %s: %v", account, err)
+		}
+	}
+
+	for account, client := range clients {
+		history, err := client.ListRequestedServiceQuotaChangeHistory(ctx,
+			&servicequotas.ListRequestedServiceQuotaChangeHistoryInput{
+				ServiceCode: aws.String("organizations"),
+			})
+		if err != nil {
+			t.Fatalf("ListRequestedServiceQuotaChangeHistory as %s: %v", account, err)
+		}
+		if len(history.RequestedQuotas) != 1 {
+			t.Fatalf("%s sees %d increase requests, want only its own 1", account, len(history.RequestedQuotas))
+		}
+		got := history.RequestedQuotas[0]
+		if v := aws.ToFloat64(got.DesiredValue); v != wanted[account] {
+			t.Errorf("%s sees a request for %v, want its own %v — the requests are crossed",
+				account, v, wanted[account])
+		}
+		if got.Status != sqtypes.RequestStatusPending {
+			t.Errorf("%s's request reads Status %q, want PENDING", account, got.Status)
+		}
+	}
+
+	// The Status filter has to agree with the unfiltered read, or a consumer that
+	// narrows its history query to PENDING would conclude it had never asked.
+	pending, err := clients[journeyAccountID].ListRequestedServiceQuotaChangeHistory(ctx,
+		&servicequotas.ListRequestedServiceQuotaChangeHistoryInput{
+			Status: sqtypes.RequestStatusPending,
+		})
+	if err != nil {
+		t.Fatalf("ListRequestedServiceQuotaChangeHistory(Status=PENDING): %v", err)
+	}
+	if len(pending.RequestedQuotas) != 1 {
+		t.Errorf("filtering on PENDING returned %d requests, want the caller's 1",
+			len(pending.RequestedQuotas))
+	}
+	// A status no record holds returns nothing rather than everything, which is the
+	// difference between an honoured filter and an ignored one.
+	denied, err := clients[journeyAccountID].ListRequestedServiceQuotaChangeHistory(ctx,
+		&servicequotas.ListRequestedServiceQuotaChangeHistoryInput{
+			Status: sqtypes.RequestStatusDenied,
+		})
+	if err != nil {
+		t.Fatalf("ListRequestedServiceQuotaChangeHistory(Status=DENIED): %v", err)
+	}
+	if len(denied.RequestedQuotas) != 0 {
+		t.Errorf("filtering on DENIED returned %d requests; every record is PENDING",
+			len(denied.RequestedQuotas))
+	}
+}

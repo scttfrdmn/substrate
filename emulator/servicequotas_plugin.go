@@ -11,7 +11,7 @@ import (
 // ServiceQuotasPlugin emulates the AWS Service Quotas API.
 // It handles ListServices, ListServiceQuotas, GetServiceQuota,
 // GetAWSDefaultServiceQuota, RequestServiceQuotaIncrease,
-// ListRequestedServiceQuotaChangesByService, and GetRequestedServiceQuotaChange.
+// ListRequestedServiceQuotaChangeHistory, and GetRequestedServiceQuotaChange.
 // The built-in quota table provides representative default values; increases
 // are stored in state as PENDING requests. The Service Quotas API is free.
 type ServiceQuotasPlugin struct {
@@ -57,8 +57,11 @@ func (p *ServiceQuotasPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequ
 		return p.getAWSDefaultServiceQuota(req)
 	case "RequestServiceQuotaIncrease":
 		return p.requestServiceQuotaIncrease(sqAccountID(reqCtx), req)
-	case "ListRequestedServiceQuotaChangesByService":
-		return p.listRequestedServiceQuotaChangesByService(sqAccountID(reqCtx), req)
+	// The second name is not one AWS has; it is the name this handler shipped
+	// under, kept as an alias so a fixture that drives the plugin by a hand-built
+	// X-Amz-Target keeps working. See the handler's doc comment (#636).
+	case "ListRequestedServiceQuotaChangeHistory", "ListRequestedServiceQuotaChangesByService":
+		return p.listRequestedServiceQuotaChangeHistory(sqAccountID(reqCtx), req)
 	case "GetRequestedServiceQuotaChange":
 		return p.getRequestedServiceQuotaChange(sqAccountID(reqCtx), req)
 	default:
@@ -240,9 +243,25 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(accountID string, req 
 	})
 }
 
-func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangesByService(accountID string, req *AWSRequest) (*AWSResponse, error) {
+// listRequestedServiceQuotaChangeHistory reports the caller's quota-increase
+// requests, optionally filtered by service and status.
+//
+// This shipped as "ListRequestedServiceQuotaChangesByService", a name the Service
+// Quotas API does not have: the 2019-06-24 model declares
+// ListRequestedServiceQuotaChangeHistory (this operation) and
+// ListRequestedServiceQuotaChangeHistoryByQuota, and nothing resembling
+// "…ChangesByService". So the handler was reachable only by a hand-built
+// X-Amz-Target — every SDK and CLI call got InvalidAction — which is why the
+// plugin's own unit tests could not see it (#636). Both names now route here; the
+// invented one is kept because a fixture may already drive it directly.
+//
+// The Status filter is honored rather than ignored: a caller asking for
+// CASE_OPENED that was handed a PENDING record back would read an outcome the
+// service never reports.
+func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangeHistory(accountID string, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ServiceCode string `json:"ServiceCode"`
+		Status      string `json:"Status"`
 	}
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &input)
@@ -261,9 +280,13 @@ func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangesByService(accountI
 		if err != nil || qi == nil {
 			continue
 		}
-		if input.ServiceCode == "" || qi.ServiceCode == input.ServiceCode {
-			results = append(results, *qi)
+		if input.ServiceCode != "" && qi.ServiceCode != input.ServiceCode {
+			continue
 		}
+		if input.Status != "" && qi.Status != input.Status {
+			continue
+		}
+		results = append(results, *qi)
 	}
 	if results == nil {
 		results = []QuotaIncrease{}

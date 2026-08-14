@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -567,4 +568,299 @@ func journeySeedOrgCreateFailure(t *testing.T, ts *emulator.TestServer, accountN
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /v1/organizations/create-account-failure: status %d", resp.StatusCode)
 	}
+}
+
+// TestJourney_OrganizationsMemberView is #623 and #619's remainder through the
+// SDK: two accounts, two identities, and the asymmetry between them.
+//
+// It is the only level at which this can be checked. A member account is a
+// different *caller*, resolved from the signing key, so nothing that signs as one
+// account can exercise it — which is exactly why #623 survived every Organizations
+// test until now: all of them are one caller by construction.
+//
+// The journey pins the three answers a governance tool depends on being distinct.
+// A member reading management's policy and a member denied it must not look the
+// same, and neither must "no delegation" and "delegation I cannot read": those are
+// different branches in a consumer, and errors.As on the typed exception is how it
+// takes them.
+func TestJourney_OrganizationsMemberView(t *testing.T) {
+	ts := emulator.StartTestServerWithAccounts(t, journeyAccountID)
+
+	mgmtCfg, err := journeyConfigAs(ts, journeyAccountID)
+	if err != nil {
+		t.Fatalf("management config: %v", err)
+	}
+	ctx := context.Background()
+	mgmt := organizations.NewFromConfig(mgmtCfg, func(o *organizations.Options) { o.RetryMaxAttempts = 1 })
+
+	orgDesc, err := mgmt.DescribeOrganization(ctx, &organizations.DescribeOrganizationInput{})
+	if err != nil {
+		t.Fatalf("DescribeOrganization as management: %v", err)
+	}
+	orgID := aws.ToString(orgDesc.Organization.Id)
+
+	// Two members, so the delegated one and the undelegated one are both real
+	// accounts of the same organization rather than one account and one absence.
+	delegated := journeyVendAccount(t, ctx, mgmt, "delegated", "delegated@example.com")
+	outsider := journeyVendAccount(t, ctx, mgmt, "outsider", "outsider@example.com")
+
+	delegatedCfg, err := journeyConfigAs(ts, ts.RegisterAccount(t, delegated).AccountID)
+	if err != nil {
+		t.Fatalf("delegated member config: %v", err)
+	}
+	outsiderCfg, err := journeyConfigAs(ts, ts.RegisterAccount(t, outsider).AccountID)
+	if err != nil {
+		t.Fatalf("undelegated member config: %v", err)
+	}
+	memberOpts := func(o *organizations.Options) { o.RetryMaxAttempts = 1 }
+	delegatedClient := organizations.NewFromConfig(delegatedCfg, memberOpts)
+	outsiderClient := organizations.NewFromConfig(outsiderCfg, memberOpts)
+
+	// --- #623: a member is in management's organization, not one of its own ---
+	//
+	// DescribeOrganization is documented as callable "from any account in the
+	// organization", so both members get an answer — and it has to be the *same*
+	// organization, or a member's view of the hierarchy it lives in is fiction.
+	for _, tc := range []struct {
+		name   string
+		client *organizations.Client
+	}{
+		{"the delegated member", delegatedClient},
+		{"the undelegated member", outsiderClient},
+	} {
+		got, describeErr := tc.client.DescribeOrganization(ctx, &organizations.DescribeOrganizationInput{})
+		if describeErr != nil {
+			t.Fatalf("DescribeOrganization as %s: %v", tc.name, describeErr)
+		}
+		if id := aws.ToString(got.Organization.Id); id != orgID {
+			t.Errorf("%s sees organization %q, want management's %q — a member must not get a private organization",
+				tc.name, id, orgID)
+		}
+		if master := aws.ToString(got.Organization.MasterAccountId); master != journeyAccountID {
+			t.Errorf("%s reports management account %q, want %q", tc.name, master, journeyAccountID)
+		}
+	}
+
+	// A member also sees the same accounts, which is what makes the organization one
+	// organization rather than three that agree on an ID.
+	memberAccounts, err := delegatedClient.ListAccounts(ctx, &organizations.ListAccountsInput{})
+	if err != nil {
+		t.Fatalf("ListAccounts as a member: %v", err)
+	}
+	if len(memberAccounts.Accounts) != 3 {
+		t.Errorf("a member sees %d accounts, want the organization's 3", len(memberAccounts.Accounts))
+	}
+
+	// --- #619: nothing is delegated yet ---
+	//
+	// Management gets the not-found refusal — the ordinary answer, since most
+	// organizations have no resource policy. A member gets denied instead, because
+	// reporting the absence to a member would leak whether a policy exists at all.
+	var notFound *orgtypes.ResourcePolicyNotFoundException
+	if _, err := mgmt.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{}); !errors.As(err, &notFound) {
+		t.Fatalf("DescribeResourcePolicy as management with no policy set: got %T (%v), want *ResourcePolicyNotFoundException", err, err)
+	}
+	var denied *orgtypes.AccessDeniedException
+	if _, err := delegatedClient.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{}); !errors.As(err, &denied) {
+		t.Fatalf("DescribeResourcePolicy as a member with no policy set: got %T (%v), want *AccessDeniedException", err, err)
+	}
+
+	// --- management delegates to one of the two members ---
+	delegation := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":` +
+		`{"AWS":"arn:aws:iam::` + delegated + `:root"},"Action":"organizations:DescribePolicy","Resource":"*"}]}`
+	put, err := mgmt.PutResourcePolicy(ctx, &organizations.PutResourcePolicyInput{
+		Content: aws.String(delegation),
+	})
+	if err != nil {
+		t.Fatalf("PutResourcePolicy as management: %v", err)
+	}
+	wantID := aws.ToString(put.ResourcePolicy.ResourcePolicySummary.Id)
+	wantARN := aws.ToString(put.ResourcePolicy.ResourcePolicySummary.Arn)
+
+	// The delegated member reads the identical document. Not an equivalent one: the
+	// same Content, Id and Arn, because a tool that reads the policy to decide what
+	// it may do has to see what management actually set.
+	got, err := delegatedClient.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{})
+	if err != nil {
+		t.Fatalf("DescribeResourcePolicy as the delegated member: %v", err)
+	}
+	if content := aws.ToString(got.ResourcePolicy.Content); content != delegation {
+		t.Errorf("the delegated member reads Content %q, want the document management put", content)
+	}
+	if id := aws.ToString(got.ResourcePolicy.ResourcePolicySummary.Id); id != wantID {
+		t.Errorf("the delegated member reads Id %q, want %q", id, wantID)
+	}
+	if arn := aws.ToString(got.ResourcePolicy.ResourcePolicySummary.Arn); arn != wantARN {
+		t.Errorf("the delegated member reads Arn %q, want %q", arn, wantARN)
+	}
+
+	// The member the policy does not name is still denied, so the delegation is what
+	// grants the read rather than membership.
+	if _, err := outsiderClient.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{}); !errors.As(err, &denied) {
+		t.Fatalf("DescribeResourcePolicy as the undelegated member: got %T (%v), want *AccessDeniedException", err, err)
+	}
+
+	// --- the writes stay management-only ---
+	//
+	// Reading a delegation does not confer the ability to rewrite it. A member that
+	// could would be able to delegate itself anything.
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "PutResourcePolicy as the delegated member",
+			call: func() error {
+				_, err := delegatedClient.PutResourcePolicy(ctx, &organizations.PutResourcePolicyInput{
+					Content: aws.String(`{"Version":"2012-10-17","Statement":[]}`),
+				})
+				return err
+			},
+		},
+		{
+			name: "DeleteResourcePolicy as the delegated member",
+			call: func() error {
+				_, err := delegatedClient.DeleteResourcePolicy(ctx, &organizations.DeleteResourcePolicyInput{})
+				return err
+			},
+		},
+	} {
+		if err := tc.call(); !errors.As(err, &denied) {
+			t.Errorf("%s: got %T (%v), want *AccessDeniedException", tc.name, err, err)
+		}
+	}
+
+	// And the document management set is untouched by those attempts.
+	after, err := mgmt.DescribeResourcePolicy(ctx, &organizations.DescribeResourcePolicyInput{})
+	if err != nil {
+		t.Fatalf("DescribeResourcePolicy as management after the refused writes: %v", err)
+	}
+	if content := aws.ToString(after.ResourcePolicy.Content); content != delegation {
+		t.Errorf("the resource policy is %q after two refused member writes, want it unchanged", content)
+	}
+}
+
+// TestJourney_OrganizationsCloseAccount is #625 through the SDK: the teardown half
+// of the vending lifecycle.
+//
+// The property worth a journey is what closing does *not* do. A cleanup tool closes
+// accounts to make room and then vends again; if a closed account left the
+// organization, that tool would appear to work here and fail against AWS, where the
+// account keeps counting against the quota until it is permanently closed.
+func TestJourney_OrganizationsCloseAccount(t *testing.T) {
+	ts := emulator.StartTestServerWithAccounts(t, journeyAccountID)
+
+	cfg, err := journeyConfigAs(ts, journeyAccountID)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	ctx := context.Background()
+	orgs := organizations.NewFromConfig(cfg, func(o *organizations.Options) { o.RetryMaxAttempts = 1 })
+
+	member := journeyVendAccount(t, ctx, orgs, "doomed", "doomed@example.com")
+
+	// CloseAccount has no output shape, so the SDK's output struct carries nothing
+	// to assert on. The absence of an error is the whole success.
+	if _, err := orgs.CloseAccount(ctx, &organizations.CloseAccountInput{
+		AccountId: aws.String(member),
+	}); err != nil {
+		t.Fatalf("CloseAccount: %v", err)
+	}
+
+	// The documented sequence, read the way AWS documents reading it. The in-flight
+	// status appears on the first poll and nowhere else: with no output shape, a
+	// consumer's PENDING_CLOSURE branch has only this to observe.
+	if status := journeyOrgAccountStatus(t, ctx, orgs, member); status != orgtypes.AccountStatusPendingClosure {
+		t.Errorf("the first DescribeAccount reads %q, want PENDING_CLOSURE", status)
+	}
+	for i := range 2 {
+		if status := journeyOrgAccountStatus(t, ctx, orgs, member); status != orgtypes.AccountStatusSuspended {
+			t.Fatalf("DescribeAccount poll %d reads %q, want SUSPENDED", i+2, status)
+		}
+	}
+
+	// Still in the organization, and reported through the listing with the same
+	// status the Describe gives — a caller polling either one must not contradict a
+	// caller polling the other.
+	listed, err := orgs.ListAccounts(ctx, &organizations.ListAccountsInput{})
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	found := false
+	for _, a := range listed.Accounts {
+		if aws.ToString(a.Id) != member {
+			continue
+		}
+		found = true
+		if a.Status != orgtypes.AccountStatusSuspended {
+			t.Errorf("ListAccounts reports the closed account as %q, want SUSPENDED", a.Status)
+		}
+	}
+	if !found {
+		t.Errorf("ListAccounts dropped the closed account %s; a closed account stays in the organization", member)
+	}
+	if len(listed.Accounts) != 2 {
+		t.Errorf("ListAccounts returned %d accounts after a closure, want 2", len(listed.Accounts))
+	}
+
+	// --- the re-run a teardown script performs ---
+	var alreadyClosed *orgtypes.AccountAlreadyClosedException
+	if _, err := orgs.CloseAccount(ctx, &organizations.CloseAccountInput{
+		AccountId: aws.String(member),
+	}); !errors.As(err, &alreadyClosed) {
+		t.Errorf("closing an already-closed account: got %T (%v), want *AccountAlreadyClosedException", err, err)
+	}
+
+	// The management account cannot be closed through this API at all, which is the
+	// refusal a script that closes "every account it can list" runs into.
+	var constraint *orgtypes.ConstraintViolationException
+	if _, err := orgs.CloseAccount(ctx, &organizations.CloseAccountInput{
+		AccountId: aws.String(journeyAccountID),
+	}); !errors.As(err, &constraint) {
+		t.Fatalf("closing the management account: got %T (%v), want *ConstraintViolationException", err, err)
+	} else if msg := constraint.ErrorMessage(); !strings.Contains(msg, "CANNOT_CLOSE_MANAGEMENT_ACCOUNT") {
+		// The reason rides in the message because the JSON-RPC error document has no
+		// member for it, and this exception covers several unrelated limits.
+		t.Errorf("the refusal message is %q; it must name CANNOT_CLOSE_MANAGEMENT_ACCOUNT", msg)
+	}
+}
+
+// journeyVendAccount vends an account through CreateAccount and returns its ID,
+// polling the request to completion the way a vending tool does.
+func journeyVendAccount(t *testing.T, ctx context.Context, orgs *organizations.Client, name, email string) string {
+	t.Helper()
+	created, err := orgs.CreateAccount(ctx, &organizations.CreateAccountInput{
+		AccountName: aws.String(name),
+		Email:       aws.String(email),
+	})
+	if err != nil {
+		t.Fatalf("CreateAccount(%s): %v", name, err)
+	}
+	status, err := orgs.DescribeCreateAccountStatus(ctx, &organizations.DescribeCreateAccountStatusInput{
+		CreateAccountRequestId: created.CreateAccountStatus.Id,
+	})
+	if err != nil {
+		t.Fatalf("DescribeCreateAccountStatus(%s): %v", name, err)
+	}
+	if status.CreateAccountStatus.State != orgtypes.CreateAccountStateSucceeded {
+		t.Fatalf("vending %s settled at %q, want SUCCEEDED", name, status.CreateAccountStatus.State)
+	}
+	id := aws.ToString(status.CreateAccountStatus.AccountId)
+	if id == "" {
+		t.Fatalf("vending %s succeeded with no AccountId", name)
+	}
+	return id
+}
+
+// journeyOrgAccountStatus reads one account's status through DescribeAccount,
+// which is the operation AWS documents as the way to watch a closure.
+func journeyOrgAccountStatus(t *testing.T, ctx context.Context, orgs *organizations.Client, accountID string) orgtypes.AccountStatus {
+	t.Helper()
+	got, err := orgs.DescribeAccount(ctx, &organizations.DescribeAccountInput{
+		AccountId: aws.String(accountID),
+	})
+	if err != nil {
+		t.Fatalf("DescribeAccount(%s): %v", accountID, err)
+	}
+	return got.Account.Status
 }

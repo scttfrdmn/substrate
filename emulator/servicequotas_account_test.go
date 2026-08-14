@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/scttfrdmn/substrate/emulator"
@@ -34,8 +35,8 @@ const sqSecondAccount = "444455556666"
 //
 // Two accounts each file one increase, and each must see only its own. Before the
 // fix both saw both, and a consumer reading
-// ListRequestedServiceQuotaChangesByService to decide whether it had already asked
-// for a raise would find another account's request and skip filing its own.
+// ListRequestedServiceQuotaChangeHistory to decide whether it had already asked for
+// a raise would find another account's request and skip filing its own.
 func TestServiceQuotas_IncreasesAreFiledUnderTheCaller(t *testing.T) {
 	ts := emulator.StartTestServerWithAccounts(t, sqSecondAccount)
 
@@ -77,11 +78,11 @@ func TestServiceQuotas_IncreasesAreFiledUnderTheCaller(t *testing.T) {
 			RequestedQuotas []requestedQuota `json:"RequestedQuotas"`
 		}
 		status, code := decodeAWSResponse(t, signedRequest(t, ts, sqTarget, account,
-			"ListRequestedServiceQuotaChangesByService", map[string]any{
+			"ListRequestedServiceQuotaChangeHistory", map[string]any{
 				"ServiceCode": "organizations",
 			}), &listed)
 		if status != http.StatusOK {
-			t.Fatalf("ListRequestedServiceQuotaChangesByService as %s: %d %s", account, status, code)
+			t.Fatalf("ListRequestedServiceQuotaChangeHistory as %s: %d %s", account, status, code)
 		}
 		if len(listed.RequestedQuotas) != 1 {
 			t.Fatalf("as %s: %d requests listed, want 1 — the other account's request leaked",
@@ -146,6 +147,9 @@ func TestServiceQuotas_UnattributedCallerKeepsThePlaceholder(t *testing.T) {
 			QuotaCode string `json:"QuotaCode"`
 		} `json:"RequestedQuotas"`
 	}
+	// Deliberately the legacy name, which is the one this handler shipped under and
+	// which no SDK can send (#636). It is kept as an alias precisely so a fixture
+	// like this one keeps working, so something has to hold it.
 	status, code := decodeAWSResponse(t,
 		makeServiceQuotasRequest(t, ts, "ListRequestedServiceQuotaChangesByService", map[string]interface{}{
 			"ServiceCode": "organizations",
@@ -155,5 +159,83 @@ func TestServiceQuotas_UnattributedCallerKeepsThePlaceholder(t *testing.T) {
 	}
 	if len(listed.RequestedQuotas) != 1 || listed.RequestedQuotas[0].QuotaCode != "L-E619E033" {
 		t.Errorf("an unsigned caller listed %+v, want the one request it just filed", listed.RequestedQuotas)
+	}
+}
+
+// TestServiceQuotas_ChangeHistoryFilters is #636: the operation an SDK can reach,
+// and the filters it accepts.
+//
+// The handler shipped as ListRequestedServiceQuotaChangesByService, which is not an
+// operation the Service Quotas API has — the 2019-06-24 model declares
+// ListRequestedServiceQuotaChangeHistory and …ChangeHistoryByQuota. So every real
+// SDK call answered InvalidAction while the unit tests, which name the operation
+// themselves, stayed green. The two names must reach the same handler, and the
+// Status filter has to narrow: a caller asking for DENIED that is handed a PENDING
+// record reads an outcome the service never reported.
+func TestServiceQuotas_ChangeHistoryFilters(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	for _, svc := range []string{"organizations", "lambda"} {
+		resp := makeServiceQuotasRequest(t, ts, "RequestServiceQuotaIncrease", map[string]interface{}{
+			"ServiceCode":  svc,
+			"QuotaCode":    map[string]string{"organizations": "L-E619E033", "lambda": "L-B99A9384"}[svc],
+			"DesiredValue": float64(50),
+		})
+		if status, code := decodeAWSResponse(t, resp, nil); status != http.StatusOK {
+			t.Fatalf("RequestServiceQuotaIncrease(%s): %d %s", svc, status, code)
+		}
+	}
+
+	list := func(t *testing.T, operation string, input map[string]interface{}) []string {
+		t.Helper()
+		var out struct {
+			RequestedQuotas []struct {
+				ServiceCode string `json:"ServiceCode"`
+			} `json:"RequestedQuotas"`
+		}
+		status, code := decodeAWSResponse(t, makeServiceQuotasRequest(t, ts, operation, input), &out)
+		if status != http.StatusOK {
+			t.Fatalf("%s%v: %d %s", operation, input, status, code)
+		}
+		codes := make([]string, 0, len(out.RequestedQuotas))
+		for _, q := range out.RequestedQuotas {
+			codes = append(codes, q.ServiceCode)
+		}
+		slices.Sort(codes)
+		return codes
+	}
+
+	tests := []struct {
+		name  string
+		input map[string]interface{}
+		want  []string
+	}{
+		{"no filter lists both", map[string]interface{}{}, []string{"lambda", "organizations"}},
+		{"service narrows", map[string]interface{}{"ServiceCode": "lambda"}, []string{"lambda"}},
+		{"status matches", map[string]interface{}{"Status": "PENDING"}, []string{"lambda", "organizations"}},
+		{"status excludes", map[string]interface{}{"Status": "DENIED"}, []string{}},
+		{
+			"service and status together",
+			map[string]interface{}{"ServiceCode": "organizations", "Status": "PENDING"},
+			[]string{"organizations"},
+		},
+		{
+			"a service with no request is empty, not everything",
+			map[string]interface{}{"ServiceCode": "s3"},
+			[]string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := list(t, "ListRequestedServiceQuotaChangeHistory", tt.input)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("listed %v, want %v", got, tt.want)
+			}
+			// The legacy name is an alias, not a second implementation: whatever the
+			// real operation answers, it answers.
+			if legacy := list(t, "ListRequestedServiceQuotaChangesByService", tt.input); !slices.Equal(legacy, got) {
+				t.Errorf("the legacy name listed %v, the real one %v", legacy, got)
+			}
+		})
 	}
 }

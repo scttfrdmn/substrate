@@ -150,11 +150,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not where it looked.
 
 ### Fixed
+- **`make test` no longer flakes on a reused Lambda port** (#634). The two
+  `TestInvokePOST` tests that stand in a fake runtime interface emulator asked
+  `findFreePort` for a number and then bound it, and `findFreePort` closes its own
+  listener before returning — so between the close and the re-bind the port belonged to
+  nobody, and a sibling `t.Parallel()` test could be handed the same one. The loser got
+  `bind: address already in use`. They now bind port 0 and read the port back off the
+  live listener, which is atomic. `findFreePort` itself is unchanged: its callers hand
+  the number to Docker's `-p`, which has to do the binding, so the gap is inherent
+  there and only a test could avoid it.
+- **The Service Quotas increase history is reachable from an SDK at all** (#636).
+  The operation was routed as `ListRequestedServiceQuotaChangesByService`, a name the
+  Service Quotas API does not have: the 2019-06-24 model declares
+  `ListRequestedServiceQuotaChangeHistory` and
+  `ListRequestedServiceQuotaChangeHistoryByQuota`, and nothing of that shape. So the
+  handler was reachable only by a hand-built `X-Amz-Target` — exactly what the plugin's
+  unit tests supply, which is why they stayed green while every real SDK and CLI call
+  answered `InvalidAction`. Found by the #624 end-to-end journey, the same class of gap
+  as #561 and #610.
+
+  The real name is now routed and the invented one kept as an alias, so a fixture that
+  already drives it does not break. The `Status` filter the model declares is honored
+  rather than ignored: a caller narrowing its history query to `DENIED` was handed the
+  `PENDING` records back, and would read an outcome the service never reported.
+  `…ChangeHistoryByQuota` remains unmodelled, and the docs say so.
 - **A Service Quotas increase is now filed under the account that requested it**
   (#624). `ServiceQuotasPlugin.HandleRequest` discarded its `*RequestContext` and
   the three quota-increase operations hardcoded the literal `000000000000`, so two
   accounts sharing one emulator shared one pile of requests. A consumer reading
-  `ListRequestedServiceQuotaChangesByService` to decide whether it had already asked
+  `ListRequestedServiceQuotaChangeHistory` to decide whether it had already asked
   for a raise would find *another* account's request and skip filing its own, and
   `GetRequestedServiceQuotaChange` would hand over a request by ID to any caller.
 

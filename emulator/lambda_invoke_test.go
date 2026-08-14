@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -377,14 +376,18 @@ func startFakeRIE(t *testing.T, body, functionError string) int {
 		_, _ = w.Write([]byte(body))
 	})
 
-	port, err := emulator.FindFreePort()
-	require.NoError(t, err)
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	// Bind port 0 and read the port back off the live listener, rather than asking
+	// FindFreePort and re-binding what it named. FindFreePort closes its listener
+	// before returning the number, so between the close and the re-bind the port is
+	// free for anything else to take — including a sibling t.Parallel() test that
+	// FindFreePort then hands the very same number. That is the "bind: address
+	// already in use" flake these two tests hit under -race (#634).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return port
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
 // TestInvokePOST_PropagatesFunctionErrorHeader asserts invokePOST surfaces the
