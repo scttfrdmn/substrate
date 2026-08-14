@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replays with the same credentials in it.
 
 ### Fixed
+- **A Service Quotas increase is now filed under the account that requested it**
+  (#624). `ServiceQuotasPlugin.HandleRequest` discarded its `*RequestContext` and
+  the three quota-increase operations hardcoded the literal `000000000000`, so two
+  accounts sharing one emulator shared one pile of requests. A consumer reading
+  `ListRequestedServiceQuotaChangesByService` to decide whether it had already asked
+  for a raise would find *another* account's request and skip filing its own, and
+  `GetRequestedServiceQuotaChange` would hand over a request by ID to any caller.
+
+  The four read-only operations still take no account, deliberately: the quota table
+  is per-service and identical for every caller, so threading one through them would
+  imply a per-account value substrate does not model and nothing can set.
+
+  An unattributed request — no `Authorization` header — still lands under
+  `000000000000`, because that is what substrate's own parser answers for one. The
+  placeholder is the fallback rather than the default, so existing fixtures that
+  file an increase without signing keep working.
 - **A member account now sees the organization it belongs to** (#623). All
   Organizations state is keyed by the caller's account, and `ensureOrganization`
   auto-created an entire organization — root, management account, `FullAWSAccess` —

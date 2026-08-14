@@ -1,15 +1,7 @@
 package emulator_test
 
 import (
-	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -44,108 +36,18 @@ func orgTestNow() time.Time {
 	return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 }
 
+// orgsTarget is the Organizations JSON-target endpoint. The signing name and the
+// host label are both the plain service name here, unlike Service Quotas.
+var orgsTarget = signedRequestTarget{
+	host:        "organizations.us-east-1.amazonaws.com",
+	target:      "Organizations_20161128",
+	signingName: "organizations",
+}
+
 // orgSignedRequest posts an Organizations operation signed as the given account.
-//
-// The account must have been registered with the server, either by
-// StartTestServerWithAccounts or by RegisterAccount; an unregistered key is
-// InvalidClientTokenId 403 before any plugin sees it.
 func orgSignedRequest(t *testing.T, ts *emulator.TestServer, account, op string, body any) *http.Response {
 	t.Helper()
-
-	creds, ok := ts.CredentialsFor(account)
-	if !ok {
-		t.Fatalf("no credential registered for account %s", account)
-	}
-
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal %s: %v", op, err)
-	}
-
-	const dateTime = "20260101T120000Z"
-	host := "organizations.us-east-1.amazonaws.com"
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("build %s request: %v", op, err)
-	}
-	req.Host = host
-	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
-	req.Header.Set("X-Amz-Target", "Organizations_20161128."+op)
-	req.Header.Set("X-Amz-Date", dateTime)
-	req.Header.Set("Authorization", orgSigV4Header(
-		host, dateTime, data, creds.AccessKeyID, creds.SecretAccessKey))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("orgs request %s as %s: %v", op, account, err)
-	}
-	return resp
-}
-
-// orgSigV4Header computes a valid SigV4 Authorization header for a POST to "/"
-// with the host and x-amz-date headers signed.
-//
-// This duplicates the algorithm rather than calling into the emulator, so a
-// mistake in the emulator's own signing cannot make these tests pass by agreeing
-// with it.
-func orgSigV4Header(host, dateTime string, body []byte, accessKey, secretKey string) string {
-	const (
-		region        = "us-east-1"
-		service       = "organizations"
-		signedHeaders = "host;x-amz-date"
-	)
-	date := dateTime[:8]
-
-	bodyHash := sha256.Sum256(body)
-	canonicalReq := strings.Join([]string{
-		http.MethodPost,
-		"/",
-		"",
-		"host:" + host + "\n" + "x-amz-date:" + dateTime + "\n",
-		signedHeaders,
-		hex.EncodeToString(bodyHash[:]),
-	}, "\n")
-
-	canonicalHash := sha256.Sum256([]byte(canonicalReq))
-	credScope := date + "/" + region + "/" + service + "/aws4_request"
-	stringToSign := "AWS4-HMAC-SHA256\n" + dateTime + "\n" + credScope + "\n" +
-		hex.EncodeToString(canonicalHash[:])
-
-	mac := func(key, data []byte) []byte {
-		h := hmac.New(sha256.New, key)
-		h.Write(data)
-		return h.Sum(nil)
-	}
-	signing := mac(mac(mac(mac([]byte("AWS4"+secretKey), []byte(date)), []byte(region)),
-		[]byte(service)), []byte("aws4_request"))
-
-	return fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		accessKey, credScope, signedHeaders, hex.EncodeToString(mac(signing, []byte(stringToSign))))
-}
-
-// orgDecode decodes an Organizations response into out, returning the status and
-// the error code a refusal carries.
-func orgDecode(t *testing.T, resp *http.Response, out any) (int, string) {
-	t.Helper()
-	defer resp.Body.Close() //nolint:errcheck
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	var errShape struct {
-		Type    string `json:"__type"`
-		Message string `json:"message"`
-	}
-	if unmarshalErr := json.Unmarshal(raw, &errShape); unmarshalErr == nil && errShape.Type != "" {
-		return resp.StatusCode, errShape.Type
-	}
-	if out != nil {
-		if unmarshalErr := json.Unmarshal(raw, out); unmarshalErr != nil {
-			t.Fatalf("decode %s: %v", raw, unmarshalErr)
-		}
-	}
-	return resp.StatusCode, ""
+	return signedRequest(t, ts, orgsTarget, account, op, body)
 }
 
 // orgVendMember creates an account through CreateAccount, polls the request to
@@ -161,7 +63,7 @@ func orgVendMember(t *testing.T, ts *emulator.TestServer, name, email string) st
 	var created struct {
 		CreateAccountStatus emulator.OrgCreateAccountStatus `json:"CreateAccountStatus"`
 	}
-	status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount, "CreateAccount",
+	status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount, "CreateAccount",
 		map[string]any{"AccountName": name, "Email": email}), &created)
 	if status != http.StatusOK {
 		t.Fatalf("CreateAccount: %d %s", status, code)
@@ -171,7 +73,7 @@ func orgVendMember(t *testing.T, ts *emulator.TestServer, name, email string) st
 	var describe struct {
 		CreateAccountStatus emulator.OrgCreateAccountStatus `json:"CreateAccountStatus"`
 	}
-	status, code = orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount, "DescribeCreateAccountStatus",
+	status, code = decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount, "DescribeCreateAccountStatus",
 		map[string]any{"CreateAccountRequestId": requestID}), &describe)
 	if status != http.StatusOK {
 		t.Fatalf("DescribeCreateAccountStatus: %d %s", status, code)
@@ -205,7 +107,7 @@ func TestOrganizations_MemberSeesManagementsOrganization(t *testing.T) {
 	var mgmt struct {
 		Organization emulator.Organization `json:"Organization"`
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"DescribeOrganization", map[string]any{}), &mgmt); status != http.StatusOK {
 		t.Fatalf("DescribeOrganization as management: %d %s", status, code)
 	}
@@ -215,7 +117,7 @@ func TestOrganizations_MemberSeesManagementsOrganization(t *testing.T) {
 	var got struct {
 		Organization emulator.Organization `json:"Organization"`
 	}
-	status, code := orgDecode(t, orgSignedRequest(t, ts, member,
+	status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, member,
 		"DescribeOrganization", map[string]any{}), &got)
 	if status != http.StatusOK {
 		t.Fatalf("DescribeOrganization as the member: %d %s", status, code)
@@ -236,11 +138,11 @@ func TestOrganizations_MemberSeesManagementsOrganization(t *testing.T) {
 	var mgmtRoots, memberRoots struct {
 		Roots []emulator.OrgRoot `json:"Roots"`
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"ListRoots", map[string]any{}), &mgmtRoots); status != http.StatusOK {
 		t.Fatalf("ListRoots as management: %d %s", status, code)
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, member,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, member,
 		"ListRoots", map[string]any{}), &memberRoots); status != http.StatusOK {
 		t.Fatalf("ListRoots as the member: %d %s", status, code)
 	}
@@ -259,7 +161,7 @@ func TestOrganizations_MemberSeesManagementsOrganization(t *testing.T) {
 	var listed struct {
 		Accounts []emulator.OrgAccount `json:"Accounts"`
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, member,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, member,
 		"ListAccounts", map[string]any{}), &listed); status != http.StatusOK {
 		t.Fatalf("ListAccounts as the member: %d %s", status, code)
 	}
@@ -288,11 +190,11 @@ func TestOrganizations_UnknownAccountStillAutoCreates(t *testing.T) {
 	var mgmt, outsider struct {
 		Organization emulator.Organization `json:"Organization"`
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"DescribeOrganization", map[string]any{}), &mgmt); status != http.StatusOK {
 		t.Fatalf("DescribeOrganization as management: %d %s", status, code)
 	}
-	status, code := orgDecode(t, orgSignedRequest(t, ts, orgOutsiderAccount,
+	status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgOutsiderAccount,
 		"DescribeOrganization", map[string]any{}), &outsider)
 	if status != http.StatusOK {
 		t.Fatalf("DescribeOrganization as an account in no organization: %d %s — the auto-create path must still work",
@@ -399,7 +301,7 @@ func TestOrganizations_ResourcePolicy_MemberAsymmetry(t *testing.T) {
 
 	// Before any policy exists, management gets the absence — the ordinary answer,
 	// since most organizations have no resource policy.
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"DescribeResourcePolicy", map[string]any{}), nil); status != http.StatusBadRequest ||
 		code != "ResourcePolicyNotFoundException" {
 		t.Fatalf("DescribeResourcePolicy with no policy set: %d %q, want 400/ResourcePolicyNotFoundException", status, code)
@@ -407,7 +309,7 @@ func TestOrganizations_ResourcePolicy_MemberAsymmetry(t *testing.T) {
 
 	// A member gets denied rather than the absence, so it cannot use this
 	// operation to learn whether the organization has a policy at all.
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, plain,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, plain,
 		"DescribeResourcePolicy", map[string]any{}), nil); status != http.StatusForbidden ||
 		code != "AccessDeniedException" {
 		t.Fatalf("DescribeResourcePolicy as a member with no policy set: %d %q, want 403/AccessDeniedException", status, code)
@@ -416,7 +318,7 @@ func TestOrganizations_ResourcePolicy_MemberAsymmetry(t *testing.T) {
 	var put struct {
 		ResourcePolicy emulator.OrgResourcePolicy `json:"ResourcePolicy"`
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"PutResourcePolicy", map[string]any{"Content": orgDelegationPolicy(delegated)}),
 		&put); status != http.StatusOK {
 		t.Fatalf("PutResourcePolicy as management: %d %s", status, code)
@@ -428,7 +330,7 @@ func TestOrganizations_ResourcePolicy_MemberAsymmetry(t *testing.T) {
 	var got struct {
 		ResourcePolicy emulator.OrgResourcePolicy `json:"ResourcePolicy"`
 	}
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, delegated,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, delegated,
 		"DescribeResourcePolicy", map[string]any{}), &got); status != http.StatusOK {
 		t.Fatalf("DescribeResourcePolicy as the delegated member: %d %s", status, code)
 	}
@@ -442,7 +344,7 @@ func TestOrganizations_ResourcePolicy_MemberAsymmetry(t *testing.T) {
 	// operations takes an input naming an organization, so a caller can only ever
 	// ask about its own and "an account in no relationship to this organization"
 	// has no way to pose the question.
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, plain,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, plain,
 		"DescribeResourcePolicy", map[string]any{}), nil); status != http.StatusForbidden ||
 		code != "AccessDeniedException" {
 		t.Fatalf("DescribeResourcePolicy as an undelegated member: %d %q, want 403/AccessDeniedException", status, code)
@@ -450,7 +352,7 @@ func TestOrganizations_ResourcePolicy_MemberAsymmetry(t *testing.T) {
 
 	// Management still reads it, which is what makes the member's denial an
 	// asymmetry rather than the policy having gone missing.
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"DescribeResourcePolicy", map[string]any{}), &got); status != http.StatusOK {
 		t.Fatalf("DescribeResourcePolicy as management after the put: %d %s", status, code)
 	}
@@ -471,7 +373,7 @@ func TestOrganizations_ResourcePolicy_WritesAreManagementOnly(t *testing.T) {
 	ts := emulator.StartTestServerWithAccounts(t)
 
 	delegated := orgVendMember(t, ts, "delegated", "delegated@example.com")
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"PutResourcePolicy", map[string]any{"Content": orgDelegationPolicy(delegated)}),
 		nil); status != http.StatusOK {
 		t.Fatalf("PutResourcePolicy as management: %d %s", status, code)
@@ -482,7 +384,7 @@ func TestOrganizations_ResourcePolicy_WritesAreManagementOnly(t *testing.T) {
 		if op == "PutResourcePolicy" {
 			body["Content"] = orgDelegationPolicy(delegated)
 		}
-		status, code := orgDecode(t, orgSignedRequest(t, ts, delegated, op, body), nil)
+		status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, delegated, op, body), nil)
 		if status != http.StatusForbidden || code != "AccessDeniedException" {
 			t.Errorf("%s as a delegated member: %d %q, want 403/AccessDeniedException", op, status, code)
 		}
@@ -490,7 +392,7 @@ func TestOrganizations_ResourcePolicy_WritesAreManagementOnly(t *testing.T) {
 
 	// And management's own delete still works, so the refusals above are about the
 	// caller rather than the operation being broken.
-	if status, code := orgDecode(t, orgSignedRequest(t, ts, orgManagementAccount,
+	if status, code := decodeAWSResponse(t, orgSignedRequest(t, ts, orgManagementAccount,
 		"DeleteResourcePolicy", map[string]any{}), nil); status != http.StatusOK {
 		t.Fatalf("DeleteResourcePolicy as management: %d %s", status, code)
 	}

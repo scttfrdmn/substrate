@@ -39,7 +39,13 @@ func (p *ServiceQuotasPlugin) Initialize(_ context.Context, cfg PluginConfig) er
 func (p *ServiceQuotasPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a Service Quotas JSON-protocol request.
-func (p *ServiceQuotasPlugin) HandleRequest(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+//
+// The three quota-increase operations take the caller's account, because a quota
+// increase belongs to the account that filed it. The four read-only ones do not:
+// the quota table is per-service and identical for every caller, so threading an
+// account into them would imply a per-account value that substrate does not model
+// and nothing can set.
+func (p *ServiceQuotasPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	switch req.Operation {
 	case "ListServices":
 		return p.listServices(req)
@@ -50,11 +56,11 @@ func (p *ServiceQuotasPlugin) HandleRequest(_ *RequestContext, req *AWSRequest) 
 	case "GetAWSDefaultServiceQuota":
 		return p.getAWSDefaultServiceQuota(req)
 	case "RequestServiceQuotaIncrease":
-		return p.requestServiceQuotaIncrease(req)
+		return p.requestServiceQuotaIncrease(sqAccountID(reqCtx), req)
 	case "ListRequestedServiceQuotaChangesByService":
-		return p.listRequestedServiceQuotaChangesByService(req)
+		return p.listRequestedServiceQuotaChangesByService(sqAccountID(reqCtx), req)
 	case "GetRequestedServiceQuotaChange":
-		return p.getRequestedServiceQuotaChange(req)
+		return p.getRequestedServiceQuotaChange(sqAccountID(reqCtx), req)
 	default:
 		return nil, &AWSError{
 			Code:       "InvalidAction",
@@ -62,6 +68,20 @@ func (p *ServiceQuotasPlugin) HandleRequest(_ *RequestContext, req *AWSRequest) 
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+}
+
+// sqAccountID returns the account a quota-increase record belongs to.
+//
+// A nil context, or one carrying no account, falls back to the same placeholder
+// every increase used to be filed under (#624). That is not a guess about the
+// caller: it is the account substrate's own parser assigns a request it cannot
+// attribute, so a plugin driven directly by a unit test keeps landing where it
+// always did rather than under "".
+func sqAccountID(reqCtx *RequestContext) string {
+	if reqCtx == nil || reqCtx.AccountID == "" {
+		return fallbackAccountID
+	}
+	return reqCtx.AccountID
 }
 
 // --- State helpers -----------------------------------------------------------
@@ -177,7 +197,7 @@ func (p *ServiceQuotasPlugin) getAWSDefaultServiceQuota(req *AWSRequest) (*AWSRe
 	return p.getServiceQuota(req)
 }
 
-func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(req *AWSRequest) (*AWSResponse, error) {
+func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(accountID string, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ServiceCode  string  `json:"ServiceCode"`
 		QuotaCode    string  `json:"QuotaCode"`
@@ -189,10 +209,6 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(req *AWSRequest) (*AWS
 	if input.ServiceCode == "" || input.QuotaCode == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "ServiceCode and QuotaCode are required", HTTPStatus: http.StatusBadRequest}
 	}
-
-	// Use a placeholder account ID since RequestContext is not passed here.
-	// The account ID will be pulled from req.AccountID if available in future.
-	accountID := "000000000000"
 
 	id := generateSQSMessageID() // reuse UUID generator
 
@@ -224,7 +240,7 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(req *AWSRequest) (*AWS
 	})
 }
 
-func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangesByService(req *AWSRequest) (*AWSResponse, error) {
+func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangesByService(accountID string, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ServiceCode string `json:"ServiceCode"`
 	}
@@ -232,7 +248,6 @@ func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangesByService(req *AWS
 		_ = json.Unmarshal(req.Body, &input)
 	}
 
-	accountID := "000000000000"
 	ctx := context.Background()
 
 	ids, err := p.loadIncreaseIDs(ctx, accountID)
@@ -259,7 +274,7 @@ func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangesByService(req *AWS
 	})
 }
 
-func (p *ServiceQuotasPlugin) getRequestedServiceQuotaChange(req *AWSRequest) (*AWSResponse, error) {
+func (p *ServiceQuotasPlugin) getRequestedServiceQuotaChange(accountID string, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		RequestID string `json:"RequestId"`
 	}
@@ -267,7 +282,6 @@ func (p *ServiceQuotasPlugin) getRequestedServiceQuotaChange(req *AWSRequest) (*
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	accountID := "000000000000"
 	qi, err := p.loadIncrease(context.Background(), accountID, input.RequestID)
 	if err != nil {
 		return nil, err
