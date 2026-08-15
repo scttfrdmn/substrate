@@ -340,6 +340,14 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/account/region-opt-status", s.handleAccountSeedRegionOptStatus)
 	r.Delete("/v1/account/region-opt-status", s.handleAccountClearRegionOptStatus)
 
+	// AWS Config control-plane endpoints (#580).
+	r.Post("/v1/config/recorder-status", s.handleConfigSeedRecorderStatus)
+	r.Delete("/v1/config/recorder-status", s.handleConfigClearRecorderStatus)
+	r.Post("/v1/config/delivery-status", s.handleConfigSeedDeliveryStatus)
+	r.Delete("/v1/config/delivery-status", s.handleConfigClearDeliveryStatus)
+	r.Post("/v1/config/delivery-policy", s.handleConfigSeedDeliveryPolicy)
+	r.Delete("/v1/config/delivery-policy", s.handleConfigClearDeliveryPolicy)
+
 	// Lambda control-plane endpoints (#393).
 	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
 	r.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)

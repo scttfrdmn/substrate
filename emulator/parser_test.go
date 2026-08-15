@@ -860,6 +860,63 @@ func TestParseAWSRequest_OrganizationsTargetPrefix(t *testing.T) {
 	}
 }
 
+// TestParseAWSRequest_ConfigResolvesByEveryPath pins all three ways a Config
+// request identifies itself, because each is taken by a different caller and only
+// one of them needed an alias.
+//
+// "StarlingDoveService" is Config's target prefix — an internal code-name, like
+// TrentService for KMS — so it bears no resemblance to the endpoint prefix and
+// reduces to nothing on its own. The host and the SigV4 signing name already yield
+// "config" without help. Asserting all three together is what makes a future
+// refactor of any one path a failing test rather than a plugin that is registered,
+// green, and unreachable — the #561/#580 failure.
+func TestParseAWSRequest_ConfigResolvesByEveryPath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("target prefix", func(t *testing.T) {
+		t.Parallel()
+		for _, target := range []string{
+			"StarlingDoveService.PutConfigurationRecorder",
+			"StarlingDoveService.DescribeConfigurationRecorderStatus",
+			"StarlingDoveService.PutDeliveryChannel",
+		} {
+			t.Run(target, func(t *testing.T) {
+				t.Parallel()
+				r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+				r.Host = "localhost:4566"
+				r.Header.Set("X-Amz-Target", target)
+
+				req, _, err := emulator.ParseAWSRequest(r)
+				require.NoError(t, err)
+				assert.Equal(t, "config", req.Service)
+			})
+		}
+	})
+
+	t.Run("host", func(t *testing.T) {
+		t.Parallel()
+		r := httptest.NewRequest(http.MethodPost, "http://config.us-east-1.amazonaws.com/", nil)
+		r.Host = "config.us-east-1.amazonaws.com"
+
+		req, _, err := emulator.ParseAWSRequest(r)
+		require.NoError(t, err)
+		assert.Equal(t, "config", req.Service)
+	})
+
+	t.Run("sigv4 signing name", func(t *testing.T) {
+		t.Parallel()
+		r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+		r.Host = "localhost:4566"
+		r.Header.Set("Authorization",
+			"AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/config/aws4_request, "+
+				"SignedHeaders=host, Signature=fake")
+
+		req, _, err := emulator.ParseAWSRequest(r)
+		require.NoError(t, err)
+		assert.Equal(t, "config", req.Service)
+	})
+}
+
 func TestNormalizeS3VirtualHost(t *testing.T) {
 	tests := []struct {
 		host       string
