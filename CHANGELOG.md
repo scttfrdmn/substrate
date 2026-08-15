@@ -231,6 +231,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent, which denies; an absent key is the safe direction.
 
 ### Fixed
+- **`DeleteBucketPolicy` deleted the bucket, and every other S3 subresource call from a real
+  SDK was misrouted** (#656). S3 routes bucket-policy and ACL operations on a query-string
+  marker — `?policy`, `?acl` — and substrate compared that marker against the `"1"` sentinel
+  its own parser assigns to *bare* query keys. aws-sdk-go-v2 does not send a bare key: it
+  sends `?policy=`, a key with an **empty value**, which the sentinel is never applied to. So
+  the comparison failed on every request a real client made, and seven operations fell
+  through to their arm's default: `PutBucketPolicy` was handled as `CreateBucket` (answering
+  `409 BucketAlreadyExists`), `GetBucketPolicy` and `GetBucketAcl` as an object listing,
+  `PutBucketAcl` as `CreateBucket`, `PutObjectAcl` as `PutObject` — overwriting the object
+  with the ACL request's empty body — and `DeleteBucketPolicy` as **`DeleteBucket`**.
+
+  That last one is data loss, and it is why this is called out rather than filed as a routing
+  nit: a consumer clearing a bucket policy destroyed the bucket. On a bucket holding objects
+  the misroute at least surfaced as `BucketNotEmpty`; on an empty bucket it answered `204`,
+  byte for byte what a correct `DeleteBucketPolicy` returns, so nothing in the response
+  distinguished the two and only a later call revealed the bucket was gone. Anyone who ran
+  `DeleteBucketPolicy` against an affected version lost the bucket and its contents.
+
+  Every S3 unit test passed throughout. Each one hand-built `Params{"policy": "1"}` — the one
+  shape no client sends — so the suite asserted the routing worked for a request that never
+  arrives. The fix tests every subresource marker for **presence** and never for a value,
+  which is the invariant: a marker carries no information beyond being there, and its wire
+  shape is the client's choice, not substrate's. `list-type` is the sole exception and stays a
+  value test, because `2` genuinely selects `ListObjectsV2`. New coverage runs the markers
+  through `Server.ServeHTTP` in both shapes — the level at which they differ at all — asserts
+  no marker's value changes routing across five values a client would not send, and adds
+  end-to-end journeys through the real SDK, including one whose whole purpose is to reach the
+  silent case and assert that an emptied bucket is still standing after its policy is
+  cleared. This is the #446 class and the #561/#610/#636 class at once: a code path that only
+  a real client exercises cannot be pinned by a test that builds the request itself.
 - **Three `AWS::Config::*` CloudFormation resources reported `CREATE_COMPLETE` while creating
   nothing** (#97). `AWS::Config::ConfigRule` and `AWS::Config::ConfigurationRecorder` were stubs
   that stored a synthetic ARN and dispatched no API call; `AWS::Config::DeliveryChannel` fell

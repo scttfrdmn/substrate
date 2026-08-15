@@ -253,14 +253,27 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		return bucket, key, method
 	}
 
+	// Every subresource below is tested for **presence**, never for a particular
+	// value. A subresource marker carries no information beyond being there, and the
+	// shape it arrives in is not substrate's to choose: aws-sdk-go-v2 sends "?policy="
+	// — a key with an empty value — where the AWS docs write the bare "?policy", so
+	// parser.go's bare-key sentinel ("1") is never applied to it.
+	//
+	// Seven of these tests compared against that sentinel until #656, which made
+	// every SDK bucket-policy and ACL call fall through to the arm's default: a
+	// PutBucketPolicy became CreateBucket, a GetBucketPolicy became a list, and a
+	// DeleteBucketPolicy became **DeleteBucket** — a consumer clearing a policy
+	// destroyed the bucket and its contents. Unit tests could not catch it, because
+	// each built Params{"policy": "1"} by hand and so asserted the one shape no client
+	// sends; that is the #446 and #561/#610/#636 class both at once.
 	if key == "" {
 		// Bucket-level operations.
 		switch method {
 		case "PUT":
-			if req.Params["policy"] == "1" {
+			if _, ok := req.Params["policy"]; ok {
 				return bucket, "", "PutBucketPolicy"
 			}
-			if req.Params["acl"] == "1" {
+			if _, ok := req.Params["acl"]; ok {
 				return bucket, "", "PutBucketAcl"
 			}
 			if _, ok := req.Params["notification"]; ok {
@@ -282,7 +295,7 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		case "HEAD":
 			return bucket, "", "HeadBucket"
 		case "DELETE":
-			if req.Params["policy"] == "1" {
+			if _, ok := req.Params["policy"]; ok {
 				return bucket, "", "DeleteBucketPolicy"
 			}
 			if _, ok := req.Params["tagging"]; ok {
@@ -298,10 +311,10 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			return bucket, "", "DeleteBucket"
 		case "GET":
-			if req.Params["policy"] == "1" {
+			if _, ok := req.Params["policy"]; ok {
 				return bucket, "", "GetBucketPolicy"
 			}
-			if req.Params["acl"] == "1" {
+			if _, ok := req.Params["acl"]; ok {
 				return bucket, "", "GetBucketAcl"
 			}
 			if _, ok := req.Params["notification"]; ok {
@@ -348,7 +361,7 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		// GetObject, whose arm tested no uploadId at all).
 		switch method {
 		case "PUT":
-			if req.Params["acl"] == "1" {
+			if _, ok := req.Params["acl"]; ok {
 				return bucket, key, "PutObjectAcl"
 			}
 			if _, ok := req.Params["tagging"]; ok {
@@ -367,7 +380,7 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			return bucket, key, "PutObject"
 		case "GET":
-			if req.Params["acl"] == "1" {
+			if _, ok := req.Params["acl"]; ok {
 				return bucket, key, "GetObjectAcl"
 			}
 			if _, ok := req.Params["tagging"]; ok {
