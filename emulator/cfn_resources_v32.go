@@ -1,7 +1,7 @@
 package emulator
 
 // cfn_resources_v32.go holds the StackDeployer.deployResource helpers for
-// Athena, Backup, CloudTrail, the CodeSuite, Config, OpenSearch, Transfer and WAFv2.
+// Athena, Backup, CloudTrail, the CodeSuite, OpenSearch, Transfer and WAFv2.
 // The name records the substrate release that added them (v0.32.0) rather than the
 // services, because several releases touched overlapping services; the helpers here
 // follow the same pattern as those in cfn_deployer.go.
@@ -170,46 +170,10 @@ func (d *StackDeployer) deployCloudTrailTrail(
 	}, 0, nil
 }
 
-// deployConfigConfigRule creates an AWS Config rule stub.
-// The Ref value is the config rule name.
-func (d *StackDeployer) deployConfigConfigRule(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	_ string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "ConfigRuleName", logicalID, cctx)
-	// Config rule ARN suffix is "config-rule-{logicalID}".
-	arn := fmt.Sprintf("arn:aws:config:%s:%s:config-rule/config-rule-%s", cctx.region, cctx.accountID, logicalID)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
-	return DeployedResource{
-		LogicalID:  logicalID,
-		Type:       "AWS::Config::ConfigRule",
-		PhysicalID: name,
-		ARN:        arn,
-	}, 0, nil
-}
-
-// deployConfigConfigurationRecorder creates an AWS Config recorder stub.
-// The Ref value is the recorder name.
-func (d *StackDeployer) deployConfigConfigurationRecorder(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	_ string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "Name", logicalID, cctx)
-	arn := fmt.Sprintf("arn:aws:config:%s:%s:recorder/%s", cctx.region, cctx.accountID, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
-	return DeployedResource{
-		LogicalID:  logicalID,
-		Type:       "AWS::Config::ConfigurationRecorder",
-		PhysicalID: name,
-		ARN:        arn,
-	}, 0, nil
-}
+// The AWS::Config::ConfigRule and AWS::Config::ConfigurationRecorder stubs that
+// shipped here in v0.32.0 are gone: they now dispatch real Config operations from
+// cfn_resources_v101.go, which became possible once the service's handlers existed
+// (#580).
 
 // deployTransferServer creates an AWS Transfer Family server stub.
 // The Ref value is the server ID.

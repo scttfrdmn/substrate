@@ -231,6 +231,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent, which denies; an absent key is the safe direction.
 
 ### Fixed
+- **Three `AWS::Config::*` CloudFormation resources reported `CREATE_COMPLETE` while creating
+  nothing** (#97). `AWS::Config::ConfigRule` and `AWS::Config::ConfigurationRecorder` were stubs
+  that stored a synthetic ARN and dispatched no API call; `AWS::Config::DeliveryChannel` fell
+  through to the generic stub and did the same. All three now dispatch the real operations, so a
+  deployed recorder is visible to `DescribeConfigurationRecorders` and a deployed rule to
+  `DescribeConfigRules`. The delivery channel was scoped out of the plan for this release and is
+  included anyway: it was *already* a de-facto stub, so excluding it would have preserved the
+  defect for one of three siblings, and it is the only route to the recorder's documented
+  CloudFormation behaviour — "AWS CloudFormation starts the recorder as soon as the delivery
+  channel is available", which a recorder cannot reach without a channel. A template carrying both
+  now ends with `recording: true` no matter which order the two are declared in, because ordering
+  is carried by `typePriority` rather than by `DependsOn`.
+  - **The recorder's ARN named a resource type that does not exist.** The stub minted
+    `recorder/<name>`; the ARN is now read back from the service, which mints the Service
+    Authorization Reference's two-segment `configuration-recorder/${RecorderName}/${RecorderId}`.
+    A delivery channel's `ARN` is deliberately **empty**: no `delivery-channel` resource type
+    exists in the reference at all, so any ARN substrate invented would match no policy.
+  - **CloudFormation and the Config API disagree about capitalisation, and a pass-through would
+    lose the whole recording group against real AWS.** CloudFormation spells the recorder's and
+    channel's nested members UpperCamel (`RecordingGroup.AllSupported`,
+    `RecordingMode.RecordingFrequency`, `DeliveryChannel.S3BucketName`) where the API spells them
+    lowerCamel. Real Config is case-sensitive and would ignore the UpperCamel members — the deploy
+    succeeding, the recorder recording AWS's *default* group, and nothing reporting that the
+    template's group had been discarded. Substrate would not have shown that, because its handlers
+    decode with `encoding/json`, whose field matching is case-insensitive; the request body
+    substrate records is nevertheless what an exported event log replays against AWS, so a body
+    that only works against a lenient decoder is a fixture that passes here and fails there. Every
+    nested member is now translated, and a test asserts the emitted wire keys directly rather than
+    through the decoder that hides the difference. `ConfigRule` is
+    UpperCamel on both sides and instead takes a whitelist, because CloudFormation defines a
+    `Compliance` property `PutConfigRule` has no member for and the model refuses `ConfigRuleArn`
+    and `ConfigRuleId` on a create.
+  - **`Fn::GetAtt` on a rule returned the rule's name for every attribute.** The
+    `AWS::Config::ConfigRule` page documents three — `Arn`, `ConfigRuleId` and `Compliance.Type` —
+    and the last two now resolve from the values the service reports rather than falling through
+    to the physical ID, which would have answered a plausible-looking wrong value that a stack
+    `Output` asserts against happily. The recorder and channel expose no attributes, matching
+    their pages' empty `Fn::GetAtt` sections.
+  - **A stack holding Config resources could not be torn down and rebuilt.** All three types were
+    in `cfnStubDeleteTypes`, so `DeleteStack` forgot them without calling Config — leaving the
+    account's one recorder and one channel behind, and the next deploy refusing. They now delete
+    through `DeleteConfigRule`, `DeleteConfigurationRecorder` and `DeleteDeliveryChannel`, with a
+    `StopConfigurationRecorder` pre-step so the channel's own
+    `LastDeliveryChannelDeleteFailedException` ordering refusal does not block teardown, and the
+    three `NoSuch…Exception` codes registered as already-absent so a resource deleted out of band
+    still reaches `DELETE_COMPLETE`. Every Config exception is HTTP 400, so the code is the only
+    thing that can carry that distinction.
+  - **An omitted `ConfigRuleName` reused the logical ID across stacks.** `AWS::Config::ConfigRule`
+    joins `cfnGeneratedNameTypes` (max 128), producing CloudFormation's documented
+    `mystack-MyConfigRule-12ABCFPXHV4OV` shape. Its two siblings stay out: AWS itself names a
+    recorder and a channel `"default"`, and only one of each exists per account per Region.
+  - Known gap: `AWS::S3::BucketPolicy` is not a supported resource type anywhere in substrate, so
+    a template cannot yet express the bucket policy `PutDeliveryChannel` requires. A fixture needs
+    either the `/v1/config/delivery-policy/{bucket}` seed or an out-of-band `PutBucketPolicy`.
 - **A conformance pack's tags outlived the pack** (#580, unreleased). `DeleteConformancePack`
   removed the pack and its index entry but not its tags, and a pack's ARN is deterministic —
   so a pack rebuilt under the same name read back its predecessor's tags, which no AWS
