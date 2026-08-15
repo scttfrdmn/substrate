@@ -422,6 +422,20 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 			Headers: map[string]string{}, Params: map[string]string{}}
 	},
 	"AWS::SES::EmailIdentity": pathDeleter("sesv2", "/v2/email/identities/"),
+
+	// AWS Config's three types were stub-deleted until their API handlers existed
+	// (#580): the sweep removed a cfnStubNamespace key and reported DELETE_COMPLETE
+	// while the recorder, channel and rule the deploy had created stayed behind. A
+	// second deploy of the same template then met
+	// MaxNumberOfConfigurationRecordersExceededException from a stack that had
+	// reported itself fully deleted, which is the teardown-and-rebuild case — a test
+	// run repeated twice — that Lane 6 of #580 exists to make work.
+	"AWS::Config::ConfigRule": jsonBodyDeleter("config", "DeleteConfigRule",
+		"ConfigRuleName"),
+	"AWS::Config::ConfigurationRecorder": jsonBodyDeleter("config",
+		"DeleteConfigurationRecorder", "ConfigurationRecorderName"),
+	"AWS::Config::DeliveryChannel": jsonBodyDeleter("config", "DeleteDeliveryChannel",
+		"DeliveryChannelName"),
 }
 
 // cfnDeletePreStepFunc builds the requests that must succeed before a resource's own
@@ -469,6 +483,34 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 		}
 		return steps
 	},
+
+	// "Before you can delete the delivery channel, you must stop the configuration
+	// recorder", else DeleteDeliveryChannel answers
+	// LastDeliveryChannelDeleteFailedException — and the deploy started the recorder
+	// precisely because the channel exists, so a stack carrying both would otherwise
+	// wedge on teardown at the very ordering the release added.
+	//
+	// Only the stack's own recorder is stopped, for the reason
+	// cfgsvcCFNStartRecorder only starts the stack's own: the deploy's start was
+	// scoped to a sibling, so the teardown's stop must be too, or a sweep would
+	// silently switch off a recorder the stack does not own and could not restore.
+	// A stack with a channel but no recorder of its own contributes no step, and its
+	// channel delete is then refused if some other recorder is running — which is the
+	// service's own answer, reported rather than worked around.
+	"AWS::Config::DeliveryChannel": func(_ *StackDeployer, _ DeployedResource,
+		_ map[string]interface{}, cctx *cfnContext,
+	) []*AWSRequest {
+		name, ok := cfgsvcCFNRecorderSibling(cctx)
+		if !ok {
+			return nil
+		}
+		body, err := json.Marshal(map[string]string{"ConfigurationRecorderName": name})
+		if err != nil {
+			return nil
+		}
+		return []*AWSRequest{{Service: "config", Operation: "StopConfigurationRecorder",
+			Body: body, Headers: map[string]string{}, Params: map[string]string{}}}
+	},
 }
 
 // cfnStubDeleteTypes are the resource types whose deploy writes properties into
@@ -489,17 +531,15 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 // resources of their own, so the record sets it wrote outlive the sweep. That gap
 // is reported rather than hidden; see cfnDeleteInertTypes.
 var cfnStubDeleteTypes = map[string]bool{
-	"AWS::Athena::WorkGroup":             true,
-	"AWS::Backup::BackupPlan":            true,
-	"AWS::CloudTrail::Trail":             true,
-	"AWS::CodeBuild::Project":            true,
-	"AWS::CodeDeploy::DeploymentGroup":   true,
-	"AWS::CodePipeline::Pipeline":        true,
-	"AWS::Config::ConfigRule":            true,
-	"AWS::Config::ConfigurationRecorder": true,
-	"AWS::OpenSearchService::Domain":     true,
-	"AWS::Transfer::Server":              true,
-	"AWS::WAFv2::WebACL":                 true,
+	"AWS::Athena::WorkGroup":           true,
+	"AWS::Backup::BackupPlan":          true,
+	"AWS::CloudTrail::Trail":           true,
+	"AWS::CodeBuild::Project":          true,
+	"AWS::CodeDeploy::DeploymentGroup": true,
+	"AWS::CodePipeline::Pipeline":      true,
+	"AWS::OpenSearchService::Domain":   true,
+	"AWS::Transfer::Server":            true,
+	"AWS::WAFv2::WebACL":               true,
 }
 
 // cfnDeleteInertTypes maps a type whose sweep is a no-op to why, so the reason a
@@ -898,18 +938,23 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"InvalidVpcID.NotFound":             true,
 	"NatGatewayNotFound":                true,
 	"NoSuchBucket":                      true,
-	"NoSuchDistribution":                true,
-	"NoSuchEntity":                      true,
-	"NoSuchHostedZone":                  true,
-	"NotFound":                          true, // SNS DeleteTopic.
-	"NotFoundException":                 true,
-	"ParameterNotFound":                 true,
-	"QueueDoesNotExist":                 true,
-	"ReplicationGroupNotFoundFault":     true,
-	"RepositoryNotFoundException":       true,
-	"ResourceNotFoundException":         true,
-	"ServiceNotFoundException":          true,
-	"StateMachineDoesNotExist":          true,
+	// AWS Config's three not-found codes. Each is HTTP 400 rather than 404 — every
+	// Config exception is — so nothing but the code identifies them as an absence.
+	"NoSuchConfigRuleException":            true,
+	"NoSuchConfigurationRecorderException": true,
+	"NoSuchDeliveryChannelException":       true,
+	"NoSuchDistribution":                   true,
+	"NoSuchEntity":                         true,
+	"NoSuchHostedZone":                     true,
+	"NotFound":                             true, // SNS DeleteTopic.
+	"NotFoundException":                    true,
+	"ParameterNotFound":                    true,
+	"QueueDoesNotExist":                    true,
+	"ReplicationGroupNotFoundFault":        true,
+	"RepositoryNotFoundException":          true,
+	"ResourceNotFoundException":            true,
+	"ServiceNotFoundException":             true,
+	"StateMachineDoesNotExist":             true,
 }
 
 // cfnDeleteIsAbsent reports whether a delete failed because the resource was

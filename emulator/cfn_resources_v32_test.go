@@ -195,49 +195,13 @@ func TestCFN_CloudTrailTrail(t *testing.T) {
 	assert.Contains(t, r.ARN, "trail/my-trail")
 }
 
-// TestCFN_ConfigConfigRule verifies the Config rule stub.
-func TestCFN_ConfigConfigRule(t *testing.T) {
-	d := newTestDeployer(t)
-	tmpl := `{
-		"AWSTemplateFormatVersion": "2010-09-09",
-		"Resources": {
-			"MyRule": {
-				"Type": "AWS::Config::ConfigRule",
-				"Properties": { "ConfigRuleName": "my-config-rule" }
-			}
-		}
-	}`
-	result, err := d.Deploy(context.Background(), tmpl, "config-rule-stack", nil)
-	require.NoError(t, err)
-	require.Len(t, result.Resources, 1)
-	r := result.Resources[0]
-	assert.Equal(t, "AWS::Config::ConfigRule", r.Type)
-	assert.Empty(t, r.Error)
-	assert.Equal(t, "my-config-rule", r.PhysicalID)
-	assert.Contains(t, r.ARN, "config-rule/config-rule-MyRule")
-}
-
-// TestCFN_ConfigConfigurationRecorder verifies the Config recorder stub.
-func TestCFN_ConfigConfigurationRecorder(t *testing.T) {
-	d := newTestDeployer(t)
-	tmpl := `{
-		"AWSTemplateFormatVersion": "2010-09-09",
-		"Resources": {
-			"MyRecorder": {
-				"Type": "AWS::Config::ConfigurationRecorder",
-				"Properties": { "Name": "default" }
-			}
-		}
-	}`
-	result, err := d.Deploy(context.Background(), tmpl, "config-recorder-stack", nil)
-	require.NoError(t, err)
-	require.Len(t, result.Resources, 1)
-	r := result.Resources[0]
-	assert.Equal(t, "AWS::Config::ConfigurationRecorder", r.Type)
-	assert.Empty(t, r.Error)
-	assert.Equal(t, "default", r.PhysicalID)
-	assert.Contains(t, r.ARN, "recorder/default")
-}
+// The Config rule and recorder tests that lived here asserted the stub behavior
+// this release removed, and could not be carried over by adjusting their
+// expectations: each template was invalid against the real API — the rule's carried
+// no Source, the recorder's no RoleARN — and newTestDeployer registers no Config
+// plugin, so both went green while creating nothing. That is the defect, not the
+// baseline. Their replacements are in cfn_resources_v101_test.go, against a deployer
+// that registers Config.
 
 // TestCFN_TransferServer verifies the Transfer Family server stub.
 func TestCFN_TransferServer(t *testing.T) {

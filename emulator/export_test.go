@@ -668,6 +668,26 @@ func CFNGeneratedNameForTest(accountID, region, stackName, resType, logicalID st
 	}, resType, logicalID)
 }
 
+// CFGSvcCFNRecordingGroupForTest and CFGSvcCFNRecordingModeForTest expose the two
+// CloudFormation-to-API translations for AWS Config's configuration recorder, so a
+// test can assert the *emitted* wire keys.
+//
+// Asserting through the service instead would not do it: substrate decodes the
+// request with encoding/json, which matches field names case-insensitively, so an
+// UpperCamel body decodes into the same struct as a lowerCamel one and the two are
+// indistinguishable downstream. Real Config is case-sensitive, and the request body
+// is what an exported event log replays against AWS, so the keys have to be pinned
+// where they are produced.
+func CFGSvcCFNRecordingGroupForTest(v interface{}) map[string]interface{} {
+	return cfgsvcCFNRecordingGroup(v, nil)
+}
+
+// CFGSvcCFNRecordingModeForTest exposes cfgsvcCFNRecordingMode — see
+// CFGSvcCFNRecordingGroupForTest for why the emitted keys are asserted directly.
+func CFGSvcCFNRecordingModeForTest(v interface{}) map[string]interface{} {
+	return cfgsvcCFNRecordingMode(v, nil)
+}
+
 // IAMMemberListForTest wraps iamMemberList for external tests.
 func IAMMemberListForTest(params map[string]string, prefix string) []string {
 	return iamMemberList(params, prefix)

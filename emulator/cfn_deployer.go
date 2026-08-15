@@ -857,15 +857,23 @@ var typePriority = map[string]int{
 	// v0.34.0 — RDS Aurora cluster and MSK.
 	"AWS::MSK::Cluster": 3,
 	// v0.32.0 — extended CFN stubs.
-	"AWS::OpenSearchService::Domain":     2,
-	"AWS::WAFv2::WebACL":                 2,
-	"AWS::Backup::BackupPlan":            2,
-	"AWS::CodeBuild::Project":            2,
-	"AWS::CodePipeline::Pipeline":        3,
-	"AWS::CodeDeploy::DeploymentGroup":   3,
-	"AWS::CloudTrail::Trail":             2,
-	"AWS::Config::ConfigRule":            3,
+	"AWS::OpenSearchService::Domain":   2,
+	"AWS::WAFv2::WebACL":               2,
+	"AWS::Backup::BackupPlan":          2,
+	"AWS::CodeBuild::Project":          2,
+	"AWS::CodePipeline::Pipeline":      3,
+	"AWS::CodeDeploy::DeploymentGroup": 3,
+	"AWS::CloudTrail::Trail":           2,
+	// AWS Config's three types carry an ordering the service enforces, and a
+	// template need not declare it with DependsOn — which substrate parses and does
+	// not act on — because the priorities alone produce it. "Before you can create a
+	// delivery channel, you must create a configuration recorder", so the channel
+	// follows the recorder; it also follows the S3 bucket it delivers to, which is
+	// itself a 2. PutConfigRule refuses without a recorder, and the rule's own page
+	// says the recorder must be running first, so the rule is last of the three.
 	"AWS::Config::ConfigurationRecorder": 2,
+	"AWS::Config::DeliveryChannel":       3,
+	"AWS::Config::ConfigRule":            4,
 	"AWS::Transfer::Server":              2,
 	"AWS::Athena::WorkGroup":             2,
 }
@@ -2612,6 +2620,8 @@ func (d *StackDeployer) dispatchResource(
 		return d.deployConfigConfigRule(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Config::ConfigurationRecorder":
 		return d.deployConfigConfigurationRecorder(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::Config::DeliveryChannel":
+		return d.deployConfigDeliveryChannel(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Transfer::Server":
 		return d.deployTransferServer(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Athena::WorkGroup":
@@ -5362,6 +5372,17 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 				return dr.ARN
 			}
 			return dr.PhysicalID
+		case "ConfigRuleId", "Compliance.Type":
+			// AWS::Config::ConfigRule GetAtt ConfigRuleId and Compliance.Type, both
+			// read back from the service at deploy time. Falling through to the
+			// default here would return the rule *name* for either one, which is a
+			// plausible-looking wrong answer: a stack Output carrying it would be
+			// asserted against happily. An unset attribute resolves to empty instead,
+			// which a test can tell apart from an ID.
+			if v, ok := dr.Metadata[attr]; ok {
+				return fmt.Sprintf("%v", v)
+			}
+			return ""
 		case "Endpoint.Address", "Endpoint.Port",
 			"ConfigurationEndpoint.Address", "ConfigurationEndpoint.Port",
 			"RedisEndPoint.Address", "RedisEndPoint.Port",

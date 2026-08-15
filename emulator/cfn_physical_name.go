@@ -72,6 +72,15 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// A bare Lambda function name "is limited to 64 characters in length"
 	// (CreateFunction).
 	"AWS::Lambda::Function": {maxLen: 64},
+
+	// A Config rule name is unique within a Region and may be up to 128 characters
+	// (ConfigRuleName, 1-128). CloudFormation documents generating one — the page's
+	// own example is mystack-MyConfigRule-12ABCFPXHV4OV, the shape this table
+	// produces. Its two sibling types are deliberately absent: AWS itself names a
+	// configuration recorder and a delivery channel "default", and only one of each
+	// may exist per account per Region, so a generated stack-scoped name would
+	// replace a name the service assigns and could not collide with anything anyway.
+	"AWS::Config::ConfigRule": {maxLen: 128},
 }
 
 // cfnGeneratedNameSuffixLen is the length of the derived suffix, matching the
