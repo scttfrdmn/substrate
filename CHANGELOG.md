@@ -185,7 +185,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pack's own seeds but leaves a `*` seed alone, since a wildcard is a fixture-wide default
   rather than one pack's state.
 
+- **A policy scoped to one Config rule now applies to one Config rule: tagging and the
+  authorization hook** (#580). `TagResource`, `UntagResource` and `ListTagsForResource`,
+  plus the three `authz.go` arms that make a Config tag mean something to a policy.
+
+  The tag trio is the smaller half. Tags matter here because **they are how a Config
+  resource is authorized**: the Service Authorization Reference supports
+  `aws:ResourceTag/${TagKey}` on nine of Config's ten resource types, so a tag is a
+  privilege boundary and not decoration. (The developer guide's tagging page claims only
+  three types support it; the SAR is authoritative for authorization and is what substrate
+  implements.) `TagResource` merges rather than replaces, per "if existing tags on a
+  resource are not specified in the request parameters, they are not changed";
+  `UntagResource` treats a key that is not there as a no-op at 200, which is undocumented
+  either way and is the reading that keeps a teardown idempotent; and
+  `ListTagsForResource` emits an **empty** `Tags` list for an untagged resource rather than
+  omitting the member, since `TagList`'s min-1 bound cannot hold for a resource with no
+  tags and an omitted member reads as a decode failure to a consumer.
+
+  **`buildResourceARN` now resolves a Config request to the resource it names**, which is
+  the substantive half. Without it every Config request authorized against `*`, so a policy
+  written to admit one rule admitted every rule — a **false allow**, the one direction a
+  privilege boundary must never fail in, and a silent one: the policy looks right and a test
+  asserting the denial passes for the wrong reason. Resolution is per-operation because the
+  member naming the resource differs per operation and is nested and lowerCamel for the
+  recorder `Put` (`ConfigurationRecorder.name`) and nested and UpperCamel for the rule
+  `Put` (`ConfigRule.ConfigRuleName`).
+
+  An operation that names a *list* of resources, or none, resolves to `*` deliberately
+  rather than to one arbitrary member of the list — picking one would be the false-allow
+  direction again. So do all four delivery-channel operations, because **there is no
+  `delivery-channel` resource type**: the SAR gives them an empty resource list, `Delivery
+  Channel` has no `arn` member in the API model, and `TagResource`'s own documentation does
+  not name a channel among the taggable types, so a channel is neither taggable nor
+  nameable in a policy. `PutEvaluations` resolves to `*` too, since its `ResultToken` is the
+  only thing naming a rule and decoding it to authorize would hand a caller control over
+  the resource its own request is checked against. A rule `Put` naming its rule by ID or ARN
+  resolves to `*` for the same class of reason: converting it needs a state lookup that can
+  miss, and a miss would authorize against a *different* rule's ARN.
+
+  The tag-injection arms complete it: `aws:ResourceTag/*` is populated from the tags of the
+  resource **the request names** — resolved by the same function `buildResourceARN` uses, so
+  the two cannot disagree about whose tags these are — and `aws:RequestTag/*` from the
+  request's own `Tags` list, which is what makes "every Config rule must carry an Owner tag"
+  expressible at creation time. A tag store that will not decode leaves the condition key
+  absent, which denies; an absent key is the safe direction.
+
 ### Fixed
+- **A conformance pack's tags outlived the pack** (#580, unreleased). `DeleteConformancePack`
+  removed the pack and its index entry but not its tags, and a pack's ARN is deterministic —
+  so a pack rebuilt under the same name read back its predecessor's tags, which no AWS
+  account does ("if you delete a resource, any tags for the resource are also deleted"). It
+  was unreachable until this release's tag operations existed, because
+  `PutConformancePackRequest` has **no `Tags` member**: a pack can only be tagged through
+  `TagResource`, so the conformance-pack tests could not have caught it. Found by the test
+  asserting a rebuilt pack starts untagged.
+- **A Config recorder's ARN named a resource type that does not exist** (#580, unreleased).
+  Substrate minted `configuration-recorder/<name>`; the SAR's template is
+  `configuration-recorder/${RecorderName}/${RecorderId}`, two segments. A one-segment ARN
+  matches no policy written against the real template, which matters now that a Config
+  request authorizes against its own ARN. `RecorderId` has no member anywhere in the API
+  model, so substrate mints it deterministically from the account, Region and name.
+- **An authorization denial from AWS Config reported the wrong error code** (#580,
+  unreleased). `AuthController.CheckAccess` calls `accessDeniedCodeFor(service, "")` with no
+  Content-Type, so a service absent from `serviceErrorProtocols` takes `errorProtocolFor`'s
+  XML default and is refused with the bare `AccessDenied`. Config is `protocol: json`, so
+  its callers need `AccessDeniedException` — the #595 failure mode, in the opposite
+  direction. `config` is now classified. `pricing` is in the same state for the same reason
+  and is tracked separately in #653, since it changes an existing service's wire behaviour.
 - **Every AWS Config request was unroutable** (#580). Config's `X-Amz-Target` prefix is
   `StarlingDoveService` — an internal code name bearing no resemblance to the `config`
   endpoint prefix, the way `TrentService` is KMS's — and `starlingdoveservice` was absent

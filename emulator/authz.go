@@ -577,6 +577,12 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 		// orgAuthzResourceARN. Falling through to "*" would make a policy scoped to
 		// one OU or policy apply to every one of them.
 		return orgAuthzResourceARN(a.state, reqCtx, req)
+	case configServiceNamespace:
+		// A Config request's resource is resolved from the operation, because the
+		// member naming it differs per operation and is nested for the two Puts. See
+		// cfgsvcAuthzResourceARN for why an operation naming a *list* of resources
+		// resolves to "*" rather than to one arbitrary member of the list.
+		return cfgsvcAuthzResourceARN(reqCtx, req)
 	default:
 		return "*"
 	}
@@ -738,6 +744,12 @@ func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *Requ
 		// would be a false allow rather than a convenience.
 		tags = orgAuthzResourceTags(a.state, req)
 
+	case configServiceNamespace:
+		// Config tags are keyed by the resource's ARN, so the same resolution
+		// buildResourceARN performs decides whose tags these are — the two cannot
+		// disagree about which resource a request names.
+		tags = cfgsvcAuthzResourceTags(a.state, reqCtx, req)
+
 	default:
 		return
 	}
@@ -804,6 +816,16 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 		// TagResource or a tagged CreatePolicy on the tag the caller is trying to
 		// apply, rather than only on tags already stored.
 		for k, v := range orgAuthzRequestTags(req) {
+			condCtx["aws:RequestTag/"+k] = v
+		}
+
+	case configServiceNamespace:
+		// Config tags arrive as "Tags": [{"Key":…,"Value":…}] on TagResource and on all
+		// four creating Puts, so one reader serves them. aws:RequestTag/${TagKey} is a
+		// condition key on TagResource specifically, per the Service Authorization
+		// Reference, which is what makes a "may only apply approved tags" policy
+		// expressible here.
+		for k, v := range cfgsvcAuthzRequestTags(req) {
 			condCtx["aws:RequestTag/"+k] = v
 		}
 

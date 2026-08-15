@@ -147,6 +147,28 @@ func configDescribeRecorders(t *testing.T, ts *emulator.TestServer) []map[string
 	return out.ConfigurationRecorders
 }
 
+// configRecorderARN returns the ARN of the account's recorder in a Region, read back
+// from the API rather than assembled in the test.
+//
+// The ARN's trailing RecorderId component is minted from a hash — the API model has
+// no member that carries it, yet the Service Authorization Reference's template
+// requires it — so a test that spelled the whole ARN out would be asserting the hash
+// rather than the behavior it cares about. TestConfigRecorder_NameDefaultsToDefault is
+// the one place the ARN's documented *shape* is asserted.
+func configRecorderARN(t *testing.T, ts *emulator.TestServer, region string) string {
+	t.Helper()
+	resp := configRequestIn(t, ts, region, "DescribeConfigurationRecorders", map[string]any{})
+	var out struct {
+		ConfigurationRecorders []map[string]any `json:"ConfigurationRecorders"`
+	}
+	status, code, message := decodeConfigResponse(t, resp, &out)
+	require.Equal(t, http.StatusOK, status, "%s: %s", code, message)
+	require.Len(t, out.ConfigurationRecorders, 1)
+	arn, ok := out.ConfigurationRecorders[0]["arn"].(string)
+	require.True(t, ok, "the recorder reports an arn")
+	return arn
+}
+
 // configDescribeRecorderStatus returns the statuses
 // DescribeConfigurationRecorderStatus reports.
 func configDescribeRecorderStatus(t *testing.T, ts *emulator.TestServer) []map[string]any {
@@ -255,15 +277,18 @@ func TestConfigRecorder_PutIsIdempotentAndDoesNotRetag(t *testing.T) {
 	assert.Equal(t, "arn:aws:iam::123456789012:role/second", recorders[0]["roleARN"],
 		"the role is updated")
 
-	tags := configStoredTags(t, ts, "arn:aws:config:us-east-1:123456789012:config-recorder/default")
+	tags := configStoredTags(t, ts, configRecorderARN(t, ts, "us-east-1"))
 	assert.Equal(t, map[string]string{"env": "prod"}, tags,
 		"tags are set at creation and a later Put does not update them")
 }
 
-// configStoredTags reads the tags substrate stored for a resource ARN. The tag
-// operations that read them over the wire arrive in a later PR; until then the state
-// is the only place the creation-time behavior is observable, and it is the
-// behavior that matters.
+// configStoredTags reads the tags substrate stored for a resource ARN.
+//
+// ListTagsForResource reads the same tags over the wire, and
+// TestConfigTags_CreationTimeTagsAreVisibleToTheTagAPI asserts the two agree. This
+// helper stays because a creation-time tag is stored before any tag operation is
+// called, so the state read is what tells a Put's own behavior apart from the tag
+// cluster's.
 func configStoredTags(t *testing.T, ts *emulator.TestServer, arn string) map[string]string {
 	t.Helper()
 	raw, err := ts.StateManager().Get(t.Context(), "config", "tags:"+arn)
@@ -311,8 +336,14 @@ func TestConfigRecorder_NameDefaultsToDefault(t *testing.T) {
 	recorders := configDescribeRecorders(t, ts)
 	require.Len(t, recorders, 1)
 	assert.Equal(t, "default", recorders[0]["name"])
-	assert.Equal(t, "arn:aws:config:us-east-1:123456789012:config-recorder/default", recorders[0]["arn"],
-		"the ARN resource type is config-recorder, per the Service Authorization Reference")
+	// The Service Authorization Reference's template is
+	// configuration-recorder/${RecorderName}/${RecorderId} — the segment is
+	// "configuration-recorder", not "config-recorder" or "recorder", and it carries two
+	// components. RecorderId has no member anywhere in the API model, so substrate mints
+	// it; only its shape is asserted.
+	assert.Regexp(t,
+		`^arn:aws:config:us-east-1:123456789012:configuration-recorder/default/[a-z0-9_-]{8}$`,
+		recorders[0]["arn"])
 }
 
 func TestConfigRecorder_RefusesAnEmptyRoleARN(t *testing.T) {
@@ -616,7 +647,7 @@ func TestConfigRecorder_AnUnknownNameIsRefused(t *testing.T) {
 			ts := emulator.StartTestServer(t)
 			configPutRecorder(t, ts, "default")
 			resp := configRequest(t, ts, op, map[string]any{
-				"Arn": "arn:aws:config:us-east-1:123456789012:config-recorder/ghost",
+				"Arn": "arn:aws:config:us-east-1:123456789012:configuration-recorder/ghost/deadbeef",
 			})
 			status, code, _ := decodeConfigResponse(t, resp, nil)
 			assert.Equal(t, http.StatusBadRequest, status)
@@ -631,7 +662,7 @@ func TestConfigRecorder_DescribeAcceptsTheRecordersOwnNameAndARN(t *testing.T) {
 	// a filter that matches nothing.
 	ts := emulator.StartTestServer(t)
 	configPutRecorder(t, ts, "default")
-	const arn = "arn:aws:config:us-east-1:123456789012:config-recorder/default"
+	arn := configRecorderARN(t, ts, "us-east-1")
 
 	for _, body := range []map[string]any{
 		{"ConfigurationRecorderNames": []string{"default"}},
@@ -725,8 +756,12 @@ func TestConfigRecorder_IsIsolatedByRegion(t *testing.T) {
 	status, code, message = decodeConfigResponse(t, resp, &out)
 	require.Equal(t, http.StatusOK, status, "%s: %s", code, message)
 	require.Len(t, out.ConfigurationRecorders, 1)
-	assert.Equal(t, "arn:aws:config:eu-west-1:123456789012:config-recorder/default",
+	assert.Regexp(t, `^arn:aws:config:eu-west-1:123456789012:configuration-recorder/default/`,
 		out.ConfigurationRecorders[0]["arn"], "the ARN carries the Region it was created in")
+	assert.NotEqual(t, configRecorderARN(t, ts, "us-east-1"),
+		out.ConfigurationRecorders[0]["arn"],
+		"the minted RecorderId is derived from the Region, so the two recorders differ by more "+
+			"than the ARN's region field")
 }
 
 func TestConfigRecorder_DeleteRemovesEverythingAboutIt(t *testing.T) {
@@ -734,7 +769,6 @@ func TestConfigRecorder_DeleteRemovesEverythingAboutIt(t *testing.T) {
 	// delete a resource, tags for the resource are deleted as well", and a fixture that
 	// tears down and rebuilds is just the same test run twice.
 	ts := emulator.StartTestServer(t)
-	const arn = "arn:aws:config:us-east-1:123456789012:config-recorder/default"
 
 	resp := configRequest(t, ts, "PutConfigurationRecorder", map[string]any{
 		"ConfigurationRecorder": configRecorderPayload("default"),
@@ -742,6 +776,7 @@ func TestConfigRecorder_DeleteRemovesEverythingAboutIt(t *testing.T) {
 	})
 	status, code, message := decodeConfigResponse(t, resp, nil)
 	require.Equal(t, http.StatusOK, status, "%s: %s", code, message)
+	arn := configRecorderARN(t, ts, "us-east-1")
 	configPutChannel(t, ts, "default", "cfg-logs")
 	configStartRecorder(t, ts, "default")
 
@@ -805,7 +840,7 @@ func TestConfigRecorder_RefusesTagsAWSWouldRefuse(t *testing.T) {
 		status, code, message := decodeConfigResponse(t, resp, nil)
 		require.Equal(t, http.StatusOK, status, "%s: %s", code, message)
 		assert.Equal(t, map[string]string{"env": ""},
-			configStoredTags(t, ts, "arn:aws:config:us-east-1:123456789012:config-recorder/default"))
+			configStoredTags(t, ts, configRecorderARN(t, ts, "us-east-1")))
 	})
 }
 

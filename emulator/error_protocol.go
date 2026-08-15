@@ -128,6 +128,7 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"codepipeline":     errProtoJSONRPC,
 	"cognito-identity": errProtoJSONRPC,
 	"cognito-idp":      errProtoJSONRPC,
+	"config":           errProtoJSONRPC,
 	"dynamodb":         errProtoJSONRPC,
 	"ecr":              errProtoJSONRPC,
 	"ecs":              errProtoJSONRPC,
