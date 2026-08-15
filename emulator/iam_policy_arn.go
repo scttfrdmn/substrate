@@ -74,34 +74,39 @@ func iamPolicyARNIsAWSManaged(arn string) bool {
 }
 
 // iamWarnUnresolvedPolicyARN logs at WARN when a well-formed ARN resolves in neither the
-// bundled catalog nor state, and reports whether it resolved.
+// bundled catalog nor state.
 //
 // The attach still succeeds. The log is what makes the gap visible without breaking the
 // consumer: an AWS managed ARN substrate does not bundle is the expected case (52 of ~1,200),
 // while a customer-managed ARN that resolves nowhere means no CreatePolicy call ever made it,
 // which is more likely to be a real mistake — so the two get different messages.
-func (p *IAMPlugin) iamWarnUnresolvedPolicyARN(goCtx context.Context, operation, arn string) bool {
-	if _, ok := GetManagedPolicy(arn); ok {
-		return true
+//
+// It returns nothing on purpose. An earlier form reported whether the ARN resolved, and no
+// caller used it — a bool no attach reads is a value a test cannot observe, so a mutation
+// flipping it survived the whole suite. The log line is the entire observable effect.
+func (p *IAMPlugin) iamWarnUnresolvedPolicyARN(goCtx context.Context, operation, arn string) {
+	if p.logger == nil {
+		return
 	}
+	if _, ok := GetManagedPolicy(arn); ok {
+		return
+	}
+	// A state failure is treated as "does not resolve": the warning is advisory and the attach
+	// proceeds either way, so a read error must not turn an accepted call into an error.
 	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
 	if err == nil && raw != nil {
-		return true
+		return
 	}
 
-	if p.logger == nil {
-		return false
-	}
 	if iamPolicyARNIsAWSManaged(arn) {
 		p.logger.Warn("iam "+operation+": the policy ARN is a well-formed AWS managed ARN "+
 			"substrate does not bundle; the attach succeeds and the policy contributes no "+
 			"statements to an authorization decision",
 			"policyArn", arn)
-		return false
+		return
 	}
 	p.logger.Warn("iam "+operation+": the policy ARN resolves in neither the bundled catalog "+
 		"nor state; the attach succeeds and the policy contributes no statements to an "+
 		"authorization decision",
 		"policyArn", arn)
-	return false
 }

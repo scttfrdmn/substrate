@@ -1,11 +1,14 @@
 package emulator_test
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,19 +86,27 @@ func TestAttachPolicy_RefusesAMalformedARN(t *testing.T) {
 	// Every case here is a mistake a consumer actually makes: the bare name from the console,
 	// an ARN for the wrong service, a resource type that is not a policy, a slash-terminated
 	// ARN with no name, an account that is not twelve digits.
+	// wantMessage is asserted, not only the code: the length bound and the pattern refuse for
+	// different reasons and say so, and a test checking only "InvalidInput" would pass with
+	// either bound removed entirely.
 	cases := []struct {
-		name      string
-		policyARN string
+		name        string
+		policyARN   string
+		wantMessage string
 	}{
-		{"a bare policy name", "AmazonS3ReadOnlyAccess"},
-		{"not an ARN at all", "not-an-arn-at-all-but-long-enough"},
-		{"the wrong service", "arn:aws:s3:::my-bucket/AmazonS3ReadOnlyAccess"},
-		{"the wrong resource type", "arn:aws:iam::123456789012:role/AmazonS3ReadOnlyAccess"},
-		{"a region where IAM has none", "arn:aws:iam:us-east-1:123456789012:policy/thing"},
-		{"no policy name", "arn:aws:iam::aws:policy/service-role/"},
-		{"a thirteen-digit account", "arn:aws:iam::1234567890123:policy/thing"},
-		{"an eleven-digit account", "arn:aws:iam::12345678901:policy/thing"},
-		{"too short to be an ARN", "arn:aws:iam::a"},
+		{"a bare policy name", "AmazonS3ReadOnlyAccess", "is not valid"},
+		{"not an ARN at all", "not-an-arn-at-all-but-long-enough", "is not valid"},
+		{"the wrong service", "arn:aws:s3:::my-bucket/AmazonS3ReadOnlyAccess", "is not valid"},
+		{"the wrong resource type", "arn:aws:iam::123456789012:role/AmazonS3ReadOnlyAccess", "is not valid"},
+		{"a region where IAM has none", "arn:aws:iam:us-east-1:123456789012:policy/thing", "is not valid"},
+		{"no policy name", "arn:aws:iam::aws:policy/service-role/", "is not valid"},
+		{"a thirteen-digit account", "arn:aws:iam::1234567890123:policy/thing", "is not valid"},
+		{"an eleven-digit account", "arn:aws:iam::12345678901:policy/thing", "is not valid"},
+		// arnType's own bounds, min 20 and max 2048. Both are refused on size rather than by
+		// the pattern, so the message names the length.
+		{"shorter than arnType allows", "arn:aws:iam::a", "between 20 and 2048"},
+		{"longer than arnType allows",
+			"arn:aws:iam::aws:policy/" + strings.Repeat("x", 2048), "between 20 and 2048"},
 	}
 
 	for _, target := range iamAttachTargets {
@@ -109,6 +120,8 @@ func TestAttachPolicy_RefusesAMalformedARN(t *testing.T) {
 				decodeIAMXML(t, resp, &result)
 				assert.Equal(t, "InvalidInput", result["__type"],
 					"the model declares InvalidInputException for all three attach operations")
+				message, _ := result["message"].(string)
+				assert.Contains(t, message, tc.wantMessage)
 			})
 		}
 	}
@@ -221,6 +234,38 @@ func TestAttachPolicy_AnUnknownEntityDoesNotWarnAboutTheARN(t *testing.T) {
 			assert.Empty(t, logs.messages(), "nothing was attached, so nothing is worth warning about")
 		})
 	}
+}
+
+func TestAttachPolicy_WithoutALoggerTheAttachStillSucceeds(t *testing.T) {
+	// PluginConfig.Logger is optional, so the warning path has to tolerate its absence: the
+	// warning is advisory, and an attach that panicked or failed because nothing was listening
+	// would turn a diagnostic into an outage. The plugin is initialized with a nil logger while
+	// the server keeps a real one, because it is the plugin's guard under test.
+	cfg := emulator.DefaultConfig()
+	state := emulator.NewMemoryStateManager()
+	registry := emulator.NewPluginRegistry()
+
+	plugin := &emulator.IAMPlugin{}
+	require.NoError(t, plugin.Initialize(context.Background(),
+		emulator.PluginConfig{State: state, Logger: nil}))
+	registry.Register(plugin)
+
+	srv := emulator.NewServer(*cfg, registry,
+		emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig()), state,
+		emulator.NewTimeController(time.Now()), emulator.NewDefaultLogger(slog.LevelInfo, false))
+
+	// An ARN that resolves nowhere: the case that would warn if there were anywhere to warn.
+	resp := iamAttach(t, srv, iamAttachTargets[0], "arn:aws:iam::123456789012:policy/never-created")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	resp = iamRequest(t, srv, "ListAttachedUserPolicies", map[string]any{"UserName": "jill"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
+	attached, ok := result["AttachedPolicies"].([]any)
+	require.True(t, ok, "the attach is recorded whether or not anything logged")
+	assert.Len(t, attached, 1)
 }
 
 func TestAttachPolicy_TheShapeCheckPrecedesAuthorization(t *testing.T) {

@@ -799,19 +799,33 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles |
 | ListRoles | |
 | CreateGroup | |
-| GetGroup | |
-| DeleteGroup | |
+| GetGroup | Reports the group's actual members |
+| DeleteGroup | Refuses with `DeleteConflict`/409 while the group has members or policies |
 | ListGroups | |
-| AttachUserPolicy | Does not verify the policy ARN resolves ([#499](https://github.com/scttfrdmn/substrate/issues/499)) |
+| AddUserToGroup | Writes both sides of the membership index; idempotent |
+| RemoveUserFromGroup | Idempotent — removing a non-member is not an error, per the model |
+| ListGroupsForUser | |
+| AttachUserPolicy | Refuses a malformed `PolicyArn` with `InvalidInput`; a well-formed ARN that resolves nowhere succeeds and logs at `WARN` (see below) |
 | DetachUserPolicy | |
 | ListAttachedUserPolicies | |
-| AttachRolePolicy | Does not verify the policy ARN resolves ([#499](https://github.com/scttfrdmn/substrate/issues/499)) |
+| AttachRolePolicy | Same `PolicyArn` check as `AttachUserPolicy` |
 | DetachRolePolicy | |
 | ListAttachedRolePolicies | |
+| AttachGroupPolicy | Same `PolicyArn` check as `AttachUserPolicy` |
+| DetachGroupPolicy | |
+| ListAttachedGroupPolicies | |
+| PutGroupPolicy | Inline policy |
+| GetGroupPolicy | |
+| DeleteGroupPolicy | |
+| ListGroupPolicies | |
 | CreatePolicy | |
 | GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
 | DeletePolicy | |
-| ListPolicies | Lists `CreatePolicy` policies only; `Scope` and `PathPrefix` are accepted and not applied ([#497](https://github.com/scttfrdmn/substrate/issues/497)) |
+| ListPolicies | Applies `Scope`, `PathPrefix` and `OnlyAttached`, and includes the bundled catalog. `PolicyUsageFilter` is validated and narrows nothing (see below) |
+| GetPolicyVersion | Returns the document, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
+| ListPolicyVersions | Returns exactly one version — substrate stores one document per policy |
+| SimulatePrincipalPolicy | Evaluates a user's, group's or role's identity policies plus its permissions boundary. See "What the policy simulator evaluates" |
+| SimulateCustomPolicy | Evaluates `PolicyInputList` only; resolves no entity, so it declares no `NoSuchEntity` |
 | CreateAccessKey | |
 | DeleteAccessKey | |
 | ListAccessKeys | |
@@ -835,7 +849,63 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | ListRoleTags | |
 | CreateInstanceProfile | |
 | GetInstanceProfile | |
+| DeleteInstanceProfile | |
 | AddRoleToInstanceProfile | |
+| RemoveRoleFromInstanceProfile | |
+| ListInstanceProfiles | |
+
+### What the policy simulator evaluates
+
+`SimulatePrincipalPolicy` and `SimulateCustomPolicy` answer "may this principal do X to
+Y?" without doing X to Y. Both run **the same evaluator the request gate enforces with**,
+which is the property worth relying on: a simulated decision that could disagree with an
+enforced one would be worse than no simulator, because a consumer would trust the
+preflight and then be refused.
+
+The three decisions are reported separately and mean different things:
+
+| `EvalDecision` | Meaning |
+|---|---|
+| `allowed` | A statement allows the action and nothing denies it |
+| `explicitDeny` | A statement denies the action by name |
+| `implicitDeny` | Nothing allows it — or a permissions boundary does not permit it |
+
+The distinction matters to an assertion. "The policy explicitly forbids this" and "no
+policy grants this" are different findings, and a test asserting the first must not pass
+on the second.
+
+**What is in the evaluated set.** For `SimulatePrincipalPolicy`: the entity's attached
+managed policies, its inline policies, the managed and inline policies of every group a
+user belongs to, plus any `PolicyInputList` documents supplied with the call. The boundary
+is `PermissionsBoundaryPolicyInputList` when given, otherwise the entity's stored one. For
+`SimulateCustomPolicy`: `PolicyInputList` and `PermissionsBoundaryPolicyInputList` only —
+it resolves no entity.
+
+`MatchedStatements` names *which* policy decided, as `SourcePolicyId` (the policy **name**,
+or `PolicyInputList.N` for a string input) and `SourcePolicyType`. `MissingContextValues`
+reports every condition key a statement tested that the request supplied no value for, so
+a conditional grant does not read as a clean refusal. A key present with an empty value is
+*set*, not missing — the `Null` operator exists precisely to test for absence.
+
+`CallerArn` defaults to `PolicySourceArn` and populates `aws:PrincipalArn`; `ResourceOwner`
+populates `aws:ResourceAccount`; an explicit `ContextEntry` wins over both. `ResourceArns`
+defaults to `["*"]`, and every action is evaluated against every resource. `MaxItems`
+defaults to 100, valid 1–1000 — **there is no cap on the number of actions per call**.
+
+#### What the simulator does not evaluate
+
+Each of these is absent rather than faked, because a fabricated field in a preflight
+answer is worse than a missing one:
+
+| Not evaluated | Why |
+|---|---|
+| **Service control policies** | Organizations stores SCPs and `CheckAccess` never consults them either, so simulating them would report a bound substrate does not enforce. `OrganizationsDecisionDetail` is therefore *absent* from a result rather than present and `false` |
+| `StartPosition` / `EndPosition` | They are byte offsets into the policy document *as submitted*. Substrate stores a parsed document, so the original text is gone and any offset would be invented. The AWS sample response shows an empty `<MatchedStatements/>`, so an absent member is a shape callers already handle |
+| `EvalDecisionDetails`, `ResourceSpecificResults` | Cross-account constructs. The reference states `EvalDecisionDetails` "is returned, but the response is empty" for a same-account simulation with a resource ARN, which is what substrate models |
+| `ResourceHandlingOption`, `PolicyExclusionList` | Accepted and ignored; both select alternate evaluation modes substrate does not model |
+
+A consumer whose preflight depends on an SCP boundary cannot get that answer here, and
+should not read an `allowed` as covering it.
 
 ### AWS managed policies are a seeded catalog
 
@@ -862,26 +932,62 @@ A policy under a path reports the path in `Path` and keeps it out of `PolicyName
 `service-role/AWSLambdaBasicExecutionRole` has `Path: /service-role/` and `PolicyName:
 AWSLambdaBasicExecutionRole`, matching AWS. The full ARN includes the path component.
 
+#### Finding a policy: `ListPolicies` scope
+
+`Scope=AWS` means substrate's **52-policy catalog**, not the ~1,200 AWS publishes.
+`Scope=Local` is the policies created through `CreatePolicy`; `All`, the default, is both.
+`PathPrefix` matches against the `Path` field and must begin *and* end with a slash, as
+IAM requires — `/service-role` is refused, `/service-role/` returns the three policies AWS
+publishes under that path (`AWSLambdaBasicExecutionRole`,
+`AWSLambdaVPCAccessExecutionRole`, `AmazonECSTaskExecutionRolePolicy`). The other two
+service-role policies substrate bundles, `AmazonSSMManagedInstanceCore` and
+`AmazonEC2ContainerRegistryReadOnly`, live at `/` because that is their real path — what a
+policy is *for* and where it lives are different things, and the path reported here is
+AWS's. `OnlyAttached` is computed from stored attachments, so a bundled policy that has
+been attached to a user, group or role does appear; the catalog's own `AttachmentCount` is
+always 0 and is not used.
+
+`PolicyUsageFilter` is **validated and applies no narrowing.** The reference does not say
+which side of `PermissionsPolicy`/`PermissionsBoundary` an entirely-unused policy falls on,
+and in a fresh substrate every bundled policy is unused — so guessing would silently drop
+all 52 from a filtered listing, which is the same failure the unfiltered listing used to
+have. An invalid value is still refused with `ValidationError`.
+
 #### Attaching a policy substrate does not bundle
 
-`AttachRolePolicy` and `AttachUserPolicy` accept **any** policy ARN without checking that
-it resolves, so attaching one of the ~1,150 unbundled managed policies succeeds and
-`GetPolicy` on the same ARN then returns `NoSuchEntity`. Real IAM refuses the attach.
+`AttachUserPolicy`, `AttachRolePolicy` and `AttachGroupPolicy` check the **shape** of
+`PolicyArn`, not that it resolves. A value that is not a well-formed policy ARN — a bare
+policy name, a bucket ARN, `role/` where `policy/` belongs, an account that is not twelve
+digits — is refused with `InvalidInput` (400).
 
-This asymmetry is deliberate for now: refusing an ARN substrate cannot resolve would fail
-every attach of an unbundled managed policy — breaking working consumer code — where the
-current behaviour merely fails to catch a typo. Tracked in
-[#499](https://github.com/scttfrdmn/substrate/issues/499). A consumer who needs the attach
-verified should follow it with `GetPolicy`, which is exact.
+A well-formed ARN that resolves in neither the catalog nor state **succeeds**, and logs at
+`WARN` naming it. Requiring existence would refuse every attach of the ~1,150 unbundled
+managed policies: attaching `AmazonAthenaFullAccess` would hard-fail where AWS succeeds.
+That trades a confusing success for a wrong failure, and the wrong failure breaks working
+consumer code rather than merely failing to catch a typo. The warning distinguishes an
+unbundled AWS managed policy (expected) from a customer-managed ARN no `CreatePolicy` ever
+created (likelier a real mistake).
 
-#### Policy documents are not observable over the wire
+The consequence to know: an attached-but-unresolvable policy contributes **no statements**
+to any authorization decision, so `CheckAccess` and the simulator both behave as though it
+were not attached. A consumer who needs the attach verified should follow it with
+`GetPolicy`, which is exact.
 
-`GetPolicy` returns metadata only — policy ID, name, ARN, path, default version,
-attachment count and dates — which is what AWS returns. On AWS the document comes from
-`GetPolicyVersion`, which substrate does not implement
-([#498](https://github.com/scttfrdmn/substrate/issues/498)). The seeded documents are
-readable in process through `emulator.GetManagedPolicy` and are what the IAM policy
-evaluator reads.
+#### Policy documents and versions
+
+`GetPolicy` returns metadata only — policy ID, name, ARN, path, default version, attachment
+count and dates — which is what AWS returns. The document comes from `GetPolicyVersion`,
+URL-encoded per RFC 3986, for a bundled policy and a created one alike.
+
+**Substrate stores one document per policy**, so `ListPolicyVersions` returns exactly one
+version and `GetPolicyVersion` answers `NoSuchEntity` for any `VersionId` other than the
+policy's default. This is reachable immediately: the catalog reports real AWS defaults, so
+`AmazonSSMManagedInstanceCore` has `DefaultVersionId: v2` and `v1` does not exist here.
+Claiming `v1` resolves when the policy reports `v3` as its default would be a fabricated
+document. A `VersionId` that is not version-shaped at all is `InvalidInput` (400).
+
+The seeded documents are also readable in process through `emulator.GetManagedPolicy`, and
+are what the IAM policy evaluator reads.
 
 ### CloudFormation resource types
 
