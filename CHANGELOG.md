@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.101.0] - 2026-08-15
+
 ### Added
 - **An account can be asked whether it is being recorded: AWS Config's recorder and
   delivery channel** (#580). Substrate emulated 66 services and not one of them could
@@ -6920,7 +6922,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.100.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.101.0...HEAD
+[v0.101.0]: https://github.com/scttfrdmn/substrate/compare/v0.100.0...v0.101.0
 [v0.100.0]: https://github.com/scttfrdmn/substrate/compare/v0.99.0...v0.100.0
 [v0.99.0]: https://github.com/scttfrdmn/substrate/compare/v0.98.0...v0.99.0
 [v0.98.0]: https://github.com/scttfrdmn/substrate/compare/v0.97.0...v0.98.0
