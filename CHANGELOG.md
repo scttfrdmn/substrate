@@ -148,6 +148,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before this release no operation could put a policy on a group at all, so an existing
   fixture can only be affected if it wrote group policy state directly.
 
+- **An attach validates the shape of its `PolicyArn`** (#499). `AttachUserPolicy`,
+  `AttachRolePolicy` and `AttachGroupPolicy` appended whatever ARN they were given to the
+  entity's list unconditionally, so a consumer could attach a bare policy name or an S3
+  bucket ARN, get a success, and only discover the mistake through `GetPolicy` answering
+  `NoSuchEntity` for an ARN the attach had just accepted. All three now refuse a
+  malformed policy ARN with `InvalidInput` (400) — the code the model declares for them —
+  built from the model's own `accountIdType`, `policyPathType` and `policyNameType`
+  patterns rather than by eye.
+
+  **Existence is deliberately not required.** Substrate bundles 52 of roughly 1,200 AWS
+  managed policies, so refusing an ARN that resolves nowhere would refuse every attach of
+  the other ~1,150: attaching `AmazonAthenaFullAccess` would hard-fail where AWS succeeds.
+  That trades a confusing success for a wrong failure, and the wrong failure is worse — it
+  breaks working consumer code rather than merely failing to catch a typo. A well-formed
+  ARN that resolves in neither the catalog nor state therefore **succeeds**, and logs at
+  `WARN` naming the ARN, with a different message for an unbundled AWS managed policy (the
+  expected case) than for a customer-managed ARN no `CreatePolicy` ever created (a likelier
+  mistake). The warning fires after the entity lookup, so an attach that is going to fail
+  with `NoSuchEntity` does not also warn about a policy nothing was attaching. An ARN
+  `GetPolicy` resolves is never refused and never warns. The partition stays permissive
+  (`aws`, `aws-cn`, `aws-us-gov`, the `aws-iso` variants and whatever follows), because
+  refusing an unknown partition would refuse an ARN that is well-formed for a region
+  substrate does not model.
+
+  Two paths the issue offered are not taken and are recorded on it: seeding all ~1,200 ARNs
+  without documents would make `GetPolicy` resolve policies whose documents are empty, and
+  a seedable strict mode would be a second behaviour for the same call with no consumer
+  asking for it yet.
+
+  This is a behaviour change: a fixture attaching a made-up ARN that is not ARN-shaped
+  starts failing. One that attaches a real-but-unbundled AWS managed ARN keeps working.
+
 ### Fixed
 - **`ListPolicies` applies its filters and can see the bundled catalog** (#497). It parsed
   `Scope` and `PathPrefix` and applied neither, and it enumerated only policies created

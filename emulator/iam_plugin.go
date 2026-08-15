@@ -920,6 +920,10 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	if params.UserName == "" || params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "UserName and PolicyArn are required", http.StatusBadRequest), nil
 	}
+	// Shape, not existence — see iam_policy_arn.go (#499).
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 
@@ -936,6 +940,10 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 			fmt.Sprintf("The user with name %s cannot be found.", params.UserName),
 			http.StatusNotFound), nil
 	}
+
+	// Existence is not required, only reported — see iam_policy_arn.go (#499). The check runs
+	// after the user lookup so an attach that is going to fail anyway does not also warn.
+	p.iamWarnUnresolvedPolicyARN(goCtx, "AttachUserPolicy", params.PolicyArn)
 
 	listKey := "user_policies:" + params.UserName
 	arns, err := p.loadPolicyList(goCtx, listKey)
@@ -1046,6 +1054,10 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	if params.RoleName == "" || params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "RoleName and PolicyArn are required", http.StatusBadRequest), nil
 	}
+	// Shape, not existence — see iam_policy_arn.go (#499).
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 
@@ -1062,6 +1074,10 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
 	}
+
+	// Existence is not required, only reported — see iam_policy_arn.go (#499). The check runs
+	// after the role lookup so an attach that is going to fail anyway does not also warn.
+	p.iamWarnUnresolvedPolicyARN(goCtx, "AttachRolePolicy", params.PolicyArn)
 
 	listKey := "role_policies:" + params.RoleName
 	arns, err := p.loadPolicyList(goCtx, listKey)
