@@ -18,6 +18,8 @@ github.com/aws/aws-sdk-go-v2/service/account v1.35.6 h1:mObt+amlHneRU0jyyCIRb6vy
 github.com/aws/aws-sdk-go-v2/service/account v1.35.6/go.mod h1:N2v9jPq9iN8zqp2/IzP44Y6hShrwn8Q7IJGiBHCc184=
 github.com/aws/aws-sdk-go-v2/service/cloudformation v1.76.1 h1:UDQGJ9AuLcf4yiDKyHPGN4EirOLo/E8+Zfoii8FhyZs=
 github.com/aws/aws-sdk-go-v2/service/cloudformation v1.76.1/go.mod h1:tCsJEKr4HMFIZSnXLx6rU2HlptPtLhWWfw2V2j9p7lE=
+github.com/aws/aws-sdk-go-v2/service/configservice v1.68.6 h1:8xf8QK6jZ5K/qvmHYUyRYuPVwMPR0FfGXMbtfn5hQqA=
+github.com/aws/aws-sdk-go-v2/service/configservice v1.68.6/go.mod h1:z2ZuTbi9wofbMt8Fy6y2De9+4xoghaKeV2XDyYoKIVs=
 github.com/aws/aws-sdk-go-v2/service/ec2 v1.321.0 h1:XxzwotCCRk2Un1OWcJujk4vAC2OZkGh5l816W1w+Fd8=
 github.com/aws/aws-sdk-go-v2/service/ec2 v1.321.0/go.mod h1:Gi5mEHpABbT34fHwafgyxqrIte9oHUEHscusPBYEdHA=
 github.com/aws/aws-sdk-go-v2/service/iam v1.58.1 h1:zfcqlttrsc7l4bPHtnPlOGripqUsq7gH7hK7IOy4Mks=
