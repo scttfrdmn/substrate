@@ -120,11 +120,18 @@ func configRecorderPayload(name string) map[string]any {
 // cases whose subject is something else.
 func configPutRecorder(t *testing.T, ts *emulator.TestServer, name string) {
 	t.Helper()
-	resp := configRequest(t, ts, "PutConfigurationRecorder", map[string]any{
+	configPutRecorderIn(t, ts, "us-east-1", name)
+}
+
+// configPutRecorderIn creates a recorder in a named Region, for the cases that need a
+// second Region to have one before it can create anything there.
+func configPutRecorderIn(t *testing.T, ts *emulator.TestServer, region, name string) {
+	t.Helper()
+	resp := configRequestIn(t, ts, region, "PutConfigurationRecorder", map[string]any{
 		"ConfigurationRecorder": configRecorderPayload(name),
 	})
 	status, code, message := decodeConfigResponse(t, resp, nil)
-	require.Equal(t, http.StatusOK, status, "%s: %s", code, message)
+	require.Equal(t, http.StatusOK, status, "%s in %s: %s", code, region, message)
 }
 
 // configDescribeRecorders returns the recorders DescribeConfigurationRecorders

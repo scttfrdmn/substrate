@@ -375,6 +375,26 @@ func (s *Server) handleSetScale(w http.ResponseWriter, r *http.Request) {
 	s.handleGetTime(w, r)
 }
 
+// writeJSONErrorDebug writes a control-plane error body, formatting message through
+// fmt.Sprintf and JSON-encoding the result.
+//
+// It exists because the obvious inline form — fmt.Sprintf(`{"error":"… %q …"}`, v) —
+// produces invalid JSON whenever an interpolated value lands inside the already-quoted
+// error string: %q adds its own quotes, closing the JSON string early. A caller that
+// decodes the body to report why its seed was refused gets a parse error instead of
+// the reason, which is the one moment it most needs to read the message.
+func writeJSONErrorDebug(w http.ResponseWriter, status int, message string, args ...any) {
+	if len(args) > 0 {
+		message = fmt.Sprintf(message, args...)
+	}
+	body, err := json.Marshal(map[string]string{"error": message})
+	if err != nil {
+		http.Error(w, `{"error":"could not encode error message"}`, http.StatusInternalServerError)
+		return
+	}
+	http.Error(w, string(body), status)
+}
+
 // writeJSONDebug marshals v to JSON and writes it to w.
 func writeJSONDebug(w http.ResponseWriter, logger Logger, v interface{}) {
 	body, err := json.Marshal(v)

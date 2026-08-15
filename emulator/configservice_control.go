@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // AWS Config control-plane seeds (#580).
@@ -18,11 +20,12 @@ import (
 // reaches them: the value is pinned here, read at request time, and the same on
 // every replay.
 //
-// Two seeds ship with the recorder and channel clusters:
+// The seeds:
 //
-//	POST/DELETE /v1/config/recorder-status    lastStatus + error code/message
-//	POST/DELETE /v1/config/delivery-policy    force or suppress the bucket-policy refusal
-//	POST/DELETE /v1/config/delivery-status    the DeliveryStatus a channel reports
+//	POST/DELETE /v1/config/recorder-status          lastStatus + error code/message
+//	POST/DELETE /v1/config/delivery-policy          force or suppress the bucket-policy refusal
+//	POST/DELETE /v1/config/delivery-status          the DeliveryStatus a channel reports
+//	POST/DELETE /v1/config/rule-compliance/{name}   a Config rule's compliance verdict
 //
 // Seeds live in their own namespace so a seeded status is never mistaken for a real
 // one in a state dump or during replay, and each is applied at *read* time rather
@@ -90,6 +93,19 @@ func cfgsvcCtrlDeliveryPolicyKey(bucket string) string {
 	return "delivery_policy:" + bucket
 }
 
+// cfgsvcCtrlRuleComplianceKey returns the state key for a seeded Config-rule
+// verdict, keyed by rule name within an account and Region.
+//
+// The rule name takes the "*" wildcard like the account and Region do, so a fixture
+// can pin one default for every rule — which is how a consumer asserts "nothing is
+// compliant yet" over a stack whose rule names it does not enumerate.
+func cfgsvcCtrlRuleComplianceKey(accountID, region, rule string) string {
+	if rule == "" {
+		rule = "*"
+	}
+	return "rule_compliance:" + cfgsvcCtrlScope(accountID, region) + "/" + rule
+}
+
 // cfgsvcCtrlScope builds the account/region component of a seed key, defaulting
 // either half to the "*" wildcard.
 func cfgsvcCtrlScope(accountID, region string) string {
@@ -155,6 +171,98 @@ type cfgsvcSeededDeliveryPolicy struct {
 
 	// Outcome is "ok" or "insufficient".
 	Outcome string `json:"outcome"`
+}
+
+// cfgsvcSeededRuleCompliance is a pinned Config-rule verdict.
+//
+// Evaluating a rule is workload-internal — running a Guard policy or a Lambda
+// against resource state — so substrate never computes a verdict and this is the
+// only way one is ever anything other than INSUFFICIENT_DATA. See the cluster
+// comment in configservice_rules.go for why that default is the right one.
+type cfgsvcSeededRuleCompliance struct {
+	// AccountID the seed applies to, or "*" for any account.
+	AccountID string `json:"accountId"`
+
+	// Region the seed applies to, or "*" for any Region.
+	Region string `json:"region"`
+
+	// ConfigRuleName the seed applies to, or "*" for any rule.
+	ConfigRuleName string `json:"configRuleName"`
+
+	// ComplianceType is the verdict the rule reports.
+	ComplianceType string `json:"complianceType"`
+
+	// Annotation is carried onto each synthesized evaluation result.
+	Annotation string `json:"annotation,omitempty"`
+
+	// Resources are the resources the verdict is attributed to, and may be empty.
+	//
+	// With none, the seed answers DescribeComplianceByConfigRule and
+	// GetComplianceDetailsByConfigRule reports an empty list — a rule-level verdict
+	// with no per-resource results, which is what AWS returns for a rule whose
+	// evaluation produced none. Naming resources is what makes the details operation
+	// worth calling.
+	Resources []cfgsvcSeededResource `json:"resources,omitempty"`
+}
+
+// cfgsvcSeededResource is one resource a seeded verdict is attributed to.
+type cfgsvcSeededResource struct {
+	// ResourceType is the resource's AWS type, e.g. AWS::S3::Bucket.
+	ResourceType string `json:"resourceType"`
+
+	// ResourceID is the resource's identifier.
+	ResourceID string `json:"resourceId"`
+}
+
+// seededRuleCompliance returns the pinned verdict for a rule, trying the rule's own
+// name before the "*" rule wildcard and, within each, the account/Region candidates
+// most specific first.
+//
+// Rule name is the outer loop because it is the more specific axis: a fixture that
+// seeds one rule NON_COMPLIANT and every other rule COMPLIANT means the named seed to
+// win, whatever account scope either carries.
+func (p *ConfigServicePlugin) seededRuleCompliance(ctx context.Context, accountID, region, rule string) (
+	seed cfgsvcSeededRuleCompliance, found bool, err error) {
+	for _, name := range []string{rule, "*"} {
+		build := func(a, r string) string { return cfgsvcCtrlRuleComplianceKey(a, r, name) }
+		for _, key := range cfgsvcCtrlKeyCandidates(build, accountID, region) {
+			data, getErr := p.state.Get(ctx, configServiceCtrlNamespace, key)
+			if getErr != nil {
+				return seed, false, fmt.Errorf("config seededRuleCompliance %s: %w", key, getErr)
+			}
+			if data == nil {
+				continue
+			}
+			if err := json.Unmarshal(data, &seed); err != nil {
+				return seed, false, fmt.Errorf("config seededRuleCompliance %s unmarshal: %w", key, err)
+			}
+			if seed.ComplianceType != "" {
+				return seed, true, nil
+			}
+		}
+		if rule == "*" {
+			break
+		}
+	}
+	return cfgsvcSeededRuleCompliance{}, false, nil
+}
+
+// cfgsvcClearRuleCompliance removes every seed naming one rule, which
+// DeleteConfigRule does so a rebuilt rule of the same name starts at
+// INSUFFICIENT_DATA rather than inheriting its predecessor's verdict.
+//
+// The "*" seed is deliberately left alone: it is a fixture-wide default rather than
+// this rule's state, and deleting a rule should not silently change what every other
+// rule reports.
+func (p *ConfigServicePlugin) cfgsvcClearRuleCompliance(ctx context.Context, reqCtx *RequestContext,
+	rule string) error {
+	build := func(a, r string) string { return cfgsvcCtrlRuleComplianceKey(a, r, rule) }
+	for _, key := range cfgsvcCtrlKeyCandidates(build, reqCtx.AccountID, reqCtx.Region) {
+		if err := p.state.Delete(ctx, configServiceCtrlNamespace, key); err != nil {
+			return fmt.Errorf("config clear rule compliance %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // seededRecorderStatus returns the pinned recorder status, matching the exact
@@ -258,8 +366,7 @@ func (s *Server) handleConfigSeedRecorderStatus(w http.ResponseWriter, r *http.R
 	// matches, so the caller's switch would fall through to its default and the test
 	// would pass while asserting nothing.
 	if !slices.Contains(cfgsvcRecorderStatuses, seed.LastStatus) {
-		http.Error(w, fmt.Sprintf(`{"error":"lastStatus %q is not a RecorderStatus"}`, seed.LastStatus),
-			http.StatusBadRequest)
+		writeJSONErrorDebug(w, http.StatusBadRequest, "lastStatus %q is not a RecorderStatus", seed.LastStatus)
 		return
 	}
 	// An error code or message on a non-Failure status would be silently dropped by
@@ -304,8 +411,8 @@ func (s *Server) handleConfigSeedDeliveryStatus(w http.ResponseWriter, r *http.R
 		return
 	}
 	if !slices.Contains(cfgsvcDeliveryStatuses, seed.Status) {
-		http.Error(w, fmt.Sprintf(`{"error":"status %q is not a DeliveryStatus (note Not_Applicable`+
-			` carries an underscore)"}`, seed.Status), http.StatusBadRequest)
+		writeJSONErrorDebug(w, http.StatusBadRequest,
+			"status %q is not a DeliveryStatus (note Not_Applicable carries an underscore)", seed.Status)
 		return
 	}
 	if seed.Status != cfgsvcDeliveryFailure && (seed.LastErrorCode != "" || seed.LastErrorMessage != "") {
@@ -346,8 +453,8 @@ func (s *Server) handleConfigSeedDeliveryPolicy(w http.ResponseWriter, r *http.R
 		return
 	}
 	if !slices.Contains(cfgsvcDeliveryOutcomes, seed.Outcome) {
-		http.Error(w, fmt.Sprintf(`{"error":"outcome %q is not one of \"ok\" or \"insufficient\""}`,
-			seed.Outcome), http.StatusBadRequest)
+		writeJSONErrorDebug(w, http.StatusBadRequest, `outcome %q is not one of "ok" or "insufficient"`,
+			seed.Outcome)
 		return
 	}
 	s.configSeedPut(w, r, cfgsvcCtrlDeliveryPolicyKey(seed.Bucket), seed,
@@ -364,6 +471,80 @@ func (s *Server) handleConfigClearDeliveryPolicy(w http.ResponseWriter, r *http.
 			return "", false
 		}
 		return cfgsvcCtrlDeliveryPolicyKey(bucket), true
+	})
+}
+
+// handleConfigSeedRuleCompliance handles POST /v1/config/rule-compliance/{name}. It
+// pins the verdict a Config rule reports, which is the only way one is ever anything
+// but INSUFFICIENT_DATA: substrate evaluates no rules.
+// Body: {"complianceType":"NON_COMPLIANT","annotation":"…",
+// "resources":[{"resourceType":"AWS::S3::Bucket","resourceId":"b1"}]}.
+// A {name} of "*" seeds every rule.
+func (s *Server) handleConfigSeedRuleCompliance(w http.ResponseWriter, r *http.Request) {
+	var seed cfgsvcSeededRuleCompliance
+	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	// The path names the rule, so a body naming a different one is a contradiction
+	// rather than an override: honoring either would leave the caller unable to tell
+	// which rule it seeded.
+	if name := chi.URLParam(r, "name"); name != "" {
+		if seed.ConfigRuleName != "" && seed.ConfigRuleName != name {
+			writeJSONErrorDebug(w, http.StatusBadRequest,
+				"configRuleName %q in the body contradicts %q in the path", seed.ConfigRuleName, name)
+			return
+		}
+		seed.ConfigRuleName = name
+	}
+	if seed.ComplianceType == "" {
+		http.Error(w, `{"error":"complianceType is required"}`, http.StatusBadRequest)
+		return
+	}
+	// NOT_APPLICABLE is in the ComplianceType enum but not in the Compliance shape's
+	// subset: "Config does not support the NOT_APPLICABLE value for the Compliance data
+	// type." Storing it would make DescribeComplianceByConfigRule report a value the
+	// shape cannot carry, which no SDK enum member matches.
+	if !slices.Contains(cfgsvcRuleComplianceTypes, seed.ComplianceType) {
+		writeJSONErrorDebug(w, http.StatusBadRequest, "complianceType %q is not valid for a rule; the "+
+			"Compliance shape supports only COMPLIANT, NON_COMPLIANT and INSUFFICIENT_DATA (Config "+
+			"does not support NOT_APPLICABLE for this data type)", seed.ComplianceType)
+		return
+	}
+	// INSUFFICIENT_DATA cannot appear in an EvaluationResult — "Config does not support
+	// the INSUFFICIENT_DATA value for the EvaluationResult data type" — so naming
+	// resources alongside it asks for per-resource results that cannot be emitted. The
+	// seed is refused rather than half-applied.
+	if seed.ComplianceType == cfgsvcInsufficientData && len(seed.Resources) > 0 {
+		http.Error(w, `{"error":"resources cannot be given with complianceType INSUFFICIENT_DATA, `+
+			`which the EvaluationResult shape does not support"}`, http.StatusBadRequest)
+		return
+	}
+	for _, res := range seed.Resources {
+		if res.ResourceType == "" || res.ResourceID == "" {
+			http.Error(w, `{"error":"each resource requires a resourceType and a resourceId"}`,
+				http.StatusBadRequest)
+			return
+		}
+	}
+	s.configSeedPut(w, r, cfgsvcCtrlRuleComplianceKey(seed.AccountID, seed.Region, seed.ConfigRuleName),
+		seed, map[string]any{
+			"complianceType": seed.ComplianceType,
+			"description":    cfgsvcRuleComplianceDescription(seed),
+		})
+}
+
+// handleConfigClearRuleCompliance handles DELETE /v1/config/rule-compliance/{name}.
+// A {name} of "*" clears the every-rule seed; omitting the segment clears all of
+// them, returning every rule to INSUFFICIENT_DATA.
+func (s *Server) handleConfigClearRuleCompliance(w http.ResponseWriter, r *http.Request) {
+	s.configSeedClear(w, r, "rule_compliance:", func() (string, bool) {
+		name := chi.URLParam(r, "name")
+		if name == "" {
+			return "", false
+		}
+		return cfgsvcCtrlRuleComplianceKey(r.URL.Query().Get("accountId"), r.URL.Query().Get("region"),
+			name), true
 	})
 }
 

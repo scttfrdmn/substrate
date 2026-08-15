@@ -86,6 +86,7 @@ func (p *ConfigServicePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 	for _, claim := range []func(string) (cfgsvcHandler, bool){
 		p.recorderOperation,
 		p.channelOperation,
+		p.ruleOperation,
 	} {
 		if h, ok := claim(req.Operation); ok {
 			return h(ctx, req)

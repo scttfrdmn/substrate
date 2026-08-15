@@ -80,7 +80,7 @@ func (s *Server) handleAccountSeedRegionOptStatus(w http.ResponseWriter, r *http
 	// no SDK enum member matches, so the caller's switch would fall through to its
 	// default and the test would pass without exercising anything.
 	if !slices.Contains(accountRegionOptStatuses, seed.Status) {
-		http.Error(w, fmt.Sprintf(`{"error":"status %q is not a RegionOptStatus"}`, seed.Status), http.StatusBadRequest)
+		writeJSONErrorDebug(w, http.StatusBadRequest, "status %q is not a RegionOptStatus", seed.Status)
 		return
 	}
 	// A default Region is always ENABLED_BY_DEFAULT, and a seed naming one would be
@@ -94,7 +94,8 @@ func (s *Server) handleAccountSeedRegionOptStatus(w http.ResponseWriter, r *http
 			return
 		}
 		if !isOptIn {
-			http.Error(w, fmt.Sprintf(`{"error":"%q is not an AWS Region code substrate knows"}`, seed.RegionName), http.StatusBadRequest)
+			writeJSONErrorDebug(w, http.StatusBadRequest, "%q is not an AWS Region code substrate knows",
+				seed.RegionName)
 			return
 		}
 	}
