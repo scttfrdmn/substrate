@@ -97,6 +97,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. Both refusals exist for the same reason: a delete that skipped them would leave one
   side of the membership index naming an entity that no longer exists, and that dangling
   membership is read by `loadPoliciesForPrincipal` on every request.
+- **A managed policy's document is readable over the wire: `GetPolicyVersion` and
+  `ListPolicyVersions`** (#498). `GetPolicy` returns metadata only — which matches AWS,
+  where the document lives behind `GetPolicyVersion` — and substrate routed no version
+  operation at all. So the 52 bundled documents, several transcribed from their AWS
+  reference pages, were readable by a Go caller through `GetManagedPolicy` and by no
+  consumer over HTTP: a test could attach `AmazonS3ReadOnlyAccess` and never see what it
+  granted. This is also what makes a simulated decision checkable — a caller who gets an
+  `implicitDeny` can now read the policy that failed to grant it.
+
+  The document is percent-encoded to **RFC 3986**, which the reference specifies and which
+  neither stdlib escaper produces. `url.QueryEscape` encodes a space as `+`, and a decoder
+  that follows RFC 3986 reads that back as a literal plus — silently corrupting any
+  document containing a space, which is most of them. `url.PathEscape` leaves `:` and
+  several sub-delimiters bare, so an ARN in a `Resource` comes back differently from what
+  AWS sends. Substrate escapes byte-at-a-time to the unreserved set per §2.5. Most SDKs
+  decode this automatically, so getting it wrong breaks the raw HTTP client and nobody
+  else, which is exactly the kind of gap that only surfaces in production; a test asserts
+  the value round-trips through a strict decoder.
+
+  Substrate models **one version per policy**: `IAMPolicy` holds a single document and a
+  `DefaultVersionID`, and no `CreatePolicyVersion`/`SetDefaultPolicyVersion` exists. So a
+  `VersionId` that is not the policy's default answers `NoSuchEntity` rather than being
+  served the default's document under the requested name — a consumer pinning a version
+  would otherwise be told a document is `v1` that AWS reports as something else. The
+  bundled catalog makes this immediately reachable rather than hypothetical:
+  `AmazonSSMManagedInstanceCore` reports `v2` and `AWSLambdaVPCAccessExecutionRole`
+  reports `v3`, because AWS has edited them since publication. `ListPolicyVersions`
+  therefore returns exactly one member, and both facts are stated in `docs/services.md`.
+
+  `ListPolicyVersions` **omits** `Document`, per the model, which documents that member as
+  returned by `GetPolicyVersion` and `GetAccountAuthorizationDetails` and not by the list
+  or create calls. Sending it would hand a caller a member AWS does not, which is the kind
+  of difference that makes a consumer work against substrate and fail against AWS. A
+  malformed `VersionId` is `InvalidInput` and is refused *before* the policy is resolved,
+  because the parameter is wrong whether or not the policy exists — answering
+  `NoSuchEntity` would send the caller looking for a policy that is right there.
 
 ### Changed
 - **A group's policies now apply to its members' requests** through `CheckAccess`. AWS
