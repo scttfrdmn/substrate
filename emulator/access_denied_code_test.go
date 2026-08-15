@@ -57,6 +57,14 @@ func TestAccessDeniedCodeFor_TracksTheWireProtocol(t *testing.T) {
 		{"dynamodb is json rpc", "dynamodb", "application/x-amz-json-1.0", "AccessDeniedException"},
 		{"ssm is json rpc", "ssm", "application/x-amz-json-1.1", "AccessDeniedException"},
 		{"sqs is json rpc", "sqs", "", "AccessDeniedException"},
+
+		// Config, whose Content-Type-free case is the one that matters: the
+		// AuthController calls accessDeniedCodeFor(service, "") with no Content-Type
+		// at all, so a service missing from serviceErrorProtocols falls through to
+		// the XML default and refuses a JSON caller with a code its SDK cannot
+		// match. Config was in exactly that state when its plugin landed (#580).
+		{"config is json rpc", "config", "", "AccessDeniedException"},
+		{"config is json rpc with a body", "config", "application/x-amz-json-1.1", "AccessDeniedException"},
 		{"lambda is rest json", "lambda", "application/json", "AccessDeniedException"},
 		{"apigateway is rest json", "apigateway", "application/json", "AccessDeniedException"},
 

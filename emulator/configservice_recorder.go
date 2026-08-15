@@ -466,9 +466,17 @@ func (p *ConfigServicePlugin) stopConfigurationRecorder(ctx *RequestContext, req
 
 // deleteConfigurationRecorder deletes the recorder and its status and tags.
 //
-// Deleting a recorder while it is recording is permitted — no refusal is documented
-// — and it does not delete the delivery channel, so a fixture that tears down and
-// rebuilds must delete both.
+// **It has no ordering precondition at all**, which is worth stating plainly because
+// the asymmetry with DeleteDeliveryChannel invites the opposite assumption. That
+// operation refuses while the recorder runs, and its prose says so; this one declares
+// exactly two exceptions — NoSuchConfigurationRecorderException and
+// UnmodifiableEntityException, the latter for service-linked recorders only — and no
+// exception exists that could express "stop it first" or "delete the channel first".
+// Inferring a precondition from the *channel* delete's prose would make substrate
+// refuse a sequence AWS accepts, and a wrong refusal breaks working code.
+//
+// So deleting a recorder while it is recording succeeds, and it does not delete the
+// delivery channel: a fixture that tears down and rebuilds must delete both.
 func (p *ConfigServicePlugin) deleteConfigurationRecorder(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var in cfgsvcRecorderNameRequest
 	if err := cfgsvcUnmarshal(req.Body, &in); err != nil {

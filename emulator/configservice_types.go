@@ -2,6 +2,8 @@ package emulator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -216,31 +218,56 @@ func cfgsvcTagsKey(arn string) string { return "tags:" + arn }
 // --- ARNs ---
 //
 // The ARN formats come from the Service Authorization Reference's "Resource types
-// defined by AWS Config" table, not from the API reference, which gives none:
+// defined by AWS Config" table, not from the API reference, which gives none. The
+// authoritative form is the machine-readable service reference at
+// servicereference.us-east-1.amazonaws.com/v1/config/config.json (Version v1.4),
+// which agrees with the rendered page:
 //
-//	arn:${Partition}:config:${Region}:${Account}:config-recorder/${Name}
-//	arn:${Partition}:config:${Region}:${Account}:delivery-channel/${Name}
+//	arn:${Partition}:config:${Region}:${Account}:configuration-recorder/${RecorderName}/${RecorderId}
 //	arn:${Partition}:config:${Region}:${Account}:config-rule/${ConfigRuleId}
-//	arn:${Partition}:config:${Region}:${Account}:conformance-pack/${Name}/${Id}
+//	arn:${Partition}:config:${Region}:${Account}:conformance-pack/${ConformancePackName}/${ConformancePackId}
 //
-// The recorder form is "config-recorder", not "recorder". Substrate's own
-// CloudFormation stub emitted the latter (#580); it is corrected where that stub
-// becomes a real dispatch.
+// Two of those corrected an earlier reading of this table (#580), and both are worth
+// recording because a wrong ARN is a silent failure: a policy written against the
+// real form would not match substrate's resource, so a test asserting a denial would
+// pass for the wrong reason.
+//
+//   - The recorder segment is "configuration-recorder", not "config-recorder" or
+//     "recorder", and it is *two* components — a name and an ID. RecorderId has no
+//     member in the API model at all, so it is minted here the way a pack's ID is.
+//   - There is **no delivery-channel resource type**. The table defines ten types and
+//     none is a delivery channel; PutDeliveryChannel, DescribeDeliveryChannels,
+//     DescribeDeliveryChannelStatus and DeleteDeliveryChannel authorize against an
+//     empty resource list, i.e. "*". Synthesizing a delivery-channel ARN would be an
+//     invention with no documentation behind it, and the DeliveryChannel shape has no
+//     arn member to carry one anyway — which is consistent: a channel is not a
+//     taggable, policy-addressable resource. TagResource's own ResourceArn
+//     documentation enumerates the supported types and a delivery channel is not
+//     among them.
 
 // cfgsvcARN builds a Config ARN for a resource type and identifier.
 func cfgsvcARN(ctx *RequestContext, resourceType, id string) string {
 	return fmt.Sprintf("arn:aws:config:%s:%s:%s/%s", ctx.Region, ctx.AccountID, resourceType, id)
 }
 
-// cfgsvcRecorderARN builds the ARN of a configuration recorder.
+// cfgsvcRecorderARN builds the ARN of a configuration recorder,
+// configuration-recorder/<RecorderName>/<RecorderId>.
+//
+// The ID component is minted deterministically because the API model has no member
+// that carries it: nothing a caller sends or reads names it, yet the ARN template
+// requires it. Deriving it by hash keeps a replayed event stream producing the same
+// ARN, which is the property the whole emulator rests on.
 func cfgsvcRecorderARN(ctx *RequestContext, name string) string {
-	return cfgsvcARN(ctx, "config-recorder", name)
+	return cfgsvcARN(ctx, "configuration-recorder",
+		name+"/"+cfgsvcMintRecorderID(ctx.AccountID, ctx.Region, name))
 }
 
-// A delivery-channel ARN is deliberately absent here: the DeliveryChannel shape
-// carries no arn member, so nothing in this cluster has one to emit. The
-// delivery-channel form above is recorded because the tag operations address a
-// channel by ARN, and it arrives with them.
+// cfgsvcMintRecorderID derives a recorder's ID component, for the reason
+// cfgsvcMintRuleID does.
+func cfgsvcMintRecorderID(accountID, region, name string) string {
+	sum := sha256.Sum256([]byte("configuration-recorder/" + accountID + "/" + region + "/" + name))
+	return strings.ToLower(base64.RawURLEncoding.EncodeToString(sum[:6]))[:8]
+}
 
 // --- errors ---
 //

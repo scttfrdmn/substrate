@@ -618,12 +618,25 @@ func (p *ConfigServicePlugin) cfgsvcSavePack(goCtx context.Context, ctx *Request
 	return p.cfgsvcPutJSON(goCtx, cfgsvcPackNamesKey(ctx.AccountID, ctx.Region), names)
 }
 
-// cfgsvcDeletePackRecord removes a pack and its index entry, the counterpart to
-// cfgsvcSavePack.
+// cfgsvcDeletePackRecord removes a pack, its index entry and its tags, the counterpart
+// to cfgsvcSavePack.
+//
+// The tags go with it because "if you delete a resource, any tags for the resource are
+// also deleted". That matters here specifically because a pack's ARN is deterministic:
+// a rebuilt pack of the same name has the same ARN, so tags left behind would be read
+// back as tags on the new pack, which no AWS account does. PutConformancePack has no
+// Tags member of its own — a pack can only be tagged through TagResource — so this is
+// the only place a pack's tags are ever removed.
 func (p *ConfigServicePlugin) cfgsvcDeletePackRecord(goCtx context.Context, ctx *RequestContext,
-	name string) error {
-	if err := p.cfgsvcDeleteKey(goCtx, cfgsvcPackKey(ctx.AccountID, ctx.Region, name)); err != nil {
-		return err
+	pack *ConfigConformancePack) error {
+	name := pack.ConformancePackName
+	for _, key := range []string{
+		cfgsvcPackKey(ctx.AccountID, ctx.Region, name),
+		cfgsvcTagsKey(pack.ConformancePackArn),
+	} {
+		if err := p.cfgsvcDeleteKey(goCtx, key); err != nil {
+			return err
+		}
 	}
 	names, err := p.cfgsvcPackNames(goCtx, ctx)
 	if err != nil {
@@ -1150,7 +1163,7 @@ func (p *ConfigServicePlugin) deleteConformancePack(ctx *RequestContext, req *AW
 		return nil, cfgsvcPackResourceInUse(req.Operation)
 	}
 
-	if err := p.cfgsvcDeletePackRecord(goCtx, ctx, in.ConformancePackName); err != nil {
+	if err := p.cfgsvcDeletePackRecord(goCtx, ctx, &pack); err != nil {
 		return nil, err
 	}
 	if err := p.cfgsvcClearPackSeeds(goCtx, ctx, in.ConformancePackName); err != nil {

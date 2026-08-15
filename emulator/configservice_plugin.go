@@ -88,6 +88,7 @@ func (p *ConfigServicePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 		p.channelOperation,
 		p.ruleOperation,
 		p.packOperation,
+		p.tagOperation,
 	} {
 		if h, ok := claim(req.Operation); ok {
 			return h(ctx, req)
