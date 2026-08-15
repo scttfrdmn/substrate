@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **66 built-in service plugins**. This section is generated
+Substrate ships **67 built-in service plugins**. This section is generated
 from the plugin registry (`make docs-reference`), so the count and plugin list
 cannot drift from the implementation. The live count is also available from the
 `/ready` endpoint (`curl http://localhost:4566/ready`). Per-service operation,
@@ -30,53 +30,54 @@ CloudFormation, and cost detail follows below the matrix.
 | 17 | CodePipeline | `codepipeline` | JSON |
 | 18 | Cognito Identity | `cognito-identity` | JSON |
 | 19 | Cognito Identity Provider | `cognito-idp` | JSON |
-| 20 | DynamoDB | `dynamodb` | JSON |
-| 21 | EC2 / VPC | `ec2` | Query |
-| 22 | ECR | `ecr` | JSON |
-| 23 | ECS | `ecs` | JSON |
-| 24 | EFS | `efs` | REST/JSON |
-| 25 | ElastiCache | `elasticache` | Query |
-| 26 | ELBv2 | `elasticloadbalancing` | Query |
-| 27 | EMR Serverless | `emrserverless` | REST/JSON |
-| 28 | EventBridge | `eventbridge` | JSON |
-| 29 | API Gateway (execute-api) | `execute-api` | REST/JSON |
-| 30 | Kinesis Data Firehose | `firehose` | JSON |
-| 31 | FSx | `fsx` | JSON |
-| 32 | Glue | `glue` | JSON |
-| 33 | Health | `health` | JSON |
-| 34 | IAM | `iam` | Query |
-| 35 | Kinesis Data Streams | `kinesis` | JSON |
-| 36 | KMS | `kms` | JSON |
-| 37 | Lambda | `lambda` | REST/JSON |
-| 38 | CloudWatch Logs | `logs` | JSON |
-| 39 | CloudWatch | `monitoring` | Query |
-| 40 | MSK | `msk` | REST/JSON |
-| 41 | HealthOmics | `omics` | REST/JSON |
-| 42 | OpenSearch | `opensearch` | REST/JSON |
-| 43 | Organizations | `organizations` | JSON |
-| 44 | Price List Query API | `pricing` | JSON |
-| 45 | QuickSight | `quicksight` | REST/JSON |
-| 46 | RAM | `ram` | REST/JSON |
-| 47 | RDS | `rds` | Query |
-| 48 | Redshift | `redshift` | Query |
-| 49 | Redshift Data API | `redshift-data` | JSON |
-| 50 | Route 53 | `route53` | REST/XML |
-| 51 | S3 | `s3` | REST/XML |
-| 52 | SageMaker | `sagemaker` | JSON |
-| 53 | EventBridge Scheduler | `scheduler` | REST/JSON |
-| 54 | Secrets Manager | `secretsmanager` | JSON |
-| 55 | Service Quotas | `servicequotas` | JSON |
-| 56 | SES v2 | `sesv2` | REST/JSON |
-| 57 | SNS | `sns` | Query |
-| 58 | SQS | `sqs` | JSON |
-| 59 | SSM | `ssm` | JSON |
-| 60 | SSO / Identity Store | `sso` | REST/JSON |
-| 61 | Step Functions | `states` | JSON |
-| 62 | STS | `sts` | Query |
-| 63 | Resource Groups Tagging | `tagging` | JSON |
-| 64 | Timestream | `timestream` | JSON |
-| 65 | Transfer Family | `transfer` | JSON |
-| 66 | WAFv2 | `wafv2` | JSON |
+| 20 | Config | `config` | JSON |
+| 21 | DynamoDB | `dynamodb` | JSON |
+| 22 | EC2 / VPC | `ec2` | Query |
+| 23 | ECR | `ecr` | JSON |
+| 24 | ECS | `ecs` | JSON |
+| 25 | EFS | `efs` | REST/JSON |
+| 26 | ElastiCache | `elasticache` | Query |
+| 27 | ELBv2 | `elasticloadbalancing` | Query |
+| 28 | EMR Serverless | `emrserverless` | REST/JSON |
+| 29 | EventBridge | `eventbridge` | JSON |
+| 30 | API Gateway (execute-api) | `execute-api` | REST/JSON |
+| 31 | Kinesis Data Firehose | `firehose` | JSON |
+| 32 | FSx | `fsx` | JSON |
+| 33 | Glue | `glue` | JSON |
+| 34 | Health | `health` | JSON |
+| 35 | IAM | `iam` | Query |
+| 36 | Kinesis Data Streams | `kinesis` | JSON |
+| 37 | KMS | `kms` | JSON |
+| 38 | Lambda | `lambda` | REST/JSON |
+| 39 | CloudWatch Logs | `logs` | JSON |
+| 40 | CloudWatch | `monitoring` | Query |
+| 41 | MSK | `msk` | REST/JSON |
+| 42 | HealthOmics | `omics` | REST/JSON |
+| 43 | OpenSearch | `opensearch` | REST/JSON |
+| 44 | Organizations | `organizations` | JSON |
+| 45 | Price List Query API | `pricing` | JSON |
+| 46 | QuickSight | `quicksight` | REST/JSON |
+| 47 | RAM | `ram` | REST/JSON |
+| 48 | RDS | `rds` | Query |
+| 49 | Redshift | `redshift` | Query |
+| 50 | Redshift Data API | `redshift-data` | JSON |
+| 51 | Route 53 | `route53` | REST/XML |
+| 52 | S3 | `s3` | REST/XML |
+| 53 | SageMaker | `sagemaker` | JSON |
+| 54 | EventBridge Scheduler | `scheduler` | REST/JSON |
+| 55 | Secrets Manager | `secretsmanager` | JSON |
+| 56 | Service Quotas | `servicequotas` | JSON |
+| 57 | SES v2 | `sesv2` | REST/JSON |
+| 58 | SNS | `sns` | Query |
+| 59 | SQS | `sqs` | JSON |
+| 60 | SSM | `ssm` | JSON |
+| 61 | SSO / Identity Store | `sso` | REST/JSON |
+| 62 | Step Functions | `states` | JSON |
+| 63 | STS | `sts` | Query |
+| 64 | Resource Groups Tagging | `tagging` | JSON |
+| 65 | Timestream | `timestream` | JSON |
+| 66 | Transfer Family | `transfer` | JSON |
+| 67 | WAFv2 | `wafv2` | JSON |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---

@@ -69,6 +69,7 @@ var meta = map[string]pluginMeta{
 	"codepipeline":         {"CodePipeline", "JSON"},
 	"cognito-identity":     {"Cognito Identity", "JSON"},
 	"cognito-idp":          {"Cognito Identity Provider", "JSON"},
+	"config":               {"Config", "JSON"},
 	"dynamodb":             {"DynamoDB", "JSON"},
 	"ec2":                  {"EC2 / VPC", "Query"},
 	"ecr":                  {"ECR", "JSON"},

@@ -313,6 +313,19 @@ var targetServiceAliases = map[string]string{
 	// aws-sdk-go-v2 and boto3 call fell through to
 	// "service not emulated: awsorganizationsv20161128".
 	"awsorganizationsv20161128": "organizations",
+	// "StarlingDoveService" → no "Amazon" to strip, no "_" version suffix →
+	// lowercase → "starlingdoveservice" → "config". StarlingDove is the internal
+	// code-name for AWS Config, the way TrentService is for KMS, so the target
+	// prefix bears no resemblance to the endpoint prefix and reduces to nothing on
+	// its own. The host "config.*" and the SigV4 signing name already yield
+	// "config", so only the target path needed this — and the target path is the
+	// one every aws-sdk-go-v2 and boto3 Config call takes.
+	//
+	// Without the alias ConfigServicePlugin would be registered and unit-tested
+	// green while unreachable from any SDK, exactly as SSOPlugin was in #561 and
+	// OrganizationsPlugin above: every call would fall through to "service not
+	// emulated: starlingdoveservice" (#580).
+	"starlingdoveservice": "config",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **An account can be asked whether it is being recorded: AWS Config's recorder and
+  delivery channel** (#580). Substrate emulated 66 services and not one of them could
+  answer "is this account under configuration recording, and is delivery working?" — the
+  detective half of the control loop a consumer builds after its stacks deploy. There was
+  no Config plugin at all.
+
+  The headline behaviour is that **two operations that look like they answer the same
+  question must disagree**. `DescribeConfigurationRecorders` reporting a recorder says
+  nothing about whether it is recording; that is
+  `DescribeConfigurationRecorderStatus.recording`. A recorder created and never started is
+  the single most common real Config misconfiguration, and a consumer that checks only the
+  first call reports an account as covered when nothing is being recorded. Substrate now
+  distinguishes them: `PutConfigurationRecorder` leaves `recording: false`, and only
+  `StartConfigurationRecorder` flips it.
+
+  The ordering refusals are the other half, and they make a consumer's sequencing bug
+  observable instead of silently tolerated. `StartConfigurationRecorder` without a delivery
+  channel is `NoAvailableDeliveryChannelException`; `PutDeliveryChannel` without a recorder
+  is `NoAvailableConfigurationRecorderException`, checked **before** the bucket so a
+  consumer with neither is told to fix the recorder first; `DeleteDeliveryChannel` while the
+  recorder runs is `LastDeliveryChannelDeleteFailedException`, which is what makes a
+  teardown-and-rebuild fixture — the same test run twice — express an ordering requirement
+  rather than pass on a sequence AWS rejects.
+
+  **`PutDeliveryChannel` computes its S3 refusals from real S3 state**, which makes it the
+  one Config operation whose success depends on another service. A missing bucket is
+  `NoSuchBucketException`; a bucket with no policy at all is
+  `InsufficientDeliveryPolicyException`. Where a policy exists, the matcher is deliberately
+  **permissive**: it passes if any `Allow` statement's principal covers
+  `config.amazonaws.com` or `*` and its action covers `s3:PutObject` — including `s3:Put*`,
+  `s3:*` and `*` — and it does not match the resource ARN. A policy shape substrate's parser
+  cannot decode passes too, because refusing there would be substrate blaming the consumer
+  for its own limitation. The two failure directions are not symmetric: always accepting
+  would make a bucket-policy bug invisible here and fatal at AWS, while demanding the exact
+  documented policy would refuse policies AWS accepts, and a wrong refusal breaks working
+  code.
+
+  Both `Put`s are idempotent per the reference — a second call with the same name updates the
+  role and recording group but **does not** replace creation-time tags — and a second
+  *distinct* name is `MaxNumberOf{ConfigurationRecorders,DeliveryChannels}ExceededException`,
+  there being one of each per account per Region. Both names default to `default`. An empty
+  `roleARN` is `InvalidRoleException`: the reference's own message makes this a null/empty
+  check, **not** an assumability check, so a role that was never created is accepted, as AWS
+  accepts it. A name prefixed `AWSConfigurationRecorderFor` is
+  `InvalidConfigurationRecorderNameException`, and `InvalidRecordingGroupException`
+  implements the reference's enumerated cases. The default recording group records all
+  supported types **excluding** the four global IAM types. Every state key carries the
+  Region, so a recorder put in `us-east-1` is absent in `eu-west-1` — "recording in one
+  Region only" being another misconfiguration that looks like success.
+
+- **Control-plane seeds for the statuses no API call can reach** (#580):
+  `POST`/`DELETE /v1/config/recorder-status`, `/v1/config/delivery-status` and
+  `/v1/config/delivery-policy`. Substrate delivers nothing to S3, so no sequence of calls
+  can produce a failed delivery — and a consumer's delivery-failure branch is code that
+  exists precisely for one. Each is scoped by account and Region with `*` wildcards, is
+  applied at read time so clearing restores the real status, and validates against the API
+  model's own enum: a near-miss such as `NotApplicable` for the `DeliveryStatus` member AWS
+  spells `Not_Applicable` is refused rather than stored as a value no SDK enum matches, and
+  an error code on a non-`Failure` status is refused rather than half-applied. Delivery
+  status reports `Not_Applicable` until the recorder first starts and `Success` after, per
+  stream, because reporting `Success` before anything was delivered would tell a consumer
+  its pipeline works when nothing has gone through it.
+
+### Fixed
+- **Every AWS Config request was unroutable** (#580). Config's `X-Amz-Target` prefix is
+  `StarlingDoveService` — an internal code name bearing no resemblance to the `config`
+  endpoint prefix, the way `TrentService` is KMS's — and `starlingdoveservice` was absent
+  from `targetServiceAliases`, so it reduced to nothing and every SDK call fell through to
+  "service not emulated: starlingdoveservice". The target path is the one every
+  aws-sdk-go-v2 and boto3 Config call takes, so without the alias the plugin would have been
+  registered and unit-tested green while unreachable — exactly what #561, #610 and #636 were.
+  A unit test now asserts resolution by target prefix, host **and** SigV4 signing name, so
+  the gap cannot reopen silently.
+
 ## [v0.100.0] - 2026-08-14
 
 ### Added
