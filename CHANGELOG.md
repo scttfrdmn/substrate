@@ -103,6 +103,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   evaluations *and* its compliance seed, so a rebuilt rule of the same name starts at
   `INSUFFICIENT_DATA` rather than inheriting its predecessor's verdict — which is what makes
   a teardown-and-rebuild fixture honest.
+- **A conformance pack's deployment converges in one poll: the conformance-pack cluster**
+  (#580). `PutConformancePack`, `DescribeConformancePacks`, `DescribeConformancePackStatus`,
+  `DescribeConformancePackCompliance`, `GetConformancePackComplianceSummary` and
+  `DeleteConformancePack`.
+
+  A pack is the only Config resource whose creation is **asynchronous**: `Put` returns an ARN
+  and nothing else, and a consumer learns whether its pack deployed by polling
+  `DescribeConformancePackStatus`. Substrate resolves `CREATE_IN_PROGRESS → CREATE_COMPLETE`
+  **on the first observation and then persists it**, following `resolveCreateAccountStatus`
+  from the Organizations plugin. Both halves matter and in opposite directions: a status that
+  never advanced would hang a waiter forever, while one that re-resolved on every poll would
+  move `LastUpdateCompletedTime` under a waiter comparing successive polls, which would also
+  never converge. Advancing on observation instead of on a duration is what keeps the
+  transition free of wall-clock dependence — #514 remains the home for clock-driven
+  transitions, and inventing a duration here would have pre-empted it.
+
+  The in-progress window is therefore real but narrow, which is what makes
+  `ResourceInUseException` reachable: a second `Put`, or a `Delete`, issued before anything
+  observed the first transition is refused with that operation's own bullet from the
+  exception's shared documentation list. Because the enum has **no `UPDATE_` state**, an
+  update re-enters `CREATE_IN_PROGRESS`, so a consumer that updates and immediately waits
+  does not get its predecessor's `CREATE_COMPLETE` back.
+
+  `PutConformancePack` enforces "you must specify only one of the follow parameters:
+  `TemplateS3Uri`, `TemplateBody` or `TemplateSSMDocumentDetails`" — AWS's own sentence, its
+  typo included, so a consumer matching on message text matches. Substrate does not deploy the
+  template and never judges its content: a template is recorded intent, and neither response
+  shape has a member to read it back, so emitting one would be an invention no SDK field would
+  receive. `ConformancePackId` and the required `StackArn` are minted deterministically from
+  the account, Region and name, so a replayed event stream produces the same identifiers and an
+  update keeps them. All six required members of `ConformancePackStatusDetail` are always
+  emitted, because a consumer decoding a required member into a non-pointer field reads an
+  omission as an empty string rather than as an error.
+
+  Pack compliance is **seeded, never computed**, like a rule's, and an unseeded pack reports no
+  rules and summarizes as `INSUFFICIENT_DATA`. The cumulative verdict
+  `GetConformancePackComplianceSummary` reports is *derived* from the same per-rule seeds
+  rather than seeded separately, so the summary and the drill-down cannot disagree, and a known
+  `NON_COMPLIANT` outranks an unevaluated rule — a pack with something wrong in it is not "we
+  don't know yet", and reporting the unknown would let a consumer treating it as "wait and
+  retry" loop past a real failure.
+
+  Two model asymmetries are honoured rather than smoothed over, because collapsing either
+  would answer where AWS refuses or refuse where AWS answers.
+  `ConformancePackComplianceType` has **no `NOT_APPLICABLE`** even though a rule's verdict
+  does, so the seed endpoint refuses that value. And the compliance *filter* — "the allowed
+  values are `COMPLIANT` and `NON_COMPLIANT`; `INSUFFICIENT_DATA` is not supported" — excludes
+  a value the response itself carries, so filtering on it is an error rather than an empty
+  list. A filter naming a rule the pack does not report is
+  `NoSuchConfigRuleInConformancePackException`, per "you must provide exact rule names", so a
+  typo in a fixture is caught instead of passing as "nothing matched". These four operations
+  answer `InvalidLimitException` for an out-of-range `Limit` where the rule cluster answers
+  `InvalidParameterValueException` — each cluster uses the codes its own operations declare —
+  and the caps differ per operation (20 for the two describes and the summary, 1000 for
+  compliance), each enforced at the model's own maximum so substrate never refuses a page size
+  AWS serves.
 - **Control-plane seeds for the statuses no API call can reach** (#580):
   `POST`/`DELETE /v1/config/recorder-status`, `/v1/config/delivery-status` and
   `/v1/config/delivery-policy`. Substrate delivers nothing to S3, so no sequence of calls
@@ -115,6 +171,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status reports `Not_Applicable` until the recorder first starts and `Success` after, per
   stream, because reporting `Success` before anything was delivered would tell a consumer
   its pipeline works when nothing has gone through it.
+
+  `POST`/`DELETE /v1/config/pack-status/{name}` and `/v1/config/pack-compliance/{name}` do the
+  same for a conformance pack, scoped by account, Region and pack name with a `*` wildcard on
+  each. A pack substrate created always completes — it deploys no stack — so `CREATE_FAILED`,
+  the state that reports a bad template to its author, and `DELETE_IN_PROGRESS`, which
+  substrate's synchronous delete never occupies, are reachable only by seed. Because a status
+  seed is applied when the status is read rather than written into the record, clearing it
+  restores the real state, and a pack seeded `CREATE_FAILED` is *deletable* — the state a
+  consumer most needs to clean up — even though the stored record still says
+  `CREATE_IN_PROGRESS`. A seeded status reports its completion time as the request time rather
+  than the current clock, so successive polls cannot move it. Deleting a pack clears that
+  pack's own seeds but leaves a `*` seed alone, since a wildcard is a fixture-wide default
+  rather than one pack's state.
 
 ### Fixed
 - **Every AWS Config request was unroutable** (#580). Config's `X-Amz-Target` prefix is

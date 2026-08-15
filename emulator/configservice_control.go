@@ -548,6 +548,307 @@ func (s *Server) handleConfigClearRuleCompliance(w http.ResponseWriter, r *http.
 	})
 }
 
+// --- conformance-pack seeds ---
+
+// cfgsvcCtrlPackStatusKey returns the state key for a seeded conformance-pack
+// deployment state, keyed by pack name within an account and Region. The pack name
+// takes the "*" wildcard, so a fixture can fail every pack at once.
+func cfgsvcCtrlPackStatusKey(accountID, region, pack string) string {
+	if pack == "" {
+		pack = "*"
+	}
+	return "pack_status:" + cfgsvcCtrlScope(accountID, region) + "/" + pack
+}
+
+// cfgsvcCtrlPackComplianceKey returns the state key for a seeded pack verdict,
+// keyed the same way.
+func cfgsvcCtrlPackComplianceKey(accountID, region, pack string) string {
+	if pack == "" {
+		pack = "*"
+	}
+	return "pack_compliance:" + cfgsvcCtrlScope(accountID, region) + "/" + pack
+}
+
+// cfgsvcSeededPackStatus pins a conformance pack's deployment state.
+//
+// Substrate deploys no CloudFormation stack, so a pack it created always reaches
+// CREATE_COMPLETE and can never fail on its own. A consumer whose waiter has a
+// CREATE_FAILED branch — the branch that reports a bad template to whoever wrote it —
+// needs this to reach that branch at all.
+type cfgsvcSeededPackStatus struct {
+	// AccountID the seed applies to, or "*" for any account.
+	AccountID string `json:"accountId"`
+
+	// Region the seed applies to, or "*" for any Region.
+	Region string `json:"region"`
+
+	// ConformancePackName the seed applies to, or "*" for any pack.
+	ConformancePackName string `json:"conformancePackName"`
+
+	// State is the ConformancePackState every observation reports.
+	State string `json:"state"`
+
+	// StatusReason explains a CREATE_FAILED or DELETE_FAILED state.
+	StatusReason string `json:"statusReason,omitempty"`
+}
+
+// cfgsvcSeededPackCompliance pins the per-rule verdicts within a conformance pack.
+//
+// The rules are named here rather than read from the pack's template because
+// substrate does not deploy the template: on AWS, CloudFormation creates a pack's
+// rules as service-linked rules, and inferring them would mean parsing arbitrary
+// CloudFormation to produce a listing a consumer would then assert against. See
+// configservice_packs.go's header comment.
+type cfgsvcSeededPackCompliance struct {
+	// AccountID the seed applies to, or "*" for any account.
+	AccountID string `json:"accountId"`
+
+	// Region the seed applies to, or "*" for any Region.
+	Region string `json:"region"`
+
+	// ConformancePackName the seed applies to, or "*" for any pack.
+	ConformancePackName string `json:"conformancePackName"`
+
+	// Rules are the pack's rules and their verdicts, and may be empty — a pack with no
+	// seeded rules reports INSUFFICIENT_DATA, the "has not evaluated" default.
+	Rules []cfgsvcSeededPackRule `json:"rules"`
+}
+
+// cfgsvcSeededPackRule is one rule's verdict within a seeded pack.
+type cfgsvcSeededPackRule struct {
+	// ConfigRuleName is the rule the verdict belongs to.
+	ConfigRuleName string `json:"configRuleName"`
+
+	// ComplianceType is a ConformancePackComplianceType member — which, unlike the
+	// rule-level ComplianceType, has no NOT_APPLICABLE.
+	ComplianceType string `json:"complianceType"`
+
+	// Controls are the controls the rule addresses, up to 20 of them. The shape
+	// documents a control as "a process to prevent or detect problems while meeting
+	// objectives"; substrate carries whatever the seed names and derives nothing from it.
+	Controls []string `json:"controls,omitempty"`
+}
+
+// seededPackStatus returns the pinned deployment state for a pack, trying the pack's
+// own name before the "*" wildcard and, within each, the account/Region candidates
+// most specific first — the resolution order seededRuleCompliance uses, and for the
+// same reason: a fixture that fails one pack and completes the rest means the named
+// seed to win.
+func (p *ConfigServicePlugin) seededPackStatus(ctx context.Context, accountID, region, pack string) (
+	seed cfgsvcSeededPackStatus, found bool, err error) {
+	for _, name := range []string{pack, "*"} {
+		build := func(a, r string) string { return cfgsvcCtrlPackStatusKey(a, r, name) }
+		for _, key := range cfgsvcCtrlKeyCandidates(build, accountID, region) {
+			data, getErr := p.state.Get(ctx, configServiceCtrlNamespace, key)
+			if getErr != nil {
+				return seed, false, fmt.Errorf("config seededPackStatus %s: %w", key, getErr)
+			}
+			if data == nil {
+				continue
+			}
+			if err := json.Unmarshal(data, &seed); err != nil {
+				return seed, false, fmt.Errorf("config seededPackStatus %s unmarshal: %w", key, err)
+			}
+			if seed.State != "" {
+				return seed, true, nil
+			}
+		}
+		if pack == "*" {
+			break
+		}
+	}
+	return cfgsvcSeededPackStatus{}, false, nil
+}
+
+// seededPackCompliance returns the pinned verdicts for a pack, resolved the same way.
+//
+// A seed naming an empty rule list counts as found: "this pack has no rules" is a
+// distinct assertion from "this pack has not been seeded", and both report
+// INSUFFICIENT_DATA in the summary but only the first is deliberate.
+func (p *ConfigServicePlugin) seededPackCompliance(ctx context.Context, accountID, region, pack string) (
+	seed cfgsvcSeededPackCompliance, found bool, err error) {
+	for _, name := range []string{pack, "*"} {
+		build := func(a, r string) string { return cfgsvcCtrlPackComplianceKey(a, r, name) }
+		for _, key := range cfgsvcCtrlKeyCandidates(build, accountID, region) {
+			data, getErr := p.state.Get(ctx, configServiceCtrlNamespace, key)
+			if getErr != nil {
+				return seed, false, fmt.Errorf("config seededPackCompliance %s: %w", key, getErr)
+			}
+			if data == nil {
+				continue
+			}
+			if err := json.Unmarshal(data, &seed); err != nil {
+				return seed, false, fmt.Errorf("config seededPackCompliance %s unmarshal: %w", key, err)
+			}
+			return seed, true, nil
+		}
+		if pack == "*" {
+			break
+		}
+	}
+	return cfgsvcSeededPackCompliance{}, false, nil
+}
+
+// cfgsvcClearPackSeeds removes every status and compliance seed naming one pack,
+// which DeleteConformancePack does so a rebuilt pack of the same name does not
+// inherit its predecessor's state or verdict.
+//
+// The "*" seeds are deliberately left alone, for the reason cfgsvcClearRuleCompliance
+// leaves them: a wildcard is a fixture-wide default rather than this pack's state,
+// and deleting one pack should not silently change what every other pack reports.
+func (p *ConfigServicePlugin) cfgsvcClearPackSeeds(ctx context.Context, reqCtx *RequestContext,
+	pack string) error {
+	builders := []func(string, string) string{
+		func(a, r string) string { return cfgsvcCtrlPackStatusKey(a, r, pack) },
+		func(a, r string) string { return cfgsvcCtrlPackComplianceKey(a, r, pack) },
+	}
+	for _, build := range builders {
+		for _, key := range cfgsvcCtrlKeyCandidates(build, reqCtx.AccountID, reqCtx.Region) {
+			if err := p.state.Delete(ctx, configServiceCtrlNamespace, key); err != nil {
+				return fmt.Errorf("config clear pack seed %s: %w", key, err)
+			}
+		}
+	}
+	return nil
+}
+
+// handleConfigSeedPackStatus handles POST /v1/config/pack-status/{name}. It pins the
+// ConformancePackState every DescribeConformancePackStatus reports, which is the only
+// way to reach CREATE_FAILED or DELETE_FAILED: substrate deploys no stack, so a pack
+// it created always completes.
+// Body: {"state":"CREATE_FAILED","statusReason":"template validation failed"}.
+// A {name} of "*" seeds every pack.
+func (s *Server) handleConfigSeedPackStatus(w http.ResponseWriter, r *http.Request) {
+	var seed cfgsvcSeededPackStatus
+	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
+		writeJSONErrorDebug(w, http.StatusBadRequest, "%s", err.Error())
+		return
+	}
+	if name := chi.URLParam(r, "name"); name != "" {
+		if seed.ConformancePackName != "" && seed.ConformancePackName != name {
+			writeJSONErrorDebug(w, http.StatusBadRequest,
+				"conformancePackName %q in the body contradicts %q in the path",
+				seed.ConformancePackName, name)
+			return
+		}
+		seed.ConformancePackName = name
+	}
+	if seed.State == "" {
+		writeJSONErrorDebug(w, http.StatusBadRequest, "state is required")
+		return
+	}
+	if !slices.Contains(cfgsvcPackStates, seed.State) {
+		writeJSONErrorDebug(w, http.StatusBadRequest, "state %q is not a ConformancePackState (the "+
+			"enum has no UPDATE_ state and no DELETE_COMPLETE)", seed.State)
+		return
+	}
+	// A status reason on a state that is not one of the two failures would be silently
+	// dropped by every consumer that reads it only on failure, so the seed is refused
+	// rather than half-applied — the same rule the recorder-status seed follows for its
+	// error code and message.
+	if seed.StatusReason != "" && !slices.Contains(cfgsvcPackFailedStates, seed.State) {
+		writeJSONErrorDebug(w, http.StatusBadRequest,
+			"statusReason applies only to state CREATE_FAILED or DELETE_FAILED")
+		return
+	}
+	s.configSeedPut(w, r, cfgsvcCtrlPackStatusKey(seed.AccountID, seed.Region, seed.ConformancePackName),
+		seed, map[string]any{"state": seed.State})
+}
+
+// handleConfigClearPackStatus handles DELETE /v1/config/pack-status/{name}. A {name}
+// of "*" clears the every-pack seed; omitting the segment clears all of them,
+// returning every pack to advance-on-observation.
+func (s *Server) handleConfigClearPackStatus(w http.ResponseWriter, r *http.Request) {
+	s.configSeedClear(w, r, "pack_status:", func() (string, bool) {
+		name := chi.URLParam(r, "name")
+		if name == "" {
+			return "", false
+		}
+		return cfgsvcCtrlPackStatusKey(r.URL.Query().Get("accountId"), r.URL.Query().Get("region"),
+			name), true
+	})
+}
+
+// handleConfigSeedPackCompliance handles POST /v1/config/pack-compliance/{name}. It
+// pins the per-rule verdicts a conformance pack reports, which is the only way one
+// reports anything: substrate evaluates no rules and does not deploy the template
+// that would declare them.
+// Body: {"rules":[{"configRuleName":"iam-password-policy","complianceType":"NON_COMPLIANT",
+// "controls":["CIS 1.5"]}]}. A {name} of "*" seeds every pack.
+func (s *Server) handleConfigSeedPackCompliance(w http.ResponseWriter, r *http.Request) {
+	var seed cfgsvcSeededPackCompliance
+	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
+		writeJSONErrorDebug(w, http.StatusBadRequest, "%s", err.Error())
+		return
+	}
+	if name := chi.URLParam(r, "name"); name != "" {
+		if seed.ConformancePackName != "" && seed.ConformancePackName != name {
+			writeJSONErrorDebug(w, http.StatusBadRequest,
+				"conformancePackName %q in the body contradicts %q in the path",
+				seed.ConformancePackName, name)
+			return
+		}
+		seed.ConformancePackName = name
+	}
+	seen := make(map[string]bool, len(seed.Rules))
+	for _, rule := range seed.Rules {
+		if rule.ConfigRuleName == "" || len(rule.ConfigRuleName) > cfgsvcMaxRuleNameLen {
+			writeJSONErrorDebug(w, http.StatusBadRequest,
+				"each rule requires a configRuleName of up to %d characters", cfgsvcMaxRuleNameLen)
+			return
+		}
+		// Two verdicts for one rule name would make the reported one depend on map
+		// iteration order, which is exactly the nondeterminism this emulator exists to
+		// remove.
+		if seen[rule.ConfigRuleName] {
+			writeJSONErrorDebug(w, http.StatusBadRequest,
+				"configRuleName %q appears twice; a rule has one verdict", rule.ConfigRuleName)
+			return
+		}
+		seen[rule.ConfigRuleName] = true
+		// NOT_APPLICABLE is in the rule-level ComplianceType enum but not in
+		// ConformancePackComplianceType, so storing one would make this cluster report a
+		// value no SDK enum member matches and a caller's switch would fall through to its
+		// default while the test passed asserting nothing.
+		if !slices.Contains(cfgsvcPackComplianceTypes, rule.ComplianceType) {
+			writeJSONErrorDebug(w, http.StatusBadRequest, "complianceType %q is not a "+
+				"ConformancePackComplianceType; the allowed values are COMPLIANT, NON_COMPLIANT "+
+				"and INSUFFICIENT_DATA (unlike a Config rule's verdict, a pack's has no "+
+				"NOT_APPLICABLE)", rule.ComplianceType)
+			return
+		}
+		if len(rule.Controls) > cfgsvcMaxPackControls {
+			writeJSONErrorDebug(w, http.StatusBadRequest, "a rule accepts up to %d controls",
+				cfgsvcMaxPackControls)
+			return
+		}
+		for _, control := range rule.Controls {
+			if control == "" || len(control) > 128 {
+				writeJSONErrorDebug(w, http.StatusBadRequest,
+					"each control must be between 1 and 128 characters long")
+				return
+			}
+		}
+	}
+	s.configSeedPut(w, r,
+		cfgsvcCtrlPackComplianceKey(seed.AccountID, seed.Region, seed.ConformancePackName), seed,
+		map[string]any{"rules": len(seed.Rules)})
+}
+
+// handleConfigClearPackCompliance handles DELETE /v1/config/pack-compliance/{name}.
+// A {name} of "*" clears the every-pack seed; omitting the segment clears all of
+// them, returning every pack to INSUFFICIENT_DATA.
+func (s *Server) handleConfigClearPackCompliance(w http.ResponseWriter, r *http.Request) {
+	s.configSeedClear(w, r, "pack_compliance:", func() (string, bool) {
+		name := chi.URLParam(r, "name")
+		if name == "" {
+			return "", false
+		}
+		return cfgsvcCtrlPackComplianceKey(r.URL.Query().Get("accountId"),
+			r.URL.Query().Get("region"), name), true
+	})
+}
+
 // configSeedPut stores one Config seed and reports what it stored.
 //
 // The stored key is echoed back because the wildcard defaulting is invisible from

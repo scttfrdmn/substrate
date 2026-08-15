@@ -50,6 +50,12 @@ const cfgsvcMaxConfigRules = 1000
 // DescribeConfigRules and DescribeComplianceByConfigRule.
 const cfgsvcMaxRuleNamesFilter = 25
 
+// cfgsvcMaxRuleNameLen is the ConfigRuleName ceiling (1-128). The conformance-pack
+// cluster shares it, because ConformancePackRuleCompliance.ConfigRuleName is the same
+// shape — though the *filter* that selects those rules is a narrower 64, which is why
+// that bound is its own constant.
+const cfgsvcMaxRuleNameLen = 128
+
 // cfgsvcMaxComplianceTypesFilter is the ComplianceTypes list bound (0-3).
 const cfgsvcMaxComplianceTypesFilter = 3
 
@@ -666,7 +672,7 @@ func (p *ConfigServicePlugin) cfgsvcResolveRuleForPut(ctx *RequestContext, rule 
 // cfgsvcCheckRuleName validates a rule name against ConfigRuleName's bounds and
 // pattern (1-128, .*\S.*).
 func cfgsvcCheckRuleName(name string) error {
-	if len(name) > 128 {
+	if len(name) > cfgsvcMaxRuleNameLen {
 		return cfgsvcInvalidParameter("The Config rule name must be between 1 and 128 characters long.")
 	}
 	if !cfgsvcRuleNamePattern.MatchString(name) {
