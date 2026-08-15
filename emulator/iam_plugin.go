@@ -126,6 +126,10 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deletePolicy(ctx, req)
 	case "ListPolicies":
 		return p.listPolicies(ctx, req)
+	case "GetPolicyVersion":
+		return p.getPolicyVersion(ctx, req)
+	case "ListPolicyVersions":
+		return p.listPolicyVersions(ctx, req)
 
 	case "CreateAccessKey":
 		return p.createAccessKey(ctx, req)
