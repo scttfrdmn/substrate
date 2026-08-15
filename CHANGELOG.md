@@ -230,6 +230,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expressible at creation time. A tag store that will not decode leaves the condition key
   absent, which denies; an absent key is the safe direction.
 
+  **An end-to-end journey drives the whole surface through the real SDK**, and for Config
+  that tier is not optional. Config's `X-Amz-Target` prefix is `StarlingDoveService` — an
+  internal code name bearing no resemblance to the `config` endpoint prefix — and every
+  aws-sdk-go-v2, boto3 and CLI call routes by that target. A plugin registered without the
+  alias is fully unit-tested and unreachable from every SDK, which is what #561, #610 and
+  #636 each turned out to be; a unit test driving a hand-built request never touches the
+  alias. The journey walks the detective-controls baseline a consumer actually performs:
+  reachability on an empty account, both ordering refusals, a recorder reporting
+  `recording: false`, the two-segment ARN, all three S3 refusals in the order the operation
+  documents them, `Start`, `recording: true`, a rule reporting `INSUFFICIENT_DATA`, a seed,
+  `NON_COMPLIANT`, and the teardown-and-rebuild sequence. `docs/services.md` gains the
+  Config section: the target-prefix warning, the supported-operation table, `curl` examples
+  for all five seed families, and prose stating plainly that compliance is seeded and never
+  computed, what the delivery-policy matcher checks and why it is permissive, and the
+  `ListTagsForResource` `Limit` contradiction with the bound substrate takes.
+
 ### Fixed
 - **`DeleteBucketPolicy` deleted the bucket, and every other S3 subresource call from a real
   SDK was misrouted** (#656). S3 routes bucket-policy and ACL operations on a query-string
