@@ -37,8 +37,8 @@ func (s *Server) handlePricingSeedQueryFailure(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !pricingSeedableErrorCodes[body.Code] {
-		http.Error(w, fmt.Sprintf(`{"error":"unknown code %q; must be one of %s"}`,
-			body.Code, strings.Join(pricingSeedableCodeList(), ", ")), http.StatusBadRequest)
+		writeJSONErrorDebug(w, http.StatusBadRequest, "unknown code %q; must be one of %s",
+			body.Code, strings.Join(pricingSeedableCodeList(), ", "))
 		return
 	}
 	operation := body.Operation

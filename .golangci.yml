@@ -49,6 +49,11 @@ linters:
       # Lustre parallel file system technology); it is not a misspelling of "luster".
       - text: "[Ll][Uu][Ss][Tt][Rr][Ee]"
         linters: [misspell]
+      # "Resouce" is AWS's own typo in NoSuchConfigRuleException's message text, which
+      # substrate reproduces verbatim so a consumer matching on the message matches.
+      # Correcting it here would make substrate's message differ from the service's.
+      - text: "Resouce"
+        linters: [misspell]
 
 formatters:
   enable:

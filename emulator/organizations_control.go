@@ -180,7 +180,8 @@ func (s *Server) handleOrganizationsSeedCreateAccountFailure(w http.ResponseWrit
 		return
 	}
 	if !slices.Contains(orgCreateAccountFailureReasons, seed.FailureReason) {
-		http.Error(w, fmt.Sprintf(`{"error":"failureReason %q is not a CreateAccountFailureReason"}`, seed.FailureReason), http.StatusBadRequest)
+		writeJSONErrorDebug(w, http.StatusBadRequest, "failureReason %q is not a CreateAccountFailureReason",
+			seed.FailureReason)
 		return
 	}
 	data, err := json.Marshal(seed)
