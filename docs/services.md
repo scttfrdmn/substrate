@@ -937,8 +937,13 @@ AWSLambdaBasicExecutionRole`, matching AWS. The full ARN includes the path compo
 `Scope=AWS` means substrate's **52-policy catalog**, not the ~1,200 AWS publishes.
 `Scope=Local` is the policies created through `CreatePolicy`; `All`, the default, is both.
 `PathPrefix` matches against the `Path` field and must begin *and* end with a slash, as
-IAM requires — `/service-role` is refused, `/service-role/` returns the five service-role
-policies. `OnlyAttached` is computed from stored attachments, so a bundled policy that has
+IAM requires — `/service-role` is refused, `/service-role/` returns the three policies AWS
+publishes under that path (`AWSLambdaBasicExecutionRole`,
+`AWSLambdaVPCAccessExecutionRole`, `AmazonECSTaskExecutionRolePolicy`). The other two
+service-role policies substrate bundles, `AmazonSSMManagedInstanceCore` and
+`AmazonEC2ContainerRegistryReadOnly`, live at `/` because that is their real path — what a
+policy is *for* and where it lives are different things, and the path reported here is
+AWS's. `OnlyAttached` is computed from stored attachments, so a bundled policy that has
 been attached to a user, group or role does appear; the catalog's own `AttachmentCount` is
 always 0 and is not used.
 
