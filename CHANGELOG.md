@@ -149,6 +149,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixture can only be affected if it wrote group policy state directly.
 
 ### Fixed
+- **`ListPolicies` applies its filters and can see the bundled catalog** (#497). It parsed
+  `Scope` and `PathPrefix` and applied neither, and it enumerated only policies created
+  through `CreatePolicy` — so the 52 bundled AWS managed policies were invisible to every
+  listing. `--scope AWS` returned whatever the caller happened to have created and
+  `--path-prefix /service-role/` returned the same thing. The pairing that broke is the one
+  a reader assumes: an ARN `GetPolicy` resolves appeared in no listing, so a consumer
+  discovering a policy rather than hardcoding its ARN had no testable path at all.
+
+  `Scope` now selects the source — `AWS` the catalog, `Local` what `CreatePolicy` wrote,
+  `All` or absent both — and a value outside `All`/`AWS`/`Local` is a `ValidationError`
+  naming the permitted set. `PathPrefix` filters on `Path`, which is why the catalog keeps
+  the path in its own field rather than folded into `PolicyName`: the five `/service-role/`
+  policies are findable by the query a consumer writes. A prefix must begin and end with a
+  slash per `policyPathType`, so `/service-role` — the natural typo — is refused here as it
+  is by IAM, rather than passing against substrate and failing against AWS.
+
+  `AttachmentCount` is now **derived from state** rather than read from the stored field.
+  The catalog carries 0 for every bundled policy and no attach operation increments a count
+  anywhere, so reading the field would have left `OnlyAttached=true` unable to ever return a
+  managed policy. Counting the `user_policies:`/`group_policies:`/`role_policies:` lists
+  instead makes an attach *and a detach* immediately visible, and covers all three entity
+  kinds in one pass. The listed copy is local, because `ListManagedPolicies` hands back
+  shared pointers and writing a count through one would leak it into `GetPolicy` and into
+  every later listing in the process.
+
+  `PolicyUsageFilter` is validated and deliberately narrows nothing, which
+  `docs/services.md` states rather than leaving to be discovered. The reference does not say
+  which side an entirely-unused policy falls on, and in a fresh substrate every bundled
+  policy is unused — so guessing that unattached means "not a permissions policy" would drop
+  all 52 from a filtered listing, which is the failure this issue reports, reintroduced under
+  a different parameter.
+
+  Pagination is keyed on the ARN rather than the state key, so the catalog and state arms
+  interleave in one stable order instead of the bundled policies landing on their own pages.
+  A test walks the whole listing ten at a time and asserts the pages reassemble the unpaged
+  result exactly — no repeat, no gap — which matters more than it did before, because the
+  result set is now large enough to page under the default `MaxItems` of 100.
+
+  Substrate can only ever return the 52 policies it bundles where real IAM returns roughly
+  1,200. That limit is documented; returning **zero** was the bug.
 - **`GetGroup` reports its actual members**, paginated by `Marker`/`MaxItems` and sorted,
   instead of an empty list. A group-based simulation is untestable through the API that
   reports it if that API always answers "empty".
