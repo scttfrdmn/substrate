@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/scttfrdmn/substrate/emulator"
 )
@@ -520,7 +521,12 @@ func TestEvaluate_MatchedStatements(t *testing.T) {
 		Action: "s3:GetObject", Resource: "*",
 	})
 	assert.Equal(t, emulator.DecisionAllow, result.Decision)
-	assert.Contains(t, result.MatchedStatements, "AllowS3")
+	require.Len(t, result.MatchedStatements, 1)
+	assert.Equal(t, "AllowS3", result.MatchedStatements[0].Sid)
+	// Evaluate's documents carry no source, so the identity-policy type is filled in
+	// and SourcePolicyID stays empty. EvaluateSourced is the call that names a policy.
+	assert.Equal(t, emulator.PolicySourceIAMPolicy, result.MatchedStatements[0].SourcePolicyType)
+	assert.Empty(t, result.MatchedStatements[0].SourcePolicyID)
 }
 
 // --- Principal matching (#593) ---------------------------------------------

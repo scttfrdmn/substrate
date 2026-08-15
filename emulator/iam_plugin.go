@@ -187,6 +187,11 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListInstanceProfiles":
 		return p.listInstanceProfiles(ctx, req)
 
+	case "SimulatePrincipalPolicy":
+		return p.simulatePrincipalPolicy(ctx, req)
+	case "SimulateCustomPolicy":
+		return p.simulateCustomPolicy(ctx, req)
+
 	default:
 		return iamErrorResponse("InvalidAction",
 			fmt.Sprintf("Could not find operation %s", req.Operation),
