@@ -350,6 +350,12 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/config/rule-compliance/{name}", s.handleConfigSeedRuleCompliance)
 	r.Delete("/v1/config/rule-compliance/{name}", s.handleConfigClearRuleCompliance)
 	r.Delete("/v1/config/rule-compliance", s.handleConfigClearRuleCompliance)
+	r.Post("/v1/config/pack-status/{name}", s.handleConfigSeedPackStatus)
+	r.Delete("/v1/config/pack-status/{name}", s.handleConfigClearPackStatus)
+	r.Delete("/v1/config/pack-status", s.handleConfigClearPackStatus)
+	r.Post("/v1/config/pack-compliance/{name}", s.handleConfigSeedPackCompliance)
+	r.Delete("/v1/config/pack-compliance/{name}", s.handleConfigClearPackCompliance)
+	r.Delete("/v1/config/pack-compliance", s.handleConfigClearPackCompliance)
 
 	// Lambda control-plane endpoints (#393).
 	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
