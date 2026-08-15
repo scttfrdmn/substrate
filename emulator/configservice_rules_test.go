@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -258,10 +260,11 @@ func TestConfigRules_PutRefusalsAreInvalidParameterValueNotValidation(t *testing
 	// the wrong one is a branch it has not got.
 	ts := configRuleServer(t)
 
-	cases := []struct {
+	type ruleCase struct {
 		name string
 		rule map[string]any
-	}{
+	}
+	cases := []ruleCase{
 		{"no source at all", map[string]any{"ConfigRuleName": "r"}},
 		{"unknown owner", map[string]any{
 			"ConfigRuleName": "r", "Source": map[string]any{"Owner": "CUSTOM_THING"},
@@ -316,6 +319,54 @@ func TestConfigRules_PutRefusalsAreInvalidParameterValueNotValidation(t *testing
 			"Scope": map[string]any{"TagValue": "prod"},
 		}},
 	}
+
+	// The shape bounds, each from the model's own min/max. They are asserted because a
+	// bound substrate does not enforce lets a fixture store a value the API would have
+	// refused, and the consumer discovers the refusal against real AWS instead.
+	longRule := func(member string, value any) map[string]any {
+		rule := configRulePayload("r")
+		rule[member] = value
+		return rule
+	}
+	cases = append(cases,
+		ruleCase{"a name past 128 characters", longRule("ConfigRuleName", strings.Repeat("n", 129))},
+		ruleCase{"a Description past 256", longRule("Description", strings.Repeat("d", 257))},
+		ruleCase{"InputParameters past 1024", longRule("InputParameters", strings.Repeat("p", 1025))},
+		ruleCase{"a SourceIdentifier past 256", map[string]any{
+			"ConfigRuleName": "r",
+			"Source": map[string]any{
+				"Owner": "AWS", "SourceIdentifier": strings.Repeat("S", 257),
+			},
+		}},
+		ruleCase{"PolicyText past 10000", map[string]any{
+			"ConfigRuleName": "r",
+			"Source": map[string]any{
+				"Owner": "CUSTOM_POLICY",
+				"CustomPolicyDetails": map[string]any{
+					"PolicyRuntime": "guard-2.x.x", "PolicyText": strings.Repeat("x", 10001),
+				},
+			},
+		}},
+		ruleCase{"a SourceDetails frequency outside the enum", map[string]any{
+			"ConfigRuleName": "r",
+			"Source": map[string]any{
+				"Owner": "CUSTOM_LAMBDA", "SourceIdentifier": "arn:aws:lambda:us-east-1:123456789012:function:f",
+				"SourceDetails": []map[string]any{
+					{"EventSource": "aws.config", "MessageType": "ScheduledNotification",
+						"MaximumExecutionFrequency": "Every_Hour"},
+				},
+			},
+		}},
+		ruleCase{"more than 100 ComplianceResourceTypes", longRule("Scope", map[string]any{
+			"ComplianceResourceTypes": slices.Repeat([]string{"AWS::S3::Bucket"}, 101),
+		})},
+		ruleCase{"a Scope TagKey past 128", longRule("Scope", map[string]any{
+			"TagKey": strings.Repeat("k", 129),
+		})},
+		ruleCase{"a Scope TagValue past 256", longRule("Scope", map[string]any{
+			"TagKey": "env", "TagValue": strings.Repeat("v", 257),
+		})},
+	)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			status, code, _ := configPutRuleRaw(t, ts, map[string]any{"ConfigRule": tc.rule})
@@ -837,6 +888,48 @@ func TestConfigRules_PutEvaluationsRefusals(t *testing.T) {
 		assert.Equal(t, "InvalidParameterValueException", code)
 	})
 
+	t.Run("a resource type past 256 characters", func(t *testing.T) {
+		evaluation := configEvaluation("b1", "COMPLIANT")
+		evaluation["ComplianceResourceType"] = strings.Repeat("T", 257)
+		status, code, _ := configPutEvaluations(t, ts, map[string]any{
+			"ResultToken": configResultToken("custom-rule"),
+			"Evaluations": []map[string]any{evaluation},
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValueException", code)
+	})
+
+	t.Run("a resource id past 768 characters", func(t *testing.T) {
+		status, code, _ := configPutEvaluations(t, ts, map[string]any{
+			"ResultToken": configResultToken("custom-rule"),
+			"Evaluations": []map[string]any{configEvaluation(strings.Repeat("b", 769), "COMPLIANT")},
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValueException", code)
+	})
+
+	t.Run("an annotation past 256 characters", func(t *testing.T) {
+		evaluation := configEvaluation("b1", "COMPLIANT")
+		evaluation["Annotation"] = strings.Repeat("a", 257)
+		status, code, _ := configPutEvaluations(t, ts, map[string]any{
+			"ResultToken": configResultToken("custom-rule"),
+			"Evaluations": []map[string]any{evaluation},
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValueException", code)
+	})
+
+	t.Run("a token that is not base64", func(t *testing.T) {
+		// The envelope's payload is base64url. An unreadable one names no rule, and a
+		// token naming no rule is the same refusal as a token naming an absent one.
+		status, code, _ := configPutEvaluations(t, ts, map[string]any{
+			"ResultToken": "substrate-config-rule:not-valid-base64!!",
+			"Evaluations": []map[string]any{configEvaluation("b1", "COMPLIANT")},
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidResultTokenException", code)
+	})
+
 	// None of the refusals stored anything, so the rule still reports the seedless
 	// default.
 	entries := configDescribeCompliance(t, ts, map[string]any{})
@@ -926,6 +1019,45 @@ func TestConfigRules_DeleteLeavesTheWildcardSeedAlone(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Equal(t, "rule-b", entries[0]["ConfigRuleName"])
 	assert.Equal(t, "COMPLIANT", configComplianceTypeOf(t, entries[0]))
+
+	// Clearing the wildcard by name returns the surviving rule to the seedless default.
+	configClearSeed(t, ts, "/v1/config/rule-compliance/*")
+	entries = configDescribeCompliance(t, ts, map[string]any{})
+	require.Len(t, entries, 1)
+	assert.Equal(t, "INSUFFICIENT_DATA", configComplianceTypeOf(t, entries[0]))
+}
+
+func TestConfigRules_ClearingEverySeedReturnsEveryRuleToInsufficientData(t *testing.T) {
+	// The name-less DELETE is the reset a fixture runs between cases, and it must reach
+	// the named seeds and the wildcard alike: a leftover seed would make the next case
+	// read the previous one's verdict, which is the failure a shared control plane
+	// invites.
+	ts := configRuleServer(t)
+	configPutRule(t, ts, "rule-a")
+	configPutRule(t, ts, "rule-b")
+	configSeedRuleCompliance(t, ts, "rule-a", map[string]any{"complianceType": "NON_COMPLIANT"})
+	configSeedRuleCompliance(t, ts, "*", map[string]any{"complianceType": "COMPLIANT"})
+
+	configClearSeed(t, ts, "/v1/config/rule-compliance")
+
+	for _, entry := range configDescribeCompliance(t, ts, map[string]any{}) {
+		assert.Equal(t, "INSUFFICIENT_DATA", configComplianceTypeOf(t, entry),
+			"%v kept a seed the reset should have cleared", entry["ConfigRuleName"])
+	}
+}
+
+func TestConfigRules_AMalformedSeedBodyIsRefusedReadably(t *testing.T) {
+	// A seed body that is not JSON at all takes a different path from one that is JSON
+	// with a bad value, and it must still answer something a caller can decode.
+	ts := configRuleServer(t)
+
+	status, body := configSeedRaw(t, ts, "/v1/config/rule-compliance/s3-encrypted", "not-a-seed-object")
+	require.Equal(t, http.StatusBadRequest, status, body)
+	var decoded struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &decoded), "refusal body is JSON: %s", body)
+	assert.NotEmpty(t, decoded.Error)
 }
 
 func TestConfigRules_UnknownRuleRefusals(t *testing.T) {
