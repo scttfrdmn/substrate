@@ -1302,49 +1302,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	return iamXMLEmptyResponse("DeletePolicy"), nil
 }
 
-func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var params struct {
-		Scope      string `json:"Scope"`
-		PathPrefix string `json:"PathPrefix"`
-		Marker     string `json:"Marker"`
-		MaxItems   iamInt `json:"MaxItems"`
-	}
-	if err := parseIAMBody(req.Body, &params); err != nil {
-		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
-	}
-
-	goCtx := context.Background()
-
-	if err := p.authorize(goCtx, ctx, "iam:ListPolicies", "*"); err != nil {
-		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
-	}
-
-	keys, err := p.state.List(goCtx, iamNamespace, "policy:")
-	if err != nil {
-		return nil, fmt.Errorf("list policies: %w", err)
-	}
-
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
-
-	policies := make([]*IAMPolicy, 0, len(page))
-	for _, k := range page {
-		raw, err := p.state.Get(goCtx, iamNamespace, k)
-		if err != nil || raw == nil {
-			continue
-		}
-		var pol IAMPolicy
-		if err := json.Unmarshal(raw, &pol); err != nil {
-			continue
-		}
-		policies = append(policies, &pol)
-	}
-
-	xmlStr := iamPolicyListXML(policies) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
-	if nextMarker != "" {
-		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
-	}
-	return iamXMLResponse(http.StatusOK, "ListPolicies", xmlStr)
-}
+// listPolicies lives in iam_list_policies.go, with the filters it applies.
 
 // --- Access key operations -------------------------------------------------
 

@@ -22,9 +22,16 @@ import (
 // newIAMTestServer returns a test server with IAMPlugin registered.
 func newIAMTestServer(t *testing.T) *emulator.Server {
 	t.Helper()
+	return newIAMTestServerWithState(t, emulator.NewMemoryStateManager())
+}
+
+// newIAMTestServerWithState is [newIAMTestServer] over a caller-supplied store, for a test
+// that needs a read to fail: a listing that swallowed a store failure would report an empty
+// result, which is the opposite signal.
+func newIAMTestServerWithState(t *testing.T, state emulator.StateManager) *emulator.Server {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelInfo, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(time.Now())
@@ -622,8 +629,9 @@ func TestIAMPlugin_DeletePolicy(t *testing.T) {
 	srv := newIAMTestServer(t)
 	iamRequest(t, srv, "CreatePolicy", map[string]any{"PolicyName": "tmp-policy"})
 
-	// Get ARN from list.
-	listResp := iamRequest(t, srv, "ListPolicies", map[string]any{})
+	// Get ARN from list. Scope=Local, because since #497 the listing also carries the 52
+	// bundled AWS managed policies — this test wants the one policy it created.
+	listResp := iamRequest(t, srv, "ListPolicies", map[string]any{"Scope": "Local"})
 	var listResult map[string]any
 	decodeIAMXML(t, listResp, &listResult)
 	policies := listResult["Policies"].([]any)
