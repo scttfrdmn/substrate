@@ -1,11 +1,14 @@
 package emulator_test
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,6 +234,38 @@ func TestAttachPolicy_AnUnknownEntityDoesNotWarnAboutTheARN(t *testing.T) {
 			assert.Empty(t, logs.messages(), "nothing was attached, so nothing is worth warning about")
 		})
 	}
+}
+
+func TestAttachPolicy_WithoutALoggerTheAttachStillSucceeds(t *testing.T) {
+	// PluginConfig.Logger is optional, so the warning path has to tolerate its absence: the
+	// warning is advisory, and an attach that panicked or failed because nothing was listening
+	// would turn a diagnostic into an outage. The plugin is initialized with a nil logger while
+	// the server keeps a real one, because it is the plugin's guard under test.
+	cfg := emulator.DefaultConfig()
+	state := emulator.NewMemoryStateManager()
+	registry := emulator.NewPluginRegistry()
+
+	plugin := &emulator.IAMPlugin{}
+	require.NoError(t, plugin.Initialize(context.Background(),
+		emulator.PluginConfig{State: state, Logger: nil}))
+	registry.Register(plugin)
+
+	srv := emulator.NewServer(*cfg, registry,
+		emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig()), state,
+		emulator.NewTimeController(time.Now()), emulator.NewDefaultLogger(slog.LevelInfo, false))
+
+	// An ARN that resolves nowhere: the case that would warn if there were anywhere to warn.
+	resp := iamAttach(t, srv, iamAttachTargets[0], "arn:aws:iam::123456789012:policy/never-created")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	resp = iamRequest(t, srv, "ListAttachedUserPolicies", map[string]any{"UserName": "jill"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result map[string]any
+	decodeIAMXML(t, resp, &result)
+	attached, ok := result["AttachedPolicies"].([]any)
+	require.True(t, ok, "the attach is recorded whether or not anything logged")
+	assert.Len(t, attached, 1)
 }
 
 func TestAttachPolicy_TheShapeCheckPrecedesAuthorization(t *testing.T) {
