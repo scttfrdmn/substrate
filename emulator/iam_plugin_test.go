@@ -30,9 +30,16 @@ func newIAMTestServer(t *testing.T) *emulator.Server {
 // result, which is the opposite signal.
 func newIAMTestServerWithState(t *testing.T, state emulator.StateManager) *emulator.Server {
 	t.Helper()
+	return newIAMTestServerWith(t, state, emulator.NewDefaultLogger(slog.LevelInfo, false))
+}
+
+// newIAMTestServerWith is [newIAMTestServer] over a caller-supplied store and logger, for a
+// test that asserts on a warning: an operation whose only report of a gap is a log line is
+// otherwise indistinguishable from one that noticed nothing.
+func newIAMTestServerWith(t *testing.T, state emulator.StateManager, logger emulator.Logger) *emulator.Server {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	logger := emulator.NewDefaultLogger(slog.LevelInfo, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(time.Now())
 

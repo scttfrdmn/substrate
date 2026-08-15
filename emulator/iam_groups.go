@@ -165,6 +165,11 @@ func (p *IAMPlugin) attachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 	if params.GroupName == "" || params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "GroupName and PolicyArn are required", http.StatusBadRequest), nil
 	}
+	// Shape, not existence — see iam_policy_arn.go (#499). Applied here too, so the asymmetry
+	// #499 reports is not recreated in an operation shipping in the same release.
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:AttachGroupPolicy", "*"); err != nil {
@@ -180,6 +185,10 @@ func (p *IAMPlugin) attachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 			fmt.Sprintf("The group with name %s cannot be found.", params.GroupName),
 			http.StatusNotFound), nil
 	}
+
+	// Existence is not required, only reported — see iam_policy_arn.go (#499). The check runs
+	// after the group lookup so an attach that is going to fail anyway does not also warn.
+	p.iamWarnUnresolvedPolicyARN(goCtx, "AttachGroupPolicy", params.PolicyArn)
 
 	listKey := iamGroupPoliciesKey(params.GroupName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
