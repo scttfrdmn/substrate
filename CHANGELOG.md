@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A tool can ask before it acts: `SimulatePrincipalPolicy` and `SimulateCustomPolicy`**
+  (#579). These are the only AWS APIs that decide whether a principal may do X to Y
+  *without* doing X to Y, and neither existed — so the one code path in a consumer that
+  decides whether to proceed at all was the one path with no emulator coverage. Worse,
+  `iam_managed.go` already granted `iam:SimulatePrincipalPolicy` and
+  `iam:SimulateCustomPolicy` in its bundled policies: substrate advertised permission for
+  operations that answered `InvalidAction`.
+
+  Both operations run the **same evaluator the request gate enforces with**. `Evaluate`
+  already implemented the IAM algorithm and already produced exactly the three outcomes
+  the API reports, so this exposes existing evaluation over the wire rather than writing a
+  second one. That is the property worth having: a simulated decision that could disagree
+  with an enforced one would be worse than no simulator at all, because a consumer would
+  trust the preflight and then be refused. A test drives one user, one policy and two
+  actions through both paths and asserts they agree.
+
+  The three-way distinction is the feature. `allowed`, `explicitDeny` and `implicitDeny`
+  are reported separately, because collapsing them would look like coverage while telling
+  a consumer the wrong thing: an assertion that "the policy explicitly forbids this" would
+  pass on what is really a missing grant. The decisive test asserts all three in a single
+  response, so a handler returning a uniform answer fails.
+
+  `MatchedStatements` gained the AWS `Statement` shape — `SourcePolicyId` and
+  `SourcePolicyType` — so a caller learns *which* policy decided, which is the whole
+  output of a simulation. `Evaluate` therefore had to learn where a document came from:
+  `SourcedPolicyDocument` and `EvaluateSourced` carry the provenance, and `Evaluate`
+  delegates to them with its signature untouched for its existing callers.
+  `MissingContextValues` reports every condition key a matching-but-for-the-condition
+  statement tested and the request supplied no value for — without it a conditional grant
+  reads as a clean `implicitDeny` with no indication that the answer would change given a
+  context value. A key present with an *empty* value is set, not missing, because the
+  `Null` operator exists precisely to test for absence.
+
+  A permissions boundary that does not allow the action turns an `allowed` into an
+  **implicit** deny and reports
+  `PermissionsBoundaryDecisionDetail.AllowedByPermissionsBoundary=false`: a boundary caps
+  what is reachable rather than denying an action by name, and an identity policy's
+  explicit deny stays explicit. A boundary supplied through
+  `PermissionsBoundaryPolicyInputList` replaces the entity's stored one, per the
+  reference. `CallerArn` defaults to `PolicySourceArn` and populates `aws:PrincipalArn`;
+  `ResourceOwner` populates `aws:ResourceAccount`; an explicit `ContextEntry` wins over
+  both, because a caller who names a key is stating what to simulate with.
+  `ResourceArns` defaults to `["*"]` and every action is evaluated against every
+  resource. `MaxItems` defaults to 100, valid 1–1000.
+
+  Deliberately **not** evaluated, and stated in `docs/services.md` rather than faked:
+  **SCPs** — Organizations stores them and `CheckAccess` never consults them either, so
+  simulating them would report a bound substrate does not enforce, and
+  `OrganizationsDecisionDetail` is therefore *absent* rather than present-and-false;
+  `StartPosition`/`EndPosition`, which are offsets into the policy document as submitted,
+  and substrate stores a parsed document, so any offset would be fabricated; and
+  `ResourceHandlingOption`, `PolicyExclusionList`, `EvalDecisionDetails` and
+  `ResourceSpecificResults`, which are cross-account constructs. An attached AWS managed
+  policy substrate does not bundle contributes no statements rather than a guess.
+
+  Note the correction to the issue: **there is no 25-action cap.** #579 asserted one;
+  neither the API reference nor the model has any action-count limit, and modelling it
+  would refuse requests AWS accepts.
 - **IAM groups have an observable effect** (#579 prerequisite). Substrate routed
   `CreateGroup`, `GetGroup`, `DeleteGroup` and `ListGroups` and nothing else, so a group
   could be created and then did nothing: no user could join it, no policy could be put on
