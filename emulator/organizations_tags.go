@@ -482,11 +482,11 @@ func orgTagsFromKeys(keys []string, byKey map[string]string) []OrgTag {
 
 // --- authorization support ---
 //
-// These three feed the organizations arms of buildResourceARN, addResourceTags
+// These feed the organizations arms of buildResourceARNs, resourceTagsFor
 // and addRequestTags in authz.go. They read through the raw StateManager rather
 // than through the plugin because authorization runs before dispatch, so no
 // plugin instance is in hand — and they run on every request, so each reads at
-// most the one resource the request names.
+// most the resources the request names.
 
 // orgAuthzResourceID returns the ID of the Organizations resource a request
 // names, or "" when it names none.
@@ -496,6 +496,12 @@ func orgTagsFromKeys(keys []string, byKey map[string]string) []OrgTag {
 // satisfy a condition written about the target — a false allow, which is the
 // failure a tag-gated boundary exists to prevent. The order below prefers the
 // member that names the operation's own subject.
+//
+// MoveAccount is the operation that outgrew this contract: it names three
+// resources AWS marks required, and no single-resource answer can authorize it.
+// It is resolved by orgAuthzMoveAccountResources instead, so do not add
+// SourceParentId or DestinationParentId to the list below — a function whose
+// contract is "one resource" cannot report three (#660).
 func orgAuthzResourceID(req *AWSRequest) string {
 	var body struct {
 		ResourceID           string `json:"ResourceId"`
@@ -534,7 +540,13 @@ func orgAuthzResourceID(req *AWSRequest) string {
 // "matches every statement", so an unreadable record would widen a
 // resource-scoped policy instead of narrowing it.
 func orgAuthzResourceARN(state StateManager, reqCtx *RequestContext, req *AWSRequest) string {
-	id := orgAuthzResourceID(req)
+	return orgAuthzResourceARNForID(state, reqCtx, orgAuthzResourceID(req))
+}
+
+// orgAuthzResourceARNForID resolves one Organizations resource ID to the ARN the
+// API reports for it, answering "*" for an empty or unknown ID. It is separate
+// from orgAuthzResourceARN because MoveAccount resolves three IDs from one body.
+func orgAuthzResourceARNForID(state StateManager, reqCtx *RequestContext, id string) string {
 	if id == "" {
 		return "*"
 	}
@@ -585,7 +597,12 @@ func orgAuthzResourceARN(state StateManager, reqCtx *RequestContext, req *AWSReq
 // orgAuthzResourceTags returns the tags on the Organizations resource a request
 // names, as an aws:ResourceTag-shaped map.
 func orgAuthzResourceTags(state StateManager, req *AWSRequest) map[string]string {
-	id := orgAuthzResourceID(req)
+	return orgAuthzResourceTagsForID(state, orgAuthzResourceID(req))
+}
+
+// orgAuthzResourceTagsForID returns the tags stored against one Organizations
+// resource ID, or nil when the ID is empty or carries none.
+func orgAuthzResourceTagsForID(state StateManager, id string) map[string]string {
 	if id == "" {
 		return nil
 	}
@@ -594,6 +611,51 @@ func orgAuthzResourceTags(state StateManager, req *AWSRequest) map[string]string
 		return nil
 	}
 	return orgTagsToMap(tags)
+}
+
+// orgAuthzMoveAccountResources returns the three resources a MoveAccount request
+// names — the account, the source parent and the destination parent — each paired
+// with its own tags. It returns nil for every other operation, which is what
+// sends them down buildResourceARNs' single-resource path.
+//
+// MoveAccount is the only Organizations action the Service Authorization
+// Reference marks with more than one required resource type: account*,
+// organizationalunit* and root*. Authorizing against the account alone let a
+// policy naming the account and one OU move that account to a parent it never
+// named — the delegated-admin confinement policy shape, and a false allow — while
+// a policy scoped only to the parents could not grant the move at all (#660).
+//
+// Order is fixed: account, source parent, destination parent. The first resource
+// a policy does not allow is the one the denial names, so a fixed order makes
+// that message deterministic and the decision replay-stable.
+//
+// A member the body omits is skipped rather than resolved to "*": "*" for an
+// absent ID would widen the policy the caller wrote instead of narrowing it. A
+// body naming none of the three returns nil, so the request is decided exactly as
+// it was before.
+func orgAuthzMoveAccountResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
+	if req.Operation != "MoveAccount" {
+		return nil
+	}
+	var body struct {
+		AccountID           string `json:"AccountId"`
+		SourceParentID      string `json:"SourceParentId"`
+		DestinationParentID string `json:"DestinationParentId"`
+	}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil
+	}
+	var out []authzResource
+	for _, id := range []string{body.AccountID, body.SourceParentID, body.DestinationParentID} {
+		if id == "" {
+			continue
+		}
+		out = append(out, authzResource{
+			ARN:  orgAuthzResourceARNForID(state, reqCtx, id),
+			Tags: orgAuthzResourceTagsForID(state, id),
+		})
+	}
+	return out
 }
 
 // orgAuthzRequestTags returns the tags a request asks to set, as an

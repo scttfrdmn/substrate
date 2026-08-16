@@ -1029,6 +1029,54 @@ func (f *orgAuthzFixture) check(t *testing.T, user, operation string, body map[s
 	})
 }
 
+// setResourcePolicy rewrites the user's single attached policy so its Resource
+// element names exactly resources, which is how a test scopes a statement to a
+// list of ARNs rather than to "*".
+func (f *orgAuthzFixture) setResourcePolicy(t *testing.T, user, action string, resources ...string) {
+	t.Helper()
+	pol := emulator.IAMPolicy{
+		PolicyName:       "moveaccount",
+		PolicyID:         "ANPAMOVE",
+		ARN:              "arn:aws:iam::123456789012:policy/OrgTagGate-" + user,
+		Path:             "/",
+		DefaultVersionID: "v1",
+		IsAttachable:     true,
+		Document: emulator.PolicyDocument{
+			Version: "2012-10-17",
+			Statement: []emulator.PolicyStatement{{
+				Effect:   "Allow",
+				Action:   emulator.StringOrSlice{action},
+				Resource: emulator.StringOrSlice(resources),
+			}},
+		},
+	}
+	raw, err := json.Marshal(pol)
+	if err != nil {
+		t.Fatalf("marshal policy: %v", err)
+	}
+	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+		t.Fatalf("store policy: %v", err)
+	}
+}
+
+// deniedResource returns the resource ARN a denial names, which is the resource
+// the caller has to add to its policy. The message is the only place the failing
+// resource surfaces, so a test asserting *which* of several resources was refused
+// has to read it.
+func deniedResource(t *testing.T, err error) string {
+	t.Helper()
+	var awsErr *emulator.AWSError
+	if !errors.As(err, &awsErr) {
+		t.Fatalf("expected an *AWSError, got %T: %v", err, err)
+	}
+	const marker = "on resource: "
+	idx := strings.Index(awsErr.Message, marker)
+	if idx < 0 {
+		t.Fatalf("denial names no resource: %q", awsErr.Message)
+	}
+	return awsErr.Message[idx+len(marker):]
+}
+
 // orgAuthzDenied reports whether err is the denial an Organizations caller sees.
 // Organizations speaks JSON-RPC, so the code carries the "Exception" suffix.
 func orgAuthzDenied(t *testing.T, err error) bool {
@@ -1394,5 +1442,418 @@ func TestOrganizations_Authz_NonOrganizationsRequestsAreUnaffected(t *testing.T)
 	}
 	if awsErr.Code != "AccessDenied" {
 		t.Errorf("expected AccessDenied for an S3 request, got %q", awsErr.Code)
+	}
+}
+
+// --- MoveAccount names three resources, and all three must authorize (#660) ---
+
+// orgMoveFixture is an authorization fixture plus the ARNs of the three resources
+// a MoveAccount request names, since a test scoping a policy to them has to paste
+// the same ARNs the decision builds.
+type orgMoveFixture struct {
+	*orgAuthzFixture
+	accountID  string
+	accountArn string
+	rootID     string
+	rootArn    string
+	ouID       string
+	ouArn      string
+}
+
+// newOrgMoveFixture builds an organization holding one OU, and reports every ARN
+// a MoveAccount between the root and that OU touches.
+func newOrgMoveFixture(t *testing.T, user string) *orgMoveFixture {
+	t.Helper()
+	f := newOrgAuthzFixture(t, user, emulator.PolicyDocument{})
+	ctx := t.Context()
+
+	root, err := f.plugin.LoadRootForTest(ctx, "123456789012")
+	if err != nil {
+		t.Fatalf("load root: %v", err)
+	}
+	account, err := f.plugin.LoadAccountForTest(ctx, "123456789012")
+	if err != nil || account == nil {
+		t.Fatalf("load management account: %v", err)
+	}
+	ouID := "ou-" + root.ID[2:] + "-move1111"
+	ouArn := "arn:aws:organizations::123456789012:ou/o-move/" + ouID
+	if err := f.plugin.SaveOUForTest(ctx, "123456789012", emulator.OrgOrganizationalUnit{
+		ID: ouID, Arn: ouArn, Name: "confined",
+	}); err != nil {
+		t.Fatalf("save OU: %v", err)
+	}
+	return &orgMoveFixture{
+		orgAuthzFixture: f,
+		accountID:       account.ID,
+		accountArn:      account.Arn,
+		rootID:          root.ID,
+		rootArn:         root.Arn,
+		ouID:            ouID,
+		ouArn:           ouArn,
+	}
+}
+
+// move runs one MoveAccount through the authorization decision.
+func (f *orgMoveFixture) move(t *testing.T, user, from, to string) error {
+	t.Helper()
+	return f.check(t, user, "MoveAccount", map[string]any{
+		"AccountId":           f.accountID,
+		"SourceParentId":      from,
+		"DestinationParentId": to,
+	})
+}
+
+// TestOrganizations_Authz_MoveAccountAuthorizesEveryParent is #660: MoveAccount
+// names an account, a source parent and a destination parent, and the Service
+// Authorization Reference marks all three required. Authorizing against the
+// account alone let a confinement policy naming the account and one OU move that
+// account into the root, which the policy never named — a false allow, and the one
+// direction a privilege boundary must never fail in.
+func TestOrganizations_Authz_MoveAccountAuthorizesEveryParent(t *testing.T) {
+	f := newOrgMoveFixture(t, "orgmover")
+	// The delegated-admin shape: the account and the confined OU, deliberately not
+	// the root.
+	f.setResourcePolicy(t, "orgmover", "organizations:MoveAccount", f.accountArn, f.ouArn)
+
+	if err := f.move(t, "orgmover", f.rootID, f.ouID); !orgAuthzDenied(t, err) {
+		t.Error("a policy that does not name the root cannot authorize a move out of it")
+	} else if got := deniedResource(t, err); got != f.rootArn {
+		t.Errorf("the denial names %q, want the root ARN %q — the caller has to be told which resource to add", got, f.rootArn)
+	}
+
+	// And the mirror direction: moving *into* the root is refused for the same
+	// reason, which is the failure #660 reported.
+	if err := f.move(t, "orgmover", f.ouID, f.rootID); !orgAuthzDenied(t, err) {
+		t.Error("a policy that does not name the root cannot authorize a move into it")
+	} else if got := deniedResource(t, err); got != f.rootArn {
+		t.Errorf("the denial names %q, want the root ARN %q", got, f.rootArn)
+	}
+
+	// Naming all three allows it, so the fix is not a blanket refusal.
+	f.setResourcePolicy(t, "orgmover", "organizations:MoveAccount",
+		f.accountArn, f.ouArn, f.rootArn)
+	if err := f.move(t, "orgmover", f.rootID, f.ouID); err != nil {
+		t.Errorf("a policy naming all three resources must allow the move: %v", err)
+	}
+}
+
+// TestOrganizations_Authz_MoveAccountParentScopedDenyBlocks is #660's second
+// false-allow direction, and the one that survives a fix written only for the
+// first: an explicit Deny scoped to a parent ARN never matched, because the parent
+// ARNs were not built, so "this account may never leave the sandbox OU" was a
+// statement that silently did nothing.
+//
+// Denying by ARN is how an SCP-shaped guardrail is written at the identity level,
+// and a Deny that quietly fails to apply is worse than one that was never written:
+// the policy reads as a boundary and is not one.
+func TestOrganizations_Authz_MoveAccountParentScopedDenyBlocks(t *testing.T) {
+	f := newOrgMoveFixture(t, "orgparentdeny")
+	// Allow the move broadly, then carve out the root by ARN.
+	pol := emulator.IAMPolicy{
+		PolicyName:       "sandbox",
+		PolicyID:         "ANPASANDBOX",
+		ARN:              "arn:aws:iam::123456789012:policy/OrgTagGate-orgparentdeny",
+		Path:             "/",
+		DefaultVersionID: "v1",
+		IsAttachable:     true,
+		Document: emulator.PolicyDocument{
+			Version: "2012-10-17",
+			Statement: []emulator.PolicyStatement{
+				{
+					Effect:   "Allow",
+					Action:   emulator.StringOrSlice{"organizations:MoveAccount"},
+					Resource: emulator.StringOrSlice{"*"},
+				},
+				{
+					Effect:   "Deny",
+					Action:   emulator.StringOrSlice{"organizations:MoveAccount"},
+					Resource: emulator.StringOrSlice{f.rootArn},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(pol)
+	if err != nil {
+		t.Fatalf("marshal policy: %v", err)
+	}
+	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+		t.Fatalf("store policy: %v", err)
+	}
+
+	// The root is the source: the Deny names it, so the move is blocked.
+	if err := f.move(t, "orgparentdeny", f.rootID, f.ouID); !orgAuthzDenied(t, err) {
+		t.Error("a Deny naming the source parent must block the move — before #660 the source ARN never entered the decision")
+	} else if got := deniedResource(t, err); got != f.rootArn {
+		t.Errorf("the denial names %q, want the root ARN %q", got, f.rootArn)
+	}
+
+	// The root is the destination: same Deny, same refusal, which is what pins the
+	// destination parent as its own resource rather than a duplicate of the source.
+	if err := f.move(t, "orgparentdeny", f.ouID, f.rootID); !orgAuthzDenied(t, err) {
+		t.Error("a Deny naming the destination parent must block the move")
+	} else if got := deniedResource(t, err); got != f.rootArn {
+		t.Errorf("the denial names %q, want the root ARN %q", got, f.rootArn)
+	}
+
+	// And a move the Deny does not name is still allowed, so the guardrail narrows
+	// rather than blocking everything.
+	otherOU := "ou-" + f.rootID[2:] + "-move2222"
+	otherArn := "arn:aws:organizations::123456789012:ou/o-move/" + otherOU
+	if err := f.plugin.SaveOUForTest(t.Context(), "123456789012", emulator.OrgOrganizationalUnit{
+		ID: otherOU, Arn: otherArn, Name: "other",
+	}); err != nil {
+		t.Fatalf("save second OU: %v", err)
+	}
+	if err := f.move(t, "orgparentdeny", f.ouID, otherOU); err != nil {
+		t.Errorf("a move between two OUs the Deny does not name must be allowed: %v", err)
+	}
+}
+
+// TestOrganizations_Authz_MoveAccountTagsPairWithTheirOwnResource is the
+// regression the fix itself could introduce. Each of the three ARNs is matched
+// against the tags of the resource *it* names; one merged tag map across all three
+// would let a tag on the OU satisfy a condition written about the account, which
+// is the false allow orgAuthzResourceID's comment exists to prevent.
+func TestOrganizations_Authz_MoveAccountTagsPairWithTheirOwnResource(t *testing.T) {
+	doc := newABACPolicy("Allow", "organizations:MoveAccount", "*",
+		"aws:ResourceTag/Owner", "platform")
+	f := newOrgMoveFixture(t, "orgmovetags")
+	// Rewrite the policy to the tag-gated one; newOrgMoveFixture starts from an
+	// empty document so the condition has to be installed here.
+	pol := emulator.IAMPolicy{
+		PolicyName:       "movetags",
+		PolicyID:         "ANPAMOVETAG",
+		ARN:              "arn:aws:iam::123456789012:policy/OrgTagGate-orgmovetags",
+		Path:             "/",
+		DefaultVersionID: "v1",
+		IsAttachable:     true,
+		Document:         doc,
+	}
+	raw, err := json.Marshal(pol)
+	if err != nil {
+		t.Fatalf("marshal policy: %v", err)
+	}
+	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+		t.Fatalf("store policy: %v", err)
+	}
+
+	ctx := t.Context()
+	tag := func(id, owner string) {
+		if err := f.plugin.SaveTagsForTest(ctx, id,
+			[]emulator.OrgTag{{Key: "Owner", Value: owner}}); err != nil {
+			t.Fatalf("tag %s: %v", id, err)
+		}
+	}
+
+	// Every resource carries the tag the condition wants: allowed.
+	tag(f.accountID, "platform")
+	tag(f.rootID, "platform")
+	tag(f.ouID, "platform")
+	if err := f.move(t, "orgmovetags", f.rootID, f.ouID); err != nil {
+		t.Fatalf("all three resources tagged Owner=platform must be allowed: %v", err)
+	}
+
+	// Now each resource in turn carries the wrong owner. Every case must deny: a
+	// merged tag map would let the two remaining "platform" tags satisfy the
+	// condition for the resource that does not carry it.
+	for _, c := range []struct{ name, id string }{
+		{"account", f.accountID},
+		{"source parent", f.rootID},
+		{"destination parent", f.ouID},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tag(c.id, "security")
+			defer tag(c.id, "platform")
+			if err := f.move(t, "orgmovetags", f.rootID, f.ouID); !orgAuthzDenied(t, err) {
+				t.Errorf("a tag on another resource must not satisfy a condition about the %s", c.name)
+			}
+		})
+	}
+}
+
+// TestOrganizations_Authz_MoveAccountWithNoParentsFallsBack asserts a body naming
+// no parent decides exactly as it did before. An absent member resolved to "*"
+// would widen the policy the caller wrote — the opposite of what the multi-resource
+// path is for.
+func TestOrganizations_Authz_MoveAccountWithNoParentsFallsBack(t *testing.T) {
+	f := newOrgMoveFixture(t, "orgnoparent")
+	f.setResourcePolicy(t, "orgnoparent", "organizations:MoveAccount", f.accountArn)
+
+	// Only the account: one resource, and the policy naming it allows the request.
+	if err := f.check(t, "orgnoparent", "MoveAccount", map[string]any{
+		"AccountId": f.accountID,
+	}); err != nil {
+		t.Errorf("a body naming only the account is one resource, and the policy names it: %v", err)
+	}
+
+	// A body naming nothing at all resolves to "*", which the account-scoped policy
+	// does not match — the same answer it gave before, and not a silent grant.
+	if err := f.check(t, "orgnoparent", "MoveAccount", map[string]any{}); !orgAuthzDenied(t, err) {
+		t.Error("a body naming no resource must not be granted by an account-scoped policy")
+	}
+
+	// And an undecodable body: no resource is named, so nothing widens.
+	reqCtx := newAuthTestReqCtx("arn:aws:iam::123456789012:user/orgnoparent")
+	if err := f.auth.CheckAccess(reqCtx, &emulator.AWSRequest{
+		Service: "organizations", Operation: "MoveAccount", Path: "/",
+		Body: []byte(`{"AccountId":`),
+	}); !orgAuthzDenied(t, err) {
+		t.Error("an unparseable MoveAccount body must not be granted by a resource-scoped policy")
+	}
+}
+
+// TestOrganizations_Authz_SingleResourceOperationsAreUnchanged asserts the
+// multi-resource path is scoped to MoveAccount. Every other operation still
+// authorizes against the one resource orgAuthzResourceID names — AttachPolicy
+// above all, where the Service Authorization Reference marks only the policy
+// required, so authorizing against the target too would turn AWS's own single-ARN
+// example into a denial.
+func TestOrganizations_Authz_SingleResourceOperationsAreUnchanged(t *testing.T) {
+	f := newOrgMoveFixture(t, "orgsingle")
+	ctx := t.Context()
+
+	policyID := "p-single01"
+	policyArn := "arn:aws:organizations::123456789012:policy/o-move/service_control_policy/" + policyID
+	if err := f.plugin.SavePolicyForTest(ctx, "123456789012", emulator.OrgPolicy{
+		PolicySummary: emulator.OrgPolicySummary{
+			ID: policyID, Arn: policyArn, Name: "deny", Type: emulator.OrgPolicyTypeSCPForTest,
+		},
+		Content: `{"Version":"2012-10-17"}`,
+	}); err != nil {
+		t.Fatalf("save policy: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		operation string
+		body      map[string]any
+		// resource is the one ARN the decision must be made against; a statement
+		// naming it alone has to allow the request.
+		resource string
+	}{
+		{"TagResource", "TagResource",
+			map[string]any{"ResourceId": f.ouID}, f.ouArn},
+		{"AttachPolicy names the policy, not the target", "AttachPolicy",
+			map[string]any{"PolicyId": policyID, "TargetId": f.ouID}, policyArn},
+		{"DetachPolicy names the policy, not the target", "DetachPolicy",
+			map[string]any{"PolicyId": policyID, "TargetId": f.ouID}, policyArn},
+		{"CreateOrganizationalUnit names the parent", "CreateOrganizationalUnit",
+			map[string]any{"ParentId": f.rootID, "Name": "new"}, f.rootArn},
+		{"DescribeAccount names the account", "DescribeAccount",
+			map[string]any{"AccountId": f.accountID}, f.accountArn},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f.setResourcePolicy(t, "orgsingle", "organizations:"+c.operation, c.resource)
+			if err := f.check(t, "orgsingle", c.operation, c.body); err != nil {
+				t.Errorf("a statement naming %s must allow %s: %v", c.resource, c.operation, err)
+			}
+			// And nothing else: a statement naming a different resource must not.
+			f.setResourcePolicy(t, "orgsingle", "organizations:"+c.operation, f.rootArn+"/nonexistent")
+			if err := f.check(t, "orgsingle", c.operation, c.body); !orgAuthzDenied(t, err) {
+				t.Errorf("%s must be denied by a statement naming another resource", c.operation)
+			}
+		})
+	}
+}
+
+// TestOrganizations_Authz_MoveAccountBoundaryCoversEveryResource pins that a
+// permission boundary is applied to every resource a MoveAccount names, not only
+// to the first.
+//
+// A boundary is the outer limit of what a principal may ever do, so checking it
+// against one of three resources is the same false allow as checking the identity
+// policy against one: a boundary confining a delegated admin to a sandbox OU would
+// let it move an account into the root, which is exactly what the boundary was set
+// to prevent. Mutation testing found this uncovered — the identity-policy tests
+// above pass with the boundary check hoisted out of the loop.
+func TestOrganizations_Authz_MoveAccountBoundaryCoversEveryResource(t *testing.T) {
+	f := newOrgMoveFixture(t, "orgbounded")
+
+	// The identity policy allows the move against every resource, so only the
+	// boundary can refuse it.
+	f.setResourcePolicy(t, "orgbounded", "organizations:MoveAccount", "*")
+
+	// The boundary names the account and the OU — not the root.
+	boundaryARN := "arn:aws:iam::123456789012:policy/MoveAccountBoundary"
+	boundary := emulator.IAMPolicy{
+		PolicyName:       "MoveAccountBoundary",
+		PolicyID:         "ANPABOUNDMOVE",
+		ARN:              boundaryARN,
+		Path:             "/",
+		DefaultVersionID: "v1",
+		IsAttachable:     true,
+		Document: emulator.PolicyDocument{
+			Version: "2012-10-17",
+			Statement: []emulator.PolicyStatement{{
+				Effect:   "Allow",
+				Action:   emulator.StringOrSlice{"organizations:MoveAccount"},
+				Resource: emulator.StringOrSlice{f.accountArn, f.ouArn},
+			}},
+		},
+	}
+	boundaryRaw, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatalf("marshal boundary: %v", err)
+	}
+	ctx := context.Background()
+	if err := f.state.Put(ctx, "iam", "policy:"+boundaryARN, boundaryRaw); err != nil { //nolint:contextcheck
+		t.Fatalf("store boundary: %v", err)
+	}
+	// Attach it to the user, which is what makes CheckAccess load it.
+	user := emulator.IAMUser{
+		UserName: "orgbounded",
+		UserID:   "AIDATEST",
+		ARN:      "arn:aws:iam::123456789012:user/orgbounded",
+		Path:     "/",
+		PermissionsBoundary: &emulator.IAMAttachedPolicy{
+			PolicyARN: boundaryARN, PolicyName: "MoveAccountBoundary",
+		},
+	}
+	userRaw, err := json.Marshal(user)
+	if err != nil {
+		t.Fatalf("marshal user: %v", err)
+	}
+	if err := f.state.Put(ctx, "iam", "user:orgbounded", userRaw); err != nil { //nolint:contextcheck
+		t.Fatalf("store user: %v", err)
+	}
+
+	// The account is the first resource and the boundary allows it, so a boundary
+	// checked only against the first resource would let this through.
+	err = f.move(t, "orgbounded", f.rootID, f.ouID)
+	if !orgAuthzDenied(t, err) {
+		t.Fatal("the boundary does not name the root, so a move out of it must be blocked")
+	}
+	var awsErr *emulator.AWSError
+	if !errors.As(err, &awsErr) {
+		t.Fatalf("expected an *AWSError, got %T: %v", err, err)
+	}
+	if !strings.Contains(awsErr.Message, "permission boundary") {
+		t.Errorf("the denial does not name the boundary as the cause: %q", awsErr.Message)
+	}
+
+	// And a move the boundary does name is allowed, so it narrows rather than
+	// blocking every MoveAccount.
+	otherOU := "ou-" + f.rootID[2:] + "-move3333"
+	otherArn := "arn:aws:organizations::123456789012:ou/o-move/" + otherOU
+	if err := f.plugin.SaveOUForTest(t.Context(), "123456789012", emulator.OrgOrganizationalUnit{
+		ID: otherOU, Arn: otherArn, Name: "other",
+	}); err != nil {
+		t.Fatalf("save second OU: %v", err)
+	}
+	// Widen the boundary by that OU only, then move OU -> otherOU: every resource
+	// the request names is now inside the boundary.
+	boundary.Document.Statement[0].Resource = emulator.StringOrSlice{
+		f.accountArn, f.ouArn, otherArn,
+	}
+	boundaryRaw, err = json.Marshal(boundary)
+	if err != nil {
+		t.Fatalf("re-marshal boundary: %v", err)
+	}
+	if err := f.state.Put(ctx, "iam", "policy:"+boundaryARN, boundaryRaw); err != nil { //nolint:contextcheck
+		t.Fatalf("re-store boundary: %v", err)
+	}
+	if err := f.move(t, "orgbounded", f.ouID, otherOU); err != nil {
+		t.Errorf("a move whose every resource the boundary names must be allowed: %v", err)
 	}
 }
