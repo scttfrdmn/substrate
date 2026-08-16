@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A confinement policy could not confine `MoveAccount`: only one of the three resources
+  it names reached the authorization decision** (#660). `organizations:MoveAccount` names an
+  account, a source parent and a destination parent, and the Service Authorization Reference
+  marks all three required. Substrate resolved a request to a single resource by walking a
+  fixed list of body members and taking the first non-empty one — a list that contains
+  `ParentId`, which a MoveAccount body does not carry, and neither `SourceParentId` nor
+  `DestinationParentId`, which it does. Every MoveAccount therefore authorized against the
+  account alone and the two parent ARNs never entered the decision.
+
+  Two things followed, both false allows. A delegated-admin policy naming the account and
+  the OU it may manage — but not the root — **allowed** a move out of the root and into it,
+  so the boundary read as a confinement and was not one. And an explicit `Deny` scoped to a
+  parent ARN, which is how an SCP-shaped guardrail is written at the identity level, never
+  matched: "this account may never leave the sandbox OU" was a statement that silently did
+  nothing.
+
+  The authorization decision now evaluates **every** resource a request names, and denies
+  unless all of them are allowed — which is how AWS documents a statement being evaluated
+  against "every resource that is required" for an action. The permission boundary is
+  applied to each of them too, since a boundary checked against a subset is not a boundary.
+  Each ARN is matched against the tags of the resource *it* names rather than one merged tag
+  map, so a condition on `aws:ResourceTag` written about the destination cannot be satisfied
+  by a tag on the account — the false allow substrate's existing `AttachPolicy` handling
+  already avoided, in a new place. The denial names the first resource the policies do not
+  allow, in a fixed order of account, source parent, destination parent, because that ARN is
+  the one the caller has to add and the message is the only place it surfaces.
+
+  The machinery is general — a request now resolves to a list of (ARN, tags) pairs — but
+  MoveAccount is its only caller. It is the only one of the 63 Organizations actions the
+  reference marks with more than one required resource type; `AttachPolicy` and
+  `DetachPolicy` mark only the policy required, so authorizing them against their target too
+  would turn AWS's own single-ARN example into a denial. Every other operation resolves to
+  exactly one pair and decides exactly as it did before.
+
 ## [v0.101.0] - 2026-08-15
 
 ### Added

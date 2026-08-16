@@ -4837,6 +4837,26 @@ condition. An invalid tag fails the whole create and leaves nothing behind, and
 request is malformed, so there is nothing to vend. Deleting an OU or a policy
 deletes its tags, so an entity that reused the ID cannot inherit them.
 
+### A request naming several resources is authorized against every one
+
+`MoveAccount` names three resources — the account, the source parent and the
+destination parent — and the Service Authorization Reference marks all three
+required. It is the only Organizations operation that does; every other one names
+a single resource, and `AttachPolicy`/`DetachPolicy` mark only the policy
+required, so those authorize against the policy alone.
+
+The caller's policies must therefore allow the action against all three ARNs. A
+policy that names the account and one OU but not the root cannot move that account
+out of the root or into it, which is what a delegated-admin confinement policy is
+written to guarantee. A permission boundary is applied to every one of the three
+as well, since a boundary checked against a subset is not a boundary.
+
+Each ARN is matched against the tags of the resource *it* names, so a condition on
+`aws:ResourceTag` written about the destination cannot be satisfied by a tag on
+the account. The denial names the first resource the policies do not allow —
+resolved in a fixed order of account, source parent, destination parent — which is
+the only place the missing ARN surfaces, and the ARN a caller has to add.
+
 ### Refusals
 
 | Condition | Answer |

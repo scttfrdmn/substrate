@@ -36,7 +36,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	if authzNoPermissionsRequired[action] {
 		return nil
 	}
-	resource := a.buildResourceARN(reqCtx, req)
+	resources := a.buildResourceARNs(reqCtx, req)
 
 	goCtx := context.Background()
 	entity, exists, err := resolveIAMEntity(goCtx, a.state, reqCtx.Principal.ARN)
@@ -65,47 +65,69 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		return nil
 	}
 
-	condCtx := a.buildConditionContext(reqCtx, req)
-
-	result := Evaluate(docs, EvaluationRequest{
-		Principal: reqCtx.Principal.ARN,
-		Action:    action,
-		Resource:  resource,
-		Context:   condCtx,
-	})
-
 	// Both denial arms take their code from the same helper, so an identity-policy
 	// refusal and a boundary refusal cannot drift apart — and neither can drift from
 	// the trust-policy gate #593 added, which resolves the same way for STS.
 	deniedCode := accessDeniedCodeFor(req.Service, "")
 
-	if result.Decision != DecisionAllow {
-		return &AWSError{
-			Code: deniedCode,
-			Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
-				reqCtx.Principal.ARN, action, resource),
-			HTTPStatus: http.StatusForbidden,
-		}
-	}
-
-	// If a permission boundary is set it must also allow the action.
+	// If a permission boundary is set it must also allow the action, against every
+	// resource the request names — loaded once, outside the loop, because it is a
+	// property of the principal rather than of a resource.
 	boundary, err := a.loadPermissionBoundary(entity)
 	if err != nil {
 		a.logger.Warn("authz: failed to load permission boundary", "principal", reqCtx.Principal.ARN, "err", err)
 	}
-	if boundary != nil {
-		boundaryResult := Evaluate([]PolicyDocument{*boundary}, EvaluationRequest{
+
+	// The request tags describe the request, not any one resource, so they are read
+	// once and merged under each resource's own tags below.
+	requestTags := make(map[string]string)
+	addRequestTags(requestTags, req)
+
+	// Every resource the request names must be allowed. A request naming several —
+	// organizations:MoveAccount is substrate's only one — is denied unless the
+	// caller's policies admit all of them, which is how AWS evaluates a statement
+	// against "every resource that is required" for the action (#660).
+	for _, res := range resources {
+		condCtx := make(map[string]string, len(requestTags)+len(res.Tags))
+		for k, v := range requestTags {
+			condCtx[k] = v
+		}
+		// The tags travel with the ARN they belong to: one merged map across several
+		// resources would let a tag on one satisfy a condition written about another,
+		// which is the false allow orgAuthzResourceID's comment exists to prevent.
+		for k, v := range res.Tags {
+			condCtx["aws:ResourceTag/"+k] = v
+		}
+
+		result := Evaluate(docs, EvaluationRequest{
 			Principal: reqCtx.Principal.ARN,
 			Action:    action,
-			Resource:  resource,
+			Resource:  res.ARN,
 			Context:   condCtx,
 		})
-		if boundaryResult.Decision != DecisionAllow {
+		if result.Decision != DecisionAllow {
 			return &AWSError{
 				Code: deniedCode,
-				Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by permission boundary)",
-					reqCtx.Principal.ARN, action),
+				Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
+					reqCtx.Principal.ARN, action, res.ARN),
 				HTTPStatus: http.StatusForbidden,
+			}
+		}
+
+		if boundary != nil {
+			boundaryResult := Evaluate([]PolicyDocument{*boundary}, EvaluationRequest{
+				Principal: reqCtx.Principal.ARN,
+				Action:    action,
+				Resource:  res.ARN,
+				Context:   condCtx,
+			})
+			if boundaryResult.Decision != DecisionAllow {
+				return &AWSError{
+					Code: deniedCode,
+					Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by permission boundary)",
+						reqCtx.Principal.ARN, action),
+					HTTPStatus: http.StatusForbidden,
+				}
 			}
 		}
 	}
@@ -458,11 +480,55 @@ func serviceToAction(req *AWSRequest, service, operation string) string {
 	return action
 }
 
+// authzResource is one resource a request names, paired with its own tags.
+//
+// The pairing is the point: the tags belong to the resource the ARN names, so a
+// condition written about one resource cannot be satisfied by a tag on another.
+// Tags are the raw key-value pairs, not yet prefixed with aws:ResourceTag/.
+type authzResource struct {
+	// ARN is the resource ARN a policy statement's Resource element is matched
+	// against. It is never "" — resourceMatches treats the empty string as
+	// matching every statement, so an unresolvable resource is "*".
+	ARN string
+
+	// Tags are the tags on the resource ARN names, or nil when it carries none.
+	Tags map[string]string
+}
+
+// buildResourceARNs returns every resource the request names, each paired with
+// its own tags. All of them must be allowed for the request to be allowed.
+//
+// Almost every AWS operation names one resource, and for those this returns
+// exactly one pair — [buildResourceARN] plus the tags [AuthController.addResourceTags]
+// reads. `organizations:MoveAccount` is substrate's only exception: it names an
+// account, a source parent and a destination parent, all three marked required by
+// the Service Authorization Reference, and authorizing against one of them
+// over-permitted a policy scoped to the other two (#660).
+//
+// The list is never empty. An empty list would skip the decision loop entirely
+// and allow the request, which is the one direction a privilege boundary must
+// never fail in.
+func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSRequest) []authzResource {
+	if req.Service == organizationsNamespace {
+		if multi := orgAuthzMoveAccountResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+	}
+	return []authzResource{{
+		ARN:  a.buildResourceARN(reqCtx, req),
+		Tags: a.resourceTagsFor(reqCtx, req),
+	}}
+}
+
 // buildResourceARN constructs a best-effort IAM resource ARN for the request.
 //
 // It is a method rather than a free function because some services cannot name
 // their resources without reading them: an Organizations ARN embeds the
 // organization's own ID, which only the stored record knows.
+//
+// It answers for one resource. An operation that names several is resolved by
+// [AuthController.buildResourceARNs], which calls this for the single-resource
+// case every other operation falls into.
 func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSRequest) string {
 	acct := reqCtx.AccountID
 	region := reqCtx.Region
@@ -612,18 +678,11 @@ func buildS3ARN(req *AWSRequest) string {
 	return "arn:aws:s3:::" + path
 }
 
-// buildConditionContext assembles the IAM condition context map for a request,
-// populating aws:ResourceTag/* and aws:RequestTag/* keys.
-func (a *AuthController) buildConditionContext(reqCtx *RequestContext, req *AWSRequest) map[string]string {
-	ctx := make(map[string]string)
-	a.addResourceTags(ctx, reqCtx, req)
-	addRequestTags(ctx, req)
-	return ctx
-}
-
-// addResourceTags loads existing resource tags from state and injects them as
-// aws:ResourceTag/{Key} entries into condCtx.
-func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *RequestContext, req *AWSRequest) {
+// resourceTagsFor loads the tags on the resource a request names, keyed by the
+// bare tag key. [AuthController.CheckAccess] adds the aws:ResourceTag/ prefix,
+// once per resource in the list, so an operation naming several resources cannot
+// mix one resource's tags into another's condition context.
+func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest) map[string]string {
 	goCtx := context.Background()
 	acct := reqCtx.AccountID
 	region := reqCtx.Region
@@ -633,50 +692,50 @@ func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *Requ
 	case "s3":
 		bucket := bucketFromPath(req.Path)
 		if bucket == "" {
-			return
+			return nil
 		}
 		raw, err := a.state.Get(goCtx, s3Namespace, "bucket:"+bucket)
 		if err != nil || raw == nil {
-			return
+			return nil
 		}
 		var b S3Bucket
 		if err := json.Unmarshal(raw, &b); err != nil {
-			return
+			return nil
 		}
 		tags = b.Tags
 
 	case "lambda":
 		name := lambdaNameFromPath(req.Path)
 		if name == "" {
-			return
+			return nil
 		}
 		raw, err := a.state.Get(goCtx, lambdaNamespace, "function:"+name)
 		if err != nil || raw == nil {
-			return
+			return nil
 		}
 		var fn LambdaFunction
 		if err := json.Unmarshal(raw, &fn); err != nil {
-			return
+			return nil
 		}
 		tags = fn.Tags
 
 	case "sqs":
 		qurl := strings.TrimRight(req.Params["QueueUrl"], "/")
 		if qurl == "" {
-			return
+			return nil
 		}
 		parts := strings.Split(qurl, "/")
 		name := parts[len(parts)-1]
 		if name == "" {
-			return
+			return nil
 		}
 		raw, err := a.state.Get(goCtx, sqsNamespace, "queue:"+name)
 		if err != nil || raw == nil {
-			return
+			return nil
 		}
 		var q SQSQueue
 		if err := json.Unmarshal(raw, &q); err != nil {
-			return
+			return nil
 		}
 		tags = q.Tags
 
@@ -686,54 +745,54 @@ func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *Requ
 		case "user":
 			raw, err := a.state.Get(goCtx, iamNamespace, "user:"+entityName)
 			if err != nil || raw == nil {
-				return
+				return nil
 			}
 			var u IAMUser
 			if err := json.Unmarshal(raw, &u); err != nil {
-				return
+				return nil
 			}
 			tags = iamTagsToMap(u.Tags)
 		case "role":
 			raw, err := a.state.Get(goCtx, iamNamespace, "role:"+entityName)
 			if err != nil || raw == nil {
-				return
+				return nil
 			}
 			var r IAMRole
 			if err := json.Unmarshal(raw, &r); err != nil {
-				return
+				return nil
 			}
 			tags = iamTagsToMap(r.Tags)
 		default:
-			return
+			return nil
 		}
 
 	case "ec2":
 		id := req.Params["InstanceId.1"]
 		if id == "" {
-			return
+			return nil
 		}
 		raw, err := a.state.Get(goCtx, ec2Namespace, "instance:"+acct+"/"+region+"/"+id)
 		if err != nil || raw == nil {
-			return
+			return nil
 		}
 		var inst EC2Instance
 		if err := json.Unmarshal(raw, &inst); err != nil {
-			return
+			return nil
 		}
 		tags = ec2TagsToMap(inst.Tags)
 
 	case "dynamodb":
 		tbl := req.Params["TableName"]
 		if tbl == "" {
-			return
+			return nil
 		}
 		raw, err := a.state.Get(goCtx, dynamodbNamespace, "table:"+acct+"/"+tbl)
 		if err != nil || raw == nil {
-			return
+			return nil
 		}
 		var t DynamoDBTable
 		if err := json.Unmarshal(raw, &t); err != nil {
-			return
+			return nil
 		}
 		tags = t.Tags
 
@@ -751,12 +810,10 @@ func (a *AuthController) addResourceTags(condCtx map[string]string, reqCtx *Requ
 		tags = cfgsvcAuthzResourceTags(a.state, reqCtx, req)
 
 	default:
-		return
+		return nil
 	}
 
-	for k, v := range tags {
-		condCtx["aws:ResourceTag/"+k] = v
-	}
+	return tags
 }
 
 // addRequestTags parses tags being set on the resource in this request and
