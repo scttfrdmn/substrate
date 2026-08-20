@@ -308,6 +308,12 @@ func RegisteredErrorProtocolServicesForTest() []string {
 // instead of restating the literal.
 const IAMAccessDeniedCodeForTest = iamAccessDeniedCode
 
+// PricingAccessDeniedCodeForTest is the code the Price List plugin's own gate
+// reports, exposed for the same reason IAMAccessDeniedCodeForTest is: so a test
+// asserts the plugin and the generic gate agree rather than restating either
+// literal.
+const PricingAccessDeniedCodeForTest = pricingErrAccessDenied
+
 // MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
 // the ErrProto*ForTest names. status is the HTTP status the error carries, which
 // the S3 arm needs because it builds a whole response rather than a body alone.
