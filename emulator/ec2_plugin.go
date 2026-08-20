@@ -662,6 +662,122 @@ type ec2GroupItem struct {
 	GroupName string `xml:"groupName,omitempty"`
 }
 
+// ec2InstanceStateItem is an instance's instanceState element.
+type ec2InstanceStateItem struct {
+	// Code is AWS's numeric state code (0 pending, 16 running, 48 terminated).
+	Code int `xml:"code"`
+
+	// Name is the state name the code corresponds to.
+	Name string `xml:"name"`
+}
+
+// ec2PlacementItem is an instance's placement element.
+//
+// Only availabilityZone is emitted: it is the one member substrate records, and it
+// must be readable for a caller to reason about TerminateInstances' zone-scoped
+// protection rule (#489).
+type ec2PlacementItem struct {
+	// AvailabilityZone is the zone the instance was placed in.
+	AvailabilityZone string `xml:"availabilityZone"`
+}
+
+// ec2IAMInstanceProfileItem is an instance's iamInstanceProfile element.
+type ec2IAMInstanceProfileItem struct {
+	// ARN is the profile's ARN, derived from the stored name when the launch gave a
+	// bare name.
+	ARN string `xml:"arn"`
+
+	// ID is the profile's AWS-side identifier.
+	ID string `xml:"id"`
+}
+
+// ec2InstanceItem is one instancesSet>item, the shape both RunInstances and
+// DescribeInstances report an instance in.
+//
+// Declared once at package level because the two responses each carried their own
+// copy and those copies had already drifted twice. #444 was the first round —
+// neither emitted a groupSet, so security groups accepted on a launch were invisible
+// to every read. By #669 they had drifted again: DescribeInstances' copy grew an
+// iamInstanceProfile that RunInstances' did not, they used different Go types for the
+// state element, and their placement and instanceState members were in opposite
+// orders. So a launch that attached an instance profile answered without it while the
+// describe that followed reported it. One shared type and one builder
+// ([EC2Plugin.ec2InstanceItemFor]) mean the two responses cannot disagree about an
+// instance again.
+type ec2InstanceItem struct {
+	InstanceID         string                     `xml:"instanceId"`
+	ImageID            string                     `xml:"imageId"`
+	InstanceType       string                     `xml:"instanceType"`
+	LaunchTime         string                     `xml:"launchTime"`
+	PrivateIPAddress   string                     `xml:"privateIpAddress"`
+	PublicIPAddress    string                     `xml:"publicIpAddress,omitempty"`
+	PublicDNSName      string                     `xml:"dnsName,omitempty"`
+	PrivateDNSName     string                     `xml:"privateDnsName,omitempty"`
+	SubnetID           string                     `xml:"subnetId"`
+	VpcID              string                     `xml:"vpcId"`
+	KeyName            string                     `xml:"keyName,omitempty"`
+	IamInstanceProfile *ec2IAMInstanceProfileItem `xml:"iamInstanceProfile,omitempty"`
+	State              ec2InstanceStateItem       `xml:"instanceState"`
+	Placement          ec2PlacementItem           `xml:"placement"`
+	Groups             []ec2GroupItem             `xml:"groupSet>item"`
+	Tags               []ec2TagItem               `xml:"tagSet>item"`
+
+	// BlockDeviceMappings is the instance's view of its EBS volumes, derived from the
+	// volume records rather than from the mappings the launch recorded (#669). It is
+	// omitted when the instance has none, which is the shape AWS's own DescribeInstances
+	// sample shows for an instance-store-backed instance.
+	BlockDeviceMappings []ec2BlockDeviceMappingItem `xml:"blockDeviceMapping>item,omitempty"`
+
+	NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
+}
+
+// ec2InstanceItemFor builds one instance's response item, shared by RunInstances and
+// DescribeInstances so neither can report an instance differently from the other.
+//
+// mappings is the instance's block device set, resolved by the caller: both callers
+// read every volume in the account and region once and bucket by instance, because a
+// per-instance read would turn one List into an instances × volumes scan.
+func (p *EC2Plugin) ec2InstanceItemFor(
+	reqCtx *RequestContext,
+	inst EC2Instance,
+	mappings []ec2BlockDeviceMappingItem,
+) ec2InstanceItem {
+	item := ec2InstanceItem{
+		InstanceID:          inst.InstanceID,
+		ImageID:             inst.ImageID,
+		InstanceType:        inst.InstanceType,
+		LaunchTime:          inst.LaunchTime,
+		PrivateIPAddress:    inst.PrivateIPAddress,
+		PublicIPAddress:     inst.PublicIPAddress,
+		PublicDNSName:       inst.PublicDNSName,
+		PrivateDNSName:      inst.PrivateDNSName,
+		SubnetID:            inst.SubnetID,
+		VpcID:               inst.VPCID,
+		KeyName:             inst.KeyName,
+		State:               ec2InstanceStateItem{Code: inst.State.Code, Name: inst.State.Name},
+		Placement:           ec2PlacementItem{AvailabilityZone: inst.AvailabilityZone},
+		Groups:              p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs),
+		BlockDeviceMappings: mappings,
+		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, inst),
+	}
+	// Echo the IAM instance profile set at launch (#331). The stored value is the name
+	// or ARN supplied; surface it as the ARN and derive an id so a caller can read back
+	// the profile it attached.
+	if inst.IamInstanceProfile != "" {
+		arn := inst.IamInstanceProfile
+		if !strings.HasPrefix(arn, "arn:") {
+			arn = "arn:aws:iam::" + reqCtx.AccountID + ":instance-profile/" + inst.IamInstanceProfile
+		}
+		item.IamInstanceProfile = &ec2IAMInstanceProfileItem{ARN: arn, ID: "AIPA" + randomHex(8)}
+	}
+	// Echo launch-time tags (from TagSpecifications) — real EC2 populates tagSet in
+	// the RunInstances response, not just DescribeInstances (#351).
+	for _, t := range inst.Tags {
+		item.Tags = append(item.Tags, ec2TagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck // XML tags differ from EC2Tag's JSON tags.
+	}
+	return item
+}
+
 // ec2NetworkInterfaceItem is one networkInterfaceSet>item, the shape both
 // RunInstances and DescribeInstances report an instance's interfaces in.
 //
@@ -770,38 +886,22 @@ func (p *EC2Plugin) ec2GroupItems(reqCtx *RequestContext, groupIDs []string) []e
 	return items
 }
 
+// runInstancesResponse renders a launch's instances.
+//
+// It reports the same members DescribeInstances does, through the one shared
+// [ec2InstanceItem]: networkInterfaceSet, whose presence AWS's own sample response
+// carries (#455); tagSet, which real EC2 populates on a launch (#351);
+// iamInstanceProfile, which DescribeInstances reported and this response silently
+// omitted until #669; and blockDeviceMapping.
+//
+// blockDeviceMapping is a deliberate divergence. AWS's only RunInstances sample
+// response emits <blockDeviceMapping /> empty, on a pending instance whose request
+// declared no mappings at all — so the reference neither shows nor forbids a populated
+// set here. Substrate renders one on the grounds networkInterfaceSet already uses: its
+// instances are running by the time RunInstances answers and their volumes already
+// exist, so reporting the instance as having no block devices would contradict the
+// state beside it.
 func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID string, reqCtx *RequestContext) (*AWSResponse, error) {
-	type tagItem struct {
-		Key   string `xml:"key"`
-		Value string `xml:"value"`
-	}
-	// See [EC2Plugin.describeInstances]'s placement item: RunInstances reports the
-	// zone too, so a caller launching into two zones can read back which is which
-	// without a follow-up describe.
-	type placementItem struct {
-		AvailabilityZone string `xml:"availabilityZone"`
-	}
-	type ec2InstanceItem struct {
-		InstanceID       string        `xml:"instanceId"`
-		ImageID          string        `xml:"imageId"`
-		InstanceType     string        `xml:"instanceType"`
-		LaunchTime       string        `xml:"launchTime"`
-		PrivateIPAddress string        `xml:"privateIpAddress"`
-		PublicIPAddress  string        `xml:"publicIpAddress,omitempty"`
-		PublicDNSName    string        `xml:"dnsName,omitempty"`
-		PrivateDNSName   string        `xml:"privateDnsName,omitempty"`
-		SubnetID         string        `xml:"subnetId"`
-		VpcID            string        `xml:"vpcId"`
-		KeyName          string        `xml:"keyName,omitempty"`
-		Placement        placementItem `xml:"placement"`
-		State            struct {
-			Code int    `xml:"code"`
-			Name string `xml:"name"`
-		} `xml:"instanceState"`
-		Groups            []ec2GroupItem            `xml:"groupSet>item"`
-		Tags              []tagItem                 `xml:"tagSet>item"`
-		NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
-	}
 	type response struct {
 		XMLName       xml.Name          `xml:"RunInstancesResponse"`
 		XMLNS         string            `xml:"xmlns,attr"`
@@ -810,39 +910,19 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		Instances     []ec2InstanceItem `xml:"instancesSet>item"`
 	}
 
+	mappings, err := p.ec2BlockDeviceMappingsByInstance(reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return nil, err
+	}
+
 	resp := response{
 		XMLNS:         "http://ec2.amazonaws.com/doc/2016-11-15/",
 		ReservationID: reservationID,
 		OwnerID:       reqCtx.AccountID,
 	}
 	for _, inst := range instances {
-		item := ec2InstanceItem{
-			InstanceID:       inst.InstanceID,
-			ImageID:          inst.ImageID,
-			InstanceType:     inst.InstanceType,
-			LaunchTime:       inst.LaunchTime,
-			PrivateIPAddress: inst.PrivateIPAddress,
-			PublicIPAddress:  inst.PublicIPAddress,
-			PublicDNSName:    inst.PublicDNSName,
-			PrivateDNSName:   inst.PrivateDNSName,
-			SubnetID:         inst.SubnetID,
-			VpcID:            inst.VPCID,
-			KeyName:          inst.KeyName,
-			Placement:        placementItem{AvailabilityZone: inst.AvailabilityZone},
-		}
-		item.State.Code = inst.State.Code
-		item.State.Name = inst.State.Name
-		item.Groups = p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)
-		// RunInstances reports networkInterfaceSet, not only DescribeInstances — the
-		// reference's own sample response carries it — so a caller can read back the
-		// interfaces it declared without a follow-up describe (#455).
-		item.NetworkInterfaces = p.ec2NetworkInterfaceItems(reqCtx, inst)
-		// Echo launch-time tags (from TagSpecifications) — real EC2 populates
-		// tagSet in the RunInstances response, not just DescribeInstances (#351).
-		for _, t := range inst.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck // XML tags differ from EC2Tag's JSON tags.
-		}
-		resp.Instances = append(resp.Instances, item)
+		resp.Instances = append(resp.Instances,
+			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID]))
 	}
 
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -922,44 +1002,6 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("ec2 describeInstances list: %w", err)
 	}
 
-	type ec2StateItem struct {
-		Code int    `xml:"code"`
-		Name string `xml:"name"`
-	}
-	type tagItem struct {
-		Key   string `xml:"key"`
-		Value string `xml:"value"`
-	}
-	type iamProfileItem struct {
-		ARN string `xml:"arn"`
-		ID  string `xml:"id"`
-	}
-	// placementItem is the instance's placement structure. Only availabilityZone is
-	// emitted: it is the one member substrate records, and it must be readable for a
-	// caller to reason about TerminateInstances' zone-scoped protection rule (#489).
-	type placementItem struct {
-		AvailabilityZone string `xml:"availabilityZone"`
-	}
-	type ec2InstanceItem struct {
-		InstanceID         string          `xml:"instanceId"`
-		ImageID            string          `xml:"imageId"`
-		InstanceType       string          `xml:"instanceType"`
-		LaunchTime         string          `xml:"launchTime"`
-		PrivateIPAddress   string          `xml:"privateIpAddress"`
-		PublicIPAddress    string          `xml:"publicIpAddress,omitempty"`
-		PublicDNSName      string          `xml:"dnsName,omitempty"`
-		PrivateDNSName     string          `xml:"privateDnsName,omitempty"`
-		SubnetID           string          `xml:"subnetId"`
-		VpcID              string          `xml:"vpcId"`
-		KeyName            string          `xml:"keyName,omitempty"`
-		IamInstanceProfile *iamProfileItem `xml:"iamInstanceProfile,omitempty"`
-		State              ec2StateItem    `xml:"instanceState"`
-		Placement          placementItem   `xml:"placement"`
-		Groups             []ec2GroupItem  `xml:"groupSet>item"`
-		Tags               []tagItem       `xml:"tagSet>item"`
-
-		NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
-	}
 	type reservationItem struct {
 		ReservationID string            `xml:"reservationId"`
 		OwnerID       string            `xml:"ownerId"`
@@ -969,6 +1011,14 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		XMLName      xml.Name          `xml:"DescribeInstancesResponse"`
 		XMLNS        string            `xml:"xmlns,attr"`
 		Reservations []reservationItem `xml:"reservationSet>item"`
+	}
+
+	// Every volume in the account and region, read once and bucketed by instance:
+	// this loop already does a Get per instance and a Get per security group, so a
+	// per-instance volume List would compound into an instances × volumes scan.
+	mappings, err := p.ec2BlockDeviceMappingsByInstance(reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return nil, err
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -992,37 +1042,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			continue
 		}
 
-		item := ec2InstanceItem{
-			InstanceID:       inst.InstanceID,
-			ImageID:          inst.ImageID,
-			InstanceType:     inst.InstanceType,
-			LaunchTime:       inst.LaunchTime,
-			PrivateIPAddress: inst.PrivateIPAddress,
-			PublicIPAddress:  inst.PublicIPAddress,
-			PublicDNSName:    inst.PublicDNSName,
-			PrivateDNSName:   inst.PrivateDNSName,
-			SubnetID:         inst.SubnetID,
-			VpcID:            inst.VPCID,
-			KeyName:          inst.KeyName,
-			Placement:        placementItem{AvailabilityZone: inst.AvailabilityZone},
-		}
-		item.State.Code = inst.State.Code
-		item.State.Name = inst.State.Name
-		item.Groups = p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)
-		item.NetworkInterfaces = p.ec2NetworkInterfaceItems(reqCtx, inst)
-		// Echo the IAM instance profile set at launch (#331). The stored value is
-		// the name or ARN supplied; surface it as the ARN and derive an id so a
-		// caller can read back the profile it attached.
-		if inst.IamInstanceProfile != "" {
-			arn := inst.IamInstanceProfile
-			if !strings.HasPrefix(arn, "arn:") {
-				arn = "arn:aws:iam::" + reqCtx.AccountID + ":instance-profile/" + inst.IamInstanceProfile
-			}
-			item.IamInstanceProfile = &iamProfileItem{ARN: arn, ID: "AIPA" + randomHex(8)}
-		}
-		for _, t := range inst.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
-		}
+		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID])
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
 			resMap[inst.ReservationID] = &reservationItem{

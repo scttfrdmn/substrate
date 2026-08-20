@@ -246,6 +246,13 @@ func TestEC2_InstanceAttribute_DisableAPITerminationDefaultsFalse(t *testing.T) 
 // is not supported." — #4273 captures real AWS rejecting exactly it. Substrate
 // refusing a value AWS's own docs list is fidelity, not a gap, and a reader who
 // checks only the valid-values list would "fix" this into a regression.
+//
+// blockDeviceMapping used to be a row here and deliberately is not one now: #669 gave
+// substrate the state to answer it, so it moved to the supported list rather than
+// staying refused. The remaining five still cover all four refusal classes — listed and
+// rejected by AWS, not an attribute at all, listed and unmodelled, and right name in the
+// wrong case — so the list shrank without losing a class.
+// See TestEC2_InstanceBlockDeviceMapping_Attribute for the answer it gives instead.
 func TestEC2_InstanceAttribute_UnknownAttribute(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -256,7 +263,6 @@ func TestEC2_InstanceAttribute_UnknownAttribute(t *testing.T) {
 		"abc",        // not an attribute at all
 		"kernel",     // listed, and unmodelled by substrate
 		"sourceDestCheck",
-		"blockDeviceMapping",
 		"InstanceType", // valid name in the wrong case — the values are case-sensitive
 	} {
 		t.Run(attr, func(t *testing.T) {

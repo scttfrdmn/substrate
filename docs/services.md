@@ -2619,13 +2619,13 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); `availability-zone` filter |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); `availability-zone` filter |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeInstanceAttribute | Four attributes, `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
+| DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | CreateVpc | |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids) |
@@ -3058,11 +3058,45 @@ Substrate's own choices, where the API model does not decide:
   mapping is still recorded.
 
 Not modeled: `Ebs.KmsKeyId` (left out rather than stored and hidden),
-`TagSpecification` scoped to `volume` (see the tag-specification note above),
-`InvalidBlockDeviceMapping` validation, and `blockDeviceMapping` on
-`DescribeInstances` or `DescribeInstanceAttribute` — the latter is still on the
-explicit-refusal list, since the shape it would render carries no size and so would
-not answer the question `DescribeVolumes` now does.
+`TagSpecification` scoped to `volume` (see the tag-specification note above), and
+`InvalidBlockDeviceMapping` validation.
+
+#### An instance reports its own block devices
+
+`DescribeInstances`, `RunInstances` and `DescribeInstanceAttribute` each render a
+`blockDeviceMapping` set for an instance, so a caller no longer has to go to
+`DescribeVolumes` and filter on `attachment.instance-id` to learn which volume is on
+which device.
+
+The set is **derived from the volume records**, not from the mappings the launch
+recorded. That is what makes it track reality rather than intent: a volume attached
+with `AttachVolume` after launch appears, one detached stops appearing, and an
+instance store device never appears because it never became a volume. `EC2Instance`
+carries no block-device field of its own, so the volumes are also the only available
+source.
+
+Each item is AWS's `InstanceBlockDeviceMapping` — `deviceName` plus an `ebs`
+sub-element — and the `ebs` element carries the four members AWS's own sample shows:
+`volumeId`, `status`, `attachTime` and `deleteOnTermination`. AWS's
+`EbsInstanceBlockDevice` has eight members and **no size**, which is why this set does
+not replace `DescribeVolumes` for the question above: the other four
+(`associatedResource`, `ebsCardIndex`, `operator`, `volumeOwnerId`) are omitted rather
+than defaulted, since substrate records nothing behind them and a fabricated
+`volumeOwnerId` would be indistinguishable from a real one. `status` uses AWS's
+four-value `AttachmentStatus` enum, which is not the five-value volume-side enum
+`DescribeVolumes` renders.
+
+Two substrate choices, where the API model does not decide:
+
+- **`RunInstances` renders the set populated.** The reference's only `RunInstances`
+  sample response emits `<blockDeviceMapping />` empty, on a `pending` instance whose
+  request declared no mappings at all. Substrate's instances are running by the time
+  `RunInstances` answers and their volumes already exist — the same ground
+  `networkInterfaceSet` is rendered on.
+- **The set is ordered by device name**, with the volume ID breaking a tie.
+  `DescribeInstances` states outright that its own order may vary, so no fidelity
+  claim rests on this; a deterministic emulator answering one request two ways would
+  break the guarantee the project exists for.
 
 ### A launch is authorized against every resource it names
 
@@ -3136,7 +3170,7 @@ nothing could observe it, so a consumer could not assert that the user data thei
 intended reached the instance — including the value a
 [launch template supplied](#a-launch-template-merges-with-the-request-field-by-field).
 
-Four attributes are readable, being the ones that correspond to state substrate holds:
+Five attributes are readable, being the ones that correspond to state substrate holds:
 
 | `Attribute` | Reports |
 |---|---|
@@ -3144,6 +3178,7 @@ Four attributes are readable, being the ones that correspond to state substrate 
 | `instanceType` | |
 | `disableApiTermination` | `true` or `false`; recorded at launch and by `ModifyInstanceAttribute` |
 | `groupSet` | `groupSet>item` with `groupId`/`groupName`, the same shape [`DescribeInstances` reports](#security-groups-on-an-instance) |
+| `blockDeviceMapping` | `blockDeviceMapping>item`, the same set [an instance reports](#an-instance-reports-its-own-block-devices) |
 
 Scalar values are **wrapped in a `<value>` element**, which all three of the
 reference's worked examples show and which matches the `AttributeValue` type the
@@ -3156,8 +3191,11 @@ response elements carry:
 </DescribeInstanceAttributeResponse>
 ```
 
-Exactly one attribute appears per response — the one asked for. `groupSet` is the
-exception to the wrapper: it is an array of `GroupIdentifier`, not an `AttributeValue`.
+Exactly one attribute appears per response — the one asked for. `groupSet` and
+`blockDeviceMapping` are the exceptions to the wrapper: they are arrays, not
+`AttributeValue`s. Both are rendered as a **present-but-empty** element when the
+instance has none, rather than an omitted one, because an SDK maps a present-but-empty
+element to an empty slice and an omitted one to nil.
 
 `Attribute` is **Required: Yes**, so an absent one fails with `MissingParameter`
 (`The request must contain the parameter Attribute`). An unknown instance ID fails
@@ -3167,8 +3205,8 @@ as [everywhere else](#explicit-resource-ids).
 #### Unmodelled attributes are refused, not defaulted
 
 Every other name in the documented valid-values list — `kernel`, `ramdisk`,
-`sourceDestCheck`, `blockDeviceMapping`, `productCodes`, `ebsOptimized`,
-`rootDeviceName`, `sriovNetSupport`, `enaSupport`, `enclaveOptions`,
+`sourceDestCheck`, `productCodes`, `ebsOptimized`, `rootDeviceName`,
+`sriovNetSupport`, `enaSupport`, `enclaveOptions`,
 `instanceInitiatedShutdownBehavior`, `disableApiStop` — is rejected:
 
 ```

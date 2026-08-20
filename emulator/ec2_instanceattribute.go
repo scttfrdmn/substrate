@@ -16,7 +16,7 @@ import (
 //	productCodes | sourceDestCheck | groupSet | ebsOptimized | sriovNetSupport |
 //	enaSupport | enclaveOptions | disableApiStop
 //
-// Substrate reads the four that correspond to state it actually holds. The rest are
+// Substrate reads the five that correspond to state it actually holds. The rest are
 // deliberately rejected rather than answered with a default: reporting
 // sourceDestCheck as false, say, would be indistinguishable from a real instance
 // that has it disabled, and a consumer asserting on it would get a green test built
@@ -32,6 +32,7 @@ const (
 	ec2AttrInstanceType          = "instanceType"
 	ec2AttrGroupSet              = "groupSet"
 	ec2AttrDisableAPITermination = "disableApiTermination"
+	ec2AttrBlockDeviceMapping    = "blockDeviceMapping"
 )
 
 // ec2InstanceAttributeXML is one DescribeInstanceAttribute response.
@@ -68,6 +69,13 @@ type ec2InstanceAttributeXML struct {
 	// <groupSet></groupSet>, and a caller asking for userData would be told the
 	// instance has no security groups. A nil pointer is skipped outright.
 	Groups *ec2GroupSetXML `xml:"groupSet,omitempty"`
+
+	// BlockDeviceMappings is the other non-AttributeValue attribute substrate answers,
+	// and it is a pointer for the same reason Groups is (#669). AWS publishes no
+	// blockDeviceMapping example on this operation, so the present-but-empty shape for
+	// an instance with no EBS volumes rests on the groupSet and userData reasoning in
+	// this file rather than on anything the reference settles.
+	BlockDeviceMappings *ec2BlockDeviceMappingSetXML `xml:"blockDeviceMapping,omitempty"`
 }
 
 // ec2GroupSetXML wraps the groupSet items so the element can be omitted entirely.
@@ -150,6 +158,18 @@ func (p *EC2Plugin) describeInstanceAttribute(reqCtx *RequestContext, req *AWSRe
 		// same reason an unset userData is present: an SDK distinguishes an empty
 		// array from a nil one.
 		resp.Groups = &ec2GroupSetXML{Items: p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)}
+	case ec2AttrBlockDeviceMapping:
+		// Derived from the volume records rather than from the launch's recorded
+		// mappings, so the answer tracks attachments made and broken after launch; see
+		// [EC2Plugin.ec2BlockDeviceMappingsByInstance]. Present-but-empty for an
+		// instance with no EBS volumes, as groupSet is.
+		mappings, mapErr := p.ec2BlockDeviceMappingsByInstance(reqCtx.AccountID, reqCtx.Region)
+		if mapErr != nil {
+			return nil, mapErr
+		}
+		resp.BlockDeviceMappings = &ec2BlockDeviceMappingSetXML{
+			Items: mappings[inst.InstanceID],
+		}
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -157,7 +177,8 @@ func (p *EC2Plugin) describeInstanceAttribute(reqCtx *RequestContext, req *AWSRe
 // ec2AttributeSupported reports whether substrate can read attr off stored state.
 func ec2AttributeSupported(attr string) bool {
 	switch attr {
-	case ec2AttrUserData, ec2AttrInstanceType, ec2AttrGroupSet, ec2AttrDisableAPITermination:
+	case ec2AttrUserData, ec2AttrInstanceType, ec2AttrGroupSet, ec2AttrDisableAPITermination,
+		ec2AttrBlockDeviceMapping:
 		return true
 	default:
 		return false
