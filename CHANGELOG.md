@@ -118,6 +118,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   far is a mapping naming a `VolumeType` and no size, which previously produced an 8 GiB
   volume of that type.
 
+- **A volume can be tagged, reports its tags, and is findable by them** (#670). A volume was
+  the one taggable EC2 resource with no working tagging path at all, and every call on it
+  answered success: `CreateVolume` accepted `TagSpecification.N` and stored nothing,
+  `CreateTags` on a `vol-` ID answered `<return>true</return>` and wrote nothing,
+  `DescribeVolumes` rendered no `tagSet` and matched no tag filter, and `EC2Volume.Tags`
+  existed with nothing ever writing to it. So an IaC consumer's tag-everything convention
+  appeared to hold and nothing could observe that it had not — the same store-and-hide shape
+  #471 closed for a launch template's tags. Four paths are now real:
+
+  - `CreateVolume` applies its `volume`-scoped `TagSpecification.N` and echoes the result in a
+    `tagSet`.
+  - `RunInstances` applies its `volume`-scoped tags to **every** volume the launch
+    materializes, including the root volume substrate synthesizes when no mapping declares
+    one. AWS's structure has no way to tag one mapping's volume differently from another's.
+  - A launch template's `volume`-scoped tags reach the launch on their own merge gate, so the
+    two scopes resolve independently: a request naming volume tags still inherits the
+    template's instance tags, and each scope replaces rather than merges within itself.
+  - `CreateTags` and `DeleteTags` accept a `vol-` ID like any other taggable ID.
+
+  Both tag rules apply on all of them — the reserved `aws:` prefix and the 50-tag limit, since
+  AWS documents no volume-specific tag constraint — and on a launch the check runs **before
+  the launch loop**, because a volume is written after its own instance and a refusal inside
+  the loop would leave the first instance of a multi-count launch behind. A launch template's
+  volume scope is checked at `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` too, and
+  each scope counts against the 50-tag limit on its own: the limit is per resource, and an
+  instance and its volumes are different resources.
+
+  `DescribeVolumes` now filters on `tag:<key>` and `tag-key`, which are exactly the two tag
+  filters AWS documents for the operation out of 20 — there is no `tag-value`. Its
+  hand-rolled `Filter.N` loop, whose nine `map[string]bool` sets could not express a filter
+  whose key is part of its name, is replaced by the shared `extractEC2Filters` walk plus a
+  match function. Three consequences worth naming rather than leaving to be found: an empty
+  filter value is now recorded as a value where the old loop truncated the list at it; a
+  filter whose value list is empty is now a filter that matches nothing rather than one that
+  was never seen; and the nine names the loop already supported are covered by a regression
+  test that passed before this change and after it.
+
+  `CreateVolume` also stopped discarding `Iops` and `Throughput`, which `EC2Volume` stored and
+  `DescribeVolumes` rendered — so a provisioned volume created through `CreateVolume` read
+  back as an unprovisioned one, while the same values given through a launch mapping did not.
+  `Ebs.KmsKeyId` stays deliberately absent.
+
+  The launch template's volume scope is stored in a **new** `VolumeTagSpecifications` field
+  rather than by widening the existing instance-scoped one with a resource-type
+  discriminator. Widening it would unmarshal every template already in an event log without
+  error, into an element with an empty resource type and no tags, so every stored template
+  would silently start launching untagged instances — a change that breaks deterministic
+  replay while compiling. This follows the split `EC2LaunchTemplateData.NetworkInterfaces`
+  already uses for the same reason.
+
+  **Provenance:** the `tagSet` element carries no `omitempty` because AWS's second
+  `CreateVolume` example renders `<tagSet/>` for an untagged volume, and an SDK tells a
+  present-but-empty element ("no tags") from an omitted one ("unknown"). Two answers are
+  substrate's own, because AWS's filtering guide settles neither: a `tag:<key>` filter with no
+  value matches nothing, following `DescribeInstances` rather than `describeImages`, which
+  treats it as `tag-key`; and an unrecognized filter name is still **dropped**, which is what
+  this operation has always done — real EC2 refuses one, and substrate has three different
+  answers across its EC2 filter sites, so reconciling them is its own change on all of them.
+  A comment claiming that dropping was universal in the package is corrected rather than
+  carried.
+
+  **Compatibility:** `CreateVolume` and `DescribeVolumes` responses gain `tagSet`, `iops` and
+  `throughput`, which a byte-exact response assertion will see. A `RunInstances` naming a
+  reserved key or more than 50 tags in a `volume`-scoped `TagSpecification` now fails where it
+  previously succeeded with the tags dropped; the same is true at `CreateLaunchTemplate`.
+
 ### Fixed
 - **`RunInstances` omitted the `iamInstanceProfile` that `DescribeInstances` reported for the
   same instance** (#669). `runInstancesResponse` and `describeInstances` each declared their

@@ -388,10 +388,14 @@ func TestEC2_RunInstances_ReservedTagRejectionCreatesNothing(t *testing.T) {
 	require.Equal(t, "InvalidParameterValue", code)
 	assert.Zero(t, ec2InstanceCount(t, ts))
 
-	// A volume-scoped reserved key does not fail an instance launch: substrate models
-	// instance tags on this path, and a specification for a resource it does not tag is
-	// skipped rather than checked. Stated as a deliberate limit, not an oversight.
-	ids := ec2RunInstanceIDs(t, ts, map[string]string{
+	// A volume-scoped reserved key now fails the launch too, and this row is inverted
+	// from what it asserted through v0.104.0: the volume scope was parsed nowhere, so a
+	// specification substrate did not apply was a specification it did not check, and
+	// the launch succeeded with the reserved key silently dropped. Now that the scope
+	// tags real volumes (#670) it is checked on the same terms as the instance scope,
+	// and the refusal still leaves no instance behind — the check runs before the
+	// launch loop, where the instance is written one iteration ahead of its volumes.
+	status, code, _ = ec2ErrorDetail(t, ts, map[string]string{
 		"Action":                          "RunInstances",
 		"ImageId":                         "ami-0rollback00000003",
 		"MinCount":                        "1",
@@ -400,7 +404,9 @@ func TestEC2_RunInstances_ReservedTagRejectionCreatesNothing(t *testing.T) {
 		"TagSpecification.1.Tag.1.Key":    "aws:volume",
 		"TagSpecification.1.Tag.1.Value":  "x",
 	})
-	assert.Len(t, ids, 1)
+	require.Equal(t, http.StatusBadRequest, status)
+	require.Equal(t, "InvalidParameterValue", code)
+	assert.Zero(t, ec2InstanceCount(t, ts), "a volume-tag refusal leaves no instance either")
 }
 
 // TestEC2_CreateImage_RejectsReservedTagKeys covers CreateImage's two tag scopes.

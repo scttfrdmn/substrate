@@ -357,6 +357,13 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// DescribeVolumes reported nothing for the instance. The mappings become real
 	// volumes in the launch loop below; see [ec2LaunchVolumesFor].
 	blockDeviceMappings := ec2ParseBlockDeviceMappings(req.Params, "")
+	// A launch tags its volumes through the same TagSpecification.N structure that
+	// tags the instance, scoped to "volume" — and those tags were accepted and
+	// discarded until #670. They are parsed here rather than in
+	// [EC2Plugin.runInstances] because a template can also supply them, and because
+	// substrate's fleet stamp is an instance tag with no volume-scoped counterpart, so
+	// there is nothing for the caller-named-tags rule to distinguish.
+	volumeTags := ec2LaunchTagsForResource(req.Params, "volume")
 	primaryIfc := ec2PrimaryInterface(networkInterfaces)
 	if subnetID == "" && primaryIfc != nil {
 		subnetID = primaryIfc.SubnetID
@@ -477,6 +484,15 @@ func (p *EC2Plugin) runInstancesWithTags(
 			}
 			tags = append(append([]EC2Tag{}, ltData.TagSpecifications...), tags...)
 		}
+		// The volume scope follows the same replace-rather-than-merge rule, on its own
+		// gate: a request naming volume tags and a template naming others yields the
+		// request's alone, and the two scopes resolve independently, so a template can
+		// supply volume tags for a request that named only instance tags. There is no
+		// reserved-key exclusion to make here — the fleet stamp is instance-scoped —
+		// so the plain emptiness test is the whole rule (#670).
+		if len(volumeTags) == 0 {
+			volumeTags = ltData.VolumeTagSpecifications
+		}
 	}
 
 	// The instance-type default is resolved last, so it applies only when neither the
@@ -508,6 +524,21 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// mutations: a refusal past that point leaves state behind, which is worse than no
 	// validation at all because the next request in the same test sees it.
 	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings); awsErr != nil {
+		return nil, awsErr
+	}
+
+	// The volume tags are checked here for the same ordering reason, and it is not the
+	// same as the instance tags' position: a volume is written inside the launch loop
+	// *after* its instance's own Put, so a refusal there would leave instance 1 behind
+	// on a MaxCount=2 launch. Both tag rules apply, whether the tags came from the
+	// request or from a template — the template check is not redundant, since a
+	// template stored before these checks existed, or one written straight into state
+	// by a replayed event log, can still carry a reserved key or more than the limit.
+	// A new volume starts with no tags, so the resolved set is the whole count (#670).
+	if awsErr := ec2CheckTagRules(volumeTags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, volumeTags); awsErr != nil {
 		return nil, awsErr
 	}
 
@@ -650,7 +681,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 		// Materialize this instance's volumes, after the instance so they can carry
 		// its ID and its zone. Each instance of a multi-count launch gets its own
 		// volumes with their own IDs — two instances cannot share one EBS volume.
-		if err := p.ec2CreateLaunchVolumes(&inst, blockDeviceMappings, now); err != nil {
+		if err := p.ec2CreateLaunchVolumes(&inst, blockDeviceMappings, volumeTags, now); err != nil {
 			return nil, err
 		}
 		instances = append(instances, inst)
@@ -2467,6 +2498,13 @@ func ec2TaggableStateKey(reqCtx *RequestContext, id string) (string, bool) {
 		return "eip:" + scope + "/" + id, true
 	case strings.HasPrefix(id, "nat-"):
 		return "nat:" + scope + "/" + id, true
+	case strings.HasPrefix(id, "vol-"):
+		// Volumes were the one taggable resource with no arm here, so CreateTags on a
+		// vol- ID fell through to the default and answered <return>true</return> having
+		// written nothing (#670). Nothing else needed changing:
+		// [EC2Plugin.applyTagsToResource] is type-agnostic — it reads and writes the
+		// record's "tags" JSON member — and [EC2Volume.Tags] already serializes there.
+		return ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, id), true
 	default:
 		return "", false
 	}
@@ -4487,13 +4525,17 @@ func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
 	ec2SortInterfacesByDeviceIndex(interfaces)
 
 	data := EC2LaunchTemplateData{
-		ImageID:             params[ltPrefix+"ImageId"],
-		InstanceType:        params[ltPrefix+"InstanceType"],
-		KeyName:             params[ltPrefix+"KeyName"],
-		UserData:            params[ltPrefix+"UserData"],
-		TagSpecifications:   ec2TagSpecificationTags(params, ltPrefix, "instance"),
-		NetworkInterfaces:   interfaces,
-		BlockDeviceMappings: ec2ParseBlockDeviceMappings(params, ltPrefix),
+		ImageID:      params[ltPrefix+"ImageId"],
+		InstanceType: params[ltPrefix+"InstanceType"],
+		KeyName:      params[ltPrefix+"KeyName"],
+		UserData:     params[ltPrefix+"UserData"],
+		// One parse per scope, into a field per scope. The instance scope keeps the
+		// original field because widening it would break replay; see
+		// [EC2LaunchTemplateData.TagSpecifications] (#670).
+		TagSpecifications:       ec2TagSpecificationTags(params, ltPrefix, "instance"),
+		VolumeTagSpecifications: ec2TagSpecificationTags(params, ltPrefix, "volume"),
+		NetworkInterfaces:       interfaces,
+		BlockDeviceMappings:     ec2ParseBlockDeviceMappings(params, ltPrefix),
 	}
 	// The flat fields hold the primary interface's values; see
 	// [EC2LaunchTemplateData.NetworkInterfaces].
@@ -4611,6 +4653,24 @@ type ec2TagItem struct {
 	Value string `xml:"value"`
 }
 
+// ec2TagItems renders a stored tag list as tagSet entries, in slice order.
+//
+// [EC2Tag] and [ec2TagItem] have identical field sets, so the conversion is a cast per
+// element rather than a copy — the same cast the five hand-rolled loops that predate
+// this helper each perform. It returns nil for an empty list, which a caller renders as
+// a present-but-empty element or omits by its own struct tag; the choice belongs to the
+// response shape, not here.
+func ec2TagItems(tags []EC2Tag) []ec2TagItem {
+	if len(tags) == 0 {
+		return nil
+	}
+	items := make([]ec2TagItem, 0, len(tags))
+	for _, t := range tags {
+		items = append(items, ec2TagItem(t))
+	}
+	return items
+}
+
 // ec2LaunchTemplateSummary renders a launch template as its summary element.
 func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 	out := ec2LaunchTemplateXML{
@@ -4718,7 +4778,30 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 
 // --- EBS volume operations ---
 
+// createVolume creates an EBS volume, tagging it from TagSpecification.N.
+//
+// The tags come from [ec2LaunchTagsForResource] scoped to "volume", which is the same
+// walk RunInstances, CreateFleet, CreateImage and CreateNatGateway already use: AWS's
+// wire shape here is byte-identical to theirs, so a second parser would only be a
+// second thing to drift (#670). They are checked before the volume is written, per the
+// rollback rule in [ec2CheckReservedTagKeys] — a refusal that had already stored the
+// volume would leave an untagged one behind for the next request to see.
+//
+// Iops and Throughput are read here for the same reason the tags are: [EC2Volume]
+// carried both and DescribeVolumes rendered both, but this parser ignored them, so
+// CreateVolume(Iops=…) and RunInstances(…Ebs.Iops=…) disagreed about the same field. No
+// per-type validation is applied — see [ec2CheckBlockDeviceMappings] for why substrate
+// does not encode the documented numeric ranges.
 func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	tags := ec2LaunchTagsForResource(req.Params, "volume")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	// A new volume starts with no tags, so the request's own tags are the whole count.
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+
 	az := req.Params["AvailabilityZone"]
 	if az == "" {
 		az = reqCtx.Region + "a"
@@ -4736,6 +4819,11 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	snapshotID := req.Params["SnapshotId"]
 	encrypted := strings.ToLower(req.Params["Encrypted"]) == "true"
+	// Recorded as given, with the same tolerance Size above has: a value that does not
+	// parse leaves the field at zero and the field is then omitted from the response,
+	// which is what a volume with no provisioned performance looks like.
+	iops, _ := strconv.Atoi(req.Params["Iops"])
+	throughput, _ := strconv.Atoi(req.Params["Throughput"])
 
 	vol := EC2Volume{
 		VolumeID:         generateVolumeID(),
@@ -4745,6 +4833,9 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		State:            "available",
 		SnapshotID:       snapshotID,
 		Encrypted:        encrypted,
+		IOPS:             iops,
+		Throughput:       throughput,
+		Tags:             tags,
 		CreateTime:       p.tc.Now().UTC().Format(time.RFC3339),
 		AccountID:        reqCtx.AccountID,
 		Region:           reqCtx.Region,
@@ -4769,19 +4860,26 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Status     string `xml:"status"`
 	}
 	type response struct {
-		XMLName          xml.Name         `xml:"CreateVolumeResponse"`
-		XMLNS            string           `xml:"xmlns,attr"`
-		VolumeID         string           `xml:"volumeId"`
-		Size             int              `xml:"size"`
-		VolumeType       string           `xml:"volumeType"`
-		AvailabilityZone string           `xml:"availabilityZone"`
-		Status           string           `xml:"status"`
-		Encrypted        bool             `xml:"encrypted"`
-		CreateTime       string           `xml:"createTime"`
-		SnapshotID       string           `xml:"snapshotId"`
-		AttachmentSet    []attachmentItem `xml:"attachmentSet>item"`
+		XMLName          xml.Name `xml:"CreateVolumeResponse"`
+		XMLNS            string   `xml:"xmlns,attr"`
+		VolumeID         string   `xml:"volumeId"`
+		Size             int      `xml:"size"`
+		VolumeType       string   `xml:"volumeType"`
+		AvailabilityZone string   `xml:"availabilityZone"`
+		Status           string   `xml:"status"`
+		Encrypted        bool     `xml:"encrypted"`
+		CreateTime       string   `xml:"createTime"`
+		SnapshotID       string   `xml:"snapshotId"`
+		IOPS             int      `xml:"iops,omitempty"`
+		Throughput       int      `xml:"throughput,omitempty"`
+		// tagSet carries no omitempty, deliberately: AWS's Example 2 emits <tagSet/>
+		// for a volume created with no tags, and an SDK maps a present-but-empty
+		// element to an empty slice where it maps an omitted one to nil. Omitting it
+		// would report "unknown" where AWS reports "none".
+		Tags          []ec2TagItem     `xml:"tagSet>item"`
+		AttachmentSet []attachmentItem `xml:"attachmentSet>item"`
 	}
-	return ec2XMLResponse(http.StatusOK, response{
+	resp := response{
 		XMLNS:            "http://ec2.amazonaws.com/doc/2016-11-15/",
 		VolumeID:         vol.VolumeID,
 		Size:             vol.Size,
@@ -4791,7 +4889,11 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Encrypted:        vol.Encrypted,
 		CreateTime:       vol.CreateTime,
 		SnapshotID:       vol.SnapshotID,
-	})
+		IOPS:             vol.IOPS,
+		Throughput:       vol.Throughput,
+		Tags:             ec2TagItems(vol.Tags),
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
 }
 
 func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -4805,53 +4907,17 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		requestedIDs[id] = true
 	}
 
-	// Collect filter values. The set grew with #666: a launch now materializes its
-	// own volumes, so "which volume is the root of this instance" and "which of
-	// these survive termination" became questions worth asking, and every filter
-	// name below is one AWS's DescribeVolumes reference documents. Names outside
-	// this set are still dropped rather than refused, which is the behavior every
-	// other EC2 filter site has.
-	filterVolumeIDs := map[string]bool{}
-	filterStatuses := map[string]bool{}
-	filterInstanceIDs := map[string]bool{}
-	filterDevices := map[string]bool{}
-	filterDeleteOnTerm := map[string]bool{}
-	filterVolumeTypes := map[string]bool{}
-	filterSizes := map[string]bool{}
-	filterZones := map[string]bool{}
-	filterSnapshotIDs := map[string]bool{}
-	for i := 1; ; i++ {
-		name := req.Params[fmt.Sprintf("Filter.%d.Name", i)]
-		if name == "" {
-			break
-		}
-		for j := 1; ; j++ {
-			val := req.Params[fmt.Sprintf("Filter.%d.Value.%d", i, j)]
-			if val == "" {
-				break
-			}
-			switch name {
-			case "volume-id":
-				filterVolumeIDs[val] = true
-			case "status":
-				filterStatuses[val] = true
-			case "attachment.instance-id":
-				filterInstanceIDs[val] = true
-			case "attachment.device":
-				filterDevices[val] = true
-			case "attachment.delete-on-termination":
-				filterDeleteOnTerm[strings.ToLower(val)] = true
-			case "volume-type":
-				filterVolumeTypes[val] = true
-			case "size":
-				filterSizes[val] = true
-			case "availability-zone":
-				filterZones[val] = true
-			case "snapshot-id":
-				filterSnapshotIDs[val] = true
-			}
-		}
-	}
+	// Filters come from the shared [extractEC2Filters] walk rather than a hand-rolled
+	// one. The hand-rolled loop this replaces switched on the filter name *inside* the
+	// value loop, into nine map[string]bool sets — a shape that cannot express
+	// tag:<key>, since the key is part of the name (#670).
+	//
+	// Two behavior changes come with the shared walk, both fidelity improvements worth
+	// naming rather than leaving to be discovered. It records an empty filter value as a
+	// value, where the old loop's `if val == "" { break }` truncated the list at it. And
+	// it keeps a filter whose value list is empty, so `tag:Env` with no value is a filter
+	// that matches nothing rather than one that was never seen.
+	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, ec2VolumeStatePrefix(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
@@ -4879,8 +4945,12 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		SnapshotID       string `xml:"snapshotId"`
 		// iops and throughput were stored and never rendered, so a volume created
 		// with provisioned performance read back as one without it.
-		IOPS          int          `xml:"iops,omitempty"`
-		Throughput    int          `xml:"throughput,omitempty"`
+		IOPS       int `xml:"iops,omitempty"`
+		Throughput int `xml:"throughput,omitempty"`
+		// tagSet carries no omitempty, for the reason CreateVolume's does not: AWS
+		// renders the element for an untagged volume, and an SDK tells a
+		// present-but-empty element from an omitted one.
+		Tags          []ec2TagItem `xml:"tagSet>item"`
 		AttachmentSet []attachItem `xml:"attachmentSet>item"`
 	}
 	var volumes []volItem
@@ -4898,31 +4968,7 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		if len(requestedIDs) > 0 && !requestedIDs[vol.VolumeID] {
 			continue
 		}
-		// Filter by volume-id filter.
-		if len(filterVolumeIDs) > 0 && !filterVolumeIDs[vol.VolumeID] {
-			continue
-		}
-		// Filter by status.
-		if len(filterStatuses) > 0 && !filterStatuses[vol.State] {
-			continue
-		}
-		// Filter by volume-type, size and availability-zone, all volume-scoped.
-		if len(filterVolumeTypes) > 0 && !filterVolumeTypes[vol.VolumeType] {
-			continue
-		}
-		if len(filterSizes) > 0 && !filterSizes[strconv.Itoa(vol.Size)] {
-			continue
-		}
-		if len(filterZones) > 0 && !filterZones[vol.AvailabilityZone] {
-			continue
-		}
-		if len(filterSnapshotIDs) > 0 && !filterSnapshotIDs[vol.SnapshotID] {
-			continue
-		}
-		// The attachment-scoped filters match when *any* attachment satisfies them,
-		// which is what a filter on a list-valued member means: a volume matches
-		// attachment.device=/dev/sdf when it is attached at that device.
-		if !ec2VolumeMatchesAttachmentFilters(vol, filterInstanceIDs, filterDevices, filterDeleteOnTerm) {
+		if !ec2VolumeMatchesFilters(vol, filters) {
 			continue
 		}
 		item := volItem{
@@ -4936,6 +4982,7 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 			SnapshotID:       vol.SnapshotID,
 			IOPS:             vol.IOPS,
 			Throughput:       vol.Throughput,
+			Tags:             ec2TagItems(vol.Tags),
 		}
 		for _, att := range vol.Attachments {
 			item.AttachmentSet = append(item.AttachmentSet, attachItem{
