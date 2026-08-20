@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **A launch-declared *data* volume is now preserved on termination rather than deleted, and
+  the ambiguity behind that value is recorded** (#675). Two current AWS pages disagree about
+  `DeleteOnTermination`'s default for a volume a launch creates.
+  `block-device-mapping-concepts` states the default is "`true` for the root volume and `false`
+  for attached volumes"; `preserving-volumes-on-termination` carries a console-vs-CLI table
+  that lists a launch-created data volume as Delete when the launch came through the CLI. #666
+  followed the second page and applied `true` to every launch-created volume, root and data
+  alike, and both the code comment and `docs/services.md` presented that as simply AWS's
+  documented behaviour.
+
+  The API reference itself documents no default for `EbsBlockDevice.DeleteOnTermination` at
+  all, and its only pointer on the subject is a link that no longer resolves to the content it
+  cites. Both guide pages agree that the real launch default comes from the **AMI's own block
+  device mapping**, which substrate's AMIs do not carry — so the value is substrate's choice
+  either way. Given a genuine ambiguity, the non-destructive side wins: a volume wrongly
+  preserved is visible and correctable, while one wrongly deleted is gone and the caller learns
+  of it by its absence rather than by an error. A consumer reading the page that describes the
+  mapping shape they are writing would otherwise find substrate wrong rather than opinionated.
+
+  The root volume still defaults to `true`, which both pages agree on, and the default keys off
+  the *resolved* device name so a mapping naming no device — which lands on `/dev/sda1` — is
+  treated as the root it became. `AttachVolume`'s `false` is unchanged and unaffected; the two
+  pages agree about a volume attached after launch. An explicit value still wins over either
+  default. `docs/services.md` now names both pages and states which wins and why, rather than
+  only the behaviour.
+
+  **Compatibility:** a data volume that a launch created and `TerminateInstances` deleted in
+  v0.103.0 and v0.104.0 now survives as `available` with no attachment, and
+  `DescribeVolumes` reports `deleteOnTermination=false` on its attachment where it previously
+  reported `true`. A mapping that names `DeleteOnTermination` explicitly is unaffected, as is
+  every root-device mapping.
+
 ## [v0.104.0] - 2026-08-20
 
 ### Fixed

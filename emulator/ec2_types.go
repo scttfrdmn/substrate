@@ -947,12 +947,12 @@ type EC2VolumeAttachment struct {
 	// the value describes this attachment: detaching and reattaching a volume
 	// resets it to the post-launch default.
 	//
-	// AWS's default depends on how the attachment came about, not on what the
-	// volume is. Anything attached after launch preserves on termination; a volume
-	// a launch creates is deleted, root and data volumes alike, when the launch
-	// came through the API rather than the console. Substrate is an API emulator,
-	// so a launch defaults this to true and AttachVolume defaults it to false. See
-	// [ec2LaunchVolumesFor].
+	// Anything attached after launch preserves on termination, which both AWS pages
+	// that document a default agree on, so AttachVolume defaults this to false. For
+	// a volume a launch creates the two pages disagree, and substrate resolves the
+	// conflict by device role: true for the root volume, false for a data volume
+	// (#675). See [ec2LaunchVolumesFor] for which pages say what and why the split
+	// wins.
 	DeleteOnTermination bool `json:"delete_on_termination"`
 }
 
