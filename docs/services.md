@@ -3275,8 +3275,55 @@ denial.
 
 A resource the request does not name is skipped, not resolved to `*` — `*` for an
 unknown resource would widen the policy the caller wrote instead of narrowing it.
-A request that names none of them at all is decided against a single `*`, as every
-other EC2 operation is.
+
+##### A launch that omits `SubnetId` is authorized against the default VPC's resources
+
+A launch that names no subnet does not run without one: substrate resolves the
+[default VPC](#runinstances)'s default subnet and its `default` security group,
+creating them when the account has none. Both are part of the decision, resolved from
+state *before* it is made:
+
+| State when the launch arrives | Subnet in the decision | Security group in the decision |
+|---|---|---|
+| A default VPC with a default subnet | that subnet's ARN | the default VPC's group, if the request named none |
+| A default VPC with no default subnet | `subnet/*` | the default VPC's group, if the request named none |
+| No default VPC | `subnet/*` | `security-group/*` |
+
+A launch that names its own security groups is authorized against those and not
+additionally against the default one, because that is what it attaches. The default
+subnet applies only when nothing else supplied one — a request parameter, a nested
+`NetworkInterface.N.SubnetId` and a launch template all take precedence, in the same
+order the launch itself applies them.
+
+The two wildcards are resources the launch is about to **create**, which is why they
+are wildcards rather than skipped: the skip-don't-widen rule above is about a resource
+the request omits. A `Deny` on `subnet/*` therefore still matches, and a
+least-privilege `Allow` naming one specific subnet correctly refuses a launch that
+will mint a different one.
+
+**This is substrate's reading, not AWS parity.** The Service Authorization Reference's
+`RunInstances` scenario rows require `subnet*` only in the `EC2-VPC-EBS-Subnet` and
+`EC2-VPC-InstanceStore-Subnet` scenarios, so a launch that omits the subnet is, read
+straight, not authorized against one — and AWS's own recommended subnet guardrail is
+the `ec2:Subnet` condition key on `network-interface/*`, which substrate does not
+populate. Substrate diverges because a guardrail a caller defeats by omitting a
+parameter is useless for the purpose substrate exists for: a test that proves a policy
+keeps workloads out of a subnet has to fail when the launch lands in it.
+
+##### A fleet's launches are authorized, not exempted
+
+`CreateFleet` launches its instances internally, through the same `RunInstances` path a
+direct call takes, so the API's authorization pipeline sees only the `CreateFleet`
+request. Each pool's launch is therefore authorized separately, against the resources
+that pool resolves to — its launch template's AMI, the override's subnet, and the
+instance and interface wildcards. A caller needs `ec2:RunInstances` on those resources
+in addition to `ec2:CreateFleet`, which is what AWS requires too: "Resource-level
+permissions for this action do not include the resources specified in a launch
+template. To specify resource-level permissions for resources specified in a launch
+template, you must include the resources in the RunInstances action statement."
+
+Every pool is decided before the first one launches, so a refused fleet leaves no
+instances and no fleet record behind.
 
 Not covered:
 
@@ -3286,15 +3333,9 @@ Not covered:
   documented types.
 - **The launch-template ARN**, which the reference does not mark required for
   `RunInstances` — so requiring it would refuse the same policy.
-- **The EC2 condition keys** (`ec2:InstanceType`, `ec2:Vpc`,
+- **The EC2 condition keys** (`ec2:InstanceType`, `ec2:Vpc`, `ec2:Subnet`,
   `ec2:IsLaunchTemplateResource` and the rest). Resource resolution is what this
   covers; the condition keys substrate does populate are the `aws:`-prefixed ones.
-- **A launch that names no subnet and no security group**, whose defaults are
-  resolved from the default VPC *after* the authorization decision. A policy scoped
-  to one subnet cannot fence off such a launch.
-- **The [fleet](#seeding-ec2-fleet-partial-fulfillment) path**, which launches
-  instances internally without going through the API's authorization pipeline, so no
-  policy applies to it.
 
 #### Tagging is authorized against every resource it names
 

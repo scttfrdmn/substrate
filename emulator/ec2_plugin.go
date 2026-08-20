@@ -28,6 +28,11 @@ type EC2Plugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// auth authorizes the launches CreateFleet dispatches through the plugin's own
+	// RunInstances path, which never passes through the server's check. nil for a
+	// registry built without [WithPluginAuth], in which case a fleet launches exactly
+	// as it did before (#673).
+	auth *AuthController
 }
 
 // Name returns the service name "ec2".
@@ -41,6 +46,9 @@ func (p *EC2Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 		p.tc = tc
 	} else {
 		p.tc = NewTimeController(time.Now())
+	}
+	if auth, ok := cfg.Options["auth_controller"].(*AuthController); ok {
+		p.auth = auth
 	}
 	return nil
 }
@@ -542,6 +550,20 @@ func (p *EC2Plugin) runInstancesWithTags(
 		return nil, awsErr
 	}
 
+	// The groups the request or its template named are checked for existence here,
+	// before the ensureDefaultVPC branch below writes anything (#673). The membership
+	// check has to wait for the subnet's VPC, but existence does not, and a launch
+	// naming a group that does not exist was previously refused *after* nine records
+	// had been committed — a VPC, subnet, security group, internet gateway, route
+	// table and four index mutations, two of them swallowing their own failures. A
+	// refusal that leaves a default VPC behind is worse than no check at all, because
+	// the next request in the same test sees state the refused one created. Reachable
+	// with no IAM configured, so this stands on its own regardless of the
+	// authorization change beside it.
+	if awsErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, ""); awsErr != nil {
+		return nil, awsErr
+	}
+
 	// Auto-create default VPC/subnet if none specified.
 	if subnetID == "" {
 		vpc, subnet, err := p.ensureDefaultVPC(context.Background(), reqCtx)
@@ -550,17 +572,10 @@ func (p *EC2Plugin) runInstancesWithTags(
 		}
 		subnetID = subnet.SubnetID
 		if sgID == "" {
-			// Use the default security group.
-			sgIDs, listErr := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
-			if listErr == nil && len(sgIDs) > 0 {
-				data, getErr := p.state.Get(context.Background(), ec2Namespace, sgIDs[0])
-				if getErr == nil && data != nil {
-					var sg EC2SecurityGroup
-					if json.Unmarshal(data, &sg) == nil && sg.VPCID == vpc.VPCID {
-						sgID = sg.GroupID
-					}
-				}
-			}
+			// Use the default security group — the same lookup the authorization
+			// decision makes, so the group this launch attaches is the group its
+			// policy was evaluated against (#673).
+			sgID = ec2LookupDefaultSecurityGroup(context.Background(), p.state, reqCtx, vpc.VPCID)
 		}
 	}
 
@@ -582,26 +597,11 @@ func (p *EC2Plugin) runInstancesWithTags(
 		}
 	}
 
-	// Validate security groups exist and belong to the target VPC.
-	for _, id := range securityGroupIDs {
-		sgData, sgErr := p.state.Get(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+id)
-		if sgErr != nil || sgData == nil {
-			return nil, &AWSError{
-				Code:       "InvalidGroup.NotFound",
-				Message:    "The security group '" + id + "' does not exist",
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-		if targetVPCID != "" {
-			var sg EC2SecurityGroup
-			if json.Unmarshal(sgData, &sg) == nil && sg.VPCID != targetVPCID {
-				return nil, &AWSError{
-					Code:       "InvalidGroup.NotFound",
-					Message:    "The security group '" + id + "' does not belong to VPC '" + targetVPCID + "'",
-					HTTPStatus: http.StatusBadRequest,
-				}
-			}
-		}
+	// Validate security groups exist and belong to the target VPC. The existence half
+	// ran above, before the default VPC could be created; this pass adds the
+	// membership half and covers the default group the branch above may have supplied.
+	if awsErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, targetVPCID); awsErr != nil {
+		return nil, awsErr
 	}
 
 	reservationID := generateReservationID()
@@ -2876,48 +2876,142 @@ func ec2KeyFingerprint(derBytes []byte) string {
 
 // --- Helper functions ---
 
-// ensureDefaultVPC creates the default VPC and subnet if they don't already
-// exist for the given account/region.
-func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
-	// Check for existing default VPC.
-	vpcKeys, err := p.state.List(ctx, ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+// ec2LookupDefaultVPC returns the account and region's default VPC and that VPC's
+// default subnet, reading state without writing any of it.
+//
+// It is a free function taking a [StateManager] for the same reason
+// [ec2LookupLaunchTemplate] is one: the authorization decision needs it, and
+// CheckAccess runs before the handler and has no plugin to call a method on. A
+// launch that omits SubnetId is authorized against the subnet it will actually land
+// in, which is only knowable by reading the default VPC first (#673).
+//
+// The read is split out from [EC2Plugin.ensureDefaultVPC] rather than shared with
+// it, because that one *creates* what it does not find — nine records, two of them
+// swallowing their own failures. Calling it from the authorizer would let an
+// unauthorized request create a VPC, which is the opposite of what authorizing
+// early is for.
+//
+// A nil subnet with a non-nil VPC means the default VPC exists but has no default
+// subnet: the caller decides whether to create one (the handler) or treat the
+// subnet as one this launch will mint (the authorizer). Both nil means there is no
+// default VPC yet. A state error is returned rather than reported as "no default
+// VPC", so the handler still fails instead of creating a second one.
+func ec2LookupDefaultVPC(ctx context.Context, state StateManager, reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
+	vpcKeys, err := state.List(ctx, ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC list vpcs: %w", err)
+		return nil, nil, fmt.Errorf("ec2 lookupDefaultVPC list vpcs: %w", err)
 	}
 	for _, k := range vpcKeys {
-		data, getErr := p.state.Get(ctx, ec2Namespace, k)
+		data, getErr := state.Get(ctx, ec2Namespace, k)
 		if getErr != nil || data == nil {
 			continue
 		}
 		var vpc EC2VPC
-		if json.Unmarshal(data, &vpc) == nil && vpc.IsDefault {
-			// Found existing default VPC. Find its default subnet.
-			subnetKeys, listErr := p.state.List(ctx, ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
-			if listErr != nil {
-				return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC list subnets: %w", listErr)
-			}
-			for _, sk := range subnetKeys {
-				sdata, sErr := p.state.Get(ctx, ec2Namespace, sk)
-				if sErr != nil || sdata == nil {
-					continue
-				}
-				var subnet EC2Subnet
-				if json.Unmarshal(sdata, &subnet) == nil && subnet.VPCID == vpc.VPCID && subnet.IsDefault {
-					return &vpc, &subnet, nil
-				}
-			}
-			// No default subnet found; create one.
-			subnet, createErr := p.createDefaultSubnet(ctx, reqCtx, &vpc)
-			if createErr != nil {
-				return nil, nil, createErr
-			}
-			return &vpc, subnet, nil
+		if json.Unmarshal(data, &vpc) != nil || !vpc.IsDefault {
+			continue
 		}
+		subnetKeys, listErr := state.List(ctx, ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+		if listErr != nil {
+			return nil, nil, fmt.Errorf("ec2 lookupDefaultVPC list subnets: %w", listErr)
+		}
+		for _, sk := range subnetKeys {
+			sdata, sErr := state.Get(ctx, ec2Namespace, sk)
+			if sErr != nil || sdata == nil {
+				continue
+			}
+			var subnet EC2Subnet
+			if json.Unmarshal(sdata, &subnet) == nil && subnet.VPCID == vpc.VPCID && subnet.IsDefault {
+				return &vpc, &subnet, nil
+			}
+		}
+		return &vpc, nil, nil
+	}
+	return nil, nil, nil
+}
+
+// ec2LookupDefaultSecurityGroup returns the ID of the security group a launch that
+// named none falls back to, or "" when none resolves.
+//
+// Shared between the launch handler and the authorization decision so the group the
+// launch attaches and the group its policy is evaluated against cannot differ. The
+// rule is deliberately the handler's own, unchanged: the first security-group key in
+// the account and region, and only if it belongs to vpcID. That is narrower than
+// "the group named default" — a launch in an account whose lexicographically first
+// group lives in another VPC attaches no group at all — but widening it would change
+// what a launch attaches, which is a separate question from what it is authorized
+// against.
+func ec2LookupDefaultSecurityGroup(ctx context.Context, state StateManager, reqCtx *RequestContext, vpcID string) string {
+	sgKeys, err := state.List(ctx, ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil || len(sgKeys) == 0 {
+		return ""
+	}
+	data, getErr := state.Get(ctx, ec2Namespace, sgKeys[0])
+	if getErr != nil || data == nil {
+		return ""
+	}
+	var sg EC2SecurityGroup
+	if json.Unmarshal(data, &sg) != nil || sg.VPCID != vpcID {
+		return ""
+	}
+	return sg.GroupID
+}
+
+// ec2CheckSecurityGroups refuses a launch naming a security group that does not
+// exist, or one that exists in a VPC other than vpcID.
+//
+// vpcID is "" for an existence-only pass, which is what lets a launch be refused
+// before the default VPC is created: membership needs the subnet's VPC and the
+// subnet may not exist yet, but existence needs nothing (#673). A group substrate's
+// own default-VPC branch supplied is checked by the second pass, where vpcID is
+// known.
+func (p *EC2Plugin) ec2CheckSecurityGroups(reqCtx *RequestContext, ids []string, vpcID string) *AWSError {
+	for _, id := range ids {
+		key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
+		sgData, sgErr := p.state.Get(context.Background(), ec2Namespace, key)
+		if sgErr != nil || sgData == nil {
+			return &AWSError{
+				Code:       "InvalidGroup.NotFound",
+				Message:    "The security group '" + id + "' does not exist",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		if vpcID == "" {
+			continue
+		}
+		var sg EC2SecurityGroup
+		if json.Unmarshal(sgData, &sg) == nil && sg.VPCID != vpcID {
+			return &AWSError{
+				Code:       "InvalidGroup.NotFound",
+				Message:    "The security group '" + id + "' does not belong to VPC '" + vpcID + "'",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+	}
+	return nil
+}
+
+// ensureDefaultVPC creates the default VPC and subnet if they don't already
+// exist for the given account/region.
+func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
+	vpc, subnet, err := ec2LookupDefaultVPC(ctx, p.state, reqCtx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if vpc != nil {
+		if subnet != nil {
+			return vpc, subnet, nil
+		}
+		// The default VPC exists but has no default subnet; create one.
+		created, createErr := p.createDefaultSubnet(ctx, reqCtx, vpc)
+		if createErr != nil {
+			return nil, nil, createErr
+		}
+		return vpc, created, nil
 	}
 
 	// Create default VPC.
 	vpcID := generateVPCID()
-	vpc := EC2VPC{
+	created := EC2VPC{
 		VPCID:              vpcID,
 		CIDRBlock:          "172.31.0.0/16",
 		IsDefault:          true,
@@ -2927,7 +3021,7 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 		AccountID:          reqCtx.AccountID,
 		Region:             reqCtx.Region,
 	}
-	vpcData, _ := json.Marshal(vpc)
+	vpcData, _ := json.Marshal(created)
 	vpcKey := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
 	if err := p.state.Put(ctx, ec2Namespace, vpcKey, vpcData); err != nil {
 		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create vpc: %w", err)
@@ -2977,11 +3071,11 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 		p.logger.Warn("ec2: failed to create default route table", "err", rtErr)
 	}
 
-	subnet, err := p.createDefaultSubnet(ctx, reqCtx, &vpc)
+	subnet, err = p.createDefaultSubnet(ctx, reqCtx, &created)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &vpc, subnet, nil
+	return &created, subnet, nil
 }
 
 func (p *EC2Plugin) createDefaultSubnet(ctx context.Context, reqCtx *RequestContext, vpc *EC2VPC) (*EC2Subnet, error) {

@@ -293,6 +293,12 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, awsErr
 	}
 
+	// Every pool is authorized before the first one launches, so a fleet the policy
+	// refuses leaves no instances behind (#673).
+	if err := p.authorizeFleetLaunches(reqCtx, pools, gotPerPool); err != nil {
+		return nil, err
+	}
+
 	fleet := EC2Fleet{
 		FleetID:                   generateFleetID(),
 		FleetState:                "active",
@@ -437,20 +443,50 @@ func distributeAcrossPools(n, pools int) []int {
 	return out
 }
 
-// launchFleetPool launches count instances for one pool by dispatching through
-// runInstances, and returns the resulting instance IDs. Going through
-// runInstances (rather than writing instance state directly) is what makes fleet
-// instances indistinguishable from directly-launched ones to DescribeInstances.
+// authorizeFleetLaunches checks the caller's permission to run each pool's
+// instances, before any of them launch.
 //
-// fleetID is stamped on every instance as [ec2FleetIDTagKey], which is what lets a
-// caller get from a fleet back to its instances at all (#443).
-func (p *EC2Plugin) launchFleetPool(
-	reqCtx *RequestContext,
-	pool fleetPool,
-	count int,
-	instanceTags []EC2Tag,
-	fleetID string,
-) ([]string, error) {
+// CreateFleet launches through [EC2Plugin.runInstancesWithTags], which the server's
+// authorization pipeline never sees: the pipeline decides the CreateFleet request
+// the caller sent, not the RunInstances requests the fleet synthesizes. Without this
+// a caller denied ec2:RunInstances on a subnet reached it by asking for a fleet
+// instead, which is not what real AWS answers — its CreateFleet reference requires
+// permission for the launch's own resources (#673). The in-repo precedent is
+// [StackDeployer.dispatch], which authorizes the requests a stack synthesizes for
+// the same reason.
+//
+// Every pool is decided before the first launch, so a refusal writes nothing at all
+// rather than leaving the pools ahead of it behind.
+//
+// The request handed to CheckAccess is [ec2FleetLaunchRequest], the same builder the
+// launch itself uses, so the decision cannot be made about a request other than the
+// one that runs.
+//
+// A nil controller or a nil principal is not enforced, matching CloudFormation: the
+// controller is absent unless [WithPluginAuth] wired one, and substrate's own
+// internal callers carry no principal.
+func (p *EC2Plugin) authorizeFleetLaunches(reqCtx *RequestContext, pools []fleetPool, gotPerPool []int) error {
+	if p.auth == nil || reqCtx.Principal == nil {
+		return nil
+	}
+	for i, pool := range pools {
+		if gotPerPool[i] <= 0 {
+			continue
+		}
+		if err := p.auth.CheckAccess(reqCtx, ec2FleetLaunchRequest(pool, gotPerPool[i])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ec2FleetLaunchRequest is the RunInstances request one fleet pool launches.
+//
+// It is built here rather than inline so the authorization decision and the launch
+// are made from the same request. CreateFleet authorizes every pool before launching
+// any of them, and a second construction site would eventually be authorized as one
+// launch and executed as another (#673).
+func ec2FleetLaunchRequest(pool fleetPool, count int) *AWSRequest {
 	params := map[string]string{
 		"Action":   "RunInstances",
 		"MinCount": strconv.Itoa(count),
@@ -489,6 +525,32 @@ func (p *EC2Plugin) launchFleetPool(
 	if pool.override.AvailabilityZone != "" {
 		params["Placement.AvailabilityZone"] = pool.override.AvailabilityZone
 	}
+	return &AWSRequest{
+		Service:   "ec2",
+		Operation: "RunInstances",
+		Params:    params,
+		Headers:   map[string]string{},
+	}
+}
+
+// launchFleetPool launches count instances for one pool by dispatching through
+// runInstances, and returns the resulting instance IDs. Going through
+// runInstances (rather than writing instance state directly) is what makes fleet
+// instances indistinguishable from directly-launched ones to DescribeInstances.
+//
+// fleetID is stamped on every instance as [ec2FleetIDTagKey], which is what lets a
+// caller get from a fleet back to its instances at all (#443).
+//
+// The launch is not authorized here. [EC2Plugin.authorizeFleetLaunches] does it for
+// every pool before the first one launches, so a refused fleet leaves no instances
+// behind.
+func (p *EC2Plugin) launchFleetPool(
+	reqCtx *RequestContext,
+	pool fleetPool,
+	count int,
+	instanceTags []EC2Tag,
+	fleetID string,
+) ([]string, error) {
 	// The caller's tags travel as already-parsed values rather than as re-emitted
 	// TagSpecification.N params, so the fleet-ID tag can be appended without hunting
 	// for a free index — and, more to the point, without riding the request-tag path
@@ -502,12 +564,7 @@ func (p *EC2Plugin) launchFleetPool(
 		})
 	}
 
-	resp, err := p.runInstancesWithTags(reqCtx, &AWSRequest{
-		Service:   "ec2",
-		Operation: "RunInstances",
-		Params:    params,
-		Headers:   map[string]string{},
-	}, tags)
+	resp, err := p.runInstancesWithTags(reqCtx, ec2FleetLaunchRequest(pool, count), tags)
 	if err != nil {
 		return nil, err
 	}

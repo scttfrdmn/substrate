@@ -185,6 +185,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously succeeded with the tags dropped; the same is true at `CreateLaunchTemplate`.
 
 ### Fixed
+- **A `RunInstances` that omitted `SubnetId` was decided before its subnet existed, so a
+  subnet-scoped guardrail was defeated by leaving the parameter out** (#673). Such a launch does
+  not run without a subnet: substrate resolves the default VPC's default subnet and its
+  `default` security group, creating them when the account has none — and that happened *after*
+  `CheckAccess`, so the decision named neither. A policy allowing `ec2:RunInstances` on exactly
+  one subnet permitted a launch into a subnet it never mentioned, and a `Deny` on the default
+  subnet was inert. This is the shape every getting-started example and most CDK-generated
+  launches take, so the guardrail that read as a boundary was not one for the most common launch
+  of all.
+
+  Both resources are now resolved from state **before** the decision, through a read-only lookup
+  rather than the create-if-absent path — calling the latter from the authorizer would let a
+  request the policy is about to refuse create a VPC. An existing default subnet is named by its
+  own ARN; an account that has none yet is decided against `subnet/*`, and one with no default
+  VPC at all also against `security-group/*`, because those are resources the launch is about to
+  **create**. That is the same reasoning `instance/*` and `network-interface/*` already rest on,
+  and it is not the skip-don't-widen rule, which is about a resource the request *omits*: a
+  `Deny` on `subnet/*` still matches, and a least-privilege `Allow` naming one specific subnet
+  correctly refuses a launch that will mint a different one. Substrate's fixtures all start from
+  empty state, so this is the common case rather than a corner.
+
+  The default subnet applies only when nothing else supplied one — a request parameter, a nested
+  `NetworkInterface.N.SubnetId` and a launch template all take precedence, in the order the
+  launch itself applies them — and a launch naming its own security groups is not additionally
+  authorized against the default group, because it does not attach it. The resolved subnet
+  arrives with its own tags, so an `aws:ResourceTag` condition about it is evaluated rather than
+  silently unsatisfiable. The default-group lookup is now one function shared with the launch
+  handler, so the group a launch attaches and the group its policy was evaluated against cannot
+  differ.
+
+  **A fleet's launches are authorized rather than exempted.** `CreateFleet` launches through the
+  same `RunInstances` path a direct call takes, which the API's authorization pipeline never
+  sees — the pipeline decides the `CreateFleet` request, not the launches it synthesizes — so a
+  caller denied `ec2:RunInstances` on a subnet reached it by asking for a fleet instead. Each
+  pool is now decided against the resources that pool resolves to, using the same request
+  builder the launch itself uses so the decision cannot be about a different request, and every
+  pool is decided before the first one launches: a refused fleet leaves no instances and no
+  fleet record behind. The `AuthController` reaches the EC2 plugin the way it already reaches
+  CloudFormation's stack deployer, and a caller carrying no IAM principal is unenforced exactly
+  as before.
+
+  One consequence worth stating: `RunInstances` is no longer decided against the literal `"*"`
+  under any circumstances. Every launch now names at least `instance/*`, and the fallback branch
+  a parameterless launch used to take was removed rather than left as a branch nothing can
+  reach.
+
+  **Provenance:** this is substrate's reading, not AWS parity, and `docs/services.md` says so.
+  The Service Authorization Reference's `RunInstances` scenario rows require `subnet*` only in
+  the `EC2-VPC-EBS-Subnet` and `EC2-VPC-InstanceStore-Subnet` scenarios, so a launch that omits
+  the subnet is, read straight, not authorized against one; AWS's own recommended subnet
+  guardrail is the `ec2:Subnet` condition key on `network-interface/*`, which substrate does not
+  populate. Substrate diverges because a guardrail a caller defeats by omitting a parameter is
+  useless for the purpose substrate exists for. The fleet half is not a divergence: AWS's
+  `CreateFleet` reference states that resource-level permissions for the action do not cover a
+  launch template's resources and that those must be named in the `RunInstances` statement.
+
+  **Compatibility:** a `RunInstances` omitting `SubnetId` that a subnet-scoped policy allowed in
+  v0.104.0 and earlier may now be denied, and a `CreateFleet` may now be denied unless the
+  policy also permits `ec2:RunInstances` on the launch's resources. Callers whose credentials
+  resolve to no IAM entity are unaffected, as enforcement remains opt-in.
+
+- **A launch refused for a nonexistent security group left a default VPC behind** (#673).
+  `runInstancesWithTags` validated security-group membership, which needs the target subnet's
+  VPC, so the check sat below the default-VPC branch — and a launch that omitted `SubnetId`
+  committed a VPC, a subnet, a security group, an internet gateway, a route table and four index
+  mutations before being refused, two of those writes swallowing their own errors. The next
+  request in the same test then saw state a refused one had created. Existence is now checked
+  before the first write, where it needs nothing; membership keeps its place, where the subnet's
+  VPC is known. Both error messages are unchanged. This is reachable with no IAM configured at
+  all, so it is independent of the authorization change above.
+
 - **`ec2:CreateTags` and `ec2:DeleteTags` were decided against a single `*` no matter how many
   resources they named, so an ARN-scoped guardrail on tagging was inert** (#674). Both
   operations name their resources in `ResourceId.N` — up to 1000 of them, of mixed types — and

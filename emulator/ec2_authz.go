@@ -31,17 +31,26 @@ import (
 // on; the two synthesized wildcards come last.
 //
 // A member the request omits is skipped rather than resolved to "*": "*" for an
-// absent ID would widen the policy the caller wrote instead of narrowing it. A
-// request naming none of them returns nil, so it is decided exactly as it was
-// before.
+// absent ID would widen the policy the caller wrote instead of narrowing it.
+//
+// The exception is a launch that omits SubnetId, whose subnet and security group are
+// substrate's default-VPC defaults. Those are resources the launch *will land in*,
+// not resources it fails to name, so they are resolved before the decision rather
+// than skipped — otherwise a caller defeats a subnet-scoped guardrail by leaving the
+// parameter out, which is the one thing such a guardrail exists to prevent (#673).
+// When there is no default VPC yet the launch is about to create both, so they are
+// the wildcards subnet/* and security-group/*, on the same reasoning instance/* and
+// network-interface/* already are.
 func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
 	if req.Operation != "RunInstances" {
 		return nil
 	}
+	// No emptiness guard: every launch names at least instance/*, and one that named
+	// nothing else still resolves its subnet from the default VPC, so RunInstances is
+	// never decided against the literal "*" any more. The guard that used to send a
+	// parameterless launch down buildResourceARNs' single-resource path was removed
+	// with #673 rather than left as a branch nothing can reach.
 	launch := ec2AuthzResolveLaunch(state, reqCtx, req)
-	if launch.empty() {
-		return nil
-	}
 
 	acct := reqCtx.AccountID
 	region := reqCtx.Region
@@ -59,17 +68,27 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 			Tags: ec2AuthzTagsFor(state, ec2ImageStateKey(acct, region, launch.imageID)),
 		})
 	}
-	if launch.subnetID != "" {
+	switch {
+	case launch.subnetID != "":
 		out = append(out, authzResource{
 			ARN:  "arn:aws:ec2:" + region + ":" + acct + ":subnet/" + launch.subnetID,
 			Tags: ec2AuthzTagsFor(state, "subnet:"+acct+"/"+region+"/"+launch.subnetID),
 		})
+	case launch.subnetWildcard:
+		// The default subnet this launch is about to create. No tags: it does not
+		// exist, so an aws:ResourceTag condition about it cannot be satisfied — which
+		// is the honest answer, since the subnet substrate mints carries no tags
+		// either.
+		out = append(out, authzResource{ARN: "arn:aws:ec2:" + region + ":" + acct + ":subnet/*"})
 	}
 	for _, sgID := range launch.securityGroupIDs {
 		out = append(out, authzResource{
 			ARN:  "arn:aws:ec2:" + region + ":" + acct + ":security-group/" + sgID,
 			Tags: ec2AuthzTagsFor(state, "sg:"+acct+"/"+region+"/"+sgID),
 		})
+	}
+	if launch.securityGroupWildcard {
+		out = append(out, authzResource{ARN: "arn:aws:ec2:" + region + ":" + acct + ":security-group/*"})
 	}
 	// Every launch attaches an interface, so network-interface* is always evaluated.
 	// An interface the launch creates has no ID yet, so it is the wildcard; one the
@@ -155,13 +174,13 @@ type ec2AuthzLaunchMembers struct {
 	subnetID            string
 	securityGroupIDs    []string
 	networkInterfaceIDs []string
-}
-
-// empty reports whether the request named no resource at all, in which case
-// authorization falls back to the single-resource path unchanged.
-func (m ec2AuthzLaunchMembers) empty() bool {
-	return m.imageID == "" && m.subnetID == "" &&
-		len(m.securityGroupIDs) == 0 && len(m.networkInterfaceIDs) == 0
+	// subnetWildcard and securityGroupWildcard mark the two default-VPC resources
+	// this launch will create rather than find: no ID exists to name, so the decision
+	// is made against subnet/* and security-group/*. They are a separate field rather
+	// than a "*" written into subnetID because a sentinel that reads as an ID is the
+	// kind of value that eventually reaches a state key (#656).
+	subnetWildcard        bool
+	securityGroupWildcard bool
 }
 
 // ec2AuthzResolveLaunch resolves the resources a RunInstances request names,
@@ -201,15 +220,35 @@ func ec2AuthzResolveLaunch(state StateManager, reqCtx *RequestContext, req *AWSR
 	}
 	m.networkInterfaceIDs = ec2AuthzInterfaceIDs(interfaces)
 
+	m.mergeTemplate(state, reqCtx, req, len(interfaces) == 0)
+	// Last, so it applies only to a launch nothing else gave a subnet — including a
+	// template. A return from the template merge above must not skip this: a plain
+	// request naming no template is exactly the launch whose subnet comes from the
+	// default VPC (#673).
+	m.resolveDefaultVPC(state, reqCtx)
+	return m
+}
+
+// mergeTemplate folds in the resources a named launch template supplies, under the
+// same field-by-field precedence the handler applies: a value the request already
+// resolved wins.
+//
+// takeInterfaces carries the handler's all-or-nothing interface rule from the caller,
+// which knows whether the *request* declared any — a request naming one interface is
+// not authorized against a second it will never attach.
+//
+// A template that cannot be read or resolved contributes nothing, which is why both
+// failures return rather than refuse.
+func (m *ec2AuthzLaunchMembers) mergeTemplate(state StateManager, reqCtx *RequestContext, req *AWSRequest, takeInterfaces bool) {
 	lt := ec2LookupLaunchTemplate(context.Background(), state, reqCtx,
 		req.Params["LaunchTemplate.LaunchTemplateId"],
 		req.Params["LaunchTemplate.LaunchTemplateName"])
 	if lt == nil {
-		return m
+		return
 	}
 	version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
 	if awsErr != nil || version == nil {
-		return m
+		return
 	}
 	data := version.Data
 	if m.imageID == "" {
@@ -221,13 +260,57 @@ func ec2AuthzResolveLaunch(state StateManager, reqCtx *RequestContext, req *AWSR
 	if len(m.securityGroupIDs) == 0 {
 		m.securityGroupIDs = data.NetworkSecurityGroupIDs()
 	}
-	// All-or-nothing, matching the handler: the template's interfaces apply only
-	// when the request declared none, so a request naming one interface is not
-	// authorized against a second it will never attach.
-	if len(interfaces) == 0 {
+	if takeInterfaces {
 		m.networkInterfaceIDs = ec2AuthzInterfaceIDs(data.NetworkInterfaces)
 	}
-	return m
+}
+
+// resolveDefaultVPC fills in the subnet and security group a launch that named
+// neither takes from the default VPC, reading state without creating anything.
+//
+// It runs last, after the template merge, because the default VPC applies only when
+// nothing else supplied a subnet — the same precedence the handler uses, which is
+// what keeps the decision and the launch from disagreeing about where an instance
+// lands.
+//
+// The read is [ec2LookupDefaultVPC] rather than ensureDefaultVPC: the latter creates
+// nine records, and calling it here would let a request the policy is about to refuse
+// create a VPC.
+//
+// A launch whose default VPC does not exist yet is authorized against subnet/* and
+// security-group/*, because it is about to create both. A Deny on subnet/* still
+// matches, and a least-privilege Allow naming one specific subnet correctly refuses a
+// launch that will mint a different one. Substrate's fixtures all start from empty
+// state, so that is the common case rather than a corner.
+func (m *ec2AuthzLaunchMembers) resolveDefaultVPC(state StateManager, reqCtx *RequestContext) {
+	if m.subnetID != "" {
+		return
+	}
+	namedGroups := len(m.securityGroupIDs) > 0
+	vpc, subnet, err := ec2LookupDefaultVPC(context.Background(), state, reqCtx)
+	if err != nil || vpc == nil {
+		// No default VPC, or state cannot say: this launch creates both. A failed read
+		// resolves to the wildcards rather than to nothing, so a storage fault cannot
+		// turn a guarded launch into an unguarded one.
+		m.subnetWildcard = true
+		m.securityGroupWildcard = !namedGroups
+		return
+	}
+	if subnet != nil {
+		m.subnetID = subnet.SubnetID
+	} else {
+		// The default VPC exists but has no default subnet, so the launch mints one.
+		m.subnetWildcard = true
+	}
+	if namedGroups {
+		return
+	}
+	// The default group already exists alongside the VPC, so it is named rather than
+	// wildcarded. When it does not resolve, the launch attaches no group at all and
+	// the decision names none either — the same rule the handler follows.
+	if sgID := ec2LookupDefaultSecurityGroup(context.Background(), state, reqCtx, vpc.VPCID); sgID != "" {
+		m.securityGroupIDs = []string{sgID}
+	}
 }
 
 // ec2AuthzInterfaceIDs returns the IDs of the interfaces the launch attaches by
