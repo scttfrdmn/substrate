@@ -84,9 +84,9 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	addRequestTags(requestTags, req)
 
 	// Every resource the request names must be allowed. A request naming several —
-	// organizations:MoveAccount is substrate's only one — is denied unless the
-	// caller's policies admit all of them, which is how AWS evaluates a statement
-	// against "every resource that is required" for the action (#660).
+	// organizations:MoveAccount and ec2:RunInstances — is denied unless the caller's
+	// policies admit all of them, which is how AWS evaluates a statement against
+	// "every resource that is required" for the action (#660, #662).
 	for _, res := range resources {
 		condCtx := make(map[string]string, len(requestTags)+len(res.Tags))
 		for k, v := range requestTags {
@@ -500,10 +500,19 @@ type authzResource struct {
 //
 // Almost every AWS operation names one resource, and for those this returns
 // exactly one pair — [buildResourceARN] plus the tags [AuthController.addResourceTags]
-// reads. `organizations:MoveAccount` is substrate's only exception: it names an
-// account, a source parent and a destination parent, all three marked required by
-// the Service Authorization Reference, and authorizing against one of them
-// over-permitted a policy scoped to the other two (#660).
+// reads. Two operations are exceptions:
+//
+//   - `organizations:MoveAccount` names an account, a source parent and a
+//     destination parent, all three marked required by the Service Authorization
+//     Reference, and authorizing against one of them over-permitted a policy
+//     scoped to the other two (#660).
+//   - `ec2:RunInstances` names an AMI, a subnet, security groups and network
+//     interfaces alongside the instance it creates — five required resource
+//     types, the most of any EC2 action — and was decided against a single ARN
+//     built from InstanceId.1, which a launch never carries (#662).
+//
+// Each exception is gated on len(multi) > 0, which is what keeps every other
+// operation of those two services on the single-resource path below.
 //
 // The list is never empty. An empty list would skip the decision loop entirely
 // and allow the request, which is the one direction a privilege boundary must
@@ -511,6 +520,11 @@ type authzResource struct {
 func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSRequest) []authzResource {
 	if req.Service == organizationsNamespace {
 		if multi := orgAuthzMoveAccountResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+	}
+	if req.Service == "ec2" {
+		if multi := ec2AuthzRunInstancesResources(a.state, reqCtx, req); len(multi) > 0 {
 			return multi
 		}
 	}
@@ -538,6 +552,10 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 	case "iam":
 		return "arn:aws:iam::" + acct + ":*"
 	case "ec2":
+		// RunInstances does not reach here: it names five resources and is resolved
+		// by [ec2AuthzRunInstancesResources] (#662). What is left is the operations
+		// that name an instance by ID — and everything else, including a CreateTags
+		// naming several ResourceId.N, which still resolves to "*".
 		if id := req.Params["InstanceId.1"]; id != "" {
 			return "arn:aws:ec2:" + region + ":" + acct + ":instance/" + id
 		}

@@ -3041,6 +3041,70 @@ Not modeled: `Ebs.KmsKeyId` (left out rather than stored and hidden),
 explicit-refusal list, since the shape it would render carries no size and so would
 not answer the question `DescribeVolumes` now does.
 
+### A launch is authorized against every resource it names
+
+`RunInstances` is the EC2 action the Service Authorization Reference marks with the
+most required resource types — **`image`, `instance`, `network-interface`,
+`security-group` and `subnet`** — and the caller's policies are evaluated against
+every one of them. A policy that allows `ec2:RunInstances` on the AMI and the
+instance but not the subnet cannot launch into that subnet, and, in the other
+direction, an ARN-scoped `Deny` on one subnet, AMI or security group fences off
+every launch that reaches it. That is what a policy written to keep workloads out of
+a shared or private subnet depends on.
+
+A permission boundary is applied to every one of those resources too, since a
+boundary checked against a subset is not a boundary. Each ARN is matched against the
+tags of the resource *it* names, so an `aws:ResourceTag` condition written about the
+subnet cannot be satisfied by a tag on the AMI. The denial names the first resource
+the policies do not allow — resolved in a fixed order of image, subnet, security
+groups, network interfaces, instance — which is the only place the missing ARN
+surfaces, and so the ARN a caller has to add.
+
+The AMI's ARN carries **no account ID** (`arn:aws:ec2:{region}::image/{ami}`),
+which is the format the Service Authorization Reference gives, because an AMI is
+shareable. The other four are `arn:aws:ec2:{region}:{account}:{type}/{id}`. Two of
+them name resources that do not exist when the decision is made, so they are
+wildcards: the instance is always `instance/*`, and an interface the launch creates
+is `network-interface/*`, while one the request brings by ID is named. The cost of
+that is a real limit — a policy scoped to `instance/i-*` matches on AWS and not
+here, because the statement is the pattern and `*` is the value it is matched
+against.
+
+Resources a [launch template](#a-launch-template-merges-with-the-request-field-by-field)
+supplies are authorized as if the request had named them, under the same
+field-by-field precedence the launch itself uses, so a policy scoped to one subnet
+fences off a launch that reaches another through a template. AWS states this only in
+`CreateFleet`'s description: "Resource-level permissions for this action do not
+include the resources specified in a launch template. To specify resource-level
+permissions for resources specified in a launch template, you must include the
+resources in the RunInstances action statement." A template that cannot be read
+contributes nothing to the resource list rather than failing the request, so a
+missing template still answers `InvalidLaunchTemplateId.NotFound` rather than a
+denial.
+
+A resource the request does not name is skipped, not resolved to `*` — `*` for an
+unknown resource would widen the policy the caller wrote instead of narrowing it.
+A request that names none of them at all is decided against a single `*`, as every
+other EC2 operation is.
+
+Not covered:
+
+- **`volume`.** Its asterisk appears only inside the reference's scenario rows,
+  never on the action's own resource list, and the ID does not exist until the
+  launch runs. Requiring it would refuse a policy naming exactly the five
+  documented types.
+- **The launch-template ARN**, which the reference does not mark required for
+  `RunInstances` — so requiring it would refuse the same policy.
+- **The EC2 condition keys** (`ec2:InstanceType`, `ec2:Vpc`,
+  `ec2:IsLaunchTemplateResource` and the rest). Resource resolution is what this
+  covers; the condition keys substrate does populate are the `aws:`-prefixed ones.
+- **A launch that names no subnet and no security group**, whose defaults are
+  resolved from the default VPC *after* the authorization decision. A policy scoped
+  to one subnet cannot fence off such a launch.
+- **The [fleet](#seeding-ec2-fleet-partial-fulfillment) path**, which launches
+  instances internally without going through the API's authorization pipeline, so no
+  policy applies to it.
+
 ### Instance attributes
 
 `DescribeInstanceAttribute` reads one attribute off an instance. It is the only way

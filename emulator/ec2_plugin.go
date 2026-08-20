@@ -4385,20 +4385,33 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 // resolveLaunchTemplate looks up a launch template by ID or name and returns it,
 // or nil if not found.
 func (p *EC2Plugin) resolveLaunchTemplate(goCtx context.Context, ctx *RequestContext, ltID, ltName string) *EC2LaunchTemplate {
+	return ec2LookupLaunchTemplate(goCtx, p.state, ctx, ltID, ltName)
+}
+
+// ec2LookupLaunchTemplate reads a launch template by ID or name, or returns nil
+// when neither is given or the record cannot be read.
+//
+// A free function over the StateManager rather than a method, because the
+// authorization decision needs it too: CheckAccess runs before the handler, so
+// [ec2AuthzRunInstancesResources] has to resolve the template itself to know which
+// subnet and security groups a launch reaches through one (#662). Two readers of
+// the same two keys could drift about which template a request names, and then a
+// policy would be evaluated against resources the launch does not use.
+func ec2LookupLaunchTemplate(goCtx context.Context, state StateManager, ctx *RequestContext, ltID, ltName string) *EC2LaunchTemplate {
 	if ltID == "" && ltName == "" {
 		return nil
 	}
 	if ltID == "" {
 		// Look up ID by name.
 		nameKey := "lt_by_name:" + ctx.AccountID + "/" + ctx.Region + "/" + ltName
-		data, err := p.state.Get(goCtx, ec2Namespace, nameKey)
+		data, err := state.Get(goCtx, ec2Namespace, nameKey)
 		if err != nil || data == nil {
 			return nil
 		}
 		ltID = string(data)
 	}
 	key := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + ltID
-	data, err := p.state.Get(goCtx, ec2Namespace, key)
+	data, err := state.Get(goCtx, ec2Namespace, key)
 	if err != nil || data == nil {
 		return nil
 	}
