@@ -240,21 +240,30 @@ func ec2TagSpecificationTags(params map[string]string, prefix, resourceType stri
 	return tags
 }
 
-// ec2CheckTemplateTags returns an error if a launch template's instance-scoped tags
-// break any tag rule, or nil.
+// ec2CheckTemplateTags returns an error if a launch template's tags break any tag
+// rule, or nil.
 //
 // Run when a template or a version of one is created, so a template carrying a
 // reserved key, an over-long key or value, or more than [ec2MaxTagsPerResource] is
 // refused up front rather than at every launch that names it. Real EC2 rejects at
 // creation too: every rule is on the tag and the count, not on the operation.
 //
+// Every scope the template records is checked, and each is counted against the limit
+// on its own: the limit is per resource, and the instance and its volumes are
+// different resources (#670).
+//
 // The launch path checks again, deliberately — see the fallback in
 // [EC2Plugin.runInstancesWithTags] for why a stored template can still carry one.
 func ec2CheckTemplateTags(d EC2LaunchTemplateData) *AWSError {
-	if awsErr := ec2CheckTagRules(d.TagSpecifications); awsErr != nil {
-		return awsErr
+	for _, scope := range [][]EC2Tag{d.TagSpecifications, d.VolumeTagSpecifications} {
+		if awsErr := ec2CheckTagRules(scope); awsErr != nil {
+			return awsErr
+		}
+		if awsErr := ec2CheckTagLimit(nil, scope); awsErr != nil {
+			return awsErr
+		}
 	}
-	return ec2CheckTagLimit(nil, d.TagSpecifications)
+	return nil
 }
 
 // ec2HasUserTags reports whether tags holds any key that is not reserved.

@@ -747,13 +747,27 @@ type EC2LaunchTemplateData struct {
 	// TagSpecifications is the template's instance-scoped tag-on-create tags, from
 	// LaunchTemplateData.TagSpecification.N with ResourceType=instance.
 	//
-	// Instance-scoped only. A template may also scope tags to volume,
-	// network-interface or spot-instances-request; substrate models none of those
-	// resources, so those scopes are recorded nowhere rather than misapplied to the
-	// instance. Note that these tags land on the *instance*, not on the template
-	// itself — the reference is explicit: "These tags are not applied to the launch
-	// template."
+	// Instance-scoped only, and deliberately still so. Widening this field to carry a
+	// resource-type discriminator would unmarshal every template already in an event
+	// log without error into an element with an empty ResourceType and no tags, so
+	// every stored template would silently start launching untagged instances — the
+	// replay guarantee broken by a change that compiles. Other scopes get their own
+	// field instead; see VolumeTagSpecifications and the same split at
+	// NetworkInterfaces above.
+	//
+	// Note that these tags land on the *instance*, not on the template itself — the
+	// reference is explicit: "These tags are not applied to the launch template."
 	TagSpecifications []EC2Tag `json:"tagSpecifications,omitempty"`
+
+	// VolumeTagSpecifications is the template's volume-scoped tag-on-create tags, from
+	// LaunchTemplateData.TagSpecification.N with ResourceType=volume (#670). They land
+	// on every volume the launch materializes, including the root volume substrate
+	// synthesizes when no mapping declares one.
+	//
+	// AWS's LaunchTemplateTagSpecificationRequest also allows network-interface and
+	// spot-instances-request; those scopes are still recorded nowhere, because a
+	// recorded tag that no read surfaces is indistinguishable from a discarded one.
+	VolumeTagSpecifications []EC2Tag `json:"volumeTagSpecifications,omitempty"`
 
 	// IamInstanceProfile is the instance profile the template names, stored as
 	// whichever of Name or Arn the request supplied — the same single-string shape

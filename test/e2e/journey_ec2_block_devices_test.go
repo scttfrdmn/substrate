@@ -288,3 +288,195 @@ func TestJourney_EC2InvalidBlockDeviceMappingRefused(t *testing.T) {
 		t.Fatalf("a refused launch materialized %d volumes, want 0", len(vols.Volumes))
 	}
 }
+
+// TestJourney_EC2VolumeTags is #670 at the tier the defect was invisible from: every
+// call below returned HTTP 200 through v0.104.0 and every tag went nowhere. CreateVolume
+// accepted TagSpecification and stored nothing, CreateTags on a vol- ID answered
+// return=true and wrote nothing, and DescribeVolumes rendered no tagSet and matched no
+// tag filter — so an IaC consumer's "tag every volume" convention appeared to work and
+// nothing could observe that it had not.
+//
+// The SDK is the right reader again: TagSpecifications and Filters are structured inputs
+// it serializes itself, and Volume.Tags is where an SDK-shaped assertion lands.
+func TestJourney_EC2VolumeTags(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	cfg, err := journeyConfig(ts)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	client := ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
+	ctx := context.Background()
+
+	created, err := client.CreateVolume(ctx, &ec2.CreateVolumeInput{
+		AvailabilityZone: aws.String("us-east-1a"),
+		Size:             aws.Int32(20),
+		VolumeType:       ec2types.VolumeTypeGp3,
+		Iops:             aws.Int32(3000),
+		Throughput:       aws.Int32(125),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeVolume,
+			Tags: []ec2types.Tag{
+				{Key: aws.String("Name"), Value: aws.String("data")},
+				{Key: aws.String("Env"), Value: aws.String("prod")},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	standaloneID := aws.ToString(created.VolumeId)
+	if got := journeyTagMap(created.Tags); got["Name"] != "data" || got["Env"] != "prod" {
+		t.Fatalf("CreateVolume returned tags %v, want Name=data and Env=prod", got)
+	}
+	// Iops and Throughput were stored and never rendered, so a provisioned volume read
+	// back as an unprovisioned one.
+	if got := aws.ToInt32(created.Iops); got != 3000 {
+		t.Errorf("CreateVolume returned Iops = %d, want 3000", got)
+	}
+	if got := aws.ToInt32(created.Throughput); got != 125 {
+		t.Errorf("CreateVolume returned Throughput = %d, want 125", got)
+	}
+
+	// A launch tags its own volumes through the same structure, scoped to volume — and
+	// the instance scope must stay separate, which is what the second specification
+	// here proves.
+	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId:      aws.String("ami-0abcdef1234567890"),
+		InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{
+			DeviceName: aws.String("/dev/sdf"),
+			Ebs:        &ec2types.EbsBlockDevice{VolumeSize: aws.Int32(40)},
+		}},
+		TagSpecifications: []ec2types.TagSpecification{
+			{
+				ResourceType: ec2types.ResourceTypeVolume,
+				Tags:         []ec2types.Tag{{Key: aws.String("Env"), Value: aws.String("prod")}},
+			},
+			{
+				ResourceType: ec2types.ResourceTypeInstance,
+				Tags:         []ec2types.Tag{{Key: aws.String("Role"), Value: aws.String("web")}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunInstances: %v", err)
+	}
+	instanceID := aws.ToString(run.Instances[0].InstanceId)
+	if got := journeyTagMap(run.Instances[0].Tags); got["Role"] != "web" || got["Env"] != "" {
+		t.Fatalf("the instance carries tags %v, want Role=web alone", got)
+	}
+
+	// The launch produced two volumes — the declared /dev/sdf and the synthesized root —
+	// and the volume-scoped tags apply to both, which is what makes the filter below
+	// return three volumes rather than one.
+	byEnv, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+		Filters: []ec2types.Filter{{Name: aws.String("tag:Env"), Values: []string{"prod"}}},
+	})
+	if err != nil {
+		t.Fatalf("DescribeVolumes by tag: %v", err)
+	}
+	if len(byEnv.Volumes) != 3 {
+		t.Fatalf("tag:Env=prod matched %d volumes, want 3 — the standalone one and both of the launch's",
+			len(byEnv.Volumes))
+	}
+	for _, vol := range byEnv.Volumes {
+		if got := journeyTagMap(vol.Tags); got["Env"] != "prod" {
+			t.Errorf("volume %s reports tags %v, want Env=prod",
+				aws.ToString(vol.VolumeId), got)
+		}
+	}
+
+	// A tag filter AND-combines with the attachment-scoped filter this operation already
+	// had, which is what makes it usable for "the volumes of this instance that carry
+	// this tag" — the question a consumer's cleanup step asks.
+	byEnvAndInstance, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+		Filters: []ec2types.Filter{
+			{Name: aws.String("tag:Env"), Values: []string{"prod"}},
+			{Name: aws.String("attachment.instance-id"), Values: []string{instanceID}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DescribeVolumes by tag and instance: %v", err)
+	}
+	if len(byEnvAndInstance.Volumes) != 2 {
+		t.Fatalf("tag:Env=prod on instance %s matched %d volumes, want 2",
+			instanceID, len(byEnvAndInstance.Volumes))
+	}
+
+	// CreateTags and DeleteTags on a vol- ID, the pair that silently no-opped.
+	if _, err := client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{standaloneID},
+		Tags:      []ec2types.Tag{{Key: aws.String("Owner"), Value: aws.String("platform")}},
+	}); err != nil {
+		t.Fatalf("CreateTags: %v", err)
+	}
+	byOwner, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+		Filters: []ec2types.Filter{{Name: aws.String("tag-key"), Values: []string{"Owner"}}},
+	})
+	if err != nil {
+		t.Fatalf("DescribeVolumes by tag-key: %v", err)
+	}
+	if len(byOwner.Volumes) != 1 || aws.ToString(byOwner.Volumes[0].VolumeId) != standaloneID {
+		t.Fatalf("tag-key=Owner matched %d volumes, want only %s", len(byOwner.Volumes), standaloneID)
+	}
+
+	if _, err := client.DeleteTags(ctx, &ec2.DeleteTagsInput{
+		Resources: []string{standaloneID},
+		Tags:      []ec2types.Tag{{Key: aws.String("Owner")}},
+	}); err != nil {
+		t.Fatalf("DeleteTags: %v", err)
+	}
+	afterDelete, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{
+		VolumeIds: []string{standaloneID},
+	})
+	if err != nil {
+		t.Fatalf("DescribeVolumes after DeleteTags: %v", err)
+	}
+	if got := journeyTagMap(afterDelete.Volumes[0].Tags); got["Owner"] != "" {
+		t.Fatalf("the volume still carries Owner=%q after DeleteTags", got["Owner"])
+	}
+	if got := journeyTagMap(afterDelete.Volumes[0].Tags); got["Name"] != "data" {
+		t.Fatal("DeleteTags removed a tag it was not asked to remove")
+	}
+
+	// A reserved key is refused on the volume scope on the same terms as the instance
+	// scope, and the refusal is whole: no instance, no volume.
+	_, err = client.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId:      aws.String("ami-0abcdef1234567890"),
+		InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeVolume,
+			Tags:         []ec2types.Tag{{Key: aws.String("aws:reserved"), Value: aws.String("x")}},
+		}},
+	})
+	var apiErr2 smithy.APIError
+	if !errors.As(err, &apiErr2) || apiErr2.ErrorCode() != "InvalidParameterValue" {
+		t.Fatalf("a reserved volume tag key gave %v, want InvalidParameterValue", err)
+	}
+	instances, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{})
+	if err != nil {
+		t.Fatalf("DescribeInstances: %v", err)
+	}
+	var count int
+	for _, res := range instances.Reservations {
+		count += len(res.Instances)
+	}
+	if count != 1 {
+		t.Fatalf("after the refusal there are %d instances, want 1 — only the successful launch's", count)
+	}
+}
+
+// journeyTagMap turns an SDK tag list into a map, so an assertion names the tag it cares
+// about rather than an index.
+func journeyTagMap(tags []ec2types.Tag) map[string]string {
+	out := make(map[string]string, len(tags))
+	for _, t := range tags {
+		out[aws.ToString(t.Key)] = aws.ToString(t.Value)
+	}
+	return out
+}

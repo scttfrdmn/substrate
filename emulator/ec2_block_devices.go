@@ -353,7 +353,16 @@ func ec2CreatesEBSVolume(bdm EC2BlockDeviceMapping) bool {
 //
 // A volume attached after launch keeps the other default; see attachVolume, where
 // the two pages agree and nothing here changes it.
-func ec2LaunchVolumesFor(inst *EC2Instance, mappings []EC2BlockDeviceMapping, now string) []EC2Volume {
+// tags are the launch's volume-scoped TagSpecification tags, applied to every volume
+// the launch materializes — including the root volume synthesized when no mapping
+// declares one. AWS's rule is per resource type, not per mapping: the request has no
+// way to tag one mapping's volume differently from another's (#670).
+func ec2LaunchVolumesFor(
+	inst *EC2Instance,
+	mappings []EC2BlockDeviceMapping,
+	tags []EC2Tag,
+	now string,
+) []EC2Volume {
 	volumes := make([]EC2Volume, 0, len(mappings)+1)
 	rootDeclared := false
 
@@ -364,13 +373,13 @@ func ec2LaunchVolumesFor(inst *EC2Instance, mappings []EC2BlockDeviceMapping, no
 		if ec2IsRootDevice(bdm.DeviceName) {
 			rootDeclared = true
 		}
-		volumes = append(volumes, ec2VolumeFromMapping(inst, bdm, now))
+		volumes = append(volumes, ec2VolumeFromMapping(inst, bdm, tags, now))
 	}
 
 	if !rootDeclared {
 		volumes = append(volumes, ec2VolumeFromMapping(inst, EC2BlockDeviceMapping{
 			DeviceName: ec2RootDeviceSDA1,
-		}, now))
+		}, tags, now))
 	}
 	return volumes
 }
@@ -381,7 +390,12 @@ func ec2LaunchVolumesFor(inst *EC2Instance, mappings []EC2BlockDeviceMapping, no
 // volume must be in the same Availability Zone as the instance it is attached to, so
 // deriving it any other way would let a launch into a non-default zone produce an
 // attachment real EC2 cannot have.
-func ec2VolumeFromMapping(inst *EC2Instance, bdm EC2BlockDeviceMapping, now string) EC2Volume {
+func ec2VolumeFromMapping(
+	inst *EC2Instance,
+	bdm EC2BlockDeviceMapping,
+	tags []EC2Tag,
+	now string,
+) EC2Volume {
 	size := bdm.VolumeSize
 	if size <= 0 {
 		size = ec2DefaultVolumeSizeGiB
@@ -406,9 +420,17 @@ func ec2VolumeFromMapping(inst *EC2Instance, bdm EC2BlockDeviceMapping, now stri
 		deleteOnTermination = strings.EqualFold(bdm.DeleteOnTermination, "true")
 	}
 
+	// Each volume gets its own copy, so a later CreateTags on one of them cannot be
+	// seen through another's slice while both are still in memory.
+	var volTags []EC2Tag
+	if len(tags) > 0 {
+		volTags = append(volTags, tags...)
+	}
+
 	return EC2Volume{
 		VolumeID:         generateVolumeID(),
 		Size:             size,
+		Tags:             volTags,
 		VolumeType:       volType,
 		AvailabilityZone: inst.AvailabilityZone,
 		State:            "in-use",
@@ -435,9 +457,10 @@ func ec2VolumeFromMapping(inst *EC2Instance, bdm EC2BlockDeviceMapping, now stri
 func (p *EC2Plugin) ec2CreateLaunchVolumes(
 	inst *EC2Instance,
 	mappings []EC2BlockDeviceMapping,
+	tags []EC2Tag,
 	now string,
 ) error {
-	for _, vol := range ec2LaunchVolumesFor(inst, mappings, now) {
+	for _, vol := range ec2LaunchVolumesFor(inst, mappings, tags, now) {
 		data, err := json.Marshal(vol)
 		if err != nil {
 			return fmt.Errorf("ec2 runInstances volume marshal: %w", err)
@@ -500,34 +523,98 @@ func (p *EC2Plugin) ec2DeleteInstanceVolumes(accountID, region, instanceID strin
 	return nil
 }
 
-// ec2VolumeMatchesAttachmentFilters reports whether a volume satisfies every
-// attachment-scoped DescribeVolumes filter that was supplied.
+// ec2VolumeMatchesFilters reports whether a volume satisfies every DescribeVolumes
+// filter that was supplied. Filters are ANDed with each other and each one's values
+// are ORed, which is AWS's documented rule for all of them.
 //
-// Each filter is satisfied by *any* attachment, which is what a filter on a
-// list-valued member means, but the filters are ANDed with each other rather than
-// evaluated against one attachment at a time — AWS's filter semantics are per
-// filter, not per list element. An empty map means the filter was not supplied and
-// so constrains nothing.
-func ec2VolumeMatchesAttachmentFilters(
-	vol EC2Volume,
-	instanceIDs, devices, deleteOnTermination map[string]bool,
-) bool {
-	matches := func(want map[string]bool, got func(EC2VolumeAttachment) string) bool {
-		if len(want) == 0 {
-			return true
+// AWS documents exactly two tag filters for this operation, `tag:<key>` and
+// `tag-key`, out of 20 filters in total — there is no `tag-value` (#670).
+//
+// A `tag:<key>` filter with no values matches nothing. AWS documents no rule for
+// that shape (Using_Filtering says only that a filter value cannot be null, and
+// offers tag-key for the any-value question), and substrate's two existing
+// implementations disagree; this follows [ec2InstanceMatchesFilter], the closer
+// sibling, rather than describeImages, which treats it as tag-key.
+func ec2VolumeMatchesFilters(vol EC2Volume, filters map[string][]string) bool {
+	for name, values := range filters {
+		if !ec2VolumeMatchesFilter(vol, name, values) {
+			return false
 		}
-		for _, att := range vol.Attachments {
-			if want[got(att)] {
+	}
+	return true
+}
+
+// ec2VolumeMatchesFilter evaluates a single DescribeVolumes filter against a volume.
+//
+// An unrecognized filter name is dropped — the volume matches — which is what this
+// operation has always done. That is not, as a comment here once claimed, what every
+// EC2 filter site does: three behaviors exist in this package (drop for volumes and
+// snapshots, match-nothing for [ec2InstanceMatchesFilter], and refuse for
+// describeInstanceTypeOfferings, which is what real EC2 does). Reconciling them is
+// its own change; this one keeps the observable answer it found.
+func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
+	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
+		for _, t := range vol.Tags {
+			if t.Key == tagKey && containsStr(values, t.Value) {
 				return true
 			}
 		}
 		return false
 	}
-	return matches(instanceIDs, func(a EC2VolumeAttachment) string { return a.InstanceID }) &&
-		matches(devices, func(a EC2VolumeAttachment) string { return a.Device }) &&
-		matches(deleteOnTermination, func(a EC2VolumeAttachment) string {
-			return strconv.FormatBool(a.DeleteOnTermination)
-		})
+
+	// An attachment-scoped filter is satisfied by *any* attachment, which is what a
+	// filter on a list-valued member means. The filters are still ANDed with each
+	// other rather than evaluated against one attachment at a time — AWS's semantics
+	// are per filter, not per list element.
+	anyAttachment := func(got func(EC2VolumeAttachment) string) bool {
+		for _, att := range vol.Attachments {
+			if containsStr(values, got(att)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	switch name {
+	case "volume-id":
+		return containsStr(values, vol.VolumeID)
+	case "status":
+		return containsStr(values, vol.State)
+	case "volume-type":
+		return containsStr(values, vol.VolumeType)
+	case "size":
+		return containsStr(values, strconv.Itoa(vol.Size))
+	case "availability-zone":
+		return containsStr(values, vol.AvailabilityZone)
+	case "snapshot-id":
+		return containsStr(values, vol.SnapshotID)
+	case "tag-key":
+		for _, t := range vol.Tags {
+			if containsStr(values, t.Key) {
+				return true
+			}
+		}
+		return false
+	case "attachment.instance-id":
+		return anyAttachment(func(a EC2VolumeAttachment) string { return a.InstanceID })
+	case "attachment.device":
+		return anyAttachment(func(a EC2VolumeAttachment) string { return a.Device })
+	case "attachment.delete-on-termination":
+		// The hand-rolled loop lowercased the value before comparing, so "True"
+		// matched a true attachment; EqualFold keeps that leniency without mutating
+		// the caller's value slice.
+		for _, att := range vol.Attachments {
+			want := strconv.FormatBool(att.DeleteOnTermination)
+			for _, v := range values {
+				if strings.EqualFold(v, want) {
+					return true
+				}
+			}
+		}
+		return false
+	default:
+		return true
+	}
 }
 
 // ec2VolumeStateKey is the state key one volume is stored under.

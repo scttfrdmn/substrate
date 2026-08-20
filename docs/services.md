@@ -2666,7 +2666,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` ID like [any other taggable ID](#a-volume-carries-tags) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits) |
 
 ### RunInstances requires a resolvable AMI
@@ -2711,6 +2711,7 @@ corresponding parameters included in the launch template."
 | `KeyName` | `k-request` | `k-template` | `k-request` |
 | `TagSpecification` (instance-scoped) | `Env=req` | `Env=tmpl,Team=x` | `Env=req` alone — replace, not merge |
 | `TagSpecification` (instance-scoped) | absent | `Env=tmpl` | `Env=tmpl` |
+| `TagSpecification` (volume-scoped) | absent | `Env=tmpl` | `Env=tmpl` on every volume the launch makes |
 | `IamInstanceProfile` | `p-request` | `p-template` | `p-request` |
 | `IamInstanceProfile` | absent | `p-template` | `p-template` |
 | `SubnetId`, security groups, `AssociatePublicIpAddress` | see [Launch template networking](#launch-template-networking) | | |
@@ -2758,13 +2759,29 @@ Both now participate in the merge, with two things worth stating:
   otherwise a fleet launched from a tagging template would silently lose the
   template's tags. See [Reserved tag keys](#reserved-tag-keys).
 
-**Only the instance scope is modelled.** A template may also scope tags to `volume`,
-`network-interface` or `spot-instances-request`. Substrate models none of those
-resources, so those specifications are recorded nowhere rather than misapplied to the
-instance: they neither reach the launch nor read back from
-`DescribeLaunchTemplateVersions`. Note that a template's instance-scoped tags land on
-the *instance*, not on the template — the reference is explicit that "these tags are
-not applied to the launch template."
+**The `instance` and `volume` scopes are modelled, and they resolve
+independently.** Each is stored in its own field, so a request naming volume tags
+alone still inherits the template's instance tags and vice versa, and each replaces
+rather than merges within its own scope. The volume scope applies to every volume the
+launch materializes, including the root volume substrate synthesizes when no mapping
+declares one — AWS's structure has no way to tag one mapping's volume differently
+from another's.
+
+Keeping the two in separate fields is deliberate rather than incidental. Widening the
+existing instance field to carry a `ResourceType` discriminator would unmarshal every
+template already in an event log without error — into an element with an empty
+resource type and no tags — so every stored template would silently start launching
+untagged instances. A change that breaks replay while compiling is exactly the shape
+this project's persisted structures are grown to avoid.
+
+A template may also scope tags to `network-interface` or `spot-instances-request`.
+Those are still recorded nowhere rather than misapplied: they neither reach the launch
+nor read back from `DescribeLaunchTemplateVersions`, because a recorded tag no read
+surfaces is indistinguishable from a discarded one.
+
+Note that a template's instance-scoped tags land on the *instance*, not on the
+template — the reference is explicit that "these tags are not applied to the launch
+template."
 
 A template's tags are subject to both tag rules, so a template is not a second
 unrestricted tagging path: a `TagSpecifications` naming an `aws:`-prefixed key or
@@ -3039,11 +3056,11 @@ DeleteOnTermination}`. `NoDevice` suppresses the device outright, and a
 an EBS volume and has no presence in `DescribeVolumes` — either way the mapping is
 recorded intent that materializes nothing.
 
-`DescribeVolumes` renders `iops` and `throughput` on the volume and
-`deleteOnTermination` on each attachment, and filters on `volume-id`, `status`,
-`size`, `volume-type`, `availability-zone`, `snapshot-id`,
-`attachment.instance-id`, `attachment.device` and
-`attachment.delete-on-termination`.
+`DescribeVolumes` renders `iops` and `throughput` on the volume,
+`deleteOnTermination` on each attachment, and a `tagSet` — and filters on
+`volume-id`, `status`, `size`, `volume-type`, `availability-zone`, `snapshot-id`,
+`attachment.instance-id`, `attachment.device`,
+`attachment.delete-on-termination`, `tag:<key>` and `tag-key`.
 
 Substrate's own choices, where the API model does not decide:
 
@@ -3055,8 +3072,50 @@ Substrate's own choices, where the API model does not decide:
   volume must be in the same zone as the instance it is attached to, so deriving it
   any other way would produce an attachment real EC2 cannot have.
 
-Not modeled: `Ebs.KmsKeyId` (left out rather than stored and hidden), and
-`TagSpecification` scoped to `volume` (see the tag-specification note above).
+Not modeled: `Ebs.KmsKeyId`, left out rather than stored and hidden.
+
+#### A volume carries tags
+
+A volume is taggable on every path the other EC2 resources are. Until this landed it
+was the one taggable EC2 resource with no working path at all: `CreateVolume`
+accepted `TagSpecification.N` and stored nothing, `CreateTags` on a `vol-` ID answered
+`<return>true</return>` and wrote nothing, and `DescribeVolumes` rendered no `tagSet`
+and matched no tag filter. Every call returned success, so an IaC consumer's
+tag-everything convention appeared to hold and nothing could observe that it had not.
+
+Four paths, all of them now real:
+
+- **`CreateVolume`** applies `TagSpecification.N` scoped to `volume` and echoes the
+  result in a `tagSet`. The element carries no `omitempty`: AWS's own second
+  `CreateVolume` example renders `<tagSet/>` for an untagged volume, and an SDK tells a
+  present-but-empty element ("no tags") from an omitted one ("unknown").
+- **`RunInstances`** applies its volume-scoped `TagSpecification.N` to every volume the
+  launch materializes, the synthesized root volume included. The instance scope is
+  unaffected: a request naming both gets each on its own resource.
+- **A launch template**'s volume-scoped tags reach the launch the same way, on their own
+  merge gate; see
+  [A launch template merges with the request, field by field](#a-launch-template-merges-with-the-request-field-by-field).
+- **`CreateTags`/`DeleteTags`** accept a `vol-` ID like any other taggable ID.
+
+Both tag rules apply on every one of them — the reserved `aws:` prefix and the 50-tag
+limit — and on a launch the check runs **before the launch loop**, because a volume is
+written after its own instance and a refusal inside the loop would leave the first
+instance of a multi-count launch behind. AWS documents no volume-specific tag
+constraint, so there is nothing else to enforce.
+
+`DescribeVolumes` supports exactly the two tag filters AWS documents for it,
+`tag:<key>` and `tag-key`. There is no `tag-value`; AWS does not define one for this
+operation. Two behaviours here are substrate's own, because AWS's filtering guide
+settles neither:
+
+- A `tag:<key>` filter with **no value** matches nothing, following
+  `DescribeInstances`. The guide says only that a filter value cannot be null, and
+  offers `tag-key` for the any-value question.
+- An **unrecognized filter name is dropped**, so the filter constrains nothing. That is
+  what this operation has always done, and it is kept rather than reconciled: real EC2
+  refuses an unknown name, and substrate has three different answers across its EC2
+  filter sites. Making them agree is its own change, and it is a behaviour change on
+  every one of them.
 
 #### A mapping AWS refuses is refused, with `InvalidBlockDeviceMapping`
 
@@ -3668,15 +3727,19 @@ instance- and fleet-scoped alike — while the fleet's own stamp is still applie
 both coexist with the caller's legal tags on the same instance.
 
 One limit of the current scope, stated rather than implied: only tags scoped to a
-resource substrate models are checked. A `TagSpecification` naming `volume` or
-`network-interface` on `RunInstances`, or inside a launch template's
+resource substrate tags are checked. A `TagSpecification` naming `network-interface`
+or `spot-instances-request` on `RunInstances`, or inside a launch template's
 `LaunchTemplateData`, is skipped, because substrate does not tag those resources at
-all; real EC2 would reject a reserved key there too.
+all; real EC2 would reject a reserved key there too. The `volume` scope used to be
+skipped for the same reason and no longer is: now that a launch tags its volumes, a
+reserved key there refuses the launch, and the refusal happens before the launch loop
+so no instance is left behind by it.
 
-A launch template's own instance-scoped tags *are* checked, at
+A launch template's own tags *are* checked, on both modelled scopes, at
 `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` as well as at every launch
 that names the template — so a template cannot serve as an unchecked second path to a
-reserved key. See
+reserved key. Each scope is counted against the 50-tag limit on its own, because the
+limit is per resource and an instance and its volumes are different resources. See
 [A launch template merges with the request, field by field](#a-launch-template-merges-with-the-request-field-by-field).
 
 ### The 50-tag-per-resource limit

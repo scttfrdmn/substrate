@@ -744,5 +744,5 @@ func LaunchVolumesForTest(instanceID, availabilityZone string, mappings []EC2Blo
 		AccountID:        "123456789012",
 		Region:           "us-east-1",
 	}
-	return ec2LaunchVolumesFor(inst, mappings, "2026-01-01T00:00:00Z")
+	return ec2LaunchVolumesFor(inst, mappings, nil, "2026-01-01T00:00:00Z")
 }
