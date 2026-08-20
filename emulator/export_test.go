@@ -726,3 +726,23 @@ func (p IAMScalarParamsForTest) IAMScalarValuesForTest() (int, bool) {
 // body-decoding path — including the parameter-naming error message — is testable
 // from package emulator_test.
 func ParseIAMBodyForTest(body []byte, dst any) error { return parseIAMBody(body, dst) }
+
+// ParseBlockDeviceMappingsForTest wraps ec2ParseBlockDeviceMappings so the
+// BlockDeviceMapping.N reader is testable in isolation, including the prefix that
+// lets one parser serve both RunInstances and a launch template (#666).
+func ParseBlockDeviceMappingsForTest(params map[string]string, prefix string) []EC2BlockDeviceMapping {
+	return ec2ParseBlockDeviceMappings(params, prefix)
+}
+
+// LaunchVolumesForTest wraps ec2LaunchVolumesFor, taking the two instance fields the
+// resolution actually reads rather than a whole EC2Instance, so a test states only
+// what it is asserting about.
+func LaunchVolumesForTest(instanceID, availabilityZone string, mappings []EC2BlockDeviceMapping) []EC2Volume {
+	inst := &EC2Instance{
+		InstanceID:       instanceID,
+		AvailabilityZone: availabilityZone,
+		AccountID:        "123456789012",
+		Region:           "us-east-1",
+	}
+	return ec2LaunchVolumesFor(inst, mappings, "2026-01-01T00:00:00Z")
+}

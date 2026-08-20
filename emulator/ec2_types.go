@@ -765,6 +765,58 @@ type EC2LaunchTemplateData struct {
 	// other, so the choice is substrate's, made for consistency with the call-level
 	// path rather than from the reference.
 	IamInstanceProfile string `json:"iamInstanceProfile,omitempty"`
+
+	// BlockDeviceMappings holds every BlockDeviceMapping.N the template declares.
+	//
+	// A template is the only way block device mappings reach a fleet launch:
+	// CreateFleet and RequestSpotFleet build their RunInstances parameters from the
+	// fleet request, forwarding the launch template reference rather than the
+	// caller's own mappings.
+	BlockDeviceMappings []EC2BlockDeviceMapping `json:"blockDeviceMappings,omitempty"`
+}
+
+// EC2BlockDeviceMapping is one BlockDeviceMapping.N entry of a launch request or a
+// launch template, as AWS's BlockDeviceMapping and EbsBlockDevice shapes define it.
+type EC2BlockDeviceMapping struct {
+	// DeviceName is the device the volume is exposed as (e.g. "/dev/sdh").
+	DeviceName string `json:"device_name,omitempty"`
+
+	// VirtualName names an instance store volume ("ephemeral0"…"ephemeral23"). No
+	// EBS volume is created for such an entry: an instance store device is not an
+	// EBS volume, and manufacturing one would be an observation nothing backs.
+	VirtualName string `json:"virtual_name,omitempty"`
+
+	// NoDevice suppresses a device the AMI's own mapping would otherwise include.
+	NoDevice bool `json:"no_device,omitempty"`
+
+	// SnapshotID is the snapshot the volume is restored from, if any.
+	SnapshotID string `json:"snapshot_id,omitempty"`
+
+	// VolumeSize is the size in GiB. AWS documents it as required unless a snapshot
+	// is named, in which case the snapshot's size is the default.
+	VolumeSize int `json:"volume_size,omitempty"`
+
+	// VolumeType is the EBS volume type. An absent value resolves to gp2 —
+	// substrate's own choice, matching CreateVolume's documented default;
+	// EbsBlockDevice documents none. See [ec2LaunchVolumesFor].
+	VolumeType string `json:"volume_type,omitempty"`
+
+	// IOPS is the provisioned IOPS, for io1/io2/gp3.
+	IOPS int `json:"iops,omitempty"`
+
+	// Throughput is the provisioned throughput in MiB/s, for gp3.
+	Throughput int `json:"throughput,omitempty"`
+
+	// Encrypted reports whether the volume is encrypted.
+	Encrypted bool `json:"encrypted,omitempty"`
+
+	// DeleteOnTermination is the raw parameter value rather than a bool, because
+	// three states are observable and a bool collapses two of them: absent (take
+	// the launch default, which is true), "true", and "false". Storing a bool here
+	// would make a mapping that explicitly preserves its volume indistinguishable
+	// from one that said nothing — the same reason
+	// [EC2LaunchTemplateData.AssociatePublicIPAddress] keeps its string.
+	DeleteOnTermination string `json:"delete_on_termination,omitempty"`
 }
 
 // NetworkSecurityGroupIDs returns the security groups a launch from this template
@@ -887,6 +939,21 @@ type EC2VolumeAttachment struct {
 
 	// AttachTime is the RFC3339 time the volume was attached.
 	AttachTime string `json:"attach_time"`
+
+	// DeleteOnTermination reports whether terminating the instance deletes the
+	// volume. It lives on the attachment rather than on the volume because that is
+	// where AWS renders it — DescribeVolumes' attachmentSet>item carries a
+	// deleteOnTermination member, and the volume item itself does not — and because
+	// the value describes this attachment: detaching and reattaching a volume
+	// resets it to the post-launch default.
+	//
+	// AWS's default depends on how the attachment came about, not on what the
+	// volume is. Anything attached after launch preserves on termination; a volume
+	// a launch creates is deleted, root and data volumes alike, when the launch
+	// came through the API rather than the console. Substrate is an API emulator,
+	// so a launch defaults this to true and AttachVolume defaults it to false. See
+	// [ec2LaunchVolumesFor].
+	DeleteOnTermination bool `json:"delete_on_termination"`
 }
 
 // EC2Volume represents an Amazon EBS volume.
@@ -914,6 +981,11 @@ type EC2Volume struct {
 
 	// IOPS is the provisioned IOPS (for io1/io2/gp3 volumes).
 	IOPS int `json:"iops,omitempty"`
+
+	// Throughput is the provisioned throughput in MiB/s. AWS supports it on gp3
+	// alone; substrate records whatever a request supplies rather than refusing it
+	// elsewhere, since no throughput validation is modeled.
+	Throughput int `json:"throughput,omitempty"`
 
 	// Attachments holds the current instance attachments.
 	Attachments []EC2VolumeAttachment `json:"attachments,omitempty"`

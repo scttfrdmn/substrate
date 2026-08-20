@@ -351,6 +351,12 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// for why that is the lowest device index rather than the first parameter index.
 	networkInterfaces := ec2ParseNetworkInterfaces(req.Params, "")
 	ec2SortInterfacesByDeviceIndex(networkInterfaces)
+
+	// Storage is specified the same way, and was likewise accepted and discarded
+	// until #666: a request naming BlockDeviceMapping.1.Ebs.VolumeSize succeeded and
+	// DescribeVolumes reported nothing for the instance. The mappings become real
+	// volumes in the launch loop below; see [ec2LaunchVolumesFor].
+	blockDeviceMappings := ec2ParseBlockDeviceMappings(req.Params, "")
 	primaryIfc := ec2PrimaryInterface(networkInterfaces)
 	if subnetID == "" && primaryIfc != nil {
 		subnetID = primaryIfc.SubnetID
@@ -431,6 +437,14 @@ func (p *EC2Plugin) runInstancesWithTags(
 		// would let a request that named one interface silently inherit a second.
 		if len(networkInterfaces) == 0 {
 			networkInterfaces = ltData.NetworkInterfaces
+		}
+		// Block device mappings follow the same all-or-nothing rule, for the same
+		// reason: merging per device name would let a request that named one volume
+		// silently inherit a second from the template. A template is also the only
+		// route by which mappings reach a fleet launch, since CreateFleet forwards
+		// the template reference rather than the caller's own mappings.
+		if len(blockDeviceMappings) == 0 {
+			blockDeviceMappings = ltData.BlockDeviceMappings
 		}
 		if sgID == "" && len(securityGroupIDs) > 0 {
 			sgID = securityGroupIDs[0]
@@ -618,6 +632,12 @@ func (p *EC2Plugin) runInstancesWithTags(
 		}
 		// Update instance_ids list.
 		if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "instance_ids", inst.InstanceID); err != nil {
+			return nil, err
+		}
+		// Materialize this instance's volumes, after the instance so they can carry
+		// its ID and its zone. Each instance of a multi-count launch gets its own
+		// volumes with their own IDs — two instances cannot share one EBS volume.
+		if err := p.ec2CreateLaunchVolumes(&inst, blockDeviceMappings, now); err != nil {
 			return nil, err
 		}
 		instances = append(instances, inst)
@@ -1086,6 +1106,12 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 		}
 		if err := p.state.Put(context.Background(), ec2Namespace, keys[i], newData); err != nil {
 			return nil, fmt.Errorf("ec2 terminateInstances state.Put: %w", err)
+		}
+		// Settle the instance's volumes: delete those whose attachment says to, and
+		// release the rest. A volume left in-use on a terminated instance would be a
+		// state real EC2 never reaches (#666).
+		if err := p.ec2DeleteInstanceVolumes(reqCtx.AccountID, reqCtx.Region, inst.InstanceID); err != nil {
+			return nil, err
 		}
 
 		sc := stateChange{InstanceID: inst.InstanceID}
@@ -4415,12 +4441,13 @@ func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
 	ec2SortInterfacesByDeviceIndex(interfaces)
 
 	data := EC2LaunchTemplateData{
-		ImageID:           params[ltPrefix+"ImageId"],
-		InstanceType:      params[ltPrefix+"InstanceType"],
-		KeyName:           params[ltPrefix+"KeyName"],
-		UserData:          params[ltPrefix+"UserData"],
-		TagSpecifications: ec2TagSpecificationTags(params, ltPrefix, "instance"),
-		NetworkInterfaces: interfaces,
+		ImageID:             params[ltPrefix+"ImageId"],
+		InstanceType:        params[ltPrefix+"InstanceType"],
+		KeyName:             params[ltPrefix+"KeyName"],
+		UserData:            params[ltPrefix+"UserData"],
+		TagSpecifications:   ec2TagSpecificationTags(params, ltPrefix, "instance"),
+		NetworkInterfaces:   interfaces,
+		BlockDeviceMappings: ec2ParseBlockDeviceMappings(params, ltPrefix),
 	}
 	// The flat fields hold the primary interface's values; see
 	// [EC2LaunchTemplateData.NetworkInterfaces].
@@ -4681,7 +4708,7 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err != nil {
 		return nil, fmt.Errorf("ec2 createVolume marshal: %w", err)
 	}
-	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vol.VolumeID
+	key := ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, vol.VolumeID)
 	if err := p.state.Put(context.Background(), ec2Namespace, key, data); err != nil {
 		return nil, fmt.Errorf("ec2 createVolume state.Put: %w", err)
 	}
@@ -4732,10 +4759,21 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		requestedIDs[id] = true
 	}
 
-	// Collect filter values (volume-id, status, attachment.instance-id).
+	// Collect filter values. The set grew with #666: a launch now materializes its
+	// own volumes, so "which volume is the root of this instance" and "which of
+	// these survive termination" became questions worth asking, and every filter
+	// name below is one AWS's DescribeVolumes reference documents. Names outside
+	// this set are still dropped rather than refused, which is the behavior every
+	// other EC2 filter site has.
 	filterVolumeIDs := map[string]bool{}
 	filterStatuses := map[string]bool{}
 	filterInstanceIDs := map[string]bool{}
+	filterDevices := map[string]bool{}
+	filterDeleteOnTerm := map[string]bool{}
+	filterVolumeTypes := map[string]bool{}
+	filterSizes := map[string]bool{}
+	filterZones := map[string]bool{}
+	filterSnapshotIDs := map[string]bool{}
 	for i := 1; ; i++ {
 		name := req.Params[fmt.Sprintf("Filter.%d.Name", i)]
 		if name == "" {
@@ -4753,11 +4791,23 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 				filterStatuses[val] = true
 			case "attachment.instance-id":
 				filterInstanceIDs[val] = true
+			case "attachment.device":
+				filterDevices[val] = true
+			case "attachment.delete-on-termination":
+				filterDeleteOnTerm[strings.ToLower(val)] = true
+			case "volume-type":
+				filterVolumeTypes[val] = true
+			case "size":
+				filterSizes[val] = true
+			case "availability-zone":
+				filterZones[val] = true
+			case "snapshot-id":
+				filterSnapshotIDs[val] = true
 			}
 		}
 	}
 
-	allKeys, err := p.state.List(context.Background(), ec2Namespace, "volume:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, ec2VolumeStatePrefix(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeVolumes list: %w", err)
 	}
@@ -4768,17 +4818,24 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		Device     string `xml:"device"`
 		Status     string `xml:"status"`
 		AttachTime string `xml:"attachTime"`
+		// deleteOnTermination lives here rather than on the volume item because that
+		// is where AWS's own DescribeVolumes response carries it.
+		DeleteOnTermination bool `xml:"deleteOnTermination"`
 	}
 	type volItem struct {
-		VolumeID         string       `xml:"volumeId"`
-		Size             int          `xml:"size"`
-		VolumeType       string       `xml:"volumeType"`
-		AvailabilityZone string       `xml:"availabilityZone"`
-		Status           string       `xml:"status"`
-		Encrypted        bool         `xml:"encrypted"`
-		CreateTime       string       `xml:"createTime"`
-		SnapshotID       string       `xml:"snapshotId"`
-		AttachmentSet    []attachItem `xml:"attachmentSet>item"`
+		VolumeID         string `xml:"volumeId"`
+		Size             int    `xml:"size"`
+		VolumeType       string `xml:"volumeType"`
+		AvailabilityZone string `xml:"availabilityZone"`
+		Status           string `xml:"status"`
+		Encrypted        bool   `xml:"encrypted"`
+		CreateTime       string `xml:"createTime"`
+		SnapshotID       string `xml:"snapshotId"`
+		// iops and throughput were stored and never rendered, so a volume created
+		// with provisioned performance read back as one without it.
+		IOPS          int          `xml:"iops,omitempty"`
+		Throughput    int          `xml:"throughput,omitempty"`
+		AttachmentSet []attachItem `xml:"attachmentSet>item"`
 	}
 	var volumes []volItem
 
@@ -4803,18 +4860,24 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		if len(filterStatuses) > 0 && !filterStatuses[vol.State] {
 			continue
 		}
-		// Filter by attachment.instance-id.
-		if len(filterInstanceIDs) > 0 {
-			found := false
-			for _, att := range vol.Attachments {
-				if filterInstanceIDs[att.InstanceID] {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
+		// Filter by volume-type, size and availability-zone, all volume-scoped.
+		if len(filterVolumeTypes) > 0 && !filterVolumeTypes[vol.VolumeType] {
+			continue
+		}
+		if len(filterSizes) > 0 && !filterSizes[strconv.Itoa(vol.Size)] {
+			continue
+		}
+		if len(filterZones) > 0 && !filterZones[vol.AvailabilityZone] {
+			continue
+		}
+		if len(filterSnapshotIDs) > 0 && !filterSnapshotIDs[vol.SnapshotID] {
+			continue
+		}
+		// The attachment-scoped filters match when *any* attachment satisfies them,
+		// which is what a filter on a list-valued member means: a volume matches
+		// attachment.device=/dev/sdf when it is attached at that device.
+		if !ec2VolumeMatchesAttachmentFilters(vol, filterInstanceIDs, filterDevices, filterDeleteOnTerm) {
+			continue
 		}
 		item := volItem{
 			VolumeID:         vol.VolumeID,
@@ -4825,14 +4888,17 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 			Encrypted:        vol.Encrypted,
 			CreateTime:       vol.CreateTime,
 			SnapshotID:       vol.SnapshotID,
+			IOPS:             vol.IOPS,
+			Throughput:       vol.Throughput,
 		}
 		for _, att := range vol.Attachments {
 			item.AttachmentSet = append(item.AttachmentSet, attachItem{
-				VolumeID:   vol.VolumeID,
-				InstanceID: att.InstanceID,
-				Device:     att.Device,
-				Status:     att.State,
-				AttachTime: att.AttachTime,
+				VolumeID:            vol.VolumeID,
+				InstanceID:          att.InstanceID,
+				Device:              att.Device,
+				Status:              att.State,
+				AttachTime:          att.AttachTime,
+				DeleteOnTermination: att.DeleteOnTermination,
 			})
 		}
 		volumes = append(volumes, item)
@@ -4859,7 +4925,7 @@ func (p *EC2Plugin) deleteVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if volID == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId is required", HTTPStatus: http.StatusBadRequest}
 	}
-	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + volID
+	key := ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, volID)
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 deleteVolume get: %w", err)
@@ -4897,7 +4963,7 @@ func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if device == "" {
 		device = "/dev/xvdf"
 	}
-	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + volID
+	key := ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, volID)
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 attachVolume get: %w", err)
@@ -4920,6 +4986,10 @@ func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Device:     device,
 		State:      "attached",
 		AttachTime: attachTime,
+		// AWS preserves a volume attached after launch: deleting one the caller
+		// brought would destroy something the launch did not make. Only a volume a
+		// launch creates defaults the other way; see [ec2LaunchVolumesFor].
+		DeleteOnTermination: false,
 	}}
 
 	newData, err := json.Marshal(vol)
@@ -4931,21 +5001,23 @@ func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	type response struct {
-		XMLName    xml.Name `xml:"AttachVolumeResponse"`
-		XMLNS      string   `xml:"xmlns,attr"`
-		VolumeID   string   `xml:"volumeId"`
-		InstanceID string   `xml:"instanceId"`
-		Device     string   `xml:"device"`
-		Status     string   `xml:"status"`
-		AttachTime string   `xml:"attachTime"`
+		XMLName             xml.Name `xml:"AttachVolumeResponse"`
+		XMLNS               string   `xml:"xmlns,attr"`
+		VolumeID            string   `xml:"volumeId"`
+		InstanceID          string   `xml:"instanceId"`
+		Device              string   `xml:"device"`
+		Status              string   `xml:"status"`
+		AttachTime          string   `xml:"attachTime"`
+		DeleteOnTermination bool     `xml:"deleteOnTermination"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
-		XMLNS:      "http://ec2.amazonaws.com/doc/2016-11-15/",
-		VolumeID:   volID,
-		InstanceID: instanceID,
-		Device:     device,
-		Status:     "attached",
-		AttachTime: attachTime,
+		XMLNS:               "http://ec2.amazonaws.com/doc/2016-11-15/",
+		VolumeID:            volID,
+		InstanceID:          instanceID,
+		Device:              device,
+		Status:              "attached",
+		AttachTime:          attachTime,
+		DeleteOnTermination: false,
 	})
 }
 
@@ -4954,7 +5026,7 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if volID == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId is required", HTTPStatus: http.StatusBadRequest}
 	}
-	key := "volume:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + volID
+	key := ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, volID)
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 detachVolume get: %w", err)
