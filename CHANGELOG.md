@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **An instance reports its own block devices, on all three surfaces that render them**
+  (#669). `DescribeInstances`, `RunInstances` and `DescribeInstanceAttribute` now emit a
+  `blockDeviceMapping` set. #666 made a launch materialize its EBS volumes, but the only way
+  to learn which volume sat on which device was `DescribeVolumes` filtered on
+  `attachment.instance-id` — a question real EC2 answers from the instance, and one CDK and
+  Terraform consumers ask while asserting on a launch they just made.
+  `DescribeInstanceAttribute` refused `blockDeviceMapping` outright.
+
+  The set is **derived from the volume records**, not from the mappings the launch recorded,
+  which is what makes it track reality rather than intent: a volume attached with
+  `AttachVolume` after launch appears, a detached one stops appearing, and an instance store
+  device never appears because it never became a volume. `EC2Instance` carries no
+  block-device field, so the volumes are also the only available source. Each item is AWS's
+  `InstanceBlockDeviceMapping` — `deviceName` plus `ebs` — and the `ebs` element carries the
+  four members AWS's own sample shows (`volumeId`, `status`, `attachTime`,
+  `deleteOnTermination`), each read straight off a stored attachment. The other four
+  `EbsInstanceBlockDevice` members are omitted rather than defaulted, since substrate records
+  nothing behind them and a fabricated `volumeOwnerId` would be indistinguishable from a real
+  one.
+
+  `EbsInstanceBlockDevice` carries **no size**, so this does not replace `DescribeVolumes`
+  for the question #666 made it answer — `docs/services.md` continues to say that
+  `DescribeVolumes` is the only surface a launch-specified size is observable on.
+  `status` uses AWS's four-value `AttachmentStatus` enum, not the five-value volume-side enum
+  `DescribeVolumes` renders, so the two are deliberately not rendered through one helper.
+
+  On `DescribeInstanceAttribute` the set follows the shape `groupSet` already established: no
+  `<value>` wrapper (it is one of the `InstanceAttribute` members that is not an
+  `AttributeValue`), present-but-empty for an instance with no EBS volumes, and absent
+  entirely from any other attribute's response. AWS publishes no `blockDeviceMapping` example
+  for the operation, so the present-but-empty choice rests on that in-file reasoning rather
+  than on the reference.
+
+  Two substrate choices are labelled as such: `RunInstances` renders the set **populated**,
+  diverging from the reference's only sample response — which emits `<blockDeviceMapping />`
+  empty, on a `pending` instance whose request declared no mappings at all — on the same
+  ground `networkInterfaceSet` already uses, that substrate's instances are running and their
+  volumes exist by the time `RunInstances` answers; and the set is **ordered by device name**
+  with the volume ID breaking a tie, since `DescribeInstances` states its own order may vary
+  but a deterministic emulator must not answer one request two ways.
+
+### Fixed
+- **`RunInstances` omitted the `iamInstanceProfile` that `DescribeInstances` reported for the
+  same instance** (#669). `runInstancesResponse` and `describeInstances` each declared their
+  own local `ec2InstanceItem`, and the copies had drifted a second time after #444: only
+  `describeInstances`' carried `iamInstanceProfile`, they used different Go types for the
+  instance-state element, and their `placement`/`instanceState` order was swapped. A consumer
+  that read the profile off the launch response got nothing back and had to describe the
+  instance to see the value it had just set. `ec2InstanceItem` and its four sub-items are now
+  declared once at package level and built by one function, following the precedent
+  `ec2GroupItem` and `ec2NetworkInterfaceItem` set for exactly this bug.
+
 ### Changed
 - **A launch-declared *data* volume is now preserved on termination rather than deleted, and
   the ambiguity behind that value is recorded** (#675). Two current AWS pages disagree about
