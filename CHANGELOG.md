@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`RunInstances` accepted `BlockDeviceMapping.N.*` and discarded it, so a launch's storage
+  was unobservable** (#666). `runInstancesWithTags` read thirteen parameter groups and none of
+  them was a block device mapping: a request naming a 60 GiB `/dev/xvda` root volume
+  succeeded, and `DescribeVolumes` reported nothing for the instance. Substrate was silently
+  accepting a parameter it did not model — the shape #97 exists to remove.
+
+  The value was not merely hidden, it was unreachable. AWS's `EbsInstanceBlockDevice` — the
+  shape an instance renders per device — carries `volumeId`, `attachTime`,
+  `deleteOnTermination` and `status`, but **no size**, so `DescribeVolumes` is the only API
+  surface on which a launch-specified size can be observed at all. A launch now materializes
+  real volumes in the same store `CreateVolume` writes to, which is how real EC2 unifies
+  provisioned and launch-created volumes. `iops` and `throughput` reach the wire too; `iops`
+  was stored and never rendered, and `throughput` had nowhere to be stored.
+
+  `TerminateInstances` now settles those volumes, and that half is what made the parsing safe
+  to land: without it a volume would report `deleteOnTermination=true` while sitting `in-use`
+  on a terminated instance forever, a state real EC2 never reaches and a new inaccuracy in
+  place of the old silence. A volume whose attachment deletes on termination is removed; one
+  that does not becomes `available` with no attachment.
+
+  `DeleteOnTermination` defaults to **`true`** for every volume a launch creates, data volumes
+  included. That is counter-intuitive and is AWS's documented behaviour: its termination table
+  splits on how the volume was attached, not on what it is — a data volume attached at launch
+  through the console preserves, but through the API it is deleted, and an API emulator has no
+  console path. `AttachVolume` keeps the other default, `false`, since deleting a volume the
+  caller brought would destroy something the launch did not make.
+
+  A fleet reaches mappings through its **launch template**, which now carries them:
+  `CreateFleet` forwards the template reference rather than the caller's own parameters, so
+  the template path is the only one it has. `DescribeVolumes` also gained the filters the new
+  state makes worth asking about — `attachment.device`,
+  `attachment.delete-on-termination`, `volume-type`, `size`, `availability-zone` and
+  `snapshot-id` — alongside the three it had.
 - **An authorization denial on `pricing` reported the XML `AccessDenied`, which the Price
   List SDK cannot parse — and no test could see a plugin in that state** (#653). The generic
   gate derives its denial code from the service's wire protocol (#595), reading
@@ -29,6 +62,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assertion is now driven from the **plugin registry**: every plugin `RegisterDefaultPlugins`
   registers must have an entry, and a new plugin that lands without one fails with a message
   naming it and saying what to add.
+
+### Changed
+- **Every `RunInstances` now produces at least one EBS volume** (#666). A real instance always
+  has a root volume whether or not the request mentions one, and `DescribeImages` already
+  reported an 8 GiB `/dev/sda1` mapping for every AMI substrate serves, so a launch that
+  produced no volume left the two disagreeing about the same instance. A launch declaring no
+  mapping now gets a synthesized 8 GiB `gp2` volume at `/dev/sda1`; a mapping that names
+  `/dev/sda1` or `/dev/xvda` — the two spellings AWS's device-naming reference gives for the
+  HVM root — configures that root rather than adding a device beside it.
+
+  A test that listed **all** volumes and expected only what it created with `CreateVolume` now
+  sees a root volume per launched instance; filter by `volume-id` or
+  `attachment.instance-id` for the previous answer. A test that terminated an instance and
+  then read a volume attached at launch will find it gone unless it set
+  `DeleteOnTermination: false`. A volume attached *after* launch is untouched by termination.
 
 ## [v0.102.0] - 2026-08-16
 

@@ -2961,6 +2961,86 @@ Substrate's own choices, where the API model does not decide:
 - `InterfaceType` defaults to `interface`; `efa` and `efa-only` are recorded as
   given. `NetworkCardIndex` is recorded as given and defaults to 0.
 
+### Launch-time storage
+
+`RunInstances` and `CreateLaunchTemplate` parse every declared
+`BlockDeviceMapping.N.*`, contiguously from 1 and stopping at the first missing
+index, and a launch **materializes** the EBS volumes those mappings describe. They
+are real volumes in the same store `CreateVolume` writes to, so `DescribeVolumes`
+is the one place to observe an instance's storage, whether the volume was
+provisioned separately or created by the launch — which is how real EC2 unifies
+the two.
+
+`DescribeVolumes` is also the **only** place a launch-specified size is
+observable. AWS's `EbsInstanceBlockDevice` — the shape an instance renders per
+device — carries `volumeId`, `attachTime`, `deleteOnTermination` and `status`, but
+no size, so a caller that wants to know how large a launch made its root volume
+has nowhere else to ask.
+
+**Every launch produces at least one volume.** A real instance always has a root
+volume whether or not the request mentions one, and `DescribeImages` already
+reports an 8 GiB `/dev/sda1` mapping for every AMI substrate serves, so a launch
+that declares no mapping gets a synthesized 8 GiB `gp2` volume at `/dev/sda1`
+rather than none. A mapping that *does* name a root device configures that root
+volume instead of adding a device beside it, which is AWS's own rule for a mapping
+whose device name the AMI's mapping already uses.
+
+Root devices are recognized **by name**: `/dev/sda1` and `/dev/xvda`, the two
+spellings AWS's device-naming reference gives for the HVM root ("Differs by AMI").
+Substrate stores no per-AMI root device to compare against, so an AMI whose real
+root device is neither is out of reach here.
+
+`DeleteOnTermination` defaults to **`true`** for every volume a launch creates,
+data volumes included. That is counter-intuitive and is AWS's documented
+behaviour: its termination table splits on *how* the volume was attached, not on
+what it is — a data volume attached at launch through the console preserves, but
+through the API it is deleted, and an API emulator has no console path. A volume
+attached later with `AttachVolume` defaults to `false`, because deleting a volume
+the caller brought would destroy something the launch did not make. An explicit
+value wins over either default.
+
+`TerminateInstances` settles the volumes accordingly: one whose attachment deletes
+on termination is removed outright, and one that does not becomes `available` with
+no attachment, which is what a preserved volume looks like once its instance is
+gone.
+
+A fleet reaches mappings only through its **launch template** — `CreateFleet`
+forwards the template reference rather than the caller's own mappings — and the
+template merge is all-or-nothing, as it is for every other field: a request naming
+one mapping of its own does not inherit a second from the template.
+
+Modeled per mapping: `DeviceName`, `VirtualName`, `NoDevice`, and
+`Ebs.{SnapshotId, VolumeSize, VolumeType, Iops, Throughput, Encrypted,
+DeleteOnTermination}`. `NoDevice` suppresses the device outright, and a
+`VirtualName` with no `Ebs.*` members names an instance store device, which is not
+an EBS volume and has no presence in `DescribeVolumes` — either way the mapping is
+recorded intent that materializes nothing.
+
+`DescribeVolumes` renders `iops` and `throughput` on the volume and
+`deleteOnTermination` on each attachment, and filters on `volume-id`, `status`,
+`size`, `volume-type`, `availability-zone`, `snapshot-id`,
+`attachment.instance-id`, `attachment.device` and
+`attachment.delete-on-termination`.
+
+Substrate's own choices, where the API model does not decide:
+
+- `VolumeType` defaults to **`gp2`**. `EbsBlockDevice` documents no default at all;
+  `CreateVolume` documents `gp2`, and substrate uses it for both so there is one
+  default in one place rather than two that can drift. Real AMIs specify `gp3` in
+  their own mapping, which substrate's AMIs do not carry.
+- A volume takes the **instance's** Availability Zone, not the region's first: a
+  volume must be in the same zone as the instance it is attached to, so deriving it
+  any other way would produce an attachment real EC2 cannot have.
+- An unparseable number reads as zero rather than failing the launch, and the
+  mapping is still recorded.
+
+Not modeled: `Ebs.KmsKeyId` (left out rather than stored and hidden),
+`TagSpecification` scoped to `volume` (see the tag-specification note above),
+`InvalidBlockDeviceMapping` validation, and `blockDeviceMapping` on
+`DescribeInstances` or `DescribeInstanceAttribute` — the latter is still on the
+explicit-refusal list, since the shape it would render carries no size and so would
+not answer the question `DescribeVolumes` now does.
+
 ### Instance attributes
 
 `DescribeInstanceAttribute` reads one attribute off an instance. It is the only way
@@ -5361,7 +5441,7 @@ Account Management API calls are free.
 
 Service Quotas answers from a **built-in table of representative default quotas**,
 not from the plugins that enforce them. It covers eleven services rather than
-AWS's full catalog, which is why an unrecognised service code is an error rather
+AWS's full catalog, which is why an unrecognized service code is an error rather
 than an empty result — see below.
 
 ### Supported operations
