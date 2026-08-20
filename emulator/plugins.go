@@ -21,14 +21,19 @@ type registerPluginsSettings struct {
 	auth *AuthController
 }
 
-// WithPluginAuth gives the CloudFormation plugin the controller that authorizes the
-// resource calls a stack deployment makes.
+// WithPluginAuth gives a plugin that dispatches requests of its own the controller
+// that authorizes them.
 //
-// Only CloudFormation takes it, and only because it is the one plugin that
-// dispatches requests of its own: every other plugin's calls arrive through the
-// server, which authorizes them before routing. Without this a stack's resource
-// calls are dispatched unauthorized, which is what they always were — the gap that
-// made a template asking for a permission it did not have deploy cleanly.
+// Two plugins take it, and both for the same reason: their calls do not arrive
+// through the server, which is where every other request is authorized before
+// routing. CloudFormation dispatches a stack's resource calls, and without this a
+// template asking for a permission it did not have deployed cleanly. EC2's
+// CreateFleet launches instances by calling its own RunInstances path, and without
+// this a fleet launched resources no policy was consulted about — the guardrail a
+// caller wrote for RunInstances was bypassed by asking for a fleet instead (#673).
+//
+// A plugin holding the controller still authorizes only requests carrying a
+// principal, so substrate's own unenforced built-in caller is unaffected.
 func WithPluginAuth(auth *AuthController) RegisterPluginsOption {
 	return func(s *registerPluginsSettings) {
 		s.auth = auth
@@ -134,10 +139,16 @@ func RegisterDefaultPlugins(
 	registry.Register(dynamodbPlugin)
 
 	ec2Plugin := &EC2Plugin{}
+	ec2Opts := map[string]any{"time_controller": tc}
+	if settings.auth != nil {
+		// CreateFleet launches through EC2's own RunInstances path rather than through
+		// the server, so the fleet's launches are authorized by the plugin itself.
+		ec2Opts["auth_controller"] = settings.auth
+	}
 	if err := ec2Plugin.Initialize(ctx, PluginConfig{
 		State:   state,
 		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
+		Options: ec2Opts,
 	}); err != nil {
 		return fmt.Errorf("initialize ec2 plugin: %w", err)
 	}

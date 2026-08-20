@@ -55,6 +55,11 @@ var (
 	ec2AuthzSGARN     = "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":security-group/" + ec2AuthzSG
 	ec2AuthzENIARN    = "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":network-interface/*"
 	ec2AuthzInstARN   = "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":instance/*"
+
+	// The two default-VPC resources a launch that names no subnet is about to create,
+	// which is why they are wildcards rather than IDs (#673).
+	ec2AuthzSubnetWildcardARN = "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":subnet/*"
+	ec2AuthzSGWildcardARN     = "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":security-group/*"
 )
 
 // ec2AuthzAllFive is every ARN a launch requires, which is what a least-privilege
@@ -441,15 +446,37 @@ func TestEC2_Authz_PermissionBoundaryCoversEveryResource(t *testing.T) {
 // "*" for an absent ID would widen the policy the caller wrote: a statement
 // naming only "*" would then satisfy a launch that named no subnet, which is the
 // direction a privilege boundary must never fail in.
+//
+// The subnet and security group are the exception, and not to this rule: a launch that
+// names neither takes both from the default VPC, creating them if the account has none,
+// so they are resolved rather than absent — by ID when they exist and as subnet/* and
+// security-group/* when the launch is about to mint them, the same footing instance/*
+// and network-interface/* are already on. That is a resource the request *creates*, not
+// one it omits (#673); see TestEC2_Authz_FreshAccountResolvesToWildcards. Every other
+// member below is genuinely absent, which is why the subtests here assert the two are
+// named while the rest are not.
 func TestEC2_Authz_AbsentMembersAreSkipped(t *testing.T) {
-	t.Run("an AMI-only launch names three resources", func(t *testing.T) {
+	t.Run("an AMI-only launch names the default-VPC wildcards too", func(t *testing.T) {
+		// Before #673 this launch named three resources and the policy below sufficed.
+		// A launch that omits SubnetId does not omit a subnet — it takes the default
+		// VPC's, and in an empty fixture it is about to create one — so subnet/* and
+		// security-group/* are part of the decision. Skip-don't-widen still governs a
+		// resource the request truly leaves out; it does not cover one the launch
+		// creates.
 		f := newEC2AuthzFixture(t, "omar", emulator.PolicyDocument{})
+		params := map[string]string{"ImageId": ec2AuthzAMI, "MinCount": "1", "MaxCount": "1"}
+
 		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzImageARN, ec2AuthzENIARN, ec2AuthzInstARN))
-		require.NoError(t, f.launch(t, map[string]string{
-			"ImageId":  ec2AuthzAMI,
-			"MinCount": "1",
-			"MaxCount": "1",
-		}), "no subnet and no security group were named, so neither is required")
+		err := f.launch(t, params)
+		if !ec2AuthzDenied(t, err) {
+			t.Fatal("a policy omitting subnet/* allowed a launch that will create a default subnet")
+		}
+		assert.Equal(t, ec2AuthzSubnetWildcardARN, deniedResource(t, err))
+
+		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzImageARN,
+			ec2AuthzSubnetWildcardARN, ec2AuthzSGWildcardARN, ec2AuthzENIARN, ec2AuthzInstARN))
+		require.NoError(t, f.launch(t, params),
+			"naming the two wildcards the launch will create permits it")
 	})
 
 	t.Run("the AMI is still required", func(t *testing.T) {
@@ -462,20 +489,30 @@ func TestEC2_Authz_AbsentMembersAreSkipped(t *testing.T) {
 		assert.Equal(t, ec2AuthzImageARN, deniedResource(t, err))
 	})
 
-	t.Run("a launch naming nothing falls back unchanged", func(t *testing.T) {
-		// No resource at all, so there is nothing to authorize against and the
-		// single-resource path decides it exactly as it did before this change: the
-		// ec2 arm of buildResourceARN, with no InstanceId.1, resolves to "*".
+	t.Run("a launch naming nothing is still decided against ARNs", func(t *testing.T) {
+		// Before #673 this fell back to buildResourceARN's single-resource path and
+		// resolved to the literal "*". It no longer can: the launch will create a
+		// default subnet, a default security group, an interface and an instance, so
+		// four ARNs are named and none of them is "*". That closes the last route by
+		// which a RunInstances escaped its own resource list.
 		f := newEC2AuthzFixture(t, "omar", emulator.PolicyDocument{})
+		params := map[string]string{"MinCount": "1", "MaxCount": "1"}
+
 		f.setPolicy(t, ec2AuthzStatement("Allow", "*"))
-		require.NoError(t, f.launch(t, map[string]string{"MinCount": "1", "MaxCount": "1"}))
+		require.NoError(t, f.launch(t, params))
 
 		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzInstARN))
-		err := f.launch(t, map[string]string{"MinCount": "1", "MaxCount": "1"})
+		err := f.launch(t, params)
 		if !ec2AuthzDenied(t, err) {
-			t.Fatal("a launch naming no resource is decided against \"*\", which an ARN-scoped policy does not match")
+			t.Fatal("a policy naming only instance/* allowed a launch that also creates a subnet")
 		}
-		assert.Equal(t, "*", deniedResource(t, err))
+		assert.Equal(t, ec2AuthzSubnetWildcardARN, deniedResource(t, err),
+			"the denial names the default subnet the launch would create, not \"*\"")
+
+		f.setPolicy(t, ec2AuthzStatement("Allow",
+			ec2AuthzSubnetWildcardARN, ec2AuthzSGWildcardARN, ec2AuthzENIARN, ec2AuthzInstARN))
+		require.NoError(t, f.launch(t, params),
+			"a launch naming no AMI requires no image ARN, so these four suffice")
 	})
 }
 
@@ -531,7 +568,10 @@ func TestEC2_Authz_NestedNetworkInterfaceFormResolves(t *testing.T) {
 
 		// And the wildcard is not also evaluated: a policy naming the specific ENI
 		// suffices, so an existing interface does not require network-interface/*.
-		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzImageARN, eniARN, ec2AuthzInstARN))
+		// The two default-VPC wildcards join it, because the interface carries no
+		// subnet and the launch has none of its own (#673).
+		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzImageARN, eniARN, ec2AuthzInstARN,
+			ec2AuthzSubnetWildcardARN, ec2AuthzSGWildcardARN))
 		require.NoError(t, f.launch(t, byID))
 	})
 }
@@ -628,7 +668,10 @@ func TestEC2_Authz_LaunchTemplateResourcesAreAuthorized(t *testing.T) {
 		// The decision must not turn that into AccessDenied, so an unreadable template
 		// adds no resources rather than failing the request.
 		f := newFixture(t)
-		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzImageARN, ec2AuthzENIARN, ec2AuthzInstARN))
+		// Contributing nothing leaves the launch with no subnet of its own, so the
+		// default-VPC wildcards apply as they would to any subnet-less launch (#673).
+		f.setPolicy(t, ec2AuthzStatement("Allow", ec2AuthzImageARN, ec2AuthzENIARN, ec2AuthzInstARN,
+			ec2AuthzSubnetWildcardARN, ec2AuthzSGWildcardARN))
 		require.NoError(t, f.launch(t, map[string]string{
 			"ImageId":                           ec2AuthzAMI,
 			"MinCount":                          "1",
