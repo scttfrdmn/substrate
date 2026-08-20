@@ -87,11 +87,11 @@ func TestJourney_EC2LaunchBlockDeviceMappings(t *testing.T) {
 	if got := aws.ToString(att.InstanceId); got != instanceID {
 		t.Fatalf("attachment InstanceId = %q, want %q", got, instanceID)
 	}
-	// True is AWS's launch default for a volume created through the API — its
-	// termination table splits on how the volume was attached, and the console path a
-	// consumer might expect Preserve from does not exist here.
+	// True for the *root* volume, which is what /dev/xvda is. Both AWS pages that
+	// document a launch default agree about the root; they disagree about a data
+	// volume, and substrate preserves that one (#675).
 	if !aws.ToBool(att.DeleteOnTermination) {
-		t.Fatal("attachment DeleteOnTermination = false, want true for a launch-created volume")
+		t.Fatal("attachment DeleteOnTermination = false, want true for a launch-created root volume")
 	}
 
 	if _, err := client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
@@ -110,5 +110,119 @@ func TestJourney_EC2LaunchBlockDeviceMappings(t *testing.T) {
 	if len(after.Volumes) != 0 {
 		t.Fatalf("DescribeVolumes after terminate returned %d volumes, want 0",
 			len(after.Volumes))
+	}
+}
+
+// TestJourney_EC2LaunchDataVolumeSurvivesTermination is #675 at the tier that made it
+// worth deciding: a consumer whose IaC attaches a data volume at launch and expects to
+// still have it afterwards.
+//
+// Through v0.104.0 substrate deleted it, following the one AWS page whose console-vs-CLI
+// table says so. The page that describes the mapping shape a consumer is actually
+// writing says the opposite, both pages agree the real default comes from an AMI mapping
+// substrate does not carry, and a volume wrongly deleted is gone — so the split default
+// wins, and this is the direction that needs an SDK-tier assertion.
+func TestJourney_EC2LaunchDataVolumeSurvivesTermination(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	cfg, err := journeyConfig(ts)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	client := ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
+	ctx := context.Background()
+
+	// Neither mapping names DeleteOnTermination, so both take a default and the two
+	// defaults differ.
+	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId:      aws.String("ami-0abcdef1234567890"),
+		InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		BlockDeviceMappings: []ec2types.BlockDeviceMapping{
+			{
+				DeviceName: aws.String("/dev/xvda"),
+				Ebs:        &ec2types.EbsBlockDevice{VolumeSize: aws.Int32(30)},
+			},
+			{
+				DeviceName: aws.String("/dev/sdf"),
+				Ebs:        &ec2types.EbsBlockDevice{VolumeSize: aws.Int32(40)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunInstances: %v", err)
+	}
+	if len(run.Instances) != 1 {
+		t.Fatalf("RunInstances returned %d instances, want 1", len(run.Instances))
+	}
+	instanceID := aws.ToString(run.Instances[0].InstanceId)
+
+	byInstance := &ec2.DescribeVolumesInput{
+		Filters: []ec2types.Filter{{
+			Name:   aws.String("attachment.instance-id"),
+			Values: []string{instanceID},
+		}},
+	}
+	described, err := client.DescribeVolumes(ctx, byInstance)
+	if err != nil {
+		t.Fatalf("DescribeVolumes: %v", err)
+	}
+	if len(described.Volumes) != 2 {
+		t.Fatalf("DescribeVolumes returned %d volumes, want 2", len(described.Volumes))
+	}
+	var dataVolumeID string
+	for _, vol := range described.Volumes {
+		if len(vol.Attachments) != 1 {
+			t.Fatalf("volume %s has %d attachments, want 1",
+				aws.ToString(vol.VolumeId), len(vol.Attachments))
+		}
+		att := vol.Attachments[0]
+		device := aws.ToString(att.Device)
+		deleteOnTermination := aws.ToBool(att.DeleteOnTermination)
+		switch device {
+		case "/dev/xvda":
+			if !deleteOnTermination {
+				t.Error("the root volume reports DeleteOnTermination=false, want true")
+			}
+		case "/dev/sdf":
+			if deleteOnTermination {
+				t.Error("the data volume reports DeleteOnTermination=true, want false (#675)")
+			}
+			dataVolumeID = aws.ToString(vol.VolumeId)
+		default:
+			t.Errorf("unexpected device %q", device)
+		}
+	}
+	if dataVolumeID == "" {
+		t.Fatal("the launch produced no /dev/sdf volume")
+	}
+
+	if _, err := client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
+		InstanceIds: []string{instanceID},
+	}); err != nil {
+		t.Fatalf("TerminateInstances: %v", err)
+	}
+
+	// What the flag reports and what termination does have to agree. Listing
+	// everything rather than filtering on the instance: a preserved volume has no
+	// attachment left to filter on, which is itself the observation.
+	all, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{})
+	if err != nil {
+		t.Fatalf("DescribeVolumes after terminate: %v", err)
+	}
+	if len(all.Volumes) != 1 {
+		t.Fatalf("after terminate there are %d volumes, want 1 — the preserved data volume",
+			len(all.Volumes))
+	}
+	if got := aws.ToString(all.Volumes[0].VolumeId); got != dataVolumeID {
+		t.Fatalf("the surviving volume is %s, want the data volume %s", got, dataVolumeID)
+	}
+	if all.Volumes[0].State != ec2types.VolumeStateAvailable {
+		t.Fatalf("the preserved volume is %q, want available", all.Volumes[0].State)
+	}
+	if len(all.Volumes[0].Attachments) != 0 {
+		t.Fatalf("the preserved volume still reports %d attachments, want 0",
+			len(all.Volumes[0].Attachments))
 	}
 }

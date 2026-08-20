@@ -214,20 +214,21 @@ func TestEC2LaunchVolumes(t *testing.T) {
 		},
 		{
 			// A data volume does not suppress the root, so a launch naming only
-			// /dev/sdf gets two volumes.
+			// /dev/sdf gets two volumes — and the two take *different*
+			// DeleteOnTermination defaults, true for the root and false for the data
+			// volume, which is substrate's resolution of a conflict between two
+			// current AWS pages (#675).
 			name:     "a data volume gets a root alongside it",
 			mappings: []emulator.EC2BlockDeviceMapping{{DeviceName: "/dev/sdf", VolumeSize: 100, VolumeType: "gp3"}},
 			want: []wantVol{
-				{"/dev/sdf", 100, "gp3", true},
+				{"/dev/sdf", 100, "gp3", false},
 				{"/dev/sda1", 8, "gp2", true},
 			},
 		},
 		{
-			// DeleteOnTermination defaults to true for a *data* volume too. Counter-
-			// intuitive, and AWS's own behavior: its termination table splits on how
-			// the volume was attached, not on what it is — a data volume attached at
-			// launch through the console preserves, but through the API it is deleted,
-			// and substrate has no console.
+			// An explicit value wins over either default, which is what makes the
+			// default distinguishable at all: the raw string is retained precisely so
+			// "false" and absent are not the same input.
 			name: "an explicit false preserves",
 			mappings: []emulator.EC2BlockDeviceMapping{
 				{DeviceName: "/dev/sdf", VolumeSize: 20, DeleteOnTermination: "false"},
@@ -271,7 +272,7 @@ func TestEC2LaunchVolumes(t *testing.T) {
 				{DeviceName: "/dev/sdb", VirtualName: "ephemeral0", VolumeSize: 12},
 			},
 			want: []wantVol{
-				{"/dev/sdb", 12, "gp2", true},
+				{"/dev/sdb", 12, "gp2", false},
 				{"/dev/sda1", 8, "gp2", true},
 			},
 		},
@@ -284,6 +285,8 @@ func TestEC2LaunchVolumes(t *testing.T) {
 			want: []wantVol{{"/dev/sda1", 8, "gp2", true}},
 		},
 		{
+			// The root deletes and both data volumes are preserved, one by default and
+			// one explicitly — the same answer by two routes.
 			name: "a root and two data volumes",
 			mappings: []emulator.EC2BlockDeviceMapping{
 				{DeviceName: "/dev/xvda", VolumeSize: 60},
@@ -292,7 +295,7 @@ func TestEC2LaunchVolumes(t *testing.T) {
 			},
 			want: []wantVol{
 				{"/dev/xvda", 60, "gp2", true},
-				{"/dev/sdf", 100, "io2", true},
+				{"/dev/sdf", 100, "io2", false},
 				{"/dev/sdg", 200, "gp2", false},
 			},
 		},

@@ -131,8 +131,11 @@ func TestEC2_BlockDeviceMapping_ReportedRepro(t *testing.T) {
 	assert.Equal(t, "in-use", vols[0].Status)
 	assert.Equal(t, "/dev/xvda", vols[0].bdmDevice())
 	assert.Equal(t, ids[0], vols[0].Attachments[0].InstanceID)
+	// /dev/xvda is a root device, and both AWS pages agree the root volume is deleted
+	// on termination. Only the data-volume default was ever in doubt (#675), and it
+	// is pinned by TestEC2_BlockDeviceMapping_DataVolumeDefaultPreserves.
 	assert.True(t, vols[0].Attachments[0].DeleteOnTermination,
-		"a volume a launch creates is deleted on termination")
+		"the root volume a launch creates is deleted on termination")
 	assert.NotEmpty(t, vols[0].Attachments[0].AttachTime)
 }
 
@@ -199,7 +202,9 @@ func TestEC2_BlockDeviceMapping_DataVolumeAlongsideRoot(t *testing.T) {
 func TestEC2_BlockDeviceMapping_TerminationHonorsDeleteOnTermination(t *testing.T) {
 	ts := newEC2TestServer(t)
 	ids := bdmRunInstances(t, ts, map[string]string{
-		// The root deletes by default; the data volume explicitly preserves.
+		// The root deletes by default; the data volume preserves explicitly, which
+		// since #675 is also its default — this case is about honoring the explicit
+		// value, so it keeps stating it.
 		"BlockDeviceMapping.1.DeviceName":              "/dev/sda1",
 		"BlockDeviceMapping.1.Ebs.VolumeSize":          "30",
 		"BlockDeviceMapping.2.DeviceName":              "/dev/sdf",
@@ -227,6 +232,53 @@ func TestEC2_BlockDeviceMapping_TerminationHonorsDeleteOnTermination(t *testing.
 	assert.Equal(t, preservedID, after[0].VolumeID)
 	// A preserved volume is available with no attachment, which is what a volume
 	// whose instance is gone looks like.
+	assert.Equal(t, "available", after[0].Status)
+	assert.Empty(t, after[0].Attachments)
+	assert.Equal(t, 40, after[0].Size)
+}
+
+// TestEC2_BlockDeviceMapping_DataVolumeDefaultPreserves pins the default #675 is
+// about, at the tier a consumer meets it: a launch-declared *data* volume that names
+// no DeleteOnTermination survives its instance, while the root volume beside it does
+// not.
+//
+// The default was untested through HTTP before this — every existing case either
+// names a root device or sets the value explicitly — so the behavior #675 disputed
+// was reachable only through the unit tier. It is the destructive direction that
+// needs the assertion: a volume wrongly deleted is gone, and the caller finds out by
+// its absence rather than by an error.
+func TestEC2_BlockDeviceMapping_DataVolumeDefaultPreserves(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ids := bdmRunInstances(t, ts, map[string]string{
+		// No DeleteOnTermination on either mapping: both take the default, and the
+		// two defaults differ.
+		"BlockDeviceMapping.1.DeviceName":     "/dev/sda1",
+		"BlockDeviceMapping.1.Ebs.VolumeSize": "30",
+		"BlockDeviceMapping.2.DeviceName":     "/dev/sdf",
+		"BlockDeviceMapping.2.Ebs.VolumeSize": "40",
+	})
+	require.Len(t, ids, 1)
+
+	before := bdmDescribeVolumes(t, ts, nil)
+	require.Len(t, before, 2)
+	assert.True(t, before[0].Attachments[0].DeleteOnTermination,
+		"the root volume is deleted on termination — both AWS pages agree")
+	assert.False(t, before[1].Attachments[0].DeleteOnTermination,
+		"a data volume with no explicit value is preserved (#675)")
+	dataVolumeID := before[1].VolumeID
+
+	termResp := ec2Request(t, ts, map[string]string{
+		"Action":       "TerminateInstances",
+		"InstanceId.1": ids[0],
+	})
+	require.Equal(t, http.StatusOK, termResp.StatusCode)
+	require.NoError(t, termResp.Body.Close())
+
+	// The rendered flag and what termination actually does have to agree; a volume
+	// reporting false and then vanishing would be worse than either answer.
+	after := bdmDescribeVolumes(t, ts, nil)
+	require.Len(t, after, 1, "the root is deleted and the data volume is not")
+	assert.Equal(t, dataVolumeID, after[0].VolumeID)
 	assert.Equal(t, "available", after[0].Status)
 	assert.Empty(t, after[0].Attachments)
 	assert.Equal(t, 40, after[0].Size)

@@ -144,12 +144,28 @@ func ec2CreatesEBSVolume(bdm EC2BlockDeviceMapping) bool {
 // rule for a mapping whose device name the AMI's mapping already uses: "the mapping
 // you specify replaces the AMI's".
 //
-// DeleteOnTermination defaults to **true** for every volume a launch creates, root
-// and data alike. That is counter-intuitive and is AWS's documented behavior: its
-// termination table splits on how the volume was attached, not on what it is — a
-// data volume attached at launch through the console preserves, but through the API
-// it is deleted, and substrate has no console. A volume attached after launch keeps
-// the other default; see attachVolume.
+// DeleteOnTermination defaults to **true for the root volume and false for a data
+// volume**, and that split is substrate's resolution of a conflict between two
+// current AWS pages rather than a value either one simply states (#675).
+//
+// The API reference documents no default for EbsBlockDevice.DeleteOnTermination at
+// all. Of the two guide pages that do, block-device-mapping-concepts gives exactly
+// this split — "true for the root volume and false for attached volumes" — while
+// preserving-volumes-on-termination carries a console-vs-CLI table listing a
+// launch-created data volume as Delete when the launch came through the CLI. #666
+// followed the second and applied true to everything.
+//
+// The split wins for two reasons. Both pages agree that the real launch default
+// comes from the *AMI's* own block device mapping, and substrate's AMIs carry none
+// to inherit — so this is substrate's choice either way, and the non-destructive
+// side of a genuine ambiguity is the one a test emulator should take: a volume
+// wrongly preserved is visible and correctable, one wrongly deleted is gone. And a
+// consumer reading block-device-mapping-concepts, the page that describes the
+// mapping shape they are writing, would find substrate wrong rather than
+// opinionated.
+//
+// A volume attached after launch keeps the other default; see attachVolume, where
+// the two pages agree and nothing here changes it.
 func ec2LaunchVolumesFor(inst *EC2Instance, mappings []EC2BlockDeviceMapping, now string) []EC2Volume {
 	volumes := make([]EC2Volume, 0, len(mappings)+1)
 	rootDeclared := false
@@ -191,9 +207,14 @@ func ec2VolumeFromMapping(inst *EC2Instance, bdm EC2BlockDeviceMapping, now stri
 	if device == "" {
 		device = ec2RootDeviceSDA1
 	}
-	// Absent means true here — the launch default — so only an explicit "false"
-	// preserves the volume. The raw string is what makes that distinguishable.
-	deleteOnTermination := true
+	// The default splits on whether this is the root device; see
+	// [ec2LaunchVolumesFor] for why. It keys off the *resolved* device name, so a
+	// mapping naming no device at all — which lands on /dev/sda1 above — is treated
+	// as the root it became rather than as a data volume.
+	//
+	// The raw string is what makes an explicit value distinguishable from an absent
+	// one, and an explicit value wins over either default.
+	deleteOnTermination := ec2IsRootDevice(device)
 	if bdm.DeleteOnTermination != "" {
 		deleteOnTermination = strings.EqualFold(bdm.DeleteOnTermination, "true")
 	}

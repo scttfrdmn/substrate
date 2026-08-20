@@ -2990,14 +2990,37 @@ spellings AWS's device-naming reference gives for the HVM root ("Differs by AMI"
 Substrate stores no per-AMI root device to compare against, so an AMI whose real
 root device is neither is out of reach here.
 
-`DeleteOnTermination` defaults to **`true`** for every volume a launch creates,
-data volumes included. That is counter-intuitive and is AWS's documented
-behaviour: its termination table splits on *how* the volume was attached, not on
-what it is — a data volume attached at launch through the console preserves, but
-through the API it is deleted, and an API emulator has no console path. A volume
-attached later with `AttachVolume` defaults to `false`, because deleting a volume
-the caller brought would destroy something the launch did not make. An explicit
-value wins over either default.
+`DeleteOnTermination` defaults to **`true` for the root volume and `false` for a
+data volume**, and that split is substrate's resolution of a conflict between two
+current AWS pages rather than a value either one simply states.
+
+The API reference documents no default for `EbsBlockDevice.DeleteOnTermination` at
+all — its only pointer on the subject is a link that no longer resolves to the
+content it cites. Two guide pages do, and they disagree:
+
+- [`block-device-mapping-concepts`][bdm-concepts] gives exactly this split: the
+  default is "`true` for the root volume and `false` for attached volumes".
+- [`preserving-volumes-on-termination`][preserve-volumes] carries a console-vs-CLI
+  table that lists a data volume created at launch **via the CLI** as Delete.
+
+Substrate previously followed the second page and applied `true` to every
+launch-created volume. The split wins now for two reasons. Both pages agree that the real
+launch default comes from the **AMI's own block device mapping**, and substrate's
+AMIs carry none to inherit — so the value is substrate's choice either way, and the
+non-destructive side of a genuine ambiguity is the one a test emulator should take:
+a volume wrongly preserved is visible and correctable, while one wrongly deleted is
+gone and the caller learns of it by its absence rather than by an error. And a
+consumer reading `block-device-mapping-concepts` — the page that describes the
+mapping shape they are writing — would find substrate wrong rather than
+opinionated.
+
+A volume attached later with `AttachVolume` defaults to `false`, because deleting a
+volume the caller brought would destroy something the launch did not make. Both
+pages agree about that one, so nothing here changes it. An explicit value wins over
+either default.
+
+[bdm-concepts]: https://docs.aws.amazon.com/ebs/latest/userguide/block-device-mapping-concepts.html
+[preserve-volumes]: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/preserving-volumes-on-termination.html
 
 `TerminateInstances` settles the volumes accordingly: one whose attachment deletes
 on termination is removed outright, and one that does not becomes `available` with
