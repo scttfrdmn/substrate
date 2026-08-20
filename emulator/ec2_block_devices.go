@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 )
@@ -86,23 +87,209 @@ func ec2ParseBlockDeviceMapping(params map[string]string, p string) (EC2BlockDev
 		VolumeType:          params[p+"Ebs.VolumeType"],
 		Encrypted:           strings.EqualFold(params[p+"Ebs.Encrypted"], "true"),
 		DeleteOnTermination: params[p+"Ebs.DeleteOnTermination"],
+
+		// The raw strings are kept beside the parsed ints so a value that does not
+		// parse stays distinguishable from an absent one; see the field docs on
+		// [EC2BlockDeviceMapping] and [ec2CheckBlockDeviceMappings] (#671).
+		VolumeSizeRaw: params[p+"Ebs.VolumeSize"],
+		IOPSRaw:       params[p+"Ebs.Iops"],
+		ThroughputRaw: params[p+"Ebs.Throughput"],
 	}
-	if n, err := strconv.Atoi(strings.TrimSpace(params[p+"Ebs.VolumeSize"])); err == nil {
+	if n, err := strconv.Atoi(strings.TrimSpace(bdm.VolumeSizeRaw)); err == nil {
 		bdm.VolumeSize = n
 	}
-	if n, err := strconv.Atoi(strings.TrimSpace(params[p+"Ebs.Iops"])); err == nil {
+	if n, err := strconv.Atoi(strings.TrimSpace(bdm.IOPSRaw)); err == nil {
 		bdm.IOPS = n
 	}
-	if n, err := strconv.Atoi(strings.TrimSpace(params[p+"Ebs.Throughput"])); err == nil {
+	if n, err := strconv.Atoi(strings.TrimSpace(bdm.ThroughputRaw)); err == nil {
 		bdm.Throughput = n
 	}
 
 	present := hasNoDevice || bdm.DeviceName != "" || bdm.VirtualName != "" ||
 		bdm.SnapshotID != "" || bdm.VolumeType != "" ||
-		params[p+"Ebs.VolumeSize"] != "" || params[p+"Ebs.Iops"] != "" ||
-		params[p+"Ebs.Throughput"] != "" || params[p+"Ebs.Encrypted"] != "" ||
-		params[p+"Ebs.DeleteOnTermination"] != ""
+		bdm.VolumeSizeRaw != "" || bdm.IOPSRaw != "" ||
+		bdm.ThroughputRaw != "" || params[p+"Ebs.Encrypted"] != "" ||
+		bdm.DeleteOnTermination != ""
 	return bdm, present
+}
+
+// ec2NamesEbsMember reports whether a mapping carries any member of the Ebs
+// structure.
+//
+// It is what scopes the "you must specify either a snapshot ID or a volume size"
+// refusal. AWS's sentence lives on EbsBlockDevice.VolumeSize — a member *of* the Ebs
+// structure — so a mapping that carries no Ebs structure at all names no EBS block
+// device for the requirement to have a subject, and substrate keeps applying its 8 GiB
+// default to it. A mapping that names Ebs.VolumeType and nothing else is
+// unambiguously configuring a volume and has given neither of the two things one of
+// which is required.
+func ec2NamesEbsMember(bdm EC2BlockDeviceMapping) bool {
+	return bdm.SnapshotID != "" || bdm.VolumeType != "" || bdm.Encrypted ||
+		bdm.VolumeSizeRaw != "" || bdm.IOPSRaw != "" || bdm.ThroughputRaw != "" ||
+		bdm.DeleteOnTermination != ""
+}
+
+// ec2VolumeTypesWithoutIOPS names the volume types for which Ebs.Iops is meaningless.
+//
+// It is deliberately a refusal list rather than the allow list AWS's sentence implies.
+// The "supported for io1, io2, and gp3 volumes only" wording lives on
+// LaunchTemplateEbsBlockDeviceRequest.Iops, not on the EbsBlockDevice shape
+// RunInstances accepts, and the very same member's own paragraph — on both shapes —
+// explains what Iops means "for gp2 volumes". AWS contradicts itself within one
+// member, so substrate refuses only the three types that appear in neither the
+// supported-values list nor that paragraph, and takes the permissive reading of gp2.
+// See [ec2CheckBlockDeviceMappings] for why an *absent* type refuses nothing.
+var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "sc1": true}
+
+// ec2CheckBlockDeviceMappings returns the error EC2 raises for a block device mapping
+// it will not accept, or nil.
+//
+// Through v0.104.0 substrate accepted every mapping it could parse and materialized a
+// volume from it, so a launch AWS refuses succeeded here — the same class of defect
+// #412 closed for an empty ImageId, and worse after #666, because the mapping now
+// produces state a consumer asserts against.
+//
+// # Scope
+//
+// Only what the API model states. Per-type size and IOPS ranges are deliberately not
+// encoded even though the reference lists them: they change, and a stale range is a
+// false deny — which is worse than the silence it replaces, because a caller cannot
+// work around a refusal of a request AWS accepts. For the same reason both type-scoped
+// rules key off the **explicitly named** VolumeType rather than the resolved one:
+// substrate resolves an absent type to gp2, but on real EC2 it comes from the AMI's own
+// mapping, commonly gp3.
+//
+// Also deliberately absent: a VolumeSize smaller than the named snapshot's.
+// EC2Snapshot.VolumeSize is the literal 8 at its single producer and substrate has no
+// CreateSnapshot, so the comparison would test a constant rather than the caller's
+// request. That is a follow-up, together with InvalidSnapshot.NotFound.
+//
+// # Provenance
+//
+// Two rules are documented verbatim — the size-or-snapshot requirement on
+// EbsBlockDevice.VolumeSize and "This parameter is valid only for gp3 volumes" on
+// Throughput. The Iops rule rests on the sibling launch-template shape; see
+// [ec2VolumeTypesWithoutIOPS]. Refusing a duplicate device name and a virtualName
+// beside an Ebs member rests on **substrate's own reading** — AWS documents no rule for
+// either, and neither is a thing real EC2 can act on, since one device cannot carry two
+// volumes and an instance store device is not an EBS volume. Refusing an unparseable
+// number is substrate's own too, and it is the reason the raw strings are recorded at
+// all.
+//
+// Every message is substrate's own; AWS publishes none. The code is documented — the
+// client-error table lists InvalidBlockDeviceMapping as "A block device mapping
+// parameter is not valid. The returned message indicates the incorrect value." The
+// status is a class-level inference: the table says only that client errors are
+// "accompanied by a 400-series HTTP response code", and substrate has no code-to-status
+// table to consult.
+//
+// # Placement
+//
+// Call it after a launch template has been merged in, so a mapping that reaches a
+// launch through a template is refused at RunInstances time, and before anything is
+// written, so a refusal leaves no state behind. CreateLaunchTemplate deliberately does
+// not call it: its response carries a documented `warning` member of type
+// ValidationWarning that exists for "parameters or parameter combinations that are not
+// valid", and its Errors section lists none — so a 400 there would be substrate's
+// invention. That an invalid block device mapping belongs in that warning is
+// substrate's reading; rendering the element is a follow-up.
+func ec2CheckBlockDeviceMappings(mappings []EC2BlockDeviceMapping) *AWSError {
+	seen := make(map[string]bool, len(mappings))
+	for _, bdm := range mappings {
+		if awsErr := ec2CheckBlockDeviceMapping(bdm); awsErr != nil {
+			return awsErr
+		}
+		// Only a mapping that materializes a volume can collide: NoDevice suppresses
+		// its device and a virtualName-only mapping names an instance store device, so
+		// neither occupies the device in a way a second mapping could contend for.
+		if !ec2CreatesEBSVolume(bdm) || bdm.DeviceName == "" {
+			continue
+		}
+		if seen[bdm.DeviceName] {
+			return ec2InvalidBlockDeviceMapping("",
+				"device "+bdm.DeviceName+" is named by more than one mapping")
+		}
+		seen[bdm.DeviceName] = true
+	}
+	return nil
+}
+
+// ec2CheckBlockDeviceMapping applies the rules that concern one mapping in isolation.
+//
+// The unparseable-number checks run first: a garbage size makes every judgement below
+// meaningless, and reporting the malformed value is more use to a caller than reporting
+// a consequence of it. The virtualName conflict runs before the size requirement, since
+// a mapping combining the two is wrong in a way that naming a size would not fix.
+func ec2CheckBlockDeviceMapping(bdm EC2BlockDeviceMapping) *AWSError {
+	device := bdm.DeviceName
+	for _, num := range []struct{ member, raw string }{
+		{"Ebs.VolumeSize", bdm.VolumeSizeRaw},
+		{"Ebs.Iops", bdm.IOPSRaw},
+		{"Ebs.Throughput", bdm.ThroughputRaw},
+	} {
+		if num.raw == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(strings.TrimSpace(num.raw)); err != nil {
+			return ec2InvalidBlockDeviceMapping(device,
+				fmt.Sprintf("%s value %q is not an integer", num.member, num.raw))
+		}
+	}
+
+	if bdm.NoDevice {
+		// A suppressed device carries nothing to validate. AWS documents NoDevice
+		// beside the other members rather than as exclusive of them, so a mapping
+		// naming both is not refused — it suppresses the device, which is what
+		// ec2CreatesEBSVolume already decided.
+		return nil
+	}
+
+	if bdm.VirtualName != "" && ec2NamesEbsMember(bdm) {
+		return ec2InvalidBlockDeviceMapping(device,
+			"virtualName names an instance store device and cannot be combined with an Ebs member")
+	}
+
+	if ec2CreatesEBSVolume(bdm) && ec2NamesEbsMember(bdm) &&
+		bdm.VolumeSizeRaw == "" && bdm.SnapshotID == "" {
+		return ec2InvalidBlockDeviceMapping(device,
+			"you must specify either a snapshot ID or a volume size")
+	}
+
+	// Both type rules read the named type, never the resolved one; see
+	// [ec2CheckBlockDeviceMappings]. An absent type therefore refuses nothing.
+	volType := strings.ToLower(bdm.VolumeType)
+	if volType == "" {
+		return nil
+	}
+	if bdm.ThroughputRaw != "" && volType != "gp3" {
+		return ec2InvalidBlockDeviceMapping(device,
+			"Ebs.Throughput is valid only for gp3 volumes, not "+bdm.VolumeType)
+	}
+	if bdm.IOPSRaw != "" && ec2VolumeTypesWithoutIOPS[volType] {
+		return ec2InvalidBlockDeviceMapping(device,
+			"Ebs.Iops is not supported for "+bdm.VolumeType+" volumes")
+	}
+	return nil
+}
+
+// ec2InvalidBlockDeviceMapping returns EC2's InvalidBlockDeviceMapping error, naming
+// the offending device when the mapping has one.
+//
+// The device name is interpolated because a request can carry many mappings and the
+// code alone does not say which one was refused — the same reason
+// [ec2UnknownInstanceAttribute] interpolates its attribute. A mapping that names no
+// device gets the unqualified form rather than a stray "for ": the cross-mapping
+// duplicate check names its device in the detail instead.
+func ec2InvalidBlockDeviceMapping(device, detail string) *AWSError {
+	msg := "Invalid block device mapping: " + detail
+	if device != "" {
+		msg = "Invalid block device mapping for " + device + ": " + detail
+	}
+	return &AWSError{
+		Code:       "InvalidBlockDeviceMapping",
+		Message:    msg,
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // ec2IsRootDevice reports whether a device name names the root volume.

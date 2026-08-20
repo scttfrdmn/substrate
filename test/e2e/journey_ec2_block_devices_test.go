@@ -2,11 +2,13 @@ package e2e_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
 	emulator "github.com/scttfrdmn/substrate/emulator"
 )
@@ -224,5 +226,65 @@ func TestJourney_EC2LaunchDataVolumeSurvivesTermination(t *testing.T) {
 	if len(all.Volumes[0].Attachments) != 0 {
 		t.Fatalf("the preserved volume still reports %d attachments, want 0",
 			len(all.Volumes[0].Attachments))
+	}
+}
+
+// TestJourney_EC2InvalidBlockDeviceMappingRefused is #671 at the SDK tier, which is
+// where it matters: the point of refusing is that a consumer's IaC fails here for the
+// reason it would fail on real AWS, rather than passing here and failing there.
+//
+// The mapping names Ebs.VolumeType and no size, which AWS's EbsBlockDevice.VolumeSize
+// documents as invalid — "You must specify either a snapshot ID or a volume size."
+// Through v0.104.0 substrate accepted it and materialized an 8 GiB gp3 volume, so the
+// consumer's assertion passed against a size their request never asked for.
+func TestJourney_EC2InvalidBlockDeviceMappingRefused(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	cfg, err := journeyConfig(ts)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	client := ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
+	ctx := context.Background()
+
+	_, err = client.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId:      aws.String("ami-0abcdef1234567890"),
+		InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		BlockDeviceMappings: []ec2types.BlockDeviceMapping{{
+			DeviceName: aws.String("/dev/sdf"),
+			Ebs:        &ec2types.EbsBlockDevice{VolumeType: ec2types.VolumeTypeGp3},
+		}},
+	})
+	if err == nil {
+		t.Fatal("RunInstances succeeded; want InvalidBlockDeviceMapping")
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("RunInstances error is not an APIError: %v", err)
+	}
+	if apiErr.ErrorCode() != "InvalidBlockDeviceMapping" {
+		t.Fatalf("error code = %q, want InvalidBlockDeviceMapping (message %q)",
+			apiErr.ErrorCode(), apiErr.ErrorMessage())
+	}
+
+	// The refusal writes nothing. Without the validator's placement ahead of
+	// ensureDefaultVPC this launch left a VPC, subnet, security group, internet
+	// gateway and route table behind, which the next request in the same test would
+	// have seen.
+	vpcs, err := client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{})
+	if err != nil {
+		t.Fatalf("DescribeVpcs: %v", err)
+	}
+	if len(vpcs.Vpcs) != 0 {
+		t.Fatalf("a refused launch left %d VPCs behind, want 0", len(vpcs.Vpcs))
+	}
+	vols, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{})
+	if err != nil {
+		t.Fatalf("DescribeVolumes: %v", err)
+	}
+	if len(vols.Volumes) != 0 {
+		t.Fatalf("a refused launch materialized %d volumes, want 0", len(vols.Volumes))
 	}
 }

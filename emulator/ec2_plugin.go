@@ -498,6 +498,19 @@ func (p *EC2Plugin) runInstancesWithTags(
 		return nil, ec2MissingParameter("ImageId")
 	}
 
+	// Block device mappings are validated here for two reasons that fix the position
+	// exactly (#671). It is after the template merge above, so a mapping that reaches
+	// this launch through a template is refused at RunInstances time rather than
+	// materialized — and one validator here covers requests, templates, template
+	// versions and fleet launches alike, since a fleet reaches mappings only through a
+	// template. And it is before the ensureDefaultVPC branch below, which commits a
+	// VPC, subnet, security group, internet gateway, route table and four index
+	// mutations: a refusal past that point leaves state behind, which is worse than no
+	// validation at all because the next request in the same test sees it.
+	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings); awsErr != nil {
+		return nil, awsErr
+	}
+
 	// Auto-create default VPC/subnet if none specified.
 	if subnetID == "" {
 		vpc, subnet, err := p.ensureDefaultVPC(context.Background(), reqCtx)

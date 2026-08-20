@@ -812,11 +812,32 @@ type EC2BlockDeviceMapping struct {
 
 	// DeleteOnTermination is the raw parameter value rather than a bool, because
 	// three states are observable and a bool collapses two of them: absent (take
-	// the launch default, which is true), "true", and "false". Storing a bool here
-	// would make a mapping that explicitly preserves its volume indistinguishable
-	// from one that said nothing — the same reason
-	// [EC2LaunchTemplateData.AssociatePublicIPAddress] keeps its string.
+	// the launch default, which splits by device role — see [ec2LaunchVolumesFor]),
+	// "true", and "false". Storing a bool here would make a mapping that explicitly
+	// preserves its volume indistinguishable from one that said nothing — the same
+	// reason [EC2LaunchTemplateData.AssociatePublicIPAddress] keeps its string.
 	DeleteOnTermination string `json:"delete_on_termination,omitempty"`
+
+	// VolumeSizeRaw, IOPSRaw and ThroughputRaw are the numeric members' parameter
+	// values exactly as they arrived, kept beside the parsed ints for two reasons
+	// that the ints alone cannot serve (#671).
+	//
+	// First, a value that does not parse is otherwise indistinguishable from an
+	// absent one: Ebs.VolumeSize=60GB left VolumeSize at 0, so the mapping silently
+	// produced substrate's 8 GiB default and a consumer asserted against a value the
+	// request never asked for. Second, an *absent* size is what
+	// EbsBlockDevice.VolumeSize's "You must specify either a snapshot ID or a volume
+	// size" is about, and a literal 0 is not the same thing.
+	//
+	// They are persisted rather than derived because a launch template carries its
+	// mappings into state, and by the time a RunInstances names that template the
+	// original parameters are long gone — so the refusal has to be reconstructable
+	// from the record. Adding a field to a persisted struct is replay-safe; an older
+	// event log simply unmarshals them empty, which reads as "nothing unparseable",
+	// and that is the behavior those logs already had.
+	VolumeSizeRaw string `json:"volume_size_raw,omitempty"`
+	IOPSRaw       string `json:"iops_raw,omitempty"`
+	ThroughputRaw string `json:"throughput_raw,omitempty"`
 }
 
 // NetworkSecurityGroupIDs returns the security groups a launch from this template

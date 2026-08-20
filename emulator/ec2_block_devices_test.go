@@ -40,7 +40,7 @@ func TestEC2ParseBlockDeviceMappings(t *testing.T) {
 				"BlockDeviceMapping.1.Ebs.VolumeSize": "60",
 			},
 			want: []emulator.EC2BlockDeviceMapping{
-				{DeviceName: "/dev/xvda", VolumeSize: 60},
+				{DeviceName: "/dev/xvda", VolumeSize: 60, VolumeSizeRaw: "60"},
 			},
 		},
 		{
@@ -64,6 +64,9 @@ func TestEC2ParseBlockDeviceMappings(t *testing.T) {
 				Throughput:          250,
 				Encrypted:           true,
 				DeleteOnTermination: "false",
+				VolumeSizeRaw:       "100",
+				IOPSRaw:             "4000",
+				ThroughputRaw:       "250",
 			}},
 		},
 		{
@@ -79,9 +82,9 @@ func TestEC2ParseBlockDeviceMappings(t *testing.T) {
 				"BlockDeviceMapping.3.Ebs.VolumeSize": "50",
 			},
 			want: []emulator.EC2BlockDeviceMapping{
-				{DeviceName: "/dev/sda1", VolumeSize: 30},
-				{DeviceName: "/dev/sdf", VolumeSize: 40},
-				{DeviceName: "/dev/sdg", VolumeSize: 50},
+				{DeviceName: "/dev/sda1", VolumeSize: 30, VolumeSizeRaw: "30"},
+				{DeviceName: "/dev/sdf", VolumeSize: 40, VolumeSizeRaw: "40"},
+				{DeviceName: "/dev/sdg", VolumeSize: 50, VolumeSizeRaw: "50"},
 			},
 		},
 		{
@@ -101,7 +104,7 @@ func TestEC2ParseBlockDeviceMappings(t *testing.T) {
 			params: map[string]string{
 				"BlockDeviceMapping.1.Ebs.VolumeSize": "25",
 			},
-			want: []emulator.EC2BlockDeviceMapping{{VolumeSize: 25}},
+			want: []emulator.EC2BlockDeviceMapping{{VolumeSize: 25, VolumeSizeRaw: "25"}},
 		},
 		{
 			// NoDevice is an empty-string member on the wire, so its presence is the
@@ -137,19 +140,25 @@ func TestEC2ParseBlockDeviceMappings(t *testing.T) {
 				"BlockDeviceMapping.1.DeviceName": "/dev/sdz",
 			},
 			want: []emulator.EC2BlockDeviceMapping{
-				{DeviceName: "/dev/sda1", VolumeSize: 40},
+				{DeviceName: "/dev/sda1", VolumeSize: 40, VolumeSizeRaw: "40"},
 			},
 		},
 		{
-			// An unparseable number reads as zero rather than failing the launch, the
-			// same tolerance ec2ParseNetworkInterface gives DeviceIndex. The index is
-			// still present, so the mapping is not dropped.
+			// An unparseable number leaves the int at zero and keeps the raw string,
+			// which is what lets ec2CheckBlockDeviceMappings tell it from an absent
+			// value and refuse the launch (#671). The parser itself stays tolerant —
+			// the same tolerance ec2ParseNetworkInterface gives DeviceIndex — because
+			// the refusal is the validator's job and a template's mapping has to reach
+			// state before it can be judged at launch. This row is therefore no longer
+			// reachable through the API; it pins the parser's half of the contract.
 			name: "unparseable size",
 			params: map[string]string{
 				"BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 				"BlockDeviceMapping.1.Ebs.VolumeSize": "not-a-number",
 			},
-			want: []emulator.EC2BlockDeviceMapping{{DeviceName: "/dev/sdf"}},
+			want: []emulator.EC2BlockDeviceMapping{
+				{DeviceName: "/dev/sdf", VolumeSizeRaw: "not-a-number"},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -264,9 +273,12 @@ func TestEC2LaunchVolumes(t *testing.T) {
 			want: []wantVol{{"/dev/sda1", 8, "gp2", true}},
 		},
 		{
-			// A VirtualName alongside real Ebs members is a contradictory mapping AWS
-			// would refuse; substrate honors the EBS half rather than silently dropping
-			// a volume the caller sized.
+			// A VirtualName alongside real Ebs members is refused at the API since #671,
+			// so this row is no longer reachable through RunInstances. It stays because
+			// the materializer must be total over whatever the parser produced: a
+			// mapping written straight into state by a replayed event log, or carried by
+			// a launch template stored before the refusal existed, still reaches here,
+			// and silently dropping a volume the caller sized would be the worse answer.
 			name: "virtual name with ebs members still creates",
 			mappings: []emulator.EC2BlockDeviceMapping{
 				{DeviceName: "/dev/sdb", VirtualName: "ephemeral0", VolumeSize: 12},

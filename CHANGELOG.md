@@ -49,6 +49,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the volume ID breaking a tie, since `DescribeInstances` states its own order may vary
   but a deterministic emulator must not answer one request two ways.
 
+- **A block device mapping real EC2 refuses is now refused, with `InvalidBlockDeviceMapping`**
+  (#671). Every mapping substrate could parse was accepted and materialized, so a consumer
+  whose IaC carried an invalid mapping got a green test here and a failure on real AWS — the
+  same class of defect an empty `ImageId` used to have, and the worst kind for a tool whose
+  purpose is validating infrastructure code before it reaches AWS. Six refusals, each a 400:
+
+  - An `Ebs` structure naming neither `Ebs.VolumeSize` nor `Ebs.SnapshotId`. Documented
+    verbatim on `EbsBlockDevice.VolumeSize`: "You must specify either a snapshot ID or a
+    volume size."
+  - `Ebs.Throughput` on an explicitly named volume type other than `gp3`. Documented
+    verbatim: "This parameter is valid only for `gp3` volumes."
+  - `Ebs.Iops` on an explicitly named `standard`, `st1` or `sc1`.
+  - An unparseable numeric value for `Ebs.VolumeSize`, `Ebs.Iops` or `Ebs.Throughput`, which
+    previously read as zero — so `Ebs.VolumeSize=60GB` silently produced substrate's 8 GiB
+    default rather than failing the launch.
+  - Two mappings naming one `DeviceName`.
+  - A `VirtualName` beside any `Ebs.*` member, which asks for an instance store device and an
+    EBS volume at the same device at once.
+
+  **Both type-scoped rules key off the explicitly named `VolumeType`, never the resolved
+  one.** Substrate resolves an absent type to `gp2`, but on real EC2 it comes from the AMI's
+  own mapping — commonly `gp3` — so refusing `Throughput` on a mapping that named no type
+  would refuse a launch real EC2 accepts. For the same reason, the per-type numeric size and
+  IOPS ranges the reference lists are deliberately **not** encoded: they change, and a stale
+  range is a false deny a caller cannot work around. Nor is a `VolumeSize` compared against
+  the named snapshot's, since `EC2Snapshot.VolumeSize` is a constant at its single producer
+  and substrate has no `CreateSnapshot` — the comparison would test the constant.
+
+  A mapping carrying **no `Ebs` structure at all** — a bare `DeviceName` — is still accepted
+  and still takes the 8 GiB default: the size-or-snapshot requirement is documented on a
+  member *of* the `Ebs` structure, so with no structure it has no subject. `NoDevice` and a
+  `VirtualName`-only instance store mapping are likewise untouched, both being forms AWS
+  documents as legal.
+
+  **A refusal writes nothing.** The validator runs after the launch template merge, so a
+  mapping that reaches a launch through a template is refused at `RunInstances` time and one
+  validator covers requests, templates, template versions and fleet launches alike — a fleet
+  reaches mappings only through a template. And it runs before the default-VPC branch, which
+  commits a VPC, subnet, security group, internet gateway, route table and four index
+  mutations; a refusal past that point would leave state the next request in the same test
+  could see. `CreateLaunchTemplate` itself does not refuse: its response carries a documented
+  `warning` member of type `ValidationWarning` that exists for "parameters or parameter
+  combinations that are not valid", and its Errors section lists none.
+
+  Recording the refusal needs the raw request strings, so `EC2BlockDeviceMapping` gained
+  `VolumeSizeRaw`, `IOPSRaw` and `ThroughputRaw` — the parser previously discarded them, which
+  left an unparseable value indistinguishable from an absent one by validation time, and it is
+  also the only form that survives into a launch template, whose raw parameters are gone by
+  `RunInstances` time. Adding fields is replay-safe: an older event log unmarshals them empty.
+
+  **Provenance:** `InvalidBlockDeviceMapping` is documented in EC2's client-error table ("A
+  block device mapping parameter is not valid. The returned message indicates the incorrect
+  value."), but the HTTP status is a **class-level inference** — the table says only that
+  client errors are "accompanied by a 400-series HTTP response code" — and every per-case
+  message is substrate's own, since AWS publishes no wording. AWS documents no rule for a
+  duplicate `DeviceName` or a `VirtualName` beside `Ebs.*`; both are substrate's reading. The
+  `Ebs.Iops` refusal is a short **deny** list rather than AWS's `io1 | io2 | gp3` allow list,
+  because that "supported for … only" sentence appears on
+  `LaunchTemplateEbsBlockDeviceRequest.Iops` and not on the `EbsBlockDevice` shape
+  `RunInstances` accepts, whose same member describes what `Iops` means "for `gp2` volumes" —
+  AWS contradicts itself inside one member, so substrate refuses only the three types that
+  appear in neither list. That an invalid mapping belongs in `CreateLaunchTemplate`'s warning
+  rather than an error is substrate's reading too.
+
+  **Compatibility:** a `RunInstances`, `CreateLaunchTemplate` or fleet launch that v0.104.0
+  and earlier accepted may now fail with `InvalidBlockDeviceMapping`. The likeliest case by
+  far is a mapping naming a `VolumeType` and no size, which previously produced an 8 GiB
+  volume of that type.
+
 ### Fixed
 - **`RunInstances` omitted the `iamInstanceProfile` that `DescribeInstances` reported for the
   same instance** (#669). `runInstancesResponse` and `describeInstances` each declared their

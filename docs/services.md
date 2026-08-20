@@ -2619,7 +2619,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); `availability-zone` filter |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -3054,12 +3054,78 @@ Substrate's own choices, where the API model does not decide:
 - A volume takes the **instance's** Availability Zone, not the region's first: a
   volume must be in the same zone as the instance it is attached to, so deriving it
   any other way would produce an attachment real EC2 cannot have.
-- An unparseable number reads as zero rather than failing the launch, and the
-  mapping is still recorded.
 
-Not modeled: `Ebs.KmsKeyId` (left out rather than stored and hidden),
-`TagSpecification` scoped to `volume` (see the tag-specification note above), and
-`InvalidBlockDeviceMapping` validation.
+Not modeled: `Ebs.KmsKeyId` (left out rather than stored and hidden), and
+`TagSpecification` scoped to `volume` (see the tag-specification note above).
+
+#### A mapping AWS refuses is refused, with `InvalidBlockDeviceMapping`
+
+A launch carrying a mapping real EC2 rejects fails here too, before anything is
+written. Through the versions that first parsed these mappings, every mapping
+substrate could parse was accepted and materialized, so a consumer whose IaC carried
+an invalid mapping got a green test and a failure on real AWS — the same class of
+defect an empty `ImageId` used to have.
+
+Six refusals:
+
+| Refused | Provenance |
+|---|---|
+| An `Ebs` structure naming neither `Ebs.VolumeSize` nor `Ebs.SnapshotId` | Documented verbatim on `EbsBlockDevice.VolumeSize`: "You must specify either a snapshot ID or a volume size." |
+| `Ebs.Throughput` on an explicitly named type that is not `gp3` | Documented verbatim: "This parameter is valid only for `gp3` volumes." |
+| `Ebs.Iops` on an explicitly named `standard`, `st1` or `sc1` | The sibling launch-template shape — substrate's reading, see below |
+| An unparseable numeric value for `Ebs.VolumeSize`, `Ebs.Iops` or `Ebs.Throughput` | Substrate's own |
+| Two mappings naming one `DeviceName` | Substrate's own — AWS documents no rule |
+| A `VirtualName` beside any `Ebs.*` member | Substrate's own — AWS documents no rule |
+
+The error code is documented — EC2's client-error table lists
+`InvalidBlockDeviceMapping` as "A block device mapping parameter is not valid. The
+returned message indicates the incorrect value." The `400` is a **class-level
+inference**: the table says only that client errors are "accompanied by a 400-series
+HTTP response code", and every message is substrate's own, since AWS publishes no
+wording. Each message names the offending device, because a request can carry many
+mappings and the code alone does not say which was refused.
+
+**The scope is only what the API model states.** Per-type size and IOPS ranges are
+deliberately *not* encoded even though the reference lists them: they change, and a
+stale range is a false deny — worse than the silence it replaces, because a caller
+cannot work around a refusal of a request AWS accepts. For the same reason both
+type-scoped rules key off the **explicitly named** `VolumeType`, never the resolved
+one. Substrate resolves an absent type to `gp2`, but on real EC2 it comes from the
+AMI's own mapping, commonly `gp3`, so refusing `Throughput` on a mapping that named
+no type would refuse a launch real EC2 accepts.
+
+Three reading calls worth stating outright:
+
+- The size-or-snapshot sentence lives on `EbsBlockDevice.VolumeSize`, a member *of*
+  the `Ebs` structure. A mapping carrying **no `Ebs` structure at all** — a bare
+  `DeviceName` — names no EBS block device for the requirement to have a subject, so
+  it is still accepted and still takes substrate's 8 GiB default.
+- `Ebs.Iops` is refused by a short **deny** list rather than AWS's `io1 | io2 | gp3`
+  allow list. The "supported for `io1`, `io2`, and `gp3` volumes only" sentence is on
+  `LaunchTemplateEbsBlockDeviceRequest.Iops`, not on the `EbsBlockDevice` shape
+  `RunInstances` accepts, and the very same member's own paragraph — on both shapes —
+  explains what `Iops` means "for `gp2` volumes". AWS contradicts itself inside one
+  member, so substrate refuses only the three types that appear in neither list and
+  takes the permissive reading of `gp2`.
+- A `VolumeSize` smaller than the named snapshot's is **not** checked.
+  `EC2Snapshot.VolumeSize` is a constant at its single producer and substrate has no
+  `CreateSnapshot`, so the comparison would test that constant rather than the
+  caller's request.
+
+**A refusal writes nothing.** The validator runs after a launch template has been
+merged in — so a mapping that reaches a launch through a template is refused at
+`RunInstances` time, and one validator covers requests, templates, template versions
+and fleet launches alike, since a fleet reaches mappings only through a template —
+and before the default-VPC branch, which commits a VPC, subnet, security group,
+internet gateway, route table and four index mutations. A refusal past that point
+would leave state the next request in the same test could see.
+
+**`CreateLaunchTemplate` does not refuse.** Its response carries a documented
+`warning` member of type `ValidationWarning` that exists precisely for "parameters or
+parameter combinations that are not valid", and its Errors section lists none — so a
+`400` there would be substrate's invention. That an invalid *block device mapping*
+belongs in that warning rather than in an error is substrate's reading; rendering the
+element is not yet modeled.
 
 #### An instance reports its own block devices
 
