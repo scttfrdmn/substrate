@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.103.0] - 2026-08-20
 
 ### Fixed
 - **`RunInstances` accepted `BlockDeviceMapping.N.*` and discarded it, so a launch's storage
@@ -7030,7 +7030,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.102.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.103.0...HEAD
+[v0.103.0]: https://github.com/scttfrdmn/substrate/compare/v0.102.0...v0.103.0
 [v0.102.0]: https://github.com/scttfrdmn/substrate/compare/v0.101.0...v0.102.0
 [v0.101.0]: https://github.com/scttfrdmn/substrate/compare/v0.100.0...v0.101.0
 [v0.100.0]: https://github.com/scttfrdmn/substrate/compare/v0.99.0...v0.100.0
