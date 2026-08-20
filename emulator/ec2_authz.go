@@ -90,6 +90,61 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 	return out
 }
 
+// ec2AuthzTagResources returns every resource a CreateTags or DeleteTags request
+// names, each paired with its own tags. It returns nil for every other EC2
+// operation, which is what leaves them on buildResourceARNs' single-resource path.
+//
+// CreateTags accepts up to 1000 resource IDs of mixed types, and substrate decided
+// all of them against one ARN built from InstanceId.1 — a parameter neither
+// operation carries — so every tagging call was decided against the literal string
+// "*" (#674). A Deny scoped to one instance, subnet or security group was
+// therefore inert, and a least-privilege Allow naming those ARNs could not grant a
+// tagging call at all: resourceMatches passes the statement's Resource to
+// globMatch as the pattern, so "*" as the request resource matches only a
+// statement whose Resource itself starts with "*".
+//
+// Neither action has a *required* resource type — the Service Authorization
+// Reference marks zero of the 105 it lists for either one. Authorizing against
+// every named resource instead rests on AWS's general rule for an action naming
+// several resources, which its Organizations counterpart (#660) and RunInstances
+// (#662) already follow here, and on AWS's own scoped tagging examples, which
+// write instance/* as the Resource of an ec2:CreateTags statement and would be
+// pointless if only one resource of a batch were evaluated.
+//
+// Order is the request's own ResourceId.N order, which makes the denial message —
+// which names the first resource the policy does not allow — deterministic and
+// replay-stable.
+//
+// An ID whose prefix names no resource type substrate can tag is skipped, not
+// denied and not widened to "*". Skipping follows
+// [ec2AuthzRunInstancesResources]' rule for a resource the request does not name,
+// and it is the ID's own handler that owes the answer: AWS documents an
+// unparseable tagging ID as InvalidID — "The specified ID for the resource you are
+// trying to tag is not valid" — not AccessDenied, and substrate's handler treats
+// it as a no-op. A request naming only such IDs returns nil and is decided exactly
+// as it was before.
+func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
+	if req.Operation != "CreateTags" && req.Operation != "DeleteTags" {
+		return nil
+	}
+	acct := reqCtx.AccountID
+	region := reqCtx.Region
+	var out []authzResource
+	for _, id := range extractIndexedParams(req.Params, "ResourceId") {
+		stateKey, arnType, ok := ec2TaggableResource(reqCtx, id)
+		if !ok {
+			continue
+		}
+		out = append(out, authzResource{
+			ARN: "arn:aws:ec2:" + region + ":" + acct + ":" + arnType + "/" + id,
+			// The same state key the handler will read and write, so the tags a
+			// condition is evaluated against are the ones the call is about to change.
+			Tags: ec2AuthzTagsFor(state, stateKey),
+		})
+	}
+	return out
+}
+
 // ec2AuthzLaunchMembers is the set of resources one RunInstances request names.
 //
 // Network interfaces hold only the IDs of interfaces the request brings, not the

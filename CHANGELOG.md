@@ -185,6 +185,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously succeeded with the tags dropped; the same is true at `CreateLaunchTemplate`.
 
 ### Fixed
+- **`ec2:CreateTags` and `ec2:DeleteTags` were decided against a single `*` no matter how many
+  resources they named, so an ARN-scoped guardrail on tagging was inert** (#674). Both
+  operations name their resources in `ResourceId.N` — up to 1000 of them, of mixed types — and
+  substrate built one ARN from `InstanceId.1`, a parameter neither operation carries, so every
+  tagging call resolved to the literal string `"*"`. This is #662's defect on the tagging pair,
+  and it broke in the same two directions: `resourceMatches` passes the *statement's* `Resource`
+  to `globMatch` as the pattern, so a `Deny` naming a VPC, volume or instance never matched
+  anything and a least-privilege `Allow` naming those ARNs denied every call. A policy written
+  to keep a shared or production resource out of reach of a pipeline that re-tags everything it
+  can see read as a boundary and was not one.
+
+  Each named resource is now resolved to its own ARN and paired with its own tags, so an
+  `aws:ResourceTag` condition written about one resource cannot be satisfied by a tag on
+  another, and the permission boundary is applied to every one of them. The denial names the
+  first resource the policies do not allow, in the request's own `ResourceId.N` order.
+
+  **The ARN resource type is stated, not derived.** For five of the nine taggable types
+  substrate's state key abbreviates where AWS's ARN does not — `sg`/`security-group`,
+  `igw`/`internet-gateway`, `rtb`/`route-table`, `eip`/`elastic-ip`, `nat`/`natgateway` — so
+  string-munging the state key would have produced `arn:…:sg/sg-…`, matching no ARN a caller can
+  write. One function now returns both spellings and the tagging handler's own resolver calls it,
+  so the list of taggable resources and the list of authorizable ones cannot drift apart.
+
+  **An ID whose prefix names no resource type substrate can tag is skipped, not denied.** AWS
+  answers an unparseable tagging ID with `InvalidID` rather than `AccessDenied`, and substrate's
+  handler treats it as a no-op — and skipping is the only safe direction, since widening to `*`
+  would hand the caller the one resource a broad `Allow` matches. A call naming only such IDs is
+  decided against a single `*`, exactly as before.
+
+  **`aws:RequestTag/{key}` is now populated for a direct tagging call**, which had to land with
+  the resource resolution rather than after it. `addRequestTags` read only
+  `TagSpecification.N.Tag.M.Key`/`.Value`; `CreateTags` and `DeleteTags` send
+  `Tag.N.Key`/`Tag.N.Value`, so the key was absent for every tagging call. On its own that was
+  inert — the statement never matched the resource anyway — but resolving the ARNs without it
+  would have converted the false allow into a false *deny*: AWS's documented "tag only with
+  these keys and values" policies would finally match the resource and then fail on the missing
+  condition key. The pre-existing `TagSpecification` walk is untouched, including its #468 rule
+  of not filtering by resource type. `DeleteTags` treats a tag's value as optional, so a request
+  naming only a key records the empty string — indistinguishable from an absent key to every
+  condition operator, including `Null`.
+
+  A refusal tags nothing at all, including the resources the policy would have allowed:
+  authorization runs before the handler, which extends the all-or-nothing shape `CreateTags`'
+  reserved-key and tag-limit checks already have.
+
+  **Provenance:** neither action has a required resource type — the Service Authorization
+  Reference marks **zero of the 105** it lists for either one. Authorizing against every
+  resource named is substrate's reading of AWS's general rule for an action naming several
+  resources, supported by AWS's own scoped tagging examples, which name a resource ARN as the
+  `Resource` of an `ec2:CreateTags` statement and would be pointless if only one resource of a
+  batch were evaluated. The nine ARN formats are the reference's own. Two things AWS does and
+  substrate does not are recorded in `docs/services.md` rather than left for a reader to
+  discover: `aws:TagKeys` is populated nowhere, so the `ForAllValues:StringEquals` form several
+  of AWS's `DeleteTags` examples use cannot be satisfied; and the second `ec2:CreateTags`
+  authorization pass AWS performs when a resource-creating action carries tags, keyed on
+  `ec2:CreateAction`, is not modelled.
+
+  **Compatibility:** a multi-resource `CreateTags` or `DeleteTags` that a broad `Allow` carried
+  in v0.104.0 and earlier may now be denied — by an ARN-scoped `Deny` that was previously inert,
+  by a permission boundary, or by an `aws:ResourceTag` condition now evaluated against each
+  resource's own tags. An `aws:RequestTag` condition on a tagging call now evaluates against keys
+  that were previously absent, which can change the decision in either direction. Callers whose
+  credentials resolve to no IAM entity are unaffected, as enforcement remains opt-in.
+
 - **`RunInstances` omitted the `iamInstanceProfile` that `DescribeInstances` reported for the
   same instance** (#669). `runInstancesResponse` and `describeInstances` each declared their
   own local `ec2InstanceItem`, and the copies had drifted a second time after #444: only
