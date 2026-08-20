@@ -500,7 +500,7 @@ type authzResource struct {
 //
 // Almost every AWS operation names one resource, and for those this returns
 // exactly one pair — [buildResourceARN] plus the tags [AuthController.addResourceTags]
-// reads. Two operations are exceptions:
+// reads. Three operations are exceptions:
 //
 //   - `organizations:MoveAccount` names an account, a source parent and a
 //     destination parent, all three marked required by the Service Authorization
@@ -510,6 +510,9 @@ type authzResource struct {
 //     interfaces alongside the instance it creates — five required resource
 //     types, the most of any EC2 action — and was decided against a single ARN
 //     built from InstanceId.1, which a launch never carries (#662).
+//   - `ec2:CreateTags` and `ec2:DeleteTags` name up to 1000 resources of mixed
+//     types in ResourceId.N, and were decided against that same absent
+//     InstanceId.1 — so against "*" (#674).
 //
 // Each exception is gated on len(multi) > 0, which is what keeps every other
 // operation of those two services on the single-resource path below.
@@ -525,6 +528,9 @@ func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSReque
 	}
 	if req.Service == "ec2" {
 		if multi := ec2AuthzRunInstancesResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+		if multi := ec2AuthzTagResources(a.state, reqCtx, req); len(multi) > 0 {
 			return multi
 		}
 	}
@@ -553,9 +559,10 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 		return "arn:aws:iam::" + acct + ":*"
 	case "ec2":
 		// RunInstances does not reach here: it names five resources and is resolved
-		// by [ec2AuthzRunInstancesResources] (#662). What is left is the operations
-		// that name an instance by ID — and everything else, including a CreateTags
-		// naming several ResourceId.N, which still resolves to "*".
+		// by [ec2AuthzRunInstancesResources] (#662). Nor does a CreateTags or
+		// DeleteTags naming any resource substrate can tag, resolved by
+		// [ec2AuthzTagResources] (#674). What is left is the operations that name an
+		// instance by ID — and everything else, which still resolves to "*".
 		if id := req.Params["InstanceId.1"]; id != "" {
 			return "arn:aws:ec2:" + region + ":" + acct + ":instance/" + id
 		}
@@ -872,6 +879,25 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 			if !found {
 				break
 			}
+		}
+		// A direct CreateTags or DeleteTags carries no TagSpecification: its tags are
+		// Tag.N.Key / Tag.N.Value, the spelling [extractEC2Tags] reads. The walk above
+		// found none of them, so aws:RequestTag/* was empty for every tagging call, and
+		// AWS's own documented CreateTags policies — which condition on exactly that key
+		// — could not be satisfied. Resolving the resource ARNs those policies name
+		// (#674) without this would have turned their false allow into a false deny: the
+		// statement would finally match the resource and then fail on the missing key.
+		//
+		// DeleteTags treats a tag's value as optional, so a request that names only a key
+		// records an empty value here. That is not a new denial: [conditionMatches] reads
+		// an absent key as the empty string too, so the two are indistinguishable to
+		// every operator, including Null.
+		for i := 1; ; i++ {
+			k := req.Params[fmt.Sprintf("Tag.%d.Key", i)]
+			if k == "" {
+				break
+			}
+			condCtx["aws:RequestTag/"+k] = req.Params[fmt.Sprintf("Tag.%d.Value", i)]
 		}
 
 	case "lambda":

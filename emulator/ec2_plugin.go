@@ -2472,6 +2472,57 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// ec2TaggableResource resolves a taggable EC2 resource ID to the state key its record
+// lives under and the resource type its ARN names, reporting whether the ID's prefix
+// names a resource type substrate can tag at all.
+//
+// One switch answers both because for five of the nine prefixes the two spellings
+// differ: substrate's state keys abbreviate where the Service Authorization Reference's
+// ARN formats do not — sg/security-group, igw/internet-gateway, rtb/route-table,
+// eip/elastic-ip, nat/natgateway. Deriving one from the other by string-munging would
+// produce arn:aws:ec2:…:sg/sg-…, which matches no ARN a caller can write, so the
+// authorization decision (#674) needs the ARN type stated rather than inferred. Keeping
+// the pair in one place is what stops the tagging handler's list of taggable resources
+// and the authorizer's from drifting apart.
+//
+// The ARN type is a bare resource type, not a whole ARN: the caller supplies the
+// partition, region and account, and all nine of these ARN formats are
+// region-and-account qualified — none has the image ARN's deliberately empty account
+// field.
+func ec2TaggableResource(reqCtx *RequestContext, id string) (stateKey, arnType string, ok bool) {
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	switch {
+	case strings.HasPrefix(id, "i-"):
+		return "instance:" + scope + "/" + id, "instance", true
+	case strings.HasPrefix(id, "vpc-"):
+		return "vpc:" + scope + "/" + id, "vpc", true
+	case strings.HasPrefix(id, "subnet-"):
+		return "subnet:" + scope + "/" + id, "subnet", true
+	case strings.HasPrefix(id, "sg-"):
+		return "sg:" + scope + "/" + id, "security-group", true
+	case strings.HasPrefix(id, "igw-"):
+		return "igw:" + scope + "/" + id, "internet-gateway", true
+	case strings.HasPrefix(id, "rtb-"):
+		return "rtb:" + scope + "/" + id, "route-table", true
+	case strings.HasPrefix(id, "eipalloc-"):
+		// elastic-ip, and the ARN carries the allocation ID — which is the ID CreateTags
+		// takes for an address, so no translation is needed here either.
+		return "eip:" + scope + "/" + id, "elastic-ip", true
+	case strings.HasPrefix(id, "nat-"):
+		// natgateway, unhyphenated, alone among the nine.
+		return "nat:" + scope + "/" + id, "natgateway", true
+	case strings.HasPrefix(id, "vol-"):
+		// Volumes were the one taggable resource with no arm here, so CreateTags on a
+		// vol- ID fell through to the default and answered <return>true</return> having
+		// written nothing (#670). Nothing else needed changing:
+		// [EC2Plugin.applyTagsToResource] is type-agnostic — it reads and writes the
+		// record's "tags" JSON member — and [EC2Volume.Tags] already serializes there.
+		return ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, id), "volume", true
+	default:
+		return "", "", false
+	}
+}
+
 // ec2TaggableStateKey returns the state key for a taggable resource ID, and whether
 // the ID's prefix names a resource type substrate can tag at all.
 //
@@ -2480,34 +2531,8 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 // disagreed about which IDs resolve, CreateTags would either check a resource it does
 // not tag or tag one it did not check.
 func ec2TaggableStateKey(reqCtx *RequestContext, id string) (string, bool) {
-	scope := reqCtx.AccountID + "/" + reqCtx.Region
-	switch {
-	case strings.HasPrefix(id, "i-"):
-		return "instance:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "vpc-"):
-		return "vpc:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "subnet-"):
-		return "subnet:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "sg-"):
-		return "sg:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "igw-"):
-		return "igw:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "rtb-"):
-		return "rtb:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "eipalloc-"):
-		return "eip:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "nat-"):
-		return "nat:" + scope + "/" + id, true
-	case strings.HasPrefix(id, "vol-"):
-		// Volumes were the one taggable resource with no arm here, so CreateTags on a
-		// vol- ID fell through to the default and answered <return>true</return> having
-		// written nothing (#670). Nothing else needed changing:
-		// [EC2Plugin.applyTagsToResource] is type-agnostic — it reads and writes the
-		// record's "tags" JSON member — and [EC2Volume.Tags] already serializes there.
-		return ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, id), true
-	default:
-		return "", false
-	}
+	stateKey, _, ok := ec2TaggableResource(reqCtx, id)
+	return stateKey, ok
 }
 
 // resourceTags returns the tags currently on the resource named by id, and whether the

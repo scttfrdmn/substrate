@@ -2666,8 +2666,8 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` ID like [any other taggable ID](#a-volume-carries-tags) |
-| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` ID like [any other taggable ID](#a-volume-carries-tags); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 
 ### RunInstances requires a resolvable AMI
 
@@ -3223,7 +3223,16 @@ Two substrate choices, where the API model does not decide:
   claim rests on this; a deterministic emulator answering one request two ways would
   break the guarantee the project exists for.
 
-### A launch is authorized against every resource it names
+### Every resource a request names is authorized
+
+Three EC2 operations name more than one resource, and each is decided against all of
+them: `RunInstances`, and the tagging pair `CreateTags`/`DeleteTags`. The rule is the
+service-agnostic one Organizations'
+[`MoveAccount` note](#a-request-naming-several-resources-is-authorized-against-every-one)
+states; these are EC2's instances of it. Every other EC2 operation still resolves to
+one ARN.
+
+#### A launch is authorized against every resource it names
 
 `RunInstances` is the EC2 action the Service Authorization Reference marks with the
 most required resource types — **`image`, `instance`, `network-interface`,
@@ -3286,6 +3295,69 @@ Not covered:
 - **The [fleet](#seeding-ec2-fleet-partial-fulfillment) path**, which launches
   instances internally without going through the API's authorization pipeline, so no
   policy applies to it.
+
+#### Tagging is authorized against every resource it names
+
+`CreateTags` and `DeleteTags` accept up to 1000 resource IDs in `ResourceId.N`, of
+mixed types, and the caller's policies are evaluated against every one of them. A
+`Deny` naming any single resource refuses the whole call, and the denial names that
+resource — so a policy written to keep a shared VPC or a production volume out of
+reach of a pipeline that re-tags everything it can see is a boundary. In the other
+direction, a least-privilege `Allow` listing the ARNs a call touches permits it; a
+policy missing one refuses the call and says which ARN to add. A permission boundary
+applies to every resource named, and each ARN is matched against the tags of the
+resource *it* names.
+
+Both actions have **no required resource type at all** — the Service Authorization
+Reference marks zero of the 105 it lists for either one. Authorizing against every
+resource named is therefore substrate's reading of AWS's general rule for an action
+naming several resources, supported by AWS's own scoped tagging examples, which write
+a resource ARN as the `Resource` of an `ec2:CreateTags` statement and would be
+pointless if only one resource of a batch were evaluated. The two actions resolve
+identically; they differ only in condition-key surface, and neither difference —
+`DeleteTags` carries no `ec2:CreateAction` — is modelled.
+
+The ARN a caller writes uses the resource type the reference documents, which for five
+of the nine taggable types is *not* the abbreviation substrate's own IDs suggest:
+
+| ID prefix | ARN resource type |
+|---|---|
+| `i-` | `instance` |
+| `vol-` | `volume` |
+| `vpc-` | `vpc` |
+| `subnet-` | `subnet` |
+| `sg-` | `security-group` |
+| `igw-` | `internet-gateway` |
+| `rtb-` | `route-table` |
+| `eipalloc-` | `elastic-ip` |
+| `nat-` | `natgateway` |
+
+An ID whose prefix names none of those is **skipped, not denied**: substrate's handler
+treats such an ID as a no-op, and AWS answers an unparseable tagging ID with `InvalidID`
+("The specified ID for the resource you are trying to tag is not valid") rather than
+`AccessDenied`. Skipping is also the only safe direction — widening it to `*` would hand
+the caller the one resource a broad `Allow` matches. A call naming *only* such IDs is
+decided against a single `*`, as every other EC2 operation is.
+
+`aws:RequestTag/{key}` is populated from the tags a tagging call carries
+(`Tag.N.Key`/`Tag.N.Value`), so the "tag only with the keys and values we prescribe"
+condition AWS's tagging guardrails are written around evaluates. `DeleteTags` treats a
+tag's value as optional, and a request naming only a key records the empty string —
+indistinguishable from an absent key to every condition operator, including `Null`.
+
+The refusal is whole: authorization runs before the handler, so a call that names one
+resource the policy denies tags **none** of them — the same all-or-nothing shape the
+[reserved-key](#reserved-tag-keys) and [tag-limit](#the-50-tag-per-resource-limit)
+checks already have.
+
+Not covered:
+
+- **`aws:TagKeys`**, which substrate populates nowhere, so the
+  `ForAllValues:StringEquals` form several of AWS's `DeleteTags` examples use cannot be
+  satisfied.
+- **The second authorization pass** AWS performs on `ec2:CreateTags` when a
+  resource-creating action carries tags, keyed on `ec2:CreateAction`. Tag-on-create is
+  authorized here as the creating action alone.
 
 ### Instance attributes
 

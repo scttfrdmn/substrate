@@ -691,10 +691,11 @@ func TestEC2_Authz_ImageARNCarriesNoAccountID(t *testing.T) {
 	assert.Equal(t, ec2AuthzImageARN, deniedResource(t, err))
 }
 
-// TestEC2_Authz_SingleResourceOperationsAreUnchanged pins that only RunInstances
-// takes the multi-resource path. Every other EC2 operation keeps the decision it
-// had before #662 — this change is about resolving a launch's resources, not
-// about tightening EC2 as a whole.
+// TestEC2_Authz_SingleResourceOperationsAreUnchanged pins which operations take the
+// multi-resource path: RunInstances (#662) and the two tagging operations (#674),
+// and nothing else. Every other EC2 operation keeps the decision it had before —
+// these changes are about resolving the resources a request names, not about
+// tightening EC2 as a whole.
 func TestEC2_Authz_SingleResourceOperationsAreUnchanged(t *testing.T) {
 	instanceARN := "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":instance/i-0abc"
 	tests := []struct {
@@ -716,11 +717,13 @@ func TestEC2_Authz_SingleResourceOperationsAreUnchanged(t *testing.T) {
 			instanceARN,
 		},
 		{
-			// CreateTags naming several resources still resolves to one ARN; that is
-			// the follow-up #662 scopes out, and this row records today's answer.
-			"CreateTags resolves to \"*\"",
+			// CreateTags with no ResourceId at all names nothing, so it stays on the
+			// single-resource path. The multi-resource form it used to take here — two
+			// ResourceId.N resolving to the one ARN "*" — was the follow-up #662 scoped
+			// out, and #674 closed it; see TestEC2_TagAuthz_ScopedDenyOnAnyNamedResourceBlocks.
+			"a CreateTags naming no resource resolves to \"*\"",
 			"CreateTags",
-			map[string]string{"ResourceId.1": ec2AuthzSubnet, "ResourceId.2": ec2AuthzSG},
+			map[string]string{"Tag.1.Key": "Env", "Tag.1.Value": "test"},
 			"*",
 		},
 		{
