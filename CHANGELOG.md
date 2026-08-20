@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`ec2:RunInstances` was authorized against one resource ARN a launch never carries, so an
+  ARN-scoped `Deny` had no effect** (#662). `buildResourceARN`'s `ec2` arm derived its ARN from
+  `InstanceId.1` — a parameter no launch request has — so every `RunInstances` was decided
+  against the literal string `"*"`. The Service Authorization Reference marks **five** required
+  resource types for the action (`image`, `instance`, `network-interface`, `security-group`,
+  `subnet`) and evaluates the caller's policies against every one of them.
+
+  Resolving to `"*"` broke the decision in both directions, because `resourceMatches` passes the
+  *statement's* `Resource` entry to `globMatch` as the pattern and the request's resource as the
+  value. A policy allowing the action on `"*"` beside a `Deny` scoped to one subnet, AMI or
+  security-group ARN matched the `Allow` and never the `Deny`: a guardrail written to keep
+  workloads out of a private or shared subnet read as a boundary and was not one. In the other
+  direction, a least-privilege policy naming exactly the five documented ARNs matched nothing,
+  so it refused every launch — the error a consumer would hit first, and the one that makes the
+  false allow look like the safe configuration.
+
+  A launch now resolves every resource it names — the AMI, the subnet, each security group, each
+  network interface it brings by ID, and the instance — and all of the caller's policies must
+  allow the action against all of them, with the permission boundary applied to each. Each ARN
+  is matched against the tags of the resource it names, so an `aws:ResourceTag` condition
+  written about the subnet cannot be satisfied by a tag on the AMI. The denial names the first
+  resource the policies do not allow, in a fixed order of image, subnet, security groups,
+  network interfaces, instance, which is the only place the missing ARN surfaces. The AMI's ARN
+  carries no account ID, the format the reference gives, because an AMI is shareable; the
+  instance and a launch-created interface are wildcards, since neither ID exists when the
+  decision is made. Resources a launch template supplies are authorized as if the request had
+  named them, under the same field-by-field precedence the launch itself uses — AWS states this
+  rule only in `CreateFleet`'s description — and a template that cannot be read contributes
+  nothing rather than turning a missing template into a denial. A resource the request omits is
+  skipped rather than resolved to `"*"`, which would widen the policy the caller wrote, and a
+  request naming none of them is decided exactly as it was before, as is every other EC2
+  operation.
+
+  **Compatibility:** a `RunInstances` request that an ARN-scoped `Deny` previously allowed is
+  now denied — that is the false allow being closed. A least-privilege policy naming the five
+  required ARNs previously denied every launch and now permits one. A policy allowing the action
+  on `"*"` with no `Deny` is unaffected, and callers whose credentials resolve to no IAM entity
+  remain unenforced. Not covered, and documented as such: `volume` and the launch-template ARN
+  (neither is marked required for the action), the EC2 condition keys, a launch whose subnet and
+  security group come from the default VPC — resolved after the decision — and the fleet path,
+  which never reaches the authorization pipeline.
+
 ## [v0.103.0] - 2026-08-20
 
 ### Fixed
