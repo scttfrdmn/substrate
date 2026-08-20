@@ -1,10 +1,13 @@
 package emulator_test
 
 import (
+	"context"
 	"encoding/xml"
 	"io"
+	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +68,11 @@ func TestAccessDeniedCodeFor_TracksTheWireProtocol(t *testing.T) {
 		// match. Config was in exactly that state when its plugin landed (#580).
 		{"config is json rpc", "config", "", "AccessDeniedException"},
 		{"config is json rpc with a body", "config", "application/x-amz-json-1.1", "AccessDeniedException"},
+
+		// Pricing, which was in that same state until #653: its plugin reported
+		// AccessDeniedException for its own refusals while the generic gate, called
+		// with no Content-Type, refused the same caller with the bare XML code.
+		{"pricing is json rpc", "pricing", "", "AccessDeniedException"},
 		{"lambda is rest json", "lambda", "application/json", "AccessDeniedException"},
 		{"apigateway is rest json", "apigateway", "application/json", "AccessDeniedException"},
 
@@ -113,6 +121,63 @@ func TestAccessDenied_IAMPluginAgreesWithTheGenericGate(t *testing.T) {
 	assert.Equal(t, emulator.AccessDeniedCodeForTest("iam", ""),
 		emulator.IAMAccessDeniedCodeForTest,
 		"the IAM plugin's denial code must be the one its protocol implies")
+}
+
+// TestAccessDenied_PricingPluginAgreesWithTheGenericGate is the IAM assertion
+// above, for the service #653 reports. The Price List plugin builds its own
+// denials from pricingErrAccessDenied, so a service missing from
+// serviceErrorProtocols left substrate reporting two codes for one outcome on one
+// service — #595's complaint restated, and the exact shape the IAM test exists to
+// prevent.
+func TestAccessDenied_PricingPluginAgreesWithTheGenericGate(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, emulator.AccessDeniedCodeForTest("pricing", ""),
+		emulator.PricingAccessDeniedCodeForTest,
+		"the Price List plugin's denial code must be the one its protocol implies")
+}
+
+// TestAccessDenied_EveryRegisteredPluginHasAnErrorProtocol is the test that could
+// have seen #653 coming, and the reason neither #580 nor #653 was caught by the
+// coverage already here.
+//
+// TestAccessDeniedCode_MatchesTheServiceErrorProtocol asserts a property over
+// serviceErrorProtocols by iterating *that map*, so a service absent from it is
+// invisible to the test: there is no entry to iterate. Both config (#580) and
+// pricing (#653) sat in exactly that blind spot, taking errorProtocolFor's final
+// errProtoQueryXML default and refusing a JSON caller with a code its SDK cannot
+// match — AuthController.CheckAccess calls accessDeniedCodeFor(service, "") with
+// no Content-Type, so the Content-Type sniff cannot rescue them either.
+//
+// The fix is to drive the assertion from the *plugin registry* instead. A plugin
+// that lands without an entry now fails here, whatever its name.
+func TestAccessDenied_EveryRegisteredPluginHasAnErrorProtocol(t *testing.T) {
+	t.Parallel()
+
+	state := emulator.NewMemoryStateManager()
+	tc := emulator.NewTimeController(time.Now())
+	registry := emulator.NewPluginRegistry()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	store := emulator.NewEventStore(
+		emulator.DefaultConfig().EventStore.ToEventStoreConfig(),
+		emulator.WithTimeController(tc))
+	require.NoError(t, emulator.RegisterDefaultPlugins(
+		context.Background(), registry, state, tc, logger, store, nil))
+
+	classified := make(map[string]bool)
+	for _, svc := range emulator.RegisteredErrorProtocolServicesForTest() {
+		classified[svc] = true
+	}
+
+	names := registry.Names()
+	require.NotEmpty(t, names, "the registry must hold plugins for this to assert anything")
+	for _, name := range names {
+		assert.True(t, classified[name],
+			"plugin %q has no serviceErrorProtocols entry, so its authorization "+
+				"denials fall back to the XML AccessDenied regardless of the "+
+				"protocol it actually speaks; add %q to serviceErrorProtocols in "+
+				"emulator/error_protocol.go, classified by the \"protocol\" field "+
+				"of its botocore service model", name, name)
+	}
 }
 
 // TestAccessDenied_BothGatesAgree is the test #595 asks for by name: an identity

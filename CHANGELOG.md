@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An authorization denial on `pricing` reported the XML `AccessDenied`, which the Price
+  List SDK cannot parse — and no test could see a plugin in that state** (#653). The generic
+  gate derives its denial code from the service's wire protocol (#595), reading
+  `serviceErrorProtocols`. It is called with no Content-Type, so a service absent from that
+  map cannot be rescued by the Content-Type sniff either and takes the final XML default.
+  `pricing` was absent. Its own plugin already reported `AccessDeniedException` for the
+  refusals it raises itself, so substrate emitted **two codes for one outcome on one
+  service** — the drift #595 exists to prevent, one level down.
+
+  `pricing` is now classified as JSON RPC, which its model states (`"protocol": "json"`,
+  jsonVersion 1.1, targetPrefix `AWSPriceListService`) and its own `AccessDeniedException`
+  shape corroborates. The shape is declared on `GetPriceListFileUrl` and `ListPriceLists`
+  but not on `GetProducts`, the operation the report names, so for `GetProducts` neither
+  spelling is modeled and the protocol rule alone decides it.
+
+  The second half is why this survived at all. The property test guarding the mapping
+  iterated `serviceErrorProtocols` itself, so a service missing from the map had no entry to
+  iterate and was invisible to it — `config` sat in the same blind spot until #580. The
+  assertion is now driven from the **plugin registry**: every plugin `RegisterDefaultPlugins`
+  registers must have an entry, and a new plugin that lands without one fails with a message
+  naming it and saying what to add.
+
 ## [v0.102.0] - 2026-08-16
 
 ### Fixed

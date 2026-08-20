@@ -141,17 +141,25 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"kms":              errProtoJSONRPC,
 	"logs":             errProtoJSONRPC,
 	"organizations":    errProtoJSONRPC,
-	"redshift-data":    errProtoJSONRPC,
-	"sagemaker":        errProtoJSONRPC,
-	"secretsmanager":   errProtoJSONRPC,
-	"servicequotas":    errProtoJSONRPC,
-	"sqs":              errProtoJSONRPC,
-	"ssm":              errProtoJSONRPC,
-	"states":           errProtoJSONRPC,
-	"tagging":          errProtoJSONRPC,
-	"timestream":       errProtoJSONRPC,
-	"transfer":         errProtoJSONRPC,
-	"wafv2":            errProtoJSONRPC,
+	// pricing is "protocol": "json" with jsonVersion 1.1 and the targetPrefix
+	// AWSPriceListService, and its model declares an AccessDeniedException shape
+	// carrying "exception": true — the suffixed spelling this arm produces. That
+	// shape is declared on GetPriceListFileUrl and ListPriceLists but *not* on
+	// GetProducts, the operation #653 reports, so for GetProducts neither code is
+	// modeled and the protocol rule alone decides it; the shape corroborates the
+	// spelling rather than supplying it.
+	"pricing":        errProtoJSONRPC,
+	"redshift-data":  errProtoJSONRPC,
+	"sagemaker":      errProtoJSONRPC,
+	"secretsmanager": errProtoJSONRPC,
+	"servicequotas":  errProtoJSONRPC,
+	"sqs":            errProtoJSONRPC,
+	"ssm":            errProtoJSONRPC,
+	"states":         errProtoJSONRPC,
+	"tagging":        errProtoJSONRPC,
+	"timestream":     errProtoJSONRPC,
+	"transfer":       errProtoJSONRPC,
+	"wafv2":          errProtoJSONRPC,
 
 	// REST-JSON.
 	"account":         errProtoRESTJSON,
