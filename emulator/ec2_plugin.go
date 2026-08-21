@@ -138,6 +138,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.createTags(ctx, req)
 	case "DeleteTags":
 		return p.deleteTags(ctx, req)
+	case "DescribeTags":
+		return p.describeTags(ctx, req)
 	case "ModifyInstanceAttribute":
 		return p.modifyInstanceAttribute(ctx, req)
 	case "DescribeInstanceAttribute":
