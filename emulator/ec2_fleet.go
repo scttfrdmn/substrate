@@ -795,6 +795,9 @@ func (p *EC2Plugin) createFleetResponse(fleet *EC2Fleet) (*AWSResponse, error) {
 func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	ids := extractIndexedParams(req.Params, "FleetId")
+	if err := ec2FleetFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 
 	keys, err := p.state.List(goCtx, ec2Namespace, "fleet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")

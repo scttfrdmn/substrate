@@ -3396,10 +3396,15 @@ func TestEC2_DescribeInstances_FilterOrderIndependent(t *testing.T) {
 	assert.Equal(t, 0, count(map[string]string{
 		"Filter.1.Name": "tag:k", "Filter.1.Value.1": "other",
 	}))
-	// Unknown filter key matches nothing (does not silently pass).
-	assert.Equal(t, 0, count(map[string]string{
+	// An undocumented filter name is refused (#687). It used to match nothing, which
+	// count() cannot tell apart from a refusal — an error document decodes to zero
+	// instances — so this asserts the status and code rather than the count.
+	status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+		"Action":        "DescribeInstances",
 		"Filter.1.Name": "some-unknown-filter", "Filter.1.Value.1": "x",
-	}))
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidParameterValue", code)
 	_ = id
 }
 
