@@ -199,20 +199,44 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 // Call it after a launch template has been merged in, so a mapping that reaches a
 // launch through a template is refused at RunInstances time, and before anything is
 // written, so a refusal leaves no state behind. CreateLaunchTemplate deliberately does
-// not call it: its response carries a documented `warning` member of type
+// not refuse: its response carries a documented `warning` member of type
 // ValidationWarning that exists for "parameters or parameter combinations that are not
 // valid", and its Errors section lists none — so a 400 there would be substrate's
-// invention. That an invalid block device mapping belongs in that warning is
-// substrate's reading; rendering the element is a follow-up.
+// invention. It reports the same problems through that member instead, which is what
+// [ec2CollectBlockDeviceMappings] is for.
 func ec2CheckBlockDeviceMappings(
 	mappings []EC2BlockDeviceMapping,
 	resolveSnapshot func(string) (EC2Snapshot, bool),
 ) *AWSError {
+	if problems := ec2CollectBlockDeviceMappings(mappings, resolveSnapshot); len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+// ec2CollectBlockDeviceMappings returns every problem the mapping rules find, in the
+// order [ec2CheckBlockDeviceMappings] would have hit them, so its first element is
+// exactly what that function refuses with.
+//
+// The list exists because CreateLaunchTemplate's `warning` member holds one — AWS's
+// ValidationWarning is "an error code and an error message […] for each issue that's
+// found", plural — while RunInstances refuses with a single error. Collecting is the
+// primitive and refusing is the thin wrapper, rather than the other way round: a
+// first-error function cannot be widened into a list without losing every problem after
+// the first, which is the whole of what a caller wants from a warning (#693).
+//
+// The elements are [AWSError] values rather than a warning-shaped type so that both
+// doors report byte-identical codes and messages by construction — a mapping refused at
+// RunInstances and the same mapping warned about at CreateLaunchTemplate cannot drift.
+// [ec2ValidationWarningFor] converts them at the wire boundary.
+func ec2CollectBlockDeviceMappings(
+	mappings []EC2BlockDeviceMapping,
+	resolveSnapshot func(string) (EC2Snapshot, bool),
+) []*AWSError {
+	var problems []*AWSError
 	seen := make(map[string]bool, len(mappings))
 	for _, bdm := range mappings {
-		if awsErr := ec2CheckBlockDeviceMapping(bdm, resolveSnapshot); awsErr != nil {
-			return awsErr
-		}
+		problems = append(problems, ec2CollectBlockDeviceMapping(bdm, resolveSnapshot)...)
 		// Only a mapping that materializes a volume can collide: NoDevice suppresses
 		// its device and a virtualName-only mapping names an instance store device, so
 		// neither occupies the device in a way a second mapping could contend for.
@@ -220,28 +244,36 @@ func ec2CheckBlockDeviceMappings(
 			continue
 		}
 		if seen[bdm.DeviceName] {
-			return ec2InvalidBlockDeviceMapping("",
-				"device "+bdm.DeviceName+" is named by more than one mapping")
+			problems = append(problems, ec2InvalidBlockDeviceMapping("",
+				"device "+bdm.DeviceName+" is named by more than one mapping"))
+			continue
 		}
 		seen[bdm.DeviceName] = true
 	}
-	return nil
+	return problems
 }
 
-// ec2CheckBlockDeviceMapping applies the rules that concern one mapping in isolation.
+// ec2CollectBlockDeviceMapping applies the rules that concern one mapping in isolation
+// and returns every problem it finds.
 //
 // The unparseable-number checks run first: a garbage size makes every judgement below
 // meaningless, and reporting the malformed value is more use to a caller than reporting
-// a consequence of it. The virtualName conflict runs before the size requirement, since
-// a mapping combining the two is wrong in a way that naming a size would not fix. The
-// snapshot checks follow the size requirement, because a mapping that names neither a
-// size nor a snapshot has no snapshot to look up; they precede the type rules so that a
-// nonexistent snapshot is still reported for a mapping that names no volume type, which
-// is where the type rules return early.
-func ec2CheckBlockDeviceMapping(
+// a consequence of it. That is also why an unparseable number is the one problem that
+// stops the walk — every rule after it reads a parsed int, so continuing would report
+// consequences of the value rather than facts about the request. All three numeric
+// members are reported, though, not just the first: they are independent mistakes.
+//
+// The virtualName conflict runs before the size requirement, since a mapping combining
+// the two is wrong in a way that naming a size would not fix. The snapshot checks follow
+// the size requirement, because a mapping that names neither a size nor a snapshot has
+// no snapshot to look up; they precede the type rules so that a nonexistent snapshot is
+// still reported for a mapping that names no volume type, which is where the type rules
+// stop.
+func ec2CollectBlockDeviceMapping(
 	bdm EC2BlockDeviceMapping,
 	resolveSnapshot func(string) (EC2Snapshot, bool),
-) *AWSError {
+) []*AWSError {
+	var problems []*AWSError
 	device := bdm.DeviceName
 	for _, num := range []struct{ member, raw string }{
 		{"Ebs.VolumeSize", bdm.VolumeSizeRaw},
@@ -252,9 +284,12 @@ func ec2CheckBlockDeviceMapping(
 			continue
 		}
 		if _, err := strconv.Atoi(strings.TrimSpace(num.raw)); err != nil {
-			return ec2InvalidBlockDeviceMapping(device,
-				fmt.Sprintf("%s value %q is not an integer", num.member, num.raw))
+			problems = append(problems, ec2InvalidBlockDeviceMapping(device,
+				fmt.Sprintf("%s value %q is not an integer", num.member, num.raw)))
 		}
+	}
+	if len(problems) > 0 {
+		return problems
 	}
 
 	if bdm.NoDevice {
@@ -266,19 +301,19 @@ func ec2CheckBlockDeviceMapping(
 	}
 
 	if bdm.VirtualName != "" && ec2NamesEbsMember(bdm) {
-		return ec2InvalidBlockDeviceMapping(device,
-			"virtualName names an instance store device and cannot be combined with an Ebs member")
+		problems = append(problems, ec2InvalidBlockDeviceMapping(device,
+			"virtualName names an instance store device and cannot be combined with an Ebs member"))
 	}
 
 	if ec2CreatesEBSVolume(bdm) && ec2NamesEbsMember(bdm) &&
 		bdm.VolumeSizeRaw == "" && bdm.SnapshotID == "" {
-		return ec2InvalidBlockDeviceMapping(device,
-			"you must specify either a snapshot ID or a volume size")
+		problems = append(problems, ec2InvalidBlockDeviceMapping(device,
+			"you must specify either a snapshot ID or a volume size"))
 	}
 
 	if bdm.SnapshotID != "" {
 		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot); awsErr != nil {
-			return awsErr
+			problems = append(problems, awsErr)
 		}
 	}
 
@@ -286,17 +321,17 @@ func ec2CheckBlockDeviceMapping(
 	// [ec2CheckBlockDeviceMappings]. An absent type therefore refuses nothing.
 	volType := strings.ToLower(bdm.VolumeType)
 	if volType == "" {
-		return nil
+		return problems
 	}
 	if bdm.ThroughputRaw != "" && volType != "gp3" {
-		return ec2InvalidBlockDeviceMapping(device,
-			"Ebs.Throughput is valid only for gp3 volumes, not "+bdm.VolumeType)
+		problems = append(problems, ec2InvalidBlockDeviceMapping(device,
+			"Ebs.Throughput is valid only for gp3 volumes, not "+bdm.VolumeType))
 	}
 	if bdm.IOPSRaw != "" && ec2VolumeTypesWithoutIOPS[volType] {
-		return ec2InvalidBlockDeviceMapping(device,
-			"Ebs.Iops is not supported for "+bdm.VolumeType+" volumes")
+		problems = append(problems, ec2InvalidBlockDeviceMapping(device,
+			"Ebs.Iops is not supported for "+bdm.VolumeType+" volumes"))
 	}
-	return nil
+	return problems
 }
 
 // ec2CheckMappingSnapshot applies the two rules that concern the snapshot a mapping
@@ -350,7 +385,7 @@ func ec2CheckMappingSnapshot(
 //
 // VolumeSizeRaw is the test for absence rather than a zero VolumeSize, for the reason it
 // exists at all: "Ebs.VolumeSize=0" is a value a caller supplied, and an unparseable one
-// has already been refused by [ec2CheckBlockDeviceMapping].
+// has already been refused by [ec2CollectBlockDeviceMapping].
 //
 // A snapshot that does not resolve is left alone rather than defaulted, because
 // [ec2CheckMappingSnapshot] has already refused it — this pass runs after validation and

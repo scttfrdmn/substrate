@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`CreateLaunchTemplate` and `CreateLaunchTemplateVersion` report an invalid block device
+  mapping through their documented `warning` member** (#693). v0.105.0 taught `RunInstances`
+  to refuse a mapping real EC2 rejects and deliberately left both create operations
+  accepting one, because neither documents an error for it — so the mapping was swallowed in
+  silence and the caller learned about it only at launch, from a template it had already
+  shipped to every consumer of that template. The response now carries AWS's
+  `ValidationWarning` (`warning` — singular; `errorSet>item` of `{code, message}`), which the
+  reference describes as being for exactly this: "parameters or parameter combinations that
+  are not valid".
+
+  **The warning and the refusal are the same diagnosis, by construction.** Both are produced
+  by one collector over the mappings; the refusal is a thin wrapper that returns its first
+  problem. So the code and message a caller reads from `CreateLaunchTemplate` are
+  byte-identical to what `RunInstances` would have refused with — the two cannot drift into
+  describing the same mapping differently, which is the failure mode two independently
+  written message strings would have.
+
+  Where the warning is *not* the same, it is wider: it reports **every** problem, not the
+  first, because `ValidationWarning` holds a list and AWS documents one entry "for each issue
+  that's found". A template naming two bad mappings is warned about both.
+
+  A valid template's response carries **no `warning` element at all**, rather than an empty
+  one — the member is a pointer, since `encoding/xml` ignores `omitempty` on a struct value
+  and would otherwise emit `<warning></warning>` on every successful create.
+
+  **Provenance.** That an invalid *block device mapping* is what lands in `warning`, rather
+  than in a 400, is substrate's reading: AWS documents the member's purpose but never says
+  which validations use it, and neither operation's Errors section lists anything about block
+  device mappings. Dispatch on the code, not the message — the codes
+  (`InvalidBlockDeviceMapping`, `InvalidSnapshot.NotFound`) are documented and the messages
+  are substrate's own.
+
+- **A launch template's block device mappings read back through
+  `DescribeLaunchTemplateVersions`** (#693). v0.104.0 taught the template to parse and store
+  `LaunchTemplateData.BlockDeviceMapping.N` and nothing ever rendered it, and that operation
+  is the only one that returns a template's data at all — so the round trip was silently
+  lossy in the one direction a caller could check it, and a warned caller could not read back
+  the mapping the warning was about. `blockDeviceMappingSet>item` now carries `deviceName`,
+  `virtualName`, `noDevice` and the full `ebs` structure (`volumeSize`, `volumeType`, `iops`,
+  `throughput`, `snapshotId`, `encrypted`, `deleteOnTermination`). `noDevice` renders as the
+  present-and-empty element AWS documents ("To omit the device from the block device mapping,
+  specify an empty string"), and `deleteOnTermination` keeps its three states — absent, true,
+  false — rather than collapsing an unstated value to `false`.
+
 - **`CreateSnapshot`, and a snapshot with a real size** (#689). Substrate had no
   `CreateSnapshot` at all — it answered `InvalidAction` / HTTP 400 — so the only snapshots it
   held were the ones `CreateImage` mints for an AMI's root device, and every one of them
@@ -158,6 +202,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be a single rule.
 
 ### Fixed
+- **A launch-template version derived with `SourceVersion` no longer silently drops its block
+  device mappings and volume tags** (#693). `SourceVersion` is documented as the way to base a
+  new version on an existing one — "The new version inherits the same launch parameters as the
+  source version, except for parameters that you explicitly specify" — and substrate's overlay
+  copied every member *except* `BlockDeviceMappings` and `VolumeTagSpecifications`. A version
+  that specified nothing about either lost both, so a launch from the derived version came up
+  with the AMI's default 8 GiB root device and untagged volumes while the source version's
+  launched exactly as written. Nothing rendered either member, so the loss was invisible until
+  an instance was launched and its volumes inspected — which is how a consumer would find it
+  in a deployed template, not in a test.
+
+  A version that names no `SourceVersion` still inherits nothing, which is the asymmetry the
+  fix had to preserve: the overlay applies only where a source version was asked for.
+
 - **A block device mapping naming a snapshot that does not exist is refused** (#689). It was
   accepted and materialized an 8 GiB volume, so a launch real EC2 rejects succeeded here and
   produced state a consumer then asserted against — the same class of defect #671 closed for
