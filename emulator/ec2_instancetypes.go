@@ -302,12 +302,31 @@ func ec2UnmodelledLocationTypeError(value string) *AWSError {
 
 // ec2FilterValueMatches reports whether value satisfies one EC2 filter value.
 //
-// EC2's resource-filtering documentation gives the rules for API filters: "An asterisk
-// (*) matches zero or more characters, and a question mark (?) matches zero or one
-// character", a literal wildcard is escaped with a preceding backslash, and filter values
-// are case-sensitive — so the comparison here is too. DescribeInstanceTypes' reference
-// documents the form explicitly for this filter: "instance-type - The instance type (for
-// example c5.2xlarge or c5*)".
+// Since #697 this is the comparison behind *every* EC2 describe filter, so the rules below
+// are the whole family's, not one operation's. EC2's resource-filtering documentation gives
+// them for API filters: "An asterisk (*) matches zero or more characters, and a question mark
+// (?) matches zero or one character", "Your search can include the literal values of the
+// wildcard characters; you just need to escape them with a backslash before the character.
+// For example, a value of `\*amazon\?\\` searches for the literal string `*amazon?\`", and
+// "Filter values are case sensitive" — which the Filter type's own reference page repeats, so
+// the comparison here is case-sensitive too.
+//
+// **'?' matches zero or one character, and AWS's own page disagrees with itself about that.**
+// #697 reports the contradiction and this is its resolution. Using_Filtering's normative
+// "Filtering considerations" list — the one that governs the API rather than the console —
+// says "zero or one", and the console's wildcard section says "zero or one" and works it
+// through: "if you have a data set with the values prod, prods, and production, a search of
+// prod* matches all values, whereas prod? matches only prod and prods". One later sentence in
+// the CLI examples says "The ? wildcard matches exactly 1 character" — and is contradicted by
+// its own example in the next breath, which returns "the snapshots whose description is
+// 'database' or 'database' followed by one character", and by `database????` returning
+// descriptions with "database" followed by **up to** four characters. Two normative statements
+// and three worked examples say zero-or-one; one sentence says otherwise and refutes itself.
+// So zero-or-one stands, and substrate is not narrowing to the outlier sentence.
+//
+// DescribeTags' Example 4 does not settle it either way: `?ebserver` finding "webserver or
+// Webserver" is consistent with both readings, because the third string a zero-or-one '?'
+// would also match — "ebserver" — is simply not in AWS's data set.
 //
 // path.Match is not used because its '?' matches exactly one character where EC2's
 // matches zero or one, and because it treats '/' specially.

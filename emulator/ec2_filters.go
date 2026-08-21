@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -64,20 +65,87 @@ func (s ec2FilterSpec) documents(name string) bool {
 // it. Refusing here would make the checker and the extractor disagree about what the
 // request contains, which is the class of defect #686 fixed.
 //
+// The three request limits are enforced here too, for the same reason the refusal is: one
+// place, inherited by every operation that has a spec. See [ec2FilterLimitError].
+//
 // Provenance: refusal is real EC2's *observed* behavior, not its documented behavior.
 // Neither Using_Filtering nor the Filter type's reference page says what happens to an
 // unrecognized name — both are silent — so nothing in AWS's documentation settles it, and
-// [ec2InvalidFilterError] carries the reasoning for the code and message.
+// [ec2InvalidFilterError] carries the reasoning for the code and message. The *limits*, by
+// contrast, are documented; only the error they raise is substrate's choice.
 func (s ec2FilterSpec) check(params map[string]string) *AWSError {
+	totalValues := 0
 	for i := 1; ; i++ {
 		name, ok := params[fmt.Sprintf("Filter.%d.Name", i)]
 		if !ok {
 			return nil
 		}
+		if i > ec2MaxFiltersPerRequest {
+			return ec2FilterLimitError(fmt.Sprintf(
+				"a request may specify at most %d filters", ec2MaxFiltersPerRequest))
+		}
+		// Values are counted for every filter, including one whose name is skipped below:
+		// AWS's limit is on the request, and an empty name still carries its values on the
+		// wire.
+		for j := 1; ; j++ {
+			v, ok := params[fmt.Sprintf("Filter.%d.Value.%d", i, j)]
+			if !ok {
+				break
+			}
+			totalValues++
+			if totalValues > ec2MaxFilterValuesPerRequest {
+				return ec2FilterLimitError(fmt.Sprintf(
+					"a request may specify at most %d filter values in total",
+					ec2MaxFilterValuesPerRequest))
+			}
+			if len(v) > ec2MaxFilterValueLength {
+				return ec2FilterLimitError(fmt.Sprintf(
+					"a filter value may be at most %d characters", ec2MaxFilterValueLength))
+			}
+		}
 		if name == "" || s.documents(name) {
 			continue
 		}
 		return ec2InvalidFilterError(name)
+	}
+}
+
+// The request limits EC2 documents for filters, from the "Filtering considerations" list in
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Filtering.html: "You can specify
+// up to 50 filters and up to 200 total filter values in a single request" and "Filter strings
+// can be up to 255 characters in length".
+//
+// The 255 is applied to filter *values*, not names. "Filter strings" is not defined on that
+// page, but a name is bounded far below 255 by [ec2FilterSpec.documents] — every documented
+// name is a fixed short literal — so a length rule on names could only ever fire after the
+// refusal already had, and pretending otherwise would advertise a check that cannot be
+// reached. The one name that is not a fixed literal, tag:<key>, is bounded by AWS's own
+// 128-character tag-key limit.
+//
+// Length is measured in bytes rather than runes. AWS does not say which it means, and the two
+// differ only for a non-ASCII value; bytes is what the wire carries.
+const (
+	ec2MaxFiltersPerRequest      = 50
+	ec2MaxFilterValuesPerRequest = 200
+	ec2MaxFilterValueLength      = 255
+)
+
+// ec2FilterLimitError returns the error substrate raises when a request exceeds one of the
+// documented filter limits. detail states which limit and its value.
+//
+// Provenance is split, the opposite way round from [ec2InvalidFilterError]: the *limits* are
+// documented and the *error* is not. EC2's client-error tables publish no filter-limit code —
+// every `*LimitExceeded` code there names a resource quota (KeyPairLimitExceeded,
+// NatGatewayLimitExceeded, TrafficMirrorFilterLimitExceeded and so on), none of them a
+// request-shape limit — so InvalidParameterValue is the only candidate whose published gloss
+// covers this: "A value specified in a parameter is not valid, is unsupported, or cannot be
+// used… The returned message provides an explanation of the error value." A consumer must
+// dispatch on the code and not on this message.
+func ec2FilterLimitError(detail string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidParameterValue",
+		Message:    detail,
+		HTTPStatus: http.StatusBadRequest,
 	}
 }
 

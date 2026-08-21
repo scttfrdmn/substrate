@@ -693,7 +693,7 @@ func ec2VolumeMatchesFilters(vol EC2Volume, filters map[string][]string) bool {
 func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range vol.Tags {
-			if t.Key == tagKey && containsStr(values, t.Value) {
+			if t.Key == tagKey && ec2FilterAccepts(values, t.Value) {
 				return true
 			}
 		}
@@ -706,7 +706,7 @@ func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
 	// are per filter, not per list element.
 	anyAttachment := func(got func(EC2VolumeAttachment) string) bool {
 		for _, att := range vol.Attachments {
-			if containsStr(values, got(att)) {
+			if ec2FilterAccepts(values, got(att)) {
 				return true
 			}
 		}
@@ -715,20 +715,20 @@ func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
 
 	switch name {
 	case "volume-id":
-		return containsStr(values, vol.VolumeID)
+		return ec2FilterAccepts(values, vol.VolumeID)
 	case "status":
-		return containsStr(values, vol.State)
+		return ec2FilterAccepts(values, vol.State)
 	case "volume-type":
-		return containsStr(values, vol.VolumeType)
+		return ec2FilterAccepts(values, vol.VolumeType)
 	case "size":
-		return containsStr(values, strconv.Itoa(vol.Size))
+		return ec2FilterAccepts(values, strconv.Itoa(vol.Size))
 	case "availability-zone":
-		return containsStr(values, vol.AvailabilityZone)
+		return ec2FilterAccepts(values, vol.AvailabilityZone)
 	case "snapshot-id":
-		return containsStr(values, vol.SnapshotID)
+		return ec2FilterAccepts(values, vol.SnapshotID)
 	case "tag-key":
 		for _, t := range vol.Tags {
-			if containsStr(values, t.Key) {
+			if ec2FilterAccepts(values, t.Key) {
 				return true
 			}
 		}
@@ -738,15 +738,17 @@ func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
 	case "attachment.device":
 		return anyAttachment(func(a EC2VolumeAttachment) string { return a.Device })
 	case "attachment.delete-on-termination":
-		// The hand-rolled loop lowercased the value before comparing, so "True"
-		// matched a true attachment; EqualFold keeps that leniency without mutating
-		// the caller's value slice.
+		// This was the tree's only case-*insensitive* filter-value comparison, inherited
+		// from a hand-rolled loop that lowercased the value so "True" matched a true
+		// attachment. AWS documents the opposite twice — Using_Filtering's "Filter values
+		// are case sensitive" and the Filter type's own "Filter values are case-sensitive" —
+		// and every sibling boolean filter (`encrypted`, `default-for-az`,
+		// `map-public-ip-on-launch`) already compared exactly, so #697 makes this one agree
+		// rather than keeping a leniency real EC2 does not offer. A caller sending "True"
+		// now selects nothing, which is what AWS answers.
 		for _, att := range vol.Attachments {
-			want := strconv.FormatBool(att.DeleteOnTermination)
-			for _, v := range values {
-				if strings.EqualFold(v, want) {
-					return true
-				}
+			if ec2FilterAccepts(values, strconv.FormatBool(att.DeleteOnTermination)) {
+				return true
 			}
 		}
 		return false

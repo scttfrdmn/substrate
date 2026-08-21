@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **EC2's documented filter limits, enforced in one place** (#697). Using_Filtering publishes
+  three: "You can specify up to 50 filters and up to 200 total filter values in a single
+  request" and "Filter strings can be up to 255 characters in length." All three are now
+  checked in `ec2FilterSpec.check`, so every one of the eleven operations that has a filter
+  spec inherits them, and the count is tested before a filter name is validated — a 51st
+  filter is refused for being the 51st, not for whatever it happens to be called. The
+  `Filter` type's own reference page publishes none of the three, which is why they are cited
+  from the filtering guide.
+
+  Provenance: the limits are AWS's, the error code is substrate's reading. No EC2 error code
+  exists for a filter limit — every `*LimitExceeded` in the client-error table names a
+  resource quota (`KeyPairLimitExceeded`, `NatGatewayLimitExceeded`,
+  `TrafficMirrorFilterLimitExceeded`, …) — so substrate answers `InvalidParameterValue`, whose
+  documented gloss is "A value specified in a parameter is not valid, is unsupported, or
+  cannot be used."
+
 ### Fixed
+- **EC2 filter values honour AWS's wildcards on every describe, not on the two that happened
+  to have them** (#697). AWS states the rule once for the whole family — "An asterisk (\*)
+  matches zero or more characters, and a question mark (?) matches zero or one character" —
+  but nine of substrate's eleven filter-value matchers compared with `containsStr`, so
+  `instance-type=t3.*` selected nothing at all. That is the silent-narrowing failure of an
+  ignored filter: a consumer sees a legitimate-looking empty set rather than an error.
+  `DescribeInstanceTypeOfferings` and `DescribeTags` already matched through
+  `ec2FilterValueMatches`, which is what made the split a defect — one documented value meant
+  two different things depending on the operation. 55 comparisons across `DescribeInstances`,
+  `DescribeVolumes`, `DescribeImages`, `DescribeSnapshots`, `DescribeSubnets`,
+  `DescribeSecurityGroups`, `DescribeRouteTables`, `DescribeNatGateways` and `DescribeFleets`
+  now route through the one matcher, escaping (`\*`, `\?`, `\\`) and all.
+
+  **`?` matches zero or one character, and AWS's own page disagrees with itself about that.**
+  #697 reported the contradiction; this is its resolution. Using_Filtering's normative
+  "Filtering considerations" list says "zero or one", and the console's wildcard section says
+  the same and works it through: "if you have a data set with the values prod, prods, and
+  production, a search of `prod*` matches all values, whereas `prod?` matches only prod and
+  prods". One later sentence in the CLI examples says "The ? wildcard matches exactly 1
+  character" and is refuted by its own next example, which returns descriptions that are
+  "'database' or 'database' followed by one character", and by `database????` returning
+  "database" followed by **up to** four characters. Two normative statements and three worked
+  examples against one self-refuting sentence, so substrate's existing zero-or-one stands and
+  was **not** narrowed.
+
+- **`attachment.delete-on-termination` is case-sensitive, like every other EC2 filter value**
+  (#697). It was the tree's only case-*insensitive* value comparison, inherited from a
+  hand-rolled loop that lowercased the request value so `True` selected a
+  delete-on-termination attachment. AWS documents the opposite twice — Using_Filtering's
+  "Filter values are case sensitive" and the `Filter` type's "Filter values are
+  case-sensitive" — so `True` now selects nothing. The lowercase form AWS's own examples use
+  is unaffected, and `*e` reaches both booleans.
+
+- **`DescribeRouteTables`' `association.subnet-id` is a filter value, not an identifier**
+  (#697). `routeTableHasSubnet` compared it exactly, which was the right rule for the wrong
+  reason: its doc comment classified it alongside `sgSourcesMatch` as a record-to-record
+  comparison, when it is a request value matched against a stored association. It globs now,
+  where the same string in `SubnetId.N` would still be a malformed ID.
+
 - **A filter naming no values matches nothing on every EC2 describe, not just on most of
   them** (#696). Three operations answered a valueless `Filter.N` with *every* resource:
   `DescribeSecurityGroups`, whose `group-name`, `vpc-id` and `group-id` arms each carried a

@@ -241,9 +241,10 @@ func ec2TagMatchesFilters(item ec2TagDescription, filters map[string][]string) b
 //
 // Values are matched with [ec2FilterAccepts], so **wildcards work** — AWS's Example 4 says
 // so for this operation in as many words: "You can use wildcards with filters, so you could
-// specify the value as ?ebserver to find tags with the key webserver or Webserver." This is
-// the first site outside DescribeInstanceTypeOfferings to match a filter value that way;
-// every other EC2 describe compares exactly, which is #697.
+// specify the value as ?ebserver to find tags with the key webserver or Webserver." Since #697
+// every EC2 describe matches its filter values that way, so this is no longer one of two
+// operations that does; see [ec2FilterValueMatches] for the rules and for what AWS's own page
+// contradicts itself about.
 //
 // An explicitly empty value is a value, not an absent one: AWS's Example 6 filters on
 // `value` with `Filter.3.Value.1=` to find tags whose value is the empty string, and

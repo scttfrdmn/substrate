@@ -47,7 +47,7 @@ func ec2SubnetMatchesFilters(subnet EC2Subnet, filters map[string][]string) bool
 func ec2SubnetMatchesFilter(subnet EC2Subnet, name string, values []string) bool {
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range subnet.Tags {
-			if t.Key == tagKey && containsStr(values, t.Value) {
+			if t.Key == tagKey && ec2FilterAccepts(values, t.Value) {
 				return true
 			}
 		}
@@ -56,31 +56,37 @@ func ec2SubnetMatchesFilter(subnet EC2Subnet, name string, values []string) bool
 
 	switch name {
 	case "availability-zone", "availabilityZone":
-		return containsStr(values, subnet.AvailabilityZone)
+		return ec2FilterAccepts(values, subnet.AvailabilityZone)
 	case "cidr-block", "cidr", "cidrBlock":
 		// AWS: "The CIDR block you specify must exactly match the subnet's CIDR block
 		// for information to be returned for the subnet." So this is equality, not
 		// containment — a caller asking for 10.0.0.0/16 does not get 10.0.1.0/24.
-		return containsStr(values, subnet.CIDRBlock)
+		//
+		// "Exactly match" is about *containment*, not about wildcards: it rules out a
+		// prefix-containment reading of the filter, not the pattern matching AWS documents
+		// for every filter value. `10.0.*` is still a legal value here (#697), and it still
+		// does not select 10.0.1.0/24 under a 10.0.0.0/16 subnet, because a value matches a
+		// subnet's CIDR string or it does not.
+		return ec2FilterAccepts(values, subnet.CIDRBlock)
 	case "default-for-az", "defaultForAz":
-		return containsStr(values, strconv.FormatBool(subnet.IsDefault))
+		return ec2FilterAccepts(values, strconv.FormatBool(subnet.IsDefault))
 	case "map-public-ip-on-launch":
-		return containsStr(values, strconv.FormatBool(subnet.MapPublicIPOnLaunch))
+		return ec2FilterAccepts(values, strconv.FormatBool(subnet.MapPublicIPOnLaunch))
 	case "owner-id":
 		// Always the requesting account: substrate is single-account, so a caller
 		// naming another account is asking a question whose honest answer is "none".
-		return containsStr(values, subnet.AccountID)
+		return ec2FilterAccepts(values, subnet.AccountID)
 	case "state":
-		return containsStr(values, subnet.State)
+		return ec2FilterAccepts(values, subnet.State)
 	case "subnet-arn":
-		return containsStr(values, ec2SubnetARN(subnet.AccountID, subnet.Region, subnet.SubnetID))
+		return ec2FilterAccepts(values, ec2SubnetARN(subnet.AccountID, subnet.Region, subnet.SubnetID))
 	case "subnet-id":
-		return containsStr(values, subnet.SubnetID)
+		return ec2FilterAccepts(values, subnet.SubnetID)
 	case "vpc-id":
-		return containsStr(values, subnet.VPCID)
+		return ec2FilterAccepts(values, subnet.VPCID)
 	case "tag-key":
 		for _, t := range subnet.Tags {
-			if containsStr(values, t.Key) {
+			if ec2FilterAccepts(values, t.Key) {
 				return true
 			}
 		}
