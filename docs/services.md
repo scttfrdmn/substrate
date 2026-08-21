@@ -2828,21 +2828,26 @@ Substrate now serves all three — the first on five operations, and the other t
   except `DescribeImages`.
 - **Filter names and values are case-sensitive**, per the `Filter` type. `VPC-Id` is not
   `vpc-id` and is refused.
-- **A `tag:<key>` filter with no value matches nothing.** AWS says only that a filter value
-  cannot be null; matching nothing is substrate's reading, and `tag-key` is the documented
-  way to ask the any-value question.
+- **A filter naming no values at all matches nothing** — on every operation and every filter
+  name, `tag:<key>` included. AWS says only that a filter value cannot be null, so matching
+  nothing is substrate's reading; `tag-key` is the documented way to ask the any-value
+  question. Note the distinction from a filter carrying one *empty* value: `Filter.1.Value.1=`
+  asks for the empty string, which `DescribeTags`' own Example 6 does, and that is a value like
+  any other. Until [#696](https://github.com/scttfrdmn/substrate/issues/696),
+  `DescribeSecurityGroups`, `DescribeTags` and `DescribeInstanceTypeOfferings` answered a
+  valueless filter with *every* resource, because they shared a matcher that read it as an
+  absent filter. An unfiltered answer to a request that asked for a subset is the more
+  dangerous silence of the two: a caller cannot tell it from a genuine match on everything.
+  An **absent** filter still constrains nothing, as it always has.
 
 **Two gaps, deliberately left standing**, because closing either would newly change
-requests that succeed today. Thirteen EC2 describes — including `DescribeVpcs`,
+requests that succeed today. Twelve EC2 describes — including `DescribeVpcs`,
 `DescribeAddresses`, `DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse
 `Filter.N` at all, so they neither apply nor refuse one
 ([#695](https://github.com/scttfrdmn/substrate/issues/695)). And filter *values* honour
 EC2's documented wildcards only on `DescribeInstanceTypeOfferings` and `DescribeTags` — the
 two operations whose reference pages state them outright; everywhere else matching is exact
-([#697](https://github.com/scttfrdmn/substrate/issues/697)). A third, narrower one: an
-**empty** value list matches nothing on most operations but matches everything on
-`DescribeSecurityGroups` and `DescribeTags`, both of which route through the same shared
-matcher ([#696](https://github.com/scttfrdmn/substrate/issues/696)).
+([#697](https://github.com/scttfrdmn/substrate/issues/697)).
 
 ### RunInstances requires a resolvable AMI
 

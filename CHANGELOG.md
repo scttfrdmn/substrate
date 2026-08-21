@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A filter naming no values matches nothing on every EC2 describe, not just on most of
+  them** (#696). Three operations answered a valueless `Filter.N` with *every* resource:
+  `DescribeSecurityGroups`, whose `group-name`, `vpc-id` and `group-id` arms each carried a
+  hand-written `len(vals) > 0` guard, and `DescribeTags` and
+  `DescribeInstanceTypeOfferings`, which share `ec2FilterAccepts`. The other nine matchers
+  already selected nothing, by calling `containsStr` with no guard at all.
+
+  AWS documents no rule here — Using_Filtering says only that "You can't specify a filter
+  value of null" — so both answers were readings, and the defect was the disagreement: the
+  same request meant two different things depending on which operation received it. The two
+  permissive sites converge on the nine strict ones. The argument for the old behaviour was
+  that dropping every result turns a malformed request into a silently empty answer, but the
+  unfiltered answer is silent in exactly the same way and wrong in the more dangerous
+  direction — a caller who asked for a subset and got everything cannot tell that from a
+  genuine match on every resource. #686 had already settled the same question for `tag:<key>`
+  on `DescribeImages`, so this extends a rule rather than inventing one.
+
+  A quiet change: an over-broad answer becomes an empty one, and nothing that succeeds today
+  starts failing. Two distinctions are unaffected. A filter carrying one *empty* value
+  (`Filter.1.Value.1=`) asks for the empty string and is a value like any other — which is
+  what `DescribeTags`' own Example 6 does. An **absent** filter still constrains nothing, and
+  `describeInstanceTypeOfferings` now looks its two filters up with the two-value map form to
+  keep telling the two apart: a bare `filters[name]` index yields the same nil slice for
+  "absent" and "present with no values", which under the new rule would have emptied the
+  catalog for an unfiltered query.
+
 ## [v0.106.0] - 2026-08-21
 
 ### Added

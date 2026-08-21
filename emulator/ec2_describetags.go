@@ -248,9 +248,11 @@ func ec2TagMatchesFilters(item ec2TagDescription, filters map[string][]string) b
 // An explicitly empty value is a value, not an absent one: AWS's Example 6 filters on
 // `value` with `Filter.3.Value.1=` to find tags whose value is the empty string, and
 // [extractEC2Filters] preserves that as a one-element list. A filter carrying *no* Value.N
-// at all is a different request, and [ec2FilterAccepts] answers it by matching everything —
-// this operation inherits that rule rather than choosing it, and reconciling it with the
-// match-nothing reading its siblings take is #696.
+// at all is a different request, and it now matches nothing, which is what every other EC2
+// describe already answered — #696 converged the two permissive sites on the nine strict ones
+// rather than the other way round. This operation still inherits the rule from
+// [ec2FilterAccepts] rather than choosing it. Only names present in the filter map reach here,
+// so an absent filter never arrives as an empty list.
 //
 // There is no default arm returning true. Every name that reaches here is one of the five
 // AWS documents, because [ec2TagFilterSpec] refuses the rest before the scan and its
