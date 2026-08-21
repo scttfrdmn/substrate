@@ -14,6 +14,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value" — and it had to arrive in the same change as the fix below, which takes away the
   spelling callers were using for it by accident.
 
+### Changed
+- **An unrecognized EC2 filter name is refused, on every operation that parses one** (#687).
+  `Filter.N.Name` outside the set that operation's own API reference documents now answers
+  `InvalidParameterValue` / `The filter "<name>" is not valid for this request`, HTTP 400.
+  Substrate had three answers to the same mistake — dropped on volumes, snapshots, security
+  groups, route tables, NAT gateways, fleets and images; matched nothing on instances;
+  refused on instance-type offerings — so a typo returned everything, nothing, or an error
+  depending on which operation received it.
+
+  **This is a behaviour change, and the loudest in this release.** A misspelled filter name
+  previously came back inside a successful response, so a consumer's test could pass on a
+  filter that was never applied. It now fails, which is what real EC2 does.
+
+  Each operation's list is transcribed from its own reference page rather than shared between
+  them, because AWS documents different filters for each: `tag:<key>` is valid on
+  `DescribeInstances` and **refused on `DescribeFleets`**, which documents no tag filter at
+  all. The check runs before the state scan, so a refusal never depends on whether a resource
+  matched, and it walks `Filter.N` in request order rather than the extracted map, so two
+  undocumented names produce the same refusal on every replay.
+
+  Refusal reproduces AWS's *documented set*, not substrate's coverage: a name AWS documents
+  that substrate keeps no state to answer is accepted and **inert**, since refusing
+  `encrypted` or `ipv6-cidr-block-association.state` would deny a filter real EC2 accepts.
+  Those names are now listed per operation in `docs/services.md` rather than left to be
+  discovered.
+
+  **Provenance.** Refusal is real EC2's *observed* behaviour. Neither `Using_Filtering` nor
+  the `Filter` type's reference page says what happens to an unrecognized name — both are
+  silent — so nothing in AWS's documentation settles it. `InvalidParameterValue` is the
+  documented code; the message text is substrate's own, so dispatch on the code.
+
+  Deliberately unchanged, and now stated in the docs with an issue each: the fourteen EC2
+  describes that never parse `Filter.N` at all neither apply nor refuse one (#695), filter
+  *values* honour EC2's documented wildcards only on `DescribeInstanceTypeOfferings` (#697),
+  and an empty value list matches everything on `DescribeSecurityGroups` where it matches
+  nothing elsewhere (#696).
+
+- **A documented-but-unevaluated filter name is inert on `DescribeInstances` instead of
+  matching nothing** (#687). It used to return an empty set, which was defensible while an
+  unknown name landed in the same branch — better to return nothing than resources the
+  caller meant to exclude — but a refused typo answers that concern directly, and the old
+  rule left this one operation emptying a query where every sibling ignored it. An empty
+  answer is also the worse half of the choice: it cannot be told apart from "the resource
+  does not exist", so a consumer's wait loop polls forever, where over-matching fails once
+  and visibly. Neither answer is real EC2's, which would apply the filter; only one of them
+  can be a single rule.
+
 ### Fixed
 - **A `tag:<key>` filter with no value no longer matches any value on `DescribeImages`**
   (#686). `Filter.1.Name=tag:Env` with no `Filter.1.Value.1` matched every image carrying an

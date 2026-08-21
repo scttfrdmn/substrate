@@ -511,13 +511,14 @@ func TestEC2_DescribeVolumes_TagFilters(t *testing.T) {
 			want: []string{},
 		},
 		{
-			// Unchanged: this operation drops a name it does not know rather than
-			// refusing or matching nothing, and replacing the filter loop must not
-			// change that.
-			name: "an unknown filter name is still dropped",
+			// A documented filter substrate keeps no state to answer is inert rather
+			// than refused, so the answer is every volume (#687). Refusing it would
+			// deny a filter real EC2 accepts; the accepted-but-unevaluated names are
+			// listed per operation in docs/services.md.
+			name: "a documented filter substrate cannot evaluate is inert",
 			filters: map[string]string{
-				"Filter.1.Name":    "not-a-filter",
-				"Filter.1.Value.1": "x",
+				"Filter.1.Name":    "encrypted",
+				"Filter.1.Value.1": "false",
 			},
 			want: []string{dev.VolumeID, prod.VolumeID, untagged.VolumeID},
 		},

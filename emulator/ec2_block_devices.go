@@ -531,10 +531,10 @@ func (p *EC2Plugin) ec2DeleteInstanceVolumes(accountID, region, instanceID strin
 // `tag-key`, out of 20 filters in total — there is no `tag-value` (#670).
 //
 // A `tag:<key>` filter with no values matches nothing. AWS documents no rule for
-// that shape (Using_Filtering says only that a filter value cannot be null, and
-// offers tag-key for the any-value question), and substrate's two existing
-// implementations disagree; this follows [ec2InstanceMatchesFilter], the closer
-// sibling, rather than describeImages, which treats it as tag-key.
+// that shape — Using_Filtering says only that a filter value cannot be null, and
+// offers tag-key for the any-value question — so this is substrate's reading, and
+// since #686 it is the reading everywhere: describeImages used to treat the shape as
+// tag-key and no longer does.
 func ec2VolumeMatchesFilters(vol EC2Volume, filters map[string][]string) bool {
 	for name, values := range filters {
 		if !ec2VolumeMatchesFilter(vol, name, values) {
@@ -546,12 +546,12 @@ func ec2VolumeMatchesFilters(vol EC2Volume, filters map[string][]string) bool {
 
 // ec2VolumeMatchesFilter evaluates a single DescribeVolumes filter against a volume.
 //
-// An unrecognized filter name is dropped — the volume matches — which is what this
-// operation has always done. That is not, as a comment here once claimed, what every
-// EC2 filter site does: three behaviors exist in this package (drop for volumes and
-// snapshots, match-nothing for [ec2InstanceMatchesFilter], and refuse for
-// describeInstanceTypeOfferings, which is what real EC2 does). Reconciling them is
-// its own change; this one keeps the observable answer it found.
+// A name this function does not handle is dropped — the volume matches — and since
+// #687 that can only be a name DescribeVolumes documents and substrate keeps no state
+// to answer, because [ec2VolumeFilterSpec] refuses anything outside AWS's set before
+// the scan begins. So the drop is now the *inert* case rather than the unknown one,
+// and it is deliberate: refusing `encrypted` would deny a filter real EC2 accepts.
+// docs/services.md lists the inert names per operation.
 func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range vol.Tags {

@@ -974,9 +974,12 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 
 // ec2InstanceMatchesFilters reports whether an instance satisfies every supplied
 // DescribeInstances filter (filters are AND-combined; each filter's values are
-// OR-combined). Supported keys cover the filters real callers use; an unknown
-// key matches nothing (returns false) rather than being silently ignored, so a
-// filtered query never returns resources the caller meant to exclude.
+// OR-combined).
+//
+// An unrecognized filter name never reaches here: [ec2InstanceFilterSpec] refuses it
+// before the scan (#687). So the names this function does not handle are exactly the
+// ones DescribeInstances documents and substrate keeps no state to answer, and those
+// are inert — see [ec2InstanceMatchesFilter].
 func ec2InstanceMatchesFilters(inst EC2Instance, filters map[string][]string) bool {
 	for name, values := range filters {
 		if !ec2InstanceMatchesFilter(inst, name, values) {
@@ -987,6 +990,14 @@ func ec2InstanceMatchesFilters(inst EC2Instance, filters map[string][]string) bo
 }
 
 // ec2InstanceMatchesFilter evaluates a single filter against an instance.
+//
+// A name it does not handle is one of the 125 DescribeInstances documents over instance
+// members substrate does not model, and it is **inert** — the instance matches. Until
+// #687 it matched nothing, which was defensible while an unknown name landed here too
+// ("never return resources the caller meant to exclude"), but a refused typo is the
+// better answer to that concern and it left this operation returning empty where every
+// other describe returned everything. One answer for the inert case is the point of
+// #687, so this now agrees with [ec2VolumeMatchesFilter] rather than opposing it.
 func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bool {
 	// tag:<key> — instance has a tag with that key whose value is in values.
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
@@ -1029,14 +1040,21 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 		}
 		return false
 	default:
-		// Unknown filter key: match nothing rather than silently passing.
-		return false
+		// A documented filter substrate cannot evaluate is inert; see the doc comment.
+		return true
 	}
 }
 
 func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InstanceId"), ec2InstanceIDKind)
 	if err := ids.validate(); err != nil {
+		return nil, err
+	}
+	// The spec check runs before the scan, so a refusal cannot depend on whether any
+	// instance matched (#687). [ec2IDFilter.unresolved] already documents the same
+	// ordering rule from the other side: a resource a filter excluded still counts as
+	// resolved.
+	if err := ec2InstanceFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)
@@ -1609,6 +1627,9 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	if err := ec2SecurityGroupFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -1997,6 +2018,9 @@ func routeTableHasSubnet(rtb EC2RouteTable, subnetIDs []string) bool {
 func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "RouteTableId"), ec2RouteTableIDKind)
 	if err := ids.validate(); err != nil {
+		return nil, err
+	}
+	if err := ec2RouteTableFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)
@@ -3532,6 +3556,10 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("ec2 describeImages list: %w", err)
 	}
 
+	if err := ec2ImageFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+
 	// Filters come from the shared extractor rather than a walk of this function's own
 	// (#686). The hand-rolled version broke out of its value loop on the first empty
 	// string, which turned an explicitly empty filter value into the valueless form and
@@ -4223,6 +4251,9 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 	if err := filterIDs.validate(); err != nil {
 		return nil, err
 	}
+	if err := ec2NatGatewayFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
 	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "nat:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
@@ -4456,12 +4487,13 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 // InstanceType.N; see [ec2CheckInstanceTypesExist] for why, and #485 for the real-AWS
 // diff of both.
 func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	filters := extractEC2Filters(req.Params)
-	for name := range filters {
-		if name != "instance-type" && name != "location" {
-			return nil, ec2InvalidFilterError(name)
-		}
+	// The bespoke check this replaced iterated the filter *map*, so with two undocumented
+	// names it reported whichever one Go's map order surfaced first (#687). The shared
+	// spec walks Filter.N in request order instead, which is deterministic.
+	if err := ec2InstanceTypeOfferingFilterSpec().check(req.Params); err != nil {
+		return nil, err
 	}
+	filters := extractEC2Filters(req.Params)
 
 	// LocationType is a top-level parameter, not a filter name, and it selects what the
 	// locations in the response *are*. Only availability-zone (the default per the
@@ -5025,6 +5057,10 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 }
 
 func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	if err := ec2VolumeFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+
 	// Collect requested volume IDs from repeated VolumeId.N params.
 	requestedIDs := map[string]bool{}
 	for i := 1; ; i++ {
@@ -5320,6 +5356,9 @@ func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SnapshotId"), ec2SnapshotIDKind)
 	if err := ids.validate(); err != nil {
+		return nil, err
+	}
+	if err := ec2SnapshotFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)

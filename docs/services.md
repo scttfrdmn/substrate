@@ -2620,7 +2620,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | Operation | Notes |
 |-----------|-------|
 | RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); `availability-zone` filter |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -2634,7 +2634,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids) |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSecurityGroup | |
-| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
 | AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules |
 | AuthorizeSecurityGroupEgress | Supports destination security groups |
@@ -2651,11 +2651,11 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
-| DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking) |
 | DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters |
 | DeleteLaunchTemplate | |
@@ -2664,10 +2664,107 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken`, and the account-wide form |
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
-| DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS |
+| DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` ID like [any other taggable ID](#a-volume-carries-tags); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+
+### One rule for an unrecognized filter name
+
+**A `Filter.N.Name` the operation's own API reference does not list is refused**, with
+`InvalidParameterValue` / `The filter "<name>" is not valid for this request`, HTTP 400.
+The check runs **before** the state scan, so the refusal never depends on whether a
+resource happened to match: an empty account and a populated one answer a typo the same
+way.
+
+This replaced three different answers across substrate's nine filter-parsing EC2
+operations — dropped on volumes, snapshots, security groups, route tables, NAT gateways,
+fleets and images; matched nothing on instances; refused on instance-type offerings — with
+the one real EC2 gives.
+
+**This is a behaviour change, and the loudest one in the release that brought it.** A
+misspelled filter name previously came back as a successful response: dropped, so the query
+returned *everything*, or match-nothing, so it returned *nothing*. Either way a consumer's
+test could pass on a filter that was never applied. It now fails, which is what real EC2
+does.
+
+**Provenance.** Refusal is real EC2's *observed* behaviour, not its documented behaviour.
+Neither the
+[filtering guide](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Filtering.html)
+nor the [`Filter` type](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Filter.html)
+says what happens to a name outside the documented set — both are silent. The code
+`InvalidParameterValue` is documented; the message text is substrate's own, so dispatch on
+the code.
+
+#### What is refused, and what is merely inert
+
+The refusal reproduces AWS's set rather than substrate's coverage, so a filter splits three
+ways:
+
+| The name | Answer |
+|---|---|
+| Documented **and** evaluated | Applied |
+| Documented, **not** evaluated — substrate keeps no state to answer it | **Inert**: it constrains nothing, so the operation returns every resource it would have returned without it |
+| Not documented for that operation | **Refused**, 400 |
+
+Refusing the middle row would deny filters real EC2 accepts —
+`ipv6-cidr-block-association.state` is a filter, not a typo — so it stays accepted, and it
+is listed by name below rather than left for a caller to discover. Inert is *also* a change
+for `DescribeInstances`, which used to match nothing for such a name: an empty answer is
+indistinguishable from "the resource does not exist", so a wait loop polls forever, where
+over-matching fails once and visibly.
+
+The lists live in `emulator/ec2_filters.go`, one per operation, each transcribed from that
+operation's own reference page. AWS documents different filters for each, so a name valid on
+one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
+
+| Operation | Evaluated | Documented but inert |
+|---|---|---|
+| DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 125 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
+| DescribeImages | `block-device-mapping.snapshot-id`, `image-id`, `tag-key`, `tag:<key>` | the other 39 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `architecture`, `creation-date`, `description`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `root-device-name`, `root-device-type`, `state` and the rest |
+| DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
+| DescribeSnapshots | `snapshot-id` | `description`, `encrypted`, `owner-alias`, `owner-id`, `progress`, `start-time`, `status`, `storage-tier`, `tag-key`, `tag:<key>`, `transfer-type`, `volume-id`, `volume-size` |
+| DescribeSecurityGroups | `group-id`, `group-name`, `vpc-id` | `description`, `owner-id`, `tag-key`, `tag:<key>`, and the twenty `ip-permission.*`/`egress.ip-permission.*` rule filters |
+| DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
+| DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
+| DescribeFleets | `activity-status`, `fleet-state`, `type` | `excess-capacity-termination-policy`, `replace-unhealthy-instances` |
+| DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#offerings-filters-and-wildcards)) | — |
+
+`tag:<key>` is refused on **`DescribeFleets` and `DescribeInstanceTypeOfferings`**, which
+document no tag filter at all — neither `tag:<key>` nor `tag-key` — even though a fleet
+carries tags and `DescribeFleets` renders them. That is AWS's set, not an omission here; to
+find a fleet by tag, use Resource Groups Tagging.
+
+Read the tag rows in the other direction and they are the surface's weakest point: only
+**`DescribeInstances`, `DescribeVolumes` and `DescribeImages`** actually filter on tags.
+On snapshots, security groups, route tables and NAT gateways a `tag:<key>` filter is
+accepted and inert, so "find the resources tagged `Env=prod`" answers with *all* of them.
+Real EC2 offers three routes to finding a resource by tag: the describe filters,
+`DescribeTags`, and Resource Groups Tagging. Substrate serves the third in full, the first
+on three operations, and does not implement `DescribeTags` at all.
+
+#### Filter semantics that apply everywhere
+
+- **Separate `Filter.N` entries AND**; **the values inside one filter OR**. Both are
+  documented.
+- **Repeated filter names OR their values.** Two `Filter.N` entries sharing a name are one
+  filter with the values of both. The second used to silently replace the first everywhere
+  except `DescribeImages`.
+- **Filter names and values are case-sensitive**, per the `Filter` type. `VPC-Id` is not
+  `vpc-id` and is refused.
+- **A `tag:<key>` filter with no value matches nothing.** AWS says only that a filter value
+  cannot be null; matching nothing is substrate's reading, and `tag-key` is the documented
+  way to ask the any-value question.
+
+**Two gaps, deliberately left standing**, because closing either would newly change
+requests that succeed today. Fourteen EC2 describes — including `DescribeVpcs`,
+`DescribeSubnets`, `DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse
+`Filter.N` at all, so they neither apply nor refuse one
+([#695](https://github.com/scttfrdmn/substrate/issues/695)). And filter *values* honour
+EC2's documented wildcards only on `DescribeInstanceTypeOfferings`; everywhere else
+matching is exact ([#697](https://github.com/scttfrdmn/substrate/issues/697)). A third,
+narrower one: an **empty** value list matches nothing here but matches everything on
+`DescribeSecurityGroups` ([#696](https://github.com/scttfrdmn/substrate/issues/696)).
 
 ### RunInstances requires a resolvable AMI
 
@@ -3105,17 +3202,15 @@ constraint, so there is nothing else to enforce.
 
 `DescribeVolumes` supports exactly the two tag filters AWS documents for it,
 `tag:<key>` and `tag-key`. There is no `tag-value`; AWS does not define one for this
-operation. Two behaviours here are substrate's own, because AWS's filtering guide
-settles neither:
+operation. A `tag:<key>` filter with **no value** matches nothing — substrate's reading,
+since the filtering guide says only that a filter value cannot be null and offers
+`tag-key` for the any-value question.
 
-- A `tag:<key>` filter with **no value** matches nothing, following
-  `DescribeInstances`. The guide says only that a filter value cannot be null, and
-  offers `tag-key` for the any-value question.
-- An **unrecognized filter name is dropped**, so the filter constrains nothing. That is
-  what this operation has always done, and it is kept rather than reconciled: real EC2
-  refuses an unknown name, and substrate has three different answers across its EC2
-  filter sites. Making them agree is its own change, and it is a behaviour change on
-  every one of them.
+An unrecognized filter name is **refused**, and one AWS documents that substrate cannot
+evaluate (`encrypted`, `create-time`, `fast-restored` and six others) is accepted and
+inert. Both follow the rule that now governs every EC2 describe — see
+[One rule for an unrecognized filter name](#one-rule-for-an-unrecognized-filter-name),
+which lists this operation's eleven evaluated names and nine inert ones.
 
 #### A mapping AWS refuses is refused, with `InvalidBlockDeviceMapping`
 
@@ -3682,9 +3777,11 @@ the same defect as an ignored filter. Tracked in
 #### Offerings filters and wildcards
 
 `DescribeInstanceTypeOfferings` accepts exactly the two filter names its reference
-documents — `instance-type` and `location`. **Any other name is refused** with
-`InvalidParameterValue` rather than ignored. Multiple `Filter.N.Value.M` values are
-an OR; separate `Filter.N` entries AND together.
+documents — `instance-type` and `location` — and there is nothing it accepts but cannot
+answer. **Any other name is refused** with `InvalidParameterValue`, which is now what
+[every EC2 describe does](#one-rule-for-an-unrecognized-filter-name); this operation is where
+that rule started. Multiple `Filter.N.Value.M` values are an OR; separate `Filter.N`
+entries AND together.
 
 Filter values honour EC2's documented wildcards, and are **case-sensitive**:
 
@@ -3979,8 +4076,9 @@ real EC2 puts them.
 #### `DescribeImages` filters
 
 Four filter names are applied: `image-id`, `block-device-mapping.snapshot-id`,
-`tag:<key>` and `tag-key`. An unrecognized name is dropped, as on every other EC2
-describe. AWS documents thirty-odd more; the rest need state substrate does not keep.
+`tag:<key>` and `tag-key`. AWS documents thirty-nine more, which need state substrate
+does not keep: those are accepted and inert, and anything outside AWS's list is refused —
+see [One rule for an unrecognized filter name](#one-rule-for-an-unrecognized-filter-name).
 
 Two behaviour changes came with `tag-key`, both of which bring this operation into line
 with `DescribeInstances` and `DescribeVolumes` rather than leaving it with its own rules:
