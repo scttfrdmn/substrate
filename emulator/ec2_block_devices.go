@@ -159,15 +159,26 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 // substrate resolves an absent type to gp2, but on real EC2 it comes from the AMI's own
 // mapping, commonly gp3.
 //
-// Also deliberately absent: a VolumeSize smaller than the named snapshot's.
-// EC2Snapshot.VolumeSize is the literal 8 at its single producer and substrate has no
-// CreateSnapshot, so the comparison would test a constant rather than the caller's
-// request. That is a follow-up, together with InvalidSnapshot.NotFound.
+// # The snapshot rules
+//
+// Two of them, both added by #689 once a snapshot had a real size to compare against:
+// a SnapshotId that is malformed or names nothing is refused, and a VolumeSize smaller
+// than the named snapshot's is refused. v0.105.0 deferred the second for the reason
+// #689 removes — EC2Snapshot.VolumeSize was the literal 8 at its single producer, so
+// the comparison would have tested a constant rather than the caller's request.
+//
+// resolveSnapshot is how both reach state: a lookup rather than a [StateManager], so
+// this stays a pure function over its arguments and a unit test can supply three
+// snapshots without a state fixture. It is required, not optional — a nil-means-skip
+// escape would silently disable a refusal, which is the failure mode #689 exists to
+// close. [EC2Plugin.ec2SnapshotResolver] builds the production one.
 //
 // # Provenance
 //
-// Two rules are documented verbatim — the size-or-snapshot requirement on
-// EbsBlockDevice.VolumeSize and "This parameter is valid only for gp3 volumes" on
+// Four rules are documented verbatim — the size-or-snapshot requirement on
+// EbsBlockDevice.VolumeSize, "You can specify a volume size that is equal to or larger
+// than the snapshot size" on the same member, InvalidSnapshot.NotFound in the
+// client-error table, and "This parameter is valid only for gp3 volumes" on
 // Throughput. The Iops rule rests on the sibling launch-template shape; see
 // [ec2VolumeTypesWithoutIOPS]. Refusing a duplicate device name and a virtualName
 // beside an Ebs member rests on **substrate's own reading** — AWS documents no rule for
@@ -193,10 +204,13 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 // valid", and its Errors section lists none — so a 400 there would be substrate's
 // invention. That an invalid block device mapping belongs in that warning is
 // substrate's reading; rendering the element is a follow-up.
-func ec2CheckBlockDeviceMappings(mappings []EC2BlockDeviceMapping) *AWSError {
+func ec2CheckBlockDeviceMappings(
+	mappings []EC2BlockDeviceMapping,
+	resolveSnapshot func(string) (EC2Snapshot, bool),
+) *AWSError {
 	seen := make(map[string]bool, len(mappings))
 	for _, bdm := range mappings {
-		if awsErr := ec2CheckBlockDeviceMapping(bdm); awsErr != nil {
+		if awsErr := ec2CheckBlockDeviceMapping(bdm, resolveSnapshot); awsErr != nil {
 			return awsErr
 		}
 		// Only a mapping that materializes a volume can collide: NoDevice suppresses
@@ -219,8 +233,15 @@ func ec2CheckBlockDeviceMappings(mappings []EC2BlockDeviceMapping) *AWSError {
 // The unparseable-number checks run first: a garbage size makes every judgement below
 // meaningless, and reporting the malformed value is more use to a caller than reporting
 // a consequence of it. The virtualName conflict runs before the size requirement, since
-// a mapping combining the two is wrong in a way that naming a size would not fix.
-func ec2CheckBlockDeviceMapping(bdm EC2BlockDeviceMapping) *AWSError {
+// a mapping combining the two is wrong in a way that naming a size would not fix. The
+// snapshot checks follow the size requirement, because a mapping that names neither a
+// size nor a snapshot has no snapshot to look up; they precede the type rules so that a
+// nonexistent snapshot is still reported for a mapping that names no volume type, which
+// is where the type rules return early.
+func ec2CheckBlockDeviceMapping(
+	bdm EC2BlockDeviceMapping,
+	resolveSnapshot func(string) (EC2Snapshot, bool),
+) *AWSError {
 	device := bdm.DeviceName
 	for _, num := range []struct{ member, raw string }{
 		{"Ebs.VolumeSize", bdm.VolumeSizeRaw},
@@ -255,6 +276,12 @@ func ec2CheckBlockDeviceMapping(bdm EC2BlockDeviceMapping) *AWSError {
 			"you must specify either a snapshot ID or a volume size")
 	}
 
+	if bdm.SnapshotID != "" {
+		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot); awsErr != nil {
+			return awsErr
+		}
+	}
+
 	// Both type rules read the named type, never the resolved one; see
 	// [ec2CheckBlockDeviceMappings]. An absent type therefore refuses nothing.
 	volType := strings.ToLower(bdm.VolumeType)
@@ -270,6 +297,82 @@ func ec2CheckBlockDeviceMapping(bdm EC2BlockDeviceMapping) *AWSError {
 			"Ebs.Iops is not supported for "+bdm.VolumeType+" volumes")
 	}
 	return nil
+}
+
+// ec2CheckMappingSnapshot applies the two rules that concern the snapshot a mapping
+// names. The caller has already established that it names one.
+//
+// The two refusals carry different codes on purpose, because they are different
+// mistakes: a snapshot substrate cannot find is an InvalidSnapshot.NotFound (or
+// InvalidSnapshotID.Malformed) about the *ID*, which is what a caller naming a snapshot
+// from another account or a stale run has done, while a size below the snapshot's is an
+// InvalidBlockDeviceMapping about the *mapping*, which is what the rest of this
+// validator reports. Collapsing them into one code would tell a caller to look in the
+// wrong place.
+//
+// The size comparison reads the parsed VolumeSize and gates on it being positive, so a
+// mapping that names no size inherits the snapshot's rather than being refused for
+// naming 0 — see [ec2ResolveSnapshotSizes], which does the inheriting.
+func ec2CheckMappingSnapshot(
+	bdm EC2BlockDeviceMapping,
+	resolveSnapshot func(string) (EC2Snapshot, bool),
+) *AWSError {
+	if !ec2SnapshotIDKind.wellFormed(bdm.SnapshotID) {
+		return ec2SnapshotIDKind.malformedError(bdm.SnapshotID)
+	}
+	snap, found := resolveSnapshot(bdm.SnapshotID)
+	if !found {
+		return ec2SnapshotIDKind.notFoundError(bdm.SnapshotID)
+	}
+	if bdm.VolumeSize > 0 && int64(bdm.VolumeSize) < snap.VolumeSize {
+		return ec2InvalidBlockDeviceMapping(bdm.DeviceName, fmt.Sprintf(
+			"Ebs.VolumeSize %d is smaller than the size of snapshot %s (%d GiB)",
+			bdm.VolumeSize, snap.SnapshotID, snap.VolumeSize))
+	}
+	return nil
+}
+
+// ec2ResolveSnapshotSizes returns mappings with every absent VolumeSize filled in from
+// the snapshot that mapping names, leaving everything else untouched.
+//
+// Without it a mapping naming a snapshot and no size fell through to
+// [ec2DefaultVolumeSizeGiB], so a 30 GiB snapshot produced an 8 GiB volume —
+// [EC2BlockDeviceMapping.VolumeSize]'s own field doc already stated the correct rule, so
+// the doc was ahead of the code (#689). AWS states it too, on EbsBlockDevice.VolumeSize:
+// "If you specify a snapshot, the default is the snapshot size."
+//
+// It is a separate pass over the mappings rather than a lookup inside
+// [ec2VolumeFromMapping] so that function stays pure — it is what
+// [ec2LaunchVolumesFor] is built out of, and threading state through it would put a
+// state read inside the volume-building loop. The returned slice is fresh, so a caller's
+// parsed mappings keep reporting what the request actually said, which is what the
+// launch template merge and the recorded-intent members read.
+//
+// VolumeSizeRaw is the test for absence rather than a zero VolumeSize, for the reason it
+// exists at all: "Ebs.VolumeSize=0" is a value a caller supplied, and an unparseable one
+// has already been refused by [ec2CheckBlockDeviceMapping].
+//
+// A snapshot that does not resolve is left alone rather than defaulted, because
+// [ec2CheckMappingSnapshot] has already refused it — this pass runs after validation and
+// never decides anything a caller can observe as an error.
+func ec2ResolveSnapshotSizes(
+	mappings []EC2BlockDeviceMapping,
+	resolveSnapshot func(string) (EC2Snapshot, bool),
+) []EC2BlockDeviceMapping {
+	if len(mappings) == 0 {
+		return mappings
+	}
+	out := make([]EC2BlockDeviceMapping, len(mappings))
+	copy(out, mappings)
+	for i := range out {
+		if out[i].SnapshotID == "" || out[i].VolumeSizeRaw != "" {
+			continue
+		}
+		if snap, found := resolveSnapshot(out[i].SnapshotID); found && snap.VolumeSize > 0 {
+			out[i].VolumeSize = int(snap.VolumeSize)
+		}
+	}
+	return out
 }
 
 // ec2InvalidBlockDeviceMapping returns EC2's InvalidBlockDeviceMapping error, naming

@@ -65,9 +65,11 @@ func ec2Filter(name string, values ...string) map[string]string {
 // EBS snapshot, tagged Scope=<name> and described "Created by CreateImage for <name>" — and
 // returns the snapshot IDs keyed by name.
 //
-// CreateImage is the only path that writes a snapshot record today; CreateSnapshot is #689.
-// The snapshots it mints therefore carry no source volume, which is why volume-id below is
-// asserted to match nothing rather than to select one.
+// Both snapshots come from one instance's root volume, so both report that volume's ID and
+// its 8 GiB size — since #689 those are read from the volume record rather than being the
+// literal 8 CreateImage used to write. The volume-id and volume-size rows below therefore
+// select on a real value; TestEC2_CreateSnapshot_ReportsTheSourceVolume is where a size
+// other than the default is asserted, so neither passes by coinciding with a constant.
 func ec2SeedTaggedSnapshots(t *testing.T, ts *httptest.Server, names ...string) map[string]string {
 	t.Helper()
 	instID := ec2TagTestInstance(t, ts)
@@ -110,6 +112,8 @@ func TestEC2_DescribeSnapshots_EvaluatedFiltersNarrowTheAnswer(t *testing.T) {
 	require.Len(t, all, 2)
 	owner := all[0].OwnerID
 	require.NotEmpty(t, owner, "ownerId is what the owner-id filter compares against")
+	require.NotEmpty(t, all[0].VolumeID,
+		"since #689 a CreateImage snapshot records the root volume it was taken from")
 
 	tests := []struct {
 		name   string
@@ -135,8 +139,9 @@ func TestEC2_DescribeSnapshots_EvaluatedFiltersNarrowTheAnswer(t *testing.T) {
 		{"tag key absent", ec2Filter("tag:Absent", "alpha"), nil},
 		{"volume-size matches", ec2Filter("volume-size", "8"), []string{alpha, beta}},
 		{"volume-size miss", ec2Filter("volume-size", "100"), nil},
-		{"volume-id matches nothing without a source volume",
-			ec2Filter("volume-id", "vol-0123456789abcdef0"), nil},
+		{"volume-id selects the shared source volume",
+			ec2Filter("volume-id", all[0].VolumeID), []string{alpha, beta}},
+		{"volume-id another volume", ec2Filter("volume-id", "vol-0123456789abcdef0"), nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

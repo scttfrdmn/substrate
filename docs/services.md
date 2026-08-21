@@ -2653,6 +2653,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | AssociateRouteTable | |
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
+| CreateSnapshot | `VolumeId` is required and checked; `volumeSize` and `encrypted` come from the source volume, and `status` is `completed` at once — see [A snapshot has a real size](#a-snapshot-has-a-real-size) |
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
@@ -2666,7 +2667,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` ID like [any other taggable ID](#a-volume-carries-tags); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` or `snap-` ID like [any other taggable ID](#a-volume-carries-tags); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DescribeTags | Every tag in the region, across thirteen resource types. Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken`, and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
@@ -3231,16 +3232,24 @@ substrate could parse was accepted and materialized, so a consumer whose IaC car
 an invalid mapping got a green test and a failure on real AWS — the same class of
 defect an empty `ImageId` used to have.
 
-Six refusals:
+Eight refusals:
 
 | Refused | Provenance |
 |---|---|
 | An `Ebs` structure naming neither `Ebs.VolumeSize` nor `Ebs.SnapshotId` | Documented verbatim on `EbsBlockDevice.VolumeSize`: "You must specify either a snapshot ID or a volume size." |
+| `Ebs.SnapshotId` naming a snapshot the account does not hold | `InvalidSnapshot.NotFound` (or `InvalidSnapshotID.Malformed` for the syntax) — both codes documented in EC2's client-error table |
+| `Ebs.VolumeSize` smaller than the named snapshot's | Documented verbatim on `EbsBlockDevice.VolumeSize`: "You can specify a volume size that is equal to or larger than the snapshot size." |
 | `Ebs.Throughput` on an explicitly named type that is not `gp3` | Documented verbatim: "This parameter is valid only for `gp3` volumes." |
 | `Ebs.Iops` on an explicitly named `standard`, `st1` or `sc1` | The sibling launch-template shape — substrate's reading, see below |
 | An unparseable numeric value for `Ebs.VolumeSize`, `Ebs.Iops` or `Ebs.Throughput` | Substrate's own |
 | Two mappings naming one `DeviceName` | Substrate's own — AWS documents no rule |
 | A `VirtualName` beside any `Ebs.*` member | Substrate's own — AWS documents no rule |
+
+The two snapshot refusals carry different codes on purpose. A snapshot substrate cannot
+find is an `InvalidSnapshot.NotFound` about the *ID* — which is what a caller naming a
+snapshot from another account or a previous run has done — while a size below the
+snapshot's is an `InvalidBlockDeviceMapping` about the *mapping*, like every other row
+above.
 
 The error code is documented — EC2's client-error table lists
 `InvalidBlockDeviceMapping` as "A block device mapping parameter is not valid. The
@@ -3272,10 +3281,11 @@ Three reading calls worth stating outright:
   explains what `Iops` means "for `gp2` volumes". AWS contradicts itself inside one
   member, so substrate refuses only the three types that appear in neither list and
   takes the permissive reading of `gp2`.
-- A `VolumeSize` smaller than the named snapshot's is **not** checked.
-  `EC2Snapshot.VolumeSize` is a constant at its single producer and substrate has no
-  `CreateSnapshot`, so the comparison would test that constant rather than the
-  caller's request.
+- A mapping naming a snapshot and **no size** takes the snapshot's size, which AWS
+  documents on the same member: "If you specify a snapshot, the default is the snapshot
+  size." It took substrate's 8 GiB default instead until #689, so a restore from a
+  30 GiB snapshot produced an 8 GiB volume. `CreateVolume` had the identical gap
+  independently and applies the same two rules through the same comparison.
 
 **A refusal writes nothing.** The validator runs after a launch template has been
 merged in — so a mapping that reaches a launch through a template is refused at
@@ -3857,11 +3867,19 @@ string, so substrate mirrors each pair exactly:
 | Internet gateway | `InvalidInternetGatewayID.NotFound` | `InvalidInternetGatewayId.Malformed` |
 | Route table | `InvalidRouteTableID.NotFound` | `InvalidRouteTableId.Malformed` |
 | Snapshot | `InvalidSnapshot.NotFound` | `InvalidSnapshotID.Malformed` |
+| Volume | `InvalidVolume.NotFound` | `InvalidVolumeID.Malformed` |
 | Elastic IP allocation | `InvalidAllocationID.NotFound` | — |
 | NAT gateway | `InvalidNatGatewayID.NotFound` | — |
 
 EC2 publishes no `Malformed` variant for allocation IDs or NAT gateway IDs; a
 malformed ID for those surfaces as the `NotFound` code.
+
+The volume row covers `CreateSnapshot`, which is where it arrived. Three older volume
+operations — `DeleteVolume`, `AttachVolume` and `DetachVolume` — raise the same
+`InvalidVolume.NotFound` code with a message they spell themselves ("The volume
+'vol-…' does not exist.", with a trailing period and no "ID"). They are left as they
+are deliberately: rewording a published message is a change a consumer matching on it
+would notice, for no gain. Unifying them is a follow-up.
 
 An ID is well formed when it has the resource's prefix followed by at least one
 lowercase hex digit. Length is deliberately not checked: substrate's generators
@@ -4181,6 +4199,45 @@ filtering it out is an empty HTTP 200 rather than `InvalidSnapshot.NotFound` —
 [Explicit resource IDs](#explicit-resource-ids) states, and the distinction between "not
 yet" and "never" that a consumer's wait loop turns on. `DescribeSubnets` follows it too.
 
+#### A snapshot has a real size
+
+Until [#689](https://github.com/scttfrdmn/substrate/issues/689) every snapshot in substrate
+reported `volumeSize` as the literal `8`,
+because `CreateImage` was the only thing that wrote one and it wrote the constant. So the
+`volume-size` filter above compared against a constant, the mapping rule "a size must not be
+smaller than its snapshot's" had nothing to test, and `DescribeImages` rendered a *second*,
+independent `8` for the same snapshot — two constants that agreed only for as long as neither
+knew a real size.
+
+`CreateSnapshot` closes it at the source:
+
+| Behaviour | Answer |
+|---|---|
+| `VolumeId` | Required, and checked against state. Absent is `MissingParameter`; a syntactically invalid ID is `InvalidVolumeID.Malformed`; one that names nothing is `InvalidVolume.NotFound` — so a snapshot cannot exist for a volume that does not |
+| `volumeSize` | The source volume's size, which is what AWS documents the member as: "the size of the volume, in GiB" |
+| `encrypted` | The source volume's. "Snapshots that are taken from encrypted volumes are automatically encrypted" |
+| `status` | `completed` at once, **not** the `pending` AWS's own sample response shows |
+| `progress` | Not rendered, for the same reason `DescribeSnapshots` renders none: substrate stores none, and `status` already says the whole of what a completed snapshot's progress would say |
+| `Description`, `TagSpecification.N` | Read; the tags go through the same walk and the same [tag rules](#reserved-tag-keys) as every other tag-on-create, checked before anything is written |
+| `Location`, `OutpostArn` | Not read. Both are documented as supported only for a Local Zone or an Outpost, neither of which substrate models, so honouring them would place the snapshot somewhere substrate cannot describe it from |
+
+`status` being `completed` immediately is the deliberate divergence. Substrate advances no
+snapshot asynchronously, so a caller's waiter succeeds on its first poll rather than
+depending on wall-clock time — which is the point of a deterministic emulator. A
+**seedable** `pending → completed` progression is the shape that would let a test exercise
+the waiting path, and it is a follow-up rather than something this operation should invent.
+
+`CreateImage`'s own snapshot now reads the instance's root volume too, recording both its
+size and its ID — so an AMI made from a 40 GiB root volume reports 40 GiB through
+`DescribeSnapshots` *and* through `DescribeImages`, which reads the snapshot record rather
+than rendering its own constant. An AMI whose snapshot was later deleted falls back to the
+8 GiB default rather than reporting `0`, since a caller sizing a volume off that member can
+act on the default.
+
+The rest of the `CreateSnapshot` family — `CreateSnapshots`, `CopySnapshot`,
+`ModifySnapshotAttribute`, `DescribeSnapshotAttribute` and `ResetSnapshotAttribute` — is
+still absent and answers `InvalidAction`.
+
 #### Finding a resource by tag
 
 `DescribeTags` — the operation whose whole job is this question — did not exist until
@@ -4196,11 +4253,12 @@ It reports every tag stored in the request's account and region. Every EC2 recor
 real EC2's scope for this operation.
 
 **The scan is deliberately wider than what `CreateTags` can write.** `CreateTags` reaches
-nine resource types; `DescribeTags` reads thirteen, adding `image`, `snapshot`,
-`launch-template` and `fleet` — types whose tags arrive through their own create call's
-`TagSpecification.N` and cannot be set through `CreateTags` at all
-([#689](https://github.com/scttfrdmn/substrate/issues/689) adds the snapshot arm;
-[#695](https://github.com/scttfrdmn/substrate/issues/695) the rest). Reporting only the
+ten resource types; `DescribeTags` reads thirteen, adding `image`, `launch-template` and
+`fleet` — types whose tags arrive through their own create call's `TagSpecification.N` and
+cannot be set through `CreateTags` at all
+([#695](https://github.com/scttfrdmn/substrate/issues/695) is the remaining three;
+`snapshot` was in this list until [#689](https://github.com/scttfrdmn/substrate/issues/689)
+gave `CreateTags` a `snap-` arm). Reporting only the
 writable types would hide tags a caller had successfully applied. `placement-group` is the one
 type carrying a `Tags` field that stays out: nothing writes it, and its records are keyed by
 group *name* where AWS's `TagDescription` reports an ID.

@@ -238,6 +238,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.attachVolume(ctx, req)
 	case "DetachVolume":
 		return p.detachVolume(ctx, req)
+	case "CreateSnapshot":
+		return p.createSnapshot(ctx, req)
 	case "DeleteSnapshot":
 		return p.deleteSnapshot(ctx, req)
 	case "DescribeSnapshots":
@@ -533,9 +535,15 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// VPC, subnet, security group, internet gateway, route table and four index
 	// mutations: a refusal past that point leaves state behind, which is worse than no
 	// validation at all because the next request in the same test sees it.
-	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings); awsErr != nil {
+	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
+	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings, resolveSnapshot); awsErr != nil {
 		return nil, awsErr
 	}
+
+	// A mapping that names a snapshot and no size takes the snapshot's, which the
+	// validation above has just established exists. It happens here rather than inside
+	// ec2VolumeFromMapping so that function stays pure; see [ec2ResolveSnapshotSizes].
+	blockDeviceMappings = ec2ResolveSnapshotSizes(blockDeviceMappings, resolveSnapshot)
 
 	// The volume tags are checked here for the same ordering reason, and it is not the
 	// same as the instance tags' position: a volume is written inside the launch loop
@@ -2549,6 +2557,13 @@ func ec2TaggableResource(reqCtx *RequestContext, id string) (stateKey, arnType s
 		// [EC2Plugin.applyTagsToResource] is type-agnostic — it reads and writes the
 		// record's "tags" JSON member — and [EC2Volume.Tags] already serializes there.
 		return ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, id), "volume", true
+	case strings.HasPrefix(id, "snap-"):
+		// Snapshots had the same silent no-op vol- did, and #689 made it reachable: a
+		// caller can now create a snapshot of their own, so tagging one after the fact is
+		// something they will do. DescribeTags already reported a snapshot's tags before
+		// this arm existed (#688) — its scan reads state directly — so until now
+		// DescribeTags could see tags CreateTags had no way to write.
+		return ec2SnapshotStateKey(reqCtx.AccountID, reqCtx.Region, id), "snapshot", true
 	default:
 		return "", "", false
 	}
@@ -3452,10 +3467,19 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	// Materialize a backing EBS snapshot for the AMI's root device, so that
 	// DescribeSnapshots and the block-device-mapping.snapshot-id filter on
 	// DescribeImages can model snapshot-retention logic (#322).
+	//
+	// The size and the source volume are read from the instance's own root volume rather
+	// than being the literal 8 this recorded through v0.105.0; see
+	// [EC2Plugin.ec2InstanceRootVolume] for what that constant cost a caller (#689).
+	rootVolumeID, rootVolumeSize, err := p.ec2InstanceRootVolume(reqCtx, instanceID)
+	if err != nil {
+		return nil, err
+	}
 	snapshotID := generateEBSSnapshotID()
 	snap := EC2Snapshot{
 		SnapshotID:  snapshotID,
-		VolumeSize:  8,
+		VolumeID:    rootVolumeID,
+		VolumeSize:  rootVolumeSize,
 		State:       "completed",
 		StartTime:   p.tc.Now().UTC().Format(time.RFC3339),
 		Description: "Created by CreateImage for " + name,
@@ -3597,6 +3621,14 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Images  []imageItem `xml:"imagesSet>item"`
 	}
 
+	// The mapping's volumeSize is read from the backing snapshot rather than rendered as
+	// the literal 8 this used through v0.105.0. That constant was a second, independent
+	// copy of createImage's — so the two agreed only for as long as neither knew a real
+	// size, and #689 gave createImage one. Reading the snapshot means there is one source
+	// of truth for an AMI's root volume size, and DescribeImages and DescribeSnapshots
+	// cannot disagree about the same snapshot.
+	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
+
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
@@ -3623,9 +3655,16 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			CreationDate: img.CreationDate,
 		}
 		if img.SnapshotID != "" {
+			// An AMI whose snapshot record is gone — DeleteSnapshot removes it and leaves
+			// the AMI standing — falls back to the default rather than reporting 0, which
+			// is what a caller sizing a volume off this member can act on.
+			size := int64(ec2DefaultVolumeSizeGiB)
+			if snap, found := resolveSnapshot(img.SnapshotID); found && snap.VolumeSize > 0 {
+				size = snap.VolumeSize
+			}
 			item.BlockDeviceMappings = []blockDeviceItem{{
 				DeviceName: "/dev/sda1",
-				EBS:        ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: 8},
+				EBS:        ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: size},
 			}}
 		}
 		item.Tags = ec2TagItems(img.Tags)
@@ -4974,7 +5013,7 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		az = reqCtx.Region + "a"
 	}
 	sizeStr := req.Params["Size"]
-	size := 8
+	size := ec2DefaultVolumeSizeGiB
 	if sizeStr != "" {
 		if n, err := strconv.Atoi(sizeStr); err == nil && n > 0 {
 			size = n
@@ -4984,7 +5023,37 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if volType == "" {
 		volType = "gp2"
 	}
+
+	// A named snapshot is checked and its size honored, the same two rules the launch
+	// path applies through [ec2CheckMappingSnapshot] — CreateVolume had an independent
+	// copy of the gap, so a restore from a 30 GiB snapshot produced an 8 GiB volume here
+	// too, and one naming a snapshot no account holds succeeded outright (#689). Both
+	// AWS sentences are on CreateVolume's own Size member: "If you specify a snapshot,
+	// the default is the snapshot size" and "You can specify a volume size that is equal
+	// to or larger than the snapshot size."
+	//
+	// A request naming neither Size nor SnapshotId still gets the 8 GiB default rather
+	// than the refusal AWS documents ("Size is required unless SnapshotId is specified").
+	// That is a wider change than this one and a follow-up.
 	snapshotID := req.Params["SnapshotId"]
+	if snapshotID != "" {
+		snap, found := p.ec2SnapshotResolver(reqCtx)(snapshotID)
+		if awsErr := ec2RequireResource(ec2SnapshotIDKind, snapshotID, found); awsErr != nil {
+			return nil, awsErr
+		}
+		switch {
+		case sizeStr == "":
+			size = int(snap.VolumeSize)
+		case int64(size) < snap.VolumeSize:
+			return nil, &AWSError{
+				Code: "InvalidParameterValue",
+				Message: fmt.Sprintf(
+					"Size %d is smaller than the size of snapshot %s (%d GiB)",
+					size, snapshotID, snap.VolumeSize),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+	}
 	encrypted := strings.ToLower(req.Params["Encrypted"]) == "true"
 	// Recorded as given, with the same tolerance Size above has: a value that does not
 	// parse leaves the field at zero and the field is then omitted from the response,
@@ -5379,7 +5448,7 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 	restorableBy := newEC2SnapshotRestorableBy(req.Params, reqCtx.AccountID)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace,
-		"snapshot:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+		ec2SnapshotStatePrefix(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSnapshots list: %w", err)
 	}
