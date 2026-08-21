@@ -961,10 +961,13 @@ map iteration order could not replay from the event log.
 
 Everything else substrate populates is single-valued: `aws:RequestTag/<key>` and
 `aws:ResourceTag/<key>` on an authorized request, `ec2:CreateAction` on [a tagged create's
-second authorization pass](#a-tagged-create-is-authorized-twice), `sts:ExternalId` when a role
+second authorization pass](#a-tagged-create-is-authorized-twice),
+[`ec2:Subnet` and `ec2:Vpc`](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc) on a
+launch's networking resources, `sts:ExternalId` when a role
 is assumed, and `aws:PrincipalArn` / `aws:ResourceAccount` in a simulation. A set qualifier on one of
 those is evaluated over a one-element set — which is the thing AWS warns against writing,
-not something substrate refuses.
+not something substrate refuses. Over one that is **absent** it is vacuously true, which is
+the other half of the same warning.
 
 **One authorization path populates neither map**: `iam:` actions decided inside the IAM
 plugin. Nothing there reads the request for tags, so a condition on `aws:RequestTag` or
@@ -3484,10 +3487,11 @@ unknown resource would widen the policy the caller wrote instead of narrowing it
 
 ##### A launch that omits `SubnetId` is authorized against the default VPC's resources
 
-A launch that names no subnet does not run without one: substrate resolves the
-[default VPC](#runinstances)'s default subnet and its `default` security group,
-creating them when the account has none. Both are part of the decision, resolved from
-state *before* it is made:
+A launch that names no subnet does not run without one: substrate resolves the default
+VPC's default subnet and its `default` security group — the VPC being the
+`172.31.0.0/16` one substrate auto-creates on the first launch that needs it — creating
+them when the account has none. Both are part of the decision, resolved from state
+*before* it is made:
 
 | State when the launch arrives | Subnet in the decision | Security group in the decision |
 |---|---|---|
@@ -3507,14 +3511,79 @@ the request omits. A `Deny` on `subnet/*` therefore still matches, and a
 least-privilege `Allow` naming one specific subnet correctly refuses a launch that
 will mint a different one.
 
-**This is substrate's reading, not AWS parity.** The Service Authorization Reference's
-`RunInstances` scenario rows require `subnet*` only in the `EC2-VPC-EBS-Subnet` and
-`EC2-VPC-InstanceStore-Subnet` scenarios, so a launch that omits the subnet is, read
-straight, not authorized against one — and AWS's own recommended subnet guardrail is
-the `ec2:Subnet` condition key on `network-interface/*`, which substrate does not
-populate. Substrate diverges because a guardrail a caller defeats by omitting a
-parameter is useless for the purpose substrate exists for: a test that proves a policy
-keeps workloads out of a subnet has to fail when the launch lands in it.
+**The resource ARN is substrate's reading, not AWS parity.** The Service Authorization
+Reference's `RunInstances` scenario rows require `subnet*` only in the
+`EC2-VPC-EBS-Subnet` and `EC2-VPC-InstanceStore-Subnet` scenarios, so a launch that
+omits the subnet is, read straight, not authorized against one. Substrate diverges
+because a guardrail a caller defeats by omitting a parameter is useless for the purpose
+substrate exists for: a test that proves a policy keeps workloads out of a subnet has to
+fail when the launch lands in it.
+
+AWS's own recommended subnet guardrail is a condition key rather than a resource ARN —
+`ec2:Subnet` on `network-interface/*` — and substrate populates that too, from the same
+resolution, so **both** spellings of the guardrail hold for a launch that names no
+subnet. See [the condition keys a launch's networking resources
+carry](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc).
+
+##### A launch's networking resources carry `ec2:Subnet` and `ec2:Vpc`
+
+These are substrate's first `ec2:`-prefixed condition keys, and they are what AWS's own
+example policies reach for to fence a launch into one subnet or one VPC. The subnet
+example is a `Deny`: "you could create a policy that denies users permissions to launch
+an instance into any other subnet. The statement does this by denying permission to
+create a network interface, except where subnet `subnet-12345678` is specified."
+
+```json
+{
+  "Effect": "Deny",
+  "Action": "ec2:RunInstances",
+  "Resource": "arn:aws:ec2:us-east-1:111122223333:network-interface/*",
+  "Condition": {
+    "ArnNotEquals": {
+      "ec2:Subnet": "arn:aws:ec2:us-east-1:111122223333:subnet/subnet-12345678"
+    }
+  }
+}
+```
+
+Both keys' values are **full ARNs**. AWS says so outright for the VPC — "To specify a
+VPC for the `ec2:Vpc` condition key, you must specify the full ARN of the VPC" — and its
+machine-readable service reference declares the `Type` of both keys as `ARN`. Its two
+example policies nonetheless use different operator families, `ArnNotEquals` for
+`ec2:Subnet` and `StringEquals` for `ec2:Vpc`; both work here, because a full ARN
+satisfies either.
+
+Each key is scoped to the resources the reference lists it on, not merged into the
+request, so a condition written about the interface cannot be satisfied by the AMI:
+
+| Resource in the decision | `ec2:Subnet` | `ec2:Vpc` |
+|---|---|---|
+| `network-interface/*` or `network-interface/{id}` | the launch's subnet | the launch's VPC |
+| `subnet/{id}` or `subnet/*` | — | the launch's VPC |
+| `security-group/{id}` | — | **that group's own** VPC |
+| `image/{ami}`, `instance/*`, `security-group/*` | — | — |
+
+A security group reports the VPC from *its own* record rather than the launch's, because
+a group in another VPC is exactly the mismatch such a policy is written to catch. The
+VPC itself comes from the default-VPC lookup when the launch names no subnet, and
+otherwise from the resolved subnet's record — including a subnet a launch template
+supplied, on the same field-by-field precedence the rest of the decision uses.
+
+**A key with nothing to report is absent, not `"*"`.** A launch with no subnet and no
+default VPC is about to create both, so there is no subnet and no VPC to name; a
+wildcard *value* would be an ARN-shaped string no caller's `ArnEquals` could ever match.
+Two consequences, both AWS's documented behaviour rather than substrate quirks:
+
+- An `Allow` gated on an absent key does not match, so such a launch is **refused** —
+  which is the safe direction, and the reason the omitted-not-wildcarded choice is not a
+  loophole.
+- A `Deny` gated on one with a positive operator does not fire, and a set qualifier
+  (`ForAllValues:`) over it is **vacuously true** — which is why AWS says not to use set
+  operators on single-valued keys.
+
+Not covered: `ec2:Vpc` on any action other than `RunInstances` — the reference lists 28
+action×resource pairs carrying `ec2:Subnet` service-wide, and this covers the launch
+path only.
 
 ##### A fleet's launches are authorized, not exempted
 
@@ -3539,10 +3608,12 @@ Not covered:
   documented types.
 - **The launch-template ARN**, which the reference does not mark required for
   `RunInstances` — so requiring it would refuse the same policy.
-- **Most of the EC2 condition keys** (`ec2:InstanceType`, `ec2:Vpc`, `ec2:Subnet`,
+- **Most of the EC2 condition keys** (`ec2:InstanceType`,
   `ec2:IsLaunchTemplateResource` and the rest). Resource resolution is what this
-  covers; the condition keys substrate populates are the `aws:`-prefixed ones plus
-  [`ec2:CreateAction`](#a-tagged-create-is-authorized-twice) on the tagging pass.
+  covers; the condition keys substrate populates are the `aws:`-prefixed ones,
+  [`ec2:CreateAction`](#a-tagged-create-is-authorized-twice) on the tagging pass, and
+  [`ec2:Subnet`/`ec2:Vpc`](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc)
+  on a launch's networking resources.
 
 #### Tagging is authorized against every resource it names
 
@@ -4113,7 +4184,7 @@ caller.
 
 #### How substrate's own fleet tag is exempt
 
-Substrate stamps [`aws:ec2:fleet-id`](#finding-a-fleets-instances) on every fleet
+Substrate stamps [`aws:ec2:fleet-id`](#finding-a-fleet-s-instances) on every fleet
 instance, which is a reserved key on a tag-on-create path — the reason this check
 was previously left off that path entirely.
 
@@ -4162,7 +4233,7 @@ Two rules make this less arithmetic than it looks, and both are modelled.
 **Tags with the `aws:` prefix do not count.** The documentation says so directly:
 "Tags with the `aws:` prefix do not count against your tags per resource limit." This
 is load-bearing rather than pedantry, because substrate stamps
-[`aws:ec2:fleet-id`](#finding-a-fleets-instances) on every fleet instance — a counter
+[`aws:ec2:fleet-id`](#finding-a-fleet-s-instances) on every fleet instance — a counter
 that included reserved keys would refuse a fleet launch whose template names the full
 50 user tags, which real EC2 accepts. A fleet instance therefore holds 51 tags legally:
 50 of the caller's and one of substrate's.

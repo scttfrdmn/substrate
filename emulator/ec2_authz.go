@@ -43,6 +43,11 @@ import (
 // When there is no default VPC yet the launch is about to create both, so they are
 // the wildcards subnet/* and security-group/*, on the same reasoning instance/* and
 // network-interface/* already are.
+//
+// Three of the resources also carry condition keys of their own — ec2:Subnet on the
+// network interface, ec2:Vpc on the interface, the subnet and each security group —
+// which is the guardrail AWS itself documents for fencing off a subnet, and which
+// #673's docs pointed at while substrate had neither key (#692).
 func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
 	if req.Operation != "RunInstances" {
 		return nil
@@ -70,26 +75,50 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 			Tags: ec2AuthzTagsFor(state, ec2ImageStateKey(acct, region, launch.imageID)),
 		})
 	}
+	// vpcID is the VPC this launch lands in, and it is what ec2:Vpc reports. The
+	// default-VPC path resolved it already; a named or template subnet carries it on
+	// the record read for that subnet's tags, so it costs no extra state read.
+	vpcID := launch.vpcID
 	switch {
 	case launch.subnetID != "":
+		tags, subnetVPC := ec2AuthzRecordFor(state, "subnet:"+acct+"/"+region+"/"+launch.subnetID)
+		if subnetVPC != "" {
+			vpcID = subnetVPC
+		}
 		out = append(out, authzResource{
 			ARN:  ec2SubnetARN(acct, region, launch.subnetID),
-			Tags: ec2AuthzTagsFor(state, "subnet:"+acct+"/"+region+"/"+launch.subnetID),
+			Tags: tags,
+			// The reference lists ec2:Vpc on RunInstances' subnet resource as well as
+			// on its network interface — a subnet belongs to exactly one VPC, so the
+			// key means the same thing here.
+			Context: ec2AuthzVpcContext(acct, region, vpcID),
 		})
 	case launch.subnetWildcard:
 		// The default subnet this launch is about to create. No tags: it does not
 		// exist, so an aws:ResourceTag condition about it cannot be satisfied — which
 		// is the honest answer, since the subnet substrate mints carries no tags
-		// either.
-		out = append(out, authzResource{ARN: "arn:aws:ec2:" + region + ":" + acct + ":subnet/*"})
+		// either. It does carry ec2:Vpc when the default VPC exists, because the
+		// subnet it mints will be in that VPC.
+		out = append(out, authzResource{
+			ARN:     "arn:aws:ec2:" + region + ":" + acct + ":subnet/*",
+			Context: ec2AuthzVpcContext(acct, region, vpcID),
+		})
 	}
 	for _, sgID := range launch.securityGroupIDs {
+		tags, sgVPC := ec2AuthzRecordFor(state, "sg:"+acct+"/"+region+"/"+sgID)
 		out = append(out, authzResource{
 			ARN:  "arn:aws:ec2:" + region + ":" + acct + ":security-group/" + sgID,
-			Tags: ec2AuthzTagsFor(state, "sg:"+acct+"/"+region+"/"+sgID),
+			Tags: tags,
+			// The group's *own* VPC, not the launch's: the reference lists ec2:Vpc on
+			// the security-group resource, where it means the VPC the group belongs
+			// to, and a group in another VPC is exactly the mismatch a policy scoped
+			// this way is written to catch.
+			Context: ec2AuthzVpcContext(acct, region, sgVPC),
 		})
 	}
 	if launch.securityGroupWildcard {
+		// No record to read, and this wildcard is set only when there is no default
+		// VPC at all — so there is no VPC to report either.
 		out = append(out, authzResource{ARN: "arn:aws:ec2:" + region + ":" + acct + ":security-group/*"})
 	}
 	// Every launch attaches an interface, so network-interface* is always evaluated.
@@ -97,11 +126,23 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 	// request brings by ID is named, because a policy can meaningfully scope to it.
 	// Neither carries tags: substrate stores no standalone taggable ENI record, and
 	// ec2TaggableStateKey has no eni- arm to read one through.
+	//
+	// This is the resource AWS's own subnet guardrail is written against, so it is
+	// where ec2:Subnet and ec2:Vpc go — both of them, on every interface the launch
+	// touches, named or wildcard, since they describe where the interface lands
+	// rather than which interface it is.
+	eniContext := ec2AuthzInterfaceContext(acct, region, launch.subnetID, vpcID)
 	if len(launch.networkInterfaceIDs) == 0 {
-		out = append(out, authzResource{ARN: "arn:aws:ec2:" + region + ":" + acct + ":network-interface/*"})
+		out = append(out, authzResource{
+			ARN:     "arn:aws:ec2:" + region + ":" + acct + ":network-interface/*",
+			Context: eniContext,
+		})
 	}
 	for _, eniID := range launch.networkInterfaceIDs {
-		out = append(out, authzResource{ARN: "arn:aws:ec2:" + region + ":" + acct + ":network-interface/" + eniID})
+		out = append(out, authzResource{
+			ARN:     "arn:aws:ec2:" + region + ":" + acct + ":network-interface/" + eniID,
+			Context: eniContext,
+		})
 	}
 	// The instance does not exist yet, so its ARN is the wildcard AWS's own
 	// least-privilege RunInstances examples write. Including it is what makes a
@@ -334,6 +375,12 @@ type ec2AuthzLaunchMembers struct {
 	// kind of value that eventually reaches a state key (#656).
 	subnetWildcard        bool
 	securityGroupWildcard bool
+
+	// vpcID is the VPC the launch lands in, when the default-VPC lookup resolved one.
+	// A launch whose subnet came from the request or a template leaves it empty and
+	// the VPC is read off that subnet's own record instead, which is the one place
+	// that knows — including when the caller named a subnet outside the default VPC.
+	vpcID string
 }
 
 // ec2AuthzResolveLaunch resolves the resources a RunInstances request names,
@@ -469,6 +516,9 @@ func (m *ec2AuthzLaunchMembers) resolveDefaultVPC(state StateManager, reqCtx *Re
 		m.securityGroupWildcard = !namedGroups
 		return
 	}
+	// The VPC is known even when its default subnet is not, so ec2:Vpc is answerable
+	// for a launch that is about to mint the subnet.
+	m.vpcID = vpc.VPCID
 	if subnet != nil {
 		m.subnetID = subnet.SubnetID
 	} else {
@@ -508,15 +558,90 @@ func ec2AuthzInterfaceIDs(interfaces []EC2NetworkInterface) []string {
 // serves all three and the ARN a resource is authorized under cannot drift from
 // the tags it is matched against.
 func ec2AuthzTagsFor(state StateManager, key string) map[string]string {
+	tags, _ := ec2AuthzRecordFor(state, key)
+	return tags
+}
+
+// ec2AuthzRecordFor returns the tags and the VPC ID stored on the EC2 record at key,
+// each zero when the record cannot be read or does not carry it.
+//
+// Both come out of one read because both describe the same resource and are needed
+// together: a subnet contributes its tags to aws:ResourceTag/* and its VPC to
+// ec2:Vpc, and reading the record twice is how the two would come to describe
+// different versions of it. An image record has no vpc_id, so it yields "" — which
+// [ec2AuthzVpcContext] turns into an omitted key rather than an empty one.
+func ec2AuthzRecordFor(state StateManager, key string) (map[string]string, string) {
 	raw, err := state.Get(context.Background(), ec2Namespace, key)
 	if err != nil || raw == nil {
-		return nil
+		return nil, ""
 	}
 	var record struct {
 		Tags []EC2Tag `json:"tags"`
+		// Every EC2 record that belongs to a VPC spells the member this way — EC2Subnet
+		// and EC2SecurityGroup both do — so one decoder serves both, for the same
+		// reason one tag decoder serves all three record types.
+		VPCID string `json:"vpc_id"`
 	}
 	if json.Unmarshal(raw, &record) != nil {
+		return nil, ""
+	}
+	return ec2TagsToMap(record.Tags), record.VPCID
+}
+
+// ec2SubnetCondKey and ec2VpcCondKey are the two resource-level condition keys the
+// Service Authorization Reference lists on RunInstances' network-interface resource,
+// and the mechanism AWS's own documentation recommends for fencing a launch into one
+// subnet — over the resource-ARN scoping substrate already had (#673, #692).
+//
+// Both take a **full ARN**, not an ID. AWS says so for the VPC outright ("To specify
+// a VPC for the ec2:Vpc condition key, you must specify the full ARN of the VPC") and
+// shows it for the subnet in the policy its subnet guardrail is written as, which
+// compares ec2:Subnet against arn:aws:ec2:<region>:<account>:subnet/subnet-… . AWS's
+// machine-readable service reference declares the Type of both as ARN.
+//
+// The two example policies use *different* operator families against those ARNs —
+// ArnNotEquals for ec2:Subnet, StringEquals for ec2:Vpc — which both work here
+// because the value is the full ARN either way and substrate's Arn* and String*
+// operators compare the same string.
+const (
+	ec2SubnetCondKey = "ec2:Subnet"
+	ec2VpcCondKey    = "ec2:Vpc"
+)
+
+// ec2VpcARN returns the ARN of a VPC, the form ec2:Vpc is compared against.
+func ec2VpcARN(accountID, region, vpcID string) string {
+	return "arn:aws:ec2:" + region + ":" + accountID + ":vpc/" + vpcID
+}
+
+// ec2AuthzVpcContext returns the ec2:Vpc entry for vpcID, or nil when no VPC
+// resolved.
+//
+// **Omitted, not wildcarded.** A "*" value would be a string no caller's ArnEquals
+// could ever match and an ARN-shaped lie about a VPC that does not exist; an absent
+// key is what AWS's own evaluation rules already describe. The consequence is worth
+// knowing: a condition on an absent single-valued key does not match, so an Allow
+// gated on ec2:Vpc refuses such a launch and a Deny gated on it does not catch one —
+// and a set qualifier over an absent key is vacuously true, which is AWS's documented
+// behavior and the reason it says not to use one on a single-valued key.
+func ec2AuthzVpcContext(accountID, region, vpcID string) map[string]string {
+	if vpcID == "" {
 		return nil
 	}
-	return ec2TagsToMap(record.Tags)
+	return map[string]string{ec2VpcCondKey: ec2VpcARN(accountID, region, vpcID)}
+}
+
+// ec2AuthzInterfaceContext returns the condition keys AWS documents on a launch's
+// network-interface resource: ec2:Subnet for the subnet the interface lands in, and
+// ec2:Vpc for that subnet's VPC. Each is omitted when it did not resolve, per
+// [ec2AuthzVpcContext].
+func ec2AuthzInterfaceContext(accountID, region, subnetID, vpcID string) map[string]string {
+	out := ec2AuthzVpcContext(accountID, region, vpcID)
+	if subnetID == "" {
+		return out
+	}
+	if out == nil {
+		out = make(map[string]string, 1)
+	}
+	out[ec2SubnetCondKey] = ec2SubnetARN(accountID, region, subnetID)
+	return out
 }

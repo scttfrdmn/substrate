@@ -209,6 +209,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents them as case-insensitive — a pre-existing property of the evaluator, global to
   every key rather than new with this one, now tracked as #704.
 
+- **`ec2:Subnet` and `ec2:Vpc` are populated on a launch's networking resources** (#692), so
+  AWS's own recommended subnet guardrail works. v0.105.0's docs pointed a reader at that
+  guardrail — a `Deny` on `ec2:RunInstances` for `network-interface/*` with `ArnNotEquals`
+  against a subnet ARN, whose prose reads "denying permission to create a network interface,
+  except where subnet `subnet-12345678` is specified" — while noting substrate did not populate
+  the key. The consequence was worse than inert: because the key was absent, `ArnNotEquals`
+  compared the permitted ARN against the empty string, matched, and **denied every launch**,
+  including into the subnet the policy exists to permit. An `Allow` gated on either key denied
+  every launch for the mirror-image reason. Both directions are in the recorded fail-before.
+
+  **The values are full ARNs.** AWS states it for the VPC — "To specify a VPC for the
+  `ec2:Vpc` condition key, you must specify the full ARN of the VPC" — and its
+  machine-readable service reference (`servicereference.us-east-1.amazonaws.com/v1/ec2/ec2.json`)
+  declares the `Type` of both keys as `ARN`. Its two example policies nonetheless use
+  different operator families, `ArnNotEquals` for `ec2:Subnet` and `StringEquals` for
+  `ec2:Vpc`; both work, because a full ARN satisfies either, and both are tested.
+
+  **Each key is scoped to the resources the reference lists it on**, carried on the
+  `authzResource` it describes rather than merged into the request context — `ec2:Subnet` on
+  the launch's `network-interface` resources, and `ec2:Vpc` on those plus its `subnet` and each
+  `security-group`. That scoping is load-bearing rather than tidy: AWS's guardrail denies
+  `network-interface/*` unconditionally *unless* the key names the right subnet, so the
+  launch's other four resources must not carry the key at all, or the same `Deny` would fire on
+  the AMI and refuse everything. The reference's own columns are wider than
+  `network-interface` for `ec2:Vpc`, which is why the subnet and the groups carry it too.
+
+  **A security group reports its own VPC**, read from that group's record rather than from the
+  launch, because a group in another VPC is exactly the mismatch such a policy is written to
+  catch. The launch's VPC comes from the default-VPC lookup when no subnet was named, and
+  otherwise from the resolved subnet's own record — including one a launch template supplied,
+  under the same field-by-field precedence the rest of the decision uses. A launch that omits
+  `SubnetId` therefore reports the default subnet it will land in, so **both** spellings of the
+  guardrail — #673's resource ARN and AWS's condition key — hold for the launch shape every
+  getting-started example uses.
+
+  **A key with nothing to report is omitted, not `"*"`.** A launch with no subnet and no
+  default VPC is about to create both; a wildcard *value* would be an ARN-shaped string no
+  caller's `ArnEquals` could match. The consequences are AWS's documented behaviour, not
+  substrate quirks: an `Allow` gated on an absent key does not match, so such a launch is
+  refused — the safe direction — while a `Deny` with a positive operator does not fire, and a
+  `ForAllValues:` qualifier over it is vacuously true, which is why AWS says not to use set
+  operators on single-valued keys.
+
+  Substrate's first `ec2:`-prefixed keys after `ec2:CreateAction`, and they inherit its
+  case-sensitivity caveat (#704): the key **name** is matched case-sensitively here where AWS
+  documents it as case-insensitive.
+
 ### Changed
 - **A create carrying `TagSpecification` now additionally requires `ec2:CreateTags`** (#691).
   AWS performs a second authorization pass on a tag-carrying create: "If tags are specified in
@@ -338,6 +385,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be a single rule.
 
 ### Fixed
+- **Three dead in-page links in `docs/services.md`** (#692). Two pointed at
+  `#finding-a-fleets-instances` where the rendered anchor is `#finding-a-fleet-s-instances`,
+  and one pointed the phrase "default VPC" at `#runinstances`, which is a row in an
+  operations table rather than a heading and so has no anchor at all. Found while adding the
+  cross-references for this issue; every in-page link in the built page now resolves.
+
 - **The `Null` operator no longer reads a multivalued condition key as null** (#690). It
   compares a single string, so a key carried only in the new `MultiContext` — which is where
   `aws:TagKeys` lives — read as absent. Without this, AWS's own recommended pairing of

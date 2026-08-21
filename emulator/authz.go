@@ -103,7 +103,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	// policies admit all of them, which is how AWS evaluates a statement against
 	// "every resource that is required" for the action (#660, #662).
 	for _, res := range resources {
-		condCtx := make(map[string]string, len(requestTags)+len(res.Tags))
+		condCtx := make(map[string]string, len(requestTags)+len(res.Tags)+len(res.Context))
 		for k, v := range requestTags {
 			condCtx[k] = v
 		}
@@ -112,6 +112,12 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		// which is the false allow orgAuthzResourceID's comment exists to prevent.
 		for k, v := range res.Tags {
 			condCtx["aws:ResourceTag/"+k] = v
+		}
+		// Keys that describe this resource, on the same reasoning: they are scoped to
+		// the resource the reference lists them on, so a condition written about a
+		// launch's network interface cannot be satisfied by its AMI or its instance.
+		for k, v := range res.Context {
+			condCtx[k] = v
 		}
 
 		result := Evaluate(docs, EvaluationRequest{
@@ -601,6 +607,19 @@ type authzResource struct {
 
 	// Tags are the tags on the resource ARN names, or nil when it carries none.
 	Tags map[string]string
+
+	// Context holds condition keys that describe this resource rather than the
+	// request — ec2:Subnet and ec2:Vpc on a launch's network interface, which the
+	// Service Authorization Reference lists on that resource and not on the action
+	// (#692). It is nil for a resource with none, which is every resource outside
+	// EC2's launch path.
+	//
+	// Per-resource rather than merged into the request context for the same reason
+	// Tags is: a key describing one resource must not satisfy a condition written
+	// about another. AWS's own subnet guardrail depends on that — it denies
+	// RunInstances on network-interface/* unless ec2:Subnet names one subnet, and
+	// the launch's other four resources must not carry the key at all.
+	Context map[string]string
 }
 
 // buildResourceARNs returns every resource the request names, each paired with
