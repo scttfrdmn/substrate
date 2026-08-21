@@ -113,6 +113,51 @@ type ec2LTVersionItem struct {
 	VersionNumber      int64               `xml:"versionNumber"`
 }
 
+// ec2ValidationWarningXML is AWS's ValidationWarning: the `warning` member
+// CreateLaunchTemplate and CreateLaunchTemplateVersion return for "parameters or
+// parameter combinations that are not valid".
+//
+// Both operations document the member and neither documents an error for an invalid
+// launch template, so a template carrying a mapping RunInstances refuses is *created*
+// and warned about rather than refused — see [ec2CollectBlockDeviceMappings]. Substrate
+// swallowed those mappings silently until #693.
+//
+// It is always rendered through a pointer field, never a value: encoding/xml ignores
+// omitempty on a struct, so a value field would emit an empty `<warning></warning>` on
+// every valid template and a caller checking for the element's presence would read every
+// template as warned about.
+type ec2ValidationWarningXML struct {
+	// Errors is ValidationWarning's sole member, ErrorSet.N. It carries no omitempty:
+	// a warning with no errors is a shape substrate never builds, since the pointer is
+	// nil when there is nothing to report.
+	Errors []ec2ValidationErrorXML `xml:"errorSet>item"`
+}
+
+// ec2ValidationErrorXML is one ValidationError within a warning — AWS's two members are
+// code and message, both documented as pointing at the same error-code table the
+// equivalent refusal draws its code from.
+type ec2ValidationErrorXML struct {
+	Code    string `xml:"code"`
+	Message string `xml:"message"`
+}
+
+// ec2ValidationWarningFor renders a collected problem list as the `warning` member, or
+// nil when there is nothing to warn about.
+//
+// Returning nil for an empty list is what keeps the element absent from a valid
+// template's response; see [ec2ValidationWarningXML] for why that cannot be a struct
+// tag's job.
+func ec2ValidationWarningFor(problems []*AWSError) *ec2ValidationWarningXML {
+	if len(problems) == 0 {
+		return nil
+	}
+	errs := make([]ec2ValidationErrorXML, 0, len(problems))
+	for _, p := range problems {
+		errs = append(errs, ec2ValidationErrorXML{Code: p.Code, Message: p.Message})
+	}
+	return &ec2ValidationWarningXML{Errors: errs}
+}
+
 // ec2LTVersionDataXML renders a version's stored parameters as AWS's
 // ResponseLaunchTemplateData.
 //
@@ -126,14 +171,51 @@ type ec2LTVersionItem struct {
 // RequestLaunchTemplateData spell it differently, so a round-trip test has to use
 // both names.
 type ec2LTVersionDataXML struct {
-	IamInstanceProfile *ec2LTVersionProfileXML  `xml:"iamInstanceProfile,omitempty"`
-	ImageID            string                   `xml:"imageId,omitempty"`
-	InstanceType       string                   `xml:"instanceType,omitempty"`
-	KeyName            string                   `xml:"keyName,omitempty"`
-	UserData           string                   `xml:"userData,omitempty"`
-	SecurityGroupIDs   []string                 `xml:"securityGroupIdSet>item,omitempty"`
-	NetworkInterfaces  []ec2LTVersionNetIfcXML  `xml:"networkInterfaceSet>item,omitempty"`
-	TagSpecifications  []ec2LTVersionTagSpecXML `xml:"tagSpecificationSet>item,omitempty"`
+	BlockDeviceMappings []ec2LTVersionBDMXML     `xml:"blockDeviceMappingSet>item,omitempty"`
+	IamInstanceProfile  *ec2LTVersionProfileXML  `xml:"iamInstanceProfile,omitempty"`
+	ImageID             string                   `xml:"imageId,omitempty"`
+	InstanceType        string                   `xml:"instanceType,omitempty"`
+	KeyName             string                   `xml:"keyName,omitempty"`
+	UserData            string                   `xml:"userData,omitempty"`
+	SecurityGroupIDs    []string                 `xml:"securityGroupIdSet>item,omitempty"`
+	NetworkInterfaces   []ec2LTVersionNetIfcXML  `xml:"networkInterfaceSet>item,omitempty"`
+	TagSpecifications   []ec2LTVersionTagSpecXML `xml:"tagSpecificationSet>item,omitempty"`
+}
+
+// ec2LTVersionBDMXML is one LaunchTemplateBlockDeviceMapping within a version's data.
+//
+// A template's mappings were stored and unreadable until #693: parsing them landed in
+// v0.104.0 and this member did not, so a caller could not read back the mapping a
+// `warning` is about — nor see what a SourceVersion-derived version inherited.
+//
+// noDevice is a string on the wire, not a bool: AWS documents it as "To omit the device
+// from the block device mapping, specify an empty string", so its presence is the signal
+// and its value carries nothing. Substrate stores a bool and renders the empty string
+// through a pointer, which is the only way encoding/xml can emit `<noDevice></noDevice>`
+// for a suppressed device and nothing at all for every other mapping.
+type ec2LTVersionBDMXML struct {
+	DeviceName  string                 `xml:"deviceName,omitempty"`
+	VirtualName string                 `xml:"virtualName,omitempty"`
+	NoDevice    *string                `xml:"noDevice"`
+	Ebs         *ec2LTVersionEbsBDMXML `xml:"ebs,omitempty"`
+}
+
+// ec2LTVersionEbsBDMXML is a mapping's LaunchTemplateEbsBlockDevice.
+//
+// Every member is a pointer or omitempty for the same reason the raw strings exist on
+// [EC2BlockDeviceMapping]: a mapping that named no size is a different request from one
+// that named zero, and rendering a 0 for the first would report a value the caller never
+// sent. deleteOnTermination is a *bool because the stored field keeps three states —
+// absent, true, false — and AWS's own member is a Boolean that a template can leave
+// unset.
+type ec2LTVersionEbsBDMXML struct {
+	DeleteOnTermination *bool  `xml:"deleteOnTermination,omitempty"`
+	Encrypted           *bool  `xml:"encrypted,omitempty"`
+	Iops                int    `xml:"iops,omitempty"`
+	SnapshotID          string `xml:"snapshotId,omitempty"`
+	Throughput          int    `xml:"throughput,omitempty"`
+	VolumeSize          int    `xml:"volumeSize,omitempty"`
+	VolumeType          string `xml:"volumeType,omitempty"`
 }
 
 // ec2LTVersionNetIfcXML is one network interface within a version's data.
@@ -185,6 +267,7 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 			out.IamInstanceProfile = &ec2LTVersionProfileXML{Name: d.IamInstanceProfile}
 		}
 	}
+	out.BlockDeviceMappings = ec2LTVersionBDMs(d.BlockDeviceMappings)
 	// Only the instance scope is stored, so only the instance scope reads back; see
 	// [EC2LaunchTemplateData.TagSpecifications].
 	if len(d.TagSpecifications) > 0 {
@@ -224,6 +307,52 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 			Groups:                   d.NetworkInterfaceGroups,
 			DeleteOnTermination:      true,
 		}}
+	}
+	return out
+}
+
+// ec2LTVersionBDMs renders a version's stored block device mappings for the wire.
+//
+// A mapping is emitted whether or not it would materialize a volume — a virtualName-only
+// entry and a NoDevice suppression are both parameters the template carries, and the
+// point of reading them back is to see what the template says rather than what a launch
+// from it would do.
+//
+// The ebs member is omitted entirely for a mapping that names none, so an instance-store
+// or suppressed device does not read back with an empty `<ebs/>` that a caller could
+// mistake for an EBS volume with defaults.
+func ec2LTVersionBDMs(mappings []EC2BlockDeviceMapping) []ec2LTVersionBDMXML {
+	if len(mappings) == 0 {
+		return nil
+	}
+	empty := ""
+	out := make([]ec2LTVersionBDMXML, 0, len(mappings))
+	for _, bdm := range mappings {
+		item := ec2LTVersionBDMXML{DeviceName: bdm.DeviceName, VirtualName: bdm.VirtualName}
+		if bdm.NoDevice {
+			item.NoDevice = &empty
+		}
+		if ec2NamesEbsMember(bdm) {
+			ebs := &ec2LTVersionEbsBDMXML{
+				Iops:       bdm.IOPS,
+				SnapshotID: bdm.SnapshotID,
+				Throughput: bdm.Throughput,
+				VolumeSize: bdm.VolumeSize,
+				VolumeType: bdm.VolumeType,
+			}
+			if bdm.Encrypted {
+				encrypted := true
+				ebs.Encrypted = &encrypted
+			}
+			// The stored value is the raw parameter, so "" is absent rather than false;
+			// see [EC2BlockDeviceMapping.DeleteOnTermination].
+			if bdm.DeleteOnTermination != "" {
+				dot := bdm.DeleteOnTermination == "true"
+				ebs.DeleteOnTermination = &dot
+			}
+			item.Ebs = ebs
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -308,14 +437,22 @@ func (p *EC2Plugin) createLaunchTemplateVersion(ctx *RequestContext, req *AWSReq
 		return nil, err
 	}
 
+	// The warning goes on this outer struct rather than on ec2LTVersionItem, which
+	// DescribeLaunchTemplateVersions shares: only the two create operations document
+	// the member, and a describe reporting one would invent it.
 	type response struct {
-		XMLName xml.Name         `xml:"CreateLaunchTemplateVersionResponse"`
-		XMLNS   string           `xml:"xmlns,attr"`
-		Version ec2LTVersionItem `xml:"launchTemplateVersion"`
+		XMLName xml.Name                 `xml:"CreateLaunchTemplateVersionResponse"`
+		XMLNS   string                   `xml:"xmlns,attr"`
+		Version ec2LTVersionItem         `xml:"launchTemplateVersion"`
+		Warning *ec2ValidationWarningXML `xml:"warning,omitempty"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
 		Version: ec2LTVersionItemFor(lt, newVersion),
+		// Collected after the overlay, for the reason the tag check runs there: a
+		// version inheriting a mapping from its source version is warned about it too.
+		Warning: ec2ValidationWarningFor(
+			ec2CollectBlockDeviceMappings(data.BlockDeviceMappings, p.ec2SnapshotResolver(ctx))),
 	})
 }
 
@@ -352,6 +489,17 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	}
 	if len(overlay.TagSpecifications) > 0 {
 		out.TagSpecifications = overlay.TagSpecifications
+	}
+	// Both scopes are overlaid, not just the instance one: a source version's volume
+	// tags survived into the new version and its block device mappings did not, so a
+	// SourceVersion-derived version silently launched instances with no mappings while
+	// reporting the same template data (#693). The omission was invisible because
+	// nothing rendered either member.
+	if len(overlay.VolumeTagSpecifications) > 0 {
+		out.VolumeTagSpecifications = overlay.VolumeTagSpecifications
+	}
+	if len(overlay.BlockDeviceMappings) > 0 {
+		out.BlockDeviceMappings = overlay.BlockDeviceMappings
 	}
 	if overlay.IamInstanceProfile != "" {
 		out.IamInstanceProfile = overlay.IamInstanceProfile

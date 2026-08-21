@@ -2933,7 +2933,11 @@ would launch instances from parameters the caller never asked for.
 `CreateLaunchTemplateVersion`'s `SourceVersion` is the asymmetry to know:
 
 - **With `SourceVersion`**, the new version inherits that version's parameters and
-  the request's values overwrite the ones they name.
+  the request's values overwrite the ones they name. Every parameter substrate stores
+  is inherited, including block device mappings and volume tag specifications —
+  those two were silently dropped until #693, so a version derived from a template
+  with a 25 GiB mapping launched an 8 GiB default root device instead, and nothing in
+  the response revealed the loss.
 - **Without it**, the new version holds *only* what the request names. Nothing is
   inherited — not from version 1, not from the latest.
 
@@ -3295,12 +3299,35 @@ and before the default-VPC branch, which commits a VPC, subnet, security group,
 internet gateway, route table and four index mutations. A refusal past that point
 would leave state the next request in the same test could see.
 
-**`CreateLaunchTemplate` does not refuse.** Its response carries a documented
-`warning` member of type `ValidationWarning` that exists precisely for "parameters or
-parameter combinations that are not valid", and its Errors section lists none — so a
-`400` there would be substrate's invention. That an invalid *block device mapping*
-belongs in that warning rather than in an error is substrate's reading; rendering the
-element is not yet modeled.
+**`CreateLaunchTemplate` does not refuse — it warns.** Its response carries a
+documented `warning` member of type `ValidationWarning` that exists precisely for
+"parameters or parameter combinations that are not valid", and its Errors section
+lists none — so a `400` there would be substrate's invention. That an invalid *block
+device mapping* belongs in that warning rather than in an error is substrate's
+reading; AWS documents the member's purpose but never says which validations use it.
+
+Since #693 both `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` render it:
+`warning` (singular) holding `errorSet>item` of `{code, message}`. The warning and
+the refusal are the same diagnosis by construction — one collector produces the
+problems and the refusal is a thin wrapper returning its first — so the code and
+message a caller reads at create time are byte-identical to what the launch would
+have refused with. The warning is wider in one respect: it reports **every** problem
+rather than the first, because AWS documents one entry "for each issue that's found".
+A valid template's response carries no `warning` element at all.
+
+| Operation | On an invalid mapping |
+|---|---|
+| `CreateLaunchTemplate` | `200` + `warning`; the template is created |
+| `CreateLaunchTemplateVersion` | `200` + `warning`; the version is created, including for a mapping inherited through `SourceVersion` |
+| `RunInstances` | `400` `InvalidBlockDeviceMapping` (or `InvalidSnapshot.NotFound`); nothing is written |
+| `CreateFleet` | as `RunInstances`, since a fleet reaches mappings only through a template |
+
+The mapping a warning is about reads back through
+`DescribeLaunchTemplateVersions`, which renders `blockDeviceMappingSet>item` —
+`deviceName`, `virtualName`, `noDevice` and the full `ebs` structure. `noDevice` is
+the present-and-empty element AWS documents, and `deleteOnTermination` keeps its
+three states rather than collapsing an unstated value to `false`. Nothing rendered
+the member before #693, so a template's mappings were write-only.
 
 #### An instance reports its own block devices
 

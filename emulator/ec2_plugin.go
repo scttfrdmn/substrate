@@ -4823,14 +4823,23 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
 	updateStringIndex(goCtx, p.state, ec2Namespace, idsKey, ltID)
 
+	// The warning goes on this outer struct rather than on ec2LaunchTemplateXML, which
+	// ModifyLaunchTemplate and DescribeLaunchTemplates share: neither documents the
+	// member, and AWS's own order is launchTemplate then warning.
 	type response struct {
-		XMLName        xml.Name             `xml:"CreateLaunchTemplateResponse"`
-		XMLNS          string               `xml:"xmlns,attr"`
-		LaunchTemplate ec2LaunchTemplateXML `xml:"launchTemplate"`
+		XMLName        xml.Name                 `xml:"CreateLaunchTemplateResponse"`
+		XMLNS          string                   `xml:"xmlns,attr"`
+		LaunchTemplate ec2LaunchTemplateXML     `xml:"launchTemplate"`
+		Warning        *ec2ValidationWarningXML `xml:"warning,omitempty"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
 		LaunchTemplate: ec2LaunchTemplateSummary(&lt),
+		// Reported rather than refused: the template is created either way, because
+		// AWS's Errors section lists nothing for an invalid one and its `warning`
+		// member exists for exactly this. See [ec2CollectBlockDeviceMappings].
+		Warning: ec2ValidationWarningFor(
+			ec2CollectBlockDeviceMappings(ltData.BlockDeviceMappings, p.ec2SnapshotResolver(ctx))),
 	})
 }
 

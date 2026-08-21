@@ -312,8 +312,11 @@ func TestEC2_BlockDeviceMapping_RefusalWritesNothing(t *testing.T) {
 // documented `warning` member of type ValidationWarning, which exists precisely for
 // "parameters or parameter combinations that are not valid", and its Errors section
 // lists none — so a 400 there would be substrate's invention. That an invalid *block
-// device mapping* lands in the warning rather than in an error is substrate's reading,
-// and rendering the element is a follow-up.
+// device mapping* lands in the warning rather than in an error is substrate's reading;
+// #693 renders the element, so the diagnosis now reaches the caller at create time as
+// well as at launch. What is pinned here is that the warning does not become a refusal:
+// the template is still created and the launch is still the operation that fails.
+// TestEC2_CreateLaunchTemplate_WarnsAboutAnInvalidMapping pins the warning itself.
 func TestEC2_BlockDeviceMapping_TemplateMappingRefusedAtLaunch(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
