@@ -59,6 +59,16 @@ var (
 		Prefix: "snap-", NotFound: "InvalidSnapshot.NotFound",
 		Malformed: "InvalidSnapshotID.Malformed", Noun: "snapshot",
 	}
+	// The three volume operations that predate this kind — DeleteVolume, AttachVolume
+	// and DetachVolume — spell the NotFound message themselves, as "The volume 'vol-…'
+	// does not exist." with a trailing period and no "ID". They are left alone: this
+	// kind is for CreateSnapshot and CreateVolume, which had no volume check at all
+	// (#689), and rewording three published messages is a change a consumer matching on
+	// them would notice for no gain. Unifying them is a follow-up.
+	ec2VolumeIDKind = ec2IDKind{
+		Prefix: "vol-", NotFound: "InvalidVolume.NotFound",
+		Malformed: "InvalidVolumeID.Malformed", Noun: "volume",
+	}
 	// EC2 publishes no InvalidAllocationID.Malformed; a malformed allocation ID
 	// comes back as InvalidAllocationID.NotFound.
 	ec2AllocationIDKind = ec2IDKind{

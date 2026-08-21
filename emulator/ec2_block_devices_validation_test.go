@@ -150,6 +150,11 @@ func TestEC2_BlockDeviceMapping_ValidIsAccepted(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		params map[string]string
+		// snapshotGiB, when set, creates a snapshot of that size first and puts its ID in
+		// BlockDeviceMapping.1.Ebs.SnapshotId. Before #689 a row could name any
+		// well-formed snap- ID and be accepted; now the ID must resolve, so a row about
+		// snapshots has to have one.
+		snapshotGiB int
 	}{
 		{
 			// AWS's sentence is on EbsBlockDevice.VolumeSize, a member of the Ebs
@@ -159,11 +164,21 @@ func TestEC2_BlockDeviceMapping_ValidIsAccepted(t *testing.T) {
 			params: map[string]string{"BlockDeviceMapping.1.DeviceName": "/dev/sdf"},
 		},
 		{
-			name: "a snapshot with no size",
+			// A snapshot and no size is legal and inherits the snapshot's; see
+			// TestEC2_BlockDeviceMapping_InheritsTheSnapshotSize for the value.
+			name:        "a snapshot with no size",
+			params:      map[string]string{"BlockDeviceMapping.1.DeviceName": "/dev/sdf"},
+			snapshotGiB: 30,
+		},
+		{
+			// The size rule is "equal to or larger", so equal is accepted — the boundary
+			// the refusal table's own row stops one below.
+			name: "a size equal to the snapshot's",
 			params: map[string]string{
 				"BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
-				"BlockDeviceMapping.1.Ebs.SnapshotId": "snap-0123456789abcdef0",
+				"BlockDeviceMapping.1.Ebs.VolumeSize": "30",
 			},
+			snapshotGiB: 30,
 		},
 		{
 			// Iops and Throughput with no VolumeType. Substrate resolves an absent
@@ -235,6 +250,10 @@ func TestEC2_BlockDeviceMapping_ValidIsAccepted(t *testing.T) {
 			}
 			for k, v := range tc.params {
 				params[k] = v
+			}
+			if tc.snapshotGiB > 0 {
+				_, snapID := ec2SnapshotOfSize(t, ts, tc.snapshotGiB)
+				params["BlockDeviceMapping.1.Ebs.SnapshotId"] = snapID
 			}
 			resp := ec2Request(t, ts, params)
 			body, err := io.ReadAll(resp.Body)

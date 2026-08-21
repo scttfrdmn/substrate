@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`CreateSnapshot`, and a snapshot with a real size** (#689). Substrate had no
+  `CreateSnapshot` at all — it answered `InvalidAction` / HTTP 400 — so the only snapshots it
+  held were the ones `CreateImage` mints for an AMI's root device, and every one of them
+  recorded `volumeSize` as **the literal `8`**. A consumer could neither create a snapshot of
+  a known size nor observe one, which made every size-dependent rule a comparison against a
+  constant: the `volume-size` filter #685 added in this release, and the block-device-mapping
+  rule that a size must not be smaller than its snapshot's, which v0.105.0 deferred *for
+  exactly this reason*.
+
+  `VolumeId` is required and checked against state — absent is `MissingParameter`, a
+  syntactically invalid ID is `InvalidVolumeID.Malformed`, one that names nothing is
+  `InvalidVolume.NotFound` — so a snapshot cannot exist for a volume that does not.
+  `volumeSize` and `encrypted` come from the source volume rather than from the request,
+  which is what AWS documents ("the size of the volume, in GiB"; "snapshots that are taken
+  from encrypted volumes are automatically encrypted"). `Description` and
+  `TagSpecification.N` are read, the tags through the same walk and the same tag rules as
+  every other tag-on-create and checked before anything is written.
+
+  `status` is **`completed` at once**, not the `pending` AWS's own sample response shows.
+  Substrate advances no snapshot asynchronously, so a caller's waiter succeeds on its first
+  poll rather than depending on wall-clock time. A *seedable* `pending → completed`
+  progression is the shape that would let a test exercise the waiting path and is a
+  follow-up. `progress` is not rendered, for the reason `DescribeSnapshots` renders none:
+  substrate stores none, and `status` already carries the whole of what a completed
+  snapshot's progress would say. `Location` and `OutpostArn` are not read — both are
+  documented as supported only for a Local Zone or an Outpost, neither of which substrate
+  models.
+
 - **`DescribeTags`** (#688) — the EC2 operation whose whole job is finding resources by tag,
   which reached the dispatcher's default arm and answered `InvalidAction` / HTTP 400 while
   four bundled managed policies *granted* `ec2:DescribeTags`: `AmazonVPCFullAccess` and
@@ -27,9 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AWS's set, not an omission.
 
   **The scan is deliberately wider than what `CreateTags` can write.** `CreateTags` reaches
-  nine resource types; the scan reads thirteen, adding `image`, `snapshot`, `launch-template`
-  and `fleet` — types whose tags arrive through their own create call's `TagSpecification.N`
-  and cannot be set through `CreateTags` at all (#689 adds the snapshot arm, #695 the rest).
+  ten resource types; the scan reads thirteen, adding `image`, `launch-template` and `fleet` —
+  types whose tags arrive through their own create call's `TagSpecification.N` and cannot be
+  set through `CreateTags` at all (#695 is the remaining three; `snapshot` was a fourth until
+  #689 in this release gave `CreateTags` a `snap-` arm).
   Reporting only the writable types would hide tags a caller had successfully applied.
   `placement-group` is the one type with a `Tags` field left out: nothing writes it, and its
   records are keyed by group *name* where AWS's `TagDescription` reports an ID.
@@ -129,6 +158,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be a single rule.
 
 ### Fixed
+- **A block device mapping naming a snapshot that does not exist is refused** (#689). It was
+  accepted and materialized an 8 GiB volume, so a launch real EC2 rejects succeeded here and
+  produced state a consumer then asserted against — the same class of defect #671 closed for
+  the six mapping rules it added. A malformed ID is `InvalidSnapshotID.Malformed` and one that
+  names nothing is `InvalidSnapshot.NotFound`, both documented codes, and the refusal leaves
+  no state behind because the check sits where #671 put the validator: after the launch
+  template merge, before the default-VPC branch.
+
+  **A size below the snapshot's is refused too**, with `InvalidBlockDeviceMapping` — the
+  refusal v0.105.0 deferred, now that there is a real size to compare against. The two carry
+  different codes on purpose: a snapshot substrate cannot find is a mistake about the *ID*,
+  which is what naming a snapshot from a previous run looks like, while a size below it is a
+  mistake about the *mapping*. AWS documents the rule verbatim on
+  `EbsBlockDevice.VolumeSize`: "You can specify a volume size that is equal to or larger than
+  the snapshot size."
+
+- **A mapping naming a snapshot and no size takes the snapshot's size** (#689), where it took
+  substrate's 8 GiB default. `EC2BlockDeviceMapping.VolumeSize`'s own field doc already stated
+  the correct rule, so the doc was ahead of the code, and AWS states it on the same member it
+  states the refusal on: "If you specify a snapshot, the default is the snapshot size."
+  `CreateVolume` had the identical gap independently — a restore from a 30 GiB snapshot
+  produced an 8 GiB volume there too, and one naming a snapshot no account holds succeeded
+  outright — and now applies both rules through the same comparison.
+
+- **`CreateImage`'s snapshot records the instance's root volume, and `DescribeImages` reads
+  it** (#689). `createImage` wrote `volumeSize: 8` as a literal, and `describeImages` rendered
+  a *second*, independent literal `8` for the same snapshot in its own `ebs` member — two
+  constants that agreed only for as long as neither knew a real size. Both now read the volume
+  record, so an AMI made from a 40 GiB root volume reports 40 GiB through `DescribeSnapshots`
+  *and* through `DescribeImages`, and the snapshot also records the source volume's ID, which
+  gives `DescribeSnapshots`' `volume-id` filter something to select on for the only snapshots
+  substrate could previously produce. An AMI whose snapshot was since deleted falls back to
+  the 8 GiB default rather than reporting `0`.
+
+- **`CreateTags` and `DeleteTags` reach a snapshot** (#689). A `snap-` ID had no arm in
+  `ec2TaggableResource`, so `CreateTags` on a snapshot answered `<return>true</return>` having
+  written nothing — the same silent no-op #670 fixed for `vol-`, and immediately relevant now
+  that `CreateSnapshot`'s `TagSpecification` gives a caller a snapshot of their own. Until this
+  release `DescribeTags` could report a snapshot's tags that `CreateTags` had no way to write.
+
 - **`DescribeSubnets` applies the filters a request sends** (#685). It parsed no `Filter.N`
   at all, so "the subnets of `vpc-x`" answered with every subnet in the region and the
   response carried nothing to say the filter had been ignored — the worst shape of this

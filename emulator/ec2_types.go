@@ -570,6 +570,17 @@ func ec2SnapshotStateKey(accountID, region, snapshotID string) string {
 	return "snapshot:" + accountID + "/" + region + "/" + snapshotID
 }
 
+// ec2SnapshotStatePrefix is the key prefix every snapshot in one account and region
+// shares, for a List that has no particular snapshot in mind.
+//
+// Declared beside the key for the reason [ec2VolumeStateKey]'s own doc comment gives:
+// CreateSnapshot now writes records CreateImage did not, and a writer that spells the
+// prefix differently from the readers would produce snapshots DescribeSnapshots cannot
+// see.
+func ec2SnapshotStatePrefix(accountID, region string) string {
+	return "snapshot:" + accountID + "/" + region + "/"
+}
+
 // EC2PlacementGroup represents an Amazon EC2 placement group.
 type EC2PlacementGroup struct {
 	// GroupName is the user-supplied placement group name.

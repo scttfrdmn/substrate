@@ -3513,6 +3513,10 @@ func TestEC2_CreateImage_SnapshotsAndFilter(t *testing.T) {
 	require.Contains(t, snaps, snapA)
 	require.Contains(t, snaps, snapB)
 	assert.Equal(t, "completed", snaps[snapA].State)
+	// 8 GiB is the launch's own root volume size, read from the volume record since #689
+	// rather than being the literal createImage used to write. The value is the same, so
+	// this assertion is unchanged — it now holds for the right reason, and
+	// TestEC2_CreateImage_SnapshotSizeIsTheRootVolume is where a non-default size proves it.
 	assert.Equal(t, int64(8), snaps[snapA].Size)
 
 	// DescribeImages filtered by snapshot-id finds only the owning AMI.

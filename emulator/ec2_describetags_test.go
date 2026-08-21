@@ -309,14 +309,20 @@ func TestEC2_DescribeTags_RefusesBadPagination(t *testing.T) {
 	}
 }
 
-// TestEC2_DescribeTags_ScanIsWiderThanCreateTags pins the asymmetry deliberately: a
-// snapshot's tags are reported even though CreateTags cannot write them.
+// TestEC2_DescribeTags_ScanIsWiderThanCreateTags pins the asymmetry deliberately: a tag
+// applied by something other than CreateTags is still reported.
 //
-// ec2TaggableResource covers nine prefixes, and a snap- ID is not one of them (#689 adds the
-// arm) — but CreateImage's TagSpecification writes a snapshot's tags anyway, so a
-// DescribeTags that reported only the CreateTags-writable types would hide tags a caller had
-// successfully applied. Reporting every tag substrate stores, however it was applied, is the
-// operation's job.
+// ec2TaggableResource covers the prefixes CreateTags can write, and several types store tags
+// without being among them — image, launch-template, fleet — but their TagSpecification
+// writes those tags anyway, so a DescribeTags that reported only the CreateTags-writable
+// types would hide tags a caller had successfully applied. Reporting every tag substrate
+// stores, however it was applied, is the operation's job.
+//
+// Snapshots were the example this test was written against, and #689 closed that half: a
+// snap- arm now exists, so the tag CreateTags writes below is reported too. The
+// CreateImage-applied tag being reported is the assertion that survives, and it is the one
+// the asymmetry is actually about — see TestEC2_CreateTags_TagsASnapshot for the writable
+// half.
 func TestEC2_DescribeTags_ScanIsWiderThanCreateTags(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -326,17 +332,18 @@ func TestEC2_DescribeTags_ScanIsWiderThanCreateTags(t *testing.T) {
 		ec2TagKeysFor(t, ts, ec2Filter("resource-type", "snapshot")),
 		"a snapshot tagged through CreateImage's TagSpecification is still reported")
 
-	// And CreateTags on that same snapshot still writes nothing, so the two halves of the
-	// asymmetry are pinned together and #689 has a test to change.
+	// Since #689 CreateTags reaches a snapshot too, so both routes onto the same record
+	// land in the same tagSet rather than one of them writing nothing.
 	ec2FleetXML(t, ts, map[string]string{
 		"Action":       "CreateTags",
 		"ResourceId.1": snaps["alpha"],
 		"Tag.1.Key":    "Added",
 		"Tag.1.Value":  "later",
 	}, nil)
-	assert.NotContains(t, ec2TagKeysFor(t, ts, ec2Filter("resource-type", "snapshot")),
-		snaps["alpha"]+"/Added=later",
-		"CreateTags has no snap- arm yet, so it silently writes nothing — #689")
+	assert.ElementsMatch(t,
+		[]string{snaps["alpha"] + "/Scope=alpha", snaps["alpha"] + "/Added=later"},
+		ec2TagKeysFor(t, ts, ec2Filter("resource-type", "snapshot")),
+		"a CreateTags-applied tag joins the CreateImage-applied one")
 }
 
 // TestEC2_DescribeTags_EmptyWhenNothingIsTagged pins that an account with no tags answers an
