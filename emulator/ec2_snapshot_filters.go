@@ -32,7 +32,7 @@ func ec2SnapshotMatchesFilters(snap EC2Snapshot, filters map[string][]string) bo
 func ec2SnapshotMatchesFilter(snap EC2Snapshot, name string, values []string) bool {
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range snap.Tags {
-			if t.Key == tagKey && containsStr(values, t.Value) {
+			if t.Key == tagKey && ec2FilterAccepts(values, t.Value) {
 				return true
 			}
 		}
@@ -41,37 +41,40 @@ func ec2SnapshotMatchesFilter(snap EC2Snapshot, name string, values []string) bo
 
 	switch name {
 	case "description":
-		return containsStr(values, snap.Description)
+		return ec2FilterAccepts(values, snap.Description)
 	case "encrypted":
-		return containsStr(values, strconv.FormatBool(snap.Encrypted))
+		return ec2FilterAccepts(values, strconv.FormatBool(snap.Encrypted))
 	case "owner-id":
 		// The account that owns the snapshot, which is always the requesting account:
 		// substrate is single-account, so this filter either matches everything or
 		// nothing. It is still evaluated rather than inert, because a caller who names
 		// another account is asking a question whose honest answer is "none".
-		return containsStr(values, snap.AccountID)
+		return ec2FilterAccepts(values, snap.AccountID)
 	case "snapshot-id":
-		return containsStr(values, snap.SnapshotID)
+		return ec2FilterAccepts(values, snap.SnapshotID)
 	case "start-time":
 		// Compared as the string substrate renders in startTime. AWS documents this
 		// filter with no matching semantics of its own, and its values are timestamps, so
-		// a caller wanting a range needs the wildcards tracked in #697 rather than this.
-		return containsStr(values, snap.StartTime)
+		// a caller wanting a range asks for it with a wildcard — `2026-08-*` selects a
+		// month, which is as close to a range as EC2's filters get (#697). AWS's own
+		// Using_Filtering answer to the range question is client-side `--query` with
+		// JMESPath, not a filter.
+		return ec2FilterAccepts(values, snap.StartTime)
 	case "status":
 		// AWS names the filter "status" and the response element "status" while the API
 		// model calls the member State; EC2Snapshot follows the model.
-		return containsStr(values, snap.State)
+		return ec2FilterAccepts(values, snap.State)
 	case "tag-key":
 		for _, t := range snap.Tags {
-			if containsStr(values, t.Key) {
+			if ec2FilterAccepts(values, t.Key) {
 				return true
 			}
 		}
 		return false
 	case "volume-id":
-		return containsStr(values, snap.VolumeID)
+		return ec2FilterAccepts(values, snap.VolumeID)
 	case "volume-size":
-		return containsStr(values, strconv.FormatInt(snap.VolumeSize, 10))
+		return ec2FilterAccepts(values, strconv.FormatInt(snap.VolumeSize, 10))
 	default:
 		// A documented filter substrate cannot evaluate is inert; see the doc comment.
 		return true

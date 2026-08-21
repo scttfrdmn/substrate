@@ -847,13 +847,13 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if len(ids) == 0 && fleet.Type == "instant" {
 			continue
 		}
-		if vals, ok := filters["fleet-state"]; ok && !containsStr(vals, fleet.FleetState) {
+		if vals, ok := filters["fleet-state"]; ok && !ec2FilterAccepts(vals, fleet.FleetState) {
 			continue
 		}
-		if vals, ok := filters["type"]; ok && !containsStr(vals, fleet.Type) {
+		if vals, ok := filters["type"]; ok && !ec2FilterAccepts(vals, fleet.Type) {
 			continue
 		}
-		if vals, ok := filters["activity-status"]; ok && !containsStr(vals, fleet.ActivityStatus) {
+		if vals, ok := filters["activity-status"]; ok && !ec2FilterAccepts(vals, fleet.ActivityStatus) {
 			continue
 		}
 

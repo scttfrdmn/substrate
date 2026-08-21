@@ -2713,7 +2713,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog) |
 | DescribeRegions | |
 | DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. `Filter.N` is not applied |
-| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#instance-types-are-a-seeded-catalog)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
+| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
@@ -2799,8 +2799,8 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
 | DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
 | DescribeFleets | `activity-status`, `fleet-state`, `type` | `excess-capacity-termination-policy`, `replace-unhealthy-instances` |
-| DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#offerings-filters-and-wildcards)) | — |
-| DescribeTags | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — all five AWS documents, all with [wildcards](#finding-a-resource-by-tag) | — |
+| DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#wildcards-in-filter-values)) | — |
+| DescribeTags | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — all five AWS documents, all with [wildcards](#wildcards-in-filter-values) | — |
 
 `tag:<key>` is refused on **`DescribeFleets` and `DescribeInstanceTypeOfferings`**, which
 document no tag filter at all — neither `tag:<key>` nor `tag-key` — even though a fleet
@@ -2839,15 +2839,63 @@ Substrate now serves all three — the first on five operations, and the other t
   absent filter. An unfiltered answer to a request that asked for a subset is the more
   dangerous silence of the two: a caller cannot tell it from a genuine match on everything.
   An **absent** filter still constrains nothing, as it always has.
+- **Wildcards work in every filter value**, on every operation — see below.
+- **The documented request limits are enforced**: at most **50 filters** and **200 total
+  filter values** per request, and at most **255 characters** per filter value. Exceeding any
+  of them is `InvalidParameterValue`, HTTP 400. The limits are AWS's, from Using_Filtering's
+  "Filtering considerations"; the error code is substrate's reading, because EC2's error tables
+  publish no filter-limit code — every `*LimitExceeded` code there names a resource quota, not
+  a request-shape limit. The 255 applies to values, not names: every documented name is a short
+  fixed literal, so a length rule on names could only fire after the refusal already had.
 
-**Two gaps, deliberately left standing**, because closing either would newly change
-requests that succeed today. Twelve EC2 describes — including `DescribeVpcs`,
-`DescribeAddresses`, `DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse
-`Filter.N` at all, so they neither apply nor refuse one
-([#695](https://github.com/scttfrdmn/substrate/issues/695)). And filter *values* honour
-EC2's documented wildcards only on `DescribeInstanceTypeOfferings` and `DescribeTags` — the
-two operations whose reference pages state them outright; everywhere else matching is exact
-([#697](https://github.com/scttfrdmn/substrate/issues/697)).
+#### Wildcards in filter values
+
+Since [#697](https://github.com/scttfrdmn/substrate/issues/697), one matcher backs every EC2
+describe filter, so these rules hold for all of them — previously only
+`DescribeInstanceTypeOfferings` and `DescribeTags` honoured wildcards, the two operations whose
+reference pages state them outright, and the other nine compared exactly.
+
+| Value | Matches |
+|---|---|
+| `c5.2xlarge` | that value exactly |
+| `c5.*` | the eight `c5` sizes — `*` matches zero or more characters |
+| `c5*` | `c5` **and** `c5a`, since `*` also matches the `a` |
+| `t3?.micro` | `t3.micro` and `t3a.micro` — `?` matches zero **or one** character |
+| `m5.larg\*` | the literal string `m5.larg*`; a backslash escapes a wildcard |
+| `M5.XLarge` | nothing — values are case-sensitive |
+
+**`?` matches zero or one character, and AWS's page disagrees with itself about that.** The
+resolution is substrate's, and it is the reading two normative statements and three worked
+examples support: Using_Filtering's "Filtering considerations" list — the one that governs the
+API rather than the console — says "a question mark (?) matches zero or one character", and the
+console's wildcard section says the same and works it through (`prod?` matches `prod` and
+`prods`, not `production`). One sentence in the CLI examples says "The ? wildcard matches
+exactly 1 character" and is refuted by its own example in the next breath, which returns
+descriptions that are `"database"` *or* `"database"` plus one character, and by `database????`
+returning `"database"` plus **up to** four. `DescribeTags`' Example 4 settles nothing either
+way: `?ebserver` finding `webserver` or `Webserver` is consistent with both readings, because
+the string a zero-or-one `?` would additionally match is not in AWS's data set.
+
+Two comparisons deliberately stay exact, because they are not filter values. **Identifier
+parameters** — `KeyName.N`, `GroupName.N`, `FleetId.N`, `RegionName.N`, `InstanceType.N` —
+assert the resource exists and answer `Invalid*.NotFound` when it does not, so globbing them
+would turn a NotFound contract into a match. And **filter names**, which are one of a fixed
+documented set.
+
+A filter whose *values* happen to be identifiers is still a filter: `DescribeRouteTables`'
+`association.subnet-id`, `DescribeSubnets`' `vpc-id`, `DescribeSnapshots`' `volume-id` and the
+rest all glob. So `association.subnet-id=subnet-*` narrows the answer to the route tables
+associated with any subnet at all, where the same string in `SubnetId.N` is a malformed ID.
+
+One case-*insensitive* comparison was removed:
+`attachment.delete-on-termination` on `DescribeVolumes` accepted `True` for `true`, which AWS's
+"Filter values are case sensitive" does not, and which no sibling boolean filter did.
+
+**One gap, deliberately left standing**, because closing it would newly change requests that
+succeed today: twelve EC2 describes — including `DescribeVpcs`, `DescribeAddresses`,
+`DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse `Filter.N` at all, so
+they neither apply nor refuse one
+([#695](https://github.com/scttfrdmn/substrate/issues/695)).
 
 ### RunInstances requires a resolvable AMI
 
@@ -4044,16 +4092,9 @@ answer. **Any other name is refused** with `InvalidParameterValue`, which is now
 that rule started. Multiple `Filter.N.Value.M` values are an OR; separate `Filter.N`
 entries AND together.
 
-Filter values honour EC2's documented wildcards, and are **case-sensitive**:
-
-| Value | Matches |
-|---|---|
-| `c5.2xlarge` | that type |
-| `c5.*` | the eight `c5` sizes |
-| `c5*` | `c5` **and** `c5a` — `*` matches zero or more characters, including the `a` |
-| `t3?.micro` | `t3.micro` and `t3a.micro` — `?` matches zero **or one** character |
-| `m5.larg\*` | nothing; a backslash escapes a literal wildcard |
-| `M5.XLarge` | nothing |
+Filter values honour EC2's documented wildcards and are case-sensitive, per
+[the rules that apply to every EC2 filter](#wildcards-in-filter-values). This operation is
+where that matcher started, which is why the examples there use instance types.
 
 `LocationType` is a top-level **parameter**, not a filter name (`location-type` is
 refused as a filter). `availability-zone` is the default and `region` returns one
@@ -4507,7 +4548,7 @@ group *name* where AWS's `TagDescription` reports an ID.
 |---|---|
 | Filters | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — every name AWS documents, all evaluated, none inert |
 | `tag-key` | **Refused.** This operation documents no such filter, alone in the describe family, because `key` already matches a key whatever its value |
-| Wildcards | `*` and `?` work in every filter value, which AWS's Example 4 states outright ("specify the value as `?ebserver` to find tags with the key `webserver` or `Webserver`") |
+| Wildcards | `*` and `?` work in every filter value, which AWS's Example 4 states outright ("specify the value as `?ebserver` to find tags with the key `webserver` or `Webserver`"). Since #697 that is true of [every EC2 filter](#wildcards-in-filter-values), not just this one |
 | An empty value | A tag whose value is the empty string renders `<value/>` and is matched by `Filter.N.Value.1=` — AWS's Example 1 and Example 6 respectively |
 | `MaxResults` | 5–1000. A value outside the range is **refused** with `InvalidParameterValue`, not clamped: a caller who asked for 2000 asked for something the operation cannot do |
 | `NextToken` | A decimal offset. A malformed token is refused; an offset past the end is clamped to an empty last page, so resuming after a tag was deleted is not an error |

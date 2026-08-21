@@ -1012,7 +1012,7 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 	// tag:<key> — instance has a tag with that key whose value is in values.
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range inst.Tags {
-			if t.Key == tagKey && containsStr(values, t.Value) {
+			if t.Key == tagKey && ec2FilterAccepts(values, t.Value) {
 				return true
 			}
 		}
@@ -1021,30 +1021,30 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 
 	switch name {
 	case "instance-state-name":
-		return containsStr(values, inst.State.Name)
+		return ec2FilterAccepts(values, inst.State.Name)
 	case "instance-state-code":
-		return containsStr(values, strconv.Itoa(inst.State.Code))
+		return ec2FilterAccepts(values, strconv.Itoa(inst.State.Code))
 	case "instance-id":
-		return containsStr(values, inst.InstanceID)
+		return ec2FilterAccepts(values, inst.InstanceID)
 	case "instance-type":
-		return containsStr(values, inst.InstanceType)
+		return ec2FilterAccepts(values, inst.InstanceType)
 	case "image-id":
-		return containsStr(values, inst.ImageID)
+		return ec2FilterAccepts(values, inst.ImageID)
 	case "vpc-id":
-		return containsStr(values, inst.VPCID)
+		return ec2FilterAccepts(values, inst.VPCID)
 	case "subnet-id":
-		return containsStr(values, inst.SubnetID)
+		return ec2FilterAccepts(values, inst.SubnetID)
 	case "key-name":
-		return containsStr(values, inst.KeyName)
+		return ec2FilterAccepts(values, inst.KeyName)
 	case "availability-zone":
 		// The reference names this filter "availability-zone", not
 		// "placement.availability-zone" — the placement family's filters are
 		// spelled out individually in DescribeInstances' filter list.
-		return containsStr(values, inst.AvailabilityZone)
+		return ec2FilterAccepts(values, inst.AvailabilityZone)
 	case "tag-key":
 		// Instance has a tag with any of the requested keys (any value).
 		for _, t := range inst.Tags {
-			if containsStr(values, t.Key) {
+			if ec2FilterAccepts(values, t.Key) {
 				return true
 			}
 		}
@@ -1695,13 +1695,13 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		// A filter naming no values matches nothing, as it does everywhere else: these
 		// three arms used to carry an `ok && len(vals) > 0 &&` guard, which returned every
 		// security group for a request that had asked for a subset (#696).
-		if vals, ok := filters["group-name"]; ok && !containsStr(vals, sg.GroupName) {
+		if vals, ok := filters["group-name"]; ok && !ec2FilterAccepts(vals, sg.GroupName) {
 			continue
 		}
-		if vals, ok := filters["vpc-id"]; ok && !containsStr(vals, sg.VPCID) {
+		if vals, ok := filters["vpc-id"]; ok && !ec2FilterAccepts(vals, sg.VPCID) {
 			continue
 		}
-		if vals, ok := filters["group-id"]; ok && !containsStr(vals, sg.GroupID) {
+		if vals, ok := filters["group-id"]; ok && !ec2FilterAccepts(vals, sg.GroupID) {
 			continue
 		}
 		renderPerm := func(rule EC2IPPermission) permItem {
@@ -2022,11 +2022,18 @@ func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localC
 	return rtbID, nil
 }
 
-// routeTableHasSubnet reports whether the route table has an association with
-// any of the given subnet IDs.
+// routeTableHasSubnet reports whether the route table has an association with any of the
+// given subnet IDs, which are the values of DescribeRouteTables' association.subnet-id
+// filter.
+//
+// They are filter values rather than an identifier list, so they match through
+// [ec2FilterAccepts] and honor EC2's wildcards like every other filter value (#697). The
+// distinction is the one [containsStr] documents: an association.subnet-id of `subnet-*`
+// narrows the answer to the route tables that are associated with any subnet at all, where
+// the same string in `SubnetId.N` would be a malformed ID.
 func routeTableHasSubnet(rtb EC2RouteTable, subnetIDs []string) bool {
 	for _, a := range rtb.Associations {
-		if a.SubnetID != "" && containsStr(subnetIDs, a.SubnetID) {
+		if a.SubnetID != "" && ec2FilterAccepts(subnetIDs, a.SubnetID) {
 			return true
 		}
 	}
@@ -2080,10 +2087,10 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 		if !ids.match(rtb.RouteTableID) {
 			continue
 		}
-		if vals, ok := filters["vpc-id"]; ok && !containsStr(vals, rtb.VPCID) {
+		if vals, ok := filters["vpc-id"]; ok && !ec2FilterAccepts(vals, rtb.VPCID) {
 			continue
 		}
-		if vals, ok := filters["association.route-table-id"]; ok && !containsStr(vals, rtb.RouteTableID) {
+		if vals, ok := filters["association.route-table-id"]; ok && !ec2FilterAccepts(vals, rtb.RouteTableID) {
 			continue
 		}
 		if vals, ok := filters["association.subnet-id"]; ok && !routeTableHasSubnet(rtb, vals) {
@@ -3258,7 +3265,25 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 	return filters
 }
 
-// containsStr reports whether s is in the slice.
+// containsStr reports whether s is in the slice, comparing exactly.
+//
+// Since #697 this is **not** how a filter value is compared — [ec2FilterAccepts] is, and it
+// honors EC2's documented wildcards. What is left here is every membership test that is not
+// a filter, and each one must stay exact:
+//
+//   - The `KeyName.N`, `GroupName.N`, `FleetId.N`, `RegionName.N` and `InstanceType.N`
+//     parameter lists on DescribeKeyPairs, DescribePlacementGroups, DescribeFleets,
+//     DescribeRegions and DescribeInstanceTypes. These are *identifiers*, not filter values:
+//     AWS documents wildcards for `Filter.N.Value.N` only, and each of these parameters
+//     asserts the resource exists — an unmatched entry raises Invalid*.NotFound rather than
+//     narrowing a result set. Globbing them would let `i-*` stand in for an ID and quietly
+//     turn a NotFound contract into a match.
+//   - [ec2FilterSpec.documents]' name lookup. AWS's wildcards are for values; a filter *name*
+//     is one of a fixed documented set and "Filter names are case-sensitive" per the Filter
+//     type, so a name is either in the set or refused.
+//   - [sgSourcesMatch], which compares two stored permissions to each other rather than a
+//     request value to a record. It backs RevokeSecurityGroupIngress/Egress, where the
+//     source a caller names is the rule being removed, not a pattern selecting rules.
 func containsStr(slice []string, s string) bool {
 	for _, v := range slice {
 		if v == s {
@@ -3696,22 +3721,22 @@ func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
 		case strings.HasPrefix(name, "tag:"):
 			key := strings.TrimPrefix(name, "tag:")
 			for _, t := range img.Tags {
-				if t.Key == key && containsStr(vals, t.Value) {
+				if t.Key == key && ec2FilterAccepts(vals, t.Value) {
 					matched = true
 					break
 				}
 			}
 		case name == "tag-key":
 			for _, t := range img.Tags {
-				if containsStr(vals, t.Key) {
+				if ec2FilterAccepts(vals, t.Key) {
 					matched = true
 					break
 				}
 			}
 		case name == "block-device-mapping.snapshot-id":
-			matched = img.SnapshotID != "" && containsStr(vals, img.SnapshotID)
+			matched = img.SnapshotID != "" && ec2FilterAccepts(vals, img.SnapshotID)
 		case name == "image-id":
-			matched = containsStr(vals, img.ImageID)
+			matched = ec2FilterAccepts(vals, img.ImageID)
 		default:
 			continue
 		}
@@ -4343,10 +4368,10 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 			continue
 		}
 		// Apply filters.
-		if stateVals, ok := filters["state"]; ok && !containsStr(stateVals, gw.State) {
+		if stateVals, ok := filters["state"]; ok && !ec2FilterAccepts(stateVals, gw.State) {
 			continue
 		}
-		if vpcVals, ok := filters["vpc-id"]; ok && !containsStr(vpcVals, gw.VPCID) {
+		if vpcVals, ok := filters["vpc-id"]; ok && !ec2FilterAccepts(vpcVals, gw.VPCID) {
 			continue
 		}
 		resp.NatGateways = append(resp.NatGateways, natItem{
