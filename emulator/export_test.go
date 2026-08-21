@@ -746,3 +746,23 @@ func LaunchVolumesForTest(instanceID, availabilityZone string, mappings []EC2Blo
 	}
 	return ec2LaunchVolumesFor(inst, mappings, nil, "2026-01-01T00:00:00Z")
 }
+
+// RequestTagKeysForTest wraps requestTagKeys for external tests.
+//
+// The sorted order it produces cannot be observed through any API surface: every
+// operator that reads aws:TagKeys is set-semantic, so reordering the slice changes no
+// decision. What it does change is whether the same request produces the same
+// recorded context twice, since three of addRequestTags' arms iterate a Go map — so
+// this is the only place the ordering can be asserted at all, the same reason
+// S3PersistedContentEncodingForTest exists (#690).
+func RequestTagKeysForTest(condCtx map[string]string) []string { return requestTagKeys(condCtx) }
+
+// AddRequestTagsForTest wraps addRequestTags, returning the aws:RequestTag entries it
+// reads out of a request together with the aws:TagKeys value derived from them. It
+// pairs the two halves the way CheckAccess does, so a test can assert that a service
+// arm feeds both without going through a whole authorized request.
+func AddRequestTagsForTest(req *AWSRequest) (map[string]string, []string) {
+	tags := make(map[string]string)
+	addRequestTags(tags, req)
+	return tags, requestTagKeys(tags)
+}

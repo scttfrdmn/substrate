@@ -1601,6 +1601,11 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		}
 	}
 
+	// The context is deliberately empty, and MultiContext is left nil for the same
+	// reason: this path authorizes an IAM control-plane call, and nothing here reads the
+	// request for tags. A policy conditioned on aws:RequestTag or aws:TagKeys therefore
+	// cannot be satisfied through this door even though [CheckAccess] populates both —
+	// which is worth knowing before writing a condition against an iam: action (#690).
 	result := Evaluate(docs, EvaluationRequest{
 		Principal: reqCtx.Principal.ARN,
 		Action:    action,

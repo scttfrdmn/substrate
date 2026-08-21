@@ -119,7 +119,29 @@ type EvaluationRequest struct {
 	Resource string
 
 	// Context provides condition key values for condition evaluation.
+	//
+	// It holds AWS's *single-valued* keys: "Single-valued condition context keys have
+	// at most one value in the request context." Every operator without a set
+	// qualifier reads this map and nothing else.
 	Context map[string]string
+
+	// MultiContext provides the values of AWS's multivalued condition keys —
+	// aws:TagKeys and its kind, which "can have multiple values in the request
+	// context".
+	//
+	// It is deliberately a second map rather than a widening of Context to
+	// map[string][]string, because IAM itself draws the same line: a key is
+	// single-valued or multivalued by its nature, "Multivalued context keys require a
+	// condition set operator", and AWS says outright not to use a set operator on a
+	// single-valued key. Two maps make that distinction representable, and they keep
+	// every unqualified operator's lookup byte-identical to what it was before
+	// set qualifiers existed (#690) — so adding a multivalued key cannot change a
+	// decision that never named one.
+	//
+	// A key may appear in both maps; nothing here requires it not to. Lookups prefer
+	// MultiContext for a set-qualified operator and Context for an unqualified one,
+	// falling back to the other, so a producer that populates only one still works.
+	MultiContext map[string][]string
 }
 
 // Evaluate applies the AWS IAM policy evaluation algorithm across all provided
@@ -167,7 +189,7 @@ func EvaluateSourced(documents []SourcedPolicyDocument, req EvaluationRequest) E
 				// condition on an unset key is the reportable case: the answer would
 				// change given a value.
 				if actionResourcePrincipalMatch(stmt, req) {
-					for _, key := range unsetConditionKeys(stmt.Condition, req.Context) {
+					for _, key := range unsetConditionKeys(stmt.Condition, req.Context, req.MultiContext) {
 						missing[key] = struct{}{}
 					}
 				}
@@ -245,19 +267,32 @@ func actionResourcePrincipalMatch(stmt PolicyStatement, req EvaluationRequest) b
 		resourceMatches(stmt, req.Resource)
 }
 
-// unsetConditionKeys returns the condition keys stmt tests that ctx has no value
-// for.
+// unsetConditionKeys returns the condition keys stmt tests that the request context
+// has no value for.
 //
 // A key present with an empty value is *set*: the Null operator exists precisely to
 // test for absence, and treating "" as missing would report every Null condition as
 // an incomplete simulation.
-func unsetConditionKeys(conditions map[string]map[string]StringOrSlice, ctx map[string]string) []string {
+//
+// Both maps are consulted, for the same reason [condContextValue] consults both: a
+// multivalued key like aws:TagKeys lives in MultiContext, and reporting it as a
+// missing context value while the evaluator was in fact evaluating it would make a
+// simulation contradict the enforcement it exists to predict (#690).
+func unsetConditionKeys(
+	conditions map[string]map[string]StringOrSlice,
+	ctx map[string]string,
+	multiCtx map[string][]string,
+) []string {
 	var out []string
 	for _, keyValues := range conditions {
 		for condKey := range keyValues {
-			if _, ok := ctx[condKey]; !ok {
-				out = append(out, condKey)
+			if _, ok := ctx[condKey]; ok {
+				continue
 			}
+			if _, ok := multiCtx[condKey]; ok {
+				continue
+			}
+			out = append(out, condKey)
 		}
 	}
 	return out
@@ -275,7 +310,7 @@ func statementMatches(stmt PolicyStatement, req EvaluationRequest) bool {
 	if !resourceMatches(stmt, req.Resource) {
 		return false
 	}
-	if !conditionMatches(stmt.Condition, req.Context) {
+	if !conditionMatches(stmt.Condition, req.Context, req.MultiContext) {
 		return false
 	}
 	return true
@@ -424,19 +459,144 @@ func resourceMatches(stmt PolicyStatement, resource string) bool {
 	return false
 }
 
-// conditionMatches evaluates all condition operators against ctx.
-// Multiple operators use AND semantics. Multiple keys within one operator
-// use AND semantics. Multiple values for one key use OR semantics.
-func conditionMatches(conditions map[string]map[string]StringOrSlice, ctx map[string]string) bool {
+// Condition set qualifiers, the prefixes AWS puts in front of a condition operator
+// to compare a multivalued request key against the policy's value list.
+//
+// "To compare your condition context key against a request context key with multiple
+// values, you must use the ForAllValues or ForAnyValue set operators".
+const (
+	// condForAllValues requires every request value to match. AWS: "The condition
+	// returns true if every context key value in the request matches a context key
+	// value in the policy. It also returns true if there are no context keys in the
+	// request".
+	condForAllValues = "ForAllValues"
+
+	// condForAnyValue requires at least one request value to match. AWS: "The
+	// condition returns true if any one of the context key values in the request
+	// matches any one of the context key values in the policy. For no matching
+	// context key or if the key does not exist, the condition returns false".
+	condForAnyValue = "ForAnyValue"
+)
+
+// splitConditionOperator separates a set qualifier from the operator it qualifies.
+//
+// "ForAllValues:StringEquals" is one JSON key in the policy, so the qualifier is not
+// a separate element to read — it has to be parsed out of the operator name. An
+// operator with no colon has no qualifier, which is every operator substrate
+// evaluated before #690.
+func splitConditionOperator(operator string) (qualifier, base string) {
+	if idx := strings.Index(operator, ":"); idx >= 0 {
+		return operator[:idx], operator[idx+1:]
+	}
+	return "", operator
+}
+
+// conditionMatches evaluates all condition operators against the request context.
+//
+// Multiple operators use AND semantics. Multiple keys within one operator use AND
+// semantics. Multiple values for one key use OR semantics — except under a set
+// qualifier, where the request's own values are what is quantified over.
+//
+// An operator carrying an *unrecognized* qualifier does not match, which preserves
+// the deny-by-default [evaluateConditionKey] applies to an unknown operator. That is
+// the rule this function used to reach for ForAllValues and ForAnyValue themselves:
+// the whole operator name was unknown, so every statement using one was discarded
+// before its key was looked at, making an Allow a false deny and a Deny silently
+// inert (#690).
+func conditionMatches(
+	conditions map[string]map[string]StringOrSlice,
+	ctx map[string]string,
+	multiCtx map[string][]string,
+) bool {
 	for operator, keyValues := range conditions {
+		qualifier, base := splitConditionOperator(operator)
 		for condKey, condValues := range keyValues {
-			ctxVal := ctx[condKey]
-			if !evaluateConditionKey(operator, ctxVal, condValues) {
+			if !conditionKeyMatches(qualifier, base, condKey, condValues, ctx, multiCtx) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// conditionKeyMatches evaluates one key of one operator, applying the set qualifier.
+func conditionKeyMatches(
+	qualifier, base, condKey string,
+	condValues StringOrSlice,
+	ctx map[string]string,
+	multiCtx map[string][]string,
+) bool {
+	switch qualifier {
+	case "":
+		return evaluateConditionKey(base, condContextValue(condKey, ctx, multiCtx), condValues)
+
+	case condForAllValues:
+		// Absent or empty is a match, per AWS — which is why AWS's own Important note
+		// says to pair ForAllValues with `"Null": {"key": "false"}` on an Allow, and why
+		// every one of its aws:TagKeys examples does.
+		for _, reqVal := range condRequestValues(condKey, ctx, multiCtx) {
+			if !evaluateConditionKey(base, reqVal, condValues) {
+				return false
+			}
+		}
+		return true
+
+	case condForAnyValue:
+		for _, reqVal := range condRequestValues(condKey, ctx, multiCtx) {
+			if evaluateConditionKey(base, reqVal, condValues) {
+				return true
+			}
+		}
+		// Absent, empty, or nothing matched: all three are false.
+		return false
+	}
+
+	return false
+}
+
+// condContextValue resolves the single value an unqualified operator compares
+// against.
+//
+// Context is consulted first, so a key both maps carry reads exactly as it did before
+// MultiContext existed. The MultiContext fallback is what makes the Null operator
+// honest about a multivalued key: without it a request carrying aws:TagKeys and no
+// aws:TagKeys entry in Context would read as null, and AWS's recommended
+// ForAllValues + `Null: false` pattern would deny every request it was written to
+// allow (#690).
+//
+// Only the first value can be reported — the caller compares a single string — which
+// is why AWS says not to use a single-valued operator on a multivalued key. Substrate
+// answers with the first value rather than with nothing, because for Null (the reason
+// this fallback exists) any value at all is the whole of what is being asked.
+func condContextValue(condKey string, ctx map[string]string, multiCtx map[string][]string) string {
+	if val, ok := ctx[condKey]; ok {
+		return val
+	}
+	if vals := multiCtx[condKey]; len(vals) > 0 {
+		return vals[0]
+	}
+	return ""
+}
+
+// condRequestValues resolves the set a set-qualified operator quantifies over.
+//
+// MultiContext is consulted first here, since a set qualifier is a statement that the
+// key is multivalued. A key present only in Context degrades to a one-element set
+// rather than to nothing: AWS's rule is about how many values the *request context*
+// holds, and a producer that recorded one value in the single-valued map has still
+// told substrate the request carried that value.
+//
+// An absent key yields no values, and the two qualifiers disagree about what that
+// means — true for ForAllValues, false for ForAnyValue — so the emptiness is returned
+// rather than resolved here.
+func condRequestValues(condKey string, ctx map[string]string, multiCtx map[string][]string) []string {
+	if vals, ok := multiCtx[condKey]; ok {
+		return vals
+	}
+	if val, ok := ctx[condKey]; ok {
+		return []string{val}
+	}
+	return nil
 }
 
 // evaluateConditionKey evaluates a single condition key against the context value.
