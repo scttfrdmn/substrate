@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`tag-key` on `DescribeImages`** (#686). AWS documents it for this operation and
+  substrate did not support it, so the name was silently dropped and the filter constrained
+  nothing. It is the any-value question — "images carrying an `Env` tag, whatever its
+  value" — and it had to arrive in the same change as the fix below, which takes away the
+  spelling callers were using for it by accident.
+
+### Fixed
+- **A `tag:<key>` filter with no value no longer matches any value on `DescribeImages`**
+  (#686). `Filter.1.Name=tag:Env` with no `Filter.1.Value.1` matched every image carrying an
+  `Env` tag, which is `tag-key`'s job — so this one operation answered a filter differently
+  from `DescribeInstances` and `DescribeVolumes`, which both match nothing. AWS settles
+  neither reading: `Using_Filtering` says only that "You can't specify a filter value of
+  null". Matching nothing is substrate's, and it is now substrate's answer everywhere rather
+  than at two of three sites.
+
+  **This is a behaviour change.** A caller relying on the valueless form to mean any-value
+  must switch to `tag-key`, which the same release adds.
+
+- **An explicitly empty filter value is a value on `DescribeImages`** (#686).
+  `Filter.1.Value.1=` asks for an image whose tag is the empty string, which is a different
+  request from naming no values at all. `describeImages` parsed `Filter.N` itself rather than
+  through the shared extractor, and its walk broke out of the value loop on the first empty
+  string — so the two requests arrived identical and the empty one inherited the
+  any-value rule above. Adopting `extractEC2Filters` fixes both defects at once and leaves
+  one filter parser in the plugin instead of two that disagreed.
+
+- **Two `Filter.N` entries sharing a name OR their values instead of the first being
+  discarded** (#686). `extractEC2Filters` keyed a map by filter name and overwrote, so a
+  caller who sent the same name twice got only the last one applied and no indication the
+  first had been dropped. AWS documents that filters are ANDed and the values within a
+  filter ORed, and says nothing about a repeated name; merging the value lists answers it as
+  an OR, which is substrate's reading. Overwriting was not a reading of anything.
+
+  This affects **every** EC2 describe that parses filters, not only `DescribeImages`.
+  Differently-named filters are ANDed, as documented, and are unchanged — a regression test
+  pins that, since adopting the shared extractor for `DescribeImages` is what put it at
+  risk.
+
+- **`DescribeImages` renders its tags through the package-level renderer** (#686), deleting
+  one of the EC2 plugin's three identical function-local `tagItem` copies. Nothing
+  observable changes — the shapes matched — but a fix to that shape now has one place to
+  land. `DescribeFleets` and `DescribeSnapshots` still carry theirs.
+
 ## [v0.105.0] - 2026-08-20
 
 ### Added

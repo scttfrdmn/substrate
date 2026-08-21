@@ -3175,6 +3175,18 @@ func extractIndexedParams(params map[string]string, prefix string) []string {
 
 // extractEC2Filters parses EC2 query-protocol Filter.N.Name / Filter.N.Value.M
 // parameters into a map of filter-name → allowed values.
+//
+// Presence rather than emptiness terminates both loops, so an explicitly empty filter
+// value is recorded as a value: Filter.1.Value.1= asks for the empty string, which is a
+// different request from naming no values at all, and every caller of this function
+// distinguishes the two.
+//
+// A repeated filter name accumulates into one value list rather than overwriting the
+// previous one (#686). AWS documents that filters are ANDed and the values within a
+// filter ORed, and says nothing about the same name appearing twice; merging the values
+// answers it as an OR, which is substrate's reading. Overwriting was not a reading of
+// anything — it silently discarded the earlier filter, so a caller who sent two got the
+// last one applied and no indication the first was dropped.
 func extractEC2Filters(params map[string]string) map[string][]string {
 	filters := make(map[string][]string)
 	for i := 1; ; i++ {
@@ -3191,7 +3203,7 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 			vals = append(vals, v)
 		}
 		if name != "" {
-			filters[name] = vals
+			filters[name] = append(filters[name], vals...)
 		}
 	}
 	return filters
@@ -3520,32 +3532,12 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("ec2 describeImages list: %w", err)
 	}
 
-	// Collect all Filter.N.Name / Filter.N.Value.M pairs.
-	type filterEntry struct {
-		name   string
-		values []string
-	}
-	var filters []filterEntry
-	for i := 1; ; i++ {
-		fn := req.Params["Filter."+strconv.Itoa(i)+".Name"]
-		if fn == "" {
-			break
-		}
-		var vals []string
-		for j := 1; ; j++ {
-			fv := req.Params["Filter."+strconv.Itoa(i)+".Value."+strconv.Itoa(j)]
-			if fv == "" {
-				break
-			}
-			vals = append(vals, fv)
-		}
-		filters = append(filters, filterEntry{name: fn, values: vals})
-	}
+	// Filters come from the shared extractor rather than a walk of this function's own
+	// (#686). The hand-rolled version broke out of its value loop on the first empty
+	// string, which turned an explicitly empty filter value into the valueless form and
+	// gave this operation a tag: rule no other describe had.
+	filters := extractEC2Filters(req.Params)
 
-	type tagItem struct {
-		Key   string `xml:"key"`
-		Value string `xml:"value"`
-	}
 	type ebsBlockDevice struct {
 		SnapshotID string `xml:"snapshotId"`
 		VolumeSize int64  `xml:"volumeSize"`
@@ -3562,7 +3554,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		OwnerID             string            `xml:"imageOwnerId"`
 		CreationDate        string            `xml:"creationDate,omitempty"`
 		BlockDeviceMappings []blockDeviceItem `xml:"blockDeviceMapping>item,omitempty"`
-		Tags                []tagItem         `xml:"tagSet>item"`
+		Tags                []ec2TagItem      `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName xml.Name    `xml:"DescribeImagesResponse"`
@@ -3581,36 +3573,9 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			continue
 		}
 
-		// Apply filters.
-		skip := false
-		for _, f := range filters {
-			switch {
-			case strings.HasPrefix(f.name, "tag:"):
-				tagKey := f.name[4:]
-				found := false
-				for _, t := range img.Tags {
-					if t.Key == tagKey && (len(f.values) == 0 || containsStr(f.values, t.Value)) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					skip = true
-				}
-			case f.name == "block-device-mapping.snapshot-id":
-				if img.SnapshotID == "" || !containsStr(f.values, img.SnapshotID) {
-					skip = true
-				}
-			case f.name == "image-id":
-				if !containsStr(f.values, img.ImageID) {
-					skip = true
-				}
-			}
-			if skip {
-				break
-			}
-		}
-		if skip {
+		// Apply filters. Every named filter must match — AWS ANDs filters and ORs the
+		// values within one — so the map's iteration order does not affect the outcome.
+		if !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 
@@ -3628,12 +3593,56 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 				EBS:        ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: 8},
 			}}
 		}
-		for _, t := range img.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
-		}
+		item.Tags = ec2TagItems(img.Tags)
 		resp.Images = append(resp.Images, item)
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// ec2ImageMatchesFilters reports whether img satisfies every filter the caller named.
+//
+// Filters are ANDed and the values within one ORed, which is what Using_Filtering
+// documents, so the map's iteration order cannot affect the answer. A name substrate does
+// not evaluate is ignored rather than refused; one rule for an unrecognized filter name
+// is #687's subject, not this function's.
+//
+// A filter naming no values matches nothing (#686). AWS documents no rule for that shape
+// — Using_Filtering says only "You can't specify a filter value of null" — so this is
+// substrate's reading, taken from ec2InstanceMatchesFilter and describeVolumes, which
+// both already answer that way. describeImages previously read it as the any-value
+// question instead, which is what tag-key spells and what this function now answers under
+// that name.
+func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
+	for name, vals := range filters {
+		matched := false
+		switch {
+		case strings.HasPrefix(name, "tag:"):
+			key := strings.TrimPrefix(name, "tag:")
+			for _, t := range img.Tags {
+				if t.Key == key && containsStr(vals, t.Value) {
+					matched = true
+					break
+				}
+			}
+		case name == "tag-key":
+			for _, t := range img.Tags {
+				if containsStr(vals, t.Key) {
+					matched = true
+					break
+				}
+			}
+		case name == "block-device-mapping.snapshot-id":
+			matched = img.SnapshotID != "" && containsStr(vals, img.SnapshotID)
+		case name == "image-id":
+			matched = containsStr(vals, img.ImageID)
+		default:
+			continue
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // deregisterImage removes an AMI from state.

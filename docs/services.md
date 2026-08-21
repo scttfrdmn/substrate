@@ -3976,6 +3976,33 @@ tags on the AMI instead. A caller asserting on `DescribeImages` tags that were
 actually snapshot-scoped will now see them on `DescribeSnapshots`, which is where
 real EC2 puts them.
 
+#### `DescribeImages` filters
+
+Four filter names are applied: `image-id`, `block-device-mapping.snapshot-id`,
+`tag:<key>` and `tag-key`. An unrecognized name is dropped, as on every other EC2
+describe. AWS documents thirty-odd more; the rest need state substrate does not keep.
+
+Two behaviour changes came with `tag-key`, both of which bring this operation into line
+with `DescribeInstances` and `DescribeVolumes` rather than leaving it with its own rules:
+
+- A **`tag:<key>` filter with no value now matches nothing**, where it previously matched
+  any value. That any-value question is what `tag-key` spells, which is why the filter had
+  to arrive in the same change — otherwise the correction would have removed the only way
+  to ask it. AWS settles neither shape: its filtering guide says only that a filter value
+  cannot be null, so matching nothing is substrate's reading, and it is now the same
+  reading everywhere.
+- An **explicitly empty filter value is a value**. `Filter.1.Value.1=` asks for an image
+  whose tag is the empty string; it previously arrived indistinguishable from naming no
+  values at all, because this operation parsed `Filter.N` itself and stopped at the first
+  empty string.
+
+Repeated filter names changed for **every** EC2 describe, not only this one: two
+`Filter.N` entries sharing a name now **OR their values** instead of the second silently
+replacing the first. AWS documents that filters are ANDed and the values within a filter
+ORed, and says nothing about a name appearing twice, so the merge is substrate's reading.
+What it replaces was not a reading of anything — the earlier entry was discarded with no
+indication. Differently-named filters are ANDed, as documented, and always were.
+
 ### Seeding EC2 Fleet partial fulfillment
 
 `CreateFleet` fulfills its whole `TotalTargetCapacity` by default. Partial
