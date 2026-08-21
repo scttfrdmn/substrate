@@ -1468,12 +1468,25 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// createSubnet creates a subnet in a VPC, optionally tagging it on creation.
+//
+// TagSpecification.N arrived with #685 for the same reason it did for CreateVolume in #670:
+// CDK and Terraform tag at create time, so without it the tags a caller can then filter on
+// could never be set. The tag rules are checked before the record is written, so a rejected
+// request creates no subnet.
 func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	vpcID := req.Params["VpcId"]
 	cidr := req.Params["CidrBlock"]
 	az := req.Params["AvailabilityZone"]
 	if az == "" {
 		az = reqCtx.Region + "a"
+	}
+	tags := ec2TagSpecificationTags(req.Params, "", "subnet")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
 	}
 	subnetID := generateSubnetID()
 	subnet := EC2Subnet{
@@ -1482,6 +1495,7 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		CIDRBlock:        cidr,
 		AvailabilityZone: az,
 		State:            "available",
+		Tags:             tags,
 		AccountID:        reqCtx.AccountID,
 		Region:           reqCtx.Region,
 	}
@@ -1496,45 +1510,40 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "subnet_ids", subnetID); err != nil {
 		return nil, err
 	}
-	type subnetItem struct {
-		SubnetID         string `xml:"subnetId"`
-		VpcID            string `xml:"vpcId"`
-		CIDRBlock        string `xml:"cidrBlock"`
-		AvailabilityZone string `xml:"availabilityZone"`
-		State            string `xml:"state"`
-	}
 	type response struct {
-		XMLName xml.Name   `xml:"CreateSubnetResponse"`
-		XMLNS   string     `xml:"xmlns,attr"`
-		Subnet  subnetItem `xml:"subnet"`
+		XMLName xml.Name      `xml:"CreateSubnetResponse"`
+		XMLNS   string        `xml:"xmlns,attr"`
+		Subnet  ec2SubnetItem `xml:"subnet"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:  "http://ec2.amazonaws.com/doc/2016-11-15/",
-		Subnet: subnetItem{SubnetID: subnetID, VpcID: vpcID, CIDRBlock: cidr, AvailabilityZone: az, State: "available"},
+		Subnet: ec2SubnetXML(subnet),
 	})
 }
 
+// describeSubnets lists the account's subnets, honoring an optional list of SubnetId.N
+// parameters and the eleven Filter.N names [ec2SubnetMatchesFilter] evaluates.
+//
+// Filter.N was parsed nowhere here before #685. The spec check runs before the scan so a
+// refusal cannot depend on whether any subnet matched, and ids.match runs before the filters
+// so a subnet a filter excluded still counts as resolved for [ec2IDFilter.unresolved].
 func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SubnetId"), ec2SubnetIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	if err := ec2SubnetFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSubnets: %w", err)
 	}
-	type subnetItem struct {
-		SubnetID            string `xml:"subnetId"`
-		VpcID               string `xml:"vpcId"`
-		CIDRBlock           string `xml:"cidrBlock"`
-		AvailabilityZone    string `xml:"availabilityZone"`
-		State               string `xml:"state"`
-		MapPublicIPOnLaunch bool   `xml:"mapPublicIpOnLaunch"`
-	}
 	type response struct {
-		XMLName xml.Name     `xml:"DescribeSubnetsResponse"`
-		XMLNS   string       `xml:"xmlns,attr"`
-		Subnets []subnetItem `xml:"subnetSet>item"`
+		XMLName xml.Name        `xml:"DescribeSubnetsResponse"`
+		XMLNS   string          `xml:"xmlns,attr"`
+		Subnets []ec2SubnetItem `xml:"subnetSet>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -1549,14 +1558,10 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		if !ids.match(subnet.SubnetID) {
 			continue
 		}
-		resp.Subnets = append(resp.Subnets, subnetItem{
-			SubnetID:            subnet.SubnetID,
-			VpcID:               subnet.VPCID,
-			CIDRBlock:           subnet.CIDRBlock,
-			AvailabilityZone:    subnet.AvailabilityZone,
-			State:               subnet.State,
-			MapPublicIPOnLaunch: subnet.MapPublicIPOnLaunch,
-		})
+		if !ec2SubnetMatchesFilters(subnet, filters) {
+			continue
+		}
+		resp.Subnets = append(resp.Subnets, ec2SubnetXML(subnet))
 	}
 	if err := ids.unresolved(); err != nil {
 		return nil, err
@@ -5351,8 +5356,14 @@ func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
-// describeSnapshots lists EBS snapshots owned by the account, honoring an
-// optional list of SnapshotId.N parameters and the snapshot-id Filter.
+// describeSnapshots lists EBS snapshots owned by the account, honoring an optional list of
+// SnapshotId.N parameters, Owner.N and RestorableBy.N, and the ten Filter.N names
+// [ec2SnapshotMatchesFilter] evaluates.
+//
+// The three selectors compose as AWS documents: a snapshot must satisfy the ID list, both
+// account scopes and every filter. ids.match runs first so that a snapshot excluded by a
+// filter still counts as resolved for [ec2IDFilter.unresolved] — a named ID that exists is
+// not "not found" merely because a filter rejected it.
 func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SnapshotId"), ec2SnapshotIDKind)
 	if err := ids.validate(); err != nil {
@@ -5362,6 +5373,8 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)
+	owners := newEC2SnapshotOwners(req.Params, reqCtx.AccountID)
+	restorableBy := newEC2SnapshotRestorableBy(req.Params, reqCtx.AccountID)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace,
 		"snapshot:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
@@ -5369,20 +5382,16 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("ec2 describeSnapshots list: %w", err)
 	}
 
-	type tagItem struct {
-		Key   string `xml:"key"`
-		Value string `xml:"value"`
-	}
 	type snapshotItem struct {
-		SnapshotID  string    `xml:"snapshotId"`
-		VolumeID    string    `xml:"volumeId,omitempty"`
-		VolumeSize  int64     `xml:"volumeSize"`
-		State       string    `xml:"status"`
-		StartTime   string    `xml:"startTime"`
-		Encrypted   bool      `xml:"encrypted"`
-		Description string    `xml:"description,omitempty"`
-		OwnerID     string    `xml:"ownerId"`
-		Tags        []tagItem `xml:"tagSet>item"`
+		SnapshotID  string       `xml:"snapshotId"`
+		VolumeID    string       `xml:"volumeId,omitempty"`
+		VolumeSize  int64        `xml:"volumeSize"`
+		State       string       `xml:"status"`
+		StartTime   string       `xml:"startTime"`
+		Encrypted   bool         `xml:"encrypted"`
+		Description string       `xml:"description,omitempty"`
+		OwnerID     string       `xml:"ownerId"`
+		Tags        []ec2TagItem `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName   xml.Name       `xml:"DescribeSnapshotsResponse"`
@@ -5403,10 +5412,13 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		if !ids.match(snap.SnapshotID) {
 			continue
 		}
-		if vals, ok := filters["snapshot-id"]; ok && !containsStr(vals, snap.SnapshotID) {
+		if !owners.match(snap) || !restorableBy.match(snap) {
 			continue
 		}
-		item := snapshotItem{
+		if !ec2SnapshotMatchesFilters(snap, filters) {
+			continue
+		}
+		resp.Snapshots = append(resp.Snapshots, snapshotItem{
 			SnapshotID:  snap.SnapshotID,
 			VolumeID:    snap.VolumeID,
 			VolumeSize:  snap.VolumeSize,
@@ -5415,11 +5427,8 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 			Encrypted:   snap.Encrypted,
 			Description: snap.Description,
 			OwnerID:     snap.AccountID,
-		}
-		for _, t := range snap.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck
-		}
-		resp.Snapshots = append(resp.Snapshots, item)
+			Tags:        ec2TagItems(snap.Tags),
+		})
 	}
 	if err := ids.unresolved(); err != nil {
 		return nil, err

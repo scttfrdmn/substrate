@@ -84,7 +84,7 @@ func (s ec2FilterSpec) check(params map[string]string) *AWSError {
 // ec2InstanceFilterSpec is DescribeInstances' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstances.html.
 //
-// The widest set of the nine, at 136 names. Substrate evaluates ten of them plus
+// The widest set of the ten, at 136 names. Substrate evaluates ten of them plus
 // tag:<key>; the rest describe instance members it does not model.
 func ec2InstanceFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
@@ -229,15 +229,48 @@ func ec2VolumeFilterSpec() ec2FilterSpec {
 // ec2SnapshotFilterSpec is DescribeSnapshots' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSnapshots.html.
 //
-// Only snapshot-id is evaluated. Widening that is #685.
+// Ten of AWS's fourteen names are evaluated as of #685 — the nine below plus tag:<key>. The
+// four that are not name snapshot members substrate does not render, so there is nothing to
+// compare a value against.
 func ec2SnapshotFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		tagValueFilter: true,
-		evaluated:      []string{"snapshot-id"},
+		evaluated: []string{
+			"description", "encrypted", "owner-id", "snapshot-id", "start-time",
+			"status", "tag-key", "volume-id", "volume-size",
+		},
+		accepted: []string{"owner-alias", "progress", "storage-tier", "transfer-type"},
+	}
+}
+
+// ec2SubnetFilterSpec is DescribeSubnets' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSubnets.html.
+//
+// Twenty-five names plus five alias spellings the page documents inline, of which #685
+// evaluates eleven and four aliases. The aliases are listed individually rather than
+// normalized: they are distinct names on the wire, and folding them would make the spec
+// disagree with [ec2SubnetMatchesFilter] about what it accepts.
+//
+// This operation parsed no Filter.N at all before #685, so unlike its siblings it gains
+// both halves at once — the refusal from #687 and the matching.
+func ec2SubnetFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated: []string{
+			"availability-zone", "availabilityZone", "cidr", "cidr-block", "cidrBlock",
+			"default-for-az", "defaultForAz", "map-public-ip-on-launch", "owner-id",
+			"state", "subnet-arn", "subnet-id", "tag-key", "vpc-id",
+		},
 		accepted: []string{
-			"description", "encrypted", "owner-alias", "owner-id", "progress",
-			"start-time", "status", "storage-tier", "tag-key", "transfer-type",
-			"volume-id", "volume-size",
+			"availability-zone-id", "availabilityZoneId", "available-ip-address-count",
+			"customer-owned-ipv4-pool", "enable-dns64", "enable-lni-at-device-index",
+			"ipv6-cidr-block-association.association-id",
+			"ipv6-cidr-block-association.ipv6-cidr-block",
+			"ipv6-cidr-block-association.state", "ipv6-native",
+			"map-customer-owned-ip-on-launch", "outpost-arn",
+			"private-dns-name-options-on-launch.enable-resource-name-dns-a-record",
+			"private-dns-name-options-on-launch.enable-resource-name-dns-aaaa-record",
+			"private-dns-name-options-on-launch.hostname-type",
 		},
 	}
 }

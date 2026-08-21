@@ -71,7 +71,7 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 	switch {
 	case launch.subnetID != "":
 		out = append(out, authzResource{
-			ARN:  "arn:aws:ec2:" + region + ":" + acct + ":subnet/" + launch.subnetID,
+			ARN:  ec2SubnetARN(acct, region, launch.subnetID),
 			Tags: ec2AuthzTagsFor(state, "subnet:"+acct+"/"+region+"/"+launch.subnetID),
 		})
 	case launch.subnetWildcard:

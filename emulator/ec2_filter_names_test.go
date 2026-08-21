@@ -13,7 +13,8 @@ import (
 //
 // Before this change the answer depended on which operation received the name — dropped
 // on volumes, snapshots, security groups, route tables, NAT gateways, fleets and images;
-// matched nothing on instances; refused on instance-type offerings. Real EC2 refuses. The
+// matched nothing on instances; refused on instance-type offerings; and, on subnets, never
+// parsed at all until #685 gave that operation filters. Real EC2 refuses. The
 // table below covers one operation per former behavior class, which is what the issue
 // asks for, plus the two cases the split into evaluated/accepted names creates: a
 // documented name substrate cannot answer must *not* be refused, and an operation that
@@ -51,6 +52,9 @@ func TestEC2_FilterNames_UndocumentedNameRefused(t *testing.T) {
 		// the plausible-looking spelling is exactly the mistake worth refusing.
 		{"DescribeFleets", "fleet-id", "dropped"},
 		{"DescribeInstanceTypeOfferings", "location-type", "refused"},
+		// DescribeSubnets parsed no Filter.N at all before #685, so this name — and every
+		// other — was neither applied nor refused. It is the tenth spec's first case.
+		{"DescribeSubnets", "vpc", "ignored the parameter entirely"},
 	} {
 		t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 			status, code, message := ec2FilterRefusal(t, tc.action, tc.filter)
@@ -97,6 +101,8 @@ func TestEC2_FilterNames_DocumentedButUnevaluatedIsAccepted(t *testing.T) {
 		{"DescribeRouteTables", "route.state"},
 		{"DescribeNatGateways", "nat-gateway-id"},
 		{"DescribeFleets", "replace-unhealthy-instances"},
+		{"DescribeSubnets", "ipv6-cidr-block-association.state"},
+		{"DescribeSubnets", "outpost-arn"},
 	} {
 		t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 			status, code, _ := ec2FilterRefusal(t, tc.action, tc.filter)
@@ -173,6 +179,8 @@ func TestEC2_FilterNames_TagFilterFollowsTheOperation(t *testing.T) {
 			{"DescribeSnapshots", "tag:Env"},
 			{"DescribeRouteTables", "tag:Env"},
 			{"DescribeNatGateways", "tag-key"},
+			{"DescribeSubnets", "tag:Env"},
+			{"DescribeSubnets", "tag-key"},
 		} {
 			t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 				status, _, _ := ec2FilterRefusal(t, tc.action, tc.filter)

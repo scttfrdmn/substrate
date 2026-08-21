@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A subnet reports its tags, and `DescribeSubnets` filters on them** (#685). `EC2Subnet`
+  has carried a `Tags` field for as long as it has existed and `CreateTags` on a `subnet-` ID
+  has always written to it — only the reader was missing, so every tag a caller applied to a
+  subnet was stored and invisible. `DescribeSubnets` now renders `tagSet`, and evaluates
+  eleven filter names plus the four alias spellings AWS documents inline
+  (`availabilityZone`, `cidr`, `cidrBlock`, `defaultForAz`), which are separate names on the
+  wire and so are answered individually rather than normalized away.
+
+  It also gains **`subnetArn`, `ownerId` and `defaultForAz`**. The first two are what the
+  `subnet-arn` and `owner-id` filters compare against, so rendering them is what lets a
+  caller round-trip a value it read; a single `ec2SubnetARN` builds the ARN for the filter,
+  the response and the authorization resolver, because two spellings would break the
+  round-trip silently.
+
+  `tagSet` is **absent** on an untagged subnet rather than present-and-empty, following both
+  of AWS's `DescribeSubnets` samples. That deliberately differs from `DescribeSnapshots`,
+  whose own page shows the empty element: each operation follows its own samples rather than
+  a house rule. Five members those samples carry stay absent —
+  `availableIpAddressCount`, `availabilityZoneId`, `assignIpv6AddressOnCreation`,
+  `ipv6CidrBlockAssociationSet` and the
+  `blockPublicAccessStates`/`privateDnsNameOptionsOnLaunch` structures — because nothing in
+  state backs them and deriving an address count from the CIDR would be fabrication.
+
+- **`TagSpecification.N` on `CreateSubnet`** (#685), scoped to `subnet`, under the same two
+  rules every other tag path enforces — the reserved `aws:` prefix and the 50-tag limit —
+  with a refused request creating no subnet. This is how CDK and Terraform set tags, so
+  without it the filters above had nothing to find on a subnet the caller had just made.
+
+- **`Owner.N` and `RestorableBy.N` on `DescribeSnapshots`** (#685). Both sit outside
+  `Filter.N` and both were read by nothing, so a request scoped to one account answered with
+  every snapshot. Substrate is single-account: `self` and the requesting account's ID match
+  everything, and anything else — **including `amazon`** — matches nothing, because
+  answering "snapshots owned by `amazon`" with the account's own snapshots would claim they
+  were public. Values within either parameter OR; the two AND with each other, with the
+  filters, and with `SnapshotId.N`.
+
 - **`tag-key` on `DescribeImages`** (#686). AWS documents it for this operation and
   substrate did not support it, so the name was silently dropped and the filter constrained
   nothing. It is the any-value question — "images carrying an `Env` tag, whatever its
@@ -62,6 +98,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be a single rule.
 
 ### Fixed
+- **`DescribeSubnets` applies the filters a request sends** (#685). It parsed no `Filter.N`
+  at all, so "the subnets of `vpc-x`" answered with every subnet in the region and the
+  response carried nothing to say the filter had been ignored — the worst shape of this
+  defect, because a consumer walking a VPC's subnets silently got its neighbours' too. Its
+  `SubnetId.N` selection is unchanged, and the filter match runs after it so that a subnet a
+  filter excluded still counts as *resolved*: naming an existing subnet and filtering it out
+  is an empty HTTP 200, not `InvalidSubnetID.NotFound`.
+
+  `cidr-block` is **exact**, per AWS — "The CIDR block you specify must exactly match the
+  subnet's CIDR block for information to be returned for the subnet" — so a caller asking
+  for `10.0.0.0/16` does not get `10.0.1.0/24`.
+
+- **`DescribeSnapshots` applies ten filters instead of one** (#685). `snapshot-id` was the
+  only name it evaluated; the other thirteen were silently dropped, so `status=pending` or
+  `tag:Env=prod` returned every snapshot in the account. Now applied: `description`,
+  `encrypted`, `owner-id`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`,
+  `volume-id` and `volume-size`. The remaining four — `owner-alias`, `progress`,
+  `storage-tier` and `transfer-type` — name members substrate does not render, so there is
+  nothing to compare a value against and they are accepted and inert.
+
+  **These two are a behaviour change.** A request that previously returned everything now
+  returns the subset that actually matches. A consumer's test asserting on a count it got
+  from an unapplied filter will see a different number — which is the point: the number it
+  saw was never the answer to the question it asked.
+
+- **`CreateSubnet` and `DescribeSubnets` render one `Subnet` element** (#685), which is what
+  AWS documents. The two rendered different subsets of it — `CreateSubnet` omitted
+  `mapPublicIpOnLaunch`, and neither carried tags, an ARN, an owner or `defaultForAz` — so a
+  caller reading the create response saw a different subnet from the one it could then
+  describe. A test asserts the two are equal, so they cannot drift apart again.
+
+- **The EC2 plugin's last two function-local tag renderers are gone** (#685).
+  `DescribeSnapshots` and `DescribeFleets` each carried their own `tagItem` copy; both now
+  use the package-level `ec2TagItems`, as `DescribeImages` began doing in #686. Nothing
+  observable changes — all four shapes matched — but a fix to the shape has one place to
+  land instead of four.
+
 - **A `tag:<key>` filter with no value no longer matches any value on `DescribeImages`**
   (#686). `Filter.1.Name=tag:Env` with no `Filter.1.Value.1` matched every image carrying an
   `Env` tag, which is `tag-key`'s job — so this one operation answered a filter differently
@@ -96,7 +169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`DescribeImages` renders its tags through the package-level renderer** (#686), deleting
   one of the EC2 plugin's three identical function-local `tagItem` copies. Nothing
   observable changes — the shapes matched — but a fix to that shape now has one place to
-  land. `DescribeFleets` and `DescribeSnapshots` still carry theirs.
+  land. #685 below deletes the last two, on `DescribeSnapshots` and `DescribeFleets`.
 
 ## [v0.105.0] - 2026-08-20
 
