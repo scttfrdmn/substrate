@@ -70,6 +70,12 @@ type iamSimulateRequest struct {
 	// request member, so it carries no JSON tag: only parseSimulateRequest fills it,
 	// from req.Params, because a nested member list has no JSON-body form at all.
 	context map[string]string
+
+	// contextMulti holds the same entries as context, keeping *every* value a caller
+	// supplied for a key rather than only the first. A ContextEntry is a list by
+	// construction (ContextKeyValues.member.N), so this is the map that matches the
+	// wire shape; context is the single-valued projection of it (#690).
+	contextMulti map[string][]string
 }
 
 // iamSimulationResult is one (action, resource) outcome, in the terms the response
@@ -224,7 +230,7 @@ func (p *IAMPlugin) parseSimulateRequest(req *AWSRequest) (*iamSimulateRequest, 
 		params.ResourceArns = []string{"*"}
 	}
 
-	params.context = simulationContextEntries(req.Params)
+	params.context, params.contextMulti = simulationContextEntries(req.Params)
 	return &params, nil
 }
 
@@ -242,18 +248,23 @@ func (p *IAMPlugin) parseSimulateRequest(req *AWSRequest) (*iamSimulateRequest, 
 // There is no JSON-body form of this at all, so unlike every other member it is read
 // only from req.Params.
 //
-// Only the first value of a multi-valued key is used, because substrate's condition
-// context is a map[string]string. A set-valued key needs ForAllValues/ForAnyValue,
-// which conditionMatches does not implement, so silently keeping one of several
-// values is the honest limit: the alternative is pretending to evaluate a
-// multi-valued condition. ContextKeyType is recorded by AWS but not consulted here —
-// every condition operator substrate implements compares strings.
-func simulationContextEntries(params map[string]string) map[string]string {
+// Every value is kept, in two shapes: the multi map holds the caller's whole list, so
+// a ForAllValues or ForAnyValue condition is evaluated over exactly what was supplied,
+// and the single map holds the first value, which is what an unqualified operator
+// compares. Until #690 only the first survived, so a caller simulating a multivalued
+// key was answered against a policy that had seen one of its values — an answer that
+// could differ from what enforcement would decide, which is the one thing a simulator
+// must not do.
+//
+// ContextKeyType is recorded by AWS but not consulted here — every condition operator
+// substrate implements compares strings.
+func simulationContextEntries(params map[string]string) (single map[string]string, multi map[string][]string) {
 	entries := iamMemberStructs(params, "ContextEntries")
 	if len(entries) == 0 {
-		return nil
+		return nil, nil
 	}
-	ctx := make(map[string]string, len(entries))
+	single = make(map[string]string, len(entries))
+	multi = make(map[string][]string, len(entries))
 	for _, entry := range entries {
 		name := entry["ContextKeyName"]
 		if name == "" {
@@ -263,13 +274,17 @@ func simulationContextEntries(params map[string]string) map[string]string {
 		if len(values) == 0 {
 			// A key named with no value is still *set* as far as the Null operator is
 			// concerned, and it must not be reported as a missing context value: the
-			// caller supplied it.
-			ctx[name] = ""
+			// caller supplied it. It is recorded in both maps for that reason — the
+			// multi entry is present and empty, which is what a ForAllValues condition
+			// reads as "no values in the request".
+			single[name] = ""
+			multi[name] = []string{}
 			continue
 		}
-		ctx[name] = values[0]
+		single[name] = values[0]
+		multi[name] = values
 	}
-	return ctx
+	return single, multi
 }
 
 // simulationPolicySet assembles the documents SimulatePrincipalPolicy evaluates:
@@ -506,10 +521,11 @@ func (p *IAMPlugin) simulateResponse(op string, params *iamSimulateRequest,
 	for _, action := range params.ActionNames {
 		for _, resource := range params.ResourceArns {
 			results = append(results, simulateOne(docs, boundaryDocs, EvaluationRequest{
-				Principal: callerArn,
-				Action:    action,
-				Resource:  resource,
-				Context:   condCtx,
+				Principal:    callerArn,
+				Action:       action,
+				Resource:     resource,
+				Context:      condCtx,
+				MultiContext: params.contextMulti,
 			}))
 		}
 	}

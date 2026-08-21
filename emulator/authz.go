@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -83,6 +84,20 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	requestTags := make(map[string]string)
 	addRequestTags(requestTags, req)
 
+	// aws:TagKeys is the same reading of the same request, so it is derived from the
+	// map above rather than gathered a second time per service. That is what keeps the
+	// two in step: every arm of addRequestTags records one aws:RequestTag/<key> entry
+	// per tag key in the request, so the keys *are* the request's tag keys, and a
+	// service arm added later populates both without knowing this key exists.
+	//
+	// It is request-level, like the tags it comes from, so one map serves every
+	// resource in the loop below — there is nothing per-resource in it to keep apart,
+	// which is the concern the per-resource condCtx exists for.
+	requestMulti := make(map[string][]string, 1)
+	if keys := requestTagKeys(requestTags); len(keys) > 0 {
+		requestMulti["aws:TagKeys"] = keys
+	}
+
 	// Every resource the request names must be allowed. A request naming several —
 	// organizations:MoveAccount and ec2:RunInstances — is denied unless the caller's
 	// policies admit all of them, which is how AWS evaluates a statement against
@@ -100,10 +115,11 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		}
 
 		result := Evaluate(docs, EvaluationRequest{
-			Principal: reqCtx.Principal.ARN,
-			Action:    action,
-			Resource:  res.ARN,
-			Context:   condCtx,
+			Principal:    reqCtx.Principal.ARN,
+			Action:       action,
+			Resource:     res.ARN,
+			Context:      condCtx,
+			MultiContext: requestMulti,
 		})
 		if result.Decision != DecisionAllow {
 			return &AWSError{
@@ -116,10 +132,11 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 
 		if boundary != nil {
 			boundaryResult := Evaluate([]PolicyDocument{*boundary}, EvaluationRequest{
-				Principal: reqCtx.Principal.ARN,
-				Action:    action,
-				Resource:  res.ARN,
-				Context:   condCtx,
+				Principal:    reqCtx.Principal.ARN,
+				Action:       action,
+				Resource:     res.ARN,
+				Context:      condCtx,
+				MultiContext: requestMulti,
 			})
 			if boundaryResult.Decision != DecisionAllow {
 				return &AWSError{
@@ -946,6 +963,34 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 			}
 		}
 	}
+}
+
+// requestTagKeys returns the tag keys a request context carries, in sorted order —
+// the value of AWS's aws:TagKeys condition key.
+//
+// It reads the aws:RequestTag/ entries [addRequestTags] just produced rather than
+// re-walking the request, so the two can never disagree about what the request asked
+// for, and a service arm added to that function populates this key for free. AWS
+// documents the pair the same way: aws:RequestTag/${TagKey} is "the tag key-value pair
+// in a request" while aws:TagKeys "defines what tag-keys are allowed in a request but
+// does not include the tag-key values".
+//
+// **The sort is load-bearing.** Three of addRequestTags' arms iterate a Go map, whose
+// order is randomized per run, and a ForAllValues decision quantifies over this slice.
+// An unsorted value would make a *denial* depend on map iteration order — the one
+// thing an event log that must replay identically cannot tolerate. It also keeps the
+// recorded context byte-stable, so two runs of the same request produce the same
+// event.
+func requestTagKeys(condCtx map[string]string) []string {
+	const prefix = "aws:RequestTag/"
+	keys := make([]string, 0, len(condCtx))
+	for k := range condCtx {
+		if after, ok := strings.CutPrefix(k, prefix); ok && after != "" {
+			keys = append(keys, after)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // iamTagsToMap converts []IAMTag to a map[string]string.

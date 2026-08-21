@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`aws:TagKeys` is populated on every request that carries tags, and IAM's request context
+  can hold a multivalued key** (#690). `EvaluationRequest` gains
+  `MultiContext map[string][]string` beside `Context`, and `AuthController.CheckAccess` fills
+  `aws:TagKeys` with the tag keys the request asked for — the key AWS documents as defining
+  "what tag-keys are allowed in a request", and the one nearly every tag-scoped policy in the
+  wild is written against. It was populated nowhere before, so a policy naming it could not be
+  satisfied by any request.
+
+  It is **derived from the `aws:RequestTag/<key>` entries substrate already read out of the
+  request**, not gathered a second time per service. That is what keeps the two in step: the
+  keys of `aws:RequestTag/*` *are* the request's tag keys, so all seven service arms — EC2's
+  `TagSpecification.N.Tag.M.Key` and a direct `CreateTags`/`DeleteTags`' `Tag.N.Key`, IAM's
+  and Organizations' `Tags` lists, Lambda's `Tags` map, Config's `Tags`, and S3's
+  `x-amz-tagging` header — are covered at once, and an arm added later populates the key
+  without knowing it exists.
+
+  **The value is sorted.** Three of those arms iterate a Go map, whose order is randomized per
+  run, and a `ForAllValues` decision quantifies over this list — an unsorted value would make
+  a *denial* depend on map iteration order, which an event log that must replay identically
+  cannot tolerate.
+
+  Two maps rather than one `map[string][]string`: IAM itself draws the line between
+  single-valued and multivalued keys, documents that "multivalued context keys require a
+  condition set operator", and says outright not to use a set operator on a single-valued key.
+  Keeping them apart means every unqualified operator's lookup is byte-identical to what it
+  was before — so adding a multivalued key cannot change a decision that never named one.
+
+  The IAM control-plane authorization path (`iam:` actions decided inside the IAM plugin)
+  deliberately passes neither map, as it did before: nothing there reads the request for tags,
+  so a condition on `aws:RequestTag` or `aws:TagKeys` still cannot be satisfied through that
+  door. Worth knowing before writing one against an `iam:` action.
+
 - **`CreateLaunchTemplate` and `CreateLaunchTemplateVersion` report an invalid block device
   mapping through their documented `warning` member** (#693). v0.105.0 taught `RunInstances`
   to refuse a mapping real EC2 rejects and deliberately left both create operations
@@ -155,6 +187,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling callers were using for it by accident.
 
 ### Changed
+- **A policy statement using `ForAllValues:` or `ForAnyValue:` is now evaluated instead of
+  discarded** (#690). Neither qualifier was parsed anywhere in substrate, so
+  `"ForAllValues:StringEquals"` reached the operator switch whole, matched none of the nine
+  operators it knows, and fell through to its deny-by-default. The statement was thrown away
+  before its condition key was ever looked at.
+
+  **This is a behaviour change in both directions, and the issue that reported it had the
+  direction backwards.** It read as an unpopulated `aws:TagKeys` making such a statement
+  *allow*; the truth is worse. An `Allow` so written was a false **deny** — including AWS's own
+  documented `ec2:DeleteTags` example policies, none of which permitted anything — and a `Deny`
+  so written was silently **inert**, so a guardrail written the way AWS recommends refused
+  nothing at all. Both now behave as documented, which means a previously-ineffective `Deny`
+  will start firing and a previously-denied `Allow` may start permitting.
+
+  The semantics are AWS's, verbatim. `ForAllValues` "returns `true` if every context key value
+  in the request matches a context key value in the policy. It also returns `true` if there are
+  no context keys in the request" — so an absent or valueless key satisfies it, which is why
+  AWS's **Important** note says to always pair it with `"Null": {"<key>": "false"}`, and why all
+  four of its `aws:TagKeys` examples do. `ForAnyValue` "returns `true` if any one of the context
+  key values in the request matches any one of the context key values in the policy. For no
+  matching context key or if the key does not exist, the condition returns `false`."
+
+  An **unrecognized** qualifier still does not match — `ForSomeValues:StringEquals`, or a
+  lowercase `forallvalues:`, denies rather than being treated as unqualified. AWS defines
+  exactly two, so anything else is a policy substrate cannot evaluate, and refusing to guess is
+  the same deny-by-default an unknown operator already gets. **Provenance:** the absent-key
+  rules and the `Null: false` pairing are documented verbatim; treating an unrecognized
+  qualifier as a non-match is substrate's own choice, consistent with its existing rule.
+
+  Two bundled managed policies contain a real set-qualified statement —
+  `AmazonRDSFullAccess` and `AmazonRDSReadOnlyAccess` gate
+  `devops-guru:SearchInsights`/`ListAnomaliesForInsight` on
+  `ForAllValues:StringEquals` over `devops-guru:ServiceNames`, paired with `Null: false`. They
+  still withhold the grant from a request that names no service names, which is the `Null`
+  arm doing its job, and now make it when one names `RDS`. That is asserted, not assumed: a
+  fix that quietly widened two bundled policies would be the change escaping its own blast
+  radius.
+
 - **An unrecognized EC2 filter name is refused, on every operation that parses one** (#687).
   `Filter.N.Name` outside the set that operation's own API reference documents now answers
   `InvalidParameterValue` / `The filter "<name>" is not valid for this request`, HTTP 400.
@@ -202,6 +272,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be a single rule.
 
 ### Fixed
+- **The `Null` operator no longer reads a multivalued condition key as null** (#690). It
+  compares a single string, so a key carried only in the new `MultiContext` — which is where
+  `aws:TagKeys` lives — read as absent. Without this, AWS's own recommended pairing of
+  `ForAllValues` with `"Null": {"aws:TagKeys": "false"}` would still have denied every request
+  it was written to allow, and the set-qualifier fix above would have looked like it worked
+  while changing nothing for a real policy. `Null` now falls back to the multivalued map, so a
+  request that carries the key is not null by either reading.
+
+- **The policy simulator keeps every value of a multivalued `ContextEntries` member** (#690).
+  `ContextKeyValues.member.N` is a value *list* by construction and
+  `SimulateCustomPolicy`/`SimulatePrincipalPolicy` kept only the first, so a caller simulating
+  `aws:TagKeys` was answered against a policy that had seen one of its values — an answer that
+  could differ from what enforcement would decide, which is the one thing a simulator must not
+  produce. All values are now evaluated, and a key supplied only as a multivalued entry is no
+  longer reported in `MissingContextValues`: naming a key that in fact decided the call would
+  make a simulation contradict the enforcement it exists to predict.
+
 - **A launch-template version derived with `SourceVersion` no longer silently drops its block
   device mappings and volume tags** (#693). `SourceVersion` is documented as the way to base a
   new version on an existing one — "The new version inherits the same launch parameters as the

@@ -908,6 +908,68 @@ answer is worse than a missing one:
 A consumer whose preflight depends on an SCP boundary cannot get that answer here, and
 should not read an `allowed` as covering it.
 
+### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
+
+A condition key is either **single-valued** — at most one value in the request context —
+or **multivalued**. AWS's rule is that a multivalued key "requires a condition set
+operator", written as a prefix on the operator itself, and that a set operator must *not*
+be used on a single-valued key. Substrate mirrors that split: the evaluator carries two
+context maps, and only the multivalued one is quantified over.
+
+| In the policy | Substrate's answer |
+|---|---|
+| `StringEquals` and the other eight operators, unqualified | Compares the single-valued context. Unchanged by anything in this section |
+| `ForAllValues:<operator>` | True when **every** value the request carries satisfies the operator — and **true when the key is absent or carries no values** |
+| `ForAnyValue:<operator>` | True when **at least one** value satisfies it; **false when the key is absent or carries no values** |
+| Anything else in that position | Does not match. `ForSomeValues:StringEquals`, or a lowercase `forallvalues:`, denies rather than being read as unqualified |
+
+Both absent-key rules are AWS's, quoted: `ForAllValues` "also returns `true` if there are no
+context keys in the request", and for `ForAnyValue`, "for no matching context key or if the
+key does not exist, the condition returns `false`".
+
+**Pair `ForAllValues` with `Null`.** The vacuous truth above means a `ForAllValues` `Allow`
+permits a request that names nothing at all, which is why AWS's own note says to "always
+include the `Null` condition operator in your policy with a `false` value", and why all four
+of its `aws:TagKeys` examples do:
+
+```json
+"Condition": {
+  "ForAllValues:StringEquals": {"aws:TagKeys": ["Department", "CostCenter"]},
+  "Null": {"aws:TagKeys": "false"}
+}
+```
+
+Seen from the `Deny` side the same vacuity bites the other way — a `ForAllValues` `Deny`
+fires on the request that carries no keys — so a guardrail is better written with
+`ForAnyValue`.
+
+Treating an unrecognized qualifier as a non-match is substrate's own choice, consistent with
+the deny-by-default it already applies to an unrecognized operator; everything else here is
+documented behaviour.
+
+#### Which keys are multivalued
+
+| Key | Populated from |
+|---|---|
+| `aws:TagKeys` | The tag keys the request asks to apply, on every service whose tags substrate reads: EC2's `TagSpecification.N.Tag.M.Key` and a direct `CreateTags`/`DeleteTags`' `Tag.N.Key`, IAM's and Organizations' `Tags` lists, Lambda's `Tags` map, Config's `Tags`, and S3's `x-amz-tagging` header |
+| Any key a simulation supplies | `ContextEntries.member.N.ContextKeyValues.member.M` — every value, not just the first |
+
+`aws:TagKeys` is derived from the `aws:RequestTag/<key>` entries substrate already read out
+of the request rather than gathered separately, so the two cannot disagree about what the
+request asked for, and its value is **sorted** — a `ForAllValues` denial that depended on Go
+map iteration order could not replay from the event log.
+
+Everything else substrate populates is single-valued: `aws:RequestTag/<key>` and
+`aws:ResourceTag/<key>` on an authorized request, `sts:ExternalId` when a role is assumed,
+and `aws:PrincipalArn` / `aws:ResourceAccount` in a simulation. A set qualifier on one of
+those is evaluated over a one-element set — which is the thing AWS warns against writing,
+not something substrate refuses.
+
+**One authorization path populates neither map**: `iam:` actions decided inside the IAM
+plugin. Nothing there reads the request for tags, so a condition on `aws:RequestTag` or
+`aws:TagKeys` cannot be satisfied through that door — worth knowing before writing one
+against an IAM action.
+
 ### AWS managed policies are a seeded catalog
 
 Substrate bundles **52** AWS managed policies, not the ~1,200 AWS publishes. Each carries
@@ -3534,11 +3596,14 @@ resource the policy denies tags **none** of them — the same all-or-nothing sha
 [reserved-key](#reserved-tag-keys) and [tag-limit](#the-50-tag-per-resource-limit)
 checks already have.
 
+`aws:TagKeys` is populated too — the sorted list of keys the request names — so the
+`ForAllValues:StringEquals` form several of AWS's `DeleteTags` examples are written in now
+evaluates. See [multivalued condition
+keys](#multivalued-condition-keys-forallvalues-and-foranyvalue) for the set-qualifier rules
+those examples depend on, including why AWS pairs them with `Null`.
+
 Not covered:
 
-- **`aws:TagKeys`**, which substrate populates nowhere, so the
-  `ForAllValues:StringEquals` form several of AWS's `DeleteTags` examples use cannot be
-  satisfied.
 - **The second authorization pass** AWS performs on `ec2:CreateTags` when a
   resource-creating action carries tags, keyed on `ec2:CreateAction`. Tag-on-create is
   authorized here as the creating action alone.
