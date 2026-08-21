@@ -356,13 +356,20 @@ func ec2globMatch(pattern, value []rune) bool {
 // ec2FilterAccepts reports whether value satisfies a filter's value list, which EC2
 // joins with OR.
 //
-// A filter carrying no values at all is treated as absent rather than as matching
-// nothing: [extractEC2Filters] records such a filter with an empty list, and dropping
-// every result for it would turn a malformed request into a silently empty answer.
+// A filter carrying no values at all matches nothing, so an empty list drops every
+// result. This function used to treat such a filter as absent, on the argument that
+// dropping everything turns a malformed request into a silently empty answer — but the
+// unfiltered answer that argument produces is silent in the same way and wrong in the
+// more dangerous direction, since a caller cannot tell it from a genuine match on every
+// resource. #686 had already settled the shape for `tag:<key>`, and nine of substrate's
+// eleven matchers reached the same answer by calling [containsStr] with no guard, so this
+// is the majority rule rather than a new one (#696).
+//
+// A caller must therefore not pass a bare map index: an *absent* filter constrains nothing
+// and an empty value list matches nothing, and `filters[name]` yields the same nil slice for
+// both. Look the name up with the two-value form and only call this when it is present, as
+// [extractEC2Filters] records a valueless filter as a present key.
 func ec2FilterAccepts(values []string, value string) bool {
-	if len(values) == 0 {
-		return true
-	}
 	for _, v := range values {
 		if ec2FilterValueMatches(v, value) {
 			return true

@@ -1692,13 +1692,16 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if !ids.match(sg.GroupID) {
 			continue
 		}
-		if vals, ok := filters["group-name"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupName) {
+		// A filter naming no values matches nothing, as it does everywhere else: these
+		// three arms used to carry an `ok && len(vals) > 0 &&` guard, which returned every
+		// security group for a request that had asked for a subset (#696).
+		if vals, ok := filters["group-name"]; ok && !containsStr(vals, sg.GroupName) {
 			continue
 		}
-		if vals, ok := filters["vpc-id"]; ok && len(vals) > 0 && !containsStr(vals, sg.VPCID) {
+		if vals, ok := filters["vpc-id"]; ok && !containsStr(vals, sg.VPCID) {
 			continue
 		}
-		if vals, ok := filters["group-id"]; ok && len(vals) > 0 && !containsStr(vals, sg.GroupID) {
+		if vals, ok := filters["group-id"]; ok && !containsStr(vals, sg.GroupID) {
 			continue
 		}
 		renderPerm := func(rule EC2IPPermission) permItem {
@@ -4576,13 +4579,20 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 		InstanceTypeOfferings []offeringItem `xml:"instanceTypeOfferingSet>item"`
 	}
 
+	// Both filters are looked up with the two-value form because an absent filter and a
+	// filter naming no values are different requests and now get different answers: absent
+	// constrains nothing, while an empty value list matches nothing (#696). Indexing the map
+	// directly would conflate them and drop the whole catalog for an unfiltered query.
+	wantTypes, filterByType := filters["instance-type"]
+	wantLocations, filterByLocation := filters["location"]
+
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, info := range ec2InstanceTypeCatalog {
-		if !ec2FilterAccepts(filters["instance-type"], info.InstanceType) {
+		if filterByType && !ec2FilterAccepts(wantTypes, info.InstanceType) {
 			continue
 		}
 		for _, loc := range locations {
-			if !ec2FilterAccepts(filters["location"], loc) {
+			if filterByLocation && !ec2FilterAccepts(wantLocations, loc) {
 				continue
 			}
 			resp.InstanceTypeOfferings = append(resp.InstanceTypeOfferings, offeringItem{
