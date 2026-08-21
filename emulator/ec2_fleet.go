@@ -811,10 +811,6 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		SpotTargetCapacity        int    `xml:"spotTargetCapacity"`
 		DefaultTargetCapacityType string `xml:"defaultTargetCapacityType,omitempty"`
 	}
-	type tagItem struct {
-		Key   string `xml:"key"`
-		Value string `xml:"value"`
-	}
 	type fleetItem struct {
 		FleetID                     string             `xml:"fleetId"`
 		FleetState                  string             `xml:"fleetState"`
@@ -825,7 +821,7 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		FulfilledOnDemandCapacity   int                `xml:"fulfilledOnDemandCapacity"`
 		TargetCapacitySpecification targetCapacityXML  `xml:"targetCapacitySpecification"`
 		ClientToken                 string             `xml:"clientToken,omitempty"`
-		Tags                        []tagItem          `xml:"tagSet>item,omitempty"`
+		Tags                        []ec2TagItem       `xml:"tagSet>item,omitempty"`
 		Errors                      []fleetDescribeErr `xml:"errorSet>item,omitempty"`
 	}
 	type response struct {
@@ -879,9 +875,7 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if fleet.DefaultTargetCapacityType != "spot" {
 			item.FulfilledOnDemandCapacity = fleet.FulfilledCapacity
 		}
-		for _, t := range fleet.Tags {
-			item.Tags = append(item.Tags, tagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck // XML tags differ from EC2Tag's JSON tags.
-		}
+		item.Tags = ec2TagItems(fleet.Tags)
 		for _, e := range fleet.Errors {
 			item.Errors = append(item.Errors, fleetDescribeErr{
 				LaunchTemplateAndOverrides: fleetLTAndOverrides(e.LaunchTemplateID, e.LaunchTemplateName, "", e.Override),

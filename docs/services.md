@@ -2630,8 +2630,8 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateVpc | |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids) |
 | DeleteVpc | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateSubnet | |
-| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids) |
+| CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them) |
+| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them) |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSecurityGroup | |
 | DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
@@ -2653,7 +2653,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | AssociateRouteTable | |
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
+| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking) |
@@ -2677,10 +2677,12 @@ The check runs **before** the state scan, so the refusal never depends on whethe
 resource happened to match: an empty account and a populated one answer a typo the same
 way.
 
-This replaced three different answers across substrate's nine filter-parsing EC2
-operations — dropped on volumes, snapshots, security groups, route tables, NAT gateways,
-fleets and images; matched nothing on instances; refused on instance-type offerings — with
-the one real EC2 gives.
+This replaced three different answers across substrate's filter-parsing EC2 operations —
+dropped on volumes, snapshots, security groups, route tables, NAT gateways, fleets and
+images; matched nothing on instances; refused on instance-type offerings — with the one
+real EC2 gives. `DescribeSubnets` is the tenth operation the rule covers, and the only one
+that arrived with both halves at once: it parsed no `Filter.N` at all before it gained the
+filters below.
 
 **This is a behaviour change, and the loudest one in the release that brought it.** A
 misspelled filter name previously came back as a successful response: dropped, so the query
@@ -2723,7 +2725,8 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 125 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
 | DescribeImages | `block-device-mapping.snapshot-id`, `image-id`, `tag-key`, `tag:<key>` | the other 39 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `architecture`, `creation-date`, `description`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `root-device-name`, `root-device-type`, `state` and the rest |
 | DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
-| DescribeSnapshots | `snapshot-id` | `description`, `encrypted`, `owner-alias`, `owner-id`, `progress`, `start-time`, `status`, `storage-tier`, `tag-key`, `tag:<key>`, `transfer-type`, `volume-id`, `volume-size` |
+| DescribeSnapshots | `description`, `encrypted`, `owner-id`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `progress`, `storage-tier`, `transfer-type` |
+| DescribeSubnets | `availability-zone`, `cidr-block`, `default-for-az`, `map-public-ip-on-launch`, `owner-id`, `state`, `subnet-arn`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id`, plus AWS's four alias spellings `availabilityZone`, `cidr`, `cidrBlock` and `defaultForAz` | `availability-zone-id`/`availabilityZoneId`, `available-ip-address-count`, `customer-owned-ipv4-pool`, `enable-dns64`, `enable-lni-at-device-index`, `ipv6-native`, `map-customer-owned-ip-on-launch`, `outpost-arn`, and the three `ipv6-cidr-block-association.*` and three `private-dns-name-options-on-launch.*` filters |
 | DescribeSecurityGroups | `group-id`, `group-name`, `vpc-id` | `description`, `owner-id`, `tag-key`, `tag:<key>`, and the twenty `ip-permission.*`/`egress.ip-permission.*` rule filters |
 | DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
 | DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
@@ -2735,13 +2738,13 @@ document no tag filter at all — neither `tag:<key>` nor `tag-key` — even tho
 carries tags and `DescribeFleets` renders them. That is AWS's set, not an omission here; to
 find a fleet by tag, use Resource Groups Tagging.
 
-Read the tag rows in the other direction and they are the surface's weakest point: only
-**`DescribeInstances`, `DescribeVolumes` and `DescribeImages`** actually filter on tags.
-On snapshots, security groups, route tables and NAT gateways a `tag:<key>` filter is
-accepted and inert, so "find the resources tagged `Env=prod`" answers with *all* of them.
-Real EC2 offers three routes to finding a resource by tag: the describe filters,
-`DescribeTags`, and Resource Groups Tagging. Substrate serves the third in full, the first
-on three operations, and does not implement `DescribeTags` at all.
+Read the tag rows in the other direction and they remain the surface's weakest point:
+**`DescribeInstances`, `DescribeVolumes`, `DescribeImages`, `DescribeSnapshots` and
+`DescribeSubnets`** filter on tags; on security groups, route tables and NAT gateways a
+`tag:<key>` filter is accepted and inert, so "find the resources tagged `Env=prod`"
+answers with *all* of them. Real EC2 offers three routes to finding a resource by tag: the
+describe filters, `DescribeTags`, and Resource Groups Tagging. Substrate serves the third
+in full, the first on five operations, and does not implement `DescribeTags` at all.
 
 #### Filter semantics that apply everywhere
 
@@ -2757,8 +2760,8 @@ on three operations, and does not implement `DescribeTags` at all.
   way to ask the any-value question.
 
 **Two gaps, deliberately left standing**, because closing either would newly change
-requests that succeed today. Fourteen EC2 describes — including `DescribeVpcs`,
-`DescribeSubnets`, `DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse
+requests that succeed today. Thirteen EC2 describes — including `DescribeVpcs`,
+`DescribeAddresses`, `DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse
 `Filter.N` at all, so they neither apply nor refuse one
 ([#695](https://github.com/scttfrdmn/substrate/issues/695)). And filter *values* honour
 EC2's documented wildcards only on `DescribeInstanceTypeOfferings`; everywhere else
@@ -4100,6 +4103,75 @@ replacing the first. AWS documents that filters are ANDed and the values within 
 ORed, and says nothing about a name appearing twice, so the merge is substrate's reading.
 What it replaces was not a reading of anything — the earlier entry was discarded with no
 indication. Differently-named filters are ANDed, as documented, and always were.
+
+#### A subnet reports its tags, and filters on them
+
+`EC2Subnet` has carried a `Tags` field since it existed, and `CreateTags` on a `subnet-` ID
+has always written to it. Only the reader was missing: `DescribeSubnets` rendered six
+members and no `tagSet`, and it parsed **no `Filter.N` at all** — so a request for "the
+subnets of `vpc-x`" answered with every subnet in the region, with nothing in the response
+to say the filter had not been applied. That is the worst shape of an ignored filter: a
+consumer walking a VPC's subnets silently got its neighbours' as well.
+
+Three things changed together, because each is useless without the others:
+
+- **`CreateSubnet` honours `TagSpecification.N`** scoped to `subnet`, under the same two
+  rules every other tag path enforces — the reserved `aws:` prefix and the 50-tag limit —
+  and a refused request creates no subnet. This is how CDK and Terraform set the tags a
+  caller then filters on, so without it the filters below had nothing to find.
+- **`CreateSubnet` and `DescribeSubnets` render one `Subnet` element**, which is what AWS
+  documents. The two previously rendered different subsets of it: `CreateSubnet` omitted
+  `mapPublicIpOnLaunch`, so a caller reading the create response saw a different subnet from
+  the one it could then describe. A regression test asserts the two are equal.
+- **The element gained `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`.** The ARN and
+  the owner are what the `subnet-arn` and `owner-id` filters compare against, so rendering
+  them is what lets a caller round-trip a value it read.
+
+`tagSet` is **absent** on an untagged subnet rather than present-and-empty, which is what
+both of AWS's `DescribeSubnets` samples show. That deliberately differs from
+`DescribeSnapshots`, whose own page shows the empty element — each follows its own
+operation's samples rather than one house rule. No sample on either page shows a *tagged*
+subnet, so `tagSet`'s position last in the element is substrate's choice.
+
+Five members AWS's samples carry stay absent: `availableIpAddressCount`,
+`availabilityZoneId`, `assignIpv6AddressOnCreation`, `ipv6CidrBlockAssociationSet` and the
+`blockPublicAccessStates`/`privateDnsNameOptionsOnLaunch` structures. Nothing in state backs
+them, and deriving an address count from the CIDR would be fabrication — the real count
+depends on how many addresses AWS reserves and on every interface in the subnet.
+
+Eleven filter names are applied, plus the four alias spellings the reference documents
+inline ("You can also use `availabilityZone` as the filter name"); the aliases are separate
+names on the wire, so each is answered beside its canonical form rather than normalized
+away. The fourteen names AWS documents that substrate keeps no state for are accepted and
+inert, and anything outside the twenty-five is refused —
+[the same rule as everywhere else](#one-rule-for-an-unrecognized-filter-name), which lists
+both sets.
+
+`cidr-block` is **exact**, per AWS: "The CIDR block you specify must exactly match the
+subnet's CIDR block for information to be returned for the subnet." A caller asking for
+`10.0.0.0/16` does not get `10.0.1.0/24`.
+
+#### A snapshot filters on its own members, and scopes by account
+
+`DescribeSnapshots` evaluated exactly one filter — `snapshot-id` — and silently dropped the
+other thirteen, so `status=pending` or `tag:Env=prod` returned every snapshot in the
+account. Ten are now applied: `description`, `encrypted`, `owner-id`, `snapshot-id`,
+`start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id` and `volume-size`. The remaining
+four — `owner-alias`, `progress`, `storage-tier` and `transfer-type` — name members
+substrate does not render, so there is nothing to compare a value against; they are
+accepted and inert.
+
+**`Owner.N` and `RestorableBy.N`** were read by neither the ID selection nor the filters,
+and are now honoured. Both sit outside `Filter.N` and both accept `self`, an account ID, or
+one of AWS's aliases. Substrate is single-account, so `self` and the requesting account's ID
+match everything, and **anything else — including `amazon` — matches nothing**: answering
+"snapshots owned by `amazon`" with the account's own snapshots would claim they were public.
+Values within either parameter OR, and the two AND with the filters and with the ID list.
+
+A snapshot a *filter* excluded still counts as resolved, so naming an existing snapshot and
+filtering it out is an empty HTTP 200 rather than `InvalidSnapshot.NotFound` — the rule
+[Explicit resource IDs](#explicit-resource-ids) states, and the distinction between "not
+yet" and "never" that a consumer's wait loop turns on. `DescribeSubnets` follows it too.
 
 ### Seeding EC2 Fleet partial fulfillment
 
