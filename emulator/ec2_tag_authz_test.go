@@ -409,13 +409,23 @@ func TestEC2_TagAuthz_RequestTagConditionEvaluates(t *testing.T) {
 		// The pre-existing walk is untouched, so the shape RunInstances sends keeps
 		// populating the same condition key (#468).
 		f := ec2TagAuthzFixture(t, "nadia")
+		condition := map[string]map[string]emulator.StringOrSlice{
+			"StringEquals": {"aws:RequestTag/Env": {"test"}},
+		}
 		f.setPolicy(t, emulator.PolicyStatement{
-			Effect:   "Allow",
-			Action:   emulator.StringOrSlice{"ec2:RunInstances"},
-			Resource: emulator.StringOrSlice{"*"},
-			Condition: map[string]map[string]emulator.StringOrSlice{
-				"StringEquals": {"aws:RequestTag/Env": {"test"}},
-			},
+			Effect:    "Allow",
+			Action:    emulator.StringOrSlice{"ec2:RunInstances"},
+			Resource:  emulator.StringOrSlice{"*"},
+			Condition: condition,
+		}, emulator.PolicyStatement{
+			// A launch that applies tags needs ec2:CreateTags as well (#691), so the
+			// policy that grants this launch is now two statements. The same condition
+			// on both is what a real tag-scoped policy does, and it holds in the
+			// tagging pass for the same reason it holds in the launch's own.
+			Effect:    "Allow",
+			Action:    emulator.StringOrSlice{"ec2:CreateTags"},
+			Resource:  emulator.StringOrSlice{"*"},
+			Condition: condition,
 		})
 		params := nominalLaunch()
 		params["TagSpecification.1.ResourceType"] = "instance"

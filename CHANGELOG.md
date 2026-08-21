@@ -186,7 +186,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value" — and it had to arrive in the same change as the fix below, which takes away the
   spelling callers were using for it by accident.
 
+- **The `ec2:CreateAction` condition key** (#691). Substrate's first `ec2:`-prefixed condition
+  key, and the one that makes a tag-on-create grant scopable to the create that carries it.
+  Its value is the creating operation's name — `RunInstances`, `CreateVolume` — so AWS's
+  documented policy shape works as written:
+
+  ```json
+  {"Effect": "Allow", "Action": "ec2:CreateTags",
+   "Resource": "arn:aws:ec2:us-east-1:111122223333:instance/*",
+   "Condition": {"StringEquals": {"ec2:CreateAction": "RunInstances"}}}
+  ```
+
+  **The key is absent outside a create**, which is the whole point of that shape: a policy so
+  written permits tagging *during* a launch and not a standalone `CreateTags` on an existing
+  instance. AWS says so directly — "Users cannot tag existing resources". A statement wanting
+  to refuse only standalone tagging can therefore gate on `"Null": {"ec2:CreateAction":
+  "false"}`, the one construct that distinguishes an absent key from one present with another
+  value.
+
+  It is a *request*-level key, evaluated against every resource the tagging pass names, not a
+  per-resource one. Condition-key **names** are still matched case-sensitively here, where AWS
+  documents them as case-insensitive — a pre-existing property of the evaluator, global to
+  every key rather than new with this one, now tracked as #704.
+
 ### Changed
+- **A create carrying `TagSpecification` now additionally requires `ec2:CreateTags`** (#691).
+  AWS performs a second authorization pass on a tag-carrying create: "If tags are specified in
+  the resource-creating action, Amazon performs additional authorization on the
+  `ec2:CreateTags` action to verify if users have permissions to create tags. Therefore, users
+  must also have explicit permissions to use the `ec2:CreateTags` action." Substrate performed
+  only the first pass, so a policy granting `ec2:RunInstances` alone launched a *tagged*
+  instance that real EC2 refuses — and, worse in the other direction, a policy that deliberately
+  withheld `ec2:CreateTags` to stop callers writing tags did not stop them.
+
+  The pass runs **after** the primary decision succeeds, which is the order AWS describes, and
+  only when the request actually carries tags: "The `ec2:CreateTags` action is only evaluated if
+  tags are applied during the resource-creating action." An untagged create is unaffected, as is
+  a `TagSpecification` that names a resource type but no tags.
+
+  **It is a second decision, not a second resource.** Different action, different resources, and
+  a context key (`ec2:CreateAction`) the create's own decision must not see. The resources are
+  the ones the create will *make* — one `arn:aws:ec2:<region>:<account>:<type>/*` per distinct
+  `TagSpecification.N.ResourceType` — not the ones it reads. A launch reads an image, a subnet
+  and a security group; its tags land on an instance and a volume, and AWS's own example turns
+  precisely on that distinction, scoping the grant to `instance/*` with the prose "users cannot
+  tag volumes using the `RunInstances` request". So a launch that tags both its instance and its
+  volumes needs the grant on **both** types; one written for `instance/*` alone refuses the
+  volume half.
+
+  The `<type>/*` wildcard is **substrate's reading**, not a documented rule: the resources do not
+  exist when the decision is made, so no concrete ARN could be formed. It is the shape AWS's
+  four example policies for this key are written against (`*/*`, `instance/*`), which is the
+  evidence for choosing it. A `TagSpecification.N.ResourceType` value substrate does not
+  otherwise model is passed through rather than filtered out — filtering could only ever produce
+  a false *allow*.
+
+  **Tags supplied by a launch template count too**, per AWS: "The `ec2:CreateTags` action is also
+  evaluated if tags are provided in a launch template." The template's tags are resolved through
+  the same lookup the launch's *resource* authorization already uses, so the two halves of one
+  launch's decision cannot resolve different template versions. Per-scope precedence mirrors the
+  handler exactly: the template's instance tags apply only when the request named none of its
+  own, and likewise for volume tags — a request that overrides a scope authorizes its own tags
+  for it, not the template's.
+
+  `aws:RequestTag/*` and `aws:TagKeys` in the second pass are the first pass's values plus
+  whatever the template supplied, so the two readings of one request cannot disagree about what
+  it asked for.
+
 - **A policy statement using `ForAllValues:` or `ForAnyValue:` is now evaluated instead of
   discarded** (#690). Neither qualifier was parsed anywhere in substrate, so
   `"ForAllValues:StringEquals"` reached the operator switch whole, matched none of the nine
