@@ -149,6 +149,97 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		}
 	}
 
+	// The create is allowed. If it also applies tags, AWS authorizes those separately
+	// against ec2:CreateTags, and the caller needs that permission too (#691).
+	return a.checkEC2TagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode)
+}
+
+// checkEC2TagOnCreate runs the second authorization pass AWS performs on
+// ec2:CreateTags when an EC2 create applies tags, returning nil when the request
+// applies none or when the caller is permitted to apply them.
+//
+// AWS: "If tags are specified in the resource-creating action, Amazon performs
+// additional authorization on the ec2:CreateTags action to verify if users have
+// permissions to create tags. Therefore, users must also have explicit permissions to
+// use the ec2:CreateTags action." Substrate authorized a tagged create as the creating
+// action alone, so every policy AWS documents for tag-on-create — each of which
+// carries a separate ec2:CreateTags statement — permitted more than it says.
+//
+// It runs after the primary decision rather than beside it because it is a second
+// decision, not a second resource: the action is different, the resources are the ones
+// the create is about to *make* rather than the ones it reads, and the context carries
+// a key the create's own decision must not see. A caller who cannot perform the create
+// never reaches it, which is also the order AWS describes ("they must have permissions
+// to use the action that creates the resource … If tags are specified …").
+//
+// requestTags is the aws:RequestTag/* map the primary decision used, so the tags this
+// pass evaluates are the same reading of the same request, plus whatever a launch
+// template supplies.
+func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSRequest,
+	docs []PolicyDocument, boundary *PolicyDocument, requestTags map[string]string, deniedCode string) error {
+	if req.Service != "ec2" {
+		return nil
+	}
+	pass := ec2AuthzCreateTagsPass(a.state, reqCtx, req)
+	if pass == nil {
+		return nil
+	}
+
+	condCtx := make(map[string]string, len(requestTags)+len(pass.templateTags)+1)
+	for k, v := range requestTags {
+		condCtx[k] = v
+	}
+	// A template's tags are new information: they never appear in the request's params,
+	// so addRequestTags could not have read them, and AWS evaluates them all the same —
+	// "The ec2:CreateTags action is also evaluated if tags are provided in a launch
+	// template."
+	for k, v := range pass.templateTags {
+		condCtx["aws:RequestTag/"+k] = v
+	}
+	// The key that separates tagging during a create from standalone tagging. It is set
+	// only here, which is why a direct CreateTags cannot satisfy a statement conditioned
+	// on it — the behavior AWS's examples call "users cannot tag existing resources".
+	condCtx[ec2CreateActionCondKey] = req.Operation
+
+	// Derived from the merged map above rather than reused from the primary decision, so
+	// a template-supplied key is in aws:TagKeys too — AWS's combined example conditions
+	// the tagging grant on both keys at once.
+	tagKeysMulti := make(map[string][]string, 1)
+	if keys := requestTagKeys(condCtx); len(keys) > 0 {
+		tagKeysMulti["aws:TagKeys"] = keys
+	}
+
+	// No aws:ResourceTag/*: these resources do not exist yet, so a condition about
+	// tags already on them is unsatisfiable, and fabricating one would let the tags
+	// being applied stand in for tags already present.
+	for _, arn := range pass.resourceARNs(reqCtx) {
+		evalReq := EvaluationRequest{
+			Principal:    reqCtx.Principal.ARN,
+			Action:       ec2CreateTagsAction,
+			Resource:     arn,
+			Context:      condCtx,
+			MultiContext: tagKeysMulti,
+		}
+		if Evaluate(docs, evalReq).Decision != DecisionAllow {
+			return &AWSError{
+				Code: deniedCode,
+				Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
+					reqCtx.Principal.ARN, ec2CreateTagsAction, arn),
+				HTTPStatus: http.StatusForbidden,
+			}
+		}
+		if boundary == nil {
+			continue
+		}
+		if Evaluate([]PolicyDocument{*boundary}, evalReq).Decision != DecisionAllow {
+			return &AWSError{
+				Code: deniedCode,
+				Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by permission boundary)",
+					reqCtx.Principal.ARN, ec2CreateTagsAction),
+				HTTPStatus: http.StatusForbidden,
+			}
+		}
+	}
 	return nil
 }
 

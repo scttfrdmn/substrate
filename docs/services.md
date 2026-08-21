@@ -960,8 +960,9 @@ request asked for, and its value is **sorted** — a `ForAllValues` denial that 
 map iteration order could not replay from the event log.
 
 Everything else substrate populates is single-valued: `aws:RequestTag/<key>` and
-`aws:ResourceTag/<key>` on an authorized request, `sts:ExternalId` when a role is assumed,
-and `aws:PrincipalArn` / `aws:ResourceAccount` in a simulation. A set qualifier on one of
+`aws:ResourceTag/<key>` on an authorized request, `ec2:CreateAction` on [a tagged create's
+second authorization pass](#a-tagged-create-is-authorized-twice), `sts:ExternalId` when a role
+is assumed, and `aws:PrincipalArn` / `aws:ResourceAccount` in a simulation. A set qualifier on one of
 those is evaluated over a one-element set — which is the thing AWS warns against writing,
 not something substrate refuses.
 
@@ -3538,9 +3539,10 @@ Not covered:
   documented types.
 - **The launch-template ARN**, which the reference does not mark required for
   `RunInstances` — so requiring it would refuse the same policy.
-- **The EC2 condition keys** (`ec2:InstanceType`, `ec2:Vpc`, `ec2:Subnet`,
+- **Most of the EC2 condition keys** (`ec2:InstanceType`, `ec2:Vpc`, `ec2:Subnet`,
   `ec2:IsLaunchTemplateResource` and the rest). Resource resolution is what this
-  covers; the condition keys substrate does populate are the `aws:`-prefixed ones.
+  covers; the condition keys substrate populates are the `aws:`-prefixed ones plus
+  [`ec2:CreateAction`](#a-tagged-create-is-authorized-twice) on the tagging pass.
 
 #### Tagging is authorized against every resource it names
 
@@ -3560,8 +3562,9 @@ resource named is therefore substrate's reading of AWS's general rule for an act
 naming several resources, supported by AWS's own scoped tagging examples, which write
 a resource ARN as the `Resource` of an `ec2:CreateTags` statement and would be
 pointless if only one resource of a batch were evaluated. The two actions resolve
-identically; they differ only in condition-key surface, and neither difference —
-`DeleteTags` carries no `ec2:CreateAction` — is modelled.
+identically. They differ in condition-key surface, and the difference that matters is
+modelled: **neither carries `ec2:CreateAction`**, because neither is a create. See [a
+tagged create is authorized twice](#a-tagged-create-is-authorized-twice).
 
 The ARN a caller writes uses the resource type the reference documents, which for five
 of the nine taggable types is *not* the abbreviation substrate's own IDs suggest:
@@ -3602,11 +3605,80 @@ evaluates. See [multivalued condition
 keys](#multivalued-condition-keys-forallvalues-and-foranyvalue) for the set-qualifier rules
 those examples depend on, including why AWS pairs them with `Null`.
 
-Not covered:
+#### A tagged create is authorized twice
 
-- **The second authorization pass** AWS performs on `ec2:CreateTags` when a
-  resource-creating action carries tags, keyed on `ec2:CreateAction`. Tag-on-create is
-  authorized here as the creating action alone.
+A create that carries tags is two authorization decisions, not one. AWS: "If tags are
+specified in the resource-creating action, Amazon performs additional authorization on the
+`ec2:CreateTags` action to verify if users have permissions to create tags. Therefore, users
+must also have explicit permissions to use the `ec2:CreateTags` action."
+
+So `ec2:RunInstances` alone launches an untagged instance and **refuses a tagged one** —
+which is what real EC2 does, and the point of the rule: a policy that withholds
+`ec2:CreateTags` is how AWS expects you to stop a caller writing tags at all.
+
+The second pass runs only when the request actually carries tags, per AWS: "The
+`ec2:CreateTags` action is only evaluated if tags are applied during the resource-creating
+action." An untagged create is decided exactly as before, as is a `TagSpecification.N` that
+names a `ResourceType` but no `Tag.M`. It also runs *after* the primary decision succeeds, so
+a caller missing both permissions is told about the create first.
+
+**What it is authorized against** is the resources the create will *make*, one wildcard per
+distinct `TagSpecification.N.ResourceType`:
+
+| Request | Second pass authorizes `ec2:CreateTags` on |
+|---|---|
+| `RunInstances` tagging `instance` | `arn:aws:ec2:<region>:<account>:instance/*` |
+| `RunInstances` tagging `instance` and `volume` | both `instance/*` and `volume/*` |
+| `CreateVolume` with `TagSpecification` | `arn:aws:ec2:<region>:<account>:volume/*` |
+| `CreateSubnet` with `TagSpecification` | `arn:aws:ec2:<region>:<account>:subnet/*` |
+
+Not the resources the create *reads*. A launch is authorized against its image, subnet and
+security group; its tags land on an instance and a volume, and AWS's own example turns on that
+distinction — it scopes the grant to `instance/*` and says "Users cannot tag existing
+resources, and users cannot tag volumes using the `RunInstances` request." A launch that tags
+both scopes therefore needs the grant on both types; one written for `instance/*` alone refuses
+the volume half, and the denial names `volume/*` so it is clear which ARN to add.
+
+The `<type>/*` wildcard is **substrate's reading**, not a documented rule — the resources have
+no IDs when the decision is made, so no concrete ARN exists to authorize against. It is the
+shape all four of AWS's example policies for this key are written against (`*/*`,
+`instance/*`), which is why it is the one chosen. A `ResourceType` substrate does not otherwise
+model is passed through as written rather than filtered out; filtering could only ever produce
+a false *allow*.
+
+**`ec2:CreateAction`** carries the creating operation's name — `RunInstances`, `CreateVolume` —
+so AWS's documented shape works verbatim:
+
+```json
+{"Effect": "Allow", "Action": "ec2:CreateTags",
+ "Resource": "arn:aws:ec2:us-east-1:111122223333:instance/*",
+ "Condition": {"StringEquals": {"ec2:CreateAction": "RunInstances"}}}
+```
+
+The key is **absent** on a direct `CreateTags` or `DeleteTags`, which is what makes that
+statement mean "tag during a launch, and not otherwise" — AWS's "Users cannot tag existing
+resources". A policy wanting to refuse only standalone tagging gates on `"Null":
+{"ec2:CreateAction": "false"}`, the one construct that tells an absent key apart from one
+present with a different value. The value is case-sensitive; the key *name* is matched
+case-sensitively too, where AWS documents key names as case-insensitive — a pre-existing
+property of substrate's evaluator, global to every condition key rather than specific to this
+one, tracked as [#704](https://github.com/scttfrdmn/substrate/issues/704).
+
+**Tags a launch template supplies are authorized the same way**, per AWS: "The
+`ec2:CreateTags` action is also evaluated if tags are provided in a launch template." The
+template is resolved through the same lookup the launch's *resource* authorization uses, so one
+launch's two decisions cannot read different template versions. Precedence is per scope and
+mirrors the handler: the template's instance tags apply only when the request named none of its
+own, and its volume tags only when the request named no volume tags — so a request that
+overrides a scope authorizes the tags it actually sends for that scope.
+
+`aws:RequestTag/{key}` and `aws:TagKeys` in the second pass are the first pass's values plus
+whatever the template contributed, so the two decisions cannot disagree about what the request
+asked for. No `aws:ResourceTag/*` is populated: the resources do not exist yet, so they have no
+tags to match.
+
+A permission boundary applies to the second pass as it does to the first — a boundary that
+omits `ec2:CreateTags` refuses a tagged create even when the identity policy permits it.
 
 ### Instance attributes
 

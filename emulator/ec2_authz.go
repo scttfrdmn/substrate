@@ -3,6 +3,8 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
 )
 
 // ec2AuthzRunInstancesResources returns every resource a RunInstances request
@@ -164,6 +166,157 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 	return out
 }
 
+// ec2CreateTagsAction is the action AWS authorizes a tag-carrying create against a
+// second time, in addition to the create itself.
+const ec2CreateTagsAction = "ec2:CreateTags"
+
+// ec2CreateActionCondKey is the condition key that tells an ec2:CreateTags statement
+// which creating operation the tags are being applied by.
+//
+// AWS: "In the IAM policy definition for the ec2:CreateTags action, use the Condition
+// element with the ec2:CreateAction condition key to give tagging permissions to the
+// action that creates the resource." It is a request-level key, so it lives in the
+// condition context beside aws:RequestTag/* rather than on a resource — and it is
+// **absent** from a direct CreateTags or DeleteTags, which is what makes AWS's own
+// examples ("users cannot tag existing resources") work.
+const ec2CreateActionCondKey = "ec2:CreateAction"
+
+// ec2CreateTagsPass is the extra ec2:CreateTags authorization a create that applies
+// tags requires, resolved from the request and any launch template it names.
+//
+// AWS: "If tags are specified in the resource-creating action, Amazon performs
+// additional authorization on the ec2:CreateTags action to verify if users have
+// permissions to create tags. Therefore, users must also have explicit permissions to
+// use the ec2:CreateTags action." And the converse, which is why this type is a
+// pointer that can be nil: "The ec2:CreateTags action is only evaluated if tags are
+// applied during the resource-creating action".
+type ec2CreateTagsPass struct {
+	// resourceTypes are the TagSpecification resource types the create actually
+	// applies tags to, in the order they were discovered — the request's own
+	// TagSpecification.N order, then any scope a launch template supplies. A fixed
+	// order makes the denial, which names the first type the policy does not allow,
+	// deterministic and replay-stable.
+	resourceTypes []string
+
+	// templateTags are the tags a launch template supplies to this create. They are
+	// held apart from the request's own because [addRequestTags] has already read
+	// those from the params: the second pass's context is that map plus these, so the
+	// two readings of the request cannot disagree.
+	templateTags map[string]string
+}
+
+// ec2AuthzCreateTagsPass returns the tagging pass a create requires, or nil when the
+// request applies no tags and therefore needs no ec2:CreateTags permission.
+//
+// It is deliberately not gated on a list of creating operation names. An operation
+// that does not accept TagSpecification.N never carries one, so the general rule costs
+// nothing — and a create added to substrate later is covered without anyone
+// remembering to extend a list, which is the only direction that cannot produce a
+// false allow. A direct CreateTags or DeleteTags carries its tags as Tag.N rather than
+// TagSpecification.N, so it resolves to nil here and is authorized once, as itself.
+//
+// A specification that declares a resource type and carries no tags applies no tags,
+// so it contributes nothing: that is AWS's "only evaluated if tags are applied" rule
+// read at the level of the individual scope.
+func ec2AuthzCreateTagsPass(state StateManager, reqCtx *RequestContext, req *AWSRequest) *ec2CreateTagsPass {
+	pass := &ec2CreateTagsPass{}
+	for n := 1; ; n++ {
+		// The absent-or-empty ResourceType ends the walk, which is how the query
+		// protocol terminates an indexed list and what ec2TagSpecificationTags does.
+		rt, ok := req.Params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
+		if !ok || rt == "" {
+			break
+		}
+		// The tags themselves are read through the single tag-on-create parser rather
+		// than a second walk of the same params, so a scope the handler will apply and
+		// a scope the decision authorizes cannot drift apart. It re-walks per type,
+		// which is fine: a request carries a handful of specifications, not a page of
+		// them.
+		pass.addScope(rt, ec2LaunchTagsForResource(req.Params, rt))
+	}
+
+	// AWS: "The ec2:CreateTags action is also evaluated if tags are provided in a
+	// launch template." Only RunInstances reads a template, and only the two scopes
+	// substrate stores — the same two the launch itself applies.
+	if req.Operation == "RunInstances" {
+		if data := ec2AuthzTemplateData(state, reqCtx, req); data != nil {
+			// Each scope is gated on whether the request named that scope itself,
+			// mirroring the launch's replace-rather-than-merge precedence: a template's
+			// tags are the ones the create applies only when the caller named none.
+			// ec2HasUserTags is that gate for the instance scope for the same reason the
+			// handler uses it — substrate's own fleet stamp is not the caller naming tags.
+			if !ec2HasUserTags(ec2LaunchTagsForResource(req.Params, "instance")) {
+				pass.addTemplateScope("instance", data.TagSpecifications)
+			}
+			if len(ec2LaunchTagsForResource(req.Params, "volume")) == 0 {
+				pass.addTemplateScope("volume", data.VolumeTagSpecifications)
+			}
+		}
+	}
+
+	if len(pass.resourceTypes) == 0 {
+		return nil
+	}
+	return pass
+}
+
+// addScope records that the create applies tags to resourceType, ignoring the tags
+// themselves.
+//
+// The tags are deliberately dropped here: a tag the request declared is already in the
+// aws:RequestTag/* map [addRequestTags] built from the same params, and reading it a
+// second time is how the two readings come to disagree. A scope carrying no tags
+// applies none, so it records nothing at all.
+func (p *ec2CreateTagsPass) addScope(resourceType string, tags []EC2Tag) {
+	if len(tags) == 0 {
+		return
+	}
+	if !slices.Contains(p.resourceTypes, resourceType) {
+		p.resourceTypes = append(p.resourceTypes, resourceType)
+	}
+}
+
+// addTemplateScope records a scope a launch template supplies, both its resource type
+// and its tags — the tags being new information, since the request's params do not
+// carry them.
+func (p *ec2CreateTagsPass) addTemplateScope(resourceType string, tags []EC2Tag) {
+	if len(tags) == 0 {
+		return
+	}
+	p.addScope(resourceType, tags)
+	if p.templateTags == nil {
+		p.templateTags = make(map[string]string, len(tags))
+	}
+	for _, t := range tags {
+		p.templateTags[t.Key] = t.Value
+	}
+}
+
+// resourceARNs returns the ARN the tagging pass is authorized against for each scope
+// the create applies tags to.
+//
+// The resources do not exist yet — that is the whole situation — so each is the
+// wildcard for its declared type: arn:aws:ec2:<region>:<account>:<type>/*. **That is
+// substrate's reading**, not a documented rule. It is the shape AWS's own examples
+// require: they write the Resource of an ec2:CreateTags statement as either */* or
+// instance/*, and the prose "users cannot tag volumes using the RunInstances request"
+// turns on instance/* not matching the volume scope of the very same launch. Resolving
+// the pass against one ARN, or against the resources the create *reads* (an AMI, a
+// subnet, a security group), would make both of those policies mean something else.
+//
+// The type is passed through as the request spells it. TagSpecification's ResourceType
+// values are the ARN resource types — "instance", "volume", "network-interface",
+// "natgateway" — so no mapping table is needed, and a type substrate does not model
+// still yields an ARN a policy naming that type matches. Filtering to a known set
+// would be the one direction that can produce a false allow.
+func (p *ec2CreateTagsPass) resourceARNs(reqCtx *RequestContext) []string {
+	out := make([]string, 0, len(p.resourceTypes))
+	for _, rt := range p.resourceTypes {
+		out = append(out, "arn:aws:ec2:"+reqCtx.Region+":"+reqCtx.AccountID+":"+rt+"/*")
+	}
+	return out
+}
+
 // ec2AuthzLaunchMembers is the set of resources one RunInstances request names.
 //
 // Network interfaces hold only the IDs of interfaces the request brings, not the
@@ -240,17 +393,11 @@ func ec2AuthzResolveLaunch(state StateManager, reqCtx *RequestContext, req *AWSR
 // A template that cannot be read or resolved contributes nothing, which is why both
 // failures return rather than refuse.
 func (m *ec2AuthzLaunchMembers) mergeTemplate(state StateManager, reqCtx *RequestContext, req *AWSRequest, takeInterfaces bool) {
-	lt := ec2LookupLaunchTemplate(context.Background(), state, reqCtx,
-		req.Params["LaunchTemplate.LaunchTemplateId"],
-		req.Params["LaunchTemplate.LaunchTemplateName"])
-	if lt == nil {
+	resolved := ec2AuthzTemplateData(state, reqCtx, req)
+	if resolved == nil {
 		return
 	}
-	version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
-	if awsErr != nil || version == nil {
-		return
-	}
-	data := version.Data
+	data := *resolved
 	if m.imageID == "" {
 		m.imageID = data.ImageID
 	}
@@ -263,6 +410,32 @@ func (m *ec2AuthzLaunchMembers) mergeTemplate(state StateManager, reqCtx *Reques
 	if takeInterfaces {
 		m.networkInterfaceIDs = ec2AuthzInterfaceIDs(data.NetworkInterfaces)
 	}
+}
+
+// ec2AuthzTemplateData resolves the launch-template data a RunInstances request
+// names, or nil when it names none or names one that cannot be read.
+//
+// It is shared by the two halves of a launch's decision — the resources it names and
+// the tags it applies — so neither can resolve a different version of the template
+// than the other, and neither can resolve a different one than the handler.
+//
+// A template that cannot be read or whose version does not resolve contributes
+// nothing rather than failing the request: the handler owes that answer
+// (InvalidLaunchTemplateId.NotFound), and refusing here would turn it into
+// AccessDenied.
+func ec2AuthzTemplateData(state StateManager, reqCtx *RequestContext, req *AWSRequest) *EC2LaunchTemplateData {
+	lt := ec2LookupLaunchTemplate(context.Background(), state, reqCtx,
+		req.Params["LaunchTemplate.LaunchTemplateId"],
+		req.Params["LaunchTemplate.LaunchTemplateName"])
+	if lt == nil {
+		return nil
+	}
+	version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
+	if awsErr != nil || version == nil {
+		return nil
+	}
+	data := version.Data
+	return &data
 }
 
 // resolveDefaultVPC fills in the subnet and security group a launch that named
