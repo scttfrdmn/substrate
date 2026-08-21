@@ -2668,6 +2668,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` ID like [any other taggable ID](#a-volume-carries-tags); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DescribeTags | Every tag in the region, across thirteen resource types. Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken`, and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
 ### One rule for an unrecognized filter name
 
@@ -2680,9 +2681,9 @@ way.
 This replaced three different answers across substrate's filter-parsing EC2 operations —
 dropped on volumes, snapshots, security groups, route tables, NAT gateways, fleets and
 images; matched nothing on instances; refused on instance-type offerings — with the one
-real EC2 gives. `DescribeSubnets` is the tenth operation the rule covers, and the only one
-that arrived with both halves at once: it parsed no `Filter.N` at all before it gained the
-filters below.
+real EC2 gives. `DescribeSubnets` and `DescribeTags` are the tenth and eleventh operations
+the rule covers, and the only two that arrived with both halves at once: the first parsed no
+`Filter.N` at all before it gained the filters below, and the second did not exist.
 
 **This is a behaviour change, and the loudest one in the release that brought it.** A
 misspelled filter name previously came back as a successful response: dropped, so the query
@@ -2732,19 +2733,24 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
 | DescribeFleets | `activity-status`, `fleet-state`, `type` | `excess-capacity-termination-policy`, `replace-unhealthy-instances` |
 | DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#offerings-filters-and-wildcards)) | — |
+| DescribeTags | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — all five AWS documents, all with [wildcards](#finding-a-resource-by-tag) | — |
 
 `tag:<key>` is refused on **`DescribeFleets` and `DescribeInstanceTypeOfferings`**, which
 document no tag filter at all — neither `tag:<key>` nor `tag-key` — even though a fleet
 carries tags and `DescribeFleets` renders them. That is AWS's set, not an omission here; to
-find a fleet by tag, use Resource Groups Tagging.
+find a fleet by tag, use `DescribeTags` or Resource Groups Tagging.
 
-Read the tag rows in the other direction and they remain the surface's weakest point:
-**`DescribeInstances`, `DescribeVolumes`, `DescribeImages`, `DescribeSnapshots` and
-`DescribeSubnets`** filter on tags; on security groups, route tables and NAT gateways a
-`tag:<key>` filter is accepted and inert, so "find the resources tagged `Env=prod`"
-answers with *all* of them. Real EC2 offers three routes to finding a resource by tag: the
-describe filters, `DescribeTags`, and Resource Groups Tagging. Substrate serves the third
-in full, the first on five operations, and does not implement `DescribeTags` at all.
+`tag-key` runs the other way: every tag-bearing describe documents it **except
+`DescribeTags`**, which has no such filter because its `key` filter already asks that
+question. So `tag-key` is refused there and accepted on its neighbours — again AWS's set.
+
+Read the tag rows in the other direction and the describe filters remain the narrowest of
+the three routes: **`DescribeInstances`, `DescribeVolumes`, `DescribeImages`,
+`DescribeSnapshots` and `DescribeSubnets`** filter on tags; on security groups, route tables
+and NAT gateways a `tag:<key>` filter is accepted and inert, so "find the security groups
+tagged `Env=prod`" answers with *all* of them. Real EC2 offers three routes to finding a
+resource by tag: the describe filters, `DescribeTags`, and Resource Groups Tagging.
+Substrate now serves all three — the first on five operations, and the other two in full.
 
 #### Filter semantics that apply everywhere
 
@@ -2764,10 +2770,12 @@ requests that succeed today. Thirteen EC2 describes — including `DescribeVpcs`
 `DescribeAddresses`, `DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse
 `Filter.N` at all, so they neither apply nor refuse one
 ([#695](https://github.com/scttfrdmn/substrate/issues/695)). And filter *values* honour
-EC2's documented wildcards only on `DescribeInstanceTypeOfferings`; everywhere else
-matching is exact ([#697](https://github.com/scttfrdmn/substrate/issues/697)). A third,
-narrower one: an **empty** value list matches nothing here but matches everything on
-`DescribeSecurityGroups` ([#696](https://github.com/scttfrdmn/substrate/issues/696)).
+EC2's documented wildcards only on `DescribeInstanceTypeOfferings` and `DescribeTags` — the
+two operations whose reference pages state them outright; everywhere else matching is exact
+([#697](https://github.com/scttfrdmn/substrate/issues/697)). A third, narrower one: an
+**empty** value list matches nothing on most operations but matches everything on
+`DescribeSecurityGroups` and `DescribeTags`, both of which route through the same shared
+matcher ([#696](https://github.com/scttfrdmn/substrate/issues/696)).
 
 ### RunInstances requires a resolvable AMI
 
@@ -4172,6 +4180,49 @@ A snapshot a *filter* excluded still counts as resolved, so naming an existing s
 filtering it out is an empty HTTP 200 rather than `InvalidSnapshot.NotFound` — the rule
 [Explicit resource IDs](#explicit-resource-ids) states, and the distinction between "not
 yet" and "never" that a consumer's wait loop turns on. `DescribeSubnets` follows it too.
+
+#### Finding a resource by tag
+
+`DescribeTags` — the operation whose whole job is this question — did not exist until
+[#688](https://github.com/scttfrdmn/substrate/issues/688), and answered
+`InvalidAction` / HTTP 400, while four of substrate's bundled managed policies *granted*
+`ec2:DescribeTags`: `AmazonVPCFullAccess` and `AmazonVPCReadOnlyAccess` name it outright, and
+`AmazonEC2FullAccess` and `AmazonEC2ReadOnlyAccess` reach it through `ec2:*` and
+`ec2:Describe*`. A policy permitted an operation nothing served, and the only routes left were
+the per-operation `tag:<key>` filters (five operations) and Resource Groups Tagging.
+
+It reports every tag stored in the request's account and region. Every EC2 record key is
+`<namespace>:<account>/<region>/<id>`, so the scan is regional by construction, which is also
+real EC2's scope for this operation.
+
+**The scan is deliberately wider than what `CreateTags` can write.** `CreateTags` reaches
+nine resource types; `DescribeTags` reads thirteen, adding `image`, `snapshot`,
+`launch-template` and `fleet` — types whose tags arrive through their own create call's
+`TagSpecification.N` and cannot be set through `CreateTags` at all
+([#689](https://github.com/scttfrdmn/substrate/issues/689) adds the snapshot arm;
+[#695](https://github.com/scttfrdmn/substrate/issues/695) the rest). Reporting only the
+writable types would hide tags a caller had successfully applied. `placement-group` is the one
+type carrying a `Tags` field that stays out: nothing writes it, and its records are keyed by
+group *name* where AWS's `TagDescription` reports an ID.
+
+| Behaviour | Answer |
+|---|---|
+| Filters | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — every name AWS documents, all evaluated, none inert |
+| `tag-key` | **Refused.** This operation documents no such filter, alone in the describe family, because `key` already matches a key whatever its value |
+| Wildcards | `*` and `?` work in every filter value, which AWS's Example 4 states outright ("specify the value as `?ebserver` to find tags with the key `webserver` or `Webserver`") |
+| An empty value | A tag whose value is the empty string renders `<value/>` and is matched by `Filter.N.Value.1=` — AWS's Example 1 and Example 6 respectively |
+| `MaxResults` | 5–1000. A value outside the range is **refused** with `InvalidParameterValue`, not clamped: a caller who asked for 2000 asked for something the operation cannot do |
+| `NextToken` | A decimal offset. A malformed token is refused; an offset past the end is clamped to an empty last page, so resuming after a tag was deleted is not an error |
+| Order | **Sorted by `resourceId`, then `resourceType`, then `key`** |
+
+The sort is *stricter than AWS*, which says its own order "might vary" and that applications
+should not rely on it. Substrate must be stricter: `StateManager.List` promises no ordering
+either, so an offset-based token over an unordered list could skip or repeat a tag between
+pages, and two replays of one recorded request could answer differently. A deterministic
+emulator cannot answer one request two ways.
+
+Authorization needs nothing special: the Service Authorization Reference gives
+`DescribeTags` resource type "—", and substrate authorizes it against `*`.
 
 ### Seeding EC2 Fleet partial fulfillment
 

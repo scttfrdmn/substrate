@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`DescribeTags`** (#688) — the EC2 operation whose whole job is finding resources by tag,
+  which reached the dispatcher's default arm and answered `InvalidAction` / HTTP 400 while
+  four bundled managed policies *granted* `ec2:DescribeTags`: `AmazonVPCFullAccess` and
+  `AmazonVPCReadOnlyAccess` name it outright, and `AmazonEC2FullAccess` and
+  `AmazonEC2ReadOnlyAccess` reach it through `ec2:*` and `ec2:Describe*`. A policy permitted
+  an operation nothing served. Real EC2 offers three routes to a resource's tags — this
+  operation, a `tag:<key>` filter on each describe, and Resource Groups Tagging — and
+  substrate served the third in full and the second on five operations.
+
+  It reports every tag stored in the request's account and region as AWS's `TagDescription`
+  (`resourceId`, `resourceType`, `key`, `value`), with `MaxResults` 5–1000 and `NextToken`.
+  All five documented filters are evaluated — `key`, `resource-id`, `resource-type`, `value`
+  and `tag:<key>` — with **wildcards in their values**, which this operation's reference
+  states outright and which no other EC2 describe in substrate honours. **There is no
+  `tag-key` filter**, alone in the describe family: `key` already asks that question, so
+  `tag-key` is refused here while it is accepted on every neighbouring operation. That is
+  AWS's set, not an omission.
+
+  **The scan is deliberately wider than what `CreateTags` can write.** `CreateTags` reaches
+  nine resource types; the scan reads thirteen, adding `image`, `snapshot`, `launch-template`
+  and `fleet` — types whose tags arrive through their own create call's `TagSpecification.N`
+  and cannot be set through `CreateTags` at all (#689 adds the snapshot arm, #695 the rest).
+  Reporting only the writable types would hide tags a caller had successfully applied.
+  `placement-group` is the one type with a `Tags` field left out: nothing writes it, and its
+  records are keyed by group *name* where AWS's `TagDescription` reports an ID.
+
+  The answer is **sorted by `resourceId`, then `resourceType`, then `key`**, which is
+  stricter than AWS — it states its own order "might vary". `StateManager.List` promises no
+  ordering either, so an offset token over an unordered list could skip or repeat a tag
+  between pages, and two replays of one recorded request could answer differently.
+
 - **A subnet reports its tags, and `DescribeSubnets` filters on them** (#685). `EC2Subnet`
   has carried a `Tags` field for as long as it has existed and `CreateTags` on a `subnet-` ID
   has always written to it — only the reader was missing, so every tag a caller applied to a
