@@ -2976,14 +2976,10 @@ func TestEC2_EBS_AttachDetachVolume(t *testing.T) {
 	assert.Contains(t, string(descBody2), "available")
 }
 
-func TestEC2_DeleteSnapshot_Stub(t *testing.T) {
-	ts := newEC2TestServer(t)
-	resp := ec2Request(t, ts, map[string]string{
-		"Action":     "DeleteSnapshot",
-		"SnapshotId": "snap-0123456789abcdef0",
-	})
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-}
+// TestEC2_DeleteSnapshot_Stub used to assert 200 for a well-formed ID naming no snapshot —
+// the stub's whole behavior. #710 made that case InvalidSnapshot.NotFound, so the test
+// moved to ec2_deletesnapshot_test.go with the rest of the operation's rules and the name
+// went with it: nothing about DeleteSnapshot is a stub now.
 
 func TestEC2_RunInstances_InvalidSG(t *testing.T) {
 	ts := newEC2TestServer(t)
@@ -3565,6 +3561,16 @@ func TestEC2_CreateImage_SnapshotsAndFilter(t *testing.T) {
 	require.Contains(t, filtered, amiA)
 
 	// Deleting a snapshot removes it from DescribeSnapshots (retention path).
+	//
+	// The deregister is AWS's documented sequence, and required as of #710: "You cannot
+	// delete a snapshot of the root device of an EBS volume used by a registered AMI. You
+	// must first deregister the AMI before you can delete the snapshot." Before #710 this
+	// deleted amiB's backing snapshot out from under a registered AMI and was told it had
+	// succeeded — which is why the AMI-whose-snapshot-is-gone fallback in describeImages
+	// exists at all.
+	dereg := ec2Request(t, ts, map[string]string{"Action": "DeregisterImage", "ImageId": amiB})
+	require.Equal(t, http.StatusOK, dereg.StatusCode)
+	dereg.Body.Close() //nolint:errcheck
 	del := ec2Request(t, ts, map[string]string{"Action": "DeleteSnapshot", "SnapshotId": snapB})
 	assert.Equal(t, http.StatusOK, del.StatusCode)
 	del.Body.Close() //nolint:errcheck

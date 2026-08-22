@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -4206,6 +4207,41 @@ func (p *EC2Plugin) deregisterImage(reqCtx *RequestContext, req *AWSRequest) (*A
 	})
 }
 
+// ec2ImageUsingSnapshot reports the AMI that references snapshotID, or "" if none does.
+//
+// The answer must be stable, because it reaches the caller inside a refusal message:
+// [StateManager.List] returns keys in map order, and an AMI registered against an existing
+// snapshot shares it with the AMI that minted it (#328), so two images can name the same
+// snapshot. Sorting the keys and reporting the first makes the message the same on every
+// run and on replay, rather than whichever image the map happened to yield.
+//
+// A record that will not read is skipped for the reason [EC2Plugin.ec2SnapshotResolver]
+// gives — but note the direction of the consequence here: a skipped image is one this
+// function does not report, so an unreadable record permits a deletion rather than
+// refusing one.
+func (p *EC2Plugin) ec2ImageUsingSnapshot(reqCtx *RequestContext, snapshotID string) (string, error) {
+	keys, err := p.state.List(context.Background(), ec2Namespace,
+		"image:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return "", fmt.Errorf("ec2 deleteSnapshot list images: %w", err)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var img EC2Image
+		if json.Unmarshal(data, &img) != nil {
+			continue
+		}
+		if img.SnapshotID == snapshotID {
+			return img.ImageID, nil
+		}
+	}
+	return "", nil
+}
+
 // --- Availability Zone operations ---
 
 // ec2SeededZones reports the region's zones, name and ID both, in a stable order.
@@ -6241,17 +6277,54 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	})
 }
 
-// deleteSnapshot is a stub that accepts DeleteSnapshot requests without error.
-// Substratefs does not persist snapshots; the operation succeeds to allow
-// AMI deregistration cleanup workflows to proceed.
+// deleteSnapshot deletes the snapshot SnapshotId names, refusing an ID that names nothing
+// and one an AMI still references.
+//
+// The record has been deleted since #325 — the doc comment this replaces claimed otherwise
+// ("Substratefs does not persist snapshots; the operation succeeds"), which was false for
+// long enough that #710 was filed to fix a deletion that already worked. What did not work
+// was the validation. A well-formed ID naming no snapshot answered 200 and `return true`,
+// so a consumer's cleanup could delete the wrong ID, or the same ID twice, or an ID it had
+// typoed, and be told each time that a snapshot had been deleted. AWS documents
+// InvalidSnapshot.NotFound: "The specified snapshot does not exist."
+//
+// # The in-use rule
+//
+// AWS: "You cannot delete a snapshot of the root device of an EBS volume used by a
+// registered AMI. You must first deregister the AMI before you can delete the snapshot."
+// [EC2Image.SnapshotID] is by construction the root device's snapshot — createImage writes
+// it from the instance's root volume and registerImage from the caller's mapping — so
+// AWS's narrower scoping (the *root* device specifically) happens not to bite here; every
+// snapshot an image references is a root-device snapshot. A future change that lets an
+// image reference a non-root snapshot has to narrow this check to keep matching AWS.
+//
+// Order matters and follows real EC2: the ID is validated, then existence, then the in-use
+// rule. Reporting InUse for a malformed ID would tell a caller an AMI holds something that
+// cannot be a snapshot ID at all.
+//
+// Provenance: InvalidSnapshot.InUse is not on API_DeleteSnapshot.html — that page's Errors
+// section is empty. It comes from EC2's client-error table, whose entry describes the
+// condition ("The snapshot that you are trying to delete is in use by one or more AMIs")
+// rather than quoting a wire message, so the message here is substrate's wording of AWS's
+// description — the same caveat [ec2UnknownInstanceAttribute] records for IncorrectState.
 func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	snapshotID := req.Params["SnapshotId"]
-	if snapshotID == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "SnapshotId is required", HTTPStatus: http.StatusBadRequest}
+	_, found := p.ec2SnapshotResolver(reqCtx)(snapshotID)
+	if err := ec2RequireNamedResource(ec2SnapshotIDKind, "SnapshotId", snapshotID, found); err != nil {
+		return nil, err
 	}
-	// Remove the snapshot from state so a subsequent DescribeSnapshots reflects
-	// the deletion (enables shared-snapshot retain-vs-delete testing). Delete is
-	// idempotent — a missing snapshot still returns success.
+	imageID, err := p.ec2ImageUsingSnapshot(reqCtx, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	if imageID != "" {
+		return nil, &AWSError{
+			Code: "InvalidSnapshot.InUse",
+			Message: fmt.Sprintf("The snapshot %s is currently in use by %s",
+				snapshotID, imageID),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, ec2SnapshotStateKey(reqCtx.AccountID, reqCtx.Region, snapshotID)); err != nil {
 		return nil, fmt.Errorf("ec2 deleteSnapshot delete: %w", err)
 	}

@@ -87,6 +87,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be used."
 
 ### Changed
+- **`DeleteSnapshot` validates the ID it is given, and refuses one a registered AMI still
+  references** (#710). The operation deleted the record correctly — it has since #325, whatever
+  the doc comment saying "Substratefs does not persist snapshots; the operation succeeds" claimed
+  — and validated nothing at all. **Every** well-formed ID answered HTTP 200 and
+  `<return>true</return>`, so a cleanup loop deleting a typoed ID, an ID from another region, or
+  the same ID twice was told each time that it had removed a snapshot. Four answers now:
+  `MissingParameter` for an omitted `SnapshotId` (AWS marks it `Required: Yes`),
+  `InvalidSnapshotID.Malformed` for anything that is not a snapshot ID,
+  `InvalidSnapshot.NotFound` for a well-formed ID naming nothing, and `InvalidSnapshot.InUse`
+  when an AMI's block device mapping names it — AWS: "You cannot delete a snapshot of the root
+  device of an EBS volume used by a registered AMI. You must first deregister the AMI before you
+  can delete the snapshot."
+
+  Two things a consumer must plan for. **The operation is not idempotent** — a second delete of
+  the same ID is `InvalidSnapshot.NotFound`, which is what AWS answers; substrate's 200 was
+  hiding a requirement a re-runnable teardown has to meet anyway. And **order matters**:
+  deregister the AMI, then delete its snapshot. The reverse order used to succeed and leave an
+  AMI referencing a snapshot that no longer existed — a state real EC2 cannot be put into, and
+  the reason `DescribeImages` needed a fallback to render a volume size at all.
+
+  Substrate's images record exactly one snapshot and it is by construction the root device's, so
+  AWS's narrower scoping (the *root* device specifically) happens not to bite; that is stated
+  rather than glossed, because an image that could reference a non-root snapshot would need the
+  check narrowed. Where two AMIs share one snapshot — reachable since #328 — the refusal names
+  the **lowest** image ID, so identical inputs produce an identical body on replay instead of one
+  that follows Go's map iteration order.
+
+  #710's premise is corrected in passing: its headline claim is that "a snapshot survives its own
+  `DeleteSnapshot`". It does not, and has not since #325 — two doc comments and a test already
+  said so. The defect was the validation, not the deletion.
+
+  Provenance: **none of the codes is on `API_DeleteSnapshot.html`**, whose Errors section is
+  empty. All three come from EC2's client-error table, where the `InvalidSnapshot.InUse` entry
+  describes the condition ("The snapshot that you are trying to delete is in use by one or more
+  AMIs") rather than quoting a wire message — so the message is substrate's wording of AWS's
+  description, the same caveat `ec2_instanceattribute.go` records for `IncorrectInstanceState`.
+  Match on the code, not the string.
+
 - **`CreateVolume` invents neither a size nor an Availability Zone** (#712). AWS puts two
   combination rules on the operation and marks every member involved `Required: No`, because
   each requirement is on a *pair*: "You must specify either a snapshot ID or a volume size" and,
