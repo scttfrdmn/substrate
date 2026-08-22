@@ -26,9 +26,14 @@ const (
 // ec2DefaultVolumeSizeGiB is the size of a volume whose mapping names none, and of
 // the implicit root volume a launch that declares no mapping still gets.
 //
-// It matches both the mapping DescribeImages fabricates for every AMI and
-// CreateVolume's own default, so a launch-created volume and a CreateVolume-created
-// one agree about what "unspecified" means.
+// It matches the mapping DescribeImages fabricates for every AMI, so an AMI's reported
+// root size and the volume a launch from it produces agree.
+//
+// It no longer backs CreateVolume, which refuses a request naming neither Size nor
+// SnapshotId as of #712: AWS documents a default only on the launch path, where a mapping
+// that omits a size is legal, and never on the operation whose whole purpose is to be told
+// one. A launch-created volume and a CreateVolume-created one therefore no longer agree
+// about what "unspecified" means — because on CreateVolume it is not a request AWS accepts.
 const ec2DefaultVolumeSizeGiB = 8
 
 // ec2DefaultVolumeType is the type of a volume whose mapping names none.

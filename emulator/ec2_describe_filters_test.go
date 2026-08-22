@@ -900,9 +900,13 @@ func TestEC2_InstanceTypeFilters_FiveOfFiftySeven(t *testing.T) {
 
 // TestEC2_SpotPriceFilters_FiveOfSix pins the filters this page documents, and the
 // ProductDescription.N index fix that rode along.
+//
+// The clock is frozen because the timestamp subtest below filters on a value read out of
+// an earlier response, and the rendered value changes at every second boundary — see
+// [newEC2TestServerFrozenClock].
 func TestEC2_SpotPriceFilters_FiveOfSix(t *testing.T) {
 	t.Parallel()
-	ts := newEC2TestServer(t)
+	ts := newEC2TestServerFrozenClock(t)
 
 	type price struct {
 		InstanceType       string `xml:"instanceType"`

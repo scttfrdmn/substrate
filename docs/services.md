@@ -2774,7 +2774,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | AttachInternetGateway | |
 | DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids); **all six** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `ownerId`, `attachmentSet` and `tagSet` |
 | DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters |
+| DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters. `zoneId` takes AWS's published shape (`use1-az1`) and always maps zone `a` to `-az1` — see [Zone IDs](#zone-ids-take-aws-s-published-shape-and-always-map-zone-a-to-az1) |
 | DescribeRegions | **All three** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). `AllRegions` is accepted and inert — every seeded region is `opt-in-not-required`, so it is already in the answer |
 | DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Five of fifty-seven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
@@ -3530,6 +3530,49 @@ evaluate (`encrypted`, `create-time`, `fast-restored` and six others) is accepte
 inert. Both follow the rule that now governs every EC2 describe — see
 [One rule for an unrecognized filter name](#one-rule-for-an-unrecognized-filter-name),
 which lists this operation's eleven evaluated names and nine inert ones.
+
+#### `CreateVolume` invents neither a size nor a zone
+
+AWS puts two combination rules on this operation and marks every member involved
+`Required: No`, because in each case the requirement is on a *pair*:
+
+| Rule | AWS's words | Substrate's answer when it is broken |
+|---|---|---|
+| Size or snapshot | "You must specify either a snapshot ID or a volume size." | `InvalidParameterCombination`, 400 |
+| Zone name or zone ID | "Either `AvailabilityZone` or `AvailabilityZoneId` must be specified, but not both." | `InvalidParameterCombination`, 400 — for **neither** and for **both** |
+| A `Size` that is not a positive integer | — | `InvalidParameterValue`, 400 |
+
+Substrate read neither rule before this. A request naming no size got a silent 8 GiB
+volume, one naming `Size=-1` or `Size=eight` got the same, and one naming no zone got
+`<region>a` — including a request that named the zone *by ID*, since
+`AvailabilityZoneId` was ignored outright. Every one of those returned `200` with a
+volume ID, which is the failure a refusal exists to prevent: the volume was real, at a
+size and in a zone the caller never asked for, and the first visible symptom was an
+attach failing later with nothing to point at.
+
+`AvailabilityZoneId` now resolves to the zone's name, through the **same derivation**
+`DescribeAvailabilityZones` renders — a zone ID read out of one operation is one the
+other accepts. Two deliberate asymmetries:
+
+- A zone **name** is recorded as given and is *not* checked against the three seeded
+  zones; a zone **ID** must resolve, because it has to be translated before it can be
+  stored at all. Validating names would be a wider change than the pair rule, and one
+  substrate makes on no zone-taking operation.
+- An unresolvable zone ID answers `InvalidParameterValue`, not `InvalidParameterCombination`.
+
+The refusal **codes are substrate's reading**: `CreateVolume`'s Errors section is empty,
+so it publishes no operation-specific error, and `InvalidParameterCombination`'s
+client-error gloss is the only one whose shape fits — "The request includes an incorrect
+combination of parameters, **or a missing parameter**."
+
+Still not enforced, and stated here rather than left to be found: AWS's per-type size
+ranges (`gp2` 1–16384, `io1` 4–16384, `st1`/`sc1` 125–16384, `standard` 1–1024, …).
+`Iops` and `Throughput` also keep their tolerance — an unparseable value leaves the
+field at zero and omits it from the response. That differs from `Size` because the
+absences differ: a volume must have a size, so an unusable `Size` has no defensible
+reading, while omitting `Iops` is the ordinary case for the five volume types that do
+not take one. The 8 GiB `ec2DefaultVolumeSizeGiB` still backs the **launch** path, where
+a mapping that omits a size is legal and AWS does document a default.
 
 #### A mapping AWS refuses is refused, with `InvalidBlockDeviceMapping`
 
@@ -4300,6 +4343,30 @@ matching the two would silently mis-read.
 The three zones `DescribeAvailabilityZones` reports are the same three the
 offerings and spot-price operations use, so filtering an offerings query by a zone
 you just enumerated always returns an answer.
+
+##### Zone IDs take AWS's published shape, and always map zone `a` to `-az1`
+
+`zoneId` is derived from the region: `us-east-1a` is `use1-az1`, `eu-west-1b` is
+`euw1-az2`, `ap-southeast-2c` is `apse2-az3`. Every prefix reproduces a row of AWS's
+[Availability Zones reference](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-availability-zones.html).
+Substrate emitted a different shape entirely until this release — `us-east-1` produced
+`ue11`, with a doubled digit — which nothing caught because zone IDs were only ever
+*emitted*: a test that read one out of a response and filtered on it was self-consistent
+whatever the string was. `CreateVolume`'s `AvailabilityZoneId` made it an input, and a
+consumer's fixture carrying the real `use1-az1` would have been refused.
+
+The derivation is **one letter per compass word**, not AWS's own summarising sentence
+("the first three letters of the Region code, followed by the number at the end"). That
+sentence is refuted by the table it introduces: `ap-southeast-2` is `apse2`, not `aps2`,
+and `ap-northeast-1` is `apne1`. The published table wins.
+
+What substrate does **not** model is the per-account shuffle. AWS: "we independently map
+Availability Zones to codes for each AWS account", so a real `us-east-1a` is `use1-az1`
+in one account and `use1-az3` in another — which is the whole reason AZ IDs exist.
+Substrate maps zone `a` to `-az1` in every account, because a deterministic emulator
+cannot hold a per-account secret and a test asserting the pairing has to be able to pass.
+Do not use substrate to verify that code correctly treats the name→ID mapping as
+account-specific; it will agree with an assumption real AWS breaks.
 
 #### Spot prices are stubs
 
