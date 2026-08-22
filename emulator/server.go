@@ -369,6 +369,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/ec2/fleet-shortfall", s.handleEC2SeedFleetShortfall)
 	r.Delete("/v1/ec2/fleet-shortfall", s.handleEC2ClearFleetShortfall)
 
+	// EC2 snapshot progression control-plane endpoints (#715).
+	r.Post("/v1/ec2/snapshot-status", s.handleEC2SeedSnapshotStatus)
+	r.Delete("/v1/ec2/snapshot-status", s.handleEC2ClearSnapshotStatus)
+
 	// spore.host spawn task-completion control-plane endpoints (#360).
 	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
 	r.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)

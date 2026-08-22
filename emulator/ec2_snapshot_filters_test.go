@@ -16,7 +16,9 @@ type describedSnapshot struct {
 	VolumeID    string `xml:"volumeId"`
 	VolumeSize  int64  `xml:"volumeSize"`
 	State       string `xml:"status"`
+	StatusMsg   string `xml:"statusMessage"`
 	StartTime   string `xml:"startTime"`
+	Progress    string `xml:"progress"`
 	Encrypted   bool   `xml:"encrypted"`
 	Description string `xml:"description"`
 	OwnerID     string `xml:"ownerId"`
@@ -97,11 +99,12 @@ func ec2SeedTaggedSnapshots(t *testing.T, ts *httptest.Server, names ...string) 
 	return out
 }
 
-// TestEC2_DescribeSnapshots_EvaluatedFiltersNarrowTheAnswer covers the ten filter names
-// #685 taught describeSnapshots to evaluate. Before it, snapshot-id was the only one that
-// did anything and the other thirteen were silently ignored — so every case below whose
-// want is narrower than "both" returned both snapshots, and a caller had no way to tell an
-// unfiltered answer from a filtered one.
+// TestEC2_DescribeSnapshots_EvaluatedFiltersNarrowTheAnswer covers the eleven filter names
+// describeSnapshots evaluates — the ten #685 taught it, plus progress, which became answerable
+// once #715 gave substrate a progress to render. Before #685, snapshot-id was the only one that
+// did anything and the other thirteen were silently ignored — so every case below whose want is
+// narrower than "both" returned both snapshots, and a caller had no way to tell an unfiltered
+// answer from a filtered one.
 func TestEC2_DescribeSnapshots_EvaluatedFiltersNarrowTheAnswer(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -128,6 +131,12 @@ func TestEC2_DescribeSnapshots_EvaluatedFiltersNarrowTheAnswer(t *testing.T) {
 		{"encrypted true", ec2Filter("encrypted", "true"), nil},
 		{"owner-id self", ec2Filter("owner-id", owner), []string{alpha, beta}},
 		{"owner-id another account", ec2Filter("owner-id", "999999999999"), nil},
+		// An unseeded snapshot is complete, so progress compares against the percent-suffixed
+		// "100%" AWS's own examples show — not against a bare "100", which is the mistake the
+		// miss row below pins.
+		{"progress complete", ec2Filter("progress", "100%"), []string{alpha, beta}},
+		{"progress without the percent sign", ec2Filter("progress", "100"), nil},
+		{"progress partial", ec2Filter("progress", "50%"), nil},
 		{"snapshot-id selects one", ec2Filter("snapshot-id", alpha), []string{alpha}},
 		{"start-time miss", ec2Filter("start-time", "2000-01-01T00:00:00Z"), nil},
 		{"status completed", ec2Filter("status", "completed"), []string{alpha, beta}},
@@ -188,11 +197,13 @@ func TestEC2_DescribeSnapshots_FiltersAND(t *testing.T) {
 		"two filters AND, so a snapshot satisfying only one is excluded")
 }
 
-// TestEC2_DescribeSnapshots_InertFiltersReturnEverything pins the four names AWS documents
+// TestEC2_DescribeSnapshots_InertFiltersReturnEverything pins the three names AWS documents
 // that substrate accepts and cannot answer. They constrain nothing rather than being
 // refused, because refusing a filter real EC2 accepts would be a false deny — and rather
 // than matching nothing, because an empty answer is indistinguishable from "no such
 // snapshot" and would hang a caller's wait loop. docs/services.md lists them by name.
+//
+// It was four until #715: progress is evaluated now, and its rows live in the table above.
 func TestEC2_DescribeSnapshots_InertFiltersReturnEverything(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -201,7 +212,6 @@ func TestEC2_DescribeSnapshots_InertFiltersReturnEverything(t *testing.T) {
 
 	for name, value := range map[string]string{
 		"owner-alias":   "amazon",
-		"progress":      "100%",
 		"storage-tier":  "standard",
 		"transfer-type": "standard",
 	} {

@@ -141,12 +141,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailing sentence in each is AWS's own prose, because that rule is the only thing telling a
   caller what to send instead. `productCodes` is answered on the describe rather than refused —
   as a **present but empty** element — because nothing in substrate assigns a product code, so
-  "none" is a fact about every snapshot it can produce rather than an invented default. Three
-  `SnapshotInfo` members are deliberately not rendered: `progress` (substrate stores none),
-  `availabilityZone` (the Local-Zone placement member — the singular `CreateSnapshot` response
-  has no such member — so rendering the volume's AZ would claim a local snapshot), and
-  `outpostArn`/`sseType` (not modelled; inventing `sse-ebs` would be indistinguishable from an
-  observation).
+  "none" is a fact about every snapshot it can produce rather than an invented default. Two
+  `SnapshotInfo` members are deliberately not rendered: `availabilityZone` (the Local-Zone
+  placement member — the singular `CreateSnapshot` response has no such member — so rendering
+  the volume's AZ would claim a local snapshot), and `outpostArn`/`sseType` (not modelled;
+  inventing `sse-ebs` would be indistinguishable from an observation). `progress` was a third
+  until the seedable progression below gave substrate one to render.
+
+- **A snapshot's `pending → completed` progression is seedable, so a poll loop has something to
+  poll** (#715). Every snapshot substrate writes is born `completed`, so the one loop callers
+  actually write around this API — poll `DescribeSnapshots` until `status` is `completed`, which
+  is what CDK's custom resources, Terraform's `aws_ebs_snapshot` and
+  `aws ec2 wait snapshot-completed` all do — exited on its first iteration. The retry, timeout
+  and error branches such a loop carries were never taken, so a consumer whose polling is broken,
+  or which treats `error` as retryable forever, passed against substrate and failed against AWS.
+
+  `POST /v1/ec2/snapshot-status` seeds how many observations report a non-terminal state before
+  the snapshot reaches its final one, keyed by snapshot ID or `*`;
+  `DELETE /v1/ec2/snapshot-status[?snapshotId=…]` clears one seed or all. `state` defaults to
+  `pending`, `finalState` to `completed`, and both accept only the five values AWS publishes for
+  the member (`pending | completed | error | recoverable | recovering`) — a sixth is refused
+  rather than stored, because it is one no SDK can map and no consumer can branch on, so the seed
+  would look accepted and produce a response the caller's own model rejects.
+
+  **The progression is counted in observations, not measured as a duration.** `TimeController.Now`
+  advances with wall time from its baseline, so a duration seed would expire partway through a
+  test and make every "still pending" assertion depend on how long the rest of the test took —
+  the reasoning `sqs_control.go` already records. It is also the more useful unit: "the next two
+  polls see pending" is what a test of a poll loop wants to say. This is the first seed in the
+  repo that models a multi-step progression at all; #715 cited Bedrock's and SageMaker's job
+  status as precedent, but both say "without simulated time" explicitly and both are a single
+  flat value.
+
+  The **count is per snapshot** even under a `"*"` seed, which is the hazard #582 recorded for
+  the SQS seed met by separating the specification (shared, read-only) from the position through
+  it (per snapshot). Without that split, one `DescribeSnapshots` over five snapshots would burn
+  five observations off a single shared countdown and the snapshot a test was watching would
+  complete early. `EC2Plugin` gained the one `seedMu sync.Mutex` — not one per key — that
+  `SQSPlugin` and `S3Plugin` already carry, since advancing the count is a read-modify-write and
+  `StateManager` offers no compare-and-swap.
+
+  A seed governs what an **observation** reports and never rewrites the snapshot record, whose
+  `state` stays `completed`. So clearing a seed, or `POST /v1/state/reset`, makes every snapshot
+  read `completed` again, and a snapshot with no seed against it is untouched — which is how the
+  default is unchanged rather than merely believed to be. Seeds live in the state manager, so
+  they replay like any other state.
+
+  Riding along: `CreateSnapshot` and `CreateSnapshots` now render the `progress` member AWS
+  documents on the types they return, `DescribeSnapshots` renders `progress` and `statusMessage`,
+  and the `progress` filter moved out of the inert list — eleven of the operation's fourteen
+  documented filter names are now evaluated. `status` and `progress` compare against what *this*
+  request reports rather than the stored record: filtering on the record would make
+  `status=pending` select nothing at the very moment the caller is told the snapshot is pending.
+  And the observation is consumed **before** the filters run, so a snapshot a filter excludes has
+  still advanced its countdown — required, because the CLI's own waiter polls
+  `--filters Name=status,Values=completed` and would otherwise never terminate.
+
+  Provenance: the *progress schedule* is substrate's. AWS documents the member only as "the
+  progress of the snapshot, as a percentage"; the ramp (`0%`, `25%`, `50%`, `75%`, `100%` for a
+  four-observation seed) is chosen because a consumer's poll loop often logs or asserts on a
+  rising percentage. A consumer must no more assert on an exact intermediate value than it may
+  against AWS, whose own `CreateSnapshot` sample response implausibly shows a freshly created
+  snapshot at `60%`. Progress reaches `100%` for **every** terminal state rather than freezing
+  below it for a failure, on the strength of AWS's one observable data point: its
+  `restore-snapshot-from-recycle-bin` example shows `"Progress": "100%"` beside
+  `"State": "recovering"`. Two of the five seedable states, `recoverable` and `recovering`, are
+  not otherwise reachable — they mean the snapshot is in the Recycle Bin, which real
+  `DescribeSnapshots` does not return — and exist here only as something a seed can make a
+  consumer's branch see; the member's five-value enumeration is followed over the filter's
+  three-value one, per #671.
 
 ### Changed
 - **`RegisterImage` records the whole block device mapping it is sent** (#711). It read exactly
@@ -420,6 +483,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is kept because it is the code the Query protocol has always used and an SDK caller's error
   branch is written against it. The message wording in both arms is substrate's — AWS publishes
   a description of the condition, never a wire message.
+
+- **`CreateVolume` refuses a snapshot that is not usable yet** (#715). AWS's snapshot-states
+  table is a documented rule — "a snapshot can't be used while it is in the `pending` state",
+  "a snapshot can't be used if it is in the `error` state" — and substrate applied neither, so
+  a restore from a snapshot in any state succeeded. It answers `IncorrectState`/400 now,
+  checked before the size rules, since a caller told "size 8 is smaller than the snapshot" would
+  fix the size and be refused again. **This is reachable only under a seeded progression**: every
+  snapshot substrate writes is `completed`, so nothing that succeeds today starts failing.
+
+  `DeleteSnapshot` deliberately does *not* acquire the matching rule, because AWS permits it in
+  so many words: "although you can delete a snapshot that is still in progress, the snapshot must
+  complete before the deletion takes effect." #715 framed both as an open decision to be settled
+  against AWS's documentation; the documentation settles them in opposite directions. The
+  deferred-effect half of that sentence is not modelled — AWS publishes nothing observable about
+  the interval, since a caller cannot see the snapshot after the request returns either way, so
+  a delay would be a resource-internal detail rather than an API observation.
+
+  Provenance: `IncorrectState` is substrate's choice from EC2's client-error table — the code it
+  already answers with for "Volume … is not in available state" — because `CreateVolume`'s own
+  page publishes no error for the condition. The rule is AWS's; only the code and the message
+  are substrate's.
 
 ### Fixed
 - **A zone ID takes the shape AWS publishes** (#712). The derivation produced `ue11-az1` for

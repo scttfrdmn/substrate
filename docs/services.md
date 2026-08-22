@@ -2866,7 +2866,7 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 125 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
 | DescribeImages | `block-device-mapping.snapshot-id`, `image-id`, `tag-key`, `tag:<key>` | the other 39 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `architecture`, `creation-date`, `description`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `root-device-name`, `root-device-type`, `state` and the rest |
 | DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
-| DescribeSnapshots | `description`, `encrypted`, `owner-id`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `progress`, `storage-tier`, `transfer-type` |
+| DescribeSnapshots | `description`, `encrypted`, `owner-id`, `progress`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `storage-tier`, `transfer-type` |
 | DescribeSubnets | `availability-zone`, `cidr-block`, `default-for-az`, `map-public-ip-on-launch`, `owner-id`, `state`, `subnet-arn`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id`, plus AWS's four alias spellings `availabilityZone`, `cidr`, `cidrBlock` and `defaultForAz` | `availability-zone-id`/`availabilityZoneId`, `available-ip-address-count`, `customer-owned-ipv4-pool`, `enable-dns64`, `enable-lni-at-device-index`, `ipv6-native`, `map-customer-owned-ip-on-launch`, `outpost-arn`, and the three `ipv6-cidr-block-association.*` and three `private-dns-name-options-on-launch.*` filters |
 | DescribeSecurityGroups | `group-id`, `group-name`, `vpc-id` | `description`, `owner-id`, `tag-key`, `tag:<key>`, and the twenty `ip-permission.*`/`egress.ip-permission.*` rule filters |
 | DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
@@ -4816,11 +4816,24 @@ subnet's CIDR block for information to be returned for the subnet." A caller ask
 
 `DescribeSnapshots` evaluated exactly one filter — `snapshot-id` — and silently dropped the
 other thirteen, so `status=pending` or `tag:Env=prod` returned every snapshot in the
-account. Ten are now applied: `description`, `encrypted`, `owner-id`, `snapshot-id`,
-`start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id` and `volume-size`. The remaining
-four — `owner-alias`, `progress`, `storage-tier` and `transfer-type` — name members
+account. Eleven are now applied: `description`, `encrypted`, `owner-id`, `progress`,
+`snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id` and `volume-size`.
+The remaining three — `owner-alias`, `storage-tier` and `transfer-type` — name members
 substrate does not render, so there is nothing to compare a value against; they are
 accepted and inert.
+
+`progress` was the fourth inert name until substrate had a progress to render (see
+[Seeding a snapshot progression](#seeding-a-snapshot-progression)). It compares against the
+percent-suffixed string the response carries, which is the form AWS's own filter text shows
+("for example, `80%`"): a caller filters on `100%`, not on `100`.
+
+**`status` and `progress` compare against what *this* request reports, not against the stored
+record.** The two differ only under a seeded progression, and that is the one case a poll loop
+cares about — filtering on the record would make `status=pending` select nothing at the very
+moment the caller is being told the snapshot is pending. It also means the CLI's own
+`aws ec2 wait snapshot-completed`, which polls
+`--filters Name=status,Values=completed`, terminates: an observation is taken before the
+filters run, so a snapshot the filter excludes has still advanced its countdown.
 
 **`Owner.N` and `RestorableBy.N`** were read by neither the ID selection nor the filters,
 and are now honoured. Both sit outside `Filter.N` and both accept `self`, an account ID, or
@@ -4851,16 +4864,17 @@ knew a real size.
 | `VolumeId` | Required, and checked against state. Absent is `MissingParameter`; a syntactically invalid ID is `InvalidVolumeID.Malformed`; one that names nothing is `InvalidVolume.NotFound` — so a snapshot cannot exist for a volume that does not |
 | `volumeSize` | The source volume's size, which is what AWS documents the member as: "the size of the volume, in GiB" |
 | `encrypted` | The source volume's. "Snapshots that are taken from encrypted volumes are automatically encrypted" |
-| `status` | `completed` at once, **not** the `pending` AWS's own sample response shows |
-| `progress` | Not rendered, for the same reason `DescribeSnapshots` renders none: substrate stores none, and `status` already says the whole of what a completed snapshot's progress would say |
+| `status` | `completed` at once by default, **not** the `pending` AWS's own sample response shows — unless a [progression is seeded](#seeding-a-snapshot-progression), in which case the snapshot is born in the seeded state |
+| `progress` | Rendered, since AWS documents it as a member of the `Snapshot` that `CreateSnapshot` returns. `100%` for an unseeded snapshot; the ramp's current position under a seed |
+| `statusMessage` | Not rendered, because AWS scopes it: "this parameter is only returned by `DescribeSnapshots`" — where an SDK reads the same element as `StateMessage`, the third of these name splits after `status`/`State` and `state`/`State` |
 | `Description`, `TagSpecification.N` | Read; the tags go through the same walk and the same [tag rules](#reserved-tag-keys) as every other tag-on-create, checked before anything is written |
 | `Location`, `OutpostArn` | Not read. Both are documented as supported only for a Local Zone or an Outpost, neither of which substrate models, so honouring them would place the snapshot somewhere substrate cannot describe it from |
 
 `status` being `completed` immediately is the deliberate divergence. Substrate advances no
 snapshot asynchronously, so a caller's waiter succeeds on its first poll rather than
-depending on wall-clock time — which is the point of a deterministic emulator. A
-**seedable** `pending → completed` progression is the shape that would let a test exercise
-the waiting path, and it is a follow-up rather than something this operation should invent.
+depending on wall-clock time — which is the point of a deterministic emulator. The waiting
+path is exercised instead by seeding it: see
+[Seeding a snapshot progression](#seeding-a-snapshot-progression).
 
 `CreateImage`'s own snapshot now reads the instance's root volume too, recording both its
 size and its ID — so an AMI made from a 40 GiB root volume reports 40 GiB through
@@ -4896,16 +4910,18 @@ table says which.
 | The root volume named in `ExcludeDataVolumeId.N` | Refused, naming `ExcludeBootVolume`. AWS: "If you specify the ID of the root volume, the request fails. To exclude the root volume, use `ExcludeBootVolume`." The code is substrate's; AWS says only that the request fails |
 | `CopyTagsFromSource` | Valid value `volume`, and any other value is refused rather than treated as "do not copy". Each snapshot inherits **its own** source volume's tags |
 | `Description`, `TagSpecification.N` | Applied to every snapshot the call creates. Where a request tag collides with a copied volume tag, the request wins — AWS settles neither the precedence nor the ordering, so both are substrate's |
-| `state` | `completed` at once, for the reason `CreateSnapshot`'s `status` is |
+| `state` | `completed` at once, for the reason `CreateSnapshot`'s `status` is — and seedable the same way. A `"*"` seed governs every snapshot in the set, each with its own countdown, so snapshotting five volumes under a two-poll seed leaves each of the five with its own two polls |
+| `progress` | Rendered, as `CreateSnapshot`'s is |
 | `Location`, `OutpostArn` | Not read, as on `CreateSnapshot` |
 
 The response element is `snapshotSet` of `SnapshotInfo`, which names the state member
 **`state`** where `CreateSnapshot` and `DescribeSnapshots` both name the same thing `status`.
-A caller unmarshalling `SnapshotInfo` reads `State`. `progress`, `availabilityZone`,
-`outpostArn` and `sseType` are not rendered: substrate stores no progress, `availabilityZone` is
-the Local-Zone placement member — the singular `CreateSnapshot` response has no such member —
-so rendering the volume's AZ would claim a local snapshot, and neither Outposts nor a specific
-server-side encryption type is modelled.
+A caller unmarshalling `SnapshotInfo` reads `State`. `availabilityZone`, `outpostArn` and
+`sseType` are not rendered: `availabilityZone` is the Local-Zone placement member — the
+singular `CreateSnapshot` response has no such member — so rendering the volume's AZ would
+claim a local snapshot, and neither Outposts nor a specific server-side encryption type is
+modelled. `SnapshotInfo` has no `statusMessage` member at all; AWS publishes that one on
+`Snapshot` alone.
 
 A refused request writes nothing: every snapshot is built and its tags checked before the
 first write, so a five-volume instance whose fourth volume carries a reserved tag key does not
@@ -5161,6 +5177,89 @@ curl -X DELETE http://localhost:4566/v1/ec2/fleet-shortfall
 any. The shortfall is spread across the request's capacity pools, so `errorSet`
 reports one item per pool that came up short, and `DescribeFleets` reports the
 result in `fulfilledCapacity`.
+
+### Seeding a snapshot progression
+
+Every snapshot substrate writes is born `completed`, so the one loop callers actually write
+around this API — poll `DescribeSnapshots` until `status` is `completed`, which is what CDK's
+custom resources, Terraform's `aws_ebs_snapshot` and `aws ec2 wait snapshot-completed` all do —
+exits on its first iteration. The retry, timeout and error branches such a loop carries are
+never taken, so a consumer whose polling is broken, or which treats `error` as retryable
+forever, passes against substrate and fails against AWS.
+
+```bash
+# The next four observations report pending; the fifth reports completed.
+curl -X POST http://localhost:4566/v1/ec2/snapshot-status \
+  -d '{"snapshotId":"*","pendingObservations":4}'
+
+# Fail immediately, with the diagnostic AWS publishes for a failed copy. DescribeSnapshots
+# renders it as `statusMessage`, which an SDK reads as `StateMessage`.
+curl -X POST http://localhost:4566/v1/ec2/snapshot-status \
+  -d '{"snapshotId":"snap-0abc123","pendingObservations":0,
+       "finalState":"error","stateMessage":"Given key ID is not accessible"}'
+
+# Clear one seed, or all of them.
+curl -X DELETE 'http://localhost:4566/v1/ec2/snapshot-status?snapshotId=snap-0abc123'
+curl -X DELETE http://localhost:4566/v1/ec2/snapshot-status
+```
+
+A seeded `error` is what makes the CLI waiter's own failure path reachable: botocore defines
+`SnapshotCompleted` with a `pathAny Snapshots[].State == error` acceptor alongside the success
+one — a fact the CLI's own documentation page omits — so `aws ec2 wait snapshot-completed`
+exits 255 with "encountered a terminal failure state" rather than retrying for ten minutes.
+That is the branch a consumer's error handling exists for, and it was unreachable before.
+
+`snapshotId` matches one snapshot ID or `*` (the default) for any; an ID-scoped seed wins over
+the wildcard. `state` defaults to `pending` and `finalState` to `completed`, and both accept any
+of the five values AWS publishes for the member — `pending`, `completed`, `error`,
+`recoverable`, `recovering`. A value outside those five is refused rather than stored: it is one
+no SDK can map and no consumer can branch on, so the seed would look accepted and produce a
+response the caller's own model rejects. Seeding again restarts the countdown, so a test that
+seeds twice gets two full progressions rather than the remainder of the first.
+
+**The progression is counted in observations, not measured as a duration.** The simulated clock
+advances with wall time from its baseline, so a duration seed would expire partway through a
+test and make every "still pending" assertion depend on how long the rest of the test took —
+which no test here may be. This follows the reasoning the SQS consistency seed records. A count
+is also the more useful unit: "the next two polls see pending" is what a test of a poll loop
+wants to say.
+
+The count is **per snapshot** even under a `"*"` seed. Without that, one `DescribeSnapshots`
+over five snapshots would burn five observations off a single shared countdown, and the
+snapshot a test was actually watching would complete early.
+
+`progress` is the fraction of the countdown already spent, so a four-observation seed reports
+`0%`, `25%`, `50%`, `75%` and then `100%`. AWS documents the member only as "the progress of the
+snapshot, as a percentage", so the *schedule* is substrate's; it is deterministic, which is the
+property that matters, and a consumer must no more assert on an exact intermediate value than it
+may against AWS — whose own `CreateSnapshot` sample response implausibly shows a freshly created
+snapshot at `60%`. Progress reaches `100%` whatever the terminal state, rather than freezing
+below it for a failure: AWS's one observable data point says so, its
+`restore-snapshot-from-recycle-bin` example showing `"Progress": "100%"` beside
+`"State": "recovering"`. So progress measures how far the progression ran, not whether it
+succeeded.
+
+Two operations read the state without consuming an observation, since neither is a poll:
+
+- **`CreateVolume`** refuses a snapshot that is not `completed` with `IncorrectState`. The rule
+  is AWS's — its snapshot-states table says "a snapshot can't be used while it is in the
+  `pending` state" and "a snapshot can't be used if it is in the `error` state" — though
+  `CreateVolume`'s own page publishes no error for it, so the code is substrate's choice from
+  EC2's client-error table, the one it already answers with for a volume in the wrong state.
+- **`DeleteSnapshot`** does *not* refuse one, because AWS permits it in so many words:
+  "although you can delete a snapshot that is still in progress, the snapshot must complete
+  before the deletion takes effect." The deferred-effect half is not modelled — AWS publishes
+  nothing observable about the interval, since a caller cannot see the snapshot after the
+  request returns either way.
+
+A seed governs what an *observation* reports and never rewrites the snapshot record, whose
+`state` stays `completed`. So clearing a seed — or `POST /v1/state/reset`, which clears the
+whole namespace — makes every snapshot read `completed` again, and a snapshot with no seed
+against it is untouched. Seeds live in the state manager, so they replay like any other state.
+
+There is no Python helper for this endpoint: `pytest_substrate`'s seeding helpers are hardcoded
+to the Athena, Redshift Data and Timestream result endpoints, so drive this one with raw HTTP,
+as the fleet seed above is driven.
 
 ### CloudFormation resource types
 

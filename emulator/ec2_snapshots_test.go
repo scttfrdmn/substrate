@@ -25,6 +25,7 @@ type createdSnapshot struct {
 	VolumeID    string `xml:"volumeId"`
 	Status      string `xml:"status"`
 	StartTime   string `xml:"startTime"`
+	Progress    string `xml:"progress"`
 	OwnerID     string `xml:"ownerId"`
 	VolumeSize  int64  `xml:"volumeSize"`
 	Description string `xml:"description"`
@@ -105,6 +106,8 @@ func TestEC2_CreateSnapshot_ReportsTheSourceVolume(t *testing.T) {
 	assert.Equal(t, volID, snap.VolumeID)
 	assert.Equal(t, int64(100), snap.VolumeSize, "the size is the source volume's, not 8")
 	assert.Equal(t, "completed", snap.Status)
+	assert.Equal(t, "100%", snap.Progress,
+		"with no seed in place a snapshot is born complete, and progress says so (#715)")
 	assert.NotEmpty(t, snap.StartTime)
 	assert.NotEmpty(t, snap.OwnerID)
 	assert.Equal(t, "Daily Backup", snap.Description)

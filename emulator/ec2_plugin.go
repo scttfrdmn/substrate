@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,11 @@ type EC2Plugin struct {
 	// registry built without [WithPluginAuth], in which case a fleet launches exactly
 	// as it did before (#673).
 	auth *AuthController
+
+	// seedMu serializes advancing a seeded snapshot progression. It is one lock rather
+	// than one per snapshot for the reason [EC2Plugin.observeSnapshotStatus] records, the
+	// same shape [SQSPlugin.consumeQueueMiss] carries (#582).
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
@@ -6074,6 +6080,30 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		if awsErr := ec2RequireResource(ec2SnapshotIDKind, snapshotID, found); awsErr != nil {
 			return nil, awsErr
 		}
+		// A snapshot that is not completed cannot be cloned (#715). AWS's snapshot-states
+		// table is the rule — "a snapshot can't be used while it is in the pending state" and
+		// "a snapshot can't be used if it is in the error state" — and it is a documented rule
+		// rather than an inference, though CreateVolume's own page publishes no error for it.
+		// IncorrectState is substrate's choice from EC2's client-error table, the code it
+		// already answers with for "Volume … is not in available state"; per #671 the rule is
+		// AWS's and only the code is substrate's.
+		//
+		// This is checked before the size rules because it is the more fundamental refusal: a
+		// caller told "size 8 is smaller than the snapshot" would fix the size and be refused
+		// again. And it reads the observation, not the record, so an unseeded snapshot — every
+		// snapshot substrate writes — is unaffected and nothing that succeeds today fails.
+		observed, obsErr := p.peekSnapshotStatus(snap)
+		if obsErr != nil {
+			return nil, obsErr
+		}
+		if observed.State != "completed" {
+			return nil, &AWSError{
+				Code: "IncorrectState",
+				Message: fmt.Sprintf("Snapshot %s is in %s state; a volume can only be created from a completed snapshot",
+					snapshotID, observed.State),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
 		switch {
 		case sizeStr == "":
 			size = int(snap.VolumeSize)
@@ -6470,6 +6500,20 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // rule. Reporting InUse for a malformed ID would tell a caller an AMI holds something that
 // cannot be a snapshot ID at all.
 //
+// # Why the snapshot's state is not consulted
+//
+// A seeded pending snapshot (#715) is deleted here as readily as a completed one, and neither
+// the peek nor the observation is taken — unlike [EC2Plugin.createVolume], which refuses one.
+// AWS documents the difference explicitly: "although you can delete a snapshot that is still in
+// progress, the snapshot must complete before the deletion takes effect." So deletion is
+// permitted, and there is no error code for the case.
+//
+// The deferred-effect half of that sentence is not modeled. AWS publishes nothing observable
+// about the interval — a caller cannot see the snapshot after the DeleteSnapshot returns
+// either way, since real DescribeSnapshots stops reporting it — so a delay here would be a
+// resource-internal detail rather than an API observation, which is the boundary CLAUDE.md
+// draws.
+//
 // Provenance: InvalidSnapshot.InUse is not on API_DeleteSnapshot.html — that page's Errors
 // section is empty. It comes from EC2's client-error table, whose entry describes the
 // condition ("The snapshot that you are trying to delete is in use by one or more AMIs")
@@ -6505,13 +6549,20 @@ func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 }
 
 // describeSnapshots lists EBS snapshots owned by the account, honoring an optional list of
-// SnapshotId.N parameters, Owner.N and RestorableBy.N, and the ten Filter.N names
+// SnapshotId.N parameters, Owner.N and RestorableBy.N, and the eleven Filter.N names
 // [ec2SnapshotMatchesFilter] evaluates.
 //
 // The three selectors compose as AWS documents: a snapshot must satisfy the ID list, both
 // account scopes and every filter. ids.match runs first so that a snapshot excluded by a
 // filter still counts as resolved for [ec2IDFilter.unresolved] — a named ID that exists is
-// not "not found" merely because a filter rejected it.
+// not "not found" merely because a filter rejected it. It also runs first so that a request
+// naming one snapshot does not advance the seeded progression of every *other* snapshot in the
+// region, which would spend a countdown a test meant for the snapshot it was polling.
+//
+// This is the operation a consumer's wait loop polls, so it is the operation a seeded
+// progression counts (#715): status and progress come from [EC2Plugin.observeSnapshotStatus]
+// rather than from the record, and with no seed in place they are the record's own state at
+// 100%.
 func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SnapshotId"), ec2SnapshotIDKind)
 	if err := ids.validate(); err != nil {
@@ -6530,16 +6581,24 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("ec2 describeSnapshots list: %w", err)
 	}
 
+	// progress is rendered unconditionally — "the progress of the snapshot, as a percentage",
+	// which AWS's own DescribeSnapshots example shows as 100% for a completed snapshot — while
+	// statusMessage carries omitempty, because AWS documents it as populated only when a copy
+	// fails ("this field displays error state details to help you diagnose why the error
+	// occurred"). A statusMessage on every snapshot would claim a diagnostic exists for one
+	// that succeeded.
 	type snapshotItem struct {
-		SnapshotID  string       `xml:"snapshotId"`
-		VolumeID    string       `xml:"volumeId,omitempty"`
-		VolumeSize  int64        `xml:"volumeSize"`
-		State       string       `xml:"status"`
-		StartTime   string       `xml:"startTime"`
-		Encrypted   bool         `xml:"encrypted"`
-		Description string       `xml:"description,omitempty"`
-		OwnerID     string       `xml:"ownerId"`
-		Tags        []ec2TagItem `xml:"tagSet>item"`
+		SnapshotID    string       `xml:"snapshotId"`
+		VolumeID      string       `xml:"volumeId,omitempty"`
+		VolumeSize    int64        `xml:"volumeSize"`
+		State         string       `xml:"status"`
+		StatusMessage string       `xml:"statusMessage,omitempty"`
+		StartTime     string       `xml:"startTime"`
+		Progress      string       `xml:"progress"`
+		Encrypted     bool         `xml:"encrypted"`
+		Description   string       `xml:"description,omitempty"`
+		OwnerID       string       `xml:"ownerId"`
+		Tags          []ec2TagItem `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName   xml.Name       `xml:"DescribeSnapshotsResponse"`
@@ -6563,19 +6622,31 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		if !owners.match(snap) || !restorableBy.match(snap) {
 			continue
 		}
-		if !ec2SnapshotMatchesFilters(snap, filters) {
+		// The observation is taken — and a seeded countdown advanced — before the filters
+		// run, so a snapshot a filter then excludes has still been observed. That is
+		// deliberate: the AWS CLI's own snapshot-completed waiter polls
+		// `DescribeSnapshots --filters Name=status,Values=completed` and waits for a
+		// non-empty answer, so a loop written that way would never advance a countdown that
+		// only counted the snapshots it selected.
+		observed, obsErr := p.observeSnapshotStatus(snap)
+		if obsErr != nil {
+			return nil, obsErr
+		}
+		if !ec2SnapshotMatchesFilters(snap, observed, filters) {
 			continue
 		}
 		resp.Snapshots = append(resp.Snapshots, snapshotItem{
-			SnapshotID:  snap.SnapshotID,
-			VolumeID:    snap.VolumeID,
-			VolumeSize:  snap.VolumeSize,
-			State:       snap.State,
-			StartTime:   snap.StartTime,
-			Encrypted:   snap.Encrypted,
-			Description: snap.Description,
-			OwnerID:     snap.AccountID,
-			Tags:        ec2TagItems(snap.Tags),
+			SnapshotID:    snap.SnapshotID,
+			VolumeID:      snap.VolumeID,
+			VolumeSize:    snap.VolumeSize,
+			State:         observed.State,
+			StatusMessage: observed.StateMessage,
+			StartTime:     snap.StartTime,
+			Progress:      observed.Progress,
+			Encrypted:     snap.Encrypted,
+			Description:   snap.Description,
+			OwnerID:       snap.AccountID,
+			Tags:          ec2TagItems(snap.Tags),
 		})
 	}
 	if err := ids.unresolved(); err != nil {

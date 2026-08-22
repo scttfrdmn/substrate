@@ -36,6 +36,7 @@ type snapshotInfo struct {
 	State       string `xml:"state"`
 	Status      string `xml:"status"`
 	StartTime   string `xml:"startTime"`
+	Progress    string `xml:"progress"`
 	OwnerID     string `xml:"ownerId"`
 	Description string `xml:"description"`
 	Encrypted   bool   `xml:"encrypted"`
@@ -150,6 +151,7 @@ func TestEC2_CreateSnapshots_SnapshotsEveryAttachedVolume(t *testing.T) {
 		assert.Equal(t, "completed", snap.State,
 			"SnapshotInfo names the state member `state`, not `status`")
 		assert.Empty(t, snap.Status, "a `status` element here would be the wrong member name")
+		assert.Equal(t, "100%", snap.Progress, "item %d is complete, so progress says so (#715)", i)
 		assert.NotEmpty(t, snap.StartTime, "item %d", i)
 		assert.NotEmpty(t, snap.OwnerID, "item %d", i)
 		assert.Equal(t, "nightly", snap.Description, "the description applies to every snapshot")
