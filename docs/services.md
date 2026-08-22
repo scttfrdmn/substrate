@@ -2785,6 +2785,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSnapshot | `VolumeId` is required and checked; `volumeSize` and `encrypted` come from the source volume, and `status` is `completed` at once — see [A snapshot has a real size](#a-snapshot-has-a-real-size) |
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account) |
+| DeleteSnapshot | `SnapshotId` is required and checked; refuses one a registered AMI still references with `InvalidSnapshot.InUse`, and is **not** idempotent — see [Deleting a snapshot](#deleting-a-snapshot-refuses-what-aws-refuses) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
@@ -4811,13 +4812,59 @@ the waiting path, and it is a follow-up rather than something this operation sho
 `CreateImage`'s own snapshot now reads the instance's root volume too, recording both its
 size and its ID — so an AMI made from a 40 GiB root volume reports 40 GiB through
 `DescribeSnapshots` *and* through `DescribeImages`, which reads the snapshot record rather
-than rendering its own constant. An AMI whose snapshot was later deleted falls back to the
-8 GiB default rather than reporting `0`, since a caller sizing a volume off that member can
-act on the default.
+than rendering its own constant. An AMI whose snapshot is missing falls back to the 8 GiB
+default rather than reporting `0`, since a caller sizing a volume off that member can act on
+the default. `DeleteSnapshot` no longer produces that state — see below — so it is reached
+only by `RegisterImage` naming a snapshot that does not exist, or by a record written
+directly into state.
 
 The rest of the `CreateSnapshot` family — `CreateSnapshots`, `CopySnapshot`,
 `ModifySnapshotAttribute`, `DescribeSnapshotAttribute` and `ResetSnapshotAttribute` — is
 still absent and answers `InvalidAction`.
+
+#### Deleting a snapshot refuses what AWS refuses
+
+`DeleteSnapshot` did delete the record — it has since
+[#325](https://github.com/scttfrdmn/substrate/issues/325), whatever its doc comment claimed —
+and validated nothing whatever. **Every** well-formed ID answered HTTP 200 and
+`<return>true</return>`, which is the answer a caller reads as "deleted": a cleanup loop
+deleting a typoed ID, an ID from another region, or the same ID twice was told each time that
+it had removed a snapshot.
+
+| Request | Answer |
+|---|---|
+| `SnapshotId` omitted | `MissingParameter` — AWS marks it `Required: Yes` |
+| Not a snapshot ID (`vol-…`, `ami-…`, no prefix, non-hex, uppercase) | `InvalidSnapshotID.Malformed` |
+| Well-formed, names nothing — **including a second delete of the same ID** | `InvalidSnapshot.NotFound` |
+| Named by a registered AMI's block device mapping | `InvalidSnapshot.InUse`, naming both the snapshot and the AMI |
+| Anything else | Deleted; a subsequent `DescribeSnapshots` does not report it |
+
+The in-use rule is AWS's: "You cannot delete a snapshot of the root device of an EBS volume
+used by a registered AMI. You must first deregister the AMI before you can delete the
+snapshot." Substrate's images record exactly one snapshot and it is by construction the root
+device's, so AWS's narrower scoping — the *root* device specifically — happens not to bite;
+every snapshot an image references here is a root-device snapshot.
+
+Two consequences worth planning for:
+
+- **The operation is not idempotent**, and against AWS it never was. A consumer whose teardown
+  is written to be re-runnable has to tolerate `InvalidSnapshot.NotFound`, which is what it has
+  to tolerate against AWS. Substrate answering 200 was hiding that requirement.
+- **Order matters**: deregister the AMI, then delete its snapshot. Substrate previously let the
+  reverse order succeed, leaving an AMI pointing at a snapshot that no longer existed — a state
+  real EC2 cannot be put into.
+
+When two AMIs reference one snapshot — reachable since
+[#328](https://github.com/scttfrdmn/substrate/issues/328), because `RegisterImage` against an
+existing snapshot shares it — the refusal names the **lowest** image ID. That tie-break exists
+so identical inputs produce an identical response body on replay; without it the message would
+follow Go's map iteration order.
+
+Provenance: none of these codes is on `API_DeleteSnapshot.html`, whose Errors section is
+empty. All three come from EC2's client-error table, and its `InvalidSnapshot.InUse` entry
+*describes* the condition ("The snapshot that you are trying to delete is in use by one or
+more AMIs") rather than quoting a wire message, so the message substrate returns is its own
+wording of AWS's description — match on the code, not the string.
 
 #### Every taggable ID prefix is reachable
 
