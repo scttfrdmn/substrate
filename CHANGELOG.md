@@ -71,6 +71,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coherent. Substrate's own suite needed roughly 300 such edits across 40 test files, and not one
   of them had been launching an AMI that existed.
 
+- **A `VolumeId.N` or `ImageId.N` that names nothing is an error, not an empty answer** (#731).
+  Both operations answered 200 and an empty set for an ID that resolved to nothing, so a
+  consumer's `InvalidVolume.NotFound` branch was unreachable and a poll loop waiting for a
+  volume to appear could not tell "not yet" from "never". `DescribeVolumes` and `DescribeImages`
+  now route their ID lists through the same `ec2IDFilter` the other ten ID-asserting describes
+  use, so they answer `InvalidVolume.NotFound`/`InvalidVolumeID.Malformed` and
+  `InvalidAMIID.NotFound`/`InvalidAMIID.Malformed` from the one table, syntax before absence,
+  and one present plus one absent ID fails the whole call. An ID a `Filter` excluded still
+  counts as resolved — only absence is an error. Twelve EC2 describes now assert existence,
+  which is every one whose ID family has a published code and a registered kind.
+
+  Validating the ID list moved **ahead** of the filter-name check on `DescribeVolumes`, where it
+  ran second, matching the other handlers; the ordering is now pinned rather than incidental.
+
+  A bundled public AMI (#733) is nameable here even though it is not enumerated: a describe
+  that called an AMI absent while a launch accepted it would contradict itself, and resolving
+  an AMI through SSM and then reading its members is the workflow generated IaC produces.
+
+  **Compatibility.** A describe naming a volume or an AMI that does not exist now fails where it
+  returned an empty set. Two of substrate's own tests asserted the empty set as the contract —
+  one of them with a comment naming this gap — and both now assert the refusal.
+
 ### Fixed
 - **One server serves one account** (#734). `ParseAWSRequest` decided the account from the
   *shape of the access key*: a key beginning with `AKIA` was attributed to `123456789012`,
@@ -119,6 +141,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and unreachable — the #561/#580 failure mode — so `ListEventBuses` returning the wrong account
   had never been observable in the first place. A test now pins all three resolution paths, as
   Config's does.
+
+- **`DescribeImages` read no `ImageId.N` at all** (#731). Found while surveying for the above:
+  a caller naming one AMI was answered with **every** AMI the account owned. This is the worse
+  half of the issue, because a superset is invisible where an error is not — "the query returns
+  only my AMI" passed with two AMIs in the answer and one in the assertion's blind spot, and a
+  CDK or Terraform run that describes an AMI to read its members read the wrong image's.
+
+  Two more silent widenings on `DescribeVolumes`' hand-rolled ID loop, both fixed by moving to
+  the shared helper: it read only the indexed `VolumeId.N`, so the un-indexed `VolumeId` a
+  hand-built request or an older SDK shape sends was ignored and the answer covered every
+  volume; and it stopped at the first empty **value** rather than the first missing **key**, so
+  an explicitly empty `VolumeId.1` discarded `VolumeId.2` and everything after it. An empty
+  value is an ID the caller sent, so it is now reported as `Malformed`.
+
+  `DescribeImages` still does not read `Owner.N` or `ExecutableBy.N`, and `docs/services.md`
+  now says so and why: substrate stores only images the account owns, so `self` is the answer
+  to every describe and AWS's other three `Owner` values select sets substrate does not model.
+  Reading the parameter would let a caller believe a narrowing happened.
+
+- **Two documentation claims that were wrong** (#731). `containsStr`'s doc comment said
+  `KeyName.N`, `GroupName.N`, `FleetId.N` and `RegionName.N` each raise an `Invalid*.NotFound`
+  on an unmatched entry; only `InstanceType.N` does, and the other four narrow the answer to
+  nothing. `docs/services.md` counted "six of the new selectors" that answer an empty set where
+  AWS answers `NotFound` and named four families; there are seven, and each now carries its own
+  reason — `DescribeFleets`' `FleetId.N` and `DescribeRegions`' `RegionName.N` are permanent
+  declines (AWS publishes no `InvalidFleetId.NotFound`, and `RegionName.N` explicitly permits
+  naming any Region), while the other five are unimplemented rather than declined.
 
   **Compatibility.** Every ARN returned to an unsigned or non-`AKIA` caller changes account, so
   a fixture asserting on `000000000000` now sees `123456789012`. Several plugins prefix their

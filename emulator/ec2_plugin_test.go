@@ -2904,14 +2904,24 @@ func TestEC2_EBS_CreateDescribeDeleteVolume(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp3.StatusCode)
 
-	// DescribeVolumes should now return empty.
-	resp4 := ec2Request(t, ts, map[string]string{
+	// Describing the deleted volume by ID is now a refusal, not an empty set (#731):
+	// naming an ID explicitly asserts it exists, and a caller who deleted a volume and
+	// then described it should be told it is gone rather than handed a 200 that reads
+	// identically to "the filter excluded it".
+	status, code := ec2ErrorCode(t, ts, map[string]string{
 		"Action":     "DescribeVolumes",
 		"VolumeId.1": volID,
 	})
-	assert.Equal(t, http.StatusOK, resp4.StatusCode)
-	body4, _ := io.ReadAll(resp4.Body)
-	assert.NotContains(t, string(body4), volID)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidVolume.NotFound", code)
+
+	// With no ID named there is no assertion to fail, so the account describes to an
+	// empty set — the "absent vs. filtered" distinction the ID list turns on.
+	resp5 := ec2Request(t, ts, map[string]string{"Action": "DescribeVolumes"})
+	defer resp5.Body.Close() //nolint:errcheck
+	assert.Equal(t, http.StatusOK, resp5.StatusCode)
+	body5, _ := io.ReadAll(resp5.Body)
+	assert.NotContains(t, string(body5), volID)
 }
 
 func TestEC2_EBS_AttachDetachVolume(t *testing.T) {

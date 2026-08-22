@@ -3756,10 +3756,12 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 //   - The `KeyName.N`, `GroupName.N`, `FleetId.N`, `RegionName.N` and `InstanceType.N`
 //     parameter lists on DescribeKeyPairs, DescribePlacementGroups, DescribeFleets,
 //     DescribeRegions and DescribeInstanceTypes. These are *identifiers*, not filter values:
-//     AWS documents wildcards for `Filter.N.Value.N` only, and each of these parameters
-//     asserts the resource exists — an unmatched entry raises Invalid*.NotFound rather than
-//     narrowing a result set. Globbing them would let `i-*` stand in for an ID and quietly
-//     turn a NotFound contract into a match.
+//     AWS documents wildcards for `Filter.N.Value.N` only, so globbing them would let `i-*`
+//     stand in for an ID. Of the five, only `InstanceType.N` asserts the resource exists
+//     (`InvalidInstanceType`); the other four narrow the answer to nothing when an entry
+//     matches nothing, each for a reason recorded in docs/services.md's "Explicit resource
+//     IDs" section. This comment claimed all five asserted existence until #731; the claim
+//     was wrong, and it mattered because it read as an already-honored contract.
 //   - [ec2FilterSpec.documents]' name lookup. AWS's wildcards are for values; a filter *name*
 //     is one of a fixed documented set and "Filter names are case-sensitive" per the Filter
 //     type, so a name is either in the set or refused.
@@ -4161,16 +4163,36 @@ func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	})
 }
 
-// describeImages lists AMIs owned by the account, with optional tag filters.
-// Supports Owners=["self"] and tag:<key>=<value> Filter entries.
+// describeImages lists the AMIs the account owns in the request's Region, narrowed by an
+// explicit ImageId.N list and by the filters [ec2ImageFilterSpec] evaluates.
+//
+// `Owner.N` and `ExecutableBy.N` are not read, deliberately and visibly: substrate stores
+// only images the account owns, so `self` is the answer to every describe and the other
+// three values AWS documents — `amazon`, `aws-marketplace`, another account ID — select
+// sets substrate does not model. Reading the parameter would let a caller believe a
+// narrowing happened. A bundled public AMI is reachable by naming it, which is the case
+// generated IaC actually produces.
 func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	allKeys, err := p.state.List(context.Background(), ec2Namespace, "image:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
-	if err != nil {
-		return nil, fmt.Errorf("ec2 describeImages list: %w", err)
+	// Before v0.108.0 this read no ImageId.N at all, so a caller naming one AMI was
+	// answered with every AMI the account owned — a superset, which is worse than an
+	// error because it looks like a successful narrowing (#731). AWS is explicit that
+	// naming an image that does not exist "will eventually return an error indicating
+	// that the AMI ID cannot be found".
+	//
+	// The ID list is validated before the filter spec, matching the eleven other
+	// ID-asserting describes.
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "ImageId"), ec2ImageIDKind)
+	if err := ids.validate(); err != nil {
+		return nil, err
 	}
 
 	if err := ec2ImageFilterSpec().check(req.Params); err != nil {
 		return nil, err
+	}
+
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, "image:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 describeImages list: %w", err)
 	}
 
 	// Filters come from the shared extractor rather than a walk of this function's own
@@ -4222,23 +4244,13 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	// cannot disagree about the same snapshot.
 	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
 
-	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	for _, k := range allKeys {
-		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var img EC2Image
-		if json.Unmarshal(data, &img) != nil {
-			continue
-		}
-
-		// Apply filters. Every named filter must match — AWS ANDs filters and ORs the
-		// values within one — so the map's iteration order does not affect the outcome.
-		if !ec2ImageMatchesFilters(img, filters) {
-			continue
-		}
-
+	// renderImage builds one response item. It is a closure rather than a method because
+	// imageItem and the types it holds are local to this function, and it is factored out
+	// because two passes render an image: the walk of the account's own AMIs below, and
+	// the bundled-catalog lookup for an ID that walk did not resolve. Rendering them
+	// through one function is what keeps a named bundled AMI reporting the same members as
+	// a registered one.
+	renderImage := func(img EC2Image) imageItem {
 		item := imageItem{
 			ImageID:      img.ImageID,
 			Name:         img.Name,
@@ -4294,7 +4306,56 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			}}
 		}
 		item.Tags = ec2TagItems(img.Tags)
-		resp.Images = append(resp.Images, item)
+		return item
+	}
+
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	for _, k := range allKeys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var img EC2Image
+		if json.Unmarshal(data, &img) != nil {
+			continue
+		}
+
+		if !ids.match(img.ImageID) {
+			continue
+		}
+
+		// Apply filters. Every named filter must match — AWS ANDs filters and ORs the
+		// values within one — so the map's iteration order does not affect the outcome.
+		if !ec2ImageMatchesFilters(img, filters) {
+			continue
+		}
+		resp.Images = append(resp.Images, renderImage(img))
+	}
+
+	// An ID the account's own images did not answer may still name a bundled public AMI.
+	// Those are deliberately absent from state (#733), so they are reachable by name but
+	// are not part of an unqualified describe's answer — substrate's reading, and the one
+	// that keeps this operation reporting what the account owns while a launch and a
+	// describe still agree about the AMI a consumer resolved through SSM.
+	for _, id := range ids.pending() {
+		img, found := p.resolveImage(reqCtx, id)
+		if !found {
+			continue
+		}
+		// Records the resolution, so unresolved below does not report an AMI that exists.
+		// It cannot return false: the ID came from the request's own list.
+		_ = ids.match(id)
+		if !ec2ImageMatchesFilters(img, filters) {
+			continue
+		}
+		resp.Images = append(resp.Images, renderImage(img))
+	}
+
+	// After both passes, because an image a *filter* excluded still counts as resolved:
+	// EC2 answers an existing ID plus a non-matching filter with an empty set, not
+	// NotFound.
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -6257,18 +6318,26 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 }
 
 func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	if err := ec2VolumeFilterSpec().check(req.Params); err != nil {
+	// The ID list is validated before the filter spec, which is the order the other
+	// eleven ID-asserting describes use and the order EC2 reports in: a request naming
+	// both a malformed volume ID and an unknown filter name answers
+	// InvalidVolumeID.Malformed. TestEC2_MalformedBeatsNotFound pins it.
+	//
+	// The hand-rolled loop this replaces (#731) did three things wrong, all of them
+	// silent. It never refused: an ID naming no volume narrowed the answer to nothing
+	// instead of raising InvalidVolume.NotFound, so a consumer's error branch was
+	// unreachable and a test asserting it passed while verifying the opposite. It broke
+	// on the first empty *value* rather than the first missing *key*, so an explicitly
+	// empty VolumeId.1 discarded VolumeId.2 and everything after it. And it read only
+	// the indexed form, so the un-indexed VolumeId some hand-built requests send was
+	// ignored entirely — a request naming one volume was answered about every volume.
+	ids := newEC2IDFilter(extractIndexedParams(req.Params, "VolumeId"), ec2VolumeIDKind)
+	if err := ids.validate(); err != nil {
 		return nil, err
 	}
 
-	// Collect requested volume IDs from repeated VolumeId.N params.
-	requestedIDs := map[string]bool{}
-	for i := 1; ; i++ {
-		id := req.Params[fmt.Sprintf("VolumeId.%d", i)]
-		if id == "" {
-			break
-		}
-		requestedIDs[id] = true
+	if err := ec2VolumeFilterSpec().check(req.Params); err != nil {
+		return nil, err
 	}
 
 	// Filters come from the shared [extractEC2Filters] walk rather than a hand-rolled
@@ -6328,8 +6397,7 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		if err := json.Unmarshal(data, &vol); err != nil {
 			continue
 		}
-		// Filter by requested IDs.
-		if len(requestedIDs) > 0 && !requestedIDs[vol.VolumeID] {
+		if !ids.match(vol.VolumeID) {
 			continue
 		}
 		if !ec2VolumeMatchesFilters(vol, filters) {
@@ -6359,6 +6427,14 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 			})
 		}
 		volumes = append(volumes, item)
+	}
+
+	// After the loop, because a volume a *filter* excluded still counts as resolved —
+	// EC2 answers an existing ID plus a non-matching filter with an empty set, not
+	// NotFound. [ec2IDFilter.match] records the resolution before the filter runs, which
+	// is what makes that distinction hold here.
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 
 	type volumeSet struct {

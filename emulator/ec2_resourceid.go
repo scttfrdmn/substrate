@@ -233,6 +233,27 @@ func (f *ec2IDFilter) unresolved() error {
 	return nil
 }
 
+// pending returns the requested IDs that match has not seen yet, in request order.
+//
+// It exists for a describe whose resources do not all live in the store it walks:
+// DescribeImages walks the account's own AMIs, and a bundled public AMI is deliberately
+// not among them (#733), so a caller naming one would reach [ec2IDFilter.unresolved] and
+// be told it does not exist. Resolving what is still pending after the walk, and calling
+// match on each one that resolves, keeps "named explicitly" working without making the
+// bundled catalog part of an unqualified describe's answer.
+//
+// It returns nothing when no IDs were requested, so a caller cannot mistake "describe
+// everything" for "everything is missing".
+func (f *ec2IDFilter) pending() []string {
+	var out []string
+	for _, id := range f.order {
+		if !f.want[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // requireResource returns the kind's Malformed error for a syntactically invalid id, its
 // NotFound error for a well-formed id that named nothing, or nil. found reports whether
 // the lookup succeeded.

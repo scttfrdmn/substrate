@@ -3327,15 +3327,20 @@ the template is resolved, so a typo answers `InvalidParameterValue` rather than
   `opt-in-not-required`, so the opt-in filtering the parameter controls has nothing to exclude.
 - **`IncludeUnsupportedInRegion` is not read** on `DescribeInstanceTypes`; the seeded catalog is
   the same in every region.
-- **Six of the new selectors answer an empty set where AWS answers `NotFound`.** `KeyName.N` and
-  `KeyPairId.N` (AWS: `InvalidKeyPair.NotFound`), `GroupName.N` and `GroupId.N` on
-  `DescribePlacementGroups` (`InvalidPlacementGroup.Unknown`), `ZoneName.N`/`ZoneId.N`, and
-  `PublicIp.N` all select by membership rather than through an
-  [ID assertion](#explicit-resource-ids), because no `ec2IDKind` is registered for those
-  resources — so naming one that does not exist narrows the answer to nothing instead of
-  failing. Within the twelve, `InstanceId.N`, `VpcId.N`, `InternetGatewayId.N`,
-  `AllocationId.N` and `DescribeLaunchTemplateVersions`' template selector **do** assert
-  existence, as does `DescribeInstanceTypes`' `InstanceType.N` (`InvalidInstanceType`).
+- **Seven selector families answer an empty set where AWS answers `NotFound`.** `KeyName.N`
+  and `KeyPairId.N` (AWS: `InvalidKeyPair.NotFound`), `GroupName.N` and `GroupId.N` on
+  `DescribePlacementGroups` (`InvalidPlacementGroup.Unknown`), `ZoneName.N`/`ZoneId.N`,
+  `PublicIp.N`, `DescribeLaunchTemplates`' selectors, `DescribeFleets`' `FleetId.N` and
+  `DescribeRegions`' `RegionName.N` all select by membership rather than through an
+  [ID assertion](#explicit-resource-ids) — so naming one that does not exist narrows the
+  answer to nothing instead of failing. This read "six of the new selectors" and named
+  four families until #731, which added `DescribeLaunchTemplates` and the two whose
+  reasons are permanent rather than pending, and recorded a reason for each; see
+  [Which selectors assert existence](#which-selectors-assert-existence), where the two whose
+  reasons are permanent are separated from the five that are merely unimplemented. Within
+  the twelve, `InstanceId.N`, `VpcId.N`, `InternetGatewayId.N`, `AllocationId.N` and
+  `DescribeLaunchTemplateVersions`' template selector **do** assert existence, as does
+  `DescribeInstanceTypes`' `InstanceType.N` (`InvalidInstanceType`).
 
 ### RunInstances requires a resolvable AMI
 
@@ -3429,7 +3434,10 @@ Two things follow from bundled images living outside state.
   public AWS-owned AMI is not that, so an unqualified `DescribeImages` does not
   return them. This is substrate's reading, not AWS's behaviour — real AWS would
   return every public image, tens of thousands of them. A bundled AMI is
-  resolvable and nameable; it is not inventory.
+  resolvable and nameable; it is not inventory. Naming one in `ImageId.N` does
+  answer with it, because a describe and a launch must agree about which AMIs
+  exist — see [Explicit resource IDs](#explicit-resource-ids), whose rules
+  `DescribeImages` follows for every other ID.
 - **They are not the caller's.** A bundled image reports no owner, so it is not
   taggable and an `Owners=self` describe does not match it. Register your own AMI
   when the test is about owning one.
@@ -3738,7 +3746,10 @@ index, and a launch **materializes** the EBS volumes those mappings describe. Th
 are real volumes in the same store `CreateVolume` writes to, so `DescribeVolumes`
 is the one place to observe an instance's storage, whether the volume was
 provisioned separately or created by the launch — which is how real EC2 unifies
-the two.
+the two. Naming a `VolumeId.N` there is an
+[assertion that the volume exists](#explicit-resource-ids), so a mapping whose
+volume a test expects is confirmed by an error rather than by a silently empty
+answer.
 
 `DescribeVolumes` is also the **only** place a launch-specified size is
 observable. AWS's `EbsInstanceBlockDevice` — the shape an instance renders per
@@ -4812,6 +4823,54 @@ An ID is well formed when it has the resource's prefix followed by at least one
 lowercase hex digit. Length is deliberately not checked: substrate's generators
 emit 16 hex characters where AWS emits 8 or 17, and AWS itself still accepts the
 legacy 8-character form for several resources.
+
+#### Which selectors assert existence
+
+Every `Describe*` whose ID family has a row above resolves the IDs a caller names.
+Twelve do: `DescribeInstances`, `DescribeInstanceStatus`, `DescribeVpcs`,
+`DescribeSubnets`, `DescribeSecurityGroups`, `DescribeInternetGateways`,
+`DescribeRouteTables`, `DescribeSnapshots`, `DescribeAddresses`,
+`DescribeNatGateways`, `DescribeVolumes` and `DescribeImages`. The last two joined with
+[#731](https://github.com/scttfrdmn/substrate/issues/731); before that each answered a
+superset rather than an error, and
+`DescribeImages` did not read `ImageId.N` **at all** — a caller naming one AMI was
+answered with every AMI the account owned. A superset is the worse failure of the two,
+because an error is visible and a superset reads as a successful narrowing.
+
+`DescribeInstanceTypes`' `InstanceType.N` also asserts existence, answering
+`InvalidInstanceType`.
+
+**Seven selector families deliberately do not**, and answer an empty set where AWS
+answers `NotFound`. Two have reasons that would not change if a kind were registered
+for them:
+
+| Selector | Why not |
+|---|---|
+| `DescribeFleets`' `FleetId.N` | AWS publishes **no** `InvalidFleetId.NotFound`. The only fleet-ID absence code in the reference is `InvalidSpotFleetRequestId.*`, which is a `sfr-` request, not a `fleet-` fleet. |
+| `DescribeRegions`' `RegionName.N` | The parameter explicitly permits naming any Region, enabled for the account or not, so "this Region is not in your answer" is not absence. |
+
+Five more have a published code but no registered `ec2IDKind`, so the assertion is
+unimplemented rather than declined: `DescribeKeyPairs`' `KeyName.N`/`KeyPairId.N`
+(`InvalidKeyPair.NotFound`), `DescribePlacementGroups`' `GroupName.N`/`GroupId.N`
+(`InvalidPlacementGroup.Unknown`), `DescribeAvailabilityZones`' `ZoneName.N`/`ZoneId.N`,
+`DescribeAddresses`' `PublicIp.N` (its `AllocationId.N` **does** assert), and
+`DescribeLaunchTemplates`, whose `InvalidLaunchTemplateId.NotFound` is one of the four
+hand-written codes above.
+
+`DescribeSecurityGroups` documents a `GroupName.N` alongside `GroupId.N` and substrate
+**does not read it**: only the ID list selects. A caller naming a group by name is
+answered about every group, so filter on `group-name` instead, which is evaluated.
+
+`DescribeImages` also does not read `Owner.N` or `ExecutableBy.N`. Substrate stores only
+images the account owns, so `self` is the answer to every describe and AWS's other three
+`Owner` values — `amazon`, `aws-marketplace`, another account ID — select sets substrate
+does not model. Reading the parameter would let a caller believe a narrowing happened. A
+bundled public AMI is reachable by naming its ID, which is the case generated IaC
+actually produces; see [Which AMIs resolve](#which-amis-resolve).
+
+Both ID lists are read in every form AWS accepts — `VolumeId.1`, `VolumeId.2`, … and the
+un-indexed `VolumeId` — and an explicitly empty value is an ID the caller sent, so it is
+reported as `Malformed` rather than truncating the list.
 
 ### Finding a fleet's instances
 

@@ -104,6 +104,19 @@ func TestEC2_DescribeByExplicitID_NotFound(t *testing.T) {
 			params: map[string]string{"Action": "DescribeNatGateways", "NatGatewayId.1": "nat-0000000000000dead"},
 			code:   "InvalidNatGatewayID.NotFound",
 		},
+		{
+			name:   "volumes",
+			params: map[string]string{"Action": "DescribeVolumes", "VolumeId.1": "vol-0000000000000dead"},
+			code:   "InvalidVolume.NotFound",
+		},
+		{
+			// The AMI family's absence code names no ID at all, and the AMI that
+			// names nothing here is deliberately not a bundled one — a bundled ID
+			// resolves by name (#733), so using one would assert the opposite.
+			name:   "images",
+			params: map[string]string{"Action": "DescribeImages", "ImageId.1": "ami-0000000000000dead"},
+			code:   "InvalidAMIID.NotFound",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,6 +202,25 @@ func TestEC2_DescribeByExplicitID_Malformed(t *testing.T) {
 			params: map[string]string{"Action": "DescribeNatGateways", "NatGatewayId.1": "not-an-id"},
 			code:   "NatGatewayMalformed",
 		},
+		{
+			// AWS spells this one InvalidVolumeID.Malformed against
+			// InvalidVolume.NotFound, the same cross-naming security groups carry.
+			name:   "volume wrong prefix",
+			params: map[string]string{"Action": "DescribeVolumes", "VolumeId.1": "not-an-id"},
+			code:   "InvalidVolumeID.Malformed",
+		},
+		{
+			name:   "image wrong prefix",
+			params: map[string]string{"Action": "DescribeImages", "ImageId.1": "not-an-id"},
+			code:   "InvalidAMIID.Malformed",
+		},
+		{
+			// The placeholder shape generated IaC produces, which is malformed
+			// rather than absent because uppercase is not hex.
+			name:   "image non-hex suffix",
+			params: map[string]string{"Action": "DescribeImages", "ImageId.1": "ami-EXAMPLE"},
+			code:   "InvalidAMIID.Malformed",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -217,6 +249,49 @@ func TestEC2_MalformedBeatsNotFound(t *testing.T) {
 	assert.Equal(t, "InvalidVpcID.Malformed", code)
 }
 
+// TestEC2_IDListValidatesBeforeFilterNames pins the *other* ordering the ID filter
+// depends on, which nothing asserted before #731: the ID list is validated before the
+// filter spec, so a request carrying both a malformed ID and an unknown filter name
+// reports the ID.
+//
+// It matters because the two are separately reachable and a caller branches on the code.
+// DescribeVolumes checked its filter names first until #731 and would have answered
+// InvalidParameterValue here, contradicting the eleven other ID-asserting describes.
+func TestEC2_IDListValidatesBeforeFilterNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		params map[string]string
+		code   string
+	}{
+		{
+			name: "volumes",
+			params: map[string]string{
+				"Action": "DescribeVolumes", "VolumeId.1": "bogus",
+				"Filter.1.Name": "not-a-filter", "Filter.1.Value.1": "x",
+			},
+			code: "InvalidVolumeID.Malformed",
+		},
+		{
+			name: "images",
+			params: map[string]string{
+				"Action": "DescribeImages", "ImageId.1": "bogus",
+				"Filter.1.Name": "not-a-filter", "Filter.1.Value.1": "x",
+			},
+			code: "InvalidAMIID.Malformed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newEC2TestServer(t)
+			status, code := ec2ErrorCode(t, ts, tt.params)
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, tt.code, code)
+		})
+	}
+}
+
 // TestEC2_DescribeWithNoIDs_ReturnsEmpty guards the "absent vs. filtered"
 // distinction #391 turns on: with no explicit ID, an empty account legitimately
 // describes to 200 and an empty set. Only an explicit ID is an existence
@@ -227,6 +302,7 @@ func TestEC2_DescribeWithNoIDs_ReturnsEmpty(t *testing.T) {
 		"DescribeInstances", "DescribeInstanceStatus", "DescribeVpcs", "DescribeSubnets",
 		"DescribeSecurityGroups", "DescribeInternetGateways", "DescribeRouteTables",
 		"DescribeSnapshots", "DescribeAddresses", "DescribeNatGateways",
+		"DescribeVolumes", "DescribeImages",
 	} {
 		t.Run(action, func(t *testing.T) {
 			t.Parallel()
@@ -451,6 +527,15 @@ func TestEC2_SubstrateMintedIDsAreWellFormed(t *testing.T) {
 	natID := create(map[string]string{
 		"Action": "CreateNatGateway", "SubnetId": subnetID, "AllocationId": allocID,
 	}, "natGatewayId")
+	volumeID := create(map[string]string{
+		"Action": "CreateVolume", "AvailabilityZone": "us-east-1a", "Size": "8",
+	}, "volumeId")
+	// generateImageID mints 16 hex characters where AWS mints 8 or 17, which is exactly
+	// the shape a length-checking Malformed rule would reject. RegisterImage rather than a
+	// bundled ID, because the point is substrate's own generator.
+	imageID := create(map[string]string{
+		"Action": "RegisterImage", "Name": "minted-ami", "RootDeviceName": "/dev/sda1",
+	}, "imageId")
 
 	for _, tc := range []struct{ action, param, id string }{
 		{"DescribeVpcs", "VpcId.1", vpcID},
@@ -462,6 +547,8 @@ func TestEC2_SubstrateMintedIDsAreWellFormed(t *testing.T) {
 		{"DescribeInstanceStatus", "InstanceId.1", instanceID},
 		{"DescribeAddresses", "AllocationId.1", allocID},
 		{"DescribeNatGateways", "NatGatewayId.1", natID},
+		{"DescribeVolumes", "VolumeId.1", volumeID},
+		{"DescribeImages", "ImageId.1", imageID},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			resp := ec2Request(t, ts, map[string]string{"Action": tc.action, tc.param: tc.id})
