@@ -1,10 +1,13 @@
 package emulator_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/scttfrdmn/substrate/emulator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -189,6 +192,67 @@ func TestEC2_MappingSnapshot_DoesNotSpendAPoll(t *testing.T) {
 	assert.Len(t, ec2DescribedVolumeIDs(t, ts, map[string]string{
 		"Filter.1.Name": "snapshot-id", "Filter.1.Value.1": snapshotID,
 	}), 3)
+}
+
+// seedBlindStateManager passes every call through until it is armed, after which a Get against
+// the snapshot control-plane namespace fails.
+//
+// Failing only that namespace is what makes the test specific: a store that failed every Get
+// would never get past resolving the snapshot record, and the refusal a test then saw would be
+// InvalidSnapshot.NotFound — the very collapse the assertion below exists to rule out.
+type seedBlindStateManager struct {
+	inner emulator.StateManager
+	armed bool
+}
+
+// ec2SnapCtrlNamespace is the namespace the snapshot progression seeds live in. It is
+// unexported, so the literal is repeated here; a rename that missed it would disarm this test
+// rather than break it, which is why the assertion below also pins the status code.
+const ec2SnapCtrlNamespaceLiteral = "ec2-snap-ctrl"
+
+func (m *seedBlindStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	if m.armed && namespace == ec2SnapCtrlNamespaceLiteral {
+		return nil, errors.New("state store unavailable")
+	}
+	return m.inner.Get(ctx, namespace, key)
+}
+
+func (m *seedBlindStateManager) Put(ctx context.Context, namespace, key string, value []byte) error {
+	return m.inner.Put(ctx, namespace, key, value)
+}
+
+func (m *seedBlindStateManager) Delete(ctx context.Context, namespace, key string) error {
+	return m.inner.Delete(ctx, namespace, key)
+}
+
+func (m *seedBlindStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	return m.inner.List(ctx, namespace, prefix)
+}
+
+// TestEC2_MappingSnapshot_UnreadableStateIsNotPermission asserts that a state read the rule
+// cannot complete answers InternalError / 500 rather than letting the mapping through.
+//
+// This is deliberately the opposite of the resolver's absent-on-error rule beside it, and the
+// two are not in tension: an unresolvable snapshot is indistinguishable from an absent one, so
+// reporting NotFound is honest, whereas an unreadable *state* is not evidence the snapshot is
+// usable. Permitting the mapping would make the rule's absence indistinguishable from its
+// satisfaction — the caller would see a launch succeed and could not tell whether it was
+// checked. A 500 is also the only answer that tells an SDK to retry, which is the correct
+// behavior for a transient store failure.
+func TestEC2_MappingSnapshot_UnreadableStateIsNotPermission(t *testing.T) {
+	t.Parallel()
+	state := &seedBlindStateManager{inner: emulator.NewMemoryStateManager()}
+	ts := newEC2TestServerWithState(t, state)
+
+	volumeID := ec2CreateSizedVolume(t, ts, 8, nil)
+	snapshotID := ec2CreateSnapshot(t, ts, map[string]string{"VolumeId": volumeID}).SnapshotID
+	state.armed = true
+
+	status, code, _ := ec2ErrorDetail(t, ts, ec2SnapshotMappingLaunch(snapshotID))
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.Equal(t, "InternalError", code)
+
+	assert.Empty(t, ec2InstanceIDs(t, ts), "and the launch wrote nothing")
 }
 
 // TestEC2_MappingSnapshot_LaunchTemplatesStayPermissive pins the exemption, which is a
