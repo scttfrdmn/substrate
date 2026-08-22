@@ -33,10 +33,21 @@ import (
 // some of them the region — in their state keys. Those are the only honest
 // subjects for this fix, so every case below uses one.
 
+// cfnOtherAccount is an account other than the one substrate attributes an
+// unsigned request to. Being it requires signing as it, which is the only way a
+// caller names an account: nothing else on the wire does (#734).
+const cfnOtherAccount = "555566667777"
+
 // newCFNIdentityTestServer builds a server with CloudFormation registered
 // alongside the *partitioned* plugins: EC2, ECS, CloudWatch Logs, DynamoDB, SQS
 // and SNS. S3 and IAM are deliberately absent — a stack whose resources are all
 // unpartitioned cannot distinguish a threaded identity from a hardcoded one.
+//
+// A [emulator.CredentialRegistry] holding [cfnOtherAccount] is wired, so a test
+// here can be two callers. That also switches SigV4 verification on, which is why
+// cfnIdentityRequest signs for real; an unsigned request still reaches its plugin,
+// as the default account, because [emulator.VerifySigV4] passes a request carrying
+// no Authorization header.
 func newCFNIdentityTestServer(t *testing.T) *cfnTestServer {
 	t.Helper()
 	cfg := emulator.DefaultConfig()
@@ -83,32 +94,39 @@ func newCFNIdentityTestServer(t *testing.T) *cfnTestServer {
 	}))
 	registry.Register(cfnp)
 
+	creds := emulator.NewCredentialRegistry()
+	creds.Register(testCredentialsFor(cfnOtherAccount))
+
 	srv := emulator.NewServer(*cfg, registry, store, state, tc, logger,
-		emulator.ServerOptions{Costs: emulator.NewCostController(emulator.CostConfig{Enabled: true})})
+		emulator.ServerOptions{
+			Costs:       emulator.NewCostController(emulator.CostConfig{Enabled: true}),
+			Credentials: creds,
+		})
 
 	return &cfnTestServer{srv: srv, state: state, registry: registry, tc: tc}
 }
 
-// cfnIdentityRequest posts a query-protocol request to any service, optionally
-// signed and optionally to a non-default region, so a test can vary exactly the
-// two things #517 is about.
+// cfnIdentityRequest posts a query-protocol request to any service, as a chosen
+// account and to a chosen region, so a test can vary exactly the two things #517 is
+// about.
 //
-// An empty authHeader means an unsigned request, which resolves to the fallback
-// account 000000000000 — the identity #517's reporter had, since their client
-// signed nothing.
-func cfnIdentityRequest(t *testing.T, ts *cfnTestServer, service, region, authHeader string, params map[string]string) (int, string) {
+// An empty account means an unsigned request, which resolves to substrate's default
+// account — the identity #517's reporter had, since their client signed nothing.
+// Any other account must be one newCFNIdentityTestServer registered, and the request
+// is signed as it; an unregistered key is InvalidClientTokenId 403 before any plugin
+// sees it.
+func cfnIdentityRequest(t *testing.T, ts *cfnTestServer, service, region, account string, params map[string]string) (int, string) {
 	t.Helper()
 	form := url.Values{}
 	for k, v := range params {
 		form.Set(k, v)
 	}
+	body := form.Encode()
 	host := service + "." + region + ".amazonaws.com"
-	r := httptest.NewRequest(http.MethodPost, "http://"+host+"/", strings.NewReader(form.Encode()))
+	r := httptest.NewRequest(http.MethodPost, "http://"+host+"/", strings.NewReader(body))
 	r.Host = host
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if authHeader != "" {
-		r.Header.Set("Authorization", authHeader)
-	}
+	cfnSignAs(r, account, service, region, []byte(body))
 	w := httptest.NewRecorder()
 	ts.srv.ServeHTTP(w, r)
 	return w.Code, w.Body.String()
@@ -116,26 +134,25 @@ func cfnIdentityRequest(t *testing.T, ts *cfnTestServer, service, region, authHe
 
 // cfnJSONRequest posts a JSON-protocol request, for the services that use one
 // (ECS and CloudWatch Logs).
-func cfnJSONRequest(t *testing.T, ts *cfnTestServer, service, region, target, authHeader, body string) (int, string) {
+func cfnJSONRequest(t *testing.T, ts *cfnTestServer, service, region, target, account, body string) (int, string) {
 	t.Helper()
 	host := service + "." + region + ".amazonaws.com"
 	r := httptest.NewRequest(http.MethodPost, "http://"+host+"/", strings.NewReader(body))
 	r.Host = host
 	r.Header.Set("Content-Type", "application/x-amz-json-1.1")
 	r.Header.Set("X-Amz-Target", target)
-	if authHeader != "" {
-		r.Header.Set("Authorization", authHeader)
-	}
+	cfnSignAs(r, account, service, region, []byte(body))
 	w := httptest.NewRecorder()
 	ts.srv.ServeHTTP(w, r)
 	return w.Code, w.Body.String()
 }
 
-// signedAuthHeader builds an AKIA-signed Authorization header, which resolves to
-// the well-known test account 123456789012.
-func signedAuthHeader(service, region string) string {
-	return "AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20260101/" +
-		region + "/" + service + "/aws4_request, SignedHeaders=host, Signature=fake"
+// cfnSignAs signs r as account, or leaves it unsigned when account is empty.
+func cfnSignAs(r *http.Request, account, signingName, region string, body []byte) {
+	if account == "" {
+		return
+	}
+	signAs(r, testCredentialsFor(account), signingName, region, body)
 }
 
 // cfnXMLValue extracts the text of the first tag element in an XML body. Enough
@@ -162,47 +179,47 @@ func cfnPhysicalID(t *testing.T, body string) string {
 const cfnInstanceTemplate = `{"Resources":{"I":{"Type":"AWS::EC2::Instance",` +
 	`"Properties":{"ImageId":"ami-12345678","InstanceType":"t3.micro"}}}}`
 
-// TestCFNIdentity_UnsignedCallerFindsItsOwnInstance is #517's reproduction, and
-// it fails before the fix.
+// TestCFNIdentity_CallerFindsItsOwnInstance is #517's reproduction, and it fails
+// before the fix.
 //
-// An unsigned request resolves to account 000000000000. The stack ARN named that
-// account, but the deployer dispatched RunInstances under substrate's default
-// 123456789012, and the EC2 plugin keys an instance by account and region — so
-// DescribeInstances, correctly scoped to the caller, reported nothing. The
-// reporter read that as EC2 support being stubbed out; it was a partition split.
-func TestCFNIdentity_UnsignedCallerFindsItsOwnInstance(t *testing.T) {
+// The caller here is not substrate's default account, which is what #517's reporter
+// was: the stack ARN named their account, but the deployer dispatched RunInstances
+// under substrate's default, and the EC2 plugin keys an instance by account and
+// region — so DescribeInstances, correctly scoped to the caller, reported nothing.
+// The reporter read that as EC2 support being stubbed out; it was a partition split.
+func TestCFNIdentity_CallerFindsItsOwnInstance(t *testing.T) {
 	ts := newCFNIdentityTestServer(t)
 
-	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action":       "CreateStack",
 		"Version":      "2010-05-15",
-		"StackName":    "unsigned",
+		"StackName":    "other",
 		"TemplateBody": cfnInstanceTemplate,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
-	assert.Contains(t, body, ":000000000000:stack/unsigned",
-		"the stack ARN should name the unsigned caller's account")
+	assert.Contains(t, body, ":"+cfnOtherAccount+":stack/other",
+		"the stack ARN should name the signing caller's account")
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action":    "DescribeStackResources",
 		"Version":   "2010-05-15",
-		"StackName": "unsigned",
+		"StackName": "other",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	instanceID := cfnPhysicalID(t, body)
 	require.True(t, strings.HasPrefix(instanceID, "i-"), "physical ID was %q", instanceID)
 
 	// The gate: the same caller that created the stack must see the instance.
-	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action":  "DescribeInstances",
 		"Version": "2016-11-15",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Contains(t, body, instanceID,
-		"the unsigned caller's DescribeInstances must find the instance its own stack created")
+		"the caller's DescribeInstances must find the instance its own stack created")
 
 	// And by ID, which is the lookup that answered InvalidInstanceID.NotFound.
-	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action":       "DescribeInstances",
 		"Version":      "2016-11-15",
 		"InstanceId.1": instanceID,
@@ -229,7 +246,7 @@ func TestCFNIdentity_PartitionedServices(t *testing.T) {
 			wantID: "identity-cluster",
 			readBack: func(t *testing.T, ts *cfnTestServer) (int, string) {
 				return cfnJSONRequest(t, ts, "ecs", "us-east-1",
-					"AmazonEC2ContainerServiceV20141113.ListClusters", "", `{}`)
+					"AmazonEC2ContainerServiceV20141113.ListClusters", cfnOtherAccount, `{}`)
 			},
 		},
 		{
@@ -239,7 +256,7 @@ func TestCFNIdentity_PartitionedServices(t *testing.T) {
 			wantID: "/identity/group",
 			readBack: func(t *testing.T, ts *cfnTestServer) (int, string) {
 				return cfnJSONRequest(t, ts, "logs", "us-east-1",
-					"Logs_20140328.DescribeLogGroups", "", `{}`)
+					"Logs_20140328.DescribeLogGroups", cfnOtherAccount, `{}`)
 			},
 		},
 		{
@@ -249,7 +266,7 @@ func TestCFNIdentity_PartitionedServices(t *testing.T) {
 				`"LaunchTemplateData":{"ImageId":"ami-12345678","InstanceType":"t3.micro"}}}}}`,
 			wantID: "identity-lt",
 			readBack: func(t *testing.T, ts *cfnTestServer) (int, string) {
-				return cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+				return cfnIdentityRequest(t, ts, "ec2", "us-east-1", cfnOtherAccount, map[string]string{
 					"Action":  "DescribeLaunchTemplates",
 					"Version": "2016-11-15",
 				})
@@ -261,7 +278,7 @@ func TestCFNIdentity_PartitionedServices(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := newCFNIdentityTestServer(t)
 
-			code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+			code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 				"Action":       "CreateStack",
 				"Version":      "2010-05-15",
 				"StackName":    "partitioned",
@@ -272,7 +289,7 @@ func TestCFNIdentity_PartitionedServices(t *testing.T) {
 			code, body = tc.readBack(t, ts)
 			require.Equal(t, http.StatusOK, code, "body was %s", body)
 			assert.Contains(t, body, tc.wantID,
-				"the unsigned caller must see the resource its own stack created")
+				"the caller must see the resource its own stack created")
 		})
 	}
 }
@@ -285,59 +302,59 @@ func TestCFNIdentity_PartitionedServices(t *testing.T) {
 func TestCFNIdentity_NonDefaultRegion(t *testing.T) {
 	ts := newCFNIdentityTestServer(t)
 
-	code, body := cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1",
-		signedAuthHeader("cloudformation", "eu-west-1"), map[string]string{
-			"Action":       "CreateStack",
-			"Version":      "2010-05-15",
-			"StackName":    "euwest",
-			"TemplateBody": cfnInstanceTemplate,
-		})
+	code, body := cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1", "", map[string]string{
+		"Action":       "CreateStack",
+		"Version":      "2010-05-15",
+		"StackName":    "euwest",
+		"TemplateBody": cfnInstanceTemplate,
+	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Contains(t, body, "arn:aws:cloudformation:eu-west-1:")
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1",
-		signedAuthHeader("cloudformation", "eu-west-1"), map[string]string{
-			"Action":    "DescribeStackResources",
-			"Version":   "2010-05-15",
-			"StackName": "euwest",
-		})
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1", "", map[string]string{
+		"Action":    "DescribeStackResources",
+		"Version":   "2010-05-15",
+		"StackName": "euwest",
+	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	instanceID := cfnPhysicalID(t, body)
 
-	code, body = cfnIdentityRequest(t, ts, "ec2", "eu-west-1",
-		signedAuthHeader("ec2", "eu-west-1"), map[string]string{
-			"Action": "DescribeInstances", "Version": "2016-11-15",
-		})
+	code, body = cfnIdentityRequest(t, ts, "ec2", "eu-west-1", "", map[string]string{
+		"Action": "DescribeInstances", "Version": "2016-11-15",
+	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Contains(t, body, instanceID, "the instance belongs to eu-west-1")
 
 	// Absent from another region, which is the half that proves partitioning still
 	// holds rather than having been widened away.
-	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1",
-		signedAuthHeader("ec2", "us-east-1"), map[string]string{
-			"Action": "DescribeInstances", "Version": "2016-11-15",
-		})
+	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+		"Action": "DescribeInstances", "Version": "2016-11-15",
+	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.NotContains(t, body, instanceID,
 		"a eu-west-1 instance must not be visible in us-east-1")
 }
 
-// TestCFNIdentity_SignedAndUnsignedAreIsolated pins that the fix threads identity
-// rather than widening a lookup. The same template deployed by a signed caller
-// (123456789012) and an unsigned one (000000000000) yields two instances, each
-// visible only to the caller that created it.
-func TestCFNIdentity_SignedAndUnsignedAreIsolated(t *testing.T) {
+// TestCFNIdentity_TwoAccountsAreIsolated pins that the fix threads identity rather
+// than widening a lookup. The same template deployed by two accounts yields two
+// instances, each visible only to the account that created it.
+//
+// This is the test that says what #734 changed and what it did not. It used to read
+// "signed and unsigned are isolated", because substrate handed out a second account
+// to any request whose access key did not begin with "AKIA" — so its two callers
+// were the same client with two credentials. They now differ by the only thing that
+// can name an account, a signature, and the isolation they assert is unchanged.
+func TestCFNIdentity_TwoAccountsAreIsolated(t *testing.T) {
 	ts := newCFNIdentityTestServer(t)
-	signed := signedAuthHeader("cloudformation", "us-east-1")
 
-	create := func(auth, stackName string) string {
-		code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", auth,
+	create := func(account, stackName string) string {
+		code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", account,
 			map[string]string{
 				"Action": "CreateStack", "Version": "2010-05-15",
 				"StackName": stackName, "TemplateBody": cfnInstanceTemplate,
 			})
 		require.Equal(t, http.StatusOK, code, "body was %s", body)
-		code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", auth,
+		code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", account,
 			map[string]string{
 				"Action": "DescribeStackResources", "Version": "2010-05-15",
 				"StackName": stackName,
@@ -346,26 +363,26 @@ func TestCFNIdentity_SignedAndUnsignedAreIsolated(t *testing.T) {
 		return cfnPhysicalID(t, body)
 	}
 
-	signedID := create(signed, "by-signed")
-	unsignedID := create("", "by-unsigned")
-	require.NotEqual(t, signedID, unsignedID, "two stacks, two instances")
+	otherID := create(cfnOtherAccount, "by-other")
+	defaultID := create("", "by-default")
+	require.NotEqual(t, otherID, defaultID, "two stacks, two instances")
 
-	describe := func(auth string) string {
-		code, body := cfnIdentityRequest(t, ts, "ec2", "us-east-1", auth,
+	describe := func(account string) string {
+		code, body := cfnIdentityRequest(t, ts, "ec2", "us-east-1", account,
 			map[string]string{"Action": "DescribeInstances", "Version": "2016-11-15"})
 		require.Equal(t, http.StatusOK, code, "body was %s", body)
 		return body
 	}
 
-	signedView := describe(signedAuthHeader("ec2", "us-east-1"))
-	assert.Contains(t, signedView, signedID)
-	assert.NotContains(t, signedView, unsignedID,
-		"the signed caller must not see the unsigned caller's instance")
+	otherView := describe(cfnOtherAccount)
+	assert.Contains(t, otherView, otherID)
+	assert.NotContains(t, otherView, defaultID,
+		"the signing caller must not see the default account's instance")
 
-	unsignedView := describe("")
-	assert.Contains(t, unsignedView, unsignedID)
-	assert.NotContains(t, unsignedView, signedID,
-		"the unsigned caller must not see the signed caller's instance")
+	defaultView := describe("")
+	assert.Contains(t, defaultView, defaultID)
+	assert.NotContains(t, defaultView, otherID,
+		"the default account must not see the signing caller's instance")
 }
 
 // TestCFNIdentity_PseudoParametersMatchTheStackARN is the buildCFNContext half of
@@ -381,20 +398,20 @@ func TestCFNIdentity_PseudoParametersMatchTheStackARN(t *testing.T) {
 	tmpl := `{"Resources":{"G":{"Type":"AWS::Logs::LogGroup","Properties":{
 		"LogGroupName":{"Fn::Sub":"/g-${AWS::AccountId}-${AWS::Region}"}}}}}`
 
-	code, body := cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1", "", map[string]string{
+	code, body := cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateStack", "Version": "2010-05-15",
 		"StackName": "pseudo", "TemplateBody": tmpl,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
-	require.Contains(t, body, "arn:aws:cloudformation:eu-west-1:000000000000:stack/pseudo",
+	require.Contains(t, body, "arn:aws:cloudformation:eu-west-1:"+cfnOtherAccount+":stack/pseudo",
 		"the stack ARN names the caller")
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "eu-west-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeStackResources", "Version": "2010-05-15",
 		"StackName": "pseudo",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
-	assert.Equal(t, "/g-000000000000-eu-west-1", cfnPhysicalID(t, body),
+	assert.Equal(t, "/g-"+cfnOtherAccount+"-eu-west-1", cfnPhysicalID(t, body),
 		"the pseudo-parameters must resolve to the caller's identity, not substrate's defaults")
 }
 
@@ -421,7 +438,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 	cases := []struct {
 		name string
 		tmpl string
-		// namespace and key locate the resource in the *unsigned* caller's
+		// namespace and key locate the resource in the *signing* caller's
 		// partition, which is where it must be for drift to have any chance.
 		namespace string
 		key       string
@@ -437,7 +454,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 				"KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
 				"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}}}}`,
 			namespace: "dynamodb",
-			key:       "table:000000000000/drift-table",
+			key:       "table:" + cfnOtherAccount + "/drift-table",
 			mutate: func(m map[string]any) {
 				m["BillingModeSummary"] = map[string]any{"BillingMode": "PROVISIONED"}
 			},
@@ -448,7 +465,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 			tmpl: `{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{
 				"QueueName":"drift-queue","VisibilityTimeout":45}}}}`,
 			namespace: "sqs",
-			key:       "queue:000000000000/drift-queue",
+			key:       "queue:" + cfnOtherAccount + "/drift-queue",
 			mutate: func(m map[string]any) {
 				attrs, _ := m["Attributes"].(map[string]any)
 				if attrs == nil {
@@ -468,7 +485,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 			// of the template, through a context built separately from the deploy
 			// path's — a third identity read, and the only place either
 			// pseudo-parameter is resolved twice. Deploy stamps
-			// "000000000000 in eu-west-1"; a comparator resolving against the
+			// "555566667777 in eu-west-1"; a comparator resolving against the
 			// defaults expects "123456789012 in us-east-1" and reports MODIFIED on a
 			// topic nobody touched. A false drift report is the failure mode, so the
 			// IN_SYNC half of this case is what pins it.
@@ -477,7 +494,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 				"TopicName":"drift-topic",
 				"DisplayName":{"Fn::Sub":"${AWS::AccountId} in ${AWS::Region}"}}}}}`,
 			namespace: "sns",
-			key:       "topic:000000000000/" + region + "/drift-topic",
+			key:       "topic:" + cfnOtherAccount + "/" + region + "/drift-topic",
 			mutate: func(m map[string]any) {
 				m["Attributes"] = map[string]any{"DisplayName": "Renamed"}
 			},
@@ -489,7 +506,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := newCFNIdentityTestServer(t)
 
-			code, body := cfnIdentityRequest(t, ts, "cloudformation", region, "",
+			code, body := cfnIdentityRequest(t, ts, "cloudformation", region, cfnOtherAccount,
 				map[string]string{
 					"Action": "CreateStack", "Version": "2010-05-15",
 					"StackName": "drift", "TemplateBody": tc.tmpl,
@@ -497,7 +514,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 			require.Equal(t, http.StatusOK, code, "body was %s", body)
 
 			drifts := func() string {
-				code, body := cfnIdentityRequest(t, ts, "cloudformation", region, "",
+				code, body := cfnIdentityRequest(t, ts, "cloudformation", region, cfnOtherAccount,
 					map[string]string{
 						"Action": "DescribeStackResourceDrifts", "Version": "2010-05-15",
 						"StackName": "drift",
@@ -516,7 +533,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 			// It reports no per-resource statuses, only a count and a stack-level
 			// verdict, so its own assertion is the count: on the wrong identity
 			// every resource reads as DELETED and the stack comes back DRIFTED.
-			code, body = cfnIdentityRequest(t, ts, "cloudformation", region, "",
+			code, body = cfnIdentityRequest(t, ts, "cloudformation", region, cfnOtherAccount,
 				map[string]string{
 					"Action": "DetectStackDrift", "Version": "2010-05-15",
 					"StackName": "drift",
@@ -524,7 +541,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 			require.Equal(t, http.StatusOK, code, "body was %s", body)
 			detectionID := cfnXMLValue(t, body, "StackDriftDetectionId")
 
-			code, body = cfnIdentityRequest(t, ts, "cloudformation", region, "",
+			code, body = cfnIdentityRequest(t, ts, "cloudformation", region, cfnOtherAccount,
 				map[string]string{
 					"Action": "DescribeStackDriftDetectionStatus", "Version": "2010-05-15",
 					"StackDriftDetectionId": detectionID,
@@ -537,7 +554,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 
 			raw, err := ts.state.Get(context.Background(), tc.namespace, tc.key)
 			require.NoError(t, err)
-			require.NotNil(t, raw, "the resource must be in the unsigned caller's partition")
+			require.NotNil(t, raw, "the resource must be in the signing caller's partition")
 			var live map[string]any
 			require.NoError(t, json.Unmarshal(raw, &live))
 			tc.mutate(live)
@@ -562,32 +579,32 @@ func TestCFNIdentity_ExecuteChangeSetUsesTheExecutingCaller(t *testing.T) {
 
 	// A stack to change: created empty so the change set is what deploys the
 	// instance.
-	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateStack", "Version": "2010-05-15",
 		"StackName": "cs", "TemplateBody": `{"Resources":{}}`,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateChangeSet", "Version": "2010-05-15",
 		"StackName": "cs", "ChangeSetName": "add-instance",
 		"TemplateBody": cfnInstanceTemplate,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "ExecuteChangeSet", "Version": "2010-05-15",
 		"StackName": "cs", "ChangeSetName": "add-instance",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeStackResources", "Version": "2010-05-15", "StackName": "cs",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	instanceID := cfnPhysicalID(t, body)
 
-	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeInstances", "Version": "2016-11-15",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
@@ -606,26 +623,26 @@ func TestCFNIdentity_ExecuteChangeSetUsesTheExecutingCaller(t *testing.T) {
 func TestCFNIdentity_UpdateStackUsesTheUpdatingCaller(t *testing.T) {
 	ts := newCFNIdentityTestServer(t)
 
-	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateStack", "Version": "2010-05-15",
 		"StackName": "upd", "TemplateBody": `{"Resources":{}}`,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "UpdateStack", "Version": "2010-05-15",
 		"StackName": "upd", "TemplateBody": cfnInstanceTemplate,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeStackResources", "Version": "2010-05-15", "StackName": "upd",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	instanceID := cfnPhysicalID(t, body)
 	require.True(t, strings.HasPrefix(instanceID, "i-"), "physical ID was %q", instanceID)
 
-	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "ec2", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeInstances", "Version": "2016-11-15",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
@@ -646,11 +663,12 @@ func TestCFNIdentity_UnpartitionedServicesStillWork(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	// Read back as an *unsigned* caller, which is a different account from the
-	// signed one that created the stack. An unpartitioned key is found anyway,
-	// which is the pre-existing behavior this fix must not change.
+	// Read back as a different account from the one that created the stack, which
+	// created it unsigned and so as the default. An unpartitioned key is found
+	// anyway, which is the pre-existing behavior this fix must not change.
 	head := httptest.NewRequest(http.MethodHead, "http://s3.amazonaws.com/cfn-shared-bucket", nil)
 	head.Host = "s3.amazonaws.com"
+	signAs(head, testCredentialsFor(cfnOtherAccount), "s3", "us-east-1", nil)
 	hw := httptest.NewRecorder()
 	ts.srv.ServeHTTP(hw, head)
 	assert.Equal(t, http.StatusOK, hw.Code,
@@ -679,11 +697,10 @@ func TestCFNIdentity_InProcessDeployerDefaultsToSubstratesOwn(t *testing.T) {
 	require.Empty(t, result.Resources[0].Error)
 	instanceID := result.Resources[0].PhysicalID
 
-	// Visible to a default-partition read: signed (123456789012) in us-east-1.
-	code, body := cfnIdentityRequest(t, ts, "ec2", "us-east-1",
-		signedAuthHeader("ec2", "us-east-1"), map[string]string{
-			"Action": "DescribeInstances", "Version": "2016-11-15",
-		})
+	// Visible to a default-partition read: the default account in us-east-1.
+	code, body := cfnIdentityRequest(t, ts, "ec2", "us-east-1", "", map[string]string{
+		"Action": "DescribeInstances", "Version": "2016-11-15",
+	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Contains(t, body, instanceID,
 		"an in-process deploy lands in substrate's default partition")
@@ -712,7 +729,7 @@ func TestCFNIdentity_ExplicitIdentityOverridesTheDefault(t *testing.T) {
 
 	// And the log group is in that partition, not the default one.
 	code, body := cfnJSONRequest(t, ts, "logs", "us-east-1",
-		"Logs_20140328.DescribeLogGroups", signedAuthHeader("logs", "us-east-1"), `{}`)
+		"Logs_20140328.DescribeLogGroups", "", `{}`)
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.NotContains(t, body, "/g-999988887777-ap-southeast-2",
 		"a default-partition read must not see it")

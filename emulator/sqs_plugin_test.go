@@ -90,8 +90,8 @@ func TestSQSPlugin_CreateGetDelete(t *testing.T) {
 	body2 := readBody(t, resp2)
 	assert.Contains(t, body2, "test-queue")
 
-	// Delete queue (account "000000000000" = fallback when no auth header).
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/test-queue"
+	// Delete queue (account "123456789012" = fallback when no auth header).
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/test-queue"
 	resp3 := sqsRequest(t, srv, map[string]string{
 		"Action":   "DeleteQueue",
 		"QueueUrl": queueURL,
@@ -109,7 +109,7 @@ func TestSQSPlugin_CreateGetDelete(t *testing.T) {
 func TestSQSPlugin_SendReceiveDelete(t *testing.T) {
 	srv, _ := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/msg-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/msg-queue"
 
 	// Create queue.
 	sqsRequest(t, srv, map[string]string{
@@ -174,7 +174,7 @@ func TestSQSPlugin_SendReceiveDelete(t *testing.T) {
 func TestSQSPlugin_VisibilityTimeout(t *testing.T) {
 	srv, tc := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/vis-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/vis-queue"
 
 	sqsRequest(t, srv, map[string]string{
 		"Action":    "CreateQueue",
@@ -222,7 +222,7 @@ func TestSQSPlugin_VisibilityTimeout(t *testing.T) {
 func TestSQSPlugin_ReceiveMessage_DelaySeconds(t *testing.T) {
 	srv, tc := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/delay-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/delay-queue"
 
 	sqsRequest(t, srv, map[string]string{
 		"Action":    "CreateQueue",
@@ -292,7 +292,7 @@ func TestSQSPlugin_ListQueues(t *testing.T) {
 func TestSQSPlugin_SendMessageBatch(t *testing.T) {
 	srv, _ := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/batch-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/batch-queue"
 
 	sqsRequest(t, srv, map[string]string{
 		"Action":    "CreateQueue",
@@ -327,7 +327,7 @@ func TestSQSPlugin_SendMessageBatch(t *testing.T) {
 func TestSQSPlugin_PurgeQueue(t *testing.T) {
 	srv, _ := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/purge-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/purge-queue"
 
 	sqsRequest(t, srv, map[string]string{
 		"Action":    "CreateQueue",
@@ -369,7 +369,7 @@ func TestSQSPlugin_GetQueueAttributes(t *testing.T) {
 		"QueueName": "attrs-queue",
 	})
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/attrs-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/attrs-queue"
 	resp := sqsRequest(t, srv, map[string]string{
 		"Action":   "GetQueueAttributes",
 		"QueueUrl": queueURL,
@@ -383,7 +383,7 @@ func TestSQSPlugin_GetQueueAttributes(t *testing.T) {
 func TestSQSPlugin_ChangeMessageVisibility(t *testing.T) {
 	srv, _ := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/cmv-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/cmv-queue"
 	sqsRequest(t, srv, map[string]string{
 		"Action":    "CreateQueue",
 		"QueueName": "cmv-queue",
@@ -439,7 +439,7 @@ func TestSQSPlugin_TagUntagListTags(t *testing.T) {
 		"Action":    "CreateQueue",
 		"QueueName": "tag-queue",
 	})
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/tag-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/tag-queue"
 
 	// Tag the queue.
 	sqsRequest(t, srv, map[string]string{
@@ -478,7 +478,7 @@ func TestSQSPlugin_TagUntagListTags(t *testing.T) {
 func TestSQSPlugin_DeleteMessageBatch(t *testing.T) {
 	srv, _ := newSQSTestServer(t)
 
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/dmbatch-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/dmbatch-queue"
 	sqsRequest(t, srv, map[string]string{
 		"Action":    "CreateQueue",
 		"QueueName": "dmbatch-queue",
@@ -534,7 +534,7 @@ func TestSQSPlugin_SetQueueAttributes(t *testing.T) {
 		"Action":    "CreateQueue",
 		"QueueName": "setattr-queue",
 	})
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/setattr-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/setattr-queue"
 
 	// Set VisibilityTimeout to 60.
 	resp := sqsRequest(t, srv, map[string]string{
@@ -628,7 +628,7 @@ func TestSQSPlugin_JSON_GetQueueAttributes(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "attrs-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/attrs-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/attrs-json-queue"
 
 	resp := sqsJSONRequest(t, srv, "GetQueueAttributes", map[string]interface{}{
 		"QueueUrl":       qURL,
@@ -648,7 +648,7 @@ func TestSQSPlugin_JSON_SetQueueAttributes(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "setattr-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/setattr-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/setattr-json-queue"
 
 	resp := sqsJSONRequest(t, srv, "SetQueueAttributes", map[string]interface{}{
 		"QueueUrl":   qURL,
@@ -670,7 +670,7 @@ func TestSQSPlugin_JSON_SendReceiveDeleteMessage(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "msg-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/msg-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/msg-json-queue"
 
 	// Send message.
 	resp := sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
@@ -718,7 +718,7 @@ func TestSQSPlugin_JSON_ReceiveMessage_Empty(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "empty-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/empty-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/empty-json-queue"
 
 	resp := sqsJSONRequest(t, srv, "ReceiveMessage", map[string]interface{}{
 		"QueueUrl":            qURL,
@@ -768,7 +768,7 @@ func TestSQSPlugin_JSON_PurgeQueue(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "purge-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/purge-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/purge-json-queue"
 
 	for i := 0; i < 3; i++ {
 		sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
@@ -796,7 +796,7 @@ func TestSQSPlugin_JSON_SendMessageBatch(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "batch-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/batch-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/batch-json-queue"
 
 	resp := sqsJSONRequest(t, srv, "SendMessageBatch", map[string]interface{}{
 		"QueueUrl": qURL,
@@ -825,7 +825,7 @@ func TestSQSPlugin_JSON_TagUntagListQueueTags(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "tag-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/tag-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/tag-json-queue"
 
 	// Tag the queue.
 	resp := sqsJSONRequest(t, srv, "TagQueue", map[string]interface{}{
@@ -866,7 +866,7 @@ func TestSQSPlugin_JSON_ChangeMessageVisibility(t *testing.T) {
 	sqsJSONRequest(t, srv, "CreateQueue", map[string]interface{}{
 		"QueueName": "cmv-json-queue",
 	})
-	qURL := "http://sqs.us-east-1.localhost/000000000000/cmv-json-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/cmv-json-queue"
 
 	sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
 		"QueueUrl":    qURL,
@@ -907,7 +907,7 @@ func TestSQSPlugin_JSON_Error_NonExistentQueue(t *testing.T) {
 	srv, _ := newSQSTestServer(t)
 
 	resp := sqsJSONRequest(t, srv, "SendMessage", map[string]interface{}{
-		"QueueUrl":    "http://sqs.us-east-1.localhost/000000000000/no-such-queue",
+		"QueueUrl":    "http://sqs.us-east-1.localhost/123456789012/no-such-queue",
 		"MessageBody": "test",
 	})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -937,7 +937,7 @@ func TestSQSPlugin_JSON_Error_NonExistentQueue(t *testing.T) {
 // registered as errProtoJSONRPC. Both protocol rows therefore assert the same JSON
 // shape; that is deliberate, not an oversight.
 func TestSQS_QueueDoesNotExist_AllOperations(t *testing.T) {
-	const missingURL = "http://sqs.us-east-1.localhost/000000000000/no-such-queue"
+	const missingURL = "http://sqs.us-east-1.localhost/123456789012/no-such-queue"
 
 	// Each case names an operation and the minimum extra parameters it needs to
 	// reach the queue lookup.
@@ -996,7 +996,7 @@ func TestSQSPlugin_CrossProtocol(t *testing.T) {
 		"QueueName": "cross-queue",
 	})
 	require.Equal(t, http.StatusOK, respCreate.StatusCode)
-	qURL := "http://sqs.us-east-1.localhost/000000000000/cross-queue"
+	qURL := "http://sqs.us-east-1.localhost/123456789012/cross-queue"
 
 	// Send via query protocol.
 	sqsRequest(t, srv, map[string]string{

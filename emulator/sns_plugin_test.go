@@ -78,7 +78,7 @@ func TestSNSPlugin_CreateTopic(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readSNSBody(t, resp)
-	assert.Contains(t, body, "arn:aws:sns:us-east-1:000000000000:my-topic")
+	assert.Contains(t, body, "arn:aws:sns:us-east-1:123456789012:my-topic")
 
 	// Idempotent create — same ARN returned.
 	resp2 := snsRequest(t, srv, map[string]string{
@@ -87,7 +87,7 @@ func TestSNSPlugin_CreateTopic(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 	body2 := readSNSBody(t, resp2)
-	assert.Contains(t, body2, "arn:aws:sns:us-east-1:000000000000:my-topic")
+	assert.Contains(t, body2, "arn:aws:sns:us-east-1:123456789012:my-topic")
 }
 
 func TestSNSPlugin_DeleteTopic(t *testing.T) {
@@ -103,7 +103,7 @@ func TestSNSPlugin_DeleteTopic(t *testing.T) {
 	// Delete topic.
 	resp2 := snsRequest(t, srv, map[string]string{
 		"Action":   "DeleteTopic",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:delete-me",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:delete-me",
 	})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 
@@ -127,9 +127,9 @@ func TestSNSPlugin_Subscribe(t *testing.T) {
 	// Subscribe with SQS protocol.
 	resp := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:sub-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:sub-topic",
 		"Protocol": "sqs",
-		"Endpoint": "https://sqs.us-east-1.amazonaws.com/000000000000/my-queue",
+		"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue",
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readSNSBody(t, resp)
@@ -147,9 +147,9 @@ func TestSNSPlugin_Unsubscribe(t *testing.T) {
 
 	subResp := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:unsub-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:unsub-topic",
 		"Protocol": "sqs",
-		"Endpoint": "https://sqs.us-east-1.amazonaws.com/000000000000/my-queue",
+		"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/my-queue",
 	})
 	assert.Equal(t, http.StatusOK, subResp.StatusCode)
 	subBody := readSNSBody(t, subResp)
@@ -197,15 +197,15 @@ func TestSNSPlugin_ListSubscriptions(t *testing.T) {
 	})
 	snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:list-sub-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:list-sub-topic",
 		"Protocol": "sqs",
-		"Endpoint": "https://sqs.us-east-1.amazonaws.com/000000000000/q1",
+		"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/q1",
 	})
 	snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:list-sub-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:list-sub-topic",
 		"Protocol": "sqs",
-		"Endpoint": "https://sqs.us-east-1.amazonaws.com/000000000000/q2",
+		"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/q2",
 	})
 
 	resp := snsRequest(t, srv, map[string]string{
@@ -227,7 +227,7 @@ func TestSNSPlugin_Publish(t *testing.T) {
 	// Publish without subscribers — should succeed.
 	resp := snsRequest(t, srv, map[string]string{
 		"Action":   "Publish",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:publish-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:publish-topic",
 		"Message":  "hello world",
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -246,7 +246,7 @@ func TestSNSPlugin_TagResource_ListTagsForResource(t *testing.T) {
 	// Tag the topic.
 	resp := snsRequest(t, srv, map[string]string{
 		"Action":              "TagResource",
-		"ResourceArn":         "arn:aws:sns:us-east-1:000000000000:tagged-topic",
+		"ResourceArn":         "arn:aws:sns:us-east-1:123456789012:tagged-topic",
 		"Tags.member.1.Key":   "Env",
 		"Tags.member.1.Value": "test",
 	})
@@ -255,7 +255,7 @@ func TestSNSPlugin_TagResource_ListTagsForResource(t *testing.T) {
 	// List tags.
 	resp2 := snsRequest(t, srv, map[string]string{
 		"Action":      "ListTagsForResource",
-		"ResourceArn": "arn:aws:sns:us-east-1:000000000000:tagged-topic",
+		"ResourceArn": "arn:aws:sns:us-east-1:123456789012:tagged-topic",
 	})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 	body2 := readSNSBody(t, resp2)
@@ -297,12 +297,12 @@ func TestSNS_Publish_SQSEnvelope(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, resp2.StatusCode)
 
-	queueURL := "http://sqs.us-east-1.amazonaws.com/000000000000/envelope-queue"
+	queueURL := "http://sqs.us-east-1.amazonaws.com/123456789012/envelope-queue"
 
 	// Subscribe SQS to topic.
 	resp3 := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:envelope-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:envelope-topic",
 		"Protocol": "sqs",
 		"Endpoint": queueURL,
 	})
@@ -311,7 +311,7 @@ func TestSNS_Publish_SQSEnvelope(t *testing.T) {
 	// Publish message.
 	resp4 := snsRequest(t, srv, map[string]string{
 		"Action":   "Publish",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:envelope-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:envelope-topic",
 		"Message":  "hello from sns",
 		"Subject":  "Test Subject",
 	})
@@ -373,7 +373,7 @@ func TestSNS_Publish_HTTPEndpoint(t *testing.T) {
 	// Subscribe HTTP endpoint.
 	resp2 := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:http-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:http-topic",
 		"Protocol": "http",
 		"Endpoint": endpoint.URL,
 	})
@@ -382,7 +382,7 @@ func TestSNS_Publish_HTTPEndpoint(t *testing.T) {
 	// Publish message.
 	resp3 := snsRequest(t, srv, map[string]string{
 		"Action":   "Publish",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:http-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:http-topic",
 		"Message":  "hello http",
 		"Subject":  "HTTP Test",
 	})
@@ -436,40 +436,40 @@ func TestSNS_Publish_FilterPolicy(t *testing.T) {
 	resp2 := sqsRequestViaSNSServer(t, srv, map[string]string{"Action": "CreateQueue", "QueueName": "filter-queue"})
 	require.Equal(t, http.StatusOK, resp2.StatusCode)
 
-	queueURL := "http://sqs.us-east-1.amazonaws.com/000000000000/filter-queue"
+	queueURL := "http://sqs.us-east-1.amazonaws.com/123456789012/filter-queue"
 
 	// Subscribe with filter policy. We need to seed the filter policy directly
 	// into state since SetSubscriptionAttributes is not yet integrated.
 	resp3 := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:filter-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:filter-topic",
 		"Protocol": "sqs",
 		"Endpoint": queueURL,
 	})
 	require.Equal(t, http.StatusOK, resp3.StatusCode)
 
 	// Seed filter policy directly into state on the subscription.
-	subKeys, _ := state.List(context.Background(), "sns", "sub_ids:000000000000/us-east-1/filter-topic")
+	subKeys, _ := state.List(context.Background(), "sns", "sub_ids:123456789012/us-east-1/filter-topic")
 	require.NotEmpty(t, subKeys)
 
 	// Load subscription IDs.
-	subIDsData, _ := state.Get(context.Background(), "sns", "sub_ids:000000000000/us-east-1/filter-topic")
+	subIDsData, _ := state.Get(context.Background(), "sns", "sub_ids:123456789012/us-east-1/filter-topic")
 	var subIDs []string
 	require.NoError(t, json.Unmarshal(subIDsData, &subIDs))
 	require.Len(t, subIDs, 1)
 
 	// Load subscription, add filter policy, save.
-	subData, _ := state.Get(context.Background(), "sns", "subscription:000000000000/us-east-1/"+subIDs[0])
+	subData, _ := state.Get(context.Background(), "sns", "subscription:123456789012/us-east-1/"+subIDs[0])
 	var sub emulator.SNSSubscription
 	require.NoError(t, json.Unmarshal(subData, &sub))
 	sub.FilterPolicy = map[string]interface{}{"color": []interface{}{"red", "blue"}}
 	updated, _ := json.Marshal(sub)
-	require.NoError(t, state.Put(context.Background(), "sns", "subscription:000000000000/us-east-1/"+subIDs[0], updated))
+	require.NoError(t, state.Put(context.Background(), "sns", "subscription:123456789012/us-east-1/"+subIDs[0], updated))
 
 	// Publish matching message (color=red) → should be delivered.
 	resp4 := snsRequest(t, srv, map[string]string{
 		"Action":                         "Publish",
-		"TopicArn":                       "arn:aws:sns:us-east-1:000000000000:filter-topic",
+		"TopicArn":                       "arn:aws:sns:us-east-1:123456789012:filter-topic",
 		"Message":                        "red message",
 		"MessageAttributes.entry.1.Name": "color",
 		"MessageAttributes.entry.1.Value.DataType":    "String",
@@ -480,7 +480,7 @@ func TestSNS_Publish_FilterPolicy(t *testing.T) {
 	// Publish non-matching message (color=green) → should NOT be delivered.
 	resp5 := snsRequest(t, srv, map[string]string{
 		"Action":                         "Publish",
-		"TopicArn":                       "arn:aws:sns:us-east-1:000000000000:filter-topic",
+		"TopicArn":                       "arn:aws:sns:us-east-1:123456789012:filter-topic",
 		"Message":                        "green message",
 		"MessageAttributes.entry.1.Name": "color",
 		"MessageAttributes.entry.1.Value.DataType":    "String",

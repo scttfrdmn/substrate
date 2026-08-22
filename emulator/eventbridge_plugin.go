@@ -504,7 +504,7 @@ func (p *EventBridgePlugin) putEvents(ctx *RequestContext, req *AWSRequest) (*AW
 	return ebJSONResponse(http.StatusOK, response{FailedEntryCount: failedCount, Entries: results})
 }
 
-func (p *EventBridgePlugin) listEventBuses(_ *RequestContext) (*AWSResponse, error) {
+func (p *EventBridgePlugin) listEventBuses(reqCtx *RequestContext) (*AWSResponse, error) {
 	type eventBus struct {
 		Name   string `json:"Name"`
 		ARN    string `json:"Arn"`
@@ -513,9 +513,14 @@ func (p *EventBridgePlugin) listEventBuses(_ *RequestContext) (*AWSResponse, err
 	type response struct {
 		EventBuses []eventBus `json:"EventBuses"`
 	}
+	// The default bus exists in every account and Region, so its ARN is the
+	// caller's — not the us-east-1/000000000000 literal this returned before
+	// (#734), which named a bus in neither the account nor the Region the caller
+	// was addressing and so matched no ARN-scoped policy and no rule this plugin
+	// went on to store.
 	return ebJSONResponse(http.StatusOK, response{
 		EventBuses: []eventBus{
-			{Name: "default", ARN: "arn:aws:events:us-east-1:000000000000:event-bus/default"},
+			{Name: "default", ARN: ebEventBusARN(reqCtx, "default")},
 		},
 	})
 }

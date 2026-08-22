@@ -28,7 +28,7 @@ func TestLambdaExecutor_GracefulDegradation_WithDocker(t *testing.T) {
 	// "docker run" fails immediately without pulling anything.
 	fn := emulator.LambdaFunction{
 		FunctionName: "docker-fail-fn",
-		FunctionArn:  "arn:aws:lambda:us-east-1:000000000000:function:docker-fail-fn",
+		FunctionArn:  "arn:aws:lambda:us-east-1:123456789012:function:docker-fail-fn",
 		Runtime:      "python3.12",
 		Handler:      "index.handler",
 		PackageType:  "Image",
@@ -66,7 +66,7 @@ func TestLambdaExecutor_StopAll_WithPool(t *testing.T) {
 		WarmPoolTTL: 5 * time.Minute,
 	}, logger, false)
 	// Inject a fake pool entry to exercise the stop-container path.
-	emulator.InjectPoolEntryForTest(exec, "arn:aws:lambda:us-east-1:000000000000:function:f",
+	emulator.InjectPoolEntryForTest(exec, "arn:aws:lambda:us-east-1:123456789012:function:f",
 		"nonexistent-container-id-xyz")
 	// StopAll logs the error but must not panic.
 	exec.StopAll()

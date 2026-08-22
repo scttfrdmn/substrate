@@ -1021,7 +1021,7 @@ func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateMa
 		tc:       tc,
 		logger:   logger,
 		costs:    costs,
-		identity: cfnIdentity{accountID: testAccountID, region: defaultRegion},
+		identity: cfnIdentity{accountID: defaultAccountID, region: defaultRegion},
 	}
 	for _, opt := range opts {
 		opt(d)

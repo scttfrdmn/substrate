@@ -71,14 +71,14 @@ func (p *ServiceQuotasPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequ
 
 // sqAccountID returns the account a quota-increase record belongs to.
 //
-// A nil context, or one carrying no account, falls back to the same placeholder
-// every increase used to be filed under (#624). That is not a guess about the
-// caller: it is the account substrate's own parser assigns a request it cannot
-// attribute, so a plugin driven directly by a unit test keeps landing where it
-// always did rather than under "".
+// A nil context, or one carrying no account, falls back to the account substrate
+// attributes an unconfigured request to (#624). That is not a guess about the
+// caller: it is what every request off the wire resolves to, so a plugin driven
+// directly by a unit test files its increase where an HTTP caller would rather
+// than under "".
 func sqAccountID(reqCtx *RequestContext) string {
 	if reqCtx == nil || reqCtx.AccountID == "" {
-		return fallbackAccountID
+		return defaultAccountID
 	}
 	return reqCtx.AccountID
 }

@@ -232,7 +232,7 @@ func TestAPIGatewayProxy_LambdaNotFound(t *testing.T) {
 	proxyPutMethod(t, ts, apiID, resourceID, "GET")
 
 	// Put integration pointing to a non-existent Lambda function.
-	ghostARN := "arn:aws:lambda:us-east-1:000000000000:function:ghost-fn"
+	ghostARN := "arn:aws:lambda:us-east-1:123456789012:function:ghost-fn"
 	uri := fmt.Sprintf("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/%s/invocations", ghostARN)
 	proxyCreateIntegration(t, ts, apiID, resourceID, "GET", uri)
 
@@ -268,7 +268,7 @@ func TestAPIGatewayProxy_EndToEnd(t *testing.T) {
 
 	// Put GET method + AWS_PROXY integration pointing at the Lambda function.
 	proxyPutMethod(t, ts, apiID, resourceID, "GET")
-	acct := "000000000000"
+	acct := "123456789012"
 	lambdaARN := fmt.Sprintf("arn:aws:lambda:us-east-1:%s:function:%s", acct, fnName)
 	uri := fmt.Sprintf("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/%s/invocations", lambdaARN)
 	proxyCreateIntegration(t, ts, apiID, resourceID, "GET", uri)
@@ -321,7 +321,7 @@ func TestAPIGatewayProxy_V2EndToEnd(t *testing.T) {
 	fnName := fmt.Sprintf("proxy-v2-fn-%d", time.Now().UnixNano())
 	proxyCreateLambdaFunction(t, ts, fnName)
 
-	acct := "000000000000"
+	acct := "123456789012"
 	lambdaARN := fmt.Sprintf("arn:aws:lambda:us-east-1:%s:function:%s", acct, fnName)
 	lambdaURI := fmt.Sprintf("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/%s/invocations", lambdaARN)
 
@@ -424,7 +424,7 @@ func proxyCreateLambdaFunction(t *testing.T, ts *emulator.TestServer, name strin
 	payload, _ := json.Marshal(map[string]interface{}{
 		"FunctionName": name,
 		"Runtime":      "python3.12",
-		"Role":         "arn:aws:iam::000000000000:role/test",
+		"Role":         "arn:aws:iam::123456789012:role/test",
 		"Handler":      "index.handler",
 	})
 	resp := proxyDoRequest(t, ts, http.MethodPost, "/2015-03-31/functions",

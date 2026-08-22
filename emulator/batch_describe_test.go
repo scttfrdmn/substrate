@@ -41,12 +41,17 @@ func batchPost(t *testing.T, ts *httptest.Server, path string, body interface{})
 	return resp.StatusCode, string(batchBody(t, resp))
 }
 
+// batchOtherAccount is an account other than the one substrate attributes an
+// unsigned request to, so a test here can be two callers. Reaching it means signing
+// as it: nothing else on the wire names an account (#734).
+const batchOtherAccount = "888899990000"
+
 // batchIdentityRequest posts to a Batch path as a particular caller: the Region comes
-// from the host the request is addressed to and the account from the Authorization
-// header, which is how the server resolves both. An empty authHeader is an unsigned
-// caller.
+// from the host the request is addressed to and the account from the signature, which
+// is how the server resolves both. An empty account is an unsigned caller, which
+// resolves to substrate's default account.
 func batchIdentityRequest(
-	t *testing.T, ts *httptest.Server, region, authHeader, path string, body interface{},
+	t *testing.T, ts *httptest.Server, region, account, path string, body interface{},
 ) (int, string) {
 	t.Helper()
 	data, err := json.Marshal(body)
@@ -55,8 +60,8 @@ func batchIdentityRequest(
 	require.NoError(t, err)
 	req.Host = "batch." + region + ".amazonaws.com"
 	req.Header.Set("Content-Type", "application/json")
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
+	if account != "" {
+		signAs(req, testCredentialsFor(account), "batch", region, data)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -437,43 +442,44 @@ func TestBatchDescribe_Pagination(t *testing.T) {
 func TestBatchDescribe_ScopedToTheCaller(t *testing.T) {
 	ts := newBatchTestServer(t)
 
-	// Unsigned resolves to 000000000000; an AKIA-signed request to 123456789012.
-	const unsigned = ""
-	signed := signedAuthHeader("batch", "us-east-1")
-	signedWest := signedAuthHeader("batch", "eu-west-1")
+	// Two accounts: an unsigned request resolves to substrate's default, and one
+	// signed as batchOtherAccount to that one. The second account also appears in
+	// eu-west-1, so the Region half of the scope is exercised independently.
+	const defaultCaller = ""
+	const otherCaller = batchOtherAccount
 
-	create := func(auth, region, name string) string {
+	create := func(account, region, name string) string {
 		t.Helper()
-		code, body := batchIdentityRequest(t, ts, region, auth, "/v1/createcomputeenvironment",
+		code, body := batchIdentityRequest(t, ts, region, account, "/v1/createcomputeenvironment",
 			map[string]interface{}{"computeEnvironmentName": name, "type": "MANAGED"})
 		require.Equal(t, http.StatusOK, code, "body was %s", body)
 		return body
 	}
 
-	zero := create(unsigned, "us-east-1", "zero-owned")
-	test := create(signed, "us-east-1", "test-owned")
-	west := create(signedWest, "eu-west-1", "west-owned")
+	own := create(defaultCaller, "us-east-1", "default-owned")
+	other := create(otherCaller, "us-east-1", "other-owned")
+	west := create(otherCaller, "eu-west-1", "west-owned")
 
-	assert.Contains(t, zero, `"computeEnvironmentArn":"arn:aws:batch:us-east-1:000000000000:compute-environment/zero-owned"`)
-	assert.Contains(t, test, `:123456789012:compute-environment/test-owned"`,
-		"the ARN carries the caller's account, not a hardcoded 000000000000")
+	assert.Contains(t, own, `"computeEnvironmentArn":"arn:aws:batch:us-east-1:123456789012:compute-environment/default-owned"`)
+	assert.Contains(t, other, `:`+batchOtherAccount+`:compute-environment/other-owned"`,
+		"the ARN carries the caller's account, not a hardcoded one")
 	assert.Contains(t, west, `"computeEnvironmentArn":"arn:aws:batch:eu-west-1:`,
 		"the ARN carries the caller's Region, not a hardcoded us-east-1")
 
 	// Each caller's unfiltered describe reports its own environment and no other's.
 	cases := []struct {
-		auth    string
+		account string
 		region  string
 		want    string
 		notWant []string
 	}{
-		{unsigned, "us-east-1", "zero-owned", []string{"test-owned", "west-owned"}},
-		{signed, "us-east-1", "test-owned", []string{"zero-owned", "west-owned"}},
-		{signedWest, "eu-west-1", "west-owned", []string{"zero-owned", "test-owned"}},
+		{defaultCaller, "us-east-1", "default-owned", []string{"other-owned", "west-owned"}},
+		{otherCaller, "us-east-1", "other-owned", []string{"default-owned", "west-owned"}},
+		{otherCaller, "eu-west-1", "west-owned", []string{"default-owned", "other-owned"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.want, func(t *testing.T) {
-			code, body := batchIdentityRequest(t, ts, tc.region, tc.auth,
+			code, body := batchIdentityRequest(t, ts, tc.region, tc.account,
 				"/v1/describecomputeenvironments", map[string]interface{}{})
 			require.Equal(t, http.StatusOK, code, "body was %s", body)
 			assert.Contains(t, body, `"computeEnvironmentName":"`+tc.want+`"`)
@@ -484,7 +490,7 @@ func TestBatchDescribe_ScopedToTheCaller(t *testing.T) {
 			// And a name filter cannot cross the scope either: naming another
 			// caller's environment reports nothing, not that caller's record.
 			for _, other := range tc.notWant {
-				code, body := batchIdentityRequest(t, ts, tc.region, tc.auth,
+				code, body := batchIdentityRequest(t, ts, tc.region, tc.account,
 					"/v1/describecomputeenvironments",
 					map[string]interface{}{"computeEnvironments": []string{other}})
 				require.Equal(t, http.StatusOK, code, "body was %s", body)
@@ -496,8 +502,8 @@ func TestBatchDescribe_ScopedToTheCaller(t *testing.T) {
 
 	// A job definition's revision counter is scoped the same way: two callers each
 	// registering one definition of the same name both get revision 1.
-	for _, auth := range []string{unsigned, signed} {
-		code, body := batchIdentityRequest(t, ts, "us-east-1", auth, "/v1/registerjobdefinition",
+	for _, account := range []string{defaultCaller, otherCaller} {
+		code, body := batchIdentityRequest(t, ts, "us-east-1", account, "/v1/registerjobdefinition",
 			map[string]interface{}{"jobDefinitionName": "shared", "type": "container"})
 		require.Equal(t, http.StatusOK, code, "body was %s", body)
 		assert.Contains(t, body, `"revision":1`,
@@ -513,7 +519,7 @@ func TestBatchDescribe_ScopedToTheCaller(t *testing.T) {
 	// caller's names consume this caller's page and the count and token come out
 	// wrong. The result would be a caller paging forever through pages that are
 	// mysteriously short.
-	code, body := batchIdentityRequest(t, ts, "us-east-1", signed,
+	code, body := batchIdentityRequest(t, ts, "us-east-1", otherCaller,
 		"/v1/describecomputeenvironments", map[string]interface{}{"maxResults": 1})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Len(t, batchMembers(t, body, "computeEnvironments"), 1,

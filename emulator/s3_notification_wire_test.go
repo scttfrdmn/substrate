@@ -261,8 +261,8 @@ func TestS3Notification_FiresSQSFromRealS3Body(t *testing.T) {
 		"Action":    "CreateQueue",
 		"QueueName": "wire-notify-queue",
 	})
-	const queueARN = "arn:aws:sqs:us-east-1:000000000000:wire-notify-queue"
-	const queueURL = "http://sqs.us-east-1.localhost/000000000000/wire-notify-queue"
+	const queueARN = "arn:aws:sqs:us-east-1:123456789012:wire-notify-queue"
+	const queueURL = "http://sqs.us-east-1.localhost/123456789012/wire-notify-queue"
 
 	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/fire-wire", nil, nil).Code)
 	require.Equal(t, http.StatusOK, putNotification(t, srv, "fire-wire", notificationXML(queueARN)).Code)
@@ -293,8 +293,8 @@ func TestS3Notification_KeyFilterAppliesOnDispatch(t *testing.T) {
 		"Action":    "CreateQueue",
 		"QueueName": "filtered-queue",
 	})
-	const queueARN = "arn:aws:sqs:us-east-1:000000000000:filtered-queue"
-	const queueURL = "http://sqs.us-east-1.localhost/000000000000/filtered-queue"
+	const queueARN = "arn:aws:sqs:us-east-1:123456789012:filtered-queue"
+	const queueURL = "http://sqs.us-east-1.localhost/123456789012/filtered-queue"
 
 	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/filter-fire", nil, nil).Code)
 	cfg := `<NotificationConfiguration><QueueConfiguration>` +

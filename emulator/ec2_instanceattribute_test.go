@@ -587,13 +587,13 @@ func TestEC2_InstanceAttribute_EmptyGroupSetIsStillPresent(t *testing.T) {
 		"instance_type": "t3.micro",
 		"image_id":      "ami-1",
 		"state":         map[string]any{"code": 16, "name": "running"},
-		"account_id":    "000000000000",
+		"account_id":    "123456789012",
 		"region":        "us-east-1",
 	}
 	raw, err := json.Marshal(inst)
 	require.NoError(t, err)
 	require.NoError(t, state.Put(context.Background(), "ec2",
-		"instance:000000000000/us-east-1/"+instID, raw))
+		"instance:123456789012/us-east-1/"+instID, raw))
 
 	resp := ec2Request(t, ts, map[string]string{
 		"Action": "DescribeInstanceAttribute", "InstanceId": instID, "Attribute": "groupSet",

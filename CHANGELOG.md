@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`account.default` in `substrate.yaml` sets the account every request is attributed to**
+  (#734). It defaults to `123456789012`, AWS's documented example account, and `Validate`
+  refuses a value that is not 12 digits rather than letting a typo through to every ARN the
+  server mints. `substrate.yaml.example` documents it beside `region:`, which it parallels.
+
+### Fixed
+- **One server serves one account** (#734). `ParseAWSRequest` decided the account from the
+  *shape of the access key*: a key beginning with `AKIA` was attributed to `123456789012`,
+  and everything else — substrate's own documented `test`/`test`, an unsigned request, an
+  `ASIA` session key — to `000000000000`. So one substrate process served two accounts,
+  chosen by which of two documented credentials the client happened to pick, and **nothing on
+  the wire told a caller which one they had.** A consumer who created an IAM user with one
+  credential and made a denied EC2 call with another saw the denial name an account their user
+  was not in.
+
+  The issue diagnosed this as the IAM plugin and the authorization path disagreeing about a
+  constant. That is refuted: both read `RequestContext.AccountID` and always have. The split
+  was upstream of both, in the parser, which is why it reached every service at once.
+
+  The account now comes from one place, in one order, each step knowing more than the last:
+  the built-in default, then `account.default`, then a `CredentialRegistry` entry, then an STS
+  session record — the last being the only thing that can know the account a cross-account
+  `AssumeRole` landed in, since a temporary credential's account is recorded when the session
+  is minted and appears nowhere on the wire. `extractAccount` and `fallbackAccountID` are gone,
+  along with the duplicate `seedSSMAccountID`.
+
+  A test parses every non-test Go file and fails on any string literal carrying an
+  account-shaped run of twelve digits, exempting only the declaration of the default itself —
+  a stronger rule than "no `000000000000`", because a second literal `123456789012` would be
+  just as wrong. It catches the one offender that survived: `ListEventBuses` returned
+  `arn:aws:events:us-east-1:000000000000:event-bus/default`, ignoring **both** of its request
+  context's fields, so a caller's own default event bus was reported in an account and a Region
+  that were not theirs. A second test asks three services who the caller is — `GetCallerIdentity`,
+  the CloudFormation deployer's stack ARN, and a DynamoDB table reached through the Resource
+  Groups Tagging API's account-prefixed state key — and compares the answers, for two accounts,
+  because a producer that returns a constant agrees with itself.
+
+  Deliberately not covered, each documented in `docs/services.md` and filed: IAM's state keys
+  stay account-blind, so an entity still resolves by name across accounts (#737);
+  `substrate.yaml`'s `credentials:` and `auth:` sections are still not read by `Config` (#736);
+  and the registry is still not wired into `cmd/substrate/main.go`, because wiring one also
+  switches SigV4 enforcement on and would 403 substrate's own documented credentials — the
+  decoupling is #630.
+
+- **EventBridge is reachable from a real SDK** (#734). Found while verifying the above with the
+  `aws` CLI: **every** EventBridge call answered `ServiceNotAvailable: service not emulated:
+  awsevents`. The target prefix in EventBridge's model is `AWSEvents`, not `AmazonEventBridge`,
+  and only the host alias (`events.*` → `eventbridge`) was registered. That is enough on a real
+  endpoint and useless on the one way substrate is actually reached: with `--endpoint-url` the
+  host is `localhost` and `X-Amz-Target` is the only signal. The plugin was registered, green,
+  and unreachable — the #561/#580 failure mode — so `ListEventBuses` returning the wrong account
+  had never been observable in the first place. A test now pins all three resolution paths, as
+  Config's does.
+
+  **Compatibility.** Every ARN returned to an unsigned or non-`AKIA` caller changes account, so
+  a fixture asserting on `000000000000` now sees `123456789012`. Several plugins prefix their
+  state keys with the account (`table:{account}/{name}`, `instance:{account}/{id}`), so
+  **persisted SQLite state written under the old account is unreachable** after upgrading:
+  re-seed it, or set `account.default: "000000000000"` to read it back.
+
 ## [v0.107.0] - 2026-08-21
 
 ### Added

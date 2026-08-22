@@ -463,7 +463,7 @@ func CFNResolveWithMappingsForTest(
 		evaluating: map[string]bool{},
 		mappings:   mappings,
 		region:     region,
-		accountID:  testAccountID,
+		accountID:  defaultAccountID,
 		stackName:  "teststack",
 	}
 	return resolveValue(v, cctx), cctx.takeFailures()
@@ -486,7 +486,7 @@ func CFNResolveListWithMappingsForTest(
 		evaluating: map[string]bool{},
 		mappings:   mappings,
 		region:     region,
-		accountID:  testAccountID,
+		accountID:  defaultAccountID,
 		stackName:  "teststack",
 	}
 	return resolveValueList(v, cctx), cctx.takeFailures()
@@ -516,7 +516,7 @@ func CFNResolveNestedWithMappingsForTest(
 		evaluating: map[string]bool{},
 		mappings:   mappings,
 		region:     region,
-		accountID:  testAccountID,
+		accountID:  defaultAccountID,
 		stackName:  "teststack",
 	}
 	return resolveNested(v, cctx), cctx.takeFailures()
@@ -545,7 +545,7 @@ func CFNResolveImportForTest(
 		imports:    map[string]bool{},
 		exports:    exports,
 		region:     defaultRegion,
-		accountID:  testAccountID,
+		accountID:  defaultAccountID,
 		stackName:  "teststack",
 	}
 	value = resolveValue(v, cctx)

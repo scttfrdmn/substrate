@@ -21,7 +21,7 @@ func TestPollAndInvoke(t *testing.T) {
 	// Create SQS queue.
 	queueName := fmt.Sprintf("esm-test-%d", time.Now().UnixNano())
 	esmCreateSQSQueue(t, ts, queueName)
-	acct := "000000000000" // fallbackAccountID used without auth
+	acct := "123456789012" // fallbackAccountID used without auth
 	queueURL := fmt.Sprintf("http://sqs.us-east-1.amazonaws.com/%s/%s", acct, queueName)
 
 	// Send two messages.
@@ -57,7 +57,7 @@ func TestESMPollerLifecycle(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 
 	queueName := fmt.Sprintf("esm-lifecycle-%d", time.Now().UnixNano())
-	acct := "000000000000"
+	acct := "123456789012"
 	region := "us-east-1"
 	sqsARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, acct, queueName)
 
@@ -75,7 +75,7 @@ func TestESMShutdown_StopsAll(t *testing.T) {
 	// Does not use t.Parallel() because we need to stop the server mid-test.
 	ts := emulator.StartTestServer(t)
 
-	acct := "000000000000"
+	acct := "123456789012"
 	region := "us-east-1"
 
 	for i := 0; i < 3; i++ {
@@ -136,7 +136,7 @@ func esmCreateLambdaFunction(t *testing.T, ts *emulator.TestServer, name string)
 	payload, _ := json.Marshal(map[string]interface{}{
 		"FunctionName": name,
 		"Runtime":      "python3.12",
-		"Role":         "arn:aws:iam::000000000000:role/test",
+		"Role":         "arn:aws:iam::123456789012:role/test",
 		"Handler":      "index.handler",
 	})
 	resp := esmDoRequest(t, ts, http.MethodPost, "/2015-03-31/functions",

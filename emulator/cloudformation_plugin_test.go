@@ -78,19 +78,29 @@ func newCFNTestServer(t *testing.T) *cfnTestServer {
 	}))
 	registry.Register(cfnp)
 
+	// A credential registry holding cfnOtherAccount, so a test here can be a caller
+	// other than the default one. It costs the unsigned requests below nothing:
+	// VerifySigV4 passes a request with no Authorization header, which resolves to
+	// the configured default account.
+	creds := emulator.NewCredentialRegistry()
+	creds.Register(testCredentialsFor(cfnOtherAccount))
+
 	srv := emulator.NewServer(*cfg, registry, store, state, tc, logger,
-		emulator.ServerOptions{Costs: emulator.NewCostController(emulator.CostConfig{Enabled: true})})
+		emulator.ServerOptions{
+			Costs:       emulator.NewCostController(emulator.CostConfig{Enabled: true}),
+			Credentials: creds,
+		})
 
 	return &cfnTestServer{srv: srv, state: state, registry: registry, tc: tc}
 }
 
-// cfnAuthHeader is a SigV4 Authorization header carrying a fake AKIA access
-// key, which extractAccount maps to the well-known test account 123456789012.
-const cfnAuthHeader = "AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20260101/" +
-	"us-east-1/cloudformation/aws4_request, SignedHeaders=host, Signature=fake"
-
 // cfnRequest posts a CloudFormation query-protocol request and returns the
 // status code and body.
+//
+// The request is unsigned, so it resolves to substrate's default account — which is
+// every account substrate has unless a caller signs as another one (#734). This used
+// to carry a fake AKIA-keyed Authorization header, because the account came from the
+// shape of the access key rather than from a signature that had to verify.
 func cfnRequest(t *testing.T, ts *cfnTestServer, params map[string]string) (int, string) {
 	t.Helper()
 	form := url.Values{}
@@ -101,10 +111,6 @@ func cfnRequest(t *testing.T, ts *cfnTestServer, params map[string]string) (int,
 		strings.NewReader(form.Encode()))
 	r.Host = "cloudformation.us-east-1.amazonaws.com"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Signing with an AKIA key resolves the request to the well-known test
-	// account, which is what a signed CLI or SDK request carries; without it the
-	// stack ARNs would name the zero account.
-	r.Header.Set("Authorization", cfnAuthHeader)
 	w := httptest.NewRecorder()
 	ts.srv.ServeHTTP(w, r)
 	body, err := io.ReadAll(w.Body)

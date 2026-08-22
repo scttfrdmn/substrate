@@ -718,7 +718,7 @@ func TestEC2_LaunchTemplate_PreVersioningStateStillWorks(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// Exactly the shape createLaunchTemplate wrote before #456: no "versions" key.
-	const acct, region, ltID = "000000000000", "us-east-1", "lt-0legacy00000001"
+	const acct, region, ltID = "123456789012", "us-east-1", "lt-0legacy00000001"
 	legacy := map[string]any{
 		"launchTemplateId":     ltID,
 		"launchTemplateName":   "legacy",

@@ -766,7 +766,7 @@ func TestIAMPlugin_CreatePolicy_Duplicate(t *testing.T) {
 func TestIAMPlugin_DeletePolicy_NotFound(t *testing.T) {
 	srv := newIAMTestServer(t)
 	resp := iamRequest(t, srv, "DeletePolicy", map[string]any{
-		"PolicyArn": "arn:aws:iam::000000000000:policy/nonexistent",
+		"PolicyArn": "arn:aws:iam::123456789012:policy/nonexistent",
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }

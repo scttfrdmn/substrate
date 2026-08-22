@@ -77,7 +77,7 @@ func TestScheduler_CreateGetDelete(t *testing.T) {
 	createBody := `{
 		"ScheduleExpression": "rate(5 minutes)",
 		"State": "ENABLED",
-		"Target": {"Arn": "arn:aws:lambda:us-east-1:000000000000:function:my-fn", "RoleArn": "arn:aws:iam::000000000000:role/my-role"},
+		"Target": {"Arn": "arn:aws:lambda:us-east-1:123456789012:function:my-fn", "RoleArn": "arn:aws:iam::123456789012:role/my-role"},
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/my-schedule", createBody)
@@ -124,7 +124,7 @@ func TestScheduler_UpdateSchedule(t *testing.T) {
 	createBody := `{
 		"ScheduleExpression": "rate(5 minutes)",
 		"State": "ENABLED",
-		"Target": {"Arn": "arn:aws:lambda:us-east-1:000000000000:function:my-fn", "RoleArn": "arn:aws:iam::000000000000:role/my-role"},
+		"Target": {"Arn": "arn:aws:lambda:us-east-1:123456789012:function:my-fn", "RoleArn": "arn:aws:iam::123456789012:role/my-role"},
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/update-test", createBody)
@@ -159,7 +159,7 @@ func TestScheduler_CreateDuplicate(t *testing.T) {
 
 	createBody := `{
 		"ScheduleExpression": "rate(1 hour)",
-		"Target": {"Arn": "arn:aws:sqs:us-east-1:000000000000:my-queue", "RoleArn": "arn:aws:iam::000000000000:role/my-role"},
+		"Target": {"Arn": "arn:aws:sqs:us-east-1:123456789012:my-queue", "RoleArn": "arn:aws:iam::123456789012:role/my-role"},
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 
@@ -177,7 +177,7 @@ func TestScheduler_ListSchedules(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	target := `{"Arn": "arn:aws:lambda:us-east-1:000000000000:function:fn", "RoleArn": "arn:aws:iam::000000000000:role/role"}`
+	target := `{"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/role"}`
 	ftw := `{"Mode": "OFF"}`
 
 	// Create 3 schedules: alpha-1, alpha-2, beta-1.
@@ -219,7 +219,7 @@ func TestScheduler_ListPagination(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	target := `{"Arn": "arn:aws:lambda:us-east-1:000000000000:function:fn", "RoleArn": "arn:aws:iam::000000000000:role/role"}`
+	target := `{"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/role"}`
 	ftw := `{"Mode": "OFF"}`
 
 	// Create 5 schedules.
@@ -282,7 +282,7 @@ func TestScheduler_TimestampFormat(t *testing.T) {
 
 	createBody := `{
 		"ScheduleExpression": "rate(1 hour)",
-		"Target": {"Arn": "arn:aws:lambda:us-east-1:000000000000:function:fn", "RoleArn": "arn:aws:iam::000000000000:role/r"},
+		"Target": {"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/r"},
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/ts-test", createBody)

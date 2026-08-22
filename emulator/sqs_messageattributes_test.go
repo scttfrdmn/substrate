@@ -209,7 +209,7 @@ func createAttrQueue(t *testing.T, srv *emulator.Server, name string) string {
 	t.Helper()
 	status, code := createQueueWithAttrs(t, srv, name, nil, false)
 	require.Equal(t, http.StatusOK, status, "create failed: %s", code)
-	return "http://sqs.us-east-1.localhost/000000000000/" + name
+	return "http://sqs.us-east-1.localhost/123456789012/" + name
 }
 
 // TestSQS_MessageAttributes_KnownGoodDigests is #461's "verified against a known-good
@@ -662,7 +662,7 @@ func TestSQS_MessageAttributes_FifoDedupReportsThisRequestsDigest(t *testing.T) 
 	status, code := createQueueWithAttrs(t, srv, "attr-dedup.fifo",
 		map[string]string{"FifoQueue": "true"}, false)
 	require.Equal(t, http.StatusOK, status, "create failed: %s", code)
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/attr-dedup.fifo"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/attr-dedup.fifo"
 
 	send := func(attrs []sqsMessageAttr) string {
 		t.Helper()

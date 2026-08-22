@@ -154,6 +154,72 @@ changed where IAM's code, message and status come from and left the shape alone.
 
 ---
 
+## Which account a request is attributed to
+
+Most plugins scope a resource to the account of the request that created it, and
+every ARN substrate mints names one, so "which account is this?" is a question with a
+single answer. Substrate resolves it in one place and in this order:
+
+| Source | When it applies |
+|---|---|
+| `123456789012` | Always, as the starting point. AWS's documented example account. |
+| `account.default` in `substrate.yaml` | Whenever it is set and 12 digits. Set it to whatever your fixtures assert on. |
+| A `CredentialRegistry` entry | When the request is signed with an access key the registry holds. |
+| An STS session record | When the request is signed with credentials `AssumeRole` minted. |
+
+Later rows win. The order is what it is because each row knows strictly more than the
+one above it: a config file knows the deployment, a registry knows which key belongs
+to which account, and only the session record knows the account a cross-account
+`AssumeRole` landed in — a temporary credential's account is recorded when the session
+is minted and appears nowhere on the wire.
+
+An **unsigned** request is attributed to the resolved default. That is deliberate:
+`VerifySigV4` passes a request carrying no `Authorization` header, so an unsigned
+caller reaches its plugin as the default account even against a server with a
+credential registry wired.
+
+### There is no second account for free
+
+Until [#734](https://github.com/scttfrdmn/substrate/issues/734), the account came
+from the *shape of the access key*: a key beginning with `AKIA` was attributed to
+`123456789012`, and everything else — substrate's own documented `test`/`test`, an
+unsigned request, an `ASIA` session key — to `000000000000`. One server served two
+accounts, chosen by which of two documented credentials the client happened to pick,
+and nothing on the wire told a caller which one they had.
+
+`000000000000` no longer exists anywhere in substrate. A test asserts it: every
+non-test Go file is parsed and any string literal carrying an account-shaped run of
+twelve digits fails the build, with one exemption for the declaration of the default
+itself. A run bounded by anything other than `:`, `/` or the end of the string is not
+an account — which is what keeps `shardId-000000000000` and the like out of it.
+
+**If a fixture asserts on `000000000000`, it now sees `123456789012`.** Two things
+follow. Every ARN returned to an unsigned or non-`AKIA` caller changes account. And
+because several plugins prefix their state keys with the account —
+`table:{account}/{name}`, `instance:{account}/{id}` — **persisted SQLite state written
+under the old account is unreachable** after upgrading. Re-seed it, or set
+`account.default: "000000000000"` to read it back.
+
+### What is deliberately not covered
+
+- **IAM's state keys are account-blind.** A user is stored under `user:{name}` with no
+  account in the key, so `resolveIAMEntity` resolves a principal by name across
+  accounts and two accounts cannot both hold a role of the same name. Filed as
+  [#737](https://github.com/scttfrdmn/substrate/issues/737); it is reachable only with
+  a credential registry, which is in-process only today.
+- **`substrate.yaml`'s `credentials:` and `auth:` sections are not read.** `Config` has
+  no fields for them, so the shipped `substrate server` discards both. Both subsystems
+  are real and reachable in-process through `ServerOptions`. Filed as
+  [#736](https://github.com/scttfrdmn/substrate/issues/736).
+- **Wiring a registry also switches SigV4 enforcement on**, because `Server` verifies
+  signatures exactly when `ServerOptions.Credentials` is non-nil. That coupling is why
+  the registry cannot simply be wired into the binary: substrate's documented
+  `test`/`test` credentials are in no registry and would start answering
+  `InvalidClientTokenId` 403. Decoupling the two is
+  [#630](https://github.com/scttfrdmn/substrate/issues/630).
+
+---
+
 ## CloudFormation
 
 **Endpoint:** `cloudformation.{region}.amazonaws.com`
@@ -250,7 +316,7 @@ caller that created the stack, so they are visible to that caller's reads and no
 one else's:
 
 ```
-# unsigned, so the caller is 000000000000
+# unsigned, so the caller is the default account — 123456789012
 aws --endpoint-url http://localhost:4566 cloudformation create-stack \
   --stack-name acct --template-body '{"Resources":{"I":{"Type":"AWS::EC2::Instance",
                      "Properties":{"ImageId":"ami-12345678","InstanceType":"t3.micro"}}}}'
@@ -265,7 +331,11 @@ built from either agrees with the stack ARN.
 The in-process `emulator.Client` deploys into substrate's default partition
 (`123456789012` / `us-east-1`). Its callers never sign a request, so there is no
 caller identity to take; an in-process caller that needs another partition can set
-one on the deployer with `emulator.WithDeployerIdentity`.
+one on the deployer with `emulator.WithDeployerIdentity`. An unsigned wire caller
+lands in the same partition — see
+[Which account a request is attributed to](#which-account-a-request-is-attributed-to)
+— so a stack deployed in process and one deployed over the wire are visible to each
+other without either side configuring anything.
 
 ### A stack's resource calls are authorized
 

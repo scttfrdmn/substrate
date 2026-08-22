@@ -457,7 +457,7 @@ func TestSQS_CreateQueue_DeletedRecentlyCounterIsIndependent(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status, "an unseeded lookup must not consume the create budget")
 
 	// ...and the create budget is still intact once the name is free.
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/indep-create-q"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/indep-create-q"
 	resp := sqsRequest(t, srv, map[string]string{"Action": "DeleteQueue", "QueueUrl": queueURL})
 	resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -513,7 +513,7 @@ func TestSQS_CreateQueue_DeletedRecentlyStateFailure(t *testing.T) {
 // presence.
 func sqsQueueAttribute(t *testing.T, srv *emulator.Server, name, attr string, jsonProto bool) string {
 	t.Helper()
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/" + name
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/" + name
 	if jsonProto {
 		resp := sqsJSONRequest(t, srv, "GetQueueAttributes", map[string]interface{}{
 			"QueueUrl":       queueURL,

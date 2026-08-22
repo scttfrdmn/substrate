@@ -232,7 +232,7 @@ func TestCFN_SNSSubscription(t *testing.T) {
 				"Properties": {
 					"TopicArn": {"Fn::GetAtt": ["MyTopic", "TopicArn"]},
 					"Protocol": "sqs",
-					"Endpoint": "https://sqs.us-east-1.amazonaws.com/000000000000/sub-cfn-queue"
+					"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/sub-cfn-queue"
 				}
 			}
 		}
@@ -327,7 +327,7 @@ func TestCFN_KMSReplicaKey(t *testing.T) {
 			"MyReplicaKey": {
 				"Type": "AWS::KMS::ReplicaKey",
 				"Properties": {
-					"PrimaryKeyArn": "arn:aws:kms:us-east-1:000000000000:key/stub",
+					"PrimaryKeyArn": "arn:aws:kms:us-east-1:123456789012:key/stub",
 					"Description": "Replica key"
 				}
 			}
@@ -607,7 +607,7 @@ func TestSNSPlugin_PublishBatch(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "batch-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:batch-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:batch-topic"
 
 	resp := snsRequest(t, srv, map[string]string{
 		"Action":                                 "PublishBatch",
@@ -663,14 +663,14 @@ func TestSNSPlugin_DispatchToSubscriber(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "fanout-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:fanout-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:fanout-topic"
 
 	// Subscribe SQS endpoint.
 	snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
 		"TopicArn": topicARN,
 		"Protocol": "sqs",
-		"Endpoint": "https://sqs.us-east-1.amazonaws.com/000000000000/fanout-queue",
+		"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/fanout-queue",
 	})
 
 	// Publish — triggers dispatchToSubscriber → SQS SendMessage.
@@ -704,7 +704,7 @@ func TestSNSPlugin_TagResourceReplaceKey(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "replace-tag-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:replace-tag-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:replace-tag-topic"
 
 	// Tag once.
 	snsRequest(t, srv, map[string]string{
@@ -1412,7 +1412,7 @@ func TestSNSPlugin_GetAndSetTopicAttributes(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "attr-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:attr-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:attr-topic"
 
 	// GetTopicAttributes.
 	resp := snsRequest(t, srv, map[string]string{
@@ -1438,7 +1438,7 @@ func TestSNSPlugin_ListSubscriptionsByTopic(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "subs-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:subs-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:subs-topic"
 
 	// Subscribe.
 	snsRequest(t, srv, map[string]string{
@@ -1466,7 +1466,7 @@ func TestSNSPlugin_GetSubscriptionAttributes(t *testing.T) {
 	})
 	subResp := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:gsa-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:gsa-topic",
 		"Protocol": "https",
 		"Endpoint": "https://example.com/sns",
 	})
@@ -1492,7 +1492,7 @@ func TestSNSPlugin_SetSubscriptionAttributes(t *testing.T) {
 	})
 	subResp := snsRequest(t, srv, map[string]string{
 		"Action":   "Subscribe",
-		"TopicArn": "arn:aws:sns:us-east-1:000000000000:ssa-topic",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:ssa-topic",
 		"Protocol": "https",
 		"Endpoint": "https://example.com/sns",
 	})
@@ -1518,7 +1518,7 @@ func TestSNSPlugin_AddRemovePermission(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "perm-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:perm-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:perm-topic"
 
 	resp := snsRequest(t, srv, map[string]string{
 		"Action":                "AddPermission",
@@ -1612,7 +1612,7 @@ func TestSNSPlugin_UntagResource(t *testing.T) {
 		"Action": "CreateTopic",
 		"Name":   "untag-topic",
 	})
-	topicARN := "arn:aws:sns:us-east-1:000000000000:untag-topic"
+	topicARN := "arn:aws:sns:us-east-1:123456789012:untag-topic"
 
 	// Tag.
 	snsRequest(t, srv, map[string]string{

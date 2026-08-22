@@ -616,7 +616,7 @@ func TestGluePlugin_TaggingOperations(t *testing.T) {
 		t.Fatalf("CreateJob: %d: %s", r.StatusCode, glueBody(t, r))
 	}
 	_ = glueBody(t, r)
-	jobARN := "arn:aws:glue:us-east-1:000000000000:job/tag-job"
+	jobARN := "arn:aws:glue:us-east-1:123456789012:job/tag-job"
 
 	// GetTags.
 	r2 := glueRequest(t, ts, "GetTags", map[string]interface{}{

@@ -409,12 +409,12 @@ func TestEC2_DescribeImages_PhantomSnapshotReportsTheDefaultSize(t *testing.T) {
 			Name:       "pre-711",
 			State:      "available",
 			SnapshotID: "snap-0123456789abcdef0",
-			AccountID:  "000000000000",
+			AccountID:  "123456789012",
 			Region:     "us-east-1",
 		})
 		require.NoError(t, err)
 		require.NoError(t, state.Put(context.Background(), "ec2",
-			"image:000000000000/us-east-1/ami-0123456789abcdef0", record))
+			"image:123456789012/us-east-1/ami-0123456789abcdef0", record))
 
 		got := ec2ImageMappings(t, ts, "ami-0123456789abcdef0")
 		require.Len(t, got, 1, "the root device entry substrate fabricates for such a record")

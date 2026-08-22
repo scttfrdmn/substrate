@@ -51,7 +51,7 @@ func createSQSQueue(t *testing.T, srv *emulator.Server, name string) string {
 	resp := sqsRequest(t, srv, map[string]string{"Action": "CreateQueue", "QueueName": name})
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	return "http://sqs.us-east-1.localhost/000000000000/" + name
+	return "http://sqs.us-east-1.localhost/123456789012/" + name
 }
 
 // sqsErrorCode returns the response status and the error code from an SQS error
@@ -667,8 +667,8 @@ func TestSQS_QueueNameFromURL(t *testing.T) {
 		url  string
 		want string
 	}{
-		{"standard", "http://sqs.us-east-1.localhost/000000000000/my-q", "my-q"},
-		{"trailing slash", "http://sqs.us-east-1.localhost/000000000000/my-q/", "my-q"},
+		{"standard", "http://sqs.us-east-1.localhost/123456789012/my-q", "my-q"},
+		{"trailing slash", "http://sqs.us-east-1.localhost/123456789012/my-q/", "my-q"},
 		{"bare name, no separator", "my-q", "my-q"},
 		{"empty", "", ""},
 	}

@@ -179,7 +179,7 @@ func TestCFNGeneratedName_UpdateDoesNotMoveAPhysicalID(t *testing.T) {
 // over-long name would fail for some types and silently pass for others.
 func TestCFNGeneratedName_Constraints(t *testing.T) {
 	const (
-		acct   = "000000000000"
+		acct   = "123456789012"
 		region = "us-east-1"
 		long40 = "abcdefghijabcdefghijabcdefghijabcdefghij"
 	)
@@ -229,17 +229,17 @@ func TestCFNGeneratedName_Constraints(t *testing.T) {
 // account or Region makes two same-named stacks in different Regions collide —
 // which sameScope already treats as different stacks.
 func TestCFNGeneratedName_ScopeChangesTheName(t *testing.T) {
-	base := emulator.CFNGeneratedNameForTest("000000000000", "us-east-1", "stk",
+	base := emulator.CFNGeneratedNameForTest("123456789012", "us-east-1", "stk",
 		"AWS::IAM::Role", "MyRole")
 
 	tests := []struct {
 		name                           string
 		acct, region, stack, logicalID string
 	}{
-		{"a different stack", "000000000000", "us-east-1", "other", "MyRole"},
-		{"a different Region", "000000000000", "eu-west-1", "stk", "MyRole"},
+		{"a different stack", "123456789012", "us-east-1", "other", "MyRole"},
+		{"a different Region", "123456789012", "eu-west-1", "stk", "MyRole"},
 		{"a different account", "111111111111", "us-east-1", "stk", "MyRole"},
-		{"a different logical ID", "000000000000", "us-east-1", "stk", "OtherRole"},
+		{"a different logical ID", "123456789012", "us-east-1", "stk", "OtherRole"},
 	}
 
 	for _, tt := range tests {
@@ -262,7 +262,7 @@ func TestCFNGeneratedName_UntabledTypeKeepsItsLogicalID(t *testing.T) {
 		"AWS::SecretsManager::Secret",
 		"AWS::Unknown::Thing",
 	} {
-		assert.Equal(t, "Widget", emulator.CFNGeneratedNameForTest("000000000000",
+		assert.Equal(t, "Widget", emulator.CFNGeneratedNameForTest("123456789012",
 			"us-east-1", "stk", resType, "Widget"),
 			"%s is not in the generated-name table and must keep its logical ID", resType)
 	}
@@ -276,7 +276,7 @@ func TestCFNGeneratedName_UntabledTypeKeepsItsLogicalID(t *testing.T) {
 // Measured: dropping stackName from cfnNameSuffix passes every other test here.
 func TestCFNGeneratedName_LongStackNamesStillDiffer(t *testing.T) {
 	const (
-		acct   = "000000000000"
+		acct   = "123456789012"
 		region = "us-east-1"
 		prefix = "a-very-long-stack-name-that-will-be-truncated"
 	)

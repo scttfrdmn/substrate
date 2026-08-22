@@ -419,25 +419,40 @@ func TestExtractService_PriceListTarget(t *testing.T) {
 	assert.Equal(t, "GetProducts", req.Operation)
 }
 
+// TestParseAWSRequest_Account pins the convergence #734 asked for: every
+// credential shape resolves to the same account.
+//
+// This table used to assert the opposite. An "AKIA"-prefixed key was filed under
+// 123456789012 and everything else — the documented test/test pair, an unsigned
+// request, an "ASIA" session key — under 000000000000, so one server served two
+// accounts depending on which credential the client happened to pick, and a
+// resource created under one was invisible to the other. Nothing on the wire names
+// an account, so the prefix was never evidence of one; the cases below are kept
+// (rather than collapsed into a single assertion) precisely because each of them
+// used to answer differently.
 func TestParseAWSRequest_Account(t *testing.T) {
 	tests := []struct {
-		name        string
-		authHeader  string
-		wantAccount string
+		name       string
+		authHeader string
 	}{
 		{
-			name:        "test AKIA key",
-			authHeader:  "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request",
-			wantAccount: "123456789012",
+			name:       "the documented AKIA example key",
+			authHeader: "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request",
 		},
 		{
-			name:        "no auth → fallback",
-			wantAccount: "000000000000",
+			name: "no Authorization header at all",
 		},
 		{
-			name:        "non-AKIA key → fallback",
-			authHeader:  "AWS4-HMAC-SHA256 Credential=ASIAXYZ/20130524/us-east-1/s3/aws4_request",
-			wantAccount: "000000000000",
+			name:       "an ASIA session key",
+			authHeader: "AWS4-HMAC-SHA256 Credential=ASIAXYZ/20130524/us-east-1/s3/aws4_request",
+		},
+		{
+			name:       "the documented test/test pair",
+			authHeader: "AWS4-HMAC-SHA256 Credential=test/20130524/us-east-1/s3/aws4_request",
+		},
+		{
+			name:       "a credential scope with no access key",
+			authHeader: "AWS4-HMAC-SHA256 Credential=/20130524/us-east-1/s3/aws4_request",
 		},
 	}
 
@@ -450,7 +465,8 @@ func TestParseAWSRequest_Account(t *testing.T) {
 
 			_, reqCtx, err := emulator.ParseAWSRequest(r)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantAccount, reqCtx.AccountID)
+			assert.Equal(t, "123456789012", reqCtx.AccountID,
+				"every credential shape resolves to the one account (#734)")
 		})
 	}
 }
@@ -914,6 +930,64 @@ func TestParseAWSRequest_ConfigResolvesByEveryPath(t *testing.T) {
 		req, _, err := emulator.ParseAWSRequest(r)
 		require.NoError(t, err)
 		assert.Equal(t, "config", req.Service)
+	})
+}
+
+// TestParseAWSRequest_EventBridgeResolvesByEveryPath is the same gate for
+// EventBridge, and it fails before the alias this file adds.
+//
+// The target prefix in EventBridge's model is **AWSEvents**, not AmazonEventBridge:
+// every SDK sends `X-Amz-Target: AWSEvents.ListEventBuses`. Only the host alias
+// ("events.*" → eventbridge) was registered, which is enough on a real endpoint and
+// useless on the one way substrate is actually reached — `--endpoint-url`, where the
+// host is localhost and the target is the only signal. So every EventBridge call from
+// a real client answered ServiceNotAvailable, and a live run for #734 is how that
+// surfaced: the plugin was registered, green, and unreachable, which is the #561/#580
+// failure mode again.
+func TestParseAWSRequest_EventBridgeResolvesByEveryPath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("target prefix", func(t *testing.T) {
+		t.Parallel()
+		for _, target := range []string{
+			"AWSEvents.ListEventBuses",
+			"AWSEvents.PutRule",
+			"AWSEvents.PutEvents",
+		} {
+			t.Run(target, func(t *testing.T) {
+				t.Parallel()
+				r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+				r.Host = "localhost:4566"
+				r.Header.Set("X-Amz-Target", target)
+
+				req, _, err := emulator.ParseAWSRequest(r)
+				require.NoError(t, err)
+				assert.Equal(t, "eventbridge", req.Service)
+			})
+		}
+	})
+
+	t.Run("host", func(t *testing.T) {
+		t.Parallel()
+		r := httptest.NewRequest(http.MethodPost, "http://events.us-east-1.amazonaws.com/", nil)
+		r.Host = "events.us-east-1.amazonaws.com"
+
+		req, _, err := emulator.ParseAWSRequest(r)
+		require.NoError(t, err)
+		assert.Equal(t, "eventbridge", req.Service)
+	})
+
+	t.Run("sigv4 signing name", func(t *testing.T) {
+		t.Parallel()
+		r := httptest.NewRequest(http.MethodPost, "http://localhost:4566/", nil)
+		r.Host = "localhost:4566"
+		r.Header.Set("Authorization",
+			"AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/events/aws4_request, "+
+				"SignedHeaders=host, Signature=fake")
+
+		req, _, err := emulator.ParseAWSRequest(r)
+		require.NoError(t, err)
+		assert.Equal(t, "eventbridge", req.Service)
 	})
 }
 

@@ -50,8 +50,8 @@ func (ts *TestServer) Registry() *PluginRegistry { return ts.registry }
 // returns.
 //
 // No [CredentialRegistry] is wired, so SigV4 signatures are not verified and any
-// access key is accepted: an AKIA-prefixed one resolves to account 123456789012
-// and everything else to 000000000000. Use [StartTestServerWithAccounts] when a
+// access key is accepted — every one of them, and an unsigned request too,
+// resolving to account 123456789012. Use [StartTestServerWithAccounts] when a
 // test needs to call as more than one account.
 func StartTestServer(t *testing.T) *TestServer {
 	t.Helper()
@@ -191,8 +191,8 @@ func startTestServer(t testing.TB, creds *CredentialRegistry) *TestServer {
 // The access key and secret are derived from the account ID rather than generated,
 // so a recorded run replays with the same credentials in it. AWS access key IDs are
 // 20 characters of uppercase alphanumerics; a 12-digit account ID padded after
-// "AKIA" fits exactly, which keeps the key one that resolvePrincipal and
-// extractAccount both recognize.
+// "AKIA" fits exactly, which keeps the key one that [VerifySigV4] and
+// resolvePrincipal both accept.
 func (ts *TestServer) RegisterAccount(t testing.TB, accountID string) CredentialEntry {
 	t.Helper()
 	if ts.creds == nil {
@@ -256,10 +256,6 @@ func (ts *TestServer) SetScale(scale float64) {
 	ts.tc.SetScale(scale)
 }
 
-// seedSSMAccountID is the AWS account ID used for seeded SSM parameters.
-// It matches the account that the built-in test key AKIATEST12345678901 maps to.
-const seedSSMAccountID = "123456789012"
-
 // seedSSMRegion is the default AWS region used for seeded SSM parameters.
 const seedSSMRegion = "us-east-1"
 
@@ -289,19 +285,19 @@ func (ts *TestServer) SeedSSMParameter(name, value string) {
 		Value:            value,
 		Version:          1,
 		LastModifiedDate: ts.tc.Now(),
-		AccountID:        seedSSMAccountID,
+		AccountID:        defaultAccountID,
 		Region:           seedSSMRegion,
-		ARN:              ssmParameterARN(seedSSMRegion, seedSSMAccountID, name),
+		ARN:              ssmParameterARN(seedSSMRegion, defaultAccountID, name),
 	}
 	data, err := json.Marshal(param)
 	if err != nil {
 		return
 	}
-	stateKey := "parameter:" + seedSSMAccountID + "/" + seedSSMRegion + "/" + name
+	stateKey := "parameter:" + defaultAccountID + "/" + seedSSMRegion + "/" + name
 	_ = ts.state.Put(ctx, ssmNamespace, stateKey, data)
 
 	// Update the paths index.
-	pathsKey := "parameter_paths:" + seedSSMAccountID + "/" + seedSSMRegion
+	pathsKey := "parameter_paths:" + defaultAccountID + "/" + seedSSMRegion
 	existing, _ := ts.state.Get(ctx, ssmNamespace, pathsKey)
 	var paths []string
 	if existing != nil {
