@@ -245,6 +245,16 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteSnapshot(ctx, req)
 	case "DescribeSnapshots":
 		return p.describeSnapshots(ctx, req)
+	case "CreateSnapshots":
+		return p.createSnapshots(ctx, req)
+	case "CopySnapshot":
+		return p.copySnapshot(ctx, req)
+	case "DescribeSnapshotAttribute":
+		return p.describeSnapshotAttribute(ctx, req)
+	case "ModifySnapshotAttribute":
+		return p.modifySnapshotAttribute(ctx, req)
+	case "ResetSnapshotAttribute":
+		return p.resetSnapshotAttribute(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), action)
 	}

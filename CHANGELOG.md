@@ -86,6 +86,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented gloss is "A value specified in a parameter is not valid, is unsupported, or
   cannot be used."
 
+- **The rest of the EC2 snapshot family: `CreateSnapshots`, `CopySnapshot` and the three
+  attribute operations** (#709). All five reached the dispatcher's unknown-action arm and
+  answered `InvalidAction` — the answer a caller reads as "this endpoint does not speak EC2",
+  not "substrate has not got to it yet". `CreateSnapshot` was the whole of substrate's snapshot
+  creation, so IaC that snapshots an instance rather than a volume, or copies a snapshot before
+  sharing it, had nowhere to land.
+
+  `CreateSnapshots` snapshots every attached volume of one instance, ordered by device name —
+  state keys come back in Go map order, so an unsorted `snapshotSet` would answer differently
+  on each run and `snapshotSet[0]` would be a coin toss. `ExcludeBootVolume` and
+  `ExcludeDataVolumeId.N` (singular member, indexed, capped at AWS's 40) each drop what they
+  name, and naming the root volume in `ExcludeDataVolumeId.N` is refused with a message naming
+  `ExcludeBootVolume`, per AWS's "If you specify the ID of the root volume, the request fails."
+  `CopyTagsFromSource=volume` gives each snapshot **its own** source volume's tags. Its response
+  item is `SnapshotInfo`, which names the state member **`state`** where `CreateSnapshot` and
+  `DescribeSnapshots` name the same thing `status` — so a caller unmarshalling it reads `State`,
+  and substrate could not reuse `CreateSnapshot`'s response struct.
+
+  `CopySnapshot` copies within the region, which AWS's text makes coherent for a single-region
+  emulator twice over: "if the source snapshot is in a Region, you can copy it within that
+  Region" (its Example 1 is one), and `DestinationRegion` is a `PresignedUrl`-signing artifact
+  rather than routing — "the snapshot copy is sent to the regional endpoint that you sent the
+  HTTP request to". A cross-region source is `SnapshotCopyUnsupported.InterRegion`. The copy
+  records an arbitrary volume ID that resolves to nothing, which is what AWS produces:
+  "snapshots copies have an arbitrary source volume ID. Do not use this volume ID for any
+  purpose" — rendering the source's would hand a caller a reference that resolves, inviting
+  exactly the use that sentence forbids.
+
+  `DescribeSnapshotAttribute`, `ModifySnapshotAttribute` and `ResetSnapshotAttribute` record and
+  report a snapshot's create-volume permissions. `ModifySnapshotAttribute` reads **both** wire
+  forms, because an SDK picks between them: structured `CreateVolumePermission.Add.N.{UserId,
+  Group}` and flat `OperationType` + `UserId.N` + **`UserGroup.N`** — the wire member, where the
+  CLI spells the same thing `--group-names` and an SDK spells it `GroupNames`. Sharing an
+  encrypted snapshot publicly is refused ("you can share only unencrypted snapshots publicly");
+  sharing one with a named account is not. Substrate is single-account, so a permission grants
+  nothing — it is recorded intent a caller can read back, which is the observable half of
+  sharing.
+
+  **#709's "you cannot both add and remove in a single operation" is scoped to account IDs, and
+  the issue's unscoped reading would have refused AWS's own example.** AWS's sentence is "you
+  may add or remove specified AWS account **IDs** … but you cannot do both in a single
+  operation", and its Example 2 adds the group `all` while removing the account `111122223333`
+  in one request. Substrate refuses only add-account-and-remove-account.
+
+  Provenance: **none of the five operations publishes an operation-specific error** — every
+  Errors section points only at the common types, and `CreateSnapshots` has no Examples section
+  at all. So each refusal is either a code from EC2's client-error table, which describes a
+  condition rather than quoting a wire message (`SnapshotCopyUnsupported.InterRegion`,
+  `InvalidSnapshot.NotFound`), or substrate's reading of a prose rule AWS states without naming
+  a code (the root-volume exclusion, `Encrypted=false`, `KmsKeyId` without encryption, a group
+  other than `all`, the public-sharing rule, the 500-modification cap). The
+  `InvalidParameterValue` message shape is the one captured EC2 example of that code; the
+  trailing sentence in each is AWS's own prose, because that rule is the only thing telling a
+  caller what to send instead. `productCodes` is answered on the describe rather than refused —
+  as a **present but empty** element — because nothing in substrate assigns a product code, so
+  "none" is a fact about every snapshot it can produce rather than an invented default. Three
+  `SnapshotInfo` members are deliberately not rendered: `progress` (substrate stores none),
+  `availabilityZone` (the Local-Zone placement member — the singular `CreateSnapshot` response
+  has no such member — so rendering the volume's AZ would claim a local snapshot), and
+  `outpostArn`/`sseType` (not modelled; inventing `sse-ebs` would be indistinguishable from an
+  observation).
+
 ### Changed
 - **`RegisterImage` records the whole block device mapping it is sent** (#711). It read exactly
   one thing out of it — the first `BlockDeviceMapping.N.Ebs.SnapshotId`, found by a hand walk of

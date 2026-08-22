@@ -4874,9 +4874,95 @@ What remains is deleting the snapshot a **non-root** mapping names, which `Delet
 permits because AWS scopes its refusal to the root device (below), and an AMI record written
 directly into state.
 
-The rest of the `CreateSnapshot` family — `CreateSnapshots`, `CopySnapshot`,
-`ModifySnapshotAttribute`, `DescribeSnapshotAttribute` and `ResetSnapshotAttribute` — is
-still absent and answers `InvalidAction`.
+#### The rest of the snapshot family
+
+`CreateSnapshots`, `CopySnapshot` and the three attribute operations answered `InvalidAction`
+until [#709](https://github.com/scttfrdmn/substrate/issues/709) — the answer that tells a
+caller the endpoint does not speak EC2, rather than that substrate has a gap. All five are
+implemented. None of the five publishes an operation-specific error: every Errors section
+points only at the common types, and `CreateSnapshots` has no Examples section at all. So each
+refusal below is either a code from EC2's client-error table (which describes a condition
+rather than quoting a wire message) or substrate's reading of a rule AWS states in prose; the
+table says which.
+
+**`CreateSnapshots`** snapshots every EBS volume attached to one instance in a single call.
+
+| Behaviour | Answer |
+|---|---|
+| `InstanceSpecification.InstanceId` | Required; absent is `MissingParameter`. Resolved against state, so an absent instance is `InvalidInstanceID.NotFound` rather than an empty `snapshotSet` — an empty set is the true answer for an instance with nothing left to snapshot, and a consumer's wait loop turns on the difference |
+| Order | `snapshotSet` is ordered by device name. State keys come back in map order, so anything else would answer differently on each run and `snapshotSet[0]` would be a coin toss |
+| `ExcludeBootVolume` | Drops the volume attached at a root device name |
+| `ExcludeDataVolumeId.N` | Singular member, indexed — not a plural. Up to 40 per request, per AWS; a 41st is `InvalidParameterValue`. An ID that is not attached excludes nothing, which is what the parameter asks for |
+| The root volume named in `ExcludeDataVolumeId.N` | Refused, naming `ExcludeBootVolume`. AWS: "If you specify the ID of the root volume, the request fails. To exclude the root volume, use `ExcludeBootVolume`." The code is substrate's; AWS says only that the request fails |
+| `CopyTagsFromSource` | Valid value `volume`, and any other value is refused rather than treated as "do not copy". Each snapshot inherits **its own** source volume's tags |
+| `Description`, `TagSpecification.N` | Applied to every snapshot the call creates. Where a request tag collides with a copied volume tag, the request wins — AWS settles neither the precedence nor the ordering, so both are substrate's |
+| `state` | `completed` at once, for the reason `CreateSnapshot`'s `status` is |
+| `Location`, `OutpostArn` | Not read, as on `CreateSnapshot` |
+
+The response element is `snapshotSet` of `SnapshotInfo`, which names the state member
+**`state`** where `CreateSnapshot` and `DescribeSnapshots` both name the same thing `status`.
+A caller unmarshalling `SnapshotInfo` reads `State`. `progress`, `availabilityZone`,
+`outpostArn` and `sseType` are not rendered: substrate stores no progress, `availabilityZone` is
+the Local-Zone placement member — the singular `CreateSnapshot` response has no such member —
+so rendering the volume's AZ would claim a local snapshot, and neither Outposts nor a specific
+server-side encryption type is modelled.
+
+A refused request writes nothing: every snapshot is built and its tags checked before the
+first write, so a five-volume instance whose fourth volume carries a reserved tag key does not
+leave three snapshots behind.
+
+**`CopySnapshot`** copies a snapshot within the region, which AWS's own text makes coherent
+for a single-region emulator twice over. "If the source snapshot is in a Region, you can copy
+it within that Region" makes a same-region copy legal rather than degenerate, and AWS's Example
+1 is one. And `DestinationRegion` is not routing — "this parameter is only valid for specifying
+the destination Region in a `PresignedUrl` parameter … the snapshot copy is sent to the
+regional endpoint that you sent the HTTP request to" — so the destination is the endpoint, and
+the endpoint is the one region substrate serves.
+
+| Behaviour | Answer |
+|---|---|
+| `SourceRegion`, `SourceSnapshotId` | Both required; absent is `MissingParameter`. A malformed source is `InvalidSnapshotID.Malformed`, one naming nothing `InvalidSnapshot.NotFound` |
+| A `SourceRegion` that is not the request's region | `SnapshotCopyUnsupported.InterRegion`, whose published description — "inter-region snapshot copy is not supported for this AWS Region" — is precisely substrate's situation. The code is AWS's; the message is substrate's |
+| `Encrypted` | Accepted only as `true`. A copy of an encrypted snapshot is encrypted whatever the request says; `Encrypted=false` is refused rather than silently honoured or silently dropped |
+| `KmsKeyId` | Validated, not stored: "if `KmsKeyId` is specified, the encrypted state must be true", so naming a key for a copy that will not be encrypted is refused. Substrate models no KMS key on a snapshot, so the rule is observable only as that refusal |
+| `Description` | The request's, empty when absent. AWS documents nothing for an omitted one, so substrate invents no "Copied from …" string a consumer might assert on |
+| `TagSpecification.N` | The only source of the copy's tags. `CopySnapshot` has no `CopyTagsFromSource` — that is `CreateSnapshots`' parameter — so the source's tags are deliberately not carried over |
+| `volumeId` | A freshly generated ID that names no volume, which is what AWS produces: "snapshots copies have an arbitrary source volume ID. Do not use this volume ID for any purpose." Rendering the source's would hand a caller a reference that resolves, inviting exactly that use |
+| `CompletionDurationMinutes`, `DestinationAvailabilityZone`, `DestinationOutpostArn`, `DestinationRegion`, `PresignedUrl` | Not read. A time-based copy has nothing to slow down here, the next two place the copy somewhere substrate does not model, and the last two are artifacts of signing a cross-region request |
+
+The response carries `snapshotId` and `tagSet` and nothing else — no status, no size — so a
+caller polls `DescribeSnapshots` for the rest.
+
+**The attribute trio** — `DescribeSnapshotAttribute`, `ModifySnapshotAttribute` and
+`ResetSnapshotAttribute` — follows
+[Instance attributes](#instance-attributes) in four respects:
+the attribute name is validated *before* the snapshot is resolved (a bad name is a defect no
+retry fixes; an absent snapshot may be one the caller is still waiting on), exactly one
+attribute element marshals, a present-but-empty element is not the same observation as an
+omitted one, and an attribute substrate will not answer is refused rather than answered with an
+invented default.
+
+| Behaviour | Answer |
+|---|---|
+| `Attribute` | `Required: Yes` on the describe and the reset — "you can specify only one attribute at a time" — and `Required: No` on the modify, where the wire form carries the selection. Valid values `createVolumePermission` and `productCodes`; anything else is `InvalidParameterValue` |
+| `productCodes` on the describe | Answered, as a **present but empty** element. Nothing in substrate assigns a product code, so "none" is a fact about every snapshot it can produce rather than an invented default — and an SDK reads a present-but-empty element as an empty list where it reads an omitted one as `nil` |
+| `productCodes` on the modify | Refused: "only volume creation permissions can be modified" |
+| `productCodes` on the reset | Refused: "only the attribute for permission to create volumes can be reset" |
+| `createVolumePermission` on a fresh or copied snapshot | Present and empty. AWS describes a reset snapshot as "a private snapshot that can only be used by the account that created it", which is what a created one already is |
+| The two wire forms of a modification | Both read. Structured is `CreateVolumePermission.Add.N.{UserId,Group}` and `…Remove.N.…`, which is what AWS's own examples send; flat is `OperationType` (`add`/`remove`) with `UserId.N` and **`UserGroup.N`** — the wire member, where the CLI spells the same thing `--group-names` and an SDK spells it `GroupNames`. A request using both simply concatenates; AWS documents no precedence |
+| `Group` | Only `all`. Any other group is refused rather than stored, since a stored group nothing can grant is a permission a caller reads back and cannot act on |
+| Adding *and* removing an **account ID** in one request | Refused. AWS: "You may add or remove specified AWS account IDs … but you cannot do both in a single operation" |
+| Adding a group while removing an account | **Allowed** — that is AWS's own Example 2, which adds `all` while removing `111122223333`. The sentence above is scoped to account IDs, so the refusal is too; read as a blanket rule it would reject AWS's example |
+| Sharing an **encrypted** snapshot publicly | Refused: "you can share only unencrypted snapshots publicly". Sharing an encrypted snapshot with a named account is not refused — the rule is about the group. The companion rule, that a snapshot carrying a Marketplace product code cannot be made public, is unreachable rather than unmodelled: substrate assigns no product codes |
+| More than 500 modifications | Refused: "you can make up to 500 modifications to a snapshot in a single operation" |
+| A flat `UserId.N`/`UserGroup.N` with no `OperationType` | `MissingParameter`. The values name no list to join, and accepting the request would silently discard the permission |
+| A modify naming no modification at all | Succeeds and changes nothing. Every parameter but `SnapshotId` is optional and AWS publishes no error for the empty case |
+| Adding a permission already present, or removing one that is not | Neither is an error, and neither duplicates. AWS documents no refusal for either, and both are idempotent in the direction a cleanup loop needs |
+| The reset | Clears the list rather than restoring a remembered default, since an empty list is what a snapshot is created with |
+
+Substrate is single-account, so a permission recorded here grants nothing. It is recorded
+intent a caller can read back, which is the observable half of sharing — and the observable
+half is the whole of what substrate models.
 
 #### Deleting a snapshot refuses what AWS refuses
 

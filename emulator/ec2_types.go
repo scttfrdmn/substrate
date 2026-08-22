@@ -572,11 +572,37 @@ type EC2Snapshot struct {
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 
+	// CreateVolumePermissions is the list of accounts and groups that may create volumes
+	// from this snapshot, as ModifySnapshotAttribute sets it and
+	// DescribeSnapshotAttribute reports it (#709).
+	//
+	// It is empty for a newly created or copied snapshot, which is what AWS describes a
+	// reset snapshot as being — "a private snapshot that can only be used by the account
+	// that created it". Substrate is single-account, so a permission here grants nothing;
+	// it is recorded intent that a caller can read back, which is the observable half of
+	// sharing.
+	CreateVolumePermissions []EC2CreateVolumePermission `json:"create_volume_permissions,omitempty"`
+
 	// AccountID is the AWS account that owns the snapshot.
 	AccountID string `json:"account_id"`
 
 	// Region is the AWS region in which the snapshot resides.
 	Region string `json:"region"`
+}
+
+// EC2CreateVolumePermission is one entry in a snapshot's create-volume permission list.
+//
+// Exactly one member is set per entry, per AWS's CreateVolumePermission: a permission names
+// either an account or the group "all". The type is comparable so that adding a permission
+// already present, or removing one that is not, needs no key function — see
+// [ec2ApplyVolumePermissions].
+type EC2CreateVolumePermission struct {
+	// UserID is the AWS account the permission is granted to.
+	UserID string `json:"user_id,omitempty"`
+
+	// Group is the group the permission is granted to. AWS's only valid value is "all",
+	// which makes the snapshot public.
+	Group string `json:"group,omitempty"`
 }
 
 // generateImageID generates a random AMI ID in the format "ami-" followed
