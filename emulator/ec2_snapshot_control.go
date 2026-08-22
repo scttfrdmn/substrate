@@ -159,11 +159,14 @@ func (p *EC2Plugin) resolveSnapshotProgression(snapshotID string) (*ec2SnapshotP
 // peekSnapshotStatus reports what the snapshot would observe right now, without advancing its
 // countdown.
 //
-// Three callers need the state without consuming an observation, because none of them is a
-// poll: CreateSnapshot and CreateSnapshots, which report the state a snapshot is born in, and
-// CreateVolume, which refuses a snapshot that is not usable yet. Counting those against a
-// budget the caller meant to spend on polling would make "pendingObservations: 2" mean two
-// polls in one test and one in another.
+// Its callers need the state without consuming an observation, because none of them is a
+// poll: CreateSnapshot and CreateSnapshots, which report the state a snapshot is born in;
+// CreateVolume, which refuses a snapshot that is not usable yet; and the block-device-mapping
+// rule that refuses the same snapshot in a launch or a RegisterImage (#732), which is also the
+// one caller that can reach here more than once per request — one mapping each. Counting any
+// of those against a budget the caller meant to spend on polling would make
+// "pendingObservations: 2" mean two polls in one test and one in another, and in the mapping
+// case would make it depend on how many volumes the launch declared.
 //
 // DeleteSnapshot needs neither peek nor observation: AWS permits deleting a snapshot in
 // progress, so its answer does not depend on the state at all — see [EC2Plugin.deleteSnapshot].

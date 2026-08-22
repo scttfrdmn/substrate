@@ -451,8 +451,10 @@ func (p *EC2Plugin) createLaunchTemplateVersion(ctx *RequestContext, req *AWSReq
 		Version: ec2LTVersionItemFor(lt, newVersion),
 		// Collected after the overlay, for the reason the tag check runs there: a
 		// version inheriting a mapping from its source version is warned about it too.
+		// The nil observer skips the snapshot-state rule for the reason
+		// CreateLaunchTemplate's does; see [ec2CheckMappingSnapshot].
 		Warning: ec2ValidationWarningFor(
-			ec2CollectBlockDeviceMappings(data.BlockDeviceMappings, p.ec2SnapshotResolver(ctx))),
+			ec2CollectBlockDeviceMappings(data.BlockDeviceMappings, p.ec2SnapshotResolver(ctx), nil)),
 	})
 }
 

@@ -93,6 +93,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned an empty set. Two of substrate's own tests asserted the empty set as the contract —
   one of them with a comment naming this gap — and both now assert the refusal.
 
+- **A block device mapping naming a snapshot that is not usable yet is refused** (#732).
+  `CreateVolume` refused such a snapshot from #715 onward, but a launch declaring the *same*
+  snapshot in a `BlockDeviceMapping` materialized a volume from it and reported success. So one
+  rule had two doors that disagreed: `create-volume --snapshot-id` failed while `run-instances
+  --block-device-mappings` naming the same snapshot succeeded, and a consumer restoring through
+  a launch — which is what CDK's and Terraform's snapshot-backed volumes do — never reached the
+  error branch it had written. `RegisterImage`, whose own second AWS example registers an AMI
+  from a root-device snapshot, had the same hole.
+
+  Both now answer `IncorrectState` / 400, naming the snapshot and the state it is in so a caller
+  can decide to wait, from the single validator the launch path and `RegisterImage` already
+  share. Everything except `completed` is refused: AWS's snapshot-states table says a `pending`
+  or `error` snapshot "can't be used", a `recoverable` one "must first [be recovered] from the
+  Recycle Bin", and a `recovering` one is "ready for use" only once it reaches `completed`.
+
+  The state is read through the peeking accessor, never the observing one, and a test pins that
+  by asserting a seeded one-observation budget survives two three-mapping launch attempts. It
+  has to: the countdown advances in exactly one place, so an observing read would spend one
+  observation *per mapping per request* and `pendingObservations: 2` would mean a different
+  number of polls depending on how many volumes a launch declared — while a consumer's wait
+  loop, which alternates a launch attempt and a describe, raced its own budget.
+
+  `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` are exempt, deliberately: a template
+  records a mapping rather than consuming one, both report mapping problems through AWS's
+  `warning` member and refuse nothing (#693), and a snapshot `pending` when a template is
+  written may legitimately be `completed` when the template is used — refusing at write time
+  would forbid an ordering AWS permits. A launch *from* such a template is refused, so the rule
+  is not escapable by routing a mapping through one.
+
+  **Provenance.** Substrate's reading. `RegisterImage`'s Errors section is empty and its page
+  says nothing about a snapshot's required state; the rule is AWS's snapshot-states rule and
+  `IncorrectState` is substrate's choice from EC2's client-error table, the same shape
+  `CreateVolume` carries. `DeleteSnapshot` is **not** analogous and still refuses nothing — AWS
+  permits deleting a snapshot that is still in progress. The issue's premise that #715 had
+  already settled `DeleteSnapshot` is inverted; #715 records the opposite.
+
+  **Compatibility.** A launch or a `RegisterImage` whose mapping names a snapshot under a seeded
+  progression now fails until that snapshot reports `completed`. Only a seeded snapshot is
+  affected: every snapshot substrate writes is born `completed`, so an unseeded mapping behaves
+  as before.
+
 ### Fixed
 - **One server serves one account** (#734). `ParseAWSRequest` decided the account from the
   *shape of the access key*: a key beginning with `AKIA` was attributed to `123456789012`,
