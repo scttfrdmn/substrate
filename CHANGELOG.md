@@ -211,6 +211,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer's branch see; the member's five-value enumeration is followed over the filter's
   three-value one, per #671.
 
+- **Every condition operator AWS documents is evaluated, and `aws:CurrentTime` /
+  `aws:EpochTime` have a producer** (#714). Nine operators were implemented out of AWS's
+  twenty-six; the numeric family, the date family, the IP family, `BinaryEquals`,
+  `StringEqualsIgnoreCase`/`StringNotEqualsIgnoreCase` (which AWS uses in its own
+  `ec2:CreateTags` example) and the `...IfExists` suffix were all absent, and every one of them
+  fell to a deny — so a policy real IAM accepts and evaluates was, at best, a false refusal
+  here. The operator layer now lives in one place, `emulator/iam_condition_operators.go`, and
+  `docs/services.md` gained the operator reference it never had.
+
+  A date operator needs a clock, so `AuthController` gained an optional `TimeController`
+  (`WithAuthTimeController`) and both `aws:CurrentTime` and `aws:EpochTime` are populated from
+  it — read once per request, so every resource in one request is decided against one instant.
+  It is deliberately **not** `reqCtx.Timestamp`, which is `time.Now()` on the HTTP path: a date
+  condition sourced from the wall clock would decide differently on replay, and `replay.go`
+  calls `SetTime(event.Timestamp)` before dispatch precisely so it does not have to. An
+  `AuthController` built without a clock leaves both keys **absent** rather than falling back to
+  wall time — a documented false deny, in exchange for a replayable one. The simulator populates
+  the same pair from the IAM plugin's clock, because a simulation reporting a date condition as a
+  missing context value while the gate evaluated it would contradict the enforcement it exists to
+  predict.
+
+  **`aws:PrincipalArn` now has a producer on the enforcement path**, at all four gates that
+  build a condition context: the identity-policy and permission-boundary decision, the
+  tag-on-create pass, the IAM control-plane door and a role's trust policy. It was populated in
+  the simulator alone, from `CallerArn` — a divergence in the worst direction, since a caller
+  could simulate a policy conditioned on the key, watch it evaluate, and have the gate the
+  simulation exists to predict decide it differently. Writing it at every gate rather than only
+  where a condition on it is expected is what keeps a request that passes two gates from getting
+  two answers. It also could not have stayed simulator-only alongside the absent-key polarity
+  rule below: with the key missing, `"ArnNotEquals": {"aws:PrincipalArn": "…:user/carol"}` — the
+  shape of an exemption — is satisfied by every caller, so as a `Deny` it fires on carol herself
+  and as an `Allow` it grants everyone. That inversion was caught by a live SDK run against this
+  release's own operator work, before either shipped. `aws:PrincipalAccount`, `aws:userid` and `aws:username` are still absent: each
+  needs a derivation substrate cannot make honestly for every principal kind, and a key guessed
+  wrong is worse than one a policy can test for with `Null`.
+
+  Two rules substrate never had, both AWS's: **an absent key follows the operator's polarity**
+  ("If the policy condition requires that the key is *not* matched, such as `StringNotLike` or
+  `ArnNotLike`, and the right key is not present, the condition is `true`") — the old code passed
+  an empty string into the operator, which coincided with the right answer for the string family
+  and would have mis-answered the numeric and date ones; and **a key present with an empty value
+  counts as absent** ("resolves to a null dataset, such as an empty string"), everywhere except
+  `Null`, whose whole job is to see it.
+
+  Provenance: several readings are substrate's, because AWS documents no answer. A value that
+  cannot be parsed as the operator's type is **skipped** in the policy and **fails a positive
+  operator / satisfies a negated one** in the request context. `"2020"` is a legal W3C year and a
+  legal epoch second; the year wins. A bare IPv6 address is a `/128` — AWS's "IAM uses the
+  default prefix value of /32" is written for IPv4, and taking it literally would turn one
+  address into 2^96 of them. Go's spellings of infinity, NaN and hexadecimal floats are refused
+  as numbers, so `"Inf"` cannot satisfy `NumericGreaterThan` against every number in existence.
+  `ForAnyValue:<operator>IfExists` is the one place AWS's own two rules conflict — the qualifier
+  says an absent key is false, the suffix says it is true — and substrate reads the suffix as the
+  more specific annotation, on the strength of AWS's gloss that other elements "can still result
+  in a nonmatch, but not a missing key when checked with `...IfExists`". A **set-qualified
+  `Null`** does not match at all: AWS defines neither `ForAllValues:Null` nor `ForAnyValue:Null`,
+  and quantifying an existence test over the values whose existence it is testing has no meaning.
+  Nothing validates an operator *name* at write time, where real IAM answers
+  `MalformedPolicyDocument`, so a misspelled operator is stored and discarded at evaluation.
+
+
 ### Changed
 - **`RegisterImage` records the whole block device mapping it is sent** (#711). It read exactly
   one thing out of it — the first `BlockDeviceMapping.N.Ebs.SnapshotId`, found by a hand walk of
@@ -692,6 +753,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep telling the two apart: a bare `filters[name]` index yields the same nil slice for
   "absent" and "present with no values", which under the new rule would have emptied the
   catalog for an unfiltered query.
+
+- **A set-qualified condition granted the statement it should have denied** (#714). Under
+  `ForAllValues:<operator>` or `ForAnyValue:<operator>`, an absent condition key answered `true`
+  **without consulting the operator at all** — so an `Allow` conditioned on
+  `ForAllValues:NumericLessThan`, or on a misspelled operator name, was *granted*. Given how few
+  condition keys substrate populates, the absent key was the common case, and #714 recorded the
+  opposite ("falls to the closing deny-by-default"), as did `docs/services.md`. The vacuous truth
+  is itself AWS's rule — "The `ForAllValues` qualifier returns true if there are no context keys
+  in the request" — and it stays, but only for an operator substrate actually evaluates; an
+  unrecognized one, and a qualified `Null`, now deny. Recognition and the answer come from one
+  function so the two cannot drift: a second list of operator names would have re-opened the hole
+  the first time an operator was added to only one of them.
+
+- **An ARN condition's wildcards no longer match across a colon** (#714). AWS: "Each of the six
+  colon-delimited components of the ARN is checked separately and each can include multi-character
+  match wildcards (`*`) or single-character match wildcards (`?`)." Substrate ran one glob over
+  the whole string, so `arn:aws:sns:*:TOPIC-ID` — five components — matched
+  `arn:aws:sns:us-east-1:123456789012:TOPIC-ID`, authorizing a resource in an account the pattern
+  never mentioned. The resource component may legitimately contain colons (an SNS subscription
+  ARN), so the split is bounded at six and the remainder stays in the last component, where AWS's
+  own wildcard examples put it. A pattern naming fewer than six components has the missing
+  trailing ones filled with `*`; AWS states that rule for a `Resource` element and not for a
+  condition, so it is substrate's reading, chosen because refusing to match a short pattern would
+  silently narrow a `Deny` — the direction that cannot be recovered from.
+
+- **`ArnNotEquals` and `ArnNotLike` honour wildcards** (#714). They compared with `==`, so no
+  real ARN was ever equal to a pattern containing a `*` and the negation was **always
+  satisfied**. `"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::123456789012:role/*"}` on a
+  `Deny` therefore fired against every principal, including the roles the pattern existed to
+  exempt; on an `Allow` — "grant anyone who is not one of these" — it granted every principal,
+  including the ones it named to exclude. #714 described the effect as an inert `Deny`; it is the
+  opposite, and the `Allow` direction is the dangerous one. Both operators are now the negation of
+  their positive pair, which is AWS's rule and not an approximation: "The `ArnNotEquals` and
+  `ArnNotLike` condition operators behave identically." #714's related claim — that aliasing
+  `ArnLike` to `ArnEquals` is wrong — is **refuted** by the same page's "The `ArnEquals` and
+  `ArnLike` condition operators behave identically"; the alias was correct.
+
+- **A policy that writes a number or a Boolean unquoted is no longer `MalformedPolicyDocument`**
+  (#714). The IAM grammar: "Values are enclosed in quotation marks. **Quotation marks are
+  optional for numeric and Boolean values.**" `{"Bool": {"aws:SecureTransport": false}}` and
+  `{"NumericLessThanEquals": {"s3:max-keys": 10}}` are both legal IAM and both were rejected
+  outright, which is a live `Bool` bug independent of the numeric family and was a prerequisite
+  for it. A number keeps the spelling the document used, through `json.Number`: routing it
+  through a float would render `10` as `1e+01` and round a value too large for a `float64` before
+  the comparison ever saw it. The tolerance reaches `Action` and `Resource`, which share the type,
+  and is left there because the effect is bounded and safe — an `"Action": 5` becomes the action
+  name `"5"`, which matches nothing.
 
 ## [v0.106.0] - 2026-08-21
 

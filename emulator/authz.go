@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // AuthController enforces IAM policy decisions for all AWS service requests.
@@ -17,11 +19,93 @@ import (
 type AuthController struct {
 	state  StateManager
 	logger Logger
+	tc     *TimeController
+}
+
+// AuthControllerOption configures an [AuthController].
+type AuthControllerOption func(*AuthController)
+
+// WithAuthTimeController gives the controller the simulated clock, which is what makes
+// aws:CurrentTime and aws:EpochTime available to a policy condition.
+//
+// Without it those two keys are absent from every request context, so a condition
+// naming either is a false deny rather than a wall-clock answer. That is deliberate:
+// substrate's guarantee is that a recorded run replays identically, and a date
+// condition evaluated against time.Now() would decide differently on replay. A caller
+// wiring authorization into a server has a TimeController already — the server reads
+// it one line above the authorization call — so the honest default is to say the keys
+// are unavailable rather than to reach for the wall clock (#714).
+func WithAuthTimeController(tc *TimeController) AuthControllerOption {
+	return func(a *AuthController) {
+		a.tc = tc
+	}
 }
 
 // NewAuthController creates an AuthController backed by state and logger.
-func NewAuthController(state StateManager, logger Logger) *AuthController {
-	return &AuthController{state: state, logger: logger}
+//
+// The options are variadic so that adding the clock did not change the signature
+// every caller and every test already uses.
+func NewAuthController(state StateManager, logger Logger, opts ...AuthControllerOption) *AuthController {
+	a := &AuthController{state: state, logger: logger}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
+}
+
+// authzTimeContext writes the two clock-derived condition keys into ctx, if the
+// controller was given a clock.
+//
+// AWS documents the pair as the keys its date operators are used with:
+// aws:CurrentTime is "the date and time of the request" in ISO 8601 / RFC 3339 form,
+// aws:EpochTime the same instant "in Unix time" — so they are one reading of one clock
+// rendered two ways, and a policy testing them against each other cannot disagree.
+//
+// The instant is read once per request rather than once per resource, so a request
+// naming several resources is evaluated at one time. reqCtx.Timestamp is deliberately
+// not the source: it is time.Now() on the HTTP path, so a condition sourced from it
+// would be unreplayable for every real SDK request.
+func (a *AuthController) authzTimeContext(ctx map[string]string, now time.Time, ok bool) {
+	if !ok {
+		return
+	}
+	ctx["aws:CurrentTime"] = now.UTC().Format(time.RFC3339)
+	ctx["aws:EpochTime"] = strconv.FormatInt(now.Unix(), 10)
+}
+
+// authzPrincipalContext writes the condition key that names the caller.
+//
+// AWS documents aws:PrincipalArn as "the ARN of the principal that made the request",
+// present in the context of every request a principal signs. Substrate knows it with
+// certainty — it is the ARN the evaluation below is run for, and the one the denial
+// message names — so leaving it out reported as missing a key the request itself carries.
+// The simulator has always derived it from CallerArn ([simulationConditionContext]), so
+// the two paths disagreed about the one key a simulation is most often written about.
+//
+// Omitting it stopped being merely a false deny once the negated operators arrived
+// (#714). AWS's rule is that a negated operator over an absent key is *true*, so with the
+// key missing, `"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::*:user/carol"}` — the
+// shape of an exemption — was satisfied by every caller: as a Deny it fired against carol
+// herself, and as an Allow it granted everyone. The absence turned an exemption into its
+// opposite, which is why the producer lands with the operators rather than after them.
+//
+// aws:PrincipalAccount, aws:userid and aws:username are deliberately still absent: each
+// needs a derivation this function cannot do honestly for every principal kind — a unique
+// ID substrate does not mint, a name that is not the last ARN component for a role
+// session — and a key guessed wrong is worse than one a policy can test for with Null.
+func authzPrincipalContext(ctx map[string]string, principalARN string) {
+	if principalARN == "" {
+		return
+	}
+	ctx["aws:PrincipalArn"] = principalARN
+}
+
+// now reports the controlled time, and whether there is a clock to read it from.
+func (a *AuthController) now() (time.Time, bool) {
+	if a.tc == nil {
+		return time.Time{}, false
+	}
+	return a.tc.Now(), true
 }
 
 // CheckAccess returns nil when the caller is allowed or when reqCtx.Principal
@@ -38,6 +122,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		return nil
 	}
 	resources := a.buildResourceARNs(reqCtx, req)
+	now, haveClock := a.now()
 
 	goCtx := context.Background()
 	entity, exists, err := resolveIAMEntity(goCtx, a.state, reqCtx.Principal.ARN)
@@ -119,6 +204,8 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		for k, v := range res.Context {
 			condCtx[k] = v
 		}
+		a.authzTimeContext(condCtx, now, haveClock)
+		authzPrincipalContext(condCtx, reqCtx.Principal.ARN)
 
 		result := Evaluate(docs, EvaluationRequest{
 			Principal:    reqCtx.Principal.ARN,
@@ -157,7 +244,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 
 	// The create is allowed. If it also applies tags, AWS authorizes those separately
 	// against ec2:CreateTags, and the caller needs that permission too (#691).
-	return a.checkEC2TagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode)
+	return a.checkEC2TagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock)
 }
 
 // checkEC2TagOnCreate runs the second authorization pass AWS performs on
@@ -182,7 +269,8 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 // pass evaluates are the same reading of the same request, plus whatever a launch
 // template supplies.
 func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSRequest,
-	docs []PolicyDocument, boundary *PolicyDocument, requestTags map[string]string, deniedCode string) error {
+	docs []PolicyDocument, boundary *PolicyDocument, requestTags map[string]string, deniedCode string,
+	now time.Time, haveClock bool) error {
 	if req.Service != "ec2" {
 		return nil
 	}
@@ -206,6 +294,11 @@ func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSReq
 	// only here, which is why a direct CreateTags cannot satisfy a statement conditioned
 	// on it — the behavior AWS's examples call "users cannot tag existing resources".
 	condCtx[ec2CreateActionCondKey] = req.Operation
+	a.authzTimeContext(condCtx, now, haveClock)
+	// The same caller signed the same request, so this gate must name the same principal
+	// as the primary decision — a request authorized twice against two different answers
+	// for aws:PrincipalArn would deny on one door and allow on the other (#714).
+	authzPrincipalContext(condCtx, reqCtx.Principal.ARN)
 
 	// Derived from the merged map above rather than reused from the primary decision, so
 	// a template-supplied key is in aws:TagKeys too — AWS's combined example conditions

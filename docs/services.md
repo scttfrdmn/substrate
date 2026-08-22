@@ -1023,6 +1023,131 @@ by case are one key, and the later one wins, under the earlier one's spelling. A
 `ContextEntry` also overrides a derived `aws:PrincipalArn` or `aws:ResourceAccount`
 however it is cased.
 
+### Which condition operators substrate evaluates
+
+Every operator AWS documents, in all five families, plus the `...IfExists` suffix on each
+of them.
+
+| Family | Operators | Comparison |
+|---|---|---|
+| String | `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`, `StringNotEqualsIgnoreCase`, `StringLike`, `StringNotLike` | Exact, case-folded, or globbed with `*` and `?` |
+| Numeric | `NumericEquals`, `NumericNotEquals`, `NumericLessThan`, `NumericLessThanEquals`, `NumericGreaterThan`, `NumericGreaterThanEquals` | Both sides read as decimals |
+| Date | `DateEquals`, `DateNotEquals`, `DateLessThan`, `DateLessThanEquals`, `DateGreaterThan`, `DateGreaterThanEquals` | W3C ISO 8601 (`2020-01-01T00:00:00Z` down to `2020`) or epoch seconds, on either side |
+| Boolean | `Bool` | `true` / `false` |
+| Binary | `BinaryEquals` | Base64 text, compared as AWS's own example table does |
+| IP | `IpAddress`, `NotIpAddress` | CIDR containment, IPv4 and IPv6 |
+| ARN | `ArnEquals`, `ArnLike`, `ArnNotEquals`, `ArnNotLike` | Six components, each globbed separately |
+| Existence | `Null` | `true` matches an absent key, `false` a present one |
+
+Three details of the comparisons are worth stating, because they are the ones a policy
+written against real IAM depends on:
+
+- **An ARN's six components are compared one at a time**, per AWS: "Each of the six
+  colon-delimited components of the ARN is checked separately and each can include
+  multi-character match wildcards (`*`) or single-character match wildcards (`?`)." So
+  `arn:aws:sns:*:TOPIC-ID` does **not** match
+  `arn:aws:sns:us-east-1:123456789012:TOPIC-ID` — a `*` cannot cross a colon. A pattern
+  naming fewer than six components has the missing trailing ones filled with `*`.
+  `ArnEquals`/`ArnLike` are one operator and `ArnNotEquals`/`ArnNotLike` are its negation,
+  which is AWS's rule, not an approximation: "The `ArnEquals` and `ArnLike` condition
+  operators behave identically."
+- **A bare IP address is a host route** — `/32` for IPv4, as AWS says, and `/128` for
+  IPv6, which AWS's IPv4-written sentence does not cover.
+- **Unquoted numbers and Booleans are accepted**, per the grammar: "Values are enclosed in
+  quotation marks. Quotation marks are optional for numeric and Boolean values." So
+  `{"Bool": {"aws:SecureTransport": false}}` and
+  `{"NumericLessThanEquals": {"s3:max-keys": 10}}` are read as written, and a number keeps
+  the spelling the document used.
+
+**A key the request context does not carry follows the operator's polarity**, which is
+AWS's rule: "If the key that you specify in a policy condition is not present in the
+request context, the values do not match and the condition is `false`. If the policy
+condition requires that the key is **not** matched, such as `StringNotLike` or
+`ArnNotLike`, and the right key is not present, the condition is `true`." A key present
+with an empty value counts as absent — AWS's own phrase is a value that "resolves to a
+null dataset, such as an empty string" — except to `Null`, which is the operator whose
+whole job is to see it.
+
+**`...IfExists` on any operator but `Null`.** AWS excludes `Null` explicitly ("any
+condition operator name except the `Null` condition"), so `NullIfExists` does not match;
+`Null` already answers the question the suffix asks. On a `Deny`, a negated `IfExists`
+still fires on an absent key, which is AWS's documented behaviour and the reason the
+suffix is safe to write in a guardrail.
+
+**A value substrate cannot parse as the operator's type** is substrate's own choice, since
+AWS documents neither side. In the *policy*, such a value is skipped, so one unparseable
+element of a list does not decide the answer. In the *request context*, it fails a positive
+operator and satisfies a negated one, on the reasoning that a comparison that cannot be
+made has not been satisfied. Two consequences: `"2020"` is read as a year rather than as
+epoch second 2020, the one place the two date notations collide; and Go's spellings of
+infinity, NaN and hexadecimal floats are not numbers, so `"Inf"` cannot satisfy
+`NumericGreaterThan` against every number in existence.
+
+**An operator substrate does not recognize denies.** Real IAM validates operator names when
+the document is submitted, answering `MalformedPolicyDocument`; substrate does not, so a
+misspelled operator is stored and then discarded at evaluation. Denying is substrate's
+choice and the only one that cannot turn a typo into a grant — including under a set
+qualifier, where an unrecognized operator over an absent key used to be
+[vacuously true](#multivalued-condition-keys-forallvalues-and-foranyvalue) and *granted*
+the statement.
+
+#### Which keys have a producer
+
+An operator is only as useful as the keys it can compare. Substrate populates these, and
+nothing else:
+
+| Key | Where it comes from |
+|---|---|
+| `aws:RequestTag/<key>`, `aws:TagKeys` | The tags the request asks to apply |
+| `aws:ResourceTag/<key>` | The tags on each resource the request names |
+| `aws:CurrentTime`, `aws:EpochTime` | The emulator's simulated clock |
+| `ec2:CreateAction` | [A tagged create's second authorization pass](#a-tagged-create-is-authorized-twice) |
+| `ec2:Subnet`, `ec2:Vpc` | [A launch's networking resources](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc) |
+| `sts:ExternalId` | An `AssumeRole` that supplied one |
+| `aws:PrincipalArn` | The caller, at every gate — identity policy, permission boundary, [tag-on-create](#a-tagged-create-is-authorized-twice), the IAM control plane and a role's trust policy |
+| `aws:ResourceAccount` | A **simulation** only, from `ResourceOwner` |
+| Anything at all | A simulation's `ContextEntries` |
+
+The time pair comes from the emulator's `TimeController`, not the wall clock, so a
+recorded request replays to the same decision. An `AuthController` constructed without one
+leaves both keys **absent** rather than falling back to `time.Now()`: a date condition then
+reports a missing key and denies, which is a false refusal, but a replayable one.
+
+`aws:PrincipalArn` is written at every gate rather than only where a condition on it is
+expected, because a request that passes two gates must get one answer from both. It is also
+why the key could not stay simulator-only once the negated operators arrived: AWS answers
+*true* for a negated operator over an absent key, so
+`"ArnNotEquals": {"aws:PrincipalArn": "arn:aws:iam::*:user/carol"}` — an exemption — was
+satisfied by every caller. As a `Deny` it fired on carol herself; as an `Allow` it granted
+everyone.
+
+What has **no** producer, and therefore never matches on the enforcement path:
+
+- `aws:SecureTransport`, `aws:username`, `aws:userid`, `aws:MultiFactorAuthPresent`,
+  `aws:MultiFactorAuthAge`, `aws:SourceIp`, `aws:SourceVpc`, `aws:PrincipalOrgID` and
+  every other key not in the table above. The IP family is therefore correct but
+  satisfiable only through a simulation's `ContextEntries`. (S3's
+  [public-access analysis](#block-public-access) reads an `aws:SourceIp` condition out of a
+  *bucket policy* to judge how broad it is, which is a different question from evaluating
+  one against a request.)
+- `aws:PrincipalAccount`, `aws:userid` and `aws:username`, even though `aws:PrincipalArn`
+  is populated beside them. Each needs a derivation substrate cannot make honestly for
+  every principal kind — it mints no unique ID, and a role session's user name is not the
+  last component of its ARN — and a key guessed wrong is worse than one a policy can test
+  for with `Null`.
+- Every key the bundled AWS managed policies condition on: `iam:PassedToService`,
+  `iam:AWSServiceName`, `aws:CalledViaLast`, `elasticloadbalancing:CreateAction`,
+  `devops-guru:ServiceNames`, and `ec2:ResourceTag/<key>` (substrate produces
+  `aws:ResourceTag/<key>`). Each is a false deny in the safe direction: all 32 condition
+  blocks in the bundled catalog sit on an `Allow`, so such a statement grants nothing
+  rather than a `Deny` going inert.
+
+**Substrate performs no policy-variable substitution.** A `${aws:username}` in a resource
+ARN or a condition value is compared literally, so the `${aws:username}` in the bundled
+`IAMUserChangePassword` policy matches no user. AWS substitutes the value before
+evaluating; substrate does not, and a policy relying on it grants nothing rather than
+granting the wrong thing.
+
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 
 A condition key is either **single-valued** — at most one value in the request context —
@@ -1036,6 +1161,8 @@ context maps, and only the multivalued one is quantified over.
 | `StringEquals` and the other eight operators, unqualified | Compares the single-valued context. Unchanged by anything in this section |
 | `ForAllValues:<operator>` | True when **every** value the request carries satisfies the operator — and **true when the key is absent or carries no values** |
 | `ForAnyValue:<operator>` | True when **at least one** value satisfies it; **false when the key is absent or carries no values** |
+| Either qualifier on an operator substrate does not [recognize](#which-condition-operators-substrate-evaluates) | Does not match, absent key or not |
+| Either qualifier on `Null` | Does not match. AWS defines no set-qualified `Null`, and quantifying an existence test over the values whose existence it is testing has no meaning |
 | Anything else in that position | Does not match. `ForSomeValues:StringEquals`, or a lowercase `forallvalues:`, denies rather than being read as unqualified |
 
 Both absent-key rules are AWS's, quoted: `ForAllValues` "also returns `true` if there are no
@@ -1058,9 +1185,15 @@ Seen from the `Deny` side the same vacuity bites the other way — a `ForAllValu
 fires on the request that carries no keys — so a guardrail is better written with
 `ForAnyValue`.
 
-Treating an unrecognized qualifier as a non-match is substrate's own choice, consistent with
-the deny-by-default it already applies to an unrecognized operator; everything else here is
-documented behaviour.
+The two absent-key rules are AWS's, but they are also what used to make the qualifiers
+dangerous: substrate answered `true` for `ForAllValues:<anything>` over an absent key
+**without consulting the operator at all**, so an `Allow` written with an operator it could
+not evaluate — or with a misspelled one, which nothing rejects at write time — was granted.
+The vacuous truth now applies only to an operator substrate
+[actually evaluates](#which-condition-operators-substrate-evaluates); an unrecognized one,
+and a qualified `Null`, deny. Treating an unrecognized qualifier or operator as a non-match
+is substrate's own choice — real IAM refuses the document instead — and it is the only choice
+that cannot turn a typo into a grant. Everything else here is documented behaviour.
 
 #### Which keys are multivalued
 
@@ -1075,11 +1208,12 @@ request asked for, and its value is **sorted** — a `ForAllValues` denial that 
 map iteration order could not replay from the event log.
 
 Everything else substrate populates is single-valued: `aws:RequestTag/<key>` and
-`aws:ResourceTag/<key>` on an authorized request, `ec2:CreateAction` on [a tagged create's
+`aws:ResourceTag/<key>` on an authorized request, `aws:CurrentTime` and `aws:EpochTime`
+from the simulated clock, `ec2:CreateAction` on [a tagged create's
 second authorization pass](#a-tagged-create-is-authorized-twice),
 [`ec2:Subnet` and `ec2:Vpc`](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc) on a
 launch's networking resources, `sts:ExternalId` when a role
-is assumed, and `aws:PrincipalArn` / `aws:ResourceAccount` in a simulation. A set qualifier on one of
+is assumed, `aws:PrincipalArn` at every gate, and `aws:ResourceAccount` in a simulation. A set qualifier on one of
 those is evaluated over a one-element set — which is the thing AWS warns against writing,
 not something substrate refuses. Over one that is **absent** it is vacuously true, which is
 the other half of the same warning.

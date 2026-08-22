@@ -134,7 +134,8 @@ configured address will have their requests emulated and recorded.`,
 			// resource calls are dispatched in process rather than through the server,
 			// so they are authorized by the controller the plugin holds rather than by
 			// the one ServerOptions.Auth names. It is the same controller either way.
-			authCtrl := substrate.NewAuthController(state, logger)
+			authCtrl := substrate.NewAuthController(state, logger,
+				substrate.WithAuthTimeController(tc))
 
 			if err := substrate.RegisterDefaultPlugins(initCtx, registry, state, tc, logger, store, cfg,
 				substrate.WithPluginAuth(authCtrl)); err != nil {

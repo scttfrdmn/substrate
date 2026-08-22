@@ -287,10 +287,16 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 	// A condition key absent from the context is not the same as one set to "":
 	// conditionMatches reads a missing key as the empty string, so a policy
 	// requiring StringEquals sts:ExternalId correctly fails when none was sent.
-	condCtx := make(map[string]string, 1)
+	condCtx := make(map[string]string, 2)
 	if externalID != "" {
 		condCtx["sts:ExternalId"] = externalID
 	}
+	// The principal asking to assume the role. A trust policy is the likeliest place in
+	// AWS for a condition on aws:PrincipalArn — it is how an account-wide Principal is
+	// narrowed to particular callers — and with the key absent, a negated operator over it
+	// was satisfied by every caller, exempting nobody and, on an Allow, admitting all
+	// (#714). See [authzPrincipalContext].
+	authzPrincipalContext(condCtx, ctx.Principal.ARN)
 
 	// Resource is empty because a trust policy carries no Resource element — the
 	// role it is attached to *is* the resource. resourceMatches treats an empty

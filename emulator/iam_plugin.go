@@ -1603,16 +1603,24 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		}
 	}
 
-	// The context is deliberately empty, and MultiContext is left nil for the same
-	// reason: this path authorizes an IAM control-plane call, and nothing here reads the
-	// request for tags. A policy conditioned on aws:RequestTag or aws:TagKeys therefore
-	// cannot be satisfied through this door even though [CheckAccess] populates both —
-	// which is worth knowing before writing a condition against an iam: action (#690).
+	// The context carries the caller and nothing else, and MultiContext is left nil: this
+	// path authorizes an IAM control-plane call, and nothing here reads the request for
+	// tags. A policy conditioned on aws:RequestTag or aws:TagKeys therefore cannot be
+	// satisfied through this door even though [CheckAccess] populates both — which is
+	// worth knowing before writing a condition against an iam: action (#690).
+	//
+	// aws:PrincipalArn is the exception, for [authzPrincipalContext]'s reason: it is not
+	// read from the request at all, it is who signed it, and this door knows that as
+	// surely as the other three. Leaving it out let a negated operator over it hold
+	// vacuously here while failing at the main gate (#714).
+	condCtx := make(map[string]string, 1)
+	authzPrincipalContext(condCtx, reqCtx.Principal.ARN)
+
 	result := Evaluate(docs, EvaluationRequest{
 		Principal: reqCtx.Principal.ARN,
 		Action:    action,
 		Resource:  resource,
-		Context:   make(map[string]string),
+		Context:   condCtx,
 	})
 
 	if result.Decision != DecisionAllow {
@@ -1639,7 +1647,7 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 					Principal: reqCtx.Principal.ARN,
 					Action:    action,
 					Resource:  resource,
-					Context:   make(map[string]string),
+					Context:   condCtx,
 				})
 				if boundaryResult.Decision != DecisionAllow {
 					return &AWSError{
