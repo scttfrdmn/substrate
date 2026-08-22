@@ -377,7 +377,7 @@ func (p *EC2Plugin) putLaunchTemplate(goCtx context.Context, lt *EC2LaunchTempla
 	if err != nil {
 		return fmt.Errorf("putLaunchTemplate: marshal: %w", err)
 	}
-	key := "lt:" + lt.AccountID + "/" + lt.Region + "/" + lt.LaunchTemplateID
+	key := ec2LaunchTemplateStateKey(lt.AccountID, lt.Region, lt.LaunchTemplateID)
 	if err := p.state.Put(goCtx, ec2Namespace, key, ltJSON); err != nil {
 		return fmt.Errorf("putLaunchTemplate: put: %w", err)
 	}
@@ -721,7 +721,7 @@ func (p *EC2Plugin) describeVersionsAccountWide(goCtx context.Context, ctx *Requ
 
 	var items []ec2LTVersionItem
 	for _, id := range ids {
-		key := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + id
+		key := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, id)
 		data, err := p.state.Get(goCtx, ec2Namespace, key)
 		if err != nil || data == nil {
 			continue

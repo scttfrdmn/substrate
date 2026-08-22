@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`CreateTags` and `DeleteTags` reach every taggable EC2 resource type** (#708). Five ID
+  prefixes were **silently ignored**: a request naming an `ami-`, `lt-`, `fleet-`, `pg-` or
+  `key-` ID answered `<return>true</return>` and wrote nothing. Each was well-formed and named
+  a resource substrate stores, so there was no way for a caller to tell — the answer is
+  identical to the one a successful call gives. `ec2TaggableResource` now resolves fifteen
+  prefixes, and `ec2TagScanTargets` reports the same fifteen, so `DescribeTags` and
+  `CreateTags` cover exactly the same set. They did not: three types could be read and not
+  written, and `placement-group` and `key-pair` could be neither.
+
+  **A launch template's own tags were settable by no path at all.** The `TagSpecification`
+  `CreateLaunchTemplate` read lives inside `LaunchTemplateData` and is AWS's "tags for the
+  resources that are created when an instance is launched" — a different parameter from the
+  top-level `TagSpecification.N`, "the tags to apply to the launch template on creation. To
+  tag the launch template, the resource type must be `launch-template`". Both are now read,
+  each on its own scope.
+
+  Also new: `EC2KeyPair` gained a `Tags` field (it had none), `CreateKeyPair`, `ImportKeyPair`
+  and `CreatePlacementGroup` honour `TagSpecification.N` and echo the result, and
+  `DescribeKeyPairs`/`DescribePlacementGroups` render `tagSet`.
+
+  Provenance: `InvalidID`'s code and description are AWS's, but from the EC2 client-error
+  table — `API_CreateTags.html` publishes no operation-specific error at all. Naming the
+  offending ID where AWS writes "The specified ID" is substrate's. Whether real `CreateTags`
+  takes a placement group **by ID or by name is not settled by AWS**: the ARN is by name and
+  `DescribePlacementGroups` publishes no `group-id` filter, but the client-error table
+  publishes `InvalidPlacementGroupId.Malformed` "in the form `pg-xxxxxxxxxxxxxxxxx`", which
+  only an ID-taking operation can raise. Substrate accepts the `pg-` form and translates.
+
 - **EC2's documented filter limits, enforced in one place** (#697). Using_Filtering publishes
   three: "You can specify up to 50 filters and up to 200 total filter values in a single
   request" and "Filter strings can be up to 255 characters in length." All three are now
@@ -25,6 +53,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be used."
 
 ### Changed
+- **A tagging ID whose prefix names no taggable type is refused, not ignored** (#708).
+  `CreateTags`/`DeleteTags` answer `InvalidID` / HTTP 400 — "The ID '<id>' for the resource you
+  are trying to tag is not valid. Ensure that you provide the full resource ID; for example,
+  ami-2bb65342 for an AMI." The check runs over every `ResourceId.N` **before the first tag is
+  applied**, so a request naming a good ID first and a bad one second tags neither; refusing
+  inside the apply loop would leave a partially-tagged state real EC2 never produces. A
+  well-formed prefix naming *nothing* stays a no-op at HTTP 200 and is still not counted
+  against the 50-tag limit.
+
+- **Seven responses omit `tagSet` for an untagged resource** instead of rendering
+  `<tagSet></tagSet>` (#708): `CreateKeyPair`, `ImportKeyPair`, `DescribeKeyPairs`,
+  `CreatePlacementGroup`, `DescribePlacementGroups`, `CreateLaunchTemplate` and
+  `DescribeLaunchTemplates`. A wire change, and AWS's own examples are the reason —
+  `CreateLaunchTemplate`'s Example 1 and `CreatePlacementGroup`'s Example 2 each create an
+  untagged resource and neither response carries a `tagSet`, while `CreateKeyPair`'s tagged
+  example does. An SDK tells an absent list from an empty one. `xml:"tagSet>item,omitempty"`
+  cannot express the absence — encoding/xml writes the parent element of a nested path even
+  for a nil slice — so the four renderers converged on the pointer-to-wrapper shape #685 had
+  already written for `DescribeSubnets`, now shared as `ec2TagSetXML`. `DescribeFleets` keeps
+  the old shape deliberately: its reference page publishes no example response, so there is no
+  untagged sample to follow and changing it would be a guess. `DescribeSnapshots` keeps its
+  present-but-empty element because its own page shows it.
+
 - **Eighteen mutating EC2 operations answer their `Invalid*.NotFound` from the kind table, not
   from a hand-written literal** (#713). `ec2_resourceid.go`'s `ec2IDKind` table has been the
   single source of an ID family's prefix rule, `NotFound` code, `Malformed` code and message
@@ -126,6 +177,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a description of the condition, never a wire message.
 
 ### Fixed
+- **An `ami-` ID is authorized against the account-less ARN AWS documents** (#708).
+  `arn:${Partition}:ec2:${Region}::image/${ImageId}` has a deliberately empty account field,
+  as does a snapshot's, where the other thirteen taggable types carry `${Account}`. The
+  authorizer stamped the account on unconditionally, which makes an ARN-scoped `Deny` naming an
+  AMI inert and stops a least-privilege `Allow` from granting the call — the same
+  two-directional failure #674 fixed for tagging as a whole. #689's `snap-` arm shipped with
+  this defect and is fixed in the same pass; `ec2TaggableResource`'s own doc comment had
+  asserted no type here was account-less while `snapshot` already was.
+
 - **Three plugins answered a wrong code for an unimplemented operation** (#716), all corrected
   by routing through the shared refusal. DynamoDB returned `UnknownOperationException` — the
   right code — at HTTP **400**, where AWS's own DynamoDB Common Errors page publishes 404.

@@ -35,12 +35,14 @@ func ec2StatePrefix(namespace, accountID, region string) string {
 	return namespace + ":" + accountID + "/" + region + "/"
 }
 
-// ec2TagResourceID returns the resource ID at the end of an EC2 state key.
+// ec2StateKeyTail returns the last path segment of an EC2 state key.
 //
-// Every namespace in [ec2TagScanTargets] keys its records by the resource's own ID in the
-// last path segment, so the tail is the ID a caller would pass to CreateTags — and the one
-// AWS's TagDescription reports.
-func ec2TagResourceID(key string) string {
+// For thirteen of the fifteen namespaces in [ec2TagScanTargets] that segment is the
+// resource's own ID, which is both what a caller passes to CreateTags and what AWS's
+// TagDescription reports. For the other two it is the resource's *name* — a placement group
+// and a key pair are keyed by name — which is why [ec2TagScanTarget.idMember] exists and why
+// this function is named for what it returns rather than for what it usually means.
+func ec2StateKeyTail(key string) string {
 	if i := strings.LastIndex(key, "/"); i >= 0 {
 		return key[i+1:]
 	}
@@ -59,39 +61,43 @@ type ec2TagScanTarget struct {
 	namespace string
 	// resourceType is AWS's TagSpecification spelling of the resource type.
 	resourceType string
+	// idMember is the record's JSON member holding the resource's ID, for a namespace
+	// keyed by name rather than by ID. Empty when [ec2StateKeyTail] is already the ID.
+	//
+	// AWS's TagDescription reports resourceId, so a name-keyed namespace has to read the
+	// ID out of the record: reporting the tail would name a placement group by its group
+	// name, which is not an ID a caller can pass back to CreateTags.
+	idMember string
 }
 
 // ec2TagScanTargets is every resource type DescribeTags reads tags from.
 //
-// This list is deliberately **wider** than [ec2TaggableResource]'s nine prefixes, which is
-// what CreateTags can write through. DescribeTags' job is to report every tag substrate
-// stores, however it was applied: an AMI, snapshot, launch template or fleet takes its tags
-// from its own create call's TagSpecification and cannot be tagged through CreateTags at
-// all (#689 adds the snapshot arm; the rest are #695's follow-up), so reporting only the
-// CreateTags-writable types would hide tags a caller had successfully applied.
-//
-// EC2PlacementGroup also carries a Tags field and is deliberately absent: no path writes
-// it, and its records are keyed by group *name* where AWS's TagDescription reports a
-// placement group's ID, so [ec2TagResourceID] would report the wrong identifier. It joins
-// the scan when something can tag a placement group.
+// The list is no longer wider than [ec2TaggableResource]'s prefixes: #708 closed the gap,
+// so every type here can also be tagged through CreateTags and every type CreateTags
+// accepts is reported here. Keeping the two aligned is the point — until #708 an AMI,
+// launch template, fleet, placement group or key pair could hold tags from its own create
+// call's TagSpecification that CreateTags had no way to change, and a placement group or
+// key pair held tags DescribeTags had no way to report.
 //
 // Order is alphabetical by type, which only sets the scan order — the response is sorted
 // by [ec2SortTagDescriptions] regardless.
 func ec2TagScanTargets() []ec2TagScanTarget {
 	return []ec2TagScanTarget{
-		{"eip", "elastic-ip"},
-		{"fleet", "fleet"},
-		{"image", "image"},
-		{"instance", "instance"},
-		{"igw", "internet-gateway"},
-		{"lt", "launch-template"},
-		{"nat", "natgateway"},
-		{"rtb", "route-table"},
-		{"sg", "security-group"},
-		{"snapshot", "snapshot"},
-		{"subnet", "subnet"},
-		{"volume", "volume"},
-		{"vpc", "vpc"},
+		{namespace: "eip", resourceType: "elastic-ip"},
+		{namespace: "fleet", resourceType: "fleet"},
+		{namespace: "image", resourceType: "image"},
+		{namespace: "instance", resourceType: "instance"},
+		{namespace: "igw", resourceType: "internet-gateway"},
+		{namespace: "keypair", resourceType: "key-pair", idMember: "keyPairId"},
+		{namespace: "lt", resourceType: "launch-template"},
+		{namespace: "nat", resourceType: "natgateway"},
+		{namespace: "placement_group", resourceType: "placement-group", idMember: "group_id"},
+		{namespace: "rtb", resourceType: "route-table"},
+		{namespace: "sg", resourceType: "security-group"},
+		{namespace: "snapshot", resourceType: "snapshot"},
+		{namespace: "subnet", resourceType: "subnet"},
+		{namespace: "volume", resourceType: "volume"},
+		{namespace: "vpc", resourceType: "vpc"},
 	}
 }
 
@@ -182,10 +188,10 @@ func (p *EC2Plugin) describeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // scanTags reads every stored tag in the account and region, keeping the ones the filters
 // accept.
 //
-// Each record is decoded into an anonymous struct carrying only "tags", the type-agnostic
-// shape [EC2Plugin.applyTagsToResource] writes and [ec2AuthzTagsFor] reads, so a new
-// resource type joins the scan by being listed in [ec2TagScanTargets] and needs no decoder
-// of its own.
+// Each record is decoded into a member map, so a new resource type joins the scan by being
+// listed in [ec2TagScanTargets] and needs no decoder of its own: "tags" is the
+// type-agnostic shape [EC2Plugin.applyTagsToResource] writes and [ec2AuthzTagsFor] reads,
+// and a name-keyed type's ID member is named by the target rather than by a Go type.
 //
 // A record that cannot be read or decoded is skipped rather than failing the request: a
 // partial answer names the resources it could read, where an error names none of them, and
@@ -204,15 +210,26 @@ func (p *EC2Plugin) scanTags(ctx context.Context, reqCtx *RequestContext, filter
 			if getErr != nil || data == nil {
 				continue
 			}
-			var record struct {
-				Tags []EC2Tag `json:"tags"`
-			}
+			var record map[string]json.RawMessage
 			if json.Unmarshal(data, &record) != nil {
 				continue
 			}
-			for _, tag := range record.Tags {
+			var tags []EC2Tag
+			if raw, ok := record["tags"]; ok && json.Unmarshal(raw, &tags) != nil {
+				continue
+			}
+			resourceID := ec2StateKeyTail(key)
+			if target.idMember != "" {
+				// A record that carries no ID member is skipped rather than reported under
+				// its name: a TagDescription naming a resource by something that is not its
+				// resourceId is worse than an omission, because a caller cannot tell.
+				if json.Unmarshal(record[target.idMember], &resourceID) != nil {
+					continue
+				}
+			}
+			for _, tag := range tags {
 				item := ec2TagDescription{
-					ResourceID:   ec2TagResourceID(key),
+					ResourceID:   resourceID,
 					ResourceType: target.resourceType,
 					Key:          tag.Key,
 					Value:        tag.Value,

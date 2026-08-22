@@ -2453,15 +2453,18 @@ func (p *EC2Plugin) rebootInstances(_ *RequestContext, _ *AWSRequest) (*AWSRespo
 // Keys using the reserved "aws:" prefix are rejected before anything is applied, so a
 // mixed request leaves every named resource untouched (#452); a key or value over its
 // length limit likewise (#490); and every resource named is checked against the
-// per-resource tag limit before any of them is modified (#469). All three checks run
-// over the whole request for the same reason: CreateTags accepts up to 1000 resource
-// IDs, and a rejection partway through the apply loop would leave a partially-tagged
-// state real EC2 never produces.
+// per-resource tag limit before any of them is modified (#469); and an ID naming no
+// taggable resource type at all (#708). All four checks run over the whole request for the
+// same reason: CreateTags accepts up to 1000 resource IDs, and a rejection partway through
+// the apply loop would leave a partially-tagged state real EC2 never produces.
 func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceIDs := extractIndexedParams(req.Params, "ResourceId")
 	tags := extractEC2Tags(req.Params)
 	if err := ec2CheckTagRules(tags); err != nil {
 		return nil, err
+	}
+	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
+		return nil, awsErr
 	}
 	for _, id := range resourceIDs {
 		existing, found, err := p.resourceTags(reqCtx, id)
@@ -2510,6 +2513,9 @@ func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	tags := extractEC2Tags(req.Params)
 	if err := ec2CheckTagRules(tags); err != nil {
 		return nil, err
+	}
+	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
+		return nil, awsErr
 	}
 	for _, id := range resourceIDs {
 		if err := p.applyTagsToResource(reqCtx, id, tags, true); err != nil {
@@ -2583,74 +2589,235 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
-// ec2TaggableResource resolves a taggable EC2 resource ID to the state key its record
-// lives under and the resource type its ARN names, reporting whether the ID's prefix
-// names a resource type substrate can tag at all.
+// ec2Taggable is what one taggable EC2 resource ID resolves to: where its record lives,
+// and how AWS spells its ARN.
 //
-// One switch answers both because for five of the nine prefixes the two spellings
-// differ: substrate's state keys abbreviate where the Service Authorization Reference's
-// ARN formats do not — sg/security-group, igw/internet-gateway, rtb/route-table,
-// eip/elastic-ip, nat/natgateway. Deriving one from the other by string-munging would
-// produce arn:aws:ec2:…:sg/sg-…, which matches no ARN a caller can write, so the
-// authorization decision (#674) needs the ARN type stated rather than inferred. Keeping
-// the pair in one place is what stops the tagging handler's list of taggable resources
-// and the authorizer's from drifting apart.
+// Four fields rather than the state key alone, because for each of three separate reasons
+// the ID a caller passes to CreateTags is not simply the tail of both strings:
 //
-// The ARN type is a bare resource type, not a whole ARN: the caller supplies the
-// partition, region and account, and all nine of these ARN formats are
-// region-and-account qualified — none has the image ARN's deliberately empty account
-// field.
-func ec2TaggableResource(reqCtx *RequestContext, id string) (stateKey, arnType string, ok bool) {
-	scope := reqCtx.AccountID + "/" + reqCtx.Region
+//   - substrate's state keys abbreviate where the Service Authorization Reference's ARN
+//     formats do not — sg/security-group, igw/internet-gateway, rtb/route-table,
+//     eip/elastic-ip, nat/natgateway. Deriving one from the other by string-munging would
+//     produce arn:aws:ec2:…:sg/sg-…, which matches no ARN a caller can write, so the
+//     authorization decision (#674) needs the ARN type stated rather than inferred.
+//   - A placement group's and a key pair's records are keyed by **name**, while CreateTags
+//     names both by ID — and AWS's ARN formats for both are by name as well
+//     (arn:${Partition}:ec2:${Region}:${Account}:placement-group/${PlacementGroupName},
+//     …:key-pair/${KeyPairName}). One state scan therefore answers both questions, which
+//     is why [ec2NameKeyedResource] runs inside the resolver rather than at either caller.
+//   - An image's and a snapshot's ARN formats have a **deliberately empty account field**
+//     (arn:${Partition}:ec2:${Region}::image/${ImageId}) where the other thirteen carry
+//     ${Account} — see [ec2Taggable.arn].
+//
+// Keeping all of it in one place is what stops the tagging handler's list of taggable
+// resources and the authorizer's from drifting apart.
+type ec2Taggable struct {
+	// stateKey is the key the resource's record lives under, or "" when the ID's prefix
+	// names a taggable type but no record answers to the ID — see [ec2Taggable.resolved].
+	stateKey string
+
+	// arnType is the bare resource type in AWS's ARN format for this resource, not a
+	// whole ARN: [ec2Taggable.arn] supplies the partition, region and account.
+	arnType string
+
+	// arnID is the identifier AWS's ARN format names the resource by, which is the
+	// request's own ID for every type except a placement group and a key pair.
+	arnID string
+
+	// accountLess reports that AWS's ARN format for this type has an empty account field.
+	accountLess bool
+}
+
+// resolved reports whether a record was found for the ID.
+//
+// False for a well-formed pg- or key- ID naming no placement group or key pair, which is
+// the one case a recognized prefix cannot be resolved: those two are looked up by scanning
+// for the ID inside the record, so an absent resource yields no state key at all where
+// every other type's key is computed from the ID and simply reads back nothing. Both
+// callers treat it as they treat an absent resource of any other type — a no-op, not a
+// refusal — and [ec2AuthzTagResources] skips it, having no name to build the ARN from.
+func (t ec2Taggable) resolved() bool { return t.stateKey != "" }
+
+// arn returns the resource's ARN, in AWS's documented format for its type.
+//
+// The account segment is empty for an image and a snapshot, which is not a substrate
+// simplification: AWS publishes arn:${Partition}:ec2:${Region}::image/${ImageId} and the
+// same shape for a snapshot, while every other type here carries ${Account}. Stamping the
+// account on produces an ARN matching no statement a caller wrote against AWS's template,
+// so a Deny naming an AMI would be inert and a least-privilege Allow could not grant the
+// call — the same defect #674 fixed for the batch as a whole. #689's snapshot arm had it:
+// this resolver's own doc comment claimed no type here was account-less while snapshot
+// already was.
+func (t ec2Taggable) arn(region, accountID string) string {
+	if t.accountLess {
+		accountID = ""
+	}
+	return "arn:aws:ec2:" + region + ":" + accountID + ":" + t.arnType + "/" + t.arnID
+}
+
+// ec2TaggableResource resolves a taggable EC2 resource ID, reporting whether the ID's
+// prefix names a resource type substrate can tag at all.
+//
+// ok=false is the caller's cue to refuse with [ec2InvalidTagResourceID]; ok=true with an
+// unresolved result is a no-op. See [ec2Taggable] for why the result carries four fields.
+func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) (ec2Taggable, bool) {
+	acct, region := reqCtx.AccountID, reqCtx.Region
+	scope := acct + "/" + region
 	switch {
 	case strings.HasPrefix(id, "i-"):
-		return "instance:" + scope + "/" + id, "instance", true
+		return ec2Taggable{stateKey: "instance:" + scope + "/" + id, arnType: "instance", arnID: id}, true
 	case strings.HasPrefix(id, "vpc-"):
-		return "vpc:" + scope + "/" + id, "vpc", true
+		return ec2Taggable{stateKey: "vpc:" + scope + "/" + id, arnType: "vpc", arnID: id}, true
 	case strings.HasPrefix(id, "subnet-"):
-		return "subnet:" + scope + "/" + id, "subnet", true
+		return ec2Taggable{stateKey: "subnet:" + scope + "/" + id, arnType: "subnet", arnID: id}, true
 	case strings.HasPrefix(id, "sg-"):
-		return "sg:" + scope + "/" + id, "security-group", true
+		return ec2Taggable{stateKey: "sg:" + scope + "/" + id, arnType: "security-group", arnID: id}, true
 	case strings.HasPrefix(id, "igw-"):
-		return "igw:" + scope + "/" + id, "internet-gateway", true
+		return ec2Taggable{stateKey: "igw:" + scope + "/" + id, arnType: "internet-gateway", arnID: id}, true
 	case strings.HasPrefix(id, "rtb-"):
-		return "rtb:" + scope + "/" + id, "route-table", true
+		return ec2Taggable{stateKey: "rtb:" + scope + "/" + id, arnType: "route-table", arnID: id}, true
 	case strings.HasPrefix(id, "eipalloc-"):
 		// elastic-ip, and the ARN carries the allocation ID — which is the ID CreateTags
 		// takes for an address, so no translation is needed here either.
-		return "eip:" + scope + "/" + id, "elastic-ip", true
+		return ec2Taggable{stateKey: "eip:" + scope + "/" + id, arnType: "elastic-ip", arnID: id}, true
 	case strings.HasPrefix(id, "nat-"):
-		// natgateway, unhyphenated, alone among the nine.
-		return "nat:" + scope + "/" + id, "natgateway", true
+		// natgateway, unhyphenated, alone among the fifteen.
+		return ec2Taggable{stateKey: "nat:" + scope + "/" + id, arnType: "natgateway", arnID: id}, true
 	case strings.HasPrefix(id, "vol-"):
 		// Volumes were the one taggable resource with no arm here, so CreateTags on a
 		// vol- ID fell through to the default and answered <return>true</return> having
 		// written nothing (#670). Nothing else needed changing:
 		// [EC2Plugin.applyTagsToResource] is type-agnostic — it reads and writes the
 		// record's "tags" JSON member — and [EC2Volume.Tags] already serializes there.
-		return ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, id), "volume", true
+		return ec2Taggable{stateKey: ec2VolumeStateKey(acct, region, id), arnType: "volume", arnID: id}, true
 	case strings.HasPrefix(id, "snap-"):
 		// Snapshots had the same silent no-op vol- did, and #689 made it reachable: a
 		// caller can now create a snapshot of their own, so tagging one after the fact is
 		// something they will do. DescribeTags already reported a snapshot's tags before
 		// this arm existed (#688) — its scan reads state directly — so until now
 		// DescribeTags could see tags CreateTags had no way to write.
-		return ec2SnapshotStateKey(reqCtx.AccountID, reqCtx.Region, id), "snapshot", true
+		return ec2Taggable{
+			stateKey: ec2SnapshotStateKey(acct, region, id), arnType: "snapshot", arnID: id,
+			accountLess: true,
+		}, true
+	case strings.HasPrefix(id, "ami-"):
+		return ec2Taggable{
+			stateKey: ec2ImageStateKey(acct, region, id), arnType: "image", arnID: id,
+			accountLess: true,
+		}, true
+	case strings.HasPrefix(id, "lt-"):
+		return ec2Taggable{
+			stateKey: ec2LaunchTemplateStateKey(acct, region, id),
+			arnType:  "launch-template", arnID: id,
+		}, true
+	case strings.HasPrefix(id, "fleet-"):
+		// A fleet ID carries four internal hyphens of its own
+		// ("fleet-12a34b56-7cd8-...") — see [generateFleetID] — so it is matched by
+		// prefix and used whole. Nothing here may split an ID on "-".
+		return ec2Taggable{stateKey: ec2FleetStateKey(acct, region, id), arnType: "fleet", arnID: id}, true
+	case strings.HasPrefix(id, "pg-"):
+		// AWS does not settle whether CreateTags takes a placement group by ID or by
+		// name: the ARN is by name and DescribePlacementGroups publishes no group-id
+		// filter, but the client-error table publishes InvalidPlacementGroupId.Malformed
+		// "in the form pg-xxxxxxxxxxxxxxxxx", which only an ID-taking operation can
+		// raise. Substrate takes the pg- form and translates.
+		name, found := ec2NameKeyedResource(state, ec2StatePrefix("placement_group", acct, region), "group_id", id)
+		if !found {
+			return ec2Taggable{arnType: "placement-group"}, true
+		}
+		return ec2Taggable{
+			stateKey: ec2PlacementGroupStateKey(acct, region, name),
+			arnType:  "placement-group", arnID: name,
+		}, true
+	case strings.HasPrefix(id, "key-"):
+		name, found := ec2NameKeyedResource(state, ec2StatePrefix("keypair", acct, region), "keyPairId", id)
+		if !found {
+			return ec2Taggable{arnType: "key-pair"}, true
+		}
+		return ec2Taggable{
+			stateKey: ec2KeyPairStateKey(acct, region, name),
+			arnType:  "key-pair", arnID: name,
+		}, true
 	default:
-		return "", "", false
+		return ec2Taggable{}, false
 	}
 }
 
-// ec2TaggableStateKey returns the state key for a taggable resource ID, and whether
-// the ID's prefix names a resource type substrate can tag at all.
+// ec2NameKeyedResource resolves a resource ID to the name its record is keyed by, for the
+// two taggable types substrate stores by name.
 //
-// Shared by [EC2Plugin.applyTagsToResource] and [EC2Plugin.resourceTags] so the tag
-// limit is counted against exactly the resources the apply step will modify: if the two
-// disagreed about which IDs resolve, CreateTags would either check a resource it does
-// not tag or tag one it did not check.
-func ec2TaggableStateKey(reqCtx *RequestContext, id string) (string, bool) {
-	stateKey, _, ok := ec2TaggableResource(reqCtx, id)
-	return stateKey, ok
+// A linear scan of the namespace, which is what a name-keyed record leaves available: the
+// ID lives inside the record, so there is no key to look it up by.
+// [EC2Plugin.deleteKeyPair] already does exactly this scan for a KeyPairId, and the cost
+// is bounded by the number of key pairs or placement groups in one account and region.
+// The state's own key order decides which of two records claiming the same ID wins, which
+// is deterministic because [StateManager.List] is; substrate mints both IDs uniquely, so
+// the tie cannot arise from anything substrate wrote.
+//
+// A read or decode failure yields found=false rather than an error, matching
+// [ec2AuthzRecordFor]: from here an unreadable record is indistinguishable from an absent
+// one, and both mean the ID names no resource this call can tag.
+func ec2NameKeyedResource(state StateManager, prefix, idMember, id string) (string, bool) {
+	keys, err := state.List(context.Background(), ec2Namespace, prefix)
+	if err != nil {
+		return "", false
+	}
+	for _, key := range keys {
+		raw, getErr := state.Get(context.Background(), ec2Namespace, key)
+		if getErr != nil || raw == nil {
+			continue
+		}
+		var record map[string]json.RawMessage
+		if json.Unmarshal(raw, &record) != nil {
+			continue
+		}
+		var got string
+		if json.Unmarshal(record[idMember], &got) != nil || got != id {
+			continue
+		}
+		return ec2StateKeyTail(key), true
+	}
+	return "", false
+}
+
+// ec2InvalidTagResourceID is the refusal for a ResourceId whose prefix names no resource
+// type substrate can tag.
+//
+// AWS publishes InvalidID for exactly this, in the EC2 client-error table rather than on
+// CreateTags itself — which publishes no operation-specific error at all: "The specified
+// ID for the resource you are trying to tag is not valid. Ensure that you provide the full
+// resource ID; for example, ami-2bb65342 for an AMI." Naming the offending ID in place of
+// AWS's "The specified ID" is substrate's; the guidance that follows is AWS's own words,
+// and is the one thing a caller who sent a truncated ID needs to read.
+//
+// Until #708 this path answered <return>true</return>: CreateTags reported success for an
+// ID it had silently ignored, which is the one answer a caller cannot detect. That
+// mattered most for the five types #708 adds — an ami-, lt-, fleet-, pg- or key- ID was
+// well-formed and named a real resource, and was dropped.
+func ec2InvalidTagResourceID(id string) *AWSError {
+	return &AWSError{
+		Code: "InvalidID",
+		Message: "The ID '" + id + "' for the resource you are trying to tag is not valid. " +
+			"Ensure that you provide the full resource ID; for example, ami-2bb65342 for an AMI.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2CheckTagResourceIDs refuses the whole request when any ResourceId names a resource
+// type substrate cannot tag, before anything is written.
+//
+// Ordering, not redundancy: [EC2Plugin.applyTagsToResource] answers the same refusal from
+// the same constructor, but it answers it partway through the apply loop, which would
+// leave the resources named ahead of the bad ID tagged. That is the partially-tagged state
+// CreateTags' three other whole-request checks exist to prevent, and real EC2 never
+// produces.
+func ec2CheckTagResourceIDs(state StateManager, reqCtx *RequestContext, ids []string) *AWSError {
+	for _, id := range ids {
+		if _, ok := ec2TaggableResource(state, reqCtx, id); !ok {
+			return ec2InvalidTagResourceID(id)
+		}
+	}
+	return nil
 }
 
 // resourceTags returns the tags currently on the resource named by id, and whether the
@@ -2660,11 +2827,11 @@ func ec2TaggableStateKey(reqCtx *RequestContext, id string) (string, bool) {
 // [EC2Plugin.applyTagsToResource]: CreateTags on an absent resource is a no-op in
 // substrate rather than a rejection, so the tag-limit check has nothing to count.
 func (p *EC2Plugin) resourceTags(reqCtx *RequestContext, id string) ([]EC2Tag, bool, error) {
-	stateKey, ok := ec2TaggableStateKey(reqCtx, id)
-	if !ok {
+	target, ok := ec2TaggableResource(p.state, reqCtx, id)
+	if !ok || !target.resolved() {
 		return nil, false, nil
 	}
-	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
+	data, err := p.state.Get(context.Background(), ec2Namespace, target.stateKey)
 	if err != nil || data == nil {
 		return nil, false, nil //nolint:nilerr // Absent resource — ignored, as by applyTagsToResource.
 	}
@@ -2682,12 +2849,25 @@ func (p *EC2Plugin) resourceTags(reqCtx *RequestContext, id string) ([]EC2Tag, b
 // applyTagsToResource loads the EC2 resource identified by id, merges or
 // removes the provided tags, and saves the updated resource back to state.
 // When remove is true, matching tag keys are deleted; otherwise tags are upserted.
+//
+// An ID whose prefix names no taggable type is refused with [ec2InvalidTagResourceID]
+// rather than silently ignored, which is what it was until #708 — the comment there read
+// "matches AWS behavior", and AWS's behavior is InvalidID. Both callers check every ID
+// through [ec2CheckTagResourceIDs] first, so the refusal here is reached only by a caller
+// that skipped that pass; it is kept so no future one can reintroduce the silent success.
+//
+// An ID that resolves to no record is still a no-op, deliberately: substrate does not
+// verify a taggable resource's existence, so a tag applied to an absent resource is
+// discarded rather than refused.
 func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags []EC2Tag, remove bool) error {
-	stateKey, ok := ec2TaggableStateKey(reqCtx, id)
+	target, ok := ec2TaggableResource(p.state, reqCtx, id)
 	if !ok {
-		// Unknown resource type — silently ignore (matches AWS behavior).
+		return ec2InvalidTagResourceID(id)
+	}
+	if !target.resolved() {
 		return nil
 	}
+	stateKey := target.stateKey
 
 	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
 	if err != nil || data == nil {
@@ -2759,14 +2939,36 @@ func extractEC2Tags(params map[string]string) []EC2Tag {
 
 // --- Key pair operations ---
 
+// ec2KeyPairTags reads the TagSpecification.N tags a key-pair create scopes to the key pair
+// and checks them, for CreateKeyPair and ImportKeyPair (#708).
+//
+// Both operations document TagSpecification.N and a tagSet in their responses — AWS's
+// CreateKeyPair Example 1 sends TagSpecification.1.ResourceType=key-pair and gets the tag
+// back — and until #708 neither read it: EC2KeyPair had no Tags field at all, so a key pair
+// created with tags reported none from anywhere.
+func ec2KeyPairTags(params map[string]string) ([]EC2Tag, *AWSError) {
+	tags := ec2TagSpecificationTags(params, "", "key-pair")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+	return tags, nil
+}
+
 func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["KeyName"]
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName is required", HTTPStatus: http.StatusBadRequest}
 	}
+	tags, awsErr := ec2KeyPairTags(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 
 	// Check for duplicate.
-	existing, _ := p.state.Get(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name)
+	existing, _ := p.state.Get(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name))
 	if existing != nil {
 		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
 	}
@@ -2799,11 +3001,15 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		Fingerprint: fp,
 		KeyType:     keyType,
 		CreatedAt:   p.tc.Now().UTC().Format(time.RFC3339),
+		Tags:        tags,
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}
-	data, _ := json.Marshal(kp)
-	if err := p.state.Put(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name, data); err != nil {
+	data, err := json.Marshal(kp)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name), data); err != nil {
 		return nil, fmt.Errorf("ec2 createKeyPair put: %w", err)
 	}
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "keypair_names", name); err != nil {
@@ -2811,13 +3017,14 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	type response struct {
-		XMLName        xml.Name `xml:"CreateKeyPairResponse"`
-		XMLNS          string   `xml:"xmlns,attr"`
-		KeyPairID      string   `xml:"keyPairId"`
-		KeyName        string   `xml:"keyName"`
-		KeyFingerprint string   `xml:"keyFingerprint"`
-		KeyType        string   `xml:"keyType"`
-		KeyMaterial    string   `xml:"keyMaterial"`
+		XMLName        xml.Name      `xml:"CreateKeyPairResponse"`
+		XMLNS          string        `xml:"xmlns,attr"`
+		KeyPairID      string        `xml:"keyPairId"`
+		KeyName        string        `xml:"keyName"`
+		KeyFingerprint string        `xml:"keyFingerprint"`
+		KeyType        string        `xml:"keyType"`
+		KeyMaterial    string        `xml:"keyMaterial"`
+		Tags           *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
@@ -2826,23 +3033,25 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyFingerprint: kp.Fingerprint,
 		KeyType:        kp.KeyType,
 		KeyMaterial:    keyMaterial,
+		Tags:           ec2TagSet(kp.Tags),
 	})
 }
 
 func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	filterNames := extractIndexedParams(req.Params, "KeyName")
 
-	allKeys, err := p.state.List(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	allKeys, err := p.state.List(context.Background(), ec2Namespace, ec2StatePrefix("keypair", reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeKeyPairs list: %w", err)
 	}
 
 	type kpItem struct {
-		KeyPairID      string `xml:"keyPairId"`
-		KeyName        string `xml:"keyName"`
-		KeyFingerprint string `xml:"keyFingerprint"`
-		KeyType        string `xml:"keyType"`
-		CreateTime     string `xml:"createTime,omitempty"`
+		KeyPairID      string        `xml:"keyPairId"`
+		KeyName        string        `xml:"keyName"`
+		KeyFingerprint string        `xml:"keyFingerprint"`
+		KeyType        string        `xml:"keyType"`
+		CreateTime     string        `xml:"createTime,omitempty"`
+		Tags           *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
 	type response struct {
 		XMLName  xml.Name `xml:"DescribeKeyPairsResponse"`
@@ -2869,6 +3078,7 @@ func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*
 			KeyFingerprint: kp.Fingerprint,
 			KeyType:        kp.KeyType,
 			CreateTime:     kp.CreatedAt,
+			Tags:           ec2TagSet(kp.Tags),
 		})
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -2884,9 +3094,9 @@ func (p *EC2Plugin) deleteKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	// Support lookup by KeyPairId: scan for matching pair.
-	stateKey := "keypair:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + name
+	stateKey := ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name)
 	if strings.HasPrefix(name, "key-") {
-		allKeys, _ := p.state.List(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+		allKeys, _ := p.state.List(context.Background(), ec2Namespace, ec2StatePrefix("keypair", reqCtx.AccountID, reqCtx.Region))
 		for _, k := range allKeys {
 			data, _ := p.state.Get(context.Background(), ec2Namespace, k)
 			if data == nil {
@@ -2921,9 +3131,13 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if pubKeyMaterial == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "PublicKeyMaterial is required", HTTPStatus: http.StatusBadRequest}
 	}
+	tags, awsErr := ec2KeyPairTags(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 
 	// Check for duplicate.
-	existing, _ := p.state.Get(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name)
+	existing, _ := p.state.Get(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name))
 	if existing != nil {
 		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
 	}
@@ -2952,11 +3166,15 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		Fingerprint: fp,
 		KeyType:     keyType,
 		CreatedAt:   p.tc.Now().UTC().Format(time.RFC3339),
+		Tags:        tags,
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 	}
-	data, _ := json.Marshal(kp)
-	if err := p.state.Put(context.Background(), ec2Namespace, "keypair:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name, data); err != nil {
+	data, err := json.Marshal(kp)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 importKeyPair marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name), data); err != nil {
 		return nil, fmt.Errorf("ec2 importKeyPair put: %w", err)
 	}
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "keypair_names", name); err != nil {
@@ -2964,12 +3182,13 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	type response struct {
-		XMLName        xml.Name `xml:"ImportKeyPairResponse"`
-		XMLNS          string   `xml:"xmlns,attr"`
-		KeyPairID      string   `xml:"keyPairId"`
-		KeyName        string   `xml:"keyName"`
-		KeyFingerprint string   `xml:"keyFingerprint"`
-		KeyType        string   `xml:"keyType"`
+		XMLName        xml.Name      `xml:"ImportKeyPairResponse"`
+		XMLNS          string        `xml:"xmlns,attr"`
+		KeyPairID      string        `xml:"keyPairId"`
+		KeyName        string        `xml:"keyName"`
+		KeyFingerprint string        `xml:"keyFingerprint"`
+		KeyType        string        `xml:"keyType"`
+		Tags           *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
@@ -2977,6 +3196,7 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyName:        kp.KeyName,
 		KeyFingerprint: kp.Fingerprint,
 		KeyType:        kp.KeyType,
+		Tags:           ec2TagSet(kp.Tags),
 	})
 }
 
@@ -3863,8 +4083,38 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequ
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
+// ec2PlacementGroupXML is AWS's placementGroup element, shared by CreatePlacementGroup and
+// DescribePlacementGroups so the two cannot render a group differently.
+//
+// tagSet carries omitempty: AWS's own CreatePlacementGroup Example 2 — a group created with
+// no TagSpecification — renders no tagSet element at all, where Example 1 renders one.
+type ec2PlacementGroupXML struct {
+	GroupName string        `xml:"groupName"`
+	GroupID   string        `xml:"groupId"`
+	Strategy  string        `xml:"strategy"`
+	State     string        `xml:"state"`
+	Tags      *ec2TagSetXML `xml:"tagSet,omitempty"`
+}
+
+// ec2PlacementGroupSummary renders a placement group as AWS's placementGroup element.
+func ec2PlacementGroupSummary(pg EC2PlacementGroup) ec2PlacementGroupXML {
+	return ec2PlacementGroupXML{
+		GroupName: pg.GroupName,
+		GroupID:   pg.GroupID,
+		Strategy:  pg.Strategy,
+		State:     pg.State,
+		Tags:      ec2TagSet(pg.Tags),
+	}
+}
+
 // createPlacementGroup creates an EC2 placement group (#344). A repeat create of
 // an existing name returns InvalidPlacementGroup.Duplicate.
+//
+// TagSpecification.N with ResourceType=placement-group is read here (#708), which is the
+// only way a placement group's tags were settable at all until CreateTags grew a pg- arm:
+// EC2PlacementGroup has carried a Tags field since #344 and nothing ever wrote it, so
+// DescribePlacementGroups and DescribeTags reported a group as untagged however it was
+// created.
 func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["GroupName"]
 	if name == "" {
@@ -3873,6 +4123,13 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 	strategy := req.Params["Strategy"]
 	if strategy == "" {
 		strategy = "cluster"
+	}
+	tags := ec2TagSpecificationTags(req.Params, "", "placement-group")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
 	}
 
 	key := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, name)
@@ -3885,6 +4142,7 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 		GroupID:   generatePlacementGroupID(),
 		Strategy:  strategy,
 		State:     "available",
+		Tags:      tags,
 		AccountID: reqCtx.AccountID,
 		Region:    reqCtx.Region,
 	}
@@ -3896,20 +4154,14 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("ec2 createPlacementGroup put: %w", err)
 	}
 
-	type pgItem struct {
-		GroupName string `xml:"groupName"`
-		GroupID   string `xml:"groupId"`
-		Strategy  string `xml:"strategy"`
-		State     string `xml:"state"`
-	}
 	type response struct {
-		XMLName        xml.Name `xml:"CreatePlacementGroupResponse"`
-		XMLNS          string   `xml:"xmlns,attr"`
-		PlacementGroup pgItem   `xml:"placementGroup"`
+		XMLName        xml.Name             `xml:"CreatePlacementGroupResponse"`
+		XMLNS          string               `xml:"xmlns,attr"`
+		PlacementGroup ec2PlacementGroupXML `xml:"placementGroup"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:          "http://ec2.amazonaws.com/doc/2016-11-15/",
-		PlacementGroup: pgItem{GroupName: pg.GroupName, GroupID: pg.GroupID, Strategy: pg.Strategy, State: pg.State},
+		PlacementGroup: ec2PlacementGroupSummary(pg),
 	})
 }
 
@@ -3918,21 +4170,15 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	names := extractIndexedParams(req.Params, "GroupName")
 	allKeys, err := p.state.List(context.Background(), ec2Namespace,
-		"placement_group:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+		ec2StatePrefix("placement_group", reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describePlacementGroups list: %w", err)
 	}
 
-	type pgItem struct {
-		GroupName string `xml:"groupName"`
-		GroupID   string `xml:"groupId"`
-		Strategy  string `xml:"strategy"`
-		State     string `xml:"state"`
-	}
 	type response struct {
-		XMLName xml.Name `xml:"DescribePlacementGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Groups  []pgItem `xml:"placementGroupSet>item"`
+		XMLName xml.Name               `xml:"DescribePlacementGroupsResponse"`
+		XMLNS   string                 `xml:"xmlns,attr"`
+		Groups  []ec2PlacementGroupXML `xml:"placementGroupSet>item"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -3948,7 +4194,7 @@ func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequ
 		if len(names) > 0 && !containsStr(names, pg.GroupName) {
 			continue
 		}
-		resp.Groups = append(resp.Groups, pgItem{GroupName: pg.GroupName, GroupID: pg.GroupID, Strategy: pg.Strategy, State: pg.State})
+		resp.Groups = append(resp.Groups, ec2PlacementGroupSummary(pg))
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -4806,7 +5052,7 @@ func ec2LookupLaunchTemplate(goCtx context.Context, state StateManager, ctx *Req
 		}
 		ltID = string(data)
 	}
-	key := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + ltID
+	key := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, ltID)
 	data, err := state.Get(goCtx, ec2Namespace, key)
 	if err != nil || data == nil {
 		return nil
@@ -4907,9 +5153,23 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 		return nil, awsErr
 	}
 
+	// The template's *own* tags, which are a different list from the two inside
+	// LaunchTemplateData: those scope to the instances and volumes a launch creates, and
+	// this one is on the template resource itself. Until #708 nothing read it, so
+	// EC2LaunchTemplate.Tags was never written by any path — ec2LaunchTemplateSummary has
+	// always rendered a tagSet from it, and the element was always empty.
+	ownTags := ec2TagSpecificationTags(req.Params, "", "launch-template")
+	if awsErr := ec2CheckTagRules(ownTags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, ownTags); awsErr != nil {
+		return nil, awsErr
+	}
+
 	lt := EC2LaunchTemplate{
 		LaunchTemplateID:   ltID,
 		LaunchTemplateName: name,
+		Tags:               ownTags,
 		DefaultVersionNum:  1,
 		LatestVersionNum:   1,
 		CreatedBy:          ctx.AccountID,
@@ -4932,7 +5192,7 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("createLaunchTemplate: marshal: %w", err)
 	}
-	ltKey := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + ltID
+	ltKey := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, ltID)
 	if err := p.state.Put(goCtx, ec2Namespace, ltKey, ltJSON); err != nil {
 		return nil, fmt.Errorf("createLaunchTemplate: put lt: %w", err)
 	}
@@ -4969,13 +5229,13 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 // template's parameters back, which is why DescribeLaunchTemplateVersions exists and
 // why anything asserting on a template's contents has to call it.
 type ec2LaunchTemplateXML struct {
-	LaunchTemplateID   string       `xml:"launchTemplateId"`
-	LaunchTemplateName string       `xml:"launchTemplateName"`
-	CreateTime         string       `xml:"createTime"`
-	CreatedBy          string       `xml:"createdBy,omitempty"`
-	DefaultVersionNum  int64        `xml:"defaultVersionNumber"`
-	LatestVersionNum   int64        `xml:"latestVersionNumber"`
-	Tags               []ec2TagItem `xml:"tagSet>item,omitempty"`
+	LaunchTemplateID   string        `xml:"launchTemplateId"`
+	LaunchTemplateName string        `xml:"launchTemplateName"`
+	CreateTime         string        `xml:"createTime"`
+	CreatedBy          string        `xml:"createdBy,omitempty"`
+	DefaultVersionNum  int64         `xml:"defaultVersionNumber"`
+	LatestVersionNum   int64         `xml:"latestVersionNumber"`
+	Tags               *ec2TagSetXML `xml:"tagSet,omitempty"`
 }
 
 // ec2TagItem is a tagSet entry on the wire.
@@ -5005,20 +5265,48 @@ func ec2TagItems(tags []EC2Tag) []ec2TagItem {
 	return items
 }
 
+// ec2TagSetXML is a tagSet element that disappears when the resource carries no tags.
+//
+// A []ec2TagItem behind an `xml:"tagSet>item,omitempty"` path cannot express that:
+// omitempty suppresses the *items*, and encoding/xml still writes the parent, so an
+// untagged resource answers <tagSet></tagSet>. AWS's examples for the operations #708
+// gave tags to show the element absent instead — CreateLaunchTemplate Example 1 and
+// CreatePlacementGroup Example 2 each create an untagged resource and neither response
+// carries a tagSet, while CreateKeyPair's tagged example does — and an SDK tells an
+// absent list from an empty one, which is the same distinction [ec2TagDescription]'s
+// value member is kept present-but-empty for.
+//
+// #685 reached the same conclusion for DescribeSubnets and wrote the wrapper there; #708
+// needed it for four more renderers, so the type moved here beside [ec2TagItems] rather
+// than being written twice. Every *other* response's always-present tagSet is left alone:
+// describeSnapshots' present-but-empty element follows its own operation's samples, and
+// each response answers to the page that documents it.
+type ec2TagSetXML struct {
+	// Items are the tags, in stored order.
+	Items []ec2TagItem `xml:"item"`
+}
+
+// ec2TagSet renders tags as an omittable tagSet, returning nil when there are none so
+// that the element itself is left out.
+func ec2TagSet(tags []EC2Tag) *ec2TagSetXML {
+	items := ec2TagItems(tags)
+	if len(items) == 0 {
+		return nil
+	}
+	return &ec2TagSetXML{Items: items}
+}
+
 // ec2LaunchTemplateSummary renders a launch template as its summary element.
 func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
-	out := ec2LaunchTemplateXML{
+	return ec2LaunchTemplateXML{
 		LaunchTemplateID:   lt.LaunchTemplateID,
 		LaunchTemplateName: lt.LaunchTemplateName,
 		CreateTime:         lt.CreateTime,
 		CreatedBy:          lt.CreatedBy,
 		DefaultVersionNum:  lt.DefaultVersionNum,
 		LatestVersionNum:   lt.LatestVersionNum,
+		Tags:               ec2TagSet(lt.Tags),
 	}
-	for _, t := range lt.Tags {
-		out.Tags = append(out.Tags, ec2TagItem(t))
-	}
-	return out
 }
 
 func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -5041,7 +5329,7 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
 		ids, _ := loadStringIndex(goCtx, p.state, ec2Namespace, idsKey)
 		for _, id := range ids {
-			key := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + id
+			key := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, id)
 			data, err := p.state.Get(goCtx, ec2Namespace, key)
 			if err != nil || data == nil {
 				continue
@@ -5080,7 +5368,7 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 		}
 	}
 
-	ltKey := "lt:" + ctx.AccountID + "/" + ctx.Region + "/" + lt.LaunchTemplateID
+	ltKey := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, lt.LaunchTemplateID)
 	nameKey := "lt_by_name:" + ctx.AccountID + "/" + ctx.Region + "/" + lt.LaunchTemplateName
 	idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
 
