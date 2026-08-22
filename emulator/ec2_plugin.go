@@ -1313,14 +1313,41 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
+// describeInstanceStatus reports each instance's state.
+//
+// The three filters substrate can evaluate here — availability-zone, instance-state-code and
+// instance-state-name — are spelled identically on DescribeInstances' page and read the same
+// members, so this delegates to [ec2InstanceMatchesFilters] rather than growing a fourteenth
+// matcher that would duplicate three arms.
+//
+// That reuse is safe *because* [ec2InstanceStatusFilterSpec] gates which names arrive: none of
+// the fifteen names it accepts-but-leaves-inert (the health, event and operator families, plus
+// availability-zone-id) appears as a case in [ec2InstanceMatchesFilter], so each falls to its
+// default arm and stays inert. The hazard to know about: promoting one of those names to an
+// evaluated case on DescribeInstances would silently start evaluating it here too, against
+// whatever DescribeInstances means by it. Add an arm to the spec's own matcher instead if the
+// two operations ever need to read one name differently.
+//
+// IncludeAllInstances is not implemented: AWS returns only running instances by default, and
+// substrate returns every instance regardless. Stated in docs/services.md rather than guessed
+// at, because narrowing it would change what a caller with no filters sees.
 func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InstanceId"), ec2InstanceIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	if err := ec2InstanceStatusFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	type statusItem struct {
-		InstanceID    string `xml:"instanceId"`
-		InstanceState struct {
+		InstanceID string `xml:"instanceId"`
+		// AvailabilityZone is rendered because the availability-zone filter selects on
+		// it: a caller narrowing to one zone could not otherwise read back which zone
+		// it got, which is the same unreadable-answer defect the filters themselves
+		// were (#695). AWS's own instanceStatusSet item carries it.
+		AvailabilityZone string `xml:"availabilityZone,omitempty"`
+		InstanceState    struct {
 			Code int    `xml:"code"`
 			Name string `xml:"name"`
 		} `xml:"instanceState"`
@@ -1348,7 +1375,10 @@ func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSReque
 		if !ids.match(inst.InstanceID) {
 			continue
 		}
-		si := statusItem{InstanceID: inst.InstanceID}
+		if !ec2InstanceMatchesFilters(inst, filters) {
+			continue
+		}
+		si := statusItem{InstanceID: inst.InstanceID, AvailabilityZone: inst.AvailabilityZone}
 		si.InstanceState.Code = inst.State.Code
 		si.InstanceState.Name = inst.State.Name
 		resp.Items = append(resp.Items, si)
@@ -1392,21 +1422,71 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		p.logger.Warn("ec2: failed to create default route table", "err", err)
 	}
 
-	type vpcItem struct {
-		VpcID     string `xml:"vpcId"`
-		CIDRBlock string `xml:"cidrBlock"`
-		IsDefault bool   `xml:"isDefault"`
-		State     string `xml:"vpcState"`
-	}
 	type response struct {
-		XMLName xml.Name `xml:"CreateVpcResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Vpc     vpcItem  `xml:"vpc"`
+		XMLName xml.Name   `xml:"CreateVpcResponse"`
+		XMLNS   string     `xml:"xmlns,attr"`
+		Vpc     ec2VPCItem `xml:"vpc"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/",
-		Vpc:   vpcItem{VpcID: vpcID, CIDRBlock: cidr, State: "available"},
+		Vpc:   ec2VPCXML(vpc),
 	})
+}
+
+// ec2VPCItem renders a VPC as AWS's Vpc element.
+//
+// Shared by CreateVpc and DescribeVpcs for the reason [ec2SubnetItem]'s doc comment gives:
+// AWS documents one Vpc type for both, and two hand-rolled copies drift. These two had
+// already drifted from AWS itself in the same way — both spelled the state element
+// `vpcState`, where AWS's own DescribeVpcs and CreateVpc samples render `<state>available</state>`.
+// Nothing pinned it, so an SDK caller read `State: ""` from both. Fixed here (#695); it is a
+// wire change, and the release notes say so.
+//
+// ownerId is new in #695 because the owner-id filter selects on it, and tagSet because the
+// tag:<key> and tag-key filters do — a filter over a member the response never showed would
+// be unreadable even when it worked.
+//
+// Six members AWS's samples carry are deliberately absent: dhcpOptionsId,
+// instanceTenancy, ipv6CidrBlockAssociationSet, cidrBlockAssociationSet, isDefault's
+// blockPublicAccessStates sibling and encryptionControl. Nothing in [EC2VPC] backs them,
+// which is exactly why [ec2VPCFilterSpec] leaves the CIDR-association and dhcp-options-id
+// filters inert.
+//
+// tagSet is omitted entirely when the VPC has no tags, which is what AWS's DescribeVpcs
+// sample shows for an untagged VPC. DescribeInternetGateways' page shows the opposite — a
+// present-but-empty <tagSet/> — and [ec2InternetGatewayItem] follows it; each response follows
+// its own page, the rule #708 recorded. See [ec2SubnetItem] for why omission needs the
+// pointer-to-wrapper shape rather than `omitempty` on a nested path.
+type ec2VPCItem struct {
+	// VpcID is the VPC's ID.
+	VpcID string `xml:"vpcId"`
+
+	// State is pending or available. Substrate mints VPCs available.
+	State string `xml:"state"`
+
+	// CIDRBlock is the VPC's primary IPv4 CIDR block.
+	CIDRBlock string `xml:"cidrBlock"`
+
+	// OwnerID is the account that owns the VPC.
+	OwnerID string `xml:"ownerId"`
+
+	// IsDefault reports whether this is the account's default VPC for the region.
+	IsDefault bool `xml:"isDefault"`
+
+	// Tags are the VPC's tags, absent when it has none.
+	Tags *ec2TagSetXML `xml:"tagSet,omitempty"`
+}
+
+// ec2VPCXML renders one stored VPC as its response element.
+func ec2VPCXML(vpc EC2VPC) ec2VPCItem {
+	return ec2VPCItem{
+		VpcID:     vpc.VPCID,
+		State:     vpc.State,
+		CIDRBlock: vpc.CIDRBlock,
+		OwnerID:   vpc.AccountID,
+		IsDefault: vpc.IsDefault,
+		Tags:      ec2TagSet(vpc.Tags),
+	}
 }
 
 func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1414,20 +1494,18 @@ func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	if err := ec2VPCFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeVpcs: %w", err)
 	}
-	type vpcItem struct {
-		VpcID     string `xml:"vpcId"`
-		CIDRBlock string `xml:"cidrBlock"`
-		IsDefault bool   `xml:"isDefault"`
-		State     string `xml:"vpcState"`
-	}
 	type response struct {
-		XMLName xml.Name  `xml:"DescribeVpcsResponse"`
-		XMLNS   string    `xml:"xmlns,attr"`
-		Vpcs    []vpcItem `xml:"vpcSet>item"`
+		XMLName xml.Name     `xml:"DescribeVpcsResponse"`
+		XMLNS   string       `xml:"xmlns,attr"`
+		Vpcs    []ec2VPCItem `xml:"vpcSet>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -1442,7 +1520,10 @@ func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		if !ids.match(vpc.VPCID) {
 			continue
 		}
-		resp.Vpcs = append(resp.Vpcs, vpcItem{VpcID: vpc.VPCID, CIDRBlock: vpc.CIDRBlock, IsDefault: vpc.IsDefault, State: vpc.State})
+		if !ec2VPCMatchesFilters(vpc, filters) {
+			continue
+		}
+		resp.Vpcs = append(resp.Vpcs, ec2VPCXML(vpc))
 	}
 	if err := ids.unresolved(); err != nil {
 		return nil, err
@@ -1848,15 +1929,64 @@ func (p *EC2Plugin) createInternetGateway(reqCtx *RequestContext, _ *AWSRequest)
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "igw_ids", igwID); err != nil {
 		return nil, err
 	}
-	type igwItem struct {
-		InternetGatewayID string `xml:"internetGatewayId"`
-	}
 	type response struct {
-		XMLName xml.Name `xml:"CreateInternetGatewayResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		IGW     igwItem  `xml:"internetGateway"`
+		XMLName xml.Name               `xml:"CreateInternetGatewayResponse"`
+		XMLNS   string                 `xml:"xmlns,attr"`
+		IGW     ec2InternetGatewayItem `xml:"internetGateway"`
 	}
-	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", IGW: igwItem{igwID}})
+	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", IGW: ec2InternetGatewayXML(igw)})
+}
+
+// ec2InternetGatewayAttachmentItem renders one attachment in an internet gateway's
+// attachmentSet.
+type ec2InternetGatewayAttachmentItem struct {
+	// State is the attachment state; AWS documents attaching, attached, detaching,
+	// detached, and substrate mints an attachment available — see [attachInternetGateway].
+	State string `xml:"state"`
+
+	// VpcID is the attached VPC.
+	VpcID string `xml:"vpcId"`
+}
+
+// ec2InternetGatewayItem renders an internet gateway as AWS's InternetGateway element.
+//
+// Shared by CreateInternetGateway and DescribeInternetGateways, which AWS documents with one
+// type; before #695 both rendered internetGatewayId and nothing else, so a caller could not
+// read which VPC a gateway was attached to, who owned it, or what it was tagged with — while
+// DescribeInternetGateways answered every filter over exactly those three things by returning
+// every gateway in the region.
+//
+// Both attachmentSet and tagSet are **present but empty** on an unattached, untagged gateway,
+// because that is what this page's own sample response shows (`<attachmentSet/>`,
+// `<tagSet/>`). That is the opposite of [ec2VPCItem]'s and [ec2SubnetItem]'s convention, whose
+// pages omit an empty tagSet. Each response follows its own page rather than a house style, the
+// rule #708 recorded; the non-pointer nested-path form here renders the empty parent, which is
+// exactly the shape [ec2SubnetItem] needs a pointer to avoid.
+type ec2InternetGatewayItem struct {
+	// Attachments are the VPCs the gateway is attached to, at most one in substrate.
+	Attachments []ec2InternetGatewayAttachmentItem `xml:"attachmentSet>item"`
+
+	// InternetGatewayID is the gateway's ID.
+	InternetGatewayID string `xml:"internetGatewayId"`
+
+	// OwnerID is the account that owns the gateway.
+	OwnerID string `xml:"ownerId"`
+
+	// Tags are the gateway's tags, present and empty when it has none.
+	Tags []ec2TagItem `xml:"tagSet>item"`
+}
+
+// ec2InternetGatewayXML renders one stored internet gateway as its response element.
+func ec2InternetGatewayXML(igw EC2InternetGateway) ec2InternetGatewayItem {
+	item := ec2InternetGatewayItem{
+		InternetGatewayID: igw.InternetGatewayID,
+		OwnerID:           igw.AccountID,
+		Tags:              ec2TagItems(igw.Tags),
+	}
+	for _, a := range igw.Attachments {
+		item.Attachments = append(item.Attachments, ec2InternetGatewayAttachmentItem{State: a.State, VpcID: a.VPCID})
+	}
+	return item
 }
 
 func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1864,17 +1994,18 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	if err := ec2InternetGatewayFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "igw:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeInternetGateways: %w", err)
 	}
-	type igwItem struct {
-		InternetGatewayID string `xml:"internetGatewayId"`
-	}
 	type response struct {
-		XMLName xml.Name  `xml:"DescribeInternetGatewaysResponse"`
-		XMLNS   string    `xml:"xmlns,attr"`
-		IGWs    []igwItem `xml:"internetGatewaySet>item"`
+		XMLName xml.Name                 `xml:"DescribeInternetGatewaysResponse"`
+		XMLNS   string                   `xml:"xmlns,attr"`
+		IGWs    []ec2InternetGatewayItem `xml:"internetGatewaySet>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -1889,7 +2020,10 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 		if !ids.match(igw.InternetGatewayID) {
 			continue
 		}
-		resp.IGWs = append(resp.IGWs, igwItem{igw.InternetGatewayID})
+		if !ec2InternetGatewayMatchesFilters(igw, filters) {
+			continue
+		}
+		resp.IGWs = append(resp.IGWs, ec2InternetGatewayXML(igw))
 	}
 	if err := ids.unresolved(); err != nil {
 		return nil, err
@@ -3037,8 +3171,23 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	})
 }
 
+// describeKeyPairs reports the region's key pairs.
+//
+// Selects on KeyName.N, KeyPairId.N and Filter.N. KeyPairId.N was read by nothing before #695
+// — a caller narrowing by ID got every key pair in the account — and it is matched by
+// membership rather than through [newEC2IDFilter] because no [ec2IDKind] describes a key-pair
+// ID, so there is no malformed-form or NotFound wording to inherit.
+//
+// Neither selector refuses an unknown name or ID. AWS answers InvalidKeyPair.NotFound there;
+// substrate answers an empty set, which docs/services.md states as the gap it is rather than
+// substrate inventing the error's wording.
 func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	filterNames := extractIndexedParams(req.Params, "KeyName")
+	filterIDs := extractIndexedParams(req.Params, "KeyPairId")
+	if err := ec2KeyPairFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, ec2StatePrefix("keypair", reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
@@ -3069,7 +3218,10 @@ func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*
 		if json.Unmarshal(data, &kp) != nil {
 			continue
 		}
-		if len(filterNames) > 0 && !containsStr(filterNames, kp.KeyName) {
+		if !ec2SelectedByEither(filterNames, kp.KeyName, filterIDs, kp.KeyPairID) {
+			continue
+		}
+		if !ec2KeyPairMatchesFilters(kp, filters) {
 			continue
 		}
 		resp.KeyPairs = append(resp.KeyPairs, kpItem{
@@ -4056,29 +4208,45 @@ func (p *EC2Plugin) deregisterImage(reqCtx *RequestContext, req *AWSRequest) (*A
 
 // --- Availability Zone operations ---
 
-func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+// describeAvailabilityZones reports the region's seeded zones.
+//
+// The signature took the request and discarded it before #695, so every documented selector
+// was ignored: ZoneName.N, ZoneId.N and Filter.N alike. A caller asking for one zone got all
+// of them.
+//
+// AllRegions stays unread, and is inert rather than unimplemented: it asks for zones in
+// regions the account has *not* opted into, and every region substrate seeds is
+// opt-in-not-required, so the flag cannot change the answer. Stated in docs/services.md.
+func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	names := extractIndexedParams(req.Params, "ZoneName")
+	zoneIDs := extractIndexedParams(req.Params, "ZoneId")
+	if err := ec2AvailabilityZoneFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	region := reqCtx.Region
 	// Derive abbreviated region for zoneId (e.g. "use1" from "us-east-1").
 	abbrev := azRegionAbbrev(region)
-	type azItem struct {
-		ZoneName   string `xml:"zoneName"`
-		State      string `xml:"zoneState"`
-		RegionName string `xml:"regionName"`
-		ZoneID     string `xml:"zoneId"`
-	}
 	type response struct {
-		XMLName           xml.Name `xml:"DescribeAvailabilityZonesResponse"`
-		XMLNS             string   `xml:"xmlns,attr"`
-		AvailabilityZones []azItem `xml:"availabilityZoneInfo>item"`
+		XMLName           xml.Name                  `xml:"DescribeAvailabilityZonesResponse"`
+		XMLNS             string                    `xml:"xmlns,attr"`
+		AvailabilityZones []ec2AvailabilityZoneItem `xml:"availabilityZoneInfo>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for i, suffix := range ec2SeededAZSuffixes {
-		resp.AvailabilityZones = append(resp.AvailabilityZones, azItem{
+		az := ec2AvailabilityZoneItem{
 			ZoneName:   region + suffix,
 			State:      "available",
 			RegionName: region,
 			ZoneID:     abbrev + "-az" + strconv.Itoa(i+1),
-		})
+		}
+		if !ec2SelectedByEither(names, az.ZoneName, zoneIDs, az.ZoneID) {
+			continue
+		}
+		if !ec2AvailabilityZoneMatchesFilters(az, filters) {
+			continue
+		}
+		resp.AvailabilityZones = append(resp.AvailabilityZones, az)
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -4091,16 +4259,22 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, _ *AWSRequ
 type ec2PlacementGroupXML struct {
 	GroupName string        `xml:"groupName"`
 	GroupID   string        `xml:"groupId"`
+	GroupARN  string        `xml:"groupArn"`
 	Strategy  string        `xml:"strategy"`
 	State     string        `xml:"state"`
 	Tags      *ec2TagSetXML `xml:"tagSet,omitempty"`
 }
 
 // ec2PlacementGroupSummary renders a placement group as AWS's placementGroup element.
+//
+// groupArn is rendered as of #695, when the group-arn filter started selecting on it: a filter
+// over a value the response never showed would leave a caller unable to read back what it
+// matched. The string comes from [ec2PlacementGroupARN], the one spelling the filter also uses.
 func ec2PlacementGroupSummary(pg EC2PlacementGroup) ec2PlacementGroupXML {
 	return ec2PlacementGroupXML{
 		GroupName: pg.GroupName,
 		GroupID:   pg.GroupID,
+		GroupARN:  ec2PlacementGroupARN(pg.AccountID, pg.Region, pg.GroupName),
 		Strategy:  pg.Strategy,
 		State:     pg.State,
 		Tags:      ec2TagSet(pg.Tags),
@@ -4167,8 +4341,20 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 
 // describePlacementGroups lists placement groups, optionally filtered by
 // GroupName.N parameters (#344).
+// describePlacementGroups reports the region's placement groups.
+//
+// Selects on GroupName.N, GroupId.N and Filter.N. GroupId.N is documented and was read by
+// nothing before #695; it is matched by membership rather than through [newEC2IDFilter]
+// because #708 left the ID-vs-name question this operation raises deliberately open — the ARN
+// is by name, and no group-id filter exists — so refusing a malformed pg- form here would
+// settle by accident what that PR recorded as underdetermined.
 func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	names := extractIndexedParams(req.Params, "GroupName")
+	groupIDs := extractIndexedParams(req.Params, "GroupId")
+	if err := ec2PlacementGroupFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace,
 		ec2StatePrefix("placement_group", reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
@@ -4191,7 +4377,10 @@ func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequ
 		if json.Unmarshal(data, &pg) != nil {
 			continue
 		}
-		if len(names) > 0 && !containsStr(names, pg.GroupName) {
+		if !ec2SelectedByEither(names, pg.GroupName, groupIDs, pg.GroupID) {
+			continue
+		}
+		if !ec2PlacementGroupMatchesFilters(pg, filters) {
 			continue
 		}
 		resp.Groups = append(resp.Groups, ec2PlacementGroupSummary(pg))
@@ -4480,23 +4669,40 @@ func (p *EC2Plugin) releaseAddress(reqCtx *RequestContext, req *AWSRequest) (*AW
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// describeAddresses reports the region's Elastic IPs.
+//
+// Selects on AllocationId.N, PublicIp.N and Filter.N. PublicIp.N is documented and was read by
+// nothing before #695; unlike AllocationId.N it goes through plain membership, because an
+// address is not an EC2 ID and there is no InvalidAddress.Malformed form to check against.
+//
+// No pagination: this operation publishes no MaxResults or NextToken, so there is none to add.
 func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	filterIDs := newEC2IDFilter(extractIndexedParams(req.Params, "AllocationId"), ec2AllocationIDKind)
+	allocationIDs := extractIndexedParams(req.Params, "AllocationId")
+	filterIDs := newEC2IDFilter(allocationIDs, ec2AllocationIDKind)
 	if err := filterIDs.validate(); err != nil {
 		return nil, err
 	}
+	publicIPs := extractIndexedParams(req.Params, "PublicIp")
+	if err := ec2AddressFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "eip:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeAddresses list: %w", err)
 	}
+	// tagSet is omitted when the address carries none, following this page's samples —
+	// none of which shows a tagSet on an untagged address. See [ec2TagSetXML] for why
+	// omission needs the wrapper.
 	type addressItem struct {
-		AllocationID       string `xml:"allocationId"`
-		PublicIP           string `xml:"publicIp"`
-		AssociationID      string `xml:"associationId,omitempty"`
-		InstanceID         string `xml:"instanceId,omitempty"`
-		NetworkInterfaceID string `xml:"networkInterfaceId,omitempty"`
-		PrivateIPAddress   string `xml:"privateIpAddress,omitempty"`
-		Domain             string `xml:"domain"`
+		AllocationID       string        `xml:"allocationId"`
+		PublicIP           string        `xml:"publicIp"`
+		AssociationID      string        `xml:"associationId,omitempty"`
+		InstanceID         string        `xml:"instanceId,omitempty"`
+		NetworkInterfaceID string        `xml:"networkInterfaceId,omitempty"`
+		PrivateIPAddress   string        `xml:"privateIpAddress,omitempty"`
+		Domain             string        `xml:"domain"`
+		Tags               *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
 	type response struct {
 		XMLName   xml.Name      `xml:"DescribeAddressesResponse"`
@@ -4513,7 +4719,18 @@ func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (
 		if json.Unmarshal(data, &eip) != nil {
 			continue
 		}
-		if !filterIDs.match(eip.AllocationID) {
+		// AllocationId.N and PublicIp.N union, for the reason [ec2SelectedByEither]
+		// records — written out here rather than delegating because
+		// [ec2IDFilter.match] must be called for every address whatever selects it: it
+		// is what records that a requested allocation ID resolved, and skipping it
+		// would turn an address selected by its public IP into a NotFound for its own
+		// allocation ID.
+		selectedByID := len(allocationIDs) > 0 && filterIDs.match(eip.AllocationID)
+		selectedByIP := len(publicIPs) > 0 && containsStr(publicIPs, eip.PublicIP)
+		if (len(allocationIDs) > 0 || len(publicIPs) > 0) && !selectedByID && !selectedByIP {
+			continue
+		}
+		if !ec2AddressMatchesFilters(eip, filters) {
 			continue
 		}
 		resp.Addresses = append(resp.Addresses, addressItem{
@@ -4524,6 +4741,7 @@ func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (
 			NetworkInterfaceID: eip.NetworkInterfaceID,
 			PrivateIPAddress:   eip.PrivateIPAddress,
 			Domain:             eip.Domain,
+			Tags:               ec2TagSet(eip.Tags),
 		})
 	}
 	if err := filterIDs.unresolved(); err != nil {
@@ -4765,6 +4983,15 @@ var ec2SeededRegions = []struct {
 	{"eu-west-1", "ec2.eu-west-1.amazonaws.com"},
 }
 
+// describeRegions reports the seeded regions.
+//
+// All three filters this operation documents — endpoint, opt-in-status and region-name — are
+// evaluated as of #695; before it, Filter.N was accepted and ignored.
+//
+// AllRegions is not read, and cannot change the answer: it asks for regions the account has
+// not opted into, and every seeded region is opt-in-not-required. By the same token an
+// opt-in-status filter naming opted-in or not-opted-in selects nothing, which is the honest
+// answer rather than a gap.
 func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Build optional RegionName.N filter.
 	wanted := map[string]bool{}
@@ -4776,15 +5003,15 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 		wanted[v] = true
 	}
 
-	type regionItem struct {
-		RegionName     string `xml:"regionName"`
-		RegionEndpoint string `xml:"regionEndpoint"`
-		OptInStatus    string `xml:"optInStatus"`
+	if err := ec2RegionFilterSpec().check(req.Params); err != nil {
+		return nil, err
 	}
+	filters := extractEC2Filters(req.Params)
+
 	type response struct {
-		XMLName    xml.Name     `xml:"DescribeRegionsResponse"`
-		XMLNS      string       `xml:"xmlns,attr"`
-		RegionInfo []regionItem `xml:"regionInfo>item"`
+		XMLName    xml.Name        `xml:"DescribeRegionsResponse"`
+		XMLNS      string          `xml:"xmlns,attr"`
+		RegionInfo []ec2RegionItem `xml:"regionInfo>item"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -4792,11 +5019,15 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 		if len(wanted) > 0 && !wanted[r.Name] {
 			continue
 		}
-		resp.RegionInfo = append(resp.RegionInfo, regionItem{
+		item := ec2RegionItem{
 			RegionName:     r.Name,
 			RegionEndpoint: r.Endpoint,
 			OptInStatus:    "opt-in-not-required",
-		})
+		}
+		if !ec2RegionMatchesFilters(item, filters) {
+			continue
+		}
+		resp.RegionInfo = append(resp.RegionInfo, item)
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
 }
@@ -4805,12 +5036,17 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 
 // describeInstanceTypes answers from the seeded [ec2InstanceTypeCatalog].
 //
-// Filter.N is not applied. The operation documents some 60 filter names, nearly all over
-// response fields the seeded catalog does not carry, so applying the handful that are
-// modellable and ignoring the rest would be the same silent-narrowing defect #485
-// reported on the offerings operation (TODO(#495): apply the filters the catalog can
-// answer and refuse the rest). InstanceType.N is honored, and unlike a filter it is an
-// assertion that the types exist.
+// Filter.N is applied through [ec2InstanceTypeFilterSpec] and
+// [ec2InstanceTypeMatchesFilters]: five of the fifty-seven documented names are evaluated,
+// the other fifty-two are accepted and inert, and an undocumented one is refused. That is
+// what #695 settled and what retires TODO(#495)'s filter half — the concern it recorded was
+// that applying the modellable handful and *silently dropping* the rest would repeat the
+// narrowing defect #485 found on the offerings operation, and the evaluated/accepted split is
+// the answer to it: an inert name constrains nothing and is listed as inert in
+// docs/services.md, rather than looking applied.
+//
+// InstanceType.N is honored, and unlike a filter it is an assertion that the types exist.
+// IncludeUnsupportedInRegion is not read; the catalog is the same in every region.
 func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	requested := indexedParams(req.Params, "InstanceType.%d")
 	if err := ec2CheckInstanceTypesExist(requested); err != nil {
@@ -4820,6 +5056,10 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 	for _, t := range requested {
 		wanted[t] = true
 	}
+	if err := ec2InstanceTypeFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 
 	type gpuInfoItem struct {
 		Count int `xml:"gpus>item>count"`
@@ -4854,6 +5094,9 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, info := range ec2InstanceTypeCatalog {
 		if len(wanted) > 0 && !wanted[info.InstanceType] {
+			continue
+		}
+		if !ec2InstanceTypeMatchesFilters(info, filters) {
 			continue
 		}
 		item := instanceTypeItem{
@@ -4974,26 +5217,25 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 	for _, t := range indexedParams(req.Params, "InstanceType.%d") {
 		wantedTypes[t] = true
 	}
-	// AZ filter.
+	// AZ filter — a scalar on this operation, not indexed, per AWS's parameter list.
 	azFilter := req.Params["AvailabilityZone"]
-	// ProductDescription filter (e.g. "Linux/UNIX").
-	pdFilter := req.Params["ProductDescription.1"]
+	// ProductDescription.N filter (e.g. "Linux/UNIX"). Read at every index as of #695;
+	// before it only ProductDescription.1 was consulted, so a caller asking for two
+	// platforms was answered as if it had asked for the first.
+	pdFilter := indexedParams(req.Params, "ProductDescription.%d")
+	if err := ec2SpotPriceFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 
 	region := reqCtx.Region
 	// Stub timestamp: use time controller's current time.
 	ts := p.tc.Now().UTC().Format(time.RFC3339)
 
-	type spotPriceItem struct {
-		InstanceType       string `xml:"instanceType"`
-		ProductDescription string `xml:"productDescription"`
-		SpotPrice          string `xml:"spotPrice"`
-		Timestamp          string `xml:"timestamp"`
-		AvailabilityZone   string `xml:"availabilityZone"`
-	}
 	type response struct {
-		XMLName          xml.Name        `xml:"DescribeSpotPriceHistoryResponse"`
-		XMLNS            string          `xml:"xmlns,attr"`
-		SpotPriceHistory []spotPriceItem `xml:"spotPriceHistorySet>item"`
+		XMLName          xml.Name           `xml:"DescribeSpotPriceHistoryResponse"`
+		XMLNS            string             `xml:"xmlns,attr"`
+		SpotPriceHistory []ec2SpotPriceItem `xml:"spotPriceHistorySet>item"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -5002,7 +5244,7 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 			continue
 		}
 		desc := "Linux/UNIX"
-		if pdFilter != "" && pdFilter != desc {
+		if len(pdFilter) > 0 && !containsStr(pdFilter, desc) {
 			continue
 		}
 		for _, suffix := range ec2SeededAZSuffixes {
@@ -5010,13 +5252,17 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 			if azFilter != "" && azFilter != az {
 				continue
 			}
-			resp.SpotPriceHistory = append(resp.SpotPriceHistory, spotPriceItem{
+			item := ec2SpotPriceItem{
 				InstanceType:       info.InstanceType,
 				ProductDescription: desc,
 				SpotPrice:          info.SpotPrice,
 				Timestamp:          ts,
 				AvailabilityZone:   az,
-			})
+			}
+			if !ec2SpotPriceMatchesFilters(item, filters) {
+				continue
+			}
+			resp.SpotPriceHistory = append(resp.SpotPriceHistory, item)
 		}
 	}
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -5309,20 +5555,52 @@ func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 	}
 }
 
+// describeLaunchTemplates reports the region's launch templates.
+//
+// Two defects fixed in #695. Filter.N was accepted and ignored, so "the templates tagged
+// Env=prod" answered with every template in the region. And only LaunchTemplateId.1 and
+// LaunchTemplateName.1 were read, so a caller naming three templates was answered about one
+// — silently, since a one-element answer to a three-element question looks like two of them
+// not existing.
+//
+// The two identity lists union, per [ec2SelectedByEither]. Each named template is resolved
+// through [EC2Plugin.resolveLaunchTemplate] rather than scanned for, because that is the
+// lookup CreateLaunchTemplateVersion and RunInstances use, and a describe that resolved names
+// differently from the operations that consume them would disagree with itself.
+//
+// An unknown ID or name still yields an empty set rather than
+// InvalidLaunchTemplateId.NotFound, which AWS publishes: that code has no [ec2IDKind] entry,
+// and #713 recorded inventing one as out of its scope. docs/services.md states the gap.
 func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var lts []EC2LaunchTemplate
 
-	filterID := req.Params["LaunchTemplateId.1"]
-	filterName := req.Params["LaunchTemplateName.1"]
+	if err := ec2LaunchTemplateFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
+	filterIDs := extractIndexedParams(req.Params, "LaunchTemplateId")
+	filterNames := extractIndexedParams(req.Params, "LaunchTemplateName")
 
 	switch {
-	case filterID != "":
-		if lt := p.resolveLaunchTemplate(goCtx, ctx, filterID, ""); lt != nil {
+	case len(filterIDs) > 0 || len(filterNames) > 0:
+		// Dedup by ID: a request may name the same template by both spellings, and
+		// answering with it twice would be a shape AWS never produces.
+		seen := map[string]bool{}
+		for _, id := range filterIDs {
+			lt := p.resolveLaunchTemplate(goCtx, ctx, id, "")
+			if lt == nil || seen[lt.LaunchTemplateID] {
+				continue
+			}
+			seen[lt.LaunchTemplateID] = true
 			lts = append(lts, *lt)
 		}
-	case filterName != "":
-		if lt := p.resolveLaunchTemplate(goCtx, ctx, "", filterName); lt != nil {
+		for _, name := range filterNames {
+			lt := p.resolveLaunchTemplate(goCtx, ctx, "", name)
+			if lt == nil || seen[lt.LaunchTemplateID] {
+				continue
+			}
+			seen[lt.LaunchTemplateID] = true
 			lts = append(lts, *lt)
 		}
 	default:
@@ -5349,6 +5627,9 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for i := range lts {
+		if !ec2LaunchTemplateMatchesFilters(lts[i], filters) {
+			continue
+		}
 		resp.LaunchTemplates = append(resp.LaunchTemplates, ec2LaunchTemplateSummary(&lts[i]))
 	}
 	return ec2XMLResponse(http.StatusOK, resp)

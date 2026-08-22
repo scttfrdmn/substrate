@@ -55,6 +55,29 @@ func TestEC2_FilterNames_UndocumentedNameRefused(t *testing.T) {
 		// DescribeSubnets parsed no Filter.N at all before #685, so this name — and every
 		// other — was neither applied nor refused. It is the tenth spec's first case.
 		{"DescribeSubnets", "vpc", "ignored the parameter entirely"},
+
+		// The twelve #695 gave a spec to. Every one is the same former class as
+		// DescribeSubnets — the parameter reached the handler and was never read — so
+		// the rows are not twelve variations on a behavior but twelve operations that
+		// had no filter contract at all. Each name below is a plausible near-miss for a
+		// real one on that page, which is the mistake a refusal is worth having.
+		{"DescribeInstanceStatus", "instance-status", "ignored the parameter entirely"},
+		{"DescribeVpcs", "vpc", "ignored the parameter entirely"},
+		{"DescribeInternetGateways", "internet-gateway", "ignored the parameter entirely"},
+		{"DescribeKeyPairs", "key-pair-name", "ignored the parameter entirely"},
+		{"DescribeAvailabilityZones", "availability-zone", "ignored the parameter entirely"},
+		{"DescribePlacementGroups", "placement-group-name", "ignored the parameter entirely"},
+		// AWS documents no domain filter here, only a domain response element, so the
+		// spelling a caller would most reasonably guess from the response is refused.
+		{"DescribeAddresses", "domain", "ignored the parameter entirely"},
+		{"DescribeRegions", "region", "ignored the parameter entirely"},
+		// vcpu-info.default-cores *is* documented (and inert); vcpu-count is not.
+		{"DescribeInstanceTypes", "vcpu-count", "ignored the parameter entirely"},
+		{"DescribeSpotPriceHistory", "spot-price-history", "ignored the parameter entirely"},
+		// No launch-template-id filter exists on either launch-template page, even
+		// though both take the ID as a parameter — the asymmetry placement groups have.
+		{"DescribeLaunchTemplates", "launch-template-id", "ignored the parameter entirely"},
+		{"DescribeLaunchTemplateVersions", "launch-template-id", "ignored the parameter entirely"},
 	} {
 		t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 			status, code, message := ec2FilterRefusal(t, tc.action, tc.filter)
@@ -103,6 +126,31 @@ func TestEC2_FilterNames_DocumentedButUnevaluatedIsAccepted(t *testing.T) {
 		{"DescribeFleets", "replace-unhealthy-instances"},
 		{"DescribeSubnets", "ipv6-cidr-block-association.state"},
 		{"DescribeSubnets", "outpost-arn"},
+
+		// #695's nine specs that have an inert name. The three that do not —
+		// DescribeInternetGateways (6/6), DescribeRegions (3/3) and
+		// DescribeLaunchTemplates (4/4) — evaluate every name their page documents, so
+		// they have no row here and any name they accept must be evaluated.
+		{"DescribeInstanceStatus", "system-status.status"},
+		{"DescribeInstanceStatus", "event.code"},
+		{"DescribeInstanceStatus", "availability-zone-id"},
+		{"DescribeVpcs", "dhcp-options-id"},
+		{"DescribeVpcs", "cidr-block-association.cidr-block"},
+		{"DescribeAvailabilityZones", "zone-type"},
+		{"DescribeAvailabilityZones", "parent-zone-id"},
+		{"DescribePlacementGroups", "spread-level"},
+		{"DescribeAddresses", "network-border-group"},
+		{"DescribeAddresses", "network-interface-owner-id"},
+		{"DescribeInstanceTypes", "bare-metal"},
+		{"DescribeInstanceTypes", "hypervisor"},
+		{"DescribeSpotPriceHistory", "availability-zone-id"},
+		// DescribeLaunchTemplateVersions has inert names too, but it cannot appear here:
+		// it answers InvalidLaunchTemplateId.NotFound without a template that exists, and
+		// this table's whole point is that no fixture is needed. Its inert names are
+		// pinned against a real template in
+		// TestEC2_LaunchTemplateVersionFilters_FourOfFourteen, whose last subtest also
+		// pins the ordering — a *refused* name is reported before the missing template,
+		// so the refusal still needs no fixture.
 	} {
 		t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 			status, code, _ := ec2FilterRefusal(t, tc.action, tc.filter)
@@ -155,6 +203,12 @@ func TestEC2_FilterNames_InertMeansEveryResource(t *testing.T) {
 // tag:<key> and not tag-key — even though a fleet carries tags and DescribeFleets renders
 // them. So the same filter name is a bad request on one operation and valid on its
 // neighbor, which is AWS's set rather than an omission in the transcription.
+//
+// #695 added eight more operations on the refusing side, which is what makes the split worth
+// a test of its own: over half the describes in EC2's family document no tag filter, and a
+// package-wide "tags are always filterable" assumption would be wrong more often than right.
+// DescribeLaunchTemplateVersions is the sharpest case — DescribeLaunchTemplates, the
+// operation next to it on the same page family, documents both tag filters.
 func TestEC2_FilterNames_TagFilterFollowsTheOperation(t *testing.T) {
 	t.Run("refused where the operation documents no tag filter", func(t *testing.T) {
 		for _, tc := range []struct{ action, filter string }{
@@ -162,6 +216,18 @@ func TestEC2_FilterNames_TagFilterFollowsTheOperation(t *testing.T) {
 			{"DescribeFleets", "tag-key"},
 			{"DescribeInstanceTypeOfferings", "tag:Env"},
 			{"DescribeInstanceTypeOfferings", "tag-key"},
+			{"DescribeInstanceStatus", "tag:Env"},
+			{"DescribeInstanceStatus", "tag-key"},
+			{"DescribeAvailabilityZones", "tag:Env"},
+			{"DescribeAvailabilityZones", "tag-key"},
+			{"DescribeRegions", "tag:Env"},
+			{"DescribeRegions", "tag-key"},
+			{"DescribeInstanceTypes", "tag:Env"},
+			{"DescribeInstanceTypes", "tag-key"},
+			{"DescribeSpotPriceHistory", "tag:Env"},
+			{"DescribeSpotPriceHistory", "tag-key"},
+			{"DescribeLaunchTemplateVersions", "tag:Env"},
+			{"DescribeLaunchTemplateVersions", "tag-key"},
 		} {
 			t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 				status, code, _ := ec2FilterRefusal(t, tc.action, tc.filter)
@@ -181,6 +247,18 @@ func TestEC2_FilterNames_TagFilterFollowsTheOperation(t *testing.T) {
 			{"DescribeNatGateways", "tag-key"},
 			{"DescribeSubnets", "tag:Env"},
 			{"DescribeSubnets", "tag-key"},
+			{"DescribeVpcs", "tag:Env"},
+			{"DescribeVpcs", "tag-key"},
+			{"DescribeInternetGateways", "tag:Env"},
+			{"DescribeInternetGateways", "tag-key"},
+			{"DescribeKeyPairs", "tag:Env"},
+			{"DescribeKeyPairs", "tag-key"},
+			{"DescribePlacementGroups", "tag:Env"},
+			{"DescribePlacementGroups", "tag-key"},
+			{"DescribeAddresses", "tag:Env"},
+			{"DescribeAddresses", "tag-key"},
+			{"DescribeLaunchTemplates", "tag:Env"},
+			{"DescribeLaunchTemplates", "tag-key"},
 		} {
 			t.Run(tc.action+"/"+tc.filter, func(t *testing.T) {
 				status, _, _ := ec2FilterRefusal(t, tc.action, tc.filter)

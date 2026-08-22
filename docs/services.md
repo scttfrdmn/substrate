@@ -2754,11 +2754,11 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids); three of eighteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `availabilityZone` |
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
-| CreateVpc | |
-| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids) |
+| CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
+| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet` |
 | DeleteVpc | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them) |
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them) |
@@ -2770,29 +2770,29 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | AuthorizeSecurityGroupEgress | Supports destination security groups |
 | RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source |
 | RevokeSecurityGroupEgress | |
-| CreateInternetGateway | |
+| CreateInternetGateway | Renders the same gateway `DescribeInternetGateways` does — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
 | AttachInternetGateway | |
-| DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids); **all six** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `ownerId`, `attachmentSet` and `tagSet` |
 | DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog) |
-| DescribeRegions | |
-| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. `Filter.N` is not applied |
+| DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters |
+| DescribeRegions | **All three** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). `AllRegions` is accepted and inert — every seeded region is `opt-in-not-required`, so it is already in the answer |
+| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Five of fifty-seven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
-| DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog) |
+| DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters |
 | CreateRouteTable | |
 | AssociateRouteTable | |
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSnapshot | `VolumeId` is required and checked; `volumeSize` and `encrypted` come from the source volume, and `status` is `completed` at once — see [A snapshot has a real size](#a-snapshot-has-a-real-size) |
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account) |
-| DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
+| DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
-| DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters |
+| DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters. **All four** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `LaunchTemplateId.N` and `LaunchTemplateName.N` are read at every index and [union](#twelve-describes-gained-filters) |
 | DeleteLaunchTemplate | |
 | CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
 | ModifyLaunchTemplate | `SetDefaultVersion` only, which is AWS's only modifiable attribute |
-| DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken`, and the account-wide form |
+| DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken`, and the account-wide form. Four of fourteen filters, applied **before** pagination, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) before the template is resolved |
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
@@ -2812,9 +2812,17 @@ way.
 This replaced three different answers across substrate's filter-parsing EC2 operations —
 dropped on volumes, snapshots, security groups, route tables, NAT gateways, fleets and
 images; matched nothing on instances; refused on instance-type offerings — with the one
-real EC2 gives. `DescribeSubnets` and `DescribeTags` are the tenth and eleventh operations
-the rule covers, and the only two that arrived with both halves at once: the first parsed no
+real EC2 gives. `DescribeSubnets` and `DescribeTags` were the tenth and eleventh operations
+the rule covered, and the only two that arrived with both halves at once: the first parsed no
 `Filter.N` at all before it gained the filters below, and the second did not exist.
+
+[#695](https://github.com/scttfrdmn/substrate/issues/695) then brought **twelve more the same
+way** — every EC2 describe that had never parsed `Filter.N` at all — so the rule now covers
+**twenty-three operations**. That is every EC2 describe substrate serves but one:
+`DescribeInstanceAttribute`, whose reference page documents no `Filters` parameter, so there is
+no set to check a name against. See
+[Twelve describes gained filters](#twelve-describes-gained-filters) for what changed besides
+the filters.
 
 **This is a behaviour change, and the loudest one in the release that brought it.** A
 misspelled filter name previously came back as a successful response: dropped, so the query
@@ -2865,23 +2873,44 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeFleets | `activity-status`, `fleet-state`, `type` | `excess-capacity-termination-policy`, `replace-unhealthy-instances` |
 | DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#wildcards-in-filter-values)) | — |
 | DescribeTags | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — all five AWS documents, all with [wildcards](#wildcards-in-filter-values) | — |
+| DescribeInstanceStatus | `availability-zone`, `instance-state-code`, `instance-state-name` | the other fifteen — the `event.*`, `system-status.*`, `instance-status.*` and `operator.*` families, plus `application-status.status`, `attached-ebs-status.status` and `availability-zone-id` |
+| DescribeVpcs | `cidr`, `is-default`, `owner-id`, `state`, `tag-key`, `tag:<key>` | `dhcp-options-id`, and the eight `cidr-block-association.*`/`ipv6-cidr-block-association.*` filters |
+| DescribeInternetGateways | `attachment.state`, `attachment.vpc-id`, `internet-gateway-id`, `owner-id`, `tag-key`, `tag:<key>` — **all six** | — |
+| DescribeKeyPairs | `fingerprint`, `key-name`, `key-pair-id`, `tag-key`, `tag:<key>` — **all five** | — |
+| DescribeAvailabilityZones | `region-name`, `state`, `zone-id`, `zone-name` | `group-long-name`, `group-name`, `message`, `opt-in-status`, `parent-zone-id`, `parent-zone-name`, `zone-type` |
+| DescribePlacementGroups | `group-arn`, `group-name`, `state`, `strategy`, `tag-key`, `tag:<key>` | `spread-level` |
+| DescribeAddresses | `allocation-id`, `association-id`, `instance-id`, `network-interface-id`, `private-ip-address`, `public-ip`, `tag-key`, `tag:<key>` | `network-border-group`, `network-interface-owner-id` |
+| DescribeRegions | `endpoint`, `opt-in-status`, `region-name` — **all three** | — |
+| DescribeInstanceTypes | `instance-type`, `memory-info.size-in-mib`, `processor-info.supported-architecture`, `supported-usage-class`, `vcpu-info.default-vcpus` | the other fifty-two — the `ebs-info.*`, `network-info.*`, `instance-storage-info.*`, `nitro-tpm-info.*`, `vcpu-info.*` (bar `default-vcpus`) and `processor-info.*` (bar `supported-architecture`) families, plus `auto-recovery-supported`, `bare-metal`, `burstable-performance-supported`, `current-generation`, `dedicated-hosts-supported`, `free-tier-eligible`, `hibernation-supported`, `hypervisor`, `instance-storage-supported`, `nitro-enclaves-support`, `nitro-tpm-support`, `reboot-migration-support`, `supported-boot-mode`, `supported-root-device-type` and `supported-virtualization-type` |
+| DescribeSpotPriceHistory | `availability-zone`, `instance-type`, `product-description`, `spot-price`, `timestamp` | `availability-zone-id` |
+| DescribeLaunchTemplates | `create-time`, `launch-template-name`, `tag-key`, `tag:<key>` — **all four** | — |
+| DescribeLaunchTemplateVersions | `create-time`, `image-id`, `instance-type`, `is-default-version` | `host-resource-group-arn`, `iam-instance-profile`, `kernel-id`, `license-configuration-arn`, `network-card-index`, `ram-disk-id`, and the four `ebs-optimized`/`http-*` metadata filters |
 
-`tag:<key>` is refused on **`DescribeFleets` and `DescribeInstanceTypeOfferings`**, which
-document no tag filter at all — neither `tag:<key>` nor `tag-key` — even though a fleet
-carries tags and `DescribeFleets` renders them. That is AWS's set, not an omission here; to
-find a fleet by tag, use `DescribeTags` or Resource Groups Tagging.
+`tag:<key>` is refused on **eight operations that document no tag filter at all** — neither
+`tag:<key>` nor `tag-key`: `DescribeFleets`, `DescribeInstanceTypeOfferings`,
+`DescribeInstanceStatus`, `DescribeAvailabilityZones`, `DescribeRegions`,
+`DescribeInstanceTypes`, `DescribeSpotPriceHistory` and `DescribeLaunchTemplateVersions`. Some
+of those describe resources that plainly carry tags — a fleet carries tags and
+`DescribeFleets` renders them, and `DescribeLaunchTemplates` documents both tag filters while
+`DescribeLaunchTemplateVersions`, next to it in the same family, documents neither. That is
+AWS's set, not an omission here; to find such a resource by tag, use `DescribeTags` or Resource
+Groups Tagging.
 
 `tag-key` runs the other way: every tag-bearing describe documents it **except
 `DescribeTags`**, which has no such filter because its `key` filter already asks that
 question. So `tag-key` is refused there and accepted on its neighbours — again AWS's set.
 
-Read the tag rows in the other direction and the describe filters remain the narrowest of
-the three routes: **`DescribeInstances`, `DescribeVolumes`, `DescribeImages`,
-`DescribeSnapshots` and `DescribeSubnets`** filter on tags; on security groups, route tables
-and NAT gateways a `tag:<key>` filter is accepted and inert, so "find the security groups
-tagged `Env=prod`" answers with *all* of them. Real EC2 offers three routes to finding a
-resource by tag: the describe filters, `DescribeTags`, and Resource Groups Tagging.
-Substrate now serves all three — the first on five operations, and the other two in full.
+Read the tag rows in the other direction and **ten** describes filter on tags:
+`DescribeInstances`, `DescribeVolumes`, `DescribeImages`, `DescribeSnapshots`,
+`DescribeSubnets`, `DescribeVpcs`, `DescribeInternetGateways`, `DescribeKeyPairs`,
+`DescribePlacementGroups` and `DescribeAddresses` — the last five since
+[#695](https://github.com/scttfrdmn/substrate/issues/695), and the two of those
+[#708](https://github.com/scttfrdmn/substrate/issues/708) had to give tag storage to first.
+On security groups, route tables and NAT gateways a `tag:<key>` filter is accepted and inert,
+so "find the security groups tagged `Env=prod`" answers with *all* of them. Real EC2 offers
+three routes to finding a resource by tag: the describe filters, `DescribeTags`, and Resource
+Groups Tagging. Substrate serves all three — the first on ten operations, and the other two in
+full.
 
 #### Filter semantics that apply everywhere
 
@@ -2941,10 +2970,11 @@ way: `?ebserver` finding `webserver` or `Webserver` is consistent with both read
 the string a zero-or-one `?` would additionally match is not in AWS's data set.
 
 Two comparisons deliberately stay exact, because they are not filter values. **Identifier
-parameters** — `KeyName.N`, `GroupName.N`, `FleetId.N`, `RegionName.N`, `InstanceType.N` —
-assert the resource exists and answer `Invalid*.NotFound` when it does not, so globbing them
-would turn a NotFound contract into a match. And **filter names**, which are one of a fixed
-documented set.
+parameters** — `KeyName.N`, `KeyPairId.N`, `GroupName.N`, `GroupId.N`, `ZoneName.N`, `ZoneId.N`,
+`AllocationId.N`, `PublicIp.N`, `LaunchTemplateId.N`, `LaunchTemplateName.N`, `FleetId.N`,
+`RegionName.N`, `InstanceType.N` — assert the resource exists and answer `Invalid*.NotFound`
+when it does not, so globbing them would turn a NotFound contract into a match. And **filter
+names**, which are one of a fixed documented set.
 
 A filter whose *values* happen to be identifiers is still a filter: `DescribeRouteTables`'
 `association.subnet-id`, `DescribeSubnets`' `vpc-id`, `DescribeSnapshots`' `volume-id` and the
@@ -2955,11 +2985,101 @@ One case-*insensitive* comparison was removed:
 `attachment.delete-on-termination` on `DescribeVolumes` accepted `True` for `true`, which AWS's
 "Filter values are case sensitive" does not, and which no sibling boolean filter did.
 
-**One gap, deliberately left standing**, because closing it would newly change requests that
-succeed today: twelve EC2 describes — including `DescribeVpcs`, `DescribeAddresses`,
-`DescribeInstanceTypes` and `DescribeAvailabilityZones` — never parse `Filter.N` at all, so
-they neither apply nor refuse one
-([#695](https://github.com/scttfrdmn/substrate/issues/695)).
+#### Twelve describes gained filters
+
+Until [#695](https://github.com/scttfrdmn/substrate/issues/695), twelve EC2 describes never
+parsed `Filter.N` at all: the parameter reached the handler and was discarded, so a filtered
+request was answered with **every resource in the region** and nothing in the response said the
+filter had been dropped. That was the same defect
+[#685](https://github.com/scttfrdmn/substrate/issues/685) fixed for `DescribeSubnets`, twelve
+times over, and it is the most consequential kind of silence in an emulator: a consumer's test
+asserting "the query returns only the tagged VPC" passed while the query was never applied.
+
+All twelve now carry a filter spec, so each one applies what it can answer, accepts the
+documented names it cannot, and refuses the rest — see the table above for the split per
+operation. What follows is everything else that had to change to make those filters *readable*,
+plus the gaps left standing.
+
+**Response members were added, because a filter you cannot read back is not usable.** Filtering
+on a value the response never renders leaves a caller unable to tell a correct answer from a
+wrong one. Six members are new:
+
+| Operation | New in the response |
+|---|---|
+| `DescribeVpcs`, `CreateVpc` | `ownerId`, `tagSet`, and `state` **renamed** from `vpcState` |
+| `DescribeInternetGateways`, `CreateInternetGateway` | `ownerId`, `attachmentSet`, `tagSet` |
+| `DescribePlacementGroups` | `groupArn` |
+| `DescribeAddresses` | `tagSet` |
+| `DescribeInstanceStatus` | `availabilityZone` |
+
+The `vpcState` → `state` rename is a **wire fix**: AWS's own samples for both `CreateVpc` and
+`DescribeVpcs` render `<state>available</state>`, so an SDK caller decoded an empty `State` from
+a VPC that was in fact available — and could not distinguish that from a VPC whose state
+substrate had failed to set. Nothing in substrate pinned the old spelling.
+
+`CreateVpc` and `CreateInternetGateway` now render through the same code as their describes, so
+the two responses cannot drift — the reason `DescribeSubnets` shares a renderer with
+`CreateSubnet`.
+
+**An empty `tagSet` follows the operation's own page, not a house rule.**
+`DescribeInternetGateways` renders a present-but-empty `<tagSet/>` and `<attachmentSet/>` on an
+unattached, untagged gateway, because its AWS sample does. `DescribeVpcs` and
+`DescribeAddresses` **omit** an empty `tagSet`, because theirs do. The inconsistency is AWS's,
+and reproducing it per page is the point: a sweep "for consistency" would break one of them
+against its own reference.
+
+**Paired identity parameters union rather than intersect.** Five operations take two lists that
+name the same resource two ways — `KeyName.N`+`KeyPairId.N`, `ZoneName.N`+`ZoneId.N`,
+`GroupName.N`+`GroupId.N`, `AllocationId.N`+`PublicIp.N`, and
+`LaunchTemplateId.N`+`LaunchTemplateName.N`. A request carrying both is answered with the
+resources named by **either**:
+
+```
+DescribeKeyPairs&KeyPairId.1=key-0abc…&KeyName.1=deploy   → both key pairs
+```
+
+*This reading is substrate's* — AWS documents no rule for the combination. It follows from what
+AWS *does* document: an unresolvable name or ID in either list is a `NotFound` error, which only
+makes sense if every resource named is expected in the answer. Intersecting would answer empty
+while reporting both lists resolved.
+
+Two of those lists were also **read only at index 1** before #695 —
+`DescribeLaunchTemplates`' `LaunchTemplateId`/`LaunchTemplateName`, and
+`DescribeSpotPriceHistory`' `ProductDescription` — so a caller naming three templates was
+answered about one, indistinguishable from the other two not existing. All indices are read now.
+Naming one resource in both lists still returns it once.
+
+**Filters apply before pagination** on `DescribeLaunchTemplateVersions`, the only one of the
+twelve that paginates. A page holds `MaxResults` *matching* versions; filtering after paging
+would answer `MaxResults=1` with an empty page and a `nextToken`, which reads as "nothing
+matches" to a caller that does not follow the token. Its filter names are also checked **before**
+the template is resolved, so a typo answers `InvalidParameterValue` rather than
+`InvalidLaunchTemplateId.NotFound`.
+
+**Gaps left standing**, each deliberate:
+
+- **No pagination was added.** `DescribeAddresses`, `DescribeKeyPairs`,
+  `DescribeAvailabilityZones` and `DescribePlacementGroups` document **no** `MaxResults` or
+  `NextToken` at all, so there is nothing to add. `DescribeInstanceStatus`, `DescribeVpcs`,
+  `DescribeInternetGateways`, `DescribeInstanceTypes`, `DescribeSpotPriceHistory` and
+  `DescribeLaunchTemplates` document both and still answer in one page.
+- **`IncludeAllInstances` is not read** on `DescribeInstanceStatus`. AWS defaults it to `false`,
+  meaning "running instances only"; substrate reports every instance whatever its state, so a
+  caller relying on the default to exclude stopped instances gets them. Filter on
+  `instance-state-name` instead, which is evaluated.
+- **`AllRegions` is inert** on `DescribeRegions`, and harmlessly so: every seeded region is
+  `opt-in-not-required`, so the opt-in filtering the parameter controls has nothing to exclude.
+- **`IncludeUnsupportedInRegion` is not read** on `DescribeInstanceTypes`; the seeded catalog is
+  the same in every region.
+- **Six of the new selectors answer an empty set where AWS answers `NotFound`.** `KeyName.N` and
+  `KeyPairId.N` (AWS: `InvalidKeyPair.NotFound`), `GroupName.N` and `GroupId.N` on
+  `DescribePlacementGroups` (`InvalidPlacementGroup.Unknown`), `ZoneName.N`/`ZoneId.N`, and
+  `PublicIp.N` all select by membership rather than through an
+  [ID assertion](#explicit-resource-ids), because no `ec2IDKind` is registered for those
+  resources — so naming one that does not exist narrows the answer to nothing instead of
+  failing. Within the twelve, `InstanceId.N`, `VpcId.N`, `InternetGatewayId.N`,
+  `AllocationId.N` and `DescribeLaunchTemplateVersions`' template selector **do** assert
+  existence, as does `DescribeInstanceTypes`' `InstanceType.N` (`InvalidInstanceType`).
 
 ### RunInstances requires a resolvable AMI
 
@@ -4141,11 +4261,20 @@ One bad type fails the whole request; the known types are not returned. The
 message is verbatim from a real `us-east-1` capture for the single-type case; the
 `", "` separator for a list is substrate's choice, so dispatch on the code.
 
-`DescribeInstanceTypes` ignores `Filter.N` entirely. The operation documents some
-60 filter names, nearly all over response fields the seeded catalog does not carry,
-and applying the handful that are answerable while silently dropping the rest is
-the same defect as an ignored filter. Tracked in
-[#495](https://github.com/scttfrdmn/substrate/issues/495).
+`DescribeInstanceTypes` applies **five** of the fifty-seven filter names its reference
+documents — `instance-type`, `memory-info.size-in-mib`,
+`processor-info.supported-architecture`, `supported-usage-class` and
+`vcpu-info.default-vcpus`. The other fifty-two are over response fields the seeded catalog does
+not carry, so they are accepted and inert, and an undocumented name is refused. That split is
+what closed [#495](https://github.com/scttfrdmn/substrate/issues/495)'s filter half: the concern
+was never that the answerable handful should go unapplied, but that dropping the rest
+*silently* is indistinguishable from applying them — which the
+[evaluated/inert table](#what-is-refused-and-what-is-merely-inert) resolves by naming every
+inert one.
+
+The numeric filters compare as **strings**, because AWS supports no
+greater-than or less-than in a filter value: `memory-info.size-in-mib=4096` selects the types
+with exactly that much memory, and `4097` selects none rather than "more than 4096".
 
 #### Offerings filters and wildcards
 

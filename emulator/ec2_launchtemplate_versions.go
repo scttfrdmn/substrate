@@ -541,8 +541,22 @@ func (p *EC2Plugin) modifyLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 }
 
 // describeLaunchTemplateVersions handles the DescribeLaunchTemplateVersions action.
+//
+// Filter.N was accepted and ignored before #695; four of AWS's fourteen names are evaluated
+// now, per [ec2LaunchTemplateVersionFilterSpec]. The filter names are checked before anything
+// is resolved, so an undocumented name is refused rather than answered after a NotFound for
+// the template — the ordering #687 established and [TestEC2_FilterNames_UndocumentedNameRefusedBeforeTheScan]
+// pins.
+//
+// Filters apply before pagination, so a page holds MaxResults *matching* versions rather than
+// MaxResults versions of which some match.
 func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
+
+	if err := ec2LaunchTemplateVersionFilterSpec().check(req.Params); err != nil {
+		return nil, err
+	}
+	filters := extractEC2Filters(req.Params)
 
 	maxResults := ec2MaxLaunchTemplateVersionResults
 	if raw := req.Params["MaxResults"]; raw != "" {
@@ -581,6 +595,16 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 		if awsErr != nil {
 			return nil, awsErr
 		}
+	}
+
+	if len(filters) > 0 {
+		kept := make([]ec2LTVersionItem, 0, len(items))
+		for _, item := range items {
+			if ec2LTVersionMatchesFilters(item, filters) {
+				kept = append(kept, item)
+			}
+		}
+		items = kept
 	}
 
 	// Pagination is offset-based over a stable ordering, matching the other EC2
