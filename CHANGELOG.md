@@ -134,6 +134,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   affected: every snapshot substrate writes is born `completed`, so an unseeded mapping behaves
   as before.
 
+- **A condition operator IAM does not recognize is refused when the document is submitted**
+  (#730). Substrate accepted any operator name, stored it, and discarded it at evaluation, so a
+  `{"NotAnOperator": {…}}` real IAM rejects outright was stored here and then silently ignored:
+  the policy looked attached, matched nothing, and the caller was never told why. All four
+  submitting paths — `CreateRole`, `UpdateAssumeRolePolicy`, `CreatePolicy` and the shared
+  handler behind `PutUserPolicy`/`PutRolePolicy`/`PutGroupPolicy` — now answer
+  `MalformedPolicyDocument` / 400 and name the offending operator, and nothing is written.
+
+  The vocabulary is not restated anywhere: the check asks the evaluator itself, so an operator
+  the evaluator learns is accepted at write time in the same commit. Three names are refused for
+  a documented reason rather than for being unknown — `NullIfExists`, because AWS permits the
+  suffix on "any condition operator name except the `Null` condition", and `ForAllValues:Null`
+  and `ForAnyValue:Null`, which AWS does not define. A set qualifier over any other recognized
+  operator is accepted, including the combinations AWS's operator page does not tabulate.
+  Operator names are matched case-sensitively; AWS's case-insensitivity covers condition *key*
+  names, not operator names.
+
+  Validation is on the submission paths only, never on the read path: `PolicyDocument` is
+  unmarshalled on every read from state, so validating there would make an already-stored
+  document permanently unloadable. A document already in state still evaluates exactly as
+  before — an unrecognized operator denies, which remains the only reading that cannot turn a
+  typo into a grant.
+
+  **Provenance.** `MalformedPolicyDocument` / 400 is AWS's published pair for every one of the
+  four operations, and their Errors sections say "The error message describes the specific
+  error" — which is what licenses substrate naming the operator. The message wording is
+  substrate's own.
+
+  **Compatibility.** A policy document carrying a misspelled operator was accepted and is now
+  refused. A test or fixture that submitted one and asserted success will fail; the policy it
+  created never granted anything, so nothing that depended on the grant changes.
+
 ### Fixed
 - **One server serves one account** (#734). `ParseAWSRequest` decided the account from the
   *shape of the access key*: a key beginning with `AKIA` was attributed to `123456789012`,
@@ -215,6 +247,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state keys with the account (`table:{account}/{name}`, `instance:{account}/{id}`), so
   **persisted SQLite state written under the old account is unreachable** after upgrading:
   re-seed it, or set `account.default: "000000000000"` to read it back.
+
+- **A grant written about `ec2:ResourceTag/<key>` no longer silently fails** (#730). Two of the
+  bundled AWS-authored managed policies scope an EC2 delete by tag under EC2's own prefix
+  rather than the global one — `ManagedCloudformationResourcesCleanupPolicy` allows
+  `ec2:DeleteInternetGateway`, `ec2:DeleteRoute`, `ec2:DeleteRouteTable` and
+  `ec2:DeleteSecurityGroup` where `ec2:ResourceTag/aws:cloudformation:stack-name` is like
+  `EC2ContainerService-*`, and `AmazonEKSClusterPolicyENIDelete` allows
+  `ec2:DeleteNetworkInterface` where `ec2:ResourceTag/eks:eni:owner` equals
+  `amazon-vpc-cni`. Substrate published a resource's tags under `aws:ResourceTag/` only, so
+  neither condition could be satisfied and neither statement ever granted anything. Both
+  prefixes now report the same tag, from the resource's one tag set, because a policy may
+  write the condition either way about the same tag and AWS answers both. A policy of your own
+  written against `ec2:ResourceTag/<key>` now evaluates end to end; the *bundled* cleanup
+  statement remains unsatisfiable for a second reason, recorded rather than papered over —
+  nothing in substrate produces the `aws:cloudformation:stack-name` tag it names, because
+  `CreateTags` refuses a caller-supplied `aws:` key exactly as AWS does and the CloudFormation
+  deployer does not tag what it creates (#746).
+
+  The prefix alone would have been inert. Authorization resolved an EC2 request to a real ARN,
+  and to that resource's tags, only when the request named `InstanceId` — every other EC2
+  operation was decided against a bare `*` with no tags, which is exactly the case the two
+  bundled statements govern. An operation naming one resource through `InstanceId`, `GroupId`,
+  `RouteTableId` or `InternetGatewayId` is now decided against that resource's ARN and that
+  resource's tags, resolved through a single lookup shared by the ARN builder and the tag
+  reader so the tags a condition is evaluated against always belong to the ARN the decision is
+  made about.
+
+  **Provenance.** The Service Authorization Reference page for EC2 was unreachable while this
+  was written; the citable evidence for `ec2:ResourceTag/${TagKey}` is EC2's own
+  service-specific condition-key list plus the two AWS-authored policies above, which use the
+  key and ship in substrate. `aws:ResourceTag/tag-key` is documented as global. Publishing a
+  `<service>:ResourceTag/` prefix is therefore **specific to EC2**, not general: reporting an
+  S3 bucket's tags under `s3:ResourceTag/` would invent a key AWS does not publish, and it
+  would diverge in the direction that grants.
+
+  **Compatibility.** An EC2 operation naming one of those four parameters is now authorized
+  against a real ARN instead of `*`. Because a statement's own `Resource` is the pattern, a
+  request resource of `*` matched only a statement whose `Resource` began with `*`, so
+  substituting the real ARN can narrow a grant but never widen one. A policy that allowed such
+  an operation through a wildcard `Resource` still allows it; one that allowed it through an
+  ARN pattern the named resource does not match no longer does. `DeleteNetworkInterface` stays
+  undecidable by tag — substrate stores no standalone taggable ENI record — so the EKS
+  statement remains unsatisfiable, and that is recorded rather than worked around.
 
 ## [v0.107.0] - 2026-08-21
 

@@ -1153,13 +1153,37 @@ epoch second 2020, the one place the two date notations collide; and Go's spelli
 infinity, NaN and hexadecimal floats are not numbers, so `"Inf"` cannot satisfy
 `NumericGreaterThan` against every number in existence.
 
-**An operator substrate does not recognize denies.** Real IAM validates operator names when
-the document is submitted, answering `MalformedPolicyDocument`; substrate does not, so a
-misspelled operator is stored and then discarded at evaluation. Denying is substrate's
-choice and the only one that cannot turn a typo into a grant — including under a set
-qualifier, where an unrecognized operator over an absent key used to be
-[vacuously true](#multivalued-condition-keys-forallvalues-and-foranyvalue) and *granted*
+**An operator substrate does not recognize is refused when the document is submitted**, with
+`MalformedPolicyDocument` and HTTP 400 — AWS's published pair for every one of the four
+submitting operations, whose Errors sections read "The request was rejected because the
+policy document was malformed. The error message describes the specific error." That last
+sentence is what licenses substrate naming the offending operator in the message, which is
+the only part of the refusal a caller can act on. The four doors are `CreateRole`,
+`UpdateAssumeRolePolicy`, `CreatePolicy` and the three inline-policy operations
+(`PutUserPolicy`, `PutRolePolicy`, `PutGroupPolicy`), which share one handler.
+
+Three names are refused for a documented reason rather than for being unknown:
+`NullIfExists`, because AWS allows the suffix on "any condition operator name except the
+`Null` condition"; `ForAllValues:Null` and `ForAnyValue:Null`, because AWS defines neither.
+A set qualifier over any other recognized operator is accepted, including the combinations
+AWS's condition-operator page does not tabulate — it lists the String, Bool and ARN forms,
+while its set-operator reference describes the qualifiers generally, so refusing
+`ForAllValues:NumericLessThan` would be substrate inventing a restriction. Operator names
+are matched **case-sensitively**: `stringequals` is refused, because AWS's
+case-insensitivity covers condition *key* names, not operator names.
+
+Validation runs on the submission paths only, never when a stored document is read back.
+`PolicyDocument` is unmarshalled on every read from state, so validating there would make
+an already-stored document — one written by an older substrate, or by a seed — permanently
+unloadable. **An operator that is already in state still denies**, which is the evaluator's
+own reading and unchanged: it is the only answer that cannot turn a typo into a grant,
+including under a set qualifier, where an unrecognized operator over an absent key used to
+be [vacuously true](#multivalued-condition-keys-forallvalues-and-foranyvalue) and *granted*
 the statement.
+
+Out of scope, and named because the asymmetry is visible: S3's `PutBucketPolicy` performs a
+shallower check and answers `MalformedPolicy`, and the SNS and SQS `Policy` attribute is
+stored opaquely and parsed by neither.
 
 #### Which keys have a producer
 
@@ -1170,6 +1194,7 @@ nothing else:
 |---|---|
 | `aws:RequestTag/<key>`, `aws:TagKeys` | The tags the request asks to apply |
 | `aws:ResourceTag/<key>` | The tags on each resource the request names |
+| `ec2:ResourceTag/<key>` | The same tags, under EC2's service-specific duplicate of the global key — see [both prefixes](#ec2-reports-a-resource-s-tags-under-both-prefixes) |
 | `aws:CurrentTime`, `aws:EpochTime` | The emulator's simulated clock |
 | `ec2:CreateAction` | [A tagged create's second authorization pass](#a-tagged-create-is-authorized-twice) |
 | `ec2:Subnet`, `ec2:Vpc` | [A launch's networking resources](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc) |
@@ -1205,18 +1230,44 @@ What has **no** producer, and therefore never matches on the enforcement path:
   every principal kind — it mints no unique ID, and a role session's user name is not the
   last component of its ARN — and a key guessed wrong is worse than one a policy can test
   for with `Null`.
-- Every key the bundled AWS managed policies condition on: `iam:PassedToService`,
-  `iam:AWSServiceName`, `aws:CalledViaLast`, `elasticloadbalancing:CreateAction`,
-  `devops-guru:ServiceNames`, and `ec2:ResourceTag/<key>` (substrate produces
-  `aws:ResourceTag/<key>`). Each is a false deny in the safe direction: all 32 condition
-  blocks in the bundled catalog sit on an `Allow`, so such a statement grants nothing
-  rather than a `Deny` going inert.
+- Six of the seven keys the bundled AWS managed policies condition on, each for its own
+  reason rather than as one omission:
 
-**Substrate performs no policy-variable substitution.** A `${aws:username}` in a resource
-ARN or a condition value is compared literally, so the `${aws:username}` in the bundled
-`IAMUserChangePassword` policy matches no user. AWS substitutes the value before
-evaluating; substrate does not, and a policy relying on it grants nothing rather than
-granting the wrong thing.
+  | Key | Blocks | Why it has no producer |
+  |---|---|---|
+  | `iam:AWSServiceName` | 11 | The most feasible of the six — it is a direct read of `CreateServiceLinkedRole`'s own parameter. Blocked only on that operation not existing |
+  | `iam:PassedToService` | 8 | No `PassRole` operation exists anywhere in substrate, and the value comes from the *calling* API's service principal, which substrate has no analogue for |
+  | `codestar-notifications:NotificationsForResource` | 6 | No CodeStar Notifications plugin |
+  | `aws:CalledViaLast` | 2 | `RequestContext` has no call-chain notion, and there is no service-to-service internal path to record one from |
+  | `devops-guru:ServiceNames` | 2 | No DevOps Guru plugin |
+  | `elasticloadbalancing:CreateAction` | 1 | The ELB plugin has no tagging at all — no `AddTags`, and a load balancer's tags are never read or written — so the action the statement conditions does not exist |
+
+  The seventh, `ec2:ResourceTag/<key>`, now has one; see [both
+  prefixes](#ec2-reports-a-resource-s-tags-under-both-prefixes).
+
+  Each remaining absence is a false deny in the safe direction: all 32 condition blocks in
+  the bundled catalog sit on an `Allow`, so such a statement grants nothing rather than a
+  `Deny` going inert.
+
+**Substrate performs no policy-variable substitution**, deliberately rather than by
+omission. A `${aws:username}` in a resource ARN or a condition value is compared literally.
+
+For the one bundled policy that uses a variable — the `${aws:username}` in
+`IAMUserChangePassword`, the only `${` across all 47 — that is not observable: AWS's rule is
+that an unresolved variable in `Resource` "will not match any resource", `aws:username` has
+no producer, and substrate's literal comparison reaches the same answer by a different
+route. The statement matches nothing either way.
+
+The divergence that **is** real is `NotResource` and the negated operators, where AWS says
+an unresolved variable *does* match — so the negation excludes everything on AWS and nothing
+here, and a policy written that way is more permissive under substrate. Nothing in the
+bundled catalog is written that way; a caller's own policy could be.
+
+Substitution cannot land before `aws:username` has an honest producer, and the two obvious
+candidates are both wrong: the ARN's last component is the *session* name for an assumed
+role, where AWS documents `aws:username` as absent altogether, and the value the caller ARN
+is built from is an access key ID. The honest producer is the resolved IAM user name, set
+where the credential lookup already has it in hand and currently discards it.
 
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 
@@ -4284,7 +4335,8 @@ treats such an ID as a no-op, and AWS answers an unparseable tagging ID with `In
 ("The specified ID for the resource you are trying to tag is not valid") rather than
 `AccessDenied`. Skipping is also the only safe direction — widening it to `*` would hand
 the caller the one resource a broad `Allow` matches. A call naming *only* such IDs is
-decided against a single `*`, as every other EC2 operation is.
+decided against a single `*`, as an EC2 operation naming no resource substrate can resolve
+is.
 
 `aws:RequestTag/{key}` is populated from the tags a tagging call carries
 (`Tag.N.Key`/`Tag.N.Value`), so the "tag only with the keys and values we prescribe"
@@ -4302,6 +4354,64 @@ checks already have.
 evaluates. See [multivalued condition
 keys](#multivalued-condition-keys-forallvalues-and-foranyvalue) for the set-qualifier rules
 those examples depend on, including why AWS pairs them with `Null`.
+
+#### An operation naming one resource by ID is decided against that resource
+
+Four request parameters resolve to the resource they name, so the operations carrying them
+are authorized against a real ARN and against that resource's own tags rather than against
+the literal `*`:
+
+| Parameter | Resolves to | The bundled actions that need it |
+|---|---|---|
+| `InstanceId` | `instance/<id>` | — (it is the one parameter that already resolved) |
+| `GroupId` | `security-group/<id>` | `ec2:DeleteSecurityGroup` |
+| `RouteTableId` | `route-table/<id>` | `ec2:DeleteRouteTable`, `ec2:DeleteRoute` |
+| `InternetGatewayId` | `internet-gateway/<id>` | `ec2:DeleteInternetGateway` |
+
+The list is short for a reason: each entry is a parameter one of the two `ec2:ResourceTag`
+statements in the bundled AWS managed policies names its target with. `DeleteRoute` appears
+under `RouteTableId` because the route table is the resource AWS authorizes a route change
+against. The indexed and un-indexed spellings are the same request, matching what the
+handlers themselves accept.
+
+`aws:ResourceTag/<key>` and `ec2:ResourceTag/<key>` both report the resolved resource's
+tags. <a id="ec2-reports-a-resource-s-tags-under-both-prefixes"></a>**EC2 reports a
+resource's tags under both prefixes** because AWS publishes both — `aws:ResourceTag` as a
+global key and `ec2:ResourceTag` as EC2's own — and AWS's own bundled policies use the
+service-specific one. The two prefixes are not folded together: they are two keys, not one
+key compared case-insensitively, and only EC2 gets a second prefix. Reporting, say, an S3
+bucket's tags under an `s3:ResourceTag/` key AWS does not publish would honor a policy real
+AWS ignores, which is a divergence in the granting direction.
+
+One caveat on the bundled statement that motivated the prefix: it conditions on
+`ec2:ResourceTag/aws:cloudformation:stack-name`, and that tag is not one a caller can set —
+`CreateTags` refuses a key beginning with `aws:`, as AWS does, and substrate's CloudFormation
+deployer does not apply stack tags to the resources it creates. So the prefix and the
+resolution work, and a policy you write against `ec2:ResourceTag/<your key>` evaluates, but
+`ManagedCloudformationResourcesCleanupPolicy`'s own statement stays unsatisfiable until the
+deployer tags what it creates ([#746](https://github.com/scttfrdmn/substrate/issues/746)).
+
+What still resolves to `*`, each named because a policy written against it will not behave
+as AWS would:
+
+- **`NetworkInterfaceId`.** Substrate stores no standalone taggable ENI record, so there are
+  no tags to compare and `AmazonEKSClusterPolicy`'s `ec2:DeleteNetworkInterface` statement
+  stays inert. Fabricating an empty tag set would be worse: it would turn "substrate cannot
+  tell" into "the tag is absent", deciding the condition rather than admitting it cannot.
+- **`VpcId` and `SubnetId`.** Several creates carry one as the *container* the new resource
+  goes into rather than as the resource acted on, and authorizing a create against its
+  parent's ARN is not what AWS evaluates it against.
+- **The plural forms.** An operation naming several resources of one type is still decided
+  against the first ID alone — a `TerminateInstances` with three `InstanceId.N` is decided
+  against `InstanceId.1`. This is the shape [tagging](#tagging-is-authorized-against-every-resource-it-names)
+  already handles for `ResourceId.N` and it is tracked for the rest.
+
+An ID that resolves to no record, or whose prefix names no type substrate can tag, falls
+back to `*` rather than being refused — the handler owes that answer, as `NotFound`. The
+fallback is safe in one direction only, which is why it is the fallback: `*` as the
+*request* resource is not a wildcard, because `resourceMatches` uses the statement's own
+`Resource` as the pattern, so `*` matched only a statement whose `Resource` began with `*`.
+Replacing it with a concrete ARN can therefore narrow a grant but never widen one.
 
 #### A tagged create is authorized twice
 
