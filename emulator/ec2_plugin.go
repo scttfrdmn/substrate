@@ -3994,38 +3994,79 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	})
 }
 
-// registerImage registers an AMI, optionally pointing its root device at an
-// existing EBS snapshot supplied via BlockDeviceMapping.N.Ebs.SnapshotId. Unlike
-// CreateImage (which always materializes a fresh snapshot), RegisterImage lets a
-// caller register multiple AMIs that *share* one snapshot — the AWS-faithful way
-// to model snapshot sharing, so retain-shared-snapshot logic is testable (#328).
+// registerImage registers an AMI from the block device mapping the caller sends, storing
+// every entry of it. Unlike CreateImage (which always materializes a fresh snapshot),
+// RegisterImage lets a caller register multiple AMIs that *share* one snapshot — the
+// AWS-faithful way to model snapshot sharing, so retain-shared-snapshot logic is testable
+// (#328).
+//
+// # The mappings
+//
+// They are read by [ec2ParseBlockDeviceMappings], the walk RunInstances and a launch
+// template already share, rather than by the bounded 1..32 scan this had through v0.106.0
+// that kept only the first snapshot it found and discarded the rest of every mapping (#711).
+// AWS's own Example 3 registers three volumes — two distinct snapshots and an empty 100 GiB
+// volume — so keeping one snapshot was losing most of the request.
+//
+// Two changes a caller can observe, beyond getting its mappings back: the walk is unbounded,
+// and it stops at the first absent index rather than tolerating a sparse one. AWS's query
+// protocol indexes contiguously and every other indexed walk in this plugin assumes it, so
+// this is alignment with the rest of substrate — but a request that skipped an index used to
+// have its later mappings read and now does not.
+//
+// Each mapping that names a snapshot is checked by [ec2CheckMappingSnapshot], so an ID that
+// is malformed or names nothing is refused instead of being stored and rendered as a
+// dangling reference. That rule alone, deliberately, and not the whole of
+// [ec2CheckBlockDeviceMappings]: the rest of it (duplicate device names, virtualName
+// spellings, gp3-only Throughput, size-or-snapshot) would arrive on a published path
+// unannounced, and none of it is a rule AWS states for this operation.
+//
+// A mapping naming no snapshot is stored as sent — AWS's third Example volume is exactly
+// that, and refusing it would refuse AWS's own documented request.
 func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["Name"]
 	if name == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Find the first block device mapping that names an EBS snapshot. EC2 sends
-	// these as BlockDeviceMapping.N.Ebs.SnapshotId (1-indexed); scan a bounded
-	// range so a sparse index doesn't cause an early stop.
-	snapshotID := ""
-	for i := 1; i <= 32; i++ {
-		if v := req.Params[fmt.Sprintf("BlockDeviceMapping.%d.Ebs.SnapshotId", i)]; v != "" {
-			snapshotID = v
-			break
+	// AWS: "To tag the AMI, the value for ResourceType must be image. If you specify
+	// another value for ResourceType, the request fails." Checked before anything is
+	// written, so a refused request registers nothing — [ec2CheckReservedTagKeys]'s
+	// rollback rule.
+	if awsErr := ec2CheckTagSpecificationTypes(req.Params, "image"); awsErr != nil {
+		return nil, awsErr
+	}
+	tags := ec2LaunchTagsForResource(req.Params, "image")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+
+	mappings := ec2ParseBlockDeviceMappings(req.Params, "")
+	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
+	for _, bdm := range mappings {
+		if bdm.SnapshotID == "" {
+			continue
+		}
+		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot); awsErr != nil {
+			return nil, awsErr
 		}
 	}
 
 	imageID := generateImageID()
 	img := EC2Image{
-		ImageID:      imageID,
-		Name:         name,
-		Description:  req.Params["Description"],
-		State:        "available",
-		CreationDate: p.tc.Now().UTC().Format(time.RFC3339),
-		SnapshotID:   snapshotID,
-		AccountID:    reqCtx.AccountID,
-		Region:       reqCtx.Region,
+		ImageID:             imageID,
+		Name:                name,
+		Description:         req.Params["Description"],
+		State:               "available",
+		CreationDate:        p.tc.Now().UTC().Format(time.RFC3339),
+		SnapshotID:          ec2RootMappingSnapshot(mappings, req.Params["RootDeviceName"]),
+		BlockDeviceMappings: mappings,
+		Tags:                tags,
+		AccountID:           reqCtx.AccountID,
+		Region:              reqCtx.Region,
 	}
 	data, err := json.Marshal(img)
 	if err != nil {
@@ -4064,13 +4105,24 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	// gave this operation a tag: rule no other describe had.
 	filters := extractEC2Filters(req.Params)
 
+	// snapshotId is omitempty because AWS's third RegisterImage example registers a
+	// mapping with a size and no snapshot; rendering an empty element for it would report
+	// a snapshot the AMI does not have.
 	type ebsBlockDevice struct {
-		SnapshotID string `xml:"snapshotId"`
+		SnapshotID string `xml:"snapshotId,omitempty"`
 		VolumeSize int64  `xml:"volumeSize"`
 	}
+	// ebs is a pointer and noDevice a pointer to a string so the three mapping shapes stay
+	// distinguishable: an EBS volume has an ebs element, an instance store device has a
+	// virtualName and no ebs, and a suppressed device has a noDevice element whose value is
+	// empty — present-but-empty is not the same as omitted, the distinction
+	// [ec2UnknownInstanceAttribute]'s neighbors in ec2_instanceattribute.go keep for the
+	// same reason. A value type here would give a suppressed device a phantom 0 GiB volume.
 	type blockDeviceItem struct {
-		DeviceName string         `xml:"deviceName"`
-		EBS        ebsBlockDevice `xml:"ebs"`
+		DeviceName  string          `xml:"deviceName,omitempty"`
+		VirtualName string          `xml:"virtualName,omitempty"`
+		NoDevice    *string         `xml:"noDevice,omitempty"`
+		EBS         *ebsBlockDevice `xml:"ebs,omitempty"`
 	}
 	type imageItem struct {
 		ImageID             string            `xml:"imageId"`
@@ -4121,17 +4173,50 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			OwnerID:      img.AccountID,
 			CreationDate: img.CreationDate,
 		}
-		if img.SnapshotID != "" {
-			// An AMI whose snapshot record is gone — DeleteSnapshot removes it and leaves
-			// the AMI standing — falls back to the default rather than reporting 0, which
-			// is what a caller sizing a volume off this member can act on.
+		// A RegisterImage AMI renders the mapping the caller sent, entry for entry, in
+		// request order (#711). ec2ResolveSnapshotSizes fills in a size the mapping left to
+		// its snapshot, which is the rule AWS states on EbsBlockDevice.VolumeSize ("If you
+		// specify a snapshot, the default is the snapshot size") and the same pass the
+		// launch path uses — so an AMI's reported volume size and the volume a launch from
+		// it produces cannot disagree.
+		for _, bdm := range ec2ResolveSnapshotSizes(img.BlockDeviceMappings, resolveSnapshot) {
+			bdi := blockDeviceItem{DeviceName: bdm.DeviceName, VirtualName: bdm.VirtualName}
+			switch {
+			case bdm.NoDevice:
+				empty := ""
+				bdi.NoDevice = &empty
+			case bdm.VirtualName != "":
+				// An instance store device is not an EBS volume; manufacturing an ebs
+				// element for it would be an observation nothing backs, the rule
+				// [EC2BlockDeviceMapping.VirtualName] already states for volumes.
+			default:
+				size := int64(bdm.VolumeSize)
+				if size <= 0 {
+					size = ec2DefaultVolumeSizeGiB
+				}
+				bdi.EBS = &ebsBlockDevice{SnapshotID: bdm.SnapshotID, VolumeSize: size}
+			}
+			item.BlockDeviceMappings = append(item.BlockDeviceMappings, bdi)
+		}
+		if len(img.BlockDeviceMappings) == 0 && img.SnapshotID != "" {
+			// Every CreateImage-minted AMI, and any AMI registered before #711, has a root
+			// snapshot and no recorded mapping — so substrate fabricates the root device
+			// entry for it. /dev/sda1 rather than a stored name because that path has none
+			// to store: it images an instance, and EC2Image records no root device.
+			//
+			// An AMI whose snapshot record is gone falls back to the default rather than
+			// reporting 0, which is what a caller sizing a volume off this member can act
+			// on. That state is reachable: DeleteSnapshot refuses only a *root* snapshot
+			// (#710, following AWS's scoping), so deleting the snapshot a non-root mapping
+			// names leaves the AMI standing and the mapping dangling — and lands in the
+			// size <= 0 branch above rather than in this one.
 			size := int64(ec2DefaultVolumeSizeGiB)
 			if snap, found := resolveSnapshot(img.SnapshotID); found && snap.VolumeSize > 0 {
 				size = snap.VolumeSize
 			}
 			item.BlockDeviceMappings = []blockDeviceItem{{
-				DeviceName: "/dev/sda1",
-				EBS:        ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: size},
+				DeviceName: ec2RootDeviceSDA1,
+				EBS:        &ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: size},
 			}}
 		}
 		item.Tags = ec2TagItems(img.Tags)
@@ -4173,7 +4258,17 @@ func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
 				}
 			}
 		case name == "block-device-mapping.snapshot-id":
-			matched = img.SnapshotID != "" && ec2FilterAccepts(vals, img.SnapshotID)
+			// Every snapshot the mapping names, not just the root device's. An AMI
+			// registered from AWS's Example 3 renders two snapshots, and a filter that
+			// consulted only the first would report no AMI for a snapshot DescribeImages
+			// had just rendered — a contradiction between two answers about one record
+			// (#711).
+			for _, id := range ec2ImageSnapshotIDs(img) {
+				if ec2FilterAccepts(vals, id) {
+					matched = true
+					break
+				}
+			}
 		case name == "image-id":
 			matched = ec2FilterAccepts(vals, img.ImageID)
 		default:
@@ -4184,6 +4279,61 @@ func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
 		}
 	}
 	return true
+}
+
+// ec2RootMappingSnapshot returns the snapshot backing the root device among mappings, or ""
+// if none of them names one.
+//
+// rootDevice is the request's RootDeviceName, which AWS's own RegisterImage examples send
+// beside the mapping that implements it ("&RootDeviceName=/dev/sda1
+// &BlockDeviceMapping.1.DeviceName=/dev/sda1"). When it names one of the mappings, that
+// mapping's snapshot is the answer; otherwise the first mapping naming a snapshot is, which
+// is what AWS's examples put first and what this operation recorded through v0.106.0.
+//
+// RootDeviceName is read rather than [ec2IsRootDevice] guessed at, because this is the one
+// place a caller states which device is root, and guessing would give the wrong answer for
+// an AMI whose root device is neither /dev/sda1 nor /dev/xvda — the limit
+// ec2_block_devices.go's device-name constants already document for paths that have nothing
+// to read.
+//
+// Which mapping wins is load-bearing, not bookkeeping: [EC2Image.SnapshotID] is what
+// DeleteSnapshot's in-use rule consults, and AWS scopes that rule to "a snapshot of the root
+// device of an EBS volume used by a registered AMI" (#710). Picking the wrong mapping would
+// protect the wrong snapshot and leave the root device's deletable.
+func ec2RootMappingSnapshot(mappings []EC2BlockDeviceMapping, rootDevice string) string {
+	if rootDevice != "" {
+		for _, bdm := range mappings {
+			if bdm.DeviceName == rootDevice && bdm.SnapshotID != "" {
+				return bdm.SnapshotID
+			}
+		}
+	}
+	for _, bdm := range mappings {
+		if bdm.SnapshotID != "" {
+			return bdm.SnapshotID
+		}
+	}
+	return ""
+}
+
+// ec2ImageSnapshotIDs returns every snapshot the AMI references, the root device's first.
+//
+// Both members are read because they answer different questions and an AMI can have either:
+// [EC2Image.SnapshotID] is the only one a pre-#711 record or a CreateImage-minted AMI has,
+// and [EC2Image.BlockDeviceMappings] is the only one that has an AMI's non-root volumes.
+// The root snapshot is skipped when a mapping repeats it, so the common case — one mapping,
+// which is the root — yields one ID rather than the same ID twice.
+func ec2ImageSnapshotIDs(img EC2Image) []string {
+	var out []string
+	if img.SnapshotID != "" {
+		out = append(out, img.SnapshotID)
+	}
+	for _, bdm := range img.BlockDeviceMappings {
+		if bdm.SnapshotID != "" && bdm.SnapshotID != img.SnapshotID {
+			out = append(out, bdm.SnapshotID)
+		}
+	}
+	return out
 }
 
 // deregisterImage removes an AMI from state.
@@ -4207,7 +4357,9 @@ func (p *EC2Plugin) deregisterImage(reqCtx *RequestContext, req *AWSRequest) (*A
 	})
 }
 
-// ec2ImageUsingSnapshot reports the AMI that references snapshotID, or "" if none does.
+// ec2ImageUsingSnapshot reports the AMI whose *root device* snapshot is snapshotID, or "" if
+// no AMI has one. An AMI that names it in some other mapping entry is not reported, for the
+// reason [EC2Plugin.deleteSnapshot] gives — AWS scopes the refusal to the root device.
 //
 // The answer must be stable, because it reaches the caller inside a refusal message:
 // [StateManager.List] returns keys in map order, and an AMI registered against an existing
@@ -6293,10 +6445,16 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // AWS: "You cannot delete a snapshot of the root device of an EBS volume used by a
 // registered AMI. You must first deregister the AMI before you can delete the snapshot."
 // [EC2Image.SnapshotID] is by construction the root device's snapshot — createImage writes
-// it from the instance's root volume and registerImage from the caller's mapping — so
-// AWS's narrower scoping (the *root* device specifically) happens not to bite here; every
-// snapshot an image references is a root-device snapshot. A future change that lets an
-// image reference a non-root snapshot has to narrow this check to keep matching AWS.
+// it from the instance's root volume and registerImage from the mapping RootDeviceName names
+// (see [ec2RootMappingSnapshot]) — so consulting that member alone *is* AWS's scoping rather
+// than an approximation of it.
+//
+// Since #711 an AMI can also reference non-root snapshots, through the rest of its recorded
+// mapping, and this rule deliberately does not protect those: AWS's sentence names the root
+// device specifically, and #671 settled that substrate models what the API model states. The
+// consequence is observable and is the one API-reachable route to an AMI whose mapping names
+// a snapshot that no longer exists — DescribeImages renders such a mapping at
+// [ec2DefaultVolumeSizeGiB], which is what that fallback is for.
 //
 // Order matters and follows real EC2: the ID is validated, then existence, then the in-use
 // rule. Reporting InUse for a malformed ID would tell a caller an AMI holds something that
