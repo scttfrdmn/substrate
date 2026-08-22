@@ -30,6 +30,15 @@ type ec2IDKind struct {
 
 // EC2 resource-ID kinds, with error codes taken verbatim from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html.
+//
+// Every operation that names a resource of one of these families answers through the kind
+// — via [ec2IDFilter] on a Describe*, or [ec2RequireResource] / [ec2RequireNamedResource]
+// on a mutation. A hand-written &AWSError carrying one of these codes is a bug: it is a
+// second place for a wording, status or request-ID change to have to land, and it is
+// invisible to anyone reading this table (#713). The one deliberate exception is
+// [EC2Plugin.ec2CheckSecurityGroups]' membership refusal, which reuses
+// InvalidGroup.NotFound for a group that exists in the wrong VPC — a different condition
+// from absence, so it cannot share the kind's message.
 var (
 	ec2InstanceIDKind = ec2IDKind{
 		Prefix: "i-", NotFound: "InvalidInstanceID.NotFound",
@@ -59,12 +68,6 @@ var (
 		Prefix: "snap-", NotFound: "InvalidSnapshot.NotFound",
 		Malformed: "InvalidSnapshotID.Malformed", Noun: "snapshot",
 	}
-	// The three volume operations that predate this kind — DeleteVolume, AttachVolume
-	// and DetachVolume — spell the NotFound message themselves, as "The volume 'vol-…'
-	// does not exist." with a trailing period and no "ID". They are left alone: this
-	// kind is for CreateSnapshot and CreateVolume, which had no volume check at all
-	// (#689), and rewording three published messages is a change a consumer matching on
-	// them would notice for no gain. Unifying them is a follow-up.
 	ec2VolumeIDKind = ec2IDKind{
 		Prefix: "vol-", NotFound: "InvalidVolume.NotFound",
 		Malformed: "InvalidVolumeID.Malformed", Noun: "volume",
@@ -72,11 +75,24 @@ var (
 	// EC2 publishes no InvalidAllocationID.Malformed; a malformed allocation ID
 	// comes back as InvalidAllocationID.NotFound.
 	ec2AllocationIDKind = ec2IDKind{
-		Prefix: "eipalloc-", NotFound: "InvalidAllocationID.NotFound", Noun: "allocation ID",
+		Prefix: "eipalloc-", NotFound: "InvalidAllocationID.NotFound", Noun: "allocation",
 	}
-	// Likewise EC2 publishes no InvalidNatGatewayID.Malformed.
+	// NAT gateways are the one family whose malformed code sits outside the
+	// Invalid*ID.Malformed naming: the reference publishes it as NatGatewayMalformed,
+	// "The specified NAT gateway ID is not formed correctly. Ensure that you specify the
+	// NAT gateway ID in the form nat-xxxxxxxxxxxxxxxxx." Pairing it with
+	// InvalidNatGatewayID.NotFound is the same cross-naming the kinds above already
+	// carry for snapshots and security groups (#713).
+	//
+	// The reference also publishes a second absence code, NatGatewayNotFound ("The
+	// specified NAT gateway does not exist."), and no per-operation page says which
+	// operation raises which — DeleteNatGateway's Errors section is empty, as EC2's are.
+	// Substrate answers InvalidNatGatewayID.NotFound everywhere, because that is the
+	// spelling every other kind here follows and the one DescribeNatGateways has always
+	// published; DeleteNatGateway's NatGatewayNotFound converged onto it.
 	ec2NatGatewayIDKind = ec2IDKind{
-		Prefix: "nat-", NotFound: "InvalidNatGatewayID.NotFound", Noun: "NAT gateway",
+		Prefix: "nat-", NotFound: "InvalidNatGatewayID.NotFound",
+		Malformed: "NatGatewayMalformed", Noun: "NAT gateway",
 	}
 )
 
@@ -203,18 +219,47 @@ func (f *ec2IDFilter) unresolved() error {
 	return nil
 }
 
+// requireResource returns the kind's Malformed error for a syntactically invalid id, its
+// NotFound error for a well-formed id that named nothing, or nil. found reports whether
+// the lookup succeeded.
+//
+// The typed *AWSError return is for the callers that thread one — returning it through an
+// error-typed variable would make a nil result a non-nil error interface holding a nil
+// pointer. [ec2RequireResource] is the error-typed form, and does the conversion once.
+func (k ec2IDKind) requireResource(id string, found bool) *AWSError {
+	switch {
+	case !k.wellFormed(id):
+		return k.malformedError(id)
+	case !found:
+		return k.notFoundError(id)
+	default:
+		return nil
+	}
+}
+
 // ec2RequireResource returns the kind's Malformed or NotFound error for an ID a
 // mutating operation named that substrate holds no state for. found reports
 // whether the lookup succeeded.
 func ec2RequireResource(kind ec2IDKind, id string, found bool) error {
-	switch {
-	case !kind.wellFormed(id):
-		return kind.malformedError(id)
-	case !found:
-		return kind.notFoundError(id)
-	default:
-		return nil
+	if err := kind.requireResource(id, found); err != nil {
+		return err
 	}
+	return nil
+}
+
+// ec2RequireNamedResource is [ec2RequireResource] for an ID read from a single named
+// request parameter, checking the three conditions in the order real EC2 reports them: an
+// omitted parameter is a MissingParameter, a syntactically invalid ID is the kind's
+// Malformed, and a well-formed ID that names nothing is the kind's NotFound.
+//
+// paramName is the wire parameter the ID came from, so the refusal names what the caller
+// left out. Without it an omitted ID reads as the empty string and falls through to
+// Malformed, reporting an invalid value for a parameter that was never sent.
+func ec2RequireNamedResource(kind ec2IDKind, paramName, id string, found bool) error {
+	if id == "" {
+		return ec2MissingParameter(paramName)
+	}
+	return ec2RequireResource(kind, id, found)
 }
 
 // ec2MissingParameter returns the error EC2 raises for a required-but-absent

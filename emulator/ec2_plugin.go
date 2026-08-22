@@ -570,8 +570,8 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// the next request in the same test sees state the refused one created. Reachable
 	// with no IAM configured, so this stands on its own regardless of the
 	// authorization change beside it.
-	if awsErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, ""); awsErr != nil {
-		return nil, awsErr
+	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, ""); sgCheckErr != nil {
+		return nil, sgCheckErr
 	}
 
 	// Auto-create default VPC/subnet if none specified.
@@ -610,8 +610,8 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// Validate security groups exist and belong to the target VPC. The existence half
 	// ran above, before the default VPC could be created; this pass adds the
 	// membership half and covers the default group the branch above may have supplied.
-	if awsErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, targetVPCID); awsErr != nil {
-		return nil, awsErr
+	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, targetVPCID); sgCheckErr != nil {
+		return nil, sgCheckErr
 	}
 
 	reservationID := generateReservationID()
@@ -1778,8 +1778,11 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 	sgID := req.Params["GroupId"]
 	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidGroup.NotFound", Message: "Security group not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifySGRules get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2SecurityGroupIDKind, "GroupId", sgID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var sg EC2SecurityGroup
 	if unmarshalErr := json.Unmarshal(data, &sg); unmarshalErr != nil {
@@ -1903,8 +1906,11 @@ func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	vpcID := req.Params["VpcId"]
 	key := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidInternetGatewayID.NotFound", Message: "Internet gateway not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 attachInternetGateway get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2InternetGatewayIDKind, "InternetGatewayId", igwID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var igw EC2InternetGateway
 	if unmarshalErr := json.Unmarshal(data, &igw); unmarshalErr != nil {
@@ -1926,8 +1932,11 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	vpcID := req.Params["VpcId"]
 	key := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidInternetGatewayID.NotFound", Message: "Internet gateway not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 detachInternetGateway get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2InternetGatewayIDKind, "InternetGatewayId", igwID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var igw EC2InternetGateway
 	if unmarshalErr := json.Unmarshal(data, &igw); unmarshalErr != nil {
@@ -2116,8 +2125,11 @@ func (p *EC2Plugin) associateRouteTable(reqCtx *RequestContext, req *AWSRequest)
 	subnetID := req.Params["SubnetId"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 associateRouteTable get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
@@ -2180,8 +2192,11 @@ func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	gwID := req.Params["GatewayId"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createRoute get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
@@ -2217,8 +2232,11 @@ func (p *EC2Plugin) replaceRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	gwID := routeTargetGateway(req.Params)
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 replaceRoute get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
@@ -2253,36 +2271,54 @@ func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AW
 	assocID := req.Params["AssociationId"]
 	newRtbID := req.Params["RouteTableId"]
 
+	// Resolve the target route table first. Both refusals below used to sit after the
+	// source association had already been removed and committed, so a request naming a
+	// bogus RouteTableId destroyed the association it was asked to move and then reported
+	// a failure — the same "a refusal must leave no state behind" rule #673 established
+	// for RunInstances. Every write now happens after both IDs have resolved.
+	newKey := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + newRtbID
+	data, getErr := p.state.Get(context.Background(), ec2Namespace, newKey)
+	if getErr != nil {
+		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation get: %w", getErr)
+	}
+	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", newRtbID, data != nil); reqErr != nil {
+		return nil, reqErr
+	}
+
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "rtb:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation list: %w", err)
 	}
 
-	// Locate and remove the existing association, capturing its subnet/main flag.
+	// Locate the existing association, capturing its subnet/main flag and the key of the
+	// route table holding it. Nothing is written until the association resolves too.
 	var moved EC2RTAssociation
+	var sourceKey string
+	var sourceAssocs []EC2RTAssociation
 	found := false
 	for _, k := range allKeys {
-		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
-		if getErr != nil || data == nil {
+		srcData, srcErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if srcErr != nil {
+			return nil, fmt.Errorf("ec2 replaceRouteTableAssociation get %s: %w", k, srcErr)
+		}
+		if srcData == nil {
 			continue
 		}
 		var rtb EC2RouteTable
-		if json.Unmarshal(data, &rtb) != nil {
+		if json.Unmarshal(srcData, &rtb) != nil {
 			continue
 		}
-		newAssoc := rtb.Associations[:0]
+		remaining := make([]EC2RTAssociation, 0, len(rtb.Associations))
 		for _, a := range rtb.Associations {
 			if a.AssociationID == assocID {
 				moved = a
 				found = true
 			} else {
-				newAssoc = append(newAssoc, a)
+				remaining = append(remaining, a)
 			}
 		}
 		if found {
-			rtb.Associations = newAssoc
-			updated, _ := json.Marshal(rtb)
-			_ = p.state.Put(context.Background(), ec2Namespace, k, updated)
+			sourceKey, sourceAssocs = k, remaining
 			break
 		}
 	}
@@ -2290,20 +2326,47 @@ func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AW
 		return nil, &AWSError{Code: "InvalidAssociationID.NotFound", Message: "association " + assocID + " not found", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Attach a fresh association to the target route table.
-	newKey := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + newRtbID
-	data, getErr := p.state.Get(context.Background(), ec2Namespace, newKey)
-	if getErr != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	// Detach from the source. Re-read rather than reuse the loop's copy only if the source
+	// and target are the same table, which the append below would otherwise clobber.
+	if sourceKey != newKey {
+		var source EC2RouteTable
+		sourceData, srcErr := p.state.Get(context.Background(), ec2Namespace, sourceKey)
+		if srcErr != nil {
+			return nil, fmt.Errorf("ec2 replaceRouteTableAssociation reread source: %w", srcErr)
+		}
+		if unmarshalErr := json.Unmarshal(sourceData, &source); unmarshalErr != nil {
+			return nil, fmt.Errorf("ec2 replaceRouteTableAssociation unmarshal source: %w", unmarshalErr)
+		}
+		source.Associations = sourceAssocs
+		updated, marshalErr := json.Marshal(source)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("ec2 replaceRouteTableAssociation marshal source: %w", marshalErr)
+		}
+		if putErr := p.state.Put(context.Background(), ec2Namespace, sourceKey, updated); putErr != nil {
+			return nil, fmt.Errorf("ec2 replaceRouteTableAssociation put source: %w", putErr)
+		}
 	}
+
+	// Attach a fresh association to the target route table. data was read before the
+	// detach above, so when the caller replaced an association with one on the same route
+	// table it still carries the old entry; sourceAssocs is that read minus the moved
+	// association, which is what the append must build on.
 	var target EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &target); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation unmarshal: %w", unmarshalErr)
 	}
+	if sourceKey == newKey {
+		target.Associations = sourceAssocs
+	}
 	newAssocID := generateAssociationID()
 	target.Associations = append(target.Associations, EC2RTAssociation{AssociationID: newAssocID, SubnetID: moved.SubnetID, Main: moved.Main})
-	newData, _ := json.Marshal(target)
-	_ = p.state.Put(context.Background(), ec2Namespace, newKey, newData)
+	newData, marshalErr := json.Marshal(target)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation marshal: %w", marshalErr)
+	}
+	if putErr := p.state.Put(context.Background(), ec2Namespace, newKey, newData); putErr != nil {
+		return nil, fmt.Errorf("ec2 replaceRouteTableAssociation put: %w", putErr)
+	}
 
 	type assocState struct {
 		State string `xml:"state"`
@@ -2326,8 +2389,11 @@ func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	destCIDR := req.Params["DestinationCidrBlock"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidRouteTableID.NotFound", Message: "Route table not found", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteRoute get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
@@ -3020,22 +3086,26 @@ func ec2LookupDefaultSecurityGroup(ctx context.Context, state StateManager, reqC
 // subnet may not exist yet, but existence needs nothing (#673). A group substrate's
 // own default-VPC branch supplied is checked by the second pass, where vpcID is
 // known.
-func (p *EC2Plugin) ec2CheckSecurityGroups(reqCtx *RequestContext, ids []string, vpcID string) *AWSError {
+func (p *EC2Plugin) ec2CheckSecurityGroups(reqCtx *RequestContext, ids []string, vpcID string) error {
 	for _, id := range ids {
 		key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + id
 		sgData, sgErr := p.state.Get(context.Background(), ec2Namespace, key)
-		if sgErr != nil || sgData == nil {
-			return &AWSError{
-				Code:       "InvalidGroup.NotFound",
-				Message:    "The security group '" + id + "' does not exist",
-				HTTPStatus: http.StatusBadRequest,
-			}
+		if sgErr != nil {
+			return fmt.Errorf("ec2 ec2CheckSecurityGroups get %s: %w", id, sgErr)
+		}
+		if reqErr := ec2RequireResource(ec2SecurityGroupIDKind, id, sgData != nil); reqErr != nil {
+			return reqErr
 		}
 		if vpcID == "" {
 			continue
 		}
 		var sg EC2SecurityGroup
 		if json.Unmarshal(sgData, &sg) == nil && sg.VPCID != vpcID {
+			// Membership, not absence: the group resolved, so this cannot come from
+			// [ec2IDKind.notFoundError]. It reuses InvalidGroup.NotFound because that is
+			// what EC2 answers for a group in another VPC — the reference's own gloss is
+			// "the specified security group does not exist", and from the target VPC's
+			// point of view it does not.
 			return &AWSError{
 				Code:       "InvalidGroup.NotFound",
 				Message:    "The security group '" + id + "' does not belong to VPC '" + vpcID + "'",
@@ -3937,8 +4007,11 @@ func (p *EC2Plugin) modifySubnetAttribute(reqCtx *RequestContext, req *AWSReques
 	subnetID := req.Params["SubnetId"]
 	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidSubnetID.NotFound", Message: "The subnet ID '" + subnetID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifySubnetAttribute get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2SubnetIDKind, "SubnetId", subnetID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var subnet EC2Subnet
 	if unmarshalErr := json.Unmarshal(data, &subnet); unmarshalErr != nil {
@@ -3963,8 +4036,11 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 	vpcID := req.Params["VpcId"]
 	key := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidVpcID.NotFound", Message: "The vpc ID '" + vpcID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifyVpcAttribute get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2VPCIDKind, "VpcId", vpcID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var vpc EC2VPC
 	if unmarshalErr := json.Unmarshal(data, &vpc); unmarshalErr != nil {
@@ -4039,8 +4115,11 @@ func (p *EC2Plugin) associateAddress(reqCtx *RequestContext, req *AWSRequest) (*
 
 	key := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidAllocationID.NotFound", Message: "The allocation ID '" + allocationID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 associateAddress get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2AllocationIDKind, "AllocationId", allocationID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var eip EC2ElasticIP
 	if unmarshalErr := json.Unmarshal(data, &eip); unmarshalErr != nil {
@@ -4135,8 +4214,11 @@ func (p *EC2Plugin) releaseAddress(reqCtx *RequestContext, req *AWSRequest) (*AW
 	allocationID := req.Params["AllocationId"]
 	key := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "InvalidAllocationID.NotFound", Message: "The allocation ID '" + allocationID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 releaseAddress get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2AllocationIDKind, "AllocationId", allocationID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var eip EC2ElasticIP
 	if unmarshalErr := json.Unmarshal(data, &eip); unmarshalErr != nil {
@@ -4221,8 +4303,11 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	// Look up subnet to get VPCID.
 	subnetKey := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
 	subnetData, err := p.state.Get(context.Background(), ec2Namespace, subnetKey)
-	if err != nil || subnetData == nil {
-		return nil, &AWSError{Code: "InvalidSubnetID.NotFound", Message: "The subnet ID '" + subnetID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createNatGateway get subnet: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2SubnetIDKind, "SubnetId", subnetID, subnetData != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var subnet EC2Subnet
 	if unmarshalErr := json.Unmarshal(subnetData, &subnet); unmarshalErr != nil {
@@ -4398,8 +4483,11 @@ func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	natID := req.Params["NatGatewayId"]
 	key := "nat:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + natID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "NatGatewayNotFound", Message: "The nat gateway ID '" + natID + "' does not exist", HTTPStatus: http.StatusBadRequest}
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deleteNatGateway get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2NatGatewayIDKind, "NatGatewayId", natID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var gw EC2NATGateway
 	if unmarshalErr := json.Unmarshal(data, &gw); unmarshalErr != nil {
@@ -5299,16 +5387,13 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 
 func (p *EC2Plugin) deleteVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	volID := req.Params["VolumeId"]
-	if volID == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId is required", HTTPStatus: http.StatusBadRequest}
-	}
 	key := ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, volID)
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 deleteVolume get: %w", err)
 	}
-	if data == nil {
-		return nil, &AWSError{Code: "InvalidVolume.NotFound", Message: "The volume '" + volID + "' does not exist.", HTTPStatus: http.StatusBadRequest}
+	if reqErr := ec2RequireNamedResource(ec2VolumeIDKind, "VolumeId", volID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var vol EC2Volume
 	if err := json.Unmarshal(data, &vol); err != nil {
@@ -5334,8 +5419,12 @@ func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	volID := req.Params["VolumeId"]
 	instanceID := req.Params["InstanceId"]
 	device := req.Params["Device"]
-	if volID == "" || instanceID == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId and InstanceId are required", HTTPStatus: http.StatusBadRequest}
+	// AttachVolume names two required IDs, so each is reported by name rather than as a
+	// single refusal naming both: a caller who sent one of the two learns which. The
+	// volume is checked first, being the resource the operation is named for — an absent
+	// VolumeId falls to ec2RequireNamedResource below.
+	if volID != "" && instanceID == "" {
+		return nil, ec2MissingParameter("InstanceId")
 	}
 	if device == "" {
 		device = "/dev/xvdf"
@@ -5345,8 +5434,8 @@ func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err != nil {
 		return nil, fmt.Errorf("ec2 attachVolume get: %w", err)
 	}
-	if data == nil {
-		return nil, &AWSError{Code: "InvalidVolume.NotFound", Message: "The volume '" + volID + "' does not exist.", HTTPStatus: http.StatusBadRequest}
+	if reqErr := ec2RequireNamedResource(ec2VolumeIDKind, "VolumeId", volID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var vol EC2Volume
 	if err := json.Unmarshal(data, &vol); err != nil {
@@ -5400,16 +5489,13 @@ func (p *EC2Plugin) attachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 
 func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	volID := req.Params["VolumeId"]
-	if volID == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "VolumeId is required", HTTPStatus: http.StatusBadRequest}
-	}
 	key := ec2VolumeStateKey(reqCtx.AccountID, reqCtx.Region, volID)
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 detachVolume get: %w", err)
 	}
-	if data == nil {
-		return nil, &AWSError{Code: "InvalidVolume.NotFound", Message: "The volume '" + volID + "' does not exist.", HTTPStatus: http.StatusBadRequest}
+	if reqErr := ec2RequireNamedResource(ec2VolumeIDKind, "VolumeId", volID, data != nil); reqErr != nil {
+		return nil, reqErr
 	}
 	var vol EC2Volume
 	if err := json.Unmarshal(data, &vol); err != nil {

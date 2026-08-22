@@ -36,8 +36,8 @@ func TestEC2_DefaultVPC_BadSecurityGroupRefusalWritesNothing(t *testing.T) {
 	})
 	require.Equal(t, http.StatusBadRequest, status)
 	require.Equal(t, "InvalidGroup.NotFound", code)
-	assert.Equal(t, "The security group 'sg-0000000000000dead' does not exist", msg,
-		"the message is unchanged; only when it is decided moved")
+	assert.Equal(t, "The security group ID 'sg-0000000000000dead' does not exist", msg,
+		"the kind's wording since #713 routed this refusal through ec2SecurityGroupIDKind")
 
 	// Nothing the launch would have created exists. DescribeSecurityGroups is included
 	// because ensureDefaultVPC's third write is the default group itself.

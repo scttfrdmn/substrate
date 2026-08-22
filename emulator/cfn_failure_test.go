@@ -64,13 +64,16 @@ func TestCFN_RefusedResourceIsRecordedAsAFailure(t *testing.T) {
 			// case is here so the fix cannot quietly break the path that worked.
 			name:       "EC2GroupNotFound",
 			convention: "*AWSError",
+			// The group ID is well-formed hex, so this is the absence path rather
+			// than the Malformed one — "sg-does-not-exist" was, and since #713 is
+			// answered as InvalidGroupId.Malformed.
 			tmpl: `{"Resources": {"I": {"Type": "AWS::EC2::SecurityGroupIngress", "Properties": {
-				"GroupId": "sg-does-not-exist",
+				"GroupId": "sg-0000000000000dead",
 				"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22,
 				"CidrIp": "0.0.0.0/0"}}}}`,
 			logicalID:   "I",
 			wantCode:    "InvalidGroup.NotFound",
-			wantMessage: "Security group not found",
+			wantMessage: "The security group ID 'sg-0000000000000dead' does not exist",
 		},
 	}
 
