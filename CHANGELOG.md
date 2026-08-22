@@ -87,6 +87,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be used."
 
 ### Changed
+- **`CreateVolume` invents neither a size nor an Availability Zone** (#712). AWS puts two
+  combination rules on the operation and marks every member involved `Required: No`, because
+  each requirement is on a *pair*: "You must specify either a snapshot ID or a volume size" and,
+  said once on each member, "Either `AvailabilityZone` or `AvailabilityZoneId` must be specified,
+  but not both." Substrate read neither. A request naming no size got a silent 8 GiB volume, one
+  naming `Size=-1` or `Size=eight` got the same — the parse was
+  `if n, err := strconv.Atoi(s); err == nil && n > 0` with no `else`, discarding both the error
+  and the out-of-range value — and one naming no zone got `<region>a`. Each returned HTTP 200
+  with a volume ID, so the volume was real, at a size and in a zone the caller never asked for,
+  and the first visible symptom was an attach failing later with nothing to point at. Both rules
+  are enforced now: `InvalidParameterCombination` for either broken pair (including a zone named
+  **both** ways, since AWS says "not both"), and `InvalidParameterValue` for a `Size` that is not
+  a positive integer. All three refusals land before the state write, so a refused call leaves
+  no volume.
+
+  **`AvailabilityZoneId` is read for the first time** — it was ignored outright, so a request
+  naming a zone by ID created a volume in zone `a`. It resolves through the same derivation
+  `DescribeAvailabilityZones` renders from, so a zone ID read out of one operation is one the
+  other accepts. Two asymmetries are deliberate: a zone *name* is recorded as given and not
+  checked against the seeded zones, because unlike an ID it needs no translation to be stored;
+  and an unresolvable zone ID answers `InvalidParameterValue` rather than the combination code.
+
+  #712's own premise is corrected in passing: it quotes AWS as documenting "Size is required
+  unless SnapshotId is specified" and `AvailabilityZone` as required. Neither sentence exists.
+  Both members are `Required: No` and the rules are the combination ones above.
+
+  Provenance: **the codes are substrate's reading.** `CreateVolume`'s Errors section is empty —
+  it publishes no operation-specific error at all — and `InvalidParameterCombination`'s EC2
+  client-error gloss is the only one whose shape fits: "The request includes an incorrect
+  combination of parameters, **or a missing parameter**." Left standing and stated in the docs:
+  AWS's per-type size ranges (`gp2` 1–16384, `io1` 4–16384, `st1`/`sc1` 125–16384, …) are still
+  unenforced, and `Iops`/`Throughput` keep their tolerance for an unparseable value. `Size` and
+  `Iops` differ because their absences differ — a volume must have a size, while omitting `Iops`
+  is the ordinary case for the five volume types that do not take one.
+
 - **A tagging ID whose prefix names no taggable type is refused, not ignored** (#708).
   `CreateTags`/`DeleteTags` answer `InvalidID` / HTTP 400 — "The ID '<id>' for the resource you
   are trying to tag is not valid. Ensure that you provide the full resource ID; for example,
@@ -237,6 +272,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a description of the condition, never a wire message.
 
 ### Fixed
+- **A zone ID takes the shape AWS publishes** (#712). The derivation produced `ue11-az1` for
+  `us-east-1` — the wrong prefix and a doubled digit — where AWS publishes `use1-az1`, and the
+  code's own comment claimed `use1`. Nothing caught it because a zone ID was only ever
+  *emitted*: a test that read one out of `DescribeAvailabilityZones` and filtered on it was
+  self-consistent whatever the string said. `CreateVolume` now accepts one as **input**, so a
+  fixture carrying the real `use1-az1` would have been refused. The prefix is AWS's published
+  table, which refutes AWS's own summarising sentence ("the first three letters of the Region
+  code, followed by the number at the end"): that rule gives `aps2` for `ap-southeast-2`, and
+  the table says `apse2`. The real shape is the first segment verbatim, one letter per compass
+  word, then the trailing number — pinned against 18 rows copied from the table.
+
+  Two limits are stated rather than left to be found: substrate always maps zone `a` to `-az1`,
+  where AWS says "we independently map Availability Zones to codes for each AWS account", so
+  substrate will agree with an assumption real AWS breaks; and a zone *name* is still not
+  validated against the seeded zones.
+
+- **A flaky filter test no longer depends on the wall clock** (#712). `DescribeSpotPriceHistory`
+  renders its timestamp from the time controller at scale 1.0, so the RFC3339 value changes at
+  every second boundary. #695's timestamp subtest read the value out of one response and
+  filtered on it in the next, which failed whenever a second elapsed between the two — roughly
+  one run in sixty, on `main`. It runs against a frozen clock now (scale zero, reachable only
+  in-process, since `POST /v1/control/scale` refuses a non-positive scale).
+
 - **An `ami-` ID is authorized against the account-less ARN AWS documents** (#708).
   `arn:${Partition}:ec2:${Region}::image/${ImageId}` has a deliberately empty account field,
   as does a snapshot's, where the other thirteen taggable types carry `${Account}`. The

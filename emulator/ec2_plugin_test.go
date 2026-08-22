@@ -24,14 +24,36 @@ func newEC2TestServer(t *testing.T) *httptest.Server {
 	return newEC2TestServerWithState(t, emulator.NewMemoryStateManager())
 }
 
+// newEC2TestServerFrozenClock is [newEC2TestServer] with a clock that does not advance,
+// for a test whose subject is a rendered timestamp.
+//
+// The default controller runs at scale 1.0, so a value rendered as RFC3339 changes at
+// every second boundary. Any test that reads a timestamp out of one response and hands
+// it back in the next request is therefore wall-clock dependent, which the house rules
+// forbid — and TestEC2_SpotPriceFilters_FiveOfSix was, failing roughly once per sixty
+// runs until #712. Scale zero is the freeze: Now() is simBaseline + elapsed*scale, so
+// every read returns the same instant. It is reachable only in-process — POST
+// /v1/control/scale refuses a non-positive scale — which is why this is a constructor
+// rather than a request the test could send.
+func newEC2TestServerFrozenClock(t *testing.T) *httptest.Server {
+	t.Helper()
+	return newEC2TestServerWithState(t, emulator.NewMemoryStateManager(), func(tc *emulator.TimeController) {
+		tc.SetScale(0)
+	})
+}
+
 // newEC2TestServerWithState is [newEC2TestServer] with the caller's StateManager, so
 // a test can write a stored shape no request produces — a pre-migration record, or an
-// instance with no security groups — and read it back through the API.
-func newEC2TestServerWithState(t *testing.T, state emulator.StateManager) *httptest.Server {
+// instance with no security groups — and read it back through the API. Each opt is
+// applied to the server's TimeController before the first request reaches it.
+func newEC2TestServerWithState(t *testing.T, state emulator.StateManager, opts ...func(*emulator.TimeController)) *httptest.Server {
 	t.Helper()
 	registry := emulator.NewPluginRegistry()
 	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
 	tc := emulator.NewTimeController(time.Now())
+	for _, opt := range opts {
+		opt(tc)
+	}
 	logger := emulator.NewDefaultLogger(0, false)
 
 	p := &emulator.EC2Plugin{}

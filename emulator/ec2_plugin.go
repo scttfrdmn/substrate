@@ -4208,6 +4208,28 @@ func (p *EC2Plugin) deregisterImage(reqCtx *RequestContext, req *AWSRequest) (*A
 
 // --- Availability Zone operations ---
 
+// ec2SeededZones reports the region's zones, name and ID both, in a stable order.
+//
+// One derivation, because two would drift: DescribeAvailabilityZones renders these and
+// CreateVolume resolves an AvailabilityZoneId through them, so a zone ID a caller read out
+// of one operation is a zone ID the other accepts. The ID follows AWS's shape —
+// "use1-az1" for us-east-1a — from [azRegionAbbrev] and the zone's position in
+// [ec2SeededAZSuffixes]. Real zone IDs are per-account shuffled and substrate's are not;
+// docs/services.md says so.
+func ec2SeededZones(region string) []ec2AvailabilityZoneItem {
+	abbrev := azRegionAbbrev(region)
+	zones := make([]ec2AvailabilityZoneItem, 0, len(ec2SeededAZSuffixes))
+	for i, suffix := range ec2SeededAZSuffixes {
+		zones = append(zones, ec2AvailabilityZoneItem{
+			ZoneName:   region + suffix,
+			State:      "available",
+			RegionName: region,
+			ZoneID:     abbrev + "-az" + strconv.Itoa(i+1),
+		})
+	}
+	return zones
+}
+
 // describeAvailabilityZones reports the region's seeded zones.
 //
 // The signature took the request and discarded it before #695, so every documented selector
@@ -4224,22 +4246,13 @@ func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)
-	region := reqCtx.Region
-	// Derive abbreviated region for zoneId (e.g. "use1" from "us-east-1").
-	abbrev := azRegionAbbrev(region)
 	type response struct {
 		XMLName           xml.Name                  `xml:"DescribeAvailabilityZonesResponse"`
 		XMLNS             string                    `xml:"xmlns,attr"`
 		AvailabilityZones []ec2AvailabilityZoneItem `xml:"availabilityZoneInfo>item"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	for i, suffix := range ec2SeededAZSuffixes {
-		az := ec2AvailabilityZoneItem{
-			ZoneName:   region + suffix,
-			State:      "available",
-			RegionName: region,
-			ZoneID:     abbrev + "-az" + strconv.Itoa(i+1),
-		}
+	for _, az := range ec2SeededZones(reqCtx.Region) {
 		if !ec2SelectedByEither(names, az.ZoneName, zoneIDs, az.ZoneID) {
 			continue
 		}
@@ -4411,24 +4424,71 @@ func (p *EC2Plugin) deletePlacementGroup(reqCtx *RequestContext, req *AWSRequest
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
-// azRegionAbbrev returns a short abbreviation for a region name used in zone IDs
-// (e.g. "us-east-1" → "use1", "eu-west-2" → "euw2").
+// azCompassWords are the direction words an AWS region code's middle segment is built from.
+//
+// Only the simple words are listed, deliberately: a compound like "southeast" is *two* words
+// and contributes two letters, so it must decompose rather than match whole. That is what
+// AWS's table shows — ap-southeast-2 is apse2 and ap-northeast-1 is apne1, where matching
+// "southeast" as one word would give apse2's neighbor aps2. None of the five is a prefix of
+// another, so a greedy left-to-right walk is unambiguous.
+var azCompassWords = []string{"north", "south", "east", "west", "central"}
+
+// azRegionAbbrev returns the AZ-ID prefix for a region: "us-east-1" → "use1",
+// "eu-west-2" → "euw2", "ap-southeast-2" → "apse2".
+//
+// This produced "ue11" for us-east-1 before #712 — the wrong shape *and* a doubled digit,
+// since the old walk took the first byte of every hyphenated segment and then appended a
+// trailing digit that, for the numeric segment, was the byte it had just written. Every
+// zoneId DescribeAvailabilityZones has ever reported was therefore a form no real account
+// returns, and #712 is where that starts to bite: CreateVolume now accepts an
+// AvailabilityZoneId, so a consumer whose fixture carries the real "use1-az1" would have been
+// refused for naming the zone correctly.
+//
+// AWS states the rule in the AZ-ID reference — "An AZ ID consists of the first three letters
+// of the Region code, followed by the number at the end of the Region code, followed by -az,
+// followed by a number" — but its own table refutes the "three letters" part for the compound
+// directions: ap-southeast-2 is apse2, not aps2, and ap-northeast-1 is apne1. The published
+// table is authoritative over the sentence summarizing it, so the derivation here is one
+// letter per compass word, which reproduces every row of that table.
+//
+// What substrate does *not* model is the mapping's per-account shuffle. AWS: "we
+// independently map Availability Zones to codes for each AWS account", so real us-east-1a is
+// use1-az1 in one account and use1-az3 in another. Substrate maps zone a to -az1 always,
+// because a deterministic emulator cannot have a per-account secret and a test asserting a
+// pairing must be able to pass. docs/services.md says so.
 func azRegionAbbrev(region string) string {
-	// Remove hyphens and digits, keep first letters of each segment plus trailing digit.
-	parts := strings.Split(region, "-")
+	parts := strings.SplitN(region, "-", 2)
 	if len(parts) < 2 {
 		return region
 	}
+	middle, number := parts[1], ""
+	if i := strings.LastIndex(middle, "-"); i >= 0 {
+		middle, number = middle[:i], middle[i+1:]
+	}
 	var sb strings.Builder
-	for _, p := range parts {
-		if len(p) > 0 {
-			sb.WriteByte(p[0])
-			// Append trailing digit if present.
-			if last := p[len(p)-1]; last >= '0' && last <= '9' {
-				sb.WriteByte(last)
+	sb.WriteString(parts[0])
+	for middle != "" {
+		word := ""
+		for _, w := range azCompassWords {
+			if strings.HasPrefix(middle, w) {
+				word = w
+				break
 			}
 		}
+		if word == "" {
+			// An unrecognized middle segment contributes its first letter, which is what
+			// AWS's three-letter sentence would give and the best available guess. A
+			// non-letter contributes nothing, so a Local Zone code substrate does not seed
+			// (us-west-2-lax-1) yields "usw1" rather than "usw-1".
+			if c := middle[0]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				sb.WriteByte(c)
+			}
+			break
+		}
+		sb.WriteByte(word[0])
+		middle = middle[len(word):]
 	}
+	sb.WriteString(number)
 	return sb.String()
 }
 
@@ -5681,7 +5741,70 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 
 // --- EBS volume operations ---
 
+// ec2VolumeZone resolves CreateVolume's zone from AvailabilityZone or AvailabilityZoneId.
+//
+// AWS states the rule on both members: "Either AvailabilityZone or AvailabilityZoneId must be
+// specified, but not both." Each is Required: No on its own, which is why neither can be
+// checked with [ec2MissingParameter] — the requirement is on the pair. Before #712 substrate
+// read neither alternative: AvailabilityZoneId was ignored outright, and an absent
+// AvailabilityZone silently became region+"a", so a request that AWS refuses produced a volume
+// in a zone the caller never named and a request naming a zone *by ID* produced one in zone a.
+// Both failures are worse than a refusal for the same reason: the call reported success, so a
+// test asserting the volume landed where it was asked for could only fail later, when an
+// attach to an instance in another zone failed for no visible cause.
+//
+// A zone *name* is recorded as given and not checked against [ec2SeededZones]; a zone *ID*
+// must resolve, because it has to be translated into the name the record and every response
+// carry. That asymmetry is deliberate and stated in docs/services.md — validating names would
+// be a wider change than the pair rule, and one substrate has never made on any zone-taking
+// operation.
+//
+// The refusal code is substrate's reading. CreateVolume publishes no operation-specific error
+// at all — its Errors section is empty — and InvalidParameterCombination is the only code in
+// EC2's client-error table whose gloss covers this shape: "an incorrect combination of
+// parameters, or a missing parameter" names both halves of the rule.
+func ec2VolumeZone(region string, params map[string]string) (string, *AWSError) {
+	name, id := params["AvailabilityZone"], params["AvailabilityZoneId"]
+	switch {
+	case name != "" && id != "":
+		return "", &AWSError{
+			Code: "InvalidParameterCombination",
+			Message: "Either AvailabilityZone or AvailabilityZoneId may be specified, " +
+				"but not both",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	case name == "" && id == "":
+		return "", &AWSError{
+			Code:       "InvalidParameterCombination",
+			Message:    "Either AvailabilityZone or AvailabilityZoneId must be specified",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	case name != "":
+		return name, nil
+	}
+	for _, zone := range ec2SeededZones(region) {
+		if zone.ZoneID == id {
+			return zone.ZoneName, nil
+		}
+	}
+	return "", &AWSError{
+		Code: "InvalidParameterValue",
+		Message: fmt.Sprintf(
+			"Invalid value '%s' for AvailabilityZoneId. No such Availability Zone in %s.",
+			id, region),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // createVolume creates an EBS volume, tagging it from TagSpecification.N.
+//
+// Size and the zone follow AWS's two combination rules as of #712 — see [ec2VolumeZone] for
+// the zone pair, and "You must specify either a snapshot ID or a volume size" for the other.
+// A request naming neither Size nor SnapshotId used to get a silent 8 GiB volume, and one
+// naming an unparseable, zero or negative Size got the same, so `Size=-1` and `Size=huge`
+// both produced 8 GiB. [ec2DefaultVolumeSizeGiB] no longer backs this operation; it still
+// backs the launch path, where a mapping that names no size is legal and AWS does supply a
+// default.
 //
 // The tags come from [ec2LaunchTagsForResource] scoped to "volume", which is the same
 // walk RunInstances, CreateFleet, CreateImage and CreateNatGateway already use: AWS's
@@ -5705,16 +5828,33 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, awsErr
 	}
 
-	az := req.Params["AvailabilityZone"]
-	if az == "" {
-		az = reqCtx.Region + "a"
+	az, awsErr := ec2VolumeZone(reqCtx.Region, req.Params)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 	sizeStr := req.Params["Size"]
-	size := ec2DefaultVolumeSizeGiB
-	if sizeStr != "" {
-		if n, err := strconv.Atoi(sizeStr); err == nil && n > 0 {
-			size = n
+	snapshotID := req.Params["SnapshotId"]
+	if sizeStr == "" && snapshotID == "" {
+		return nil, &AWSError{
+			Code: "InvalidParameterCombination",
+			Message: "Either the volume size or the snapshot ID must be specified, " +
+				"but not neither",
+			HTTPStatus: http.StatusBadRequest,
 		}
+	}
+	size := 0
+	if sizeStr != "" {
+		n, err := strconv.Atoi(sizeStr)
+		if err != nil || n <= 0 {
+			return nil, &AWSError{
+				Code: "InvalidParameterValue",
+				Message: fmt.Sprintf(
+					"Invalid value '%s' for size. Size must be a positive integer number of GiB.",
+					sizeStr),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		size = n
 	}
 	volType := req.Params["VolumeType"]
 	if volType == "" {
@@ -5729,10 +5869,8 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	// the default is the snapshot size" and "You can specify a volume size that is equal
 	// to or larger than the snapshot size."
 	//
-	// A request naming neither Size nor SnapshotId still gets the 8 GiB default rather
-	// than the refusal AWS documents ("Size is required unless SnapshotId is specified").
-	// That is a wider change than this one and a follow-up.
-	snapshotID := req.Params["SnapshotId"]
+	// Both are refused above when neither is given (#712), so by here the size is either a
+	// positive integer from the request or zero with a snapshot to take it from.
 	if snapshotID != "" {
 		snap, found := p.ec2SnapshotResolver(reqCtx)(snapshotID)
 		if awsErr := ec2RequireResource(ec2SnapshotIDKind, snapshotID, found); awsErr != nil {
@@ -5752,9 +5890,12 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 	encrypted := strings.ToLower(req.Params["Encrypted"]) == "true"
-	// Recorded as given, with the same tolerance Size above has: a value that does not
-	// parse leaves the field at zero and the field is then omitted from the response,
-	// which is what a volume with no provisioned performance looks like.
+	// Recorded as given, and tolerant where Size is now strict (#712): a value that does not
+	// parse leaves the field at zero and the field is then omitted from the response, which
+	// is what a volume with no provisioned performance looks like. The two differ because
+	// their absences differ — a volume must have a size, so an unusable Size has no
+	// defensible reading, while omitting Iops entirely is the ordinary case for the five
+	// volume types that do not take one.
 	iops, _ := strconv.Atoi(req.Params["Iops"])
 	throughput, _ := strconv.Atoi(req.Params["Throughput"])
 
