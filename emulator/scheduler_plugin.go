@@ -118,11 +118,9 @@ func (p *SchedulerPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*
 	case "ListSchedules":
 		return p.listSchedules(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("SchedulerPlugin: unknown operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		// parseSchedulerOperation answers "" for a path it does not recognize, so there
+		// is no operation name to name and the refusal reports the verb and path.
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

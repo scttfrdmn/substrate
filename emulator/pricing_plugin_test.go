@@ -1017,12 +1017,17 @@ func TestPricingEndpointRegions(t *testing.T) {
 	}
 }
 
+// TestPricingUnsupportedOperation pins the default arm. It answered
+// InvalidParameterException — the code for a bad *parameter*, not a bad operation —
+// until #716 routed every plugin's unknown-action arm through one place. Pricing is
+// JSON-RPC, so the answer is now the UnknownOperationException at 404 AWS publishes
+// for that protocol.
 func TestPricingUnsupportedOperation(t *testing.T) {
 	t.Parallel()
 	ts := newPricingTestServer(t)
 
 	resp := pricingCall(t, ts, "us-east-1", "GetPriceListFileUrl", map[string]any{})
-	assertPricingError(t, resp, http.StatusBadRequest, "InvalidParameterException")
+	assertPricingError(t, resp, http.StatusNotFound, "UnknownOperationException")
 }
 
 // TestPricingSeededFailure is the point of the seed endpoint: it lets a consumer

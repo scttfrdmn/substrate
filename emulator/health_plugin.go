@@ -69,11 +69,7 @@ func (p *HealthPlugin) HandleRequest(_ *RequestContext, req *AWSRequest) (*AWSRe
 	case "DescribeEventAggregates":
 		return p.describeEventAggregates()
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "HealthPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

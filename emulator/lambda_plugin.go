@@ -114,11 +114,7 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 	case "DeleteEventSourceMapping":
 		return p.deleteEventSourceMapping(ctx, name)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("LambdaPlugin: unknown operation %q (path %q)", op, req.Path),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

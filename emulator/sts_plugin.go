@@ -57,11 +57,7 @@ func (p *STSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "GetSessionToken":
 		return p.getSessionToken(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("Could not find operation %s", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

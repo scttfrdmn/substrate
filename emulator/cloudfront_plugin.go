@@ -71,11 +71,7 @@ func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CloudFrontPlugin: unsupported operation for path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

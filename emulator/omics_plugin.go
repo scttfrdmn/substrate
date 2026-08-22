@@ -55,11 +55,7 @@ func (p *OmicsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 	case "ListRuns":
 		return p.listRuns(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "OmicsPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

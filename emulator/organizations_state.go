@@ -184,11 +184,6 @@ func orgConstraintViolation(reason, message string) *AWSError {
 	return orgErr("ConstraintViolationException", fmt.Sprintf("%s: %s", reason, message))
 }
 
-// orgInvalidAction reports an operation the plugin does not implement.
-func orgInvalidAction(op string) *AWSError {
-	return orgErr("InvalidAction", "OrganizationsPlugin: unsupported operation "+op)
-}
-
 // orgUnmarshal decodes a request body, answering InvalidInputException rather
 // than a generic malformed-data code: the caller's catch branch is written
 // against the Organizations exception, and no Organizations operation can return

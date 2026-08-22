@@ -55,11 +55,7 @@ func (p *TaggingPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (
 	case "UntagResources":
 		return p.untagResources(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("The action %q is not valid for this web service", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), op)
 	}
 }
 

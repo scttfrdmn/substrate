@@ -65,11 +65,7 @@ func (p *CognitoIdentityPlugin) HandleRequest(ctx *RequestContext, req *AWSReque
 	case "GetIdentityPoolRoles":
 		return p.getIdentityPoolRoles(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("CognitoIdentityPlugin: unknown operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), op)
 	}
 }
 

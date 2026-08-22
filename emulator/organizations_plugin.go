@@ -104,7 +104,7 @@ func (p *OrganizationsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 			return h(caller, req)
 		}
 	}
-	return nil, orgInvalidAction(req.Operation)
+	return nil, unknownActionError(p.Name(), req.Operation)
 }
 
 // resolveOrgCaller builds the orgCaller for a request, resolving the signing

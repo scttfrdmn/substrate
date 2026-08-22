@@ -94,7 +94,10 @@ func (p *ConfigServicePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 			return h(ctx, req)
 		}
 	}
-	return nil, cfgsvcInvalidAction(req.Operation)
+	// AWS Config has 97 operations and substrate implements the detective-controls
+	// subset, so this is the answer for the rest. It names the operation so a
+	// consumer discovers which call is missing rather than reading a bare refusal.
+	return nil, unknownActionError(p.Name(), req.Operation)
 }
 
 // cfgsvcJSONResponse marshals an AWS Config response body.

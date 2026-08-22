@@ -80,11 +80,7 @@ func (p *CEPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	case "GetDimensionValues":
 		return p.getDimensionValues(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CEPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

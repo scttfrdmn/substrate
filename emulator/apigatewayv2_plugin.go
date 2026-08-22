@@ -93,11 +93,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "CreateApiMapping":
 		return p.createAPIMapping(ctx, req, params["name"])
 	default:
-		return nil, &AWSError{
-			Code:       "NotFoundException",
-			Message:    fmt.Sprintf("APIGatewayV2Plugin: unknown operation for %s %s", req.Operation, req.Path),
-			HTTPStatus: http.StatusNotFound,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

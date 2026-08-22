@@ -125,11 +125,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetBasePathMappings":
 		return p.getBasePathMappings(ctx, params["name"])
 	default:
-		return nil, &AWSError{
-			Code:       "NotFoundException",
-			Message:    fmt.Sprintf("APIGatewayPlugin: unknown operation for %s %s", req.Operation, req.Path),
-			HTTPStatus: http.StatusNotFound,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

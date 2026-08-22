@@ -51,11 +51,7 @@ func (p *FirehosePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 	case "DeleteDeliveryStream":
 		return p.deleteDeliveryStream(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "FirehosePlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

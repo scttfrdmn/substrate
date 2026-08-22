@@ -40,7 +40,8 @@ func TestJourney_ConfigDetectiveControls(t *testing.T) {
 		o.UsePathStyle = true
 	})
 
-	// --- reachability. If this answers InvalidAction, nothing below matters. ---
+	// --- reachability. If this answers UnknownOperationException — Config is JSON, so
+	// that is its unknown-action refusal (#716) — nothing below matters. ---
 	recorders, err := cs.DescribeConfigurationRecorders(ctx,
 		&configservice.DescribeConfigurationRecordersInput{})
 	if err != nil {

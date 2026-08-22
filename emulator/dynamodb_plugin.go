@@ -105,11 +105,7 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 	case "ListTagsOfResource":
 		return p.listTagsOfResource(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "UnknownOperationException",
-			Message:    fmt.Sprintf("DynamoDBPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

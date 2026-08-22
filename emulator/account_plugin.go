@@ -183,11 +183,10 @@ func (p *AccountPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (
 	case "GetRegionOptStatus":
 		return p.getRegionOptStatus(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("AccountPlugin: unsupported operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		// parseAccountOperation answers "" for anything but the four Region routes, so
+		// there is no operation name to name and the refusal reports the verb and path
+		// that resolved to nothing.
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

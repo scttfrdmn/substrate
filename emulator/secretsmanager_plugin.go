@@ -68,11 +68,7 @@ func (p *SecretsManagerPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	case "RotateSecret":
 		return p.rotateSecret(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "UnrecognizedClientException",
-			Message:    fmt.Sprintf("SecretsManagerPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

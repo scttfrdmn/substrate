@@ -106,11 +106,7 @@ func (p *GluePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	case "GetTags":
 		return p.getTags(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "GluePlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

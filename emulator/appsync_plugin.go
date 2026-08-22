@@ -89,11 +89,7 @@ func (p *AppSyncPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 	case "ExecuteGraphQL":
 		return p.executeGraphQL(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "AppSyncPlugin: unsupported operation " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

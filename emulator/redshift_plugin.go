@@ -60,11 +60,7 @@ func (p *RedshiftPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) 
 	case "DescribeClusterSnapshots":
 		return p.describeClusterSnapshots(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "RedshiftPlugin: unsupported action " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

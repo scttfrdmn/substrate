@@ -109,11 +109,7 @@ func (p *AthenaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 	case "ListWorkGroups":
 		return p.listWorkGroups(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "AthenaPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

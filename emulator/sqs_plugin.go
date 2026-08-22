@@ -88,11 +88,7 @@ func (p *SQSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "PurgeQueue":
 		return p.purgeQueue(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("The action %s is not valid for this endpoint.", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

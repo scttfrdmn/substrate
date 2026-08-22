@@ -110,11 +110,7 @@ func (p *CognitoIDPPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "SetUserPoolMfaConfig":
 		return p.setUserPoolMfaConfig(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("CognitoIDPPlugin: unknown operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), op)
 	}
 }
 

@@ -69,11 +69,7 @@ func (p *BatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 	case "DescribeJobDefinitions":
 		return p.describeJobDefinitions(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "BatchPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

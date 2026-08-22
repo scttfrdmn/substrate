@@ -197,9 +197,11 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.simulateCustomPolicy(ctx, req)
 
 	default:
-		return iamErrorResponse("InvalidAction",
-			fmt.Sprintf("Could not find operation %s", req.Operation),
-			http.StatusBadRequest), nil
+		// IAM answers a refusal as a 4xx *AWSResponse rather than an *AWSError —
+		// both conventions are in use and #516 turns on that — so the shape stays
+		// IAM's while the code, message and status come from the one place.
+		refusal := unknownActionError(p.Name(), req.Operation)
+		return iamErrorResponse(refusal.Code, refusal.Message, refusal.HTTPStatus), nil
 	}
 }
 

@@ -25,10 +25,13 @@ func TestCWLogs_Shutdown(t *testing.T) {
 	require.NoError(t, p.Shutdown(context.Background()))
 }
 
+// TestCWLogs_UnknownOperation pins the default arm. CloudWatch Logs is JSON-RPC, so
+// the refusal is AWS's documented UnknownOperationException at 404, not the Query
+// protocol's InvalidAction at 400 (#716).
 func TestCWLogs_UnknownOperation(t *testing.T) {
 	srv := newCWLogsTestServer(t)
 	resp := cwLogsRequest(t, srv, "UnknownOp", map[string]any{})
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestCWLogs_CreateGroupMissingName(t *testing.T) {
@@ -137,10 +140,13 @@ func TestEB_Shutdown(t *testing.T) {
 	require.NoError(t, p.Shutdown(context.Background()))
 }
 
+// TestEB_UnknownOperation pins the default arm. EventBridge is JSON-RPC, so the
+// refusal is AWS's documented UnknownOperationException at 404, not the Query
+// protocol's InvalidAction at 400 (#716).
 func TestEB_UnknownOperation(t *testing.T) {
 	srv := newEBTestServer(t)
 	resp := ebRequest(t, srv, "UnknownOp", map[string]any{})
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestEB_PutRuleMissingName(t *testing.T) {

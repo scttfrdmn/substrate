@@ -107,11 +107,7 @@ func (p *FSxPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "DeleteFileSystem":
 		return p.deleteFileSystem(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("FSxPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

@@ -859,12 +859,14 @@ func TestConfigRecorder_RefusesAMissingRecorderMember(t *testing.T) {
 func TestConfigService_AnUnimplementedOperationNamesItself(t *testing.T) {
 	// AWS Config has 97 operations and substrate implements the detective-controls
 	// subset. An unimplemented one must say which, so a consumer discovers the gap from
-	// the response rather than by reading the plugin.
+	// the response rather than by reading the plugin. Config is JSON-RPC, so the code
+	// and status are the UnknownOperationException/404 AWS publishes for that protocol
+	// (#716).
 	ts := emulator.StartTestServer(t)
 
 	resp := configRequest(t, ts, "SelectResourceConfig", map[string]any{})
 	status, code, message := decodeConfigResponse(t, resp, nil)
-	assert.Equal(t, http.StatusBadRequest, status)
-	assert.Equal(t, "InvalidAction", code)
+	assert.Equal(t, http.StatusNotFound, status)
+	assert.Equal(t, "UnknownOperationException", code)
 	assert.Contains(t, message, "SelectResourceConfig")
 }

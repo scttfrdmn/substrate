@@ -1208,12 +1208,14 @@ func TestConfigRules_DescribePaginatesAndTheTokenTerminates(t *testing.T) {
 
 func TestConfigRules_AreNotReachableWithoutTheOperationBeingClaimed(t *testing.T) {
 	// The rule cluster is claimed by the plugin's third claim function; an operation no
-	// cluster claims is InvalidAction naming itself, so a consumer discovers which call
-	// is missing rather than getting a bare refusal.
+	// cluster claims is refused naming itself, so a consumer discovers which call is
+	// missing rather than getting a bare refusal. Config is JSON-RPC, so the code and
+	// status are the UnknownOperationException/404 AWS publishes for that protocol
+	// (#716).
 	ts := configRuleServer(t)
 	resp := configRequest(t, ts, "PutRemediationConfigurations", map[string]any{})
 	status, code, message := decodeConfigResponse(t, resp, nil)
-	assert.Equal(t, http.StatusBadRequest, status)
-	assert.Equal(t, "InvalidAction", code)
+	assert.Equal(t, http.StatusNotFound, status)
+	assert.Equal(t, "UnknownOperationException", code)
 	assert.Contains(t, message, "PutRemediationConfigurations")
 }

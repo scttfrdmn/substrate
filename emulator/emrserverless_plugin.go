@@ -59,11 +59,7 @@ func (p *EMRServerlessPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 	case "ListJobRuns":
 		return p.listJobRuns(ctx, req, appID)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "EMRServerlessPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

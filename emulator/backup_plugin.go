@@ -66,11 +66,7 @@ func (p *BackupPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*
 	case "DeleteBackupSelection":
 		return p.deleteBackupSelection(reqCtx, planID, selectionID)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "BackupPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

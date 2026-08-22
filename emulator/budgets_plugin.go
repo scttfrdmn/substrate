@@ -50,11 +50,7 @@ func (p *BudgetsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 	case "DeleteBudget":
 		return p.deleteBudget(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "BudgetsPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

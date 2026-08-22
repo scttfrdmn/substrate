@@ -993,11 +993,15 @@ func TestDynamoDB_UpdateItem_AddAndDelete(t *testing.T) {
 	assert.Equal(t, "alpha", remainingTags[0])
 }
 
+// TestDynamoDB_UnknownOperation pins the default arm. DynamoDB is the JSON-RPC
+// service whose Common Errors page substrate reads UnknownOperationException's HTTP
+// 404 from, so this is where the status is pinned: it was 400 before #716, which no
+// AWS page publishes.
 func TestDynamoDB_UnknownOperation(t *testing.T) {
 	srv := newDynamoDBTestServer(t)
 
 	resp := dynamodbRequest(t, srv, "FakeOperation", map[string]any{})
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
 	var errResult map[string]any
 	decodeDynamoJSON(t, resp, &errResult)

@@ -173,8 +173,7 @@ func (p *PriceListPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*
 	case "GetAttributeValues":
 		return p.getAttributeValues(req)
 	default:
-		return nil, pricingError(pricingErrInvalidParameter,
-			"PriceListPlugin: unsupported operation "+req.Operation)
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

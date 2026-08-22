@@ -65,11 +65,7 @@ func (p *ServiceQuotasPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequ
 	case "GetRequestedServiceQuotaChange":
 		return p.getRequestedServiceQuotaChange(sqAccountID(reqCtx), req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("ServiceQuotasPlugin: unsupported operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 
