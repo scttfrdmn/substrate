@@ -291,10 +291,31 @@ func TestEC2_Authz_CreateActionScopesTheTaggingGrant(t *testing.T) {
 		}
 	})
 
-	// The key is spelled exactly "ec2:CreateAction". AWS matches a condition key's
-	// name case-insensitively — substrate matches every condition key's name
-	// case-sensitively, which predates this pass and applies to all of them, so a
-	// policy writing "ec2:createaction" is not evaluated here (#704).
+	t.Run("the key's own name is not case-sensitive", func(t *testing.T) {
+		// AWS: "Context key *names* are not case-sensitive. For example, including the
+		// aws:SourceIP context key is equivalent to testing for AWS:SourceIp."
+		//
+		// This ran on the enforcement path rather than through Evaluate directly,
+		// because that is where the gap was found (#691) and where it mattered: a real
+		// policy naming "ec2:createaction" was silently unmatched, so AWS's own
+		// tag-on-create grant was a false refusal and the same grant written as a Deny
+		// was inert. #704 closed it; this subtest replaces the comment that recorded it.
+		for _, spelling := range []string{"ec2:createaction", "EC2:CreateAction"} {
+			t.Run(spelling, func(t *testing.T) {
+				f := newEC2AuthzFixture(t, "ulla", emulator.PolicyDocument{})
+				f.setPolicy(t,
+					ec2CreateTagsStatement("Allow", "ec2:RunInstances", []string{"*"}, nil),
+					ec2CreateTagsStatement("Allow", "ec2:CreateTags", []string{ec2AuthzInstARN},
+						map[string]map[string]emulator.StringOrSlice{
+							"StringEquals": {spelling: {"RunInstances"}},
+						}),
+				)
+				require.NoError(t, f.call(t, "RunInstances",
+					ec2CreateTagsParams(nominalLaunch(), ec2TagSpecParams(1, "instance", "Env", "prod"))),
+					"a grant naming the key as %q must be evaluated", spelling)
+			})
+		}
+	})
 }
 
 // TestEC2_Authz_CreateActionIsAbsentOutsideACreate pins the key's absence, which

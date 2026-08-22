@@ -278,6 +278,12 @@ func actionResourcePrincipalMatch(stmt PolicyStatement, req EvaluationRequest) b
 // multivalued key like aws:TagKeys lives in MultiContext, and reporting it as a
 // missing context value while the evaluator was in fact evaluating it would make a
 // simulation contradict the enforcement it exists to predict (#690).
+//
+// Resolution goes through [condResolveKey] for that same reason: a key the evaluator
+// found by folding case must not be reported as missing (#704). What is appended is
+// the **policy's** spelling, not the producer's — that string reaches the wire as
+// MissingContextValues, and a caller comparing it against the document it submitted
+// would not recognize a canonicalized name.
 func unsetConditionKeys(
 	conditions map[string]map[string]StringOrSlice,
 	ctx map[string]string,
@@ -286,10 +292,10 @@ func unsetConditionKeys(
 	var out []string
 	for _, keyValues := range conditions {
 		for condKey := range keyValues {
-			if _, ok := ctx[condKey]; ok {
+			if _, ok := condResolveKey(condKey, ctx); ok {
 				continue
 			}
-			if _, ok := multiCtx[condKey]; ok {
+			if _, ok := condResolveKey(condKey, multiCtx); ok {
 				continue
 			}
 			out = append(out, condKey)
@@ -554,6 +560,52 @@ func conditionKeyMatches(
 	return false
 }
 
+// condResolveKey resolves the name a policy spells against the names the request
+// context carries, matching case-insensitively, and reports the name to read under.
+//
+// AWS, in *IAM JSON policy elements: Condition*: "Context key *names* are not
+// case-sensitive. For example, including the aws:SourceIP context key is equivalent
+// to testing for AWS:SourceIp. Case-sensitivity of context key *values* depends on
+// the condition operator that you use." Only the name folds here; every operator in
+// [evaluateConditionKey] still compares values exactly as its own definition says,
+// which is why the fold lives in the lookup and not in the operator arms.
+//
+// The **whole** name folds, tag suffix included, on AWS's own statement about the
+// key–value form: "Key names are not case-sensitive. This means that if you specify
+// "aws:ResourceTag/TagKey1": "Value1" in the condition element of your policy, then
+// the condition matches a resource tag key named either TagKey1 or tagkey1, but not
+// both." That is the opposite of what #704 assumed. The case-sensitive rule #704
+// remembers governs a tag key used as a condition *value* — aws:TagKeys, and the tag
+// rules in [ec2_tags.go] — which is a different thing from a key name.
+//
+// "But not both" leaves unstated which of the two wins, and AWS names the resulting
+// hazard rather than resolving it: "you might tag an Amazon EC2 instance with
+// ec2=test1 and EC2=test2 … the key name matches both tags, but only one value
+// matches. This can result in unexpected condition failures." Substrate has to pick
+// one, so it picks the first in sorted order — a property of the request, never of Go
+// map iteration order, which an event log that must replay identically cannot depend
+// on. The minimum is selected in one pass rather than by sorting, which is the same
+// answer without the allocation.
+//
+// The exact match is answered first, so a policy spelling a key canonically — which
+// is every policy substrate itself ships, and every key any of its producers writes —
+// reads byte-identically to how it read before #704, and pays nothing for the fold.
+func condResolveKey[V any](condKey string, ctx map[string]V) (string, bool) {
+	if _, ok := ctx[condKey]; ok {
+		return condKey, true
+	}
+	name, found := "", false
+	for candidate := range ctx {
+		if !strings.EqualFold(candidate, condKey) {
+			continue
+		}
+		if !found || candidate < name {
+			name, found = candidate, true
+		}
+	}
+	return name, found
+}
+
 // condContextValue resolves the single value an unqualified operator compares
 // against.
 //
@@ -564,16 +616,21 @@ func conditionKeyMatches(
 // ForAllValues + `Null: false` pattern would deny every request it was written to
 // allow (#690).
 //
+// Both lookups go through [condResolveKey], so the policy's spelling of the name need
+// not be the producer's (#704).
+//
 // Only the first value can be reported — the caller compares a single string — which
 // is why AWS says not to use a single-valued operator on a multivalued key. Substrate
 // answers with the first value rather than with nothing, because for Null (the reason
 // this fallback exists) any value at all is the whole of what is being asked.
 func condContextValue(condKey string, ctx map[string]string, multiCtx map[string][]string) string {
-	if val, ok := ctx[condKey]; ok {
-		return val
+	if name, ok := condResolveKey(condKey, ctx); ok {
+		return ctx[name]
 	}
-	if vals := multiCtx[condKey]; len(vals) > 0 {
-		return vals[0]
+	if name, ok := condResolveKey(condKey, multiCtx); ok {
+		if vals := multiCtx[name]; len(vals) > 0 {
+			return vals[0]
+		}
 	}
 	return ""
 }
@@ -588,13 +645,15 @@ func condContextValue(condKey string, ctx map[string]string, multiCtx map[string
 //
 // An absent key yields no values, and the two qualifiers disagree about what that
 // means — true for ForAllValues, false for ForAnyValue — so the emptiness is returned
-// rather than resolved here.
+// rather than resolved here. That disagreement is why the name must fold here too: a
+// differently-cased key would read as absent, silently granting every
+// ForAllValues Allow and making every ForAnyValue Allow a false deny (#704).
 func condRequestValues(condKey string, ctx map[string]string, multiCtx map[string][]string) []string {
-	if vals, ok := multiCtx[condKey]; ok {
-		return vals
+	if name, ok := condResolveKey(condKey, multiCtx); ok {
+		return multiCtx[name]
 	}
-	if val, ok := ctx[condKey]; ok {
-		return []string{val}
+	if name, ok := condResolveKey(condKey, ctx); ok {
+		return []string{ctx[name]}
 	}
 	return nil
 }
