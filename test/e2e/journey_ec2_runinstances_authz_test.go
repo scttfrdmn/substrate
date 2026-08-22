@@ -18,6 +18,22 @@ import (
 	emulator "github.com/scttfrdmn/substrate/emulator"
 )
 
+// journeyImage is the AMI the EC2 journeys launch from — the ID substrate resolves for
+// AWS's Amazon Linux 2023 x86_64 SSM public parameter, which is what a consumer's IaC
+// discovers an AMI through.
+//
+// It is derived from the bundled catalog rather than written as a literal because
+// RunInstances refuses an ImageId it cannot resolve (#733). The fabricated
+// "ami-0abcdef1234567890" these journeys used to name is one of the example IDs from AWS's
+// own reference pages, and substrate deliberately does not bundle those: IaC hardcoding one
+// fails on real AWS, so it has to fail here too.
+//
+// The region is the one every journey's client addresses (see journeyConfig), and it is
+// load-bearing — an AMI ID names an image in exactly one region and nothing in any other,
+// so this value is launchable only through a us-east-1 client.
+var journeyImage = emulator.BundledImageID("us-east-1",
+	"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")
+
 // TestJourney_EC2RunInstancesSubnetGuardrail is #662 at the tier the guardrail is
 // actually written at: a policy that allows ec2:RunInstances everywhere except one
 // subnet, which is how a consumer keeps workloads out of a private or shared
@@ -129,7 +145,7 @@ func TestJourney_EC2RunInstancesSubnetGuardrail(t *testing.T) {
 
 	launch := func(client *ec2.Client, subnetID string) (*ec2.RunInstancesOutput, error) {
 		return client.RunInstances(ctx, &ec2.RunInstancesInput{
-			ImageId:          aws.String("ami-0abcdef1234567890"),
+			ImageId:          aws.String(journeyImage),
 			InstanceType:     ec2types.InstanceTypeT3Micro,
 			MinCount:         aws.Int32(1),
 			MaxCount:         aws.Int32(1),
@@ -183,7 +199,7 @@ func TestJourney_EC2RunInstancesSubnetGuardrail(t *testing.T) {
 	// Reference gives — an AMI is shareable.
 	leastPrivilege := `{"Version":"2012-10-17","Statement":[` +
 		`{"Effect":"Allow","Action":"ec2:RunInstances","Resource":[` +
-		`"arn:aws:ec2:` + region + `::image/ami-0abcdef1234567890",` +
+		`"arn:aws:ec2:` + region + `::image/` + journeyImage + `",` +
 		`"arn:aws:ec2:` + region + `:` + account + `:subnet/` + publicSubnet + `",` +
 		`"arn:aws:ec2:` + region + `:` + account + `:security-group/` + sgID + `",` +
 		`"arn:aws:ec2:` + region + `:` + account + `:network-interface/*",` +

@@ -32,10 +32,15 @@ import (
 const (
 	ec2AuthzAccount = "123456789012"
 	ec2AuthzRegion  = "us-east-1"
-	ec2AuthzAMI     = "ami-0abcdef1234567890"
 	ec2AuthzSubnet  = "subnet-0aaa11112222bbbb3"
 	ec2AuthzSG      = "sg-0ccc44445555dddd6"
 )
+
+// ec2AuthzAMI is the AMI the nominal launch names. It is a bundled image rather than a
+// fabricated literal so the fixture names an AMI a real RunInstances would also accept
+// (#733) — these tests reach only the authorization decision, but a reader copying the
+// fixture into a launch should not be handed an ID substrate refuses.
+var ec2AuthzAMI = ec2TestImage
 
 // ec2AuthzFixture is an EC2 state store plus an AuthController over the same
 // store, which is what makes a resource-tag condition testable: the tag has to
@@ -643,7 +648,9 @@ func TestEC2_Authz_LaunchTemplateResourcesAreAuthorized(t *testing.T) {
 		// AWS: "Any additional parameters that you specify for the new instance
 		// overwrite the corresponding parameters included in the launch template." So
 		// the decision has to be about the AMI the launch will actually use.
-		const ownAMI = "ami-00000000000000001"
+		// A second bundled image, distinct from the template's, so "the request's AMI
+		// won" is falsifiable.
+		ownAMI := ec2TestImageArm
 		f := newFixture(t)
 		f.putImage(t, ownAMI, nil)
 		ownARN := "arn:aws:ec2:" + ec2AuthzRegion + "::image/" + ownAMI

@@ -412,7 +412,7 @@ func TestEC2_IDKind_ConvergedOperationsStillSucceed(t *testing.T) {
 		"Action": "AllocateAddress", "Domain": "vpc",
 	}, "allocationId")
 	instanceID := ec2CreateAndExtract(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-0abcdef1234567890", "InstanceType": "t3.micro",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"MinCount": "1", "MaxCount": "1", "SubnetId": subnetID,
 	}, "instanceId")
 	volID := ec2CreateAndExtract(t, ts, map[string]string{

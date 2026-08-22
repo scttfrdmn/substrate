@@ -32,7 +32,7 @@ func TestJourney_EC2DescribeTags(t *testing.T) {
 
 	// Two resources of different types, so resourceType has something to distinguish.
 	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

@@ -215,7 +215,7 @@ func TestCE_GetCostAndUsage_BlendedCostMetric(t *testing.T) {
 	// Run an instance so there is non-zero cost.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "m7i.large",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -302,7 +302,7 @@ func TestCE_EC2UsageCost_RunningInstance(t *testing.T) {
 	// Launch an m7i.large instance.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "m7i.large",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -375,7 +375,7 @@ func TestCE_EC2UsageCost_TerminatedInstance(t *testing.T) {
 	// Launch an instance.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "m7i.large",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -484,7 +484,7 @@ func TestCE_GetCostAndUsage_GroupByTag(t *testing.T) {
 	// Launch an m7i.large with Name=cost-tag-test.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-12345678",
+		"ImageId":                         ec2TestImage,
 		"InstanceType":                    "m7i.large",
 		"MinCount":                        "1",
 		"MaxCount":                        "1",
@@ -568,7 +568,7 @@ func TestCE_GetCostAndUsage_GroupByTag_NoServiceFilter(t *testing.T) {
 	// Launch instance with no Name tag.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.micro",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -625,7 +625,7 @@ func TestCE_GetCostAndUsage_GroupByTag_NoEventStoreLeakage(t *testing.T) {
 	// Generate EventStore records for several services by making API calls.
 	ec2QueryRequest(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-12345678",
+		"ImageId":                         ec2TestImage,
 		"InstanceType":                    "t3.micro",
 		"MinCount":                        "1",
 		"MaxCount":                        "1",
@@ -705,7 +705,7 @@ func TestCE_GetCostAndUsage_DailyGranularity(t *testing.T) {
 	// Launch a t3.micro on day 1 (Jan 5).
 	ec2QueryRequest(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.micro",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -782,7 +782,7 @@ func TestCE_GetCostAndUsage_CreateTagsAfterLaunch(t *testing.T) {
 	// Launch an m7i.large with NO tags.
 	runResp := ec2QueryRequest(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "m7i.large",
 		"MinCount":     "1",
 		"MaxCount":     "1",

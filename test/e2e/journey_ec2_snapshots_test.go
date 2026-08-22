@@ -104,7 +104,7 @@ func TestJourney_EC2SnapshotRestore(t *testing.T) {
 	// observable only through DescribeVolumes — AWS's EbsInstanceBlockDevice, the shape
 	// DescribeInstances renders per device, carries no size member.
 	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -166,7 +166,7 @@ func TestJourney_EC2SnapshotRefusals(t *testing.T) {
 
 	launch := func(bdm ec2types.BlockDeviceMapping) error {
 		_, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-			ImageId:             aws.String("ami-0abcdef1234567890"),
+			ImageId:             aws.String(journeyImage),
 			InstanceType:        ec2types.InstanceTypeT3Micro,
 			MinCount:            aws.Int32(1),
 			MaxCount:            aws.Int32(1),

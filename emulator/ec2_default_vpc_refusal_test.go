@@ -29,7 +29,7 @@ func TestEC2_DefaultVPC_BadSecurityGroupRefusalWritesNothing(t *testing.T) {
 
 	status, code, msg := ec2ErrorDetail(t, ts, map[string]string{
 		"Action":            "RunInstances",
-		"ImageId":           "ami-0abcdef1234567890",
+		"ImageId":           ec2TestImage,
 		"MinCount":          "1",
 		"MaxCount":          "1",
 		"SecurityGroupId.1": "sg-0000000000000dead",
@@ -128,7 +128,7 @@ func TestEC2_DefaultVPC_MembershipStillRefusedAfterResolution(t *testing.T) {
 
 	_, code, msg := ec2ErrorDetail(t, ts, map[string]string{
 		"Action":            "RunInstances",
-		"ImageId":           "ami-0abcdef1234567890",
+		"ImageId":           ec2TestImage,
 		"MinCount":          "1",
 		"MaxCount":          "1",
 		"SecurityGroupId.1": group.GroupID,

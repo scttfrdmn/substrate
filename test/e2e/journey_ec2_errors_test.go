@@ -78,7 +78,7 @@ func TestJourney_EC2ErrorCodesReachTheSDK(t *testing.T) {
 	})
 
 	_, err = client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: "t3.micro",
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -106,9 +106,12 @@ func TestJourney_EC2ErrorCodesReachTheSDK(t *testing.T) {
 
 	// Clearing the fault restores the nominal path, which proves the assertion above
 	// was reading the seeded error rather than a launch that would have failed anyway.
+	// That argument only holds if the launch is otherwise valid, which is why both calls
+	// name the bundled journeyImage rather than a fabricated ID RunInstances would refuse
+	// with InvalidAMIID.NotFound (#733).
 	clearFaultRules(t, ts)
 	if _, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-12345678"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: "t3.micro",
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

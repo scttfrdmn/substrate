@@ -328,3 +328,37 @@ func (ts *TestServer) SeedSSMParameters(params map[string]string) {
 		ts.SeedSSMParameter(name, value)
 	}
 }
+
+// SeedEC2Image registers an AMI owned by the seeding account, bypassing the HTTP layer, so a
+// test can launch from an image ID it chose.
+//
+// RunInstances refuses an AMI it cannot resolve (#733), which leaves a test that needs a
+// specific ID three options: name a bundled AMI through [BundledImageID], call RegisterImage,
+// or call this. It exists for the third case — a caller-owned image, or an ID a fixture
+// already hardcodes — and writes the same record RegisterImage would, in state, so
+// DescribeImages lists it and an Owners=self describe matches it. A bundled AMI is *not* in
+// state, which is the difference between the two.
+//
+// The image is stored under account 123456789012 and the region the built-in test credentials
+// use, in state "available". Call [TestServer.ResetState] between cases to clear it.
+func (ts *TestServer) SeedEC2Image(imageID, name string) {
+	if ts.state == nil {
+		return
+	}
+
+	img := EC2Image{
+		ImageID:      imageID,
+		Name:         name,
+		Description:  name,
+		State:        "available",
+		CreationDate: ts.tc.Now().UTC().Format(time.RFC3339),
+		AccountID:    defaultAccountID,
+		Region:       seedSSMRegion,
+	}
+	data, err := json.Marshal(img)
+	if err != nil {
+		return
+	}
+	_ = ts.state.Put(context.Background(), ec2Namespace,
+		ec2ImageStateKey(defaultAccountID, seedSSMRegion, imageID), data)
+}

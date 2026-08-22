@@ -143,7 +143,7 @@ func TestEC2_LaunchTemplate_SubnetSources(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.1.0.0/16", "lt-case-a")
 		ltID := createLaunchTemplate(t, ts, "case-a", map[string]string{
-			"LaunchTemplateData.ImageId":                        "ami-0case00000000001",
+			"LaunchTemplateData.ImageId":                        ec2TestImage,
 			"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 			"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 		})
@@ -159,7 +159,7 @@ func TestEC2_LaunchTemplate_SubnetSources(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.2.0.0/16", "lt-case-b")
 		ltID := createLaunchTemplate(t, ts, "case-b", map[string]string{
-			"LaunchTemplateData.ImageId": "ami-0case00000000002",
+			"LaunchTemplateData.ImageId": ec2TestImageArm,
 		})
 
 		id := runInstance(t, ts, map[string]string{
@@ -175,7 +175,7 @@ func TestEC2_LaunchTemplate_SubnetSources(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.3.0.0/16", "lt-case-c")
 		ltID := createLaunchTemplate(t, ts, "case-c", map[string]string{
-			"LaunchTemplateData.ImageId": "ami-0case00000000003",
+			"LaunchTemplateData.ImageId": ec2TestImageMinimal,
 		})
 
 		var fleet createFleetResp
@@ -200,7 +200,7 @@ func TestEC2_LaunchTemplate_SubnetSources(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.4.0.0/16", "lt-case-d")
 		ltID := createLaunchTemplate(t, ts, "case-d", map[string]string{
-			"LaunchTemplateData.ImageId":                        "ami-0case00000000004",
+			"LaunchTemplateData.ImageId":                        ec2TestImageMinimalArm,
 			"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 			"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 		})
@@ -235,7 +235,7 @@ func TestEC2_LaunchTemplate_SubnetPrecedence(t *testing.T) {
 	overrideNet := newLTNetwork(t, ts, "10.7.0.0/16", "lt-prec-override")
 
 	ltID := createLaunchTemplate(t, ts, "precedence", map[string]string{
-		"LaunchTemplateData.ImageId":                        "ami-0prec00000000001",
+		"LaunchTemplateData.ImageId":                        ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":    templateNet.subnetID,
 	})
@@ -310,7 +310,7 @@ func TestEC2_LaunchTemplate_SecurityGroups(t *testing.T) {
 
 			// A group from the template's own VPC launches.
 			sameVPC := createLaunchTemplate(t, ts, "sg-same-"+tt.param, map[string]string{
-				"LaunchTemplateData.ImageId":                        "ami-0sg000000000001",
+				"LaunchTemplateData.ImageId":                        ec2TestImage,
 				"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 				"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 				tt.param: net.sgID,
@@ -327,7 +327,7 @@ func TestEC2_LaunchTemplate_SecurityGroups(t *testing.T) {
 			// A group from a different VPC than the template's subnet must be
 			// rejected — which proves the list was read rather than ignored.
 			crossVPC := createLaunchTemplate(t, ts, "sg-cross-"+tt.param, map[string]string{
-				"LaunchTemplateData.ImageId":                        "ami-0sg000000000002",
+				"LaunchTemplateData.ImageId":                        ec2TestImageArm,
 				"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 				"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 				tt.param: other.sgID,
@@ -381,7 +381,7 @@ func TestEC2_LaunchTemplate_AssociatePublicIPAddress(t *testing.T) {
 			ts := newEC2TestServer(t)
 			net := newLTNetwork(t, ts, "10.9.0.0/16", "lt-public-ip")
 			data := map[string]string{
-				"LaunchTemplateData.ImageId":                        "ami-0pub00000000001",
+				"LaunchTemplateData.ImageId":                        ec2TestImage,
 				"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 				"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 			}
@@ -406,7 +406,7 @@ func TestEC2_LaunchTemplate_AssociatePublicIPAddress(t *testing.T) {
 func TestEC2_LaunchTemplate_NoNetworkInterface(t *testing.T) {
 	ts := newEC2TestServer(t)
 	ltID := createLaunchTemplate(t, ts, "no-ni", map[string]string{
-		"LaunchTemplateData.ImageId":      "ami-0noni0000000001",
+		"LaunchTemplateData.ImageId":      ec2TestImage,
 		"LaunchTemplateData.InstanceType": "t3.small",
 	})
 
@@ -442,7 +442,7 @@ func TestEC2_LaunchTemplate_MergesWithRequestParams(t *testing.T) {
 	ts := newEC2TestServer(t)
 	net := newLTNetwork(t, ts, "10.20.0.0/16", "lt-merge")
 	ltID := createLaunchTemplate(t, ts, "merge", map[string]string{
-		"LaunchTemplateData.ImageId":                                     "ami-0template000001",
+		"LaunchTemplateData.ImageId":                                     ec2TestImage,
 		"LaunchTemplateData.InstanceType":                                "c5.xlarge",
 		"LaunchTemplateData.KeyName":                                     "template-key",
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
@@ -455,11 +455,11 @@ func TestEC2_LaunchTemplate_MergesWithRequestParams(t *testing.T) {
 		"LaunchTemplate.LaunchTemplateId": ltID,
 		// The only field the request names. Before #453 its presence alone was
 		// enough to discard everything else above.
-		"ImageId": "ami-0request0000001",
+		"ImageId": ec2TestImageArm,
 	})
 	got := describeInstance(t, ts, id)
 
-	if got.ImageID != "ami-0request0000001" {
+	if got.ImageID != ec2TestImageArm {
 		t.Errorf("imageId = %q, want the request's AMI", got.ImageID)
 	}
 	if got.InstanceType != "c5.xlarge" {
@@ -565,10 +565,10 @@ func TestEC2_LaunchTemplate_FieldPrecedence(t *testing.T) {
 		},
 		{
 			name:          "the template fills an absent ImageId",
-			templateData:  map[string]string{"LaunchTemplateData.ImageId": "ami-0template000002"},
+			templateData:  map[string]string{"LaunchTemplateData.ImageId": ec2TestImageArm},
 			requestParams: map[string]string{},
 			check: func(t *testing.T, got launchedInstance) {
-				if got.ImageID != "ami-0template000002" {
+				if got.ImageID != ec2TestImageArm {
 					t.Errorf("imageId = %q, want the template's", got.ImageID)
 				}
 			},
@@ -582,7 +582,7 @@ func TestEC2_LaunchTemplate_FieldPrecedence(t *testing.T) {
 			// Every template carries an AMI so the #412 check is satisfied even in
 			// the cases whose request names one; a case asserting on the AMI
 			// overrides it explicitly.
-			data := map[string]string{"LaunchTemplateData.ImageId": "ami-0template000001"}
+			data := map[string]string{"LaunchTemplateData.ImageId": ec2TestImage}
 			for k, v := range tt.templateData {
 				data[k] = v
 			}
@@ -611,7 +611,7 @@ func TestEC2_LaunchTemplate_NetworkingPrecedenceWithRequestImageID(t *testing.T)
 	reqNet := newLTNetwork(t, ts, "10.31.0.0/16", "lt-net-req")
 
 	ltID := createLaunchTemplate(t, ts, "net-precedence", map[string]string{
-		"LaunchTemplateData.ImageId":                                     "ami-0template000003",
+		"LaunchTemplateData.ImageId":                                     ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":                 tmplNet.subnetID,
 		"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1":        tmplNet.sgID,
@@ -620,7 +620,7 @@ func TestEC2_LaunchTemplate_NetworkingPrecedenceWithRequestImageID(t *testing.T)
 
 	got := describeInstance(t, ts, runInstance(t, ts, map[string]string{
 		"LaunchTemplate.LaunchTemplateId": ltID,
-		"ImageId":                         "ami-0request0000002",
+		"ImageId":                         ec2TestImageArm,
 		"SubnetId":                        reqNet.subnetID,
 		"SecurityGroupId.1":               reqNet.sgID,
 	}))
@@ -649,7 +649,7 @@ func TestEC2_LaunchTemplate_RequestFalseBeatsTemplateTrue(t *testing.T) {
 	ts := newEC2TestServer(t)
 	net := newLTNetwork(t, ts, "10.40.0.0/16", "lt-public-false")
 	ltID := createLaunchTemplate(t, ts, "public-false", map[string]string{
-		"LaunchTemplateData.ImageId":                                     "ami-0template000004",
+		"LaunchTemplateData.ImageId":                                     ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":                 net.subnetID,
 		"LaunchTemplateData.NetworkInterface.1.AssociatePublicIpAddress": "true",
@@ -657,7 +657,7 @@ func TestEC2_LaunchTemplate_RequestFalseBeatsTemplateTrue(t *testing.T) {
 
 	got := describeInstance(t, ts, runInstance(t, ts, map[string]string{
 		"LaunchTemplate.LaunchTemplateId": ltID,
-		"ImageId":                         "ami-0request0000003",
+		"ImageId":                         ec2TestImageArm,
 		"NetworkInterface.1.AssociatePublicIpAddress": "false",
 		"NetworkInterface.1.SubnetId":                 net.subnetID,
 	}))
@@ -773,7 +773,7 @@ func TestEC2_LaunchTemplate_RoundTripsTagsAndProfile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
 			data := map[string]string{
-				"LaunchTemplateData.ImageId": "ami-0roundtrip000001",
+				"LaunchTemplateData.ImageId": ec2TestImage,
 				tt.profileParam:              tt.profile,
 			}
 			for k, v := range ltTagParams([2]string{"Env", "prod"}, [2]string{"Team", "core"}) {
@@ -811,7 +811,7 @@ func TestEC2_LaunchTemplate_RoundTripsTagsAndProfile(t *testing.T) {
 // created, and it can fail even when the tagSet is right.
 func TestEC2_LaunchTemplate_TagsReachTheInstance(t *testing.T) {
 	ts := newEC2TestServer(t)
-	data := map[string]string{"LaunchTemplateData.ImageId": "ami-0tagsreach00001"}
+	data := map[string]string{"LaunchTemplateData.ImageId": ec2TestImage}
 	for k, v := range ltTagParams([2]string{"Env", "prod"}, [2]string{"Team", "core"}) {
 		data[k] = v
 	}
@@ -856,7 +856,7 @@ func TestEC2_LaunchTemplate_ProfileReachesTheInstance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
 			ltID := createLaunchTemplate(t, ts, "profile-"+tt.param, map[string]string{
-				"LaunchTemplateData.ImageId": "ami-0profile0000001",
+				"LaunchTemplateData.ImageId": ec2TestImage,
 				tt.param:                     tt.value,
 			})
 			instID := runInstance(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": ltID})
@@ -938,7 +938,7 @@ func TestEC2_LaunchTemplate_TagAndProfilePrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			data := map[string]string{"LaunchTemplateData.ImageId": "ami-0precedence0001"}
+			data := map[string]string{"LaunchTemplateData.ImageId": ec2TestImage}
 			for k, v := range tt.templateData {
 				data[k] = v
 			}
@@ -974,7 +974,7 @@ func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
 		params := map[string]string{
 			"Action":                     "CreateLaunchTemplate",
 			"LaunchTemplateName":         "reserved-tag",
-			"LaunchTemplateData.ImageId": "ami-0reserved00001",
+			"LaunchTemplateData.ImageId": ec2TestImage,
 		}
 		for k, v := range ltTagParams([2]string{"Name", "ok"}, [2]string{"aws:foo", "v"}) {
 			params[k] = v
@@ -986,13 +986,13 @@ func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
 
 		// Nothing is created, so the name is still free.
 		_ = createLaunchTemplate(t, ts, "reserved-tag", map[string]string{
-			"LaunchTemplateData.ImageId": "ami-0reserved00002",
+			"LaunchTemplateData.ImageId": ec2TestImageArm,
 		})
 	})
 
 	t.Run("SourceVersion inheritance does not outrank the new version's tags", func(t *testing.T) {
 		ts := newEC2TestServer(t)
-		v1 := map[string]string{"LaunchTemplateData.ImageId": "ami-0overlay00000001"}
+		v1 := map[string]string{"LaunchTemplateData.ImageId": ec2TestImageMinimal}
 		for k, v := range ltTagParams([2]string{"Env", "one"}) {
 			v1[k] = v
 		}
@@ -1029,12 +1029,12 @@ func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
 	t.Run("a new version carrying a reserved key is rejected", func(t *testing.T) {
 		ts := newEC2TestServer(t)
 		ltID := createLaunchTemplate(t, ts, "reserved-version", map[string]string{
-			"LaunchTemplateData.ImageId": "ami-0reserved00003",
+			"LaunchTemplateData.ImageId": ec2TestImageMinimalArm,
 		})
 		params := map[string]string{
 			"Action":                     "CreateLaunchTemplateVersion",
 			"LaunchTemplateId":           ltID,
-			"LaunchTemplateData.ImageId": "ami-0reserved00004",
+			"LaunchTemplateData.ImageId": ec2TestImageWindows,
 		}
 		for k, v := range ltTagParams([2]string{"aws:foo", "v"}) {
 			params[k] = v
@@ -1055,7 +1055,7 @@ func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
 		params := map[string]string{
 			"Action":                     "CreateLaunchTemplate",
 			"LaunchTemplateName":         "too-many-tags",
-			"LaunchTemplateData.ImageId": "ami-0toomany000001",
+			"LaunchTemplateData.ImageId": ec2TestImageECS,
 		}
 		for k, v := range ltTagParams(tags...) {
 			params[k] = v
@@ -1072,7 +1072,7 @@ func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
 		for i := 1; i <= ec2TagLimit; i++ {
 			tags = append(tags, [2]string{fmt.Sprintf("key%d", i), "v"})
 		}
-		data := map[string]string{"LaunchTemplateData.ImageId": "ami-0atlimit0000001"}
+		data := map[string]string{"LaunchTemplateData.ImageId": ec2TestImageECS2}
 		for k, v := range ltTagParams(tags...) {
 			data[k] = v
 		}
@@ -1116,7 +1116,7 @@ func storeTemplateWithTags(t *testing.T, name, ltID string, tags []map[string]st
 		"createdBy":            acct,
 		"createTime":           "2026-01-01T00:00:00Z",
 		"latestData": map[string]any{
-			"imageId":           "ami-0stored00000001",
+			"imageId":           ec2TestImage,
 			"tagSpecifications": tags,
 		},
 		"accountID": acct,
@@ -1190,7 +1190,7 @@ func storedNumberedTags(count int) []map[string]string {
 // exactly the path #443 added.
 func TestEC2_Fleet_TemplateTagsReachFleetInstances(t *testing.T) {
 	ts := newEC2TestServer(t)
-	data := map[string]string{"LaunchTemplateData.ImageId": "ami-0fleettags00001"}
+	data := map[string]string{"LaunchTemplateData.ImageId": ec2TestImage}
 	for k, v := range ltTagParams([2]string{"Env", "prod"}) {
 		data[k] = v
 	}
@@ -1219,7 +1219,7 @@ func TestEC2_LaunchTemplate_DescribeEchoesNetworking(t *testing.T) {
 	ts := newEC2TestServer(t)
 	net := newLTNetwork(t, ts, "10.10.0.0/16", "lt-echo")
 	ltID := createLaunchTemplate(t, ts, "echo", map[string]string{
-		"LaunchTemplateData.ImageId":                                     "ami-0echo0000000001",
+		"LaunchTemplateData.ImageId":                                     ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":              "0",
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":                 net.subnetID,
 		"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1":        net.sgID,

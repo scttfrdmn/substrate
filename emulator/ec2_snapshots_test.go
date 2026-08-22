@@ -258,7 +258,7 @@ func TestEC2_BlockDeviceMapping_InheritsTheSnapshotSize(t *testing.T) {
 
 	ec2FleetXML(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-0abcdef1234567890",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1", "MaxCount": "1",
 		"BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"BlockDeviceMapping.1.Ebs.SnapshotId": snapID,
@@ -371,7 +371,7 @@ func TestEC2_CreateImage_SnapshotSizeIsTheRootVolume(t *testing.T) {
 	}
 	ec2FleetXML(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-0abcdef1234567890",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1", "MaxCount": "1",
 		"BlockDeviceMapping.1.DeviceName":     "/dev/sda1",
 		"BlockDeviceMapping.1.Ebs.VolumeSize": "40",

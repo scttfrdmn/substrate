@@ -444,7 +444,7 @@ func TestEC2_SubstrateMintedIDsAreWellFormed(t *testing.T) {
 	igwID := create(map[string]string{"Action": "CreateInternetGateway"}, "internetGatewayId")
 	rtbID := create(map[string]string{"Action": "CreateRouteTable", "VpcId": vpcID}, "routeTableId")
 	instanceID := create(map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"MinCount": "1", "MaxCount": "1",
 	}, "instanceId")
 	allocID := create(map[string]string{"Action": "AllocateAddress", "Domain": "vpc"}, "allocationId")

@@ -72,6 +72,20 @@ var (
 		Prefix: "vol-", NotFound: "InvalidVolume.NotFound",
 		Malformed: "InvalidVolumeID.Malformed", Noun: "volume",
 	}
+	// AMIs are the one family whose absence code names no ID at all —
+	// InvalidAMIID.NotFound, "The specified AMI doesn't exist" — which is the
+	// cross-naming snapshots already carry the other way round.
+	//
+	// The reference publishes a third code, InvalidAMIID.Unavailable, for an AMI
+	// "deregistered and no longer available, or ... not in a state from which you can
+	// launch an instance". Substrate raises it nowhere: it models no
+	// deregistered-but-extant image, since DeregisterImage deletes the record, and
+	// every AMI it holds is "available". An unavailable AMI is therefore reported as
+	// absent, which is what a caller polling for one observes anyway.
+	ec2ImageIDKind = ec2IDKind{
+		Prefix: "ami-", NotFound: "InvalidAMIID.NotFound",
+		Malformed: "InvalidAMIID.Malformed", Noun: "image",
+	}
 	// EC2 publishes no InvalidAllocationID.Malformed; a malformed allocation ID
 	// comes back as InvalidAllocationID.NotFound.
 	ec2AllocationIDKind = ec2IDKind{

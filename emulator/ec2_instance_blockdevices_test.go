@@ -123,7 +123,7 @@ func TestEC2_InstanceBlockDeviceMapping_RunInstances(t *testing.T) {
 	ts := newEC2TestServer(t)
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                              "RunInstances",
-		"ImageId":                             "ami-0abcdef1234567890",
+		"ImageId":                             ec2TestImage,
 		"MinCount":                            "1",
 		"MaxCount":                            "1",
 		"BlockDeviceMapping.1.DeviceName":     "/dev/sdf",

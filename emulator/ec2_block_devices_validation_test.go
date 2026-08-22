@@ -31,7 +31,7 @@ func ec2InvalidBDM(t *testing.T, ts *httptest.Server, extra map[string]string) (
 	t.Helper()
 	params := map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-0abcdef1234567890",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	}
@@ -244,7 +244,7 @@ func TestEC2_BlockDeviceMapping_ValidIsAccepted(t *testing.T) {
 			ts := newEC2TestServer(t)
 			params := map[string]string{
 				"Action":   "RunInstances",
-				"ImageId":  "ami-0abcdef1234567890",
+				"ImageId":  ec2TestImage,
 				"MinCount": "1",
 				"MaxCount": "1",
 			}
@@ -324,7 +324,7 @@ func TestEC2_BlockDeviceMapping_TemplateMappingRefusedAtLaunch(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "bad-mapping",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
 	})

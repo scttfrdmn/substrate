@@ -75,7 +75,7 @@ func ec2InstanceWithDataVolume(t *testing.T, ts *httptest.Server, dataGiB int) (
 	t.Helper()
 	instanceID = ec2RunInstanceIDs(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-0123456789abcdef0",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	})[0]

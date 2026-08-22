@@ -18,10 +18,12 @@ import (
 	emulator "github.com/scttfrdmn/substrate/emulator"
 )
 
+// journeyDefaultVPCRegion has to be the region [journeyImage] resolves in: these journeys
+// launch from that AMI and also name it in a policy ARN, and an AMI ID is valid in exactly
+// one region (#733).
 const (
 	journeyDefaultVPCRegion  = "us-east-1"
 	journeyDefaultVPCAccount = "123456789012"
-	journeyDefaultVPCAMI     = "ami-0abcdef1234567890"
 )
 
 // journeyGuardedEC2 creates an IAM user with an access key and returns an EC2 client
@@ -141,7 +143,7 @@ func TestJourney_EC2DefaultVPCSubnetGuardrail(t *testing.T) {
 	arn := func(format string) string {
 		return "arn:aws:ec2:" + journeyDefaultVPCRegion + ":" + journeyDefaultVPCAccount + ":" + format
 	}
-	imageARN := "arn:aws:ec2:" + journeyDefaultVPCRegion + "::image/" + journeyDefaultVPCAMI
+	imageARN := "arn:aws:ec2:" + journeyDefaultVPCRegion + "::image/" + journeyImage
 	allow := func(resources ...string) string {
 		return `{"Version":"2012-10-17","Statement":[` +
 			`{"Effect":"Allow","Action":"ec2:RunInstances","Resource":["` +
@@ -151,7 +153,7 @@ func TestJourney_EC2DefaultVPCSubnetGuardrail(t *testing.T) {
 	launcher, putPolicy := journeyGuardedEC2(t, ctx, ts, iamClient, "subnetless-launcher")
 	launch := func(client *ec2.Client) (*ec2.RunInstancesOutput, error) {
 		return client.RunInstances(ctx, &ec2.RunInstancesInput{
-			ImageId:      aws.String(journeyDefaultVPCAMI),
+			ImageId:      aws.String(journeyImage),
 			InstanceType: ec2types.InstanceTypeT3Micro,
 			MinCount:     aws.Int32(1),
 			MaxCount:     aws.Int32(1),
@@ -296,7 +298,7 @@ func TestJourney_EC2CreateFleetAuthorizesItsLaunches(t *testing.T) {
 	lt, err := admin.CreateLaunchTemplate(ctx, &ec2.CreateLaunchTemplateInput{
 		LaunchTemplateName: aws.String("fleet-pool"),
 		LaunchTemplateData: &ec2types.RequestLaunchTemplateData{
-			ImageId: aws.String(journeyDefaultVPCAMI),
+			ImageId: aws.String(journeyImage),
 		},
 	})
 	if err != nil {
@@ -307,7 +309,7 @@ func TestJourney_EC2CreateFleetAuthorizesItsLaunches(t *testing.T) {
 	arn := func(format string) string {
 		return "arn:aws:ec2:" + journeyDefaultVPCRegion + ":" + journeyDefaultVPCAccount + ":" + format
 	}
-	imageARN := "arn:aws:ec2:" + journeyDefaultVPCRegion + "::image/" + journeyDefaultVPCAMI
+	imageARN := "arn:aws:ec2:" + journeyDefaultVPCRegion + "::image/" + journeyImage
 
 	fleeter, putPolicy := journeyGuardedEC2(t, ctx, ts, iamClient, "fleeter")
 	createFleet := func() (*ec2.CreateFleetOutput, error) {

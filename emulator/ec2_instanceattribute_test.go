@@ -93,7 +93,7 @@ func TestEC2_InstanceAttribute_UserData(t *testing.T) {
 
 	encoded := base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\necho hello\n"))
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro", "UserData": encoded,
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro", "UserData": encoded,
 	})
 
 	got := describeInstanceAttribute(t, ts, id, "userData")
@@ -120,7 +120,7 @@ func TestEC2_InstanceAttribute_UserDataFromLaunchTemplate(t *testing.T) {
 
 	encoded := base64.StdEncoding.EncodeToString([]byte("from-the-template"))
 	ltID := createLaunchTemplate(t, ts, "lt-userdata", map[string]string{
-		"LaunchTemplateData.ImageId":      "ami-tmpl",
+		"LaunchTemplateData.ImageId":      ec2TestImage,
 		"LaunchTemplateData.InstanceType": "t3.small",
 		"LaunchTemplateData.UserData":     encoded,
 	})
@@ -147,7 +147,7 @@ func TestEC2_InstanceAttribute_RequestBeatsTemplate(t *testing.T) {
 	tmpl := base64.StdEncoding.EncodeToString([]byte("template"))
 	req := base64.StdEncoding.EncodeToString([]byte("request"))
 	ltID := createLaunchTemplate(t, ts, "lt-userdata-override", map[string]string{
-		"LaunchTemplateData.ImageId":  "ami-tmpl",
+		"LaunchTemplateData.ImageId":  ec2TestImage,
 		"LaunchTemplateData.UserData": tmpl,
 	})
 
@@ -175,7 +175,7 @@ func TestEC2_InstanceAttribute_UnsetIsPresentButEmpty(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 	})
 
 	got := describeInstanceAttribute(t, ts, id, "userData")
@@ -195,7 +195,7 @@ func TestEC2_InstanceAttribute_SupportedAttributes(t *testing.T) {
 	subnetID := createSubnet(t, ts, vpcID, "10.9.1.0/24")
 
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.large",
+		"ImageId": ec2TestImage, "InstanceType": "t3.large",
 		"SubnetId": subnetID, "SecurityGroupId.1": sgID,
 		"DisableApiTermination": "true",
 	})
@@ -229,7 +229,7 @@ func TestEC2_InstanceAttribute_DisableAPITerminationDefaultsFalse(t *testing.T) 
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	got := describeInstanceAttribute(t, ts, id, "disableApiTermination")
 	require.NotNil(t, got.DisableAPI)
@@ -256,7 +256,7 @@ func TestEC2_InstanceAttribute_DisableAPITerminationDefaultsFalse(t *testing.T) 
 func TestEC2_InstanceAttribute_UnknownAttribute(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
-	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	for _, attr := range []string{
 		"enaSupport", // listed by AWS, rejected by AWS
@@ -309,7 +309,7 @@ func TestEC2_InstanceAttribute_AttributeCheckedBeforeInstance(t *testing.T) {
 func TestEC2_InstanceAttribute_RequiredParameters(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
-	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	tests := []struct {
 		name   string
@@ -365,7 +365,7 @@ func TestEC2_InstanceAttribute_ModifyUserData(t *testing.T) {
 	first := base64.StdEncoding.EncodeToString([]byte("first"))
 	second := base64.StdEncoding.EncodeToString([]byte("second"))
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro", "UserData": first,
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro", "UserData": first,
 	})
 	stopInstance(t, ts, id)
 
@@ -391,7 +391,7 @@ func TestEC2_InstanceAttribute_ModifyUserDataCanClear(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"UserData": base64.StdEncoding.EncodeToString([]byte("to-be-cleared")),
 	})
 	stopInstance(t, ts, id)
@@ -439,7 +439,7 @@ func TestEC2_InstanceAttribute_ModifyRequiresStopped(t *testing.T) {
 
 			original := base64.StdEncoding.EncodeToString([]byte("original"))
 			id := runInstance(t, ts, map[string]string{
-				"ImageId": "ami-1", "InstanceType": "t3.micro", "UserData": original,
+				"ImageId": ec2TestImage, "InstanceType": "t3.micro", "UserData": original,
 			})
 
 			status, code, msg := ec2ErrorDetail(t, ts, map[string]string{
@@ -483,7 +483,7 @@ func TestEC2_InstanceAttribute_TerminationProtectionNotGated(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	// Still running.
 	status := modifyInstanceAttribute(t, ts, map[string]string{
@@ -541,7 +541,7 @@ func TestEC2_InstanceAttribute_ModifyUnknownInstance(t *testing.T) {
 func TestEC2_InstanceAttribute_ResponseWrapsTheValue(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
-	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	resp := ec2Request(t, ts, map[string]string{
 		"Action": "DescribeInstanceAttribute", "InstanceId": id, "Attribute": "instanceType",
@@ -585,7 +585,7 @@ func TestEC2_InstanceAttribute_EmptyGroupSetIsStillPresent(t *testing.T) {
 	inst := map[string]any{
 		"instance_id":   instID,
 		"instance_type": "t3.micro",
-		"image_id":      "ami-1",
+		"image_id":      ec2TestImage,
 		"state":         map[string]any{"code": 16, "name": "running"},
 		"account_id":    "123456789012",
 		"region":        "us-east-1",
@@ -690,7 +690,7 @@ func TestEC2_TerminateInstances_ProtectionRefused(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"DisableApiTermination": "true",
 	})
 
@@ -712,7 +712,7 @@ func TestEC2_TerminateInstances_ProtectionClearedThenTerminates(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"DisableApiTermination": "true",
 	})
 	require.Equal(t, http.StatusOK, modifyInstanceAttribute(t, ts, map[string]string{
@@ -731,8 +731,8 @@ func TestEC2_TerminateInstances_UnprotectedUnaffected(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	a := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
-	b := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	a := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
+	b := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	code, body := terminateInstances(t, ts, a, b)
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
@@ -758,7 +758,7 @@ func TestEC2_TerminateInstances_ProtectionIsZoneScoped(t *testing.T) {
 
 	launch := func(az string, protected bool) string {
 		params := map[string]string{
-			"ImageId": "ami-1", "InstanceType": "t3.micro",
+			"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 			"Placement.AvailabilityZone": az,
 		}
 		if protected {
@@ -792,12 +792,12 @@ func TestEC2_TerminateInstances_ProtectedAloneInItsZone(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	protected := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"Placement.AvailabilityZone": "us-east-1a",
 		"DisableApiTermination":      "true",
 	})
 	other := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"Placement.AvailabilityZone": "us-east-1b",
 	})
 
@@ -817,7 +817,7 @@ func TestEC2_TerminateInstances_BadIDTerminatesNothing(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	good := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	good := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	code, _ := terminateInstances(t, ts, good, "i-0deadbeefdeadbeef")
 	assert.Equal(t, http.StatusBadRequest, code)
@@ -832,7 +832,7 @@ func TestEC2_TerminateInstances_Idempotent(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	id := runInstance(t, ts, map[string]string{"ImageId": "ami-1", "InstanceType": "t3.micro"})
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 	code, _ := terminateInstances(t, ts, id)
 	require.Equal(t, http.StatusOK, code)
 	code, body := terminateInstances(t, ts, id)
@@ -856,14 +856,14 @@ func TestEC2_TerminateInstances_ZoneFromSubnet(t *testing.T) {
 	subnetB := createSubnetInAZ(t, ts, vpcID, "10.0.2.0/24", "us-east-1b")
 
 	protected := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"SubnetId": subnetA, "DisableApiTermination": "true",
 	})
 	sameZone := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro", "SubnetId": subnetA,
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro", "SubnetId": subnetA,
 	})
 	otherZone := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro", "SubnetId": subnetB,
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro", "SubnetId": subnetB,
 	})
 
 	code, _ := terminateInstances(t, ts, protected, sameZone, otherZone)
@@ -885,7 +885,7 @@ func TestEC2_Instance_ReportsAvailabilityZone(t *testing.T) {
 	// RunInstances reports it directly, so no follow-up describe is needed.
 	resp := ec2Request(t, ts, map[string]string{
 		"Action": "RunInstances", "MinCount": "1", "MaxCount": "1",
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"Placement.AvailabilityZone": "us-west-2c",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -923,11 +923,11 @@ func TestEC2_DescribeInstances_AvailabilityZoneFilter(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	inA := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"Placement.AvailabilityZone": "eu-west-1a",
 	})
 	inB := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"Placement.AvailabilityZone": "eu-west-1b",
 	})
 
@@ -958,7 +958,7 @@ func TestEC2_Instance_AlwaysCarriesAZone(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	id := runInstance(t, ts, map[string]string{
-		"ImageId": "ami-1", "InstanceType": "t3.micro",
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"SubnetId": "subnet-0000000000000dead",
 	})
 

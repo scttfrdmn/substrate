@@ -176,8 +176,22 @@ func cfnPhysicalID(t *testing.T, body string) string {
 	return cfnXMLValue(t, body, "PhysicalResourceId")
 }
 
-const cfnInstanceTemplate = `{"Resources":{"I":{"Type":"AWS::EC2::Instance",` +
-	`"Properties":{"ImageId":"ami-12345678","InstanceType":"t3.micro"}}}}`
+// cfnInstanceTemplateIn returns the one-instance stack these tests deploy, naming an AMI
+// that resolves in region.
+//
+// RunInstances refuses an AMI it cannot resolve (#733) and an AMI ID names an image in
+// exactly one Region, so a stack deployed outside [ec2TestRegion] has to carry that
+// Region's ID — otherwise the deploy fails for a reason none of these tests is about.
+func cfnInstanceTemplateIn(region string) string {
+	imageID := emulator.BundledImageID(region,
+		"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")
+	return `{"Resources":{"I":{"Type":"AWS::EC2::Instance",` +
+		`"Properties":{"ImageId":"` + imageID + `","InstanceType":"t3.micro"}}}}`
+}
+
+// cfnInstanceTemplate is that stack in the Region every test here but
+// TestCFNIdentity_NonDefaultRegion addresses.
+var cfnInstanceTemplate = cfnInstanceTemplateIn(ec2TestRegion)
 
 // TestCFNIdentity_CallerFindsItsOwnInstance is #517's reproduction, and it fails
 // before the fix.
@@ -306,7 +320,7 @@ func TestCFNIdentity_NonDefaultRegion(t *testing.T) {
 		"Action":       "CreateStack",
 		"Version":      "2010-05-15",
 		"StackName":    "euwest",
-		"TemplateBody": cfnInstanceTemplate,
+		"TemplateBody": cfnInstanceTemplateIn("eu-west-1"),
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Contains(t, body, "arn:aws:cloudformation:eu-west-1:")

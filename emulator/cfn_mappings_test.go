@@ -500,17 +500,22 @@ func TestCFN_FindInMap_UnknownKeyFailsTheResource(t *testing.T) {
 
 	deployer, _ := newFullTestDeployerWithRegistry(t)
 
-	const template = `
+	// The mapped AMI is a bundled one in the deployer's own region, because Good is
+	// launched rather than merely resolved: RunInstances refuses an AMI it cannot
+	// resolve (#733), and a lookup that resolved to a fabricated ID would fail the
+	// resource for the wrong reason and make "a resolvable lookup must deploy"
+	// unfalsifiable.
+	template := `
 AWSTemplateFormatVersion: '2010-09-09'
 Mappings:
   RegionMap:
-    eu-west-1:
-      AMI: ami-0eu1
+    us-east-1:
+      AMI: ` + ec2TestImage + `
 Resources:
   Good:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !FindInMap [RegionMap, eu-west-1, AMI]
+      ImageId: !FindInMap [RegionMap, us-east-1, AMI]
       InstanceType: t3.micro
   Bad:
     Type: AWS::EC2::Instance

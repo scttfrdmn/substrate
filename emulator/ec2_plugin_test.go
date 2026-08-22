@@ -99,7 +99,7 @@ func TestEC2_RunDescribeTerminate(t *testing.T) {
 	// RunInstances.
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.micro",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -153,7 +153,7 @@ func TestEC2_StopStartInstances(t *testing.T) {
 	// Launch instance.
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-00000001",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	})
@@ -482,7 +482,7 @@ func TestEC2_DefaultVPCAutoCreate(t *testing.T) {
 	// Launch without specifying a subnet — should auto-create default VPC/subnet.
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-auto",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	})
@@ -528,9 +528,9 @@ func TestEC2_DescribeInstances_Filter(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	// Launch 2 instances.
-	r1 := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1"})
+	r1 := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1"})
 	r1.Body.Close() //nolint:errcheck
-	r2 := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": "ami-2", "MinCount": "1", "MaxCount": "1"})
+	r2 := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": ec2TestImageArm, "MinCount": "1", "MaxCount": "1"})
 	r2.Body.Close() //nolint:errcheck
 
 	// Describe all — should get at least 2.
@@ -556,7 +556,7 @@ func TestEC2_DescribeInstanceStatus(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	resp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-status", "MinCount": "1", "MaxCount": "1",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1",
 	})
 	resp.Body.Close() //nolint:errcheck
 
@@ -897,7 +897,7 @@ func TestEC2_KeyPair_CreateDescribeDelete(t *testing.T) {
 	// RunInstances referencing the key pair records KeyName on the instance.
 	runResp := ec2Request(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.micro",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -993,7 +993,7 @@ func TestEC2_RebootInstances(t *testing.T) {
 
 	// Launch an instance first.
 	runResp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
 		Instances []struct {
@@ -1019,7 +1019,7 @@ func TestEC2_CreateDeleteTags(t *testing.T) {
 
 	// Launch an instance.
 	runResp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-1", "MinCount": "1", "MaxCount": "1",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
 		Instances []struct {
@@ -1097,7 +1097,7 @@ func TestEC2_ModifyInstanceAttribute(t *testing.T) {
 
 	// Launch a t3.micro instance.
 	runResp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-1",
+		"Action": "RunInstances", "ImageId": ec2TestImage,
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
@@ -1164,7 +1164,7 @@ func TestEC2_AMI_CreateDescribeDeregister(t *testing.T) {
 
 	// Launch an instance so we have a valid source instance ID.
 	runResp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base",
+		"Action": "RunInstances", "ImageId": ec2TestImage,
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
@@ -1399,7 +1399,7 @@ func TestEC2_Image_CreationDate(t *testing.T) {
 
 	// Launch an instance so we have a valid source instance ID.
 	runResp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base",
+		"Action": "RunInstances", "ImageId": ec2TestImage,
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
@@ -1457,7 +1457,7 @@ func TestEC2_RunInstances_TagSpecifications(t *testing.T) {
 	// Launch with TagSpecifications for ResourceType=instance.
 	runResp := ec2Request(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-1",
+		"ImageId":                         ec2TestImage,
 		"InstanceType":                    "t3.micro",
 		"MinCount":                        "1",
 		"MaxCount":                        "1",
@@ -1670,7 +1670,7 @@ func TestEC2_PublicIP(t *testing.T) {
 	// RunInstances into the default VPC/subnet (no SubnetId specified).
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.micro",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -1795,7 +1795,7 @@ func TestEC2_NoPublicIP_NonDefaultSubnet(t *testing.T) {
 	// RunInstances into the non-default subnet.
 	runResp := ec2Request(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.micro",
 		"MinCount":     "1",
 		"MaxCount":     "1",
@@ -2024,7 +2024,7 @@ func TestEC2_ElasticIP_AssociateDisassociate(t *testing.T) {
 	_ = xml.NewDecoder(allocResp.Body).Decode(&allocResult)
 
 	// Launch instance.
-	runResp := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": "ami-test", "MinCount": "1", "MaxCount": "1"})
+	runResp := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1"})
 	defer runResp.Body.Close() //nolint:errcheck
 	var runResult struct {
 		Instances []struct {
@@ -2116,7 +2116,7 @@ func TestEC2_ElasticIP_ReleaseWhileAssociated(t *testing.T) {
 	_ = xml.NewDecoder(allocResp.Body).Decode(&allocResult)
 
 	// Launch and associate.
-	runResp := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": "ami-test", "MinCount": "1", "MaxCount": "1"})
+	runResp := ec2Request(t, ts, map[string]string{"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1"})
 	defer runResp.Body.Close() //nolint:errcheck
 	var runResult struct {
 		Instances []struct {
@@ -2670,7 +2670,7 @@ func TestEC2Plugin_CreateDescribeDeleteLaunchTemplate(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                               "CreateLaunchTemplate",
 		"LaunchTemplateName":                   "my-template",
-		"LaunchTemplateData.ImageId":           "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId":           ec2TestImage,
 		"LaunchTemplateData.InstanceType":      "t3.small",
 		"LaunchTemplateData.KeyName":           "my-key",
 		"LaunchTemplateData.SecurityGroupId.1": "sg-12345678",
@@ -2780,7 +2780,7 @@ func TestEC2Plugin_RunInstances_ViaLaunchTemplate(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                          "CreateLaunchTemplate",
 		"LaunchTemplateName":              "run-tmpl",
-		"LaunchTemplateData.ImageId":      "ami-launch-template-test",
+		"LaunchTemplateData.ImageId":      ec2TestImage,
 		"LaunchTemplateData.InstanceType": "m5.large",
 	})
 	defer resp.Body.Close() //nolint:errcheck
@@ -2822,8 +2822,8 @@ func TestEC2Plugin_RunInstances_ViaLaunchTemplate(t *testing.T) {
 	if len(runResult.Instances) != 1 {
 		t.Fatalf("expected 1 instance, got %d", len(runResult.Instances))
 	}
-	if runResult.Instances[0].ImageID != "ami-launch-template-test" {
-		t.Errorf("expected ami-launch-template-test, got %q", runResult.Instances[0].ImageID)
+	if runResult.Instances[0].ImageID != ec2TestImage {
+		t.Errorf("expected %q, got %q", ec2TestImage, runResult.Instances[0].ImageID)
 	}
 	if runResult.Instances[0].InstanceType != "m5.large" {
 		t.Errorf("expected m5.large, got %q", runResult.Instances[0].InstanceType)
@@ -2920,7 +2920,7 @@ func TestEC2_EBS_AttachDetachVolume(t *testing.T) {
 	// Launch an instance to attach to.
 	runResp := ec2Request(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-test",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	})
@@ -3011,7 +3011,7 @@ func TestEC2_RunInstances_InvalidSG(t *testing.T) {
 	// answers InvalidGroupId.Malformed, which is a different assertion (below).
 	resp3 := ec2Request(t, ts, map[string]string{
 		"Action":            "RunInstances",
-		"ImageId":           "ami-12345678",
+		"ImageId":           ec2TestImage,
 		"InstanceType":      "t2.micro",
 		"SubnetId":          subnetID,
 		"SecurityGroupId.1": "sg-0000000000000dead",
@@ -3026,7 +3026,7 @@ func TestEC2_RunInstances_InvalidSG(t *testing.T) {
 	// Malformed code — the same ordering every other ID family follows (#713).
 	resp4 := ec2Request(t, ts, map[string]string{
 		"Action":            "RunInstances",
-		"ImageId":           "ami-12345678",
+		"ImageId":           ec2TestImage,
 		"InstanceType":      "t2.micro",
 		"SubnetId":          subnetID,
 		"SecurityGroupId.1": "sg-nonexistent",
@@ -3313,7 +3313,7 @@ func TestEC2_DefaultVPC_IGWRoute(t *testing.T) {
 
 	// RunInstances with no SubnetId triggers ensureDefaultVPC.
 	run := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"MinCount": "1", "MaxCount": "1",
 	})
 	assert.Equal(t, http.StatusOK, run.StatusCode)
@@ -3333,7 +3333,7 @@ func TestEC2_DescribeInstances_MultiFilter(t *testing.T) {
 
 	// Launch a tagged instance.
 	resp := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "t3.micro",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"MinCount": "1", "MaxCount": "1",
 		"TagSpecification.1.ResourceType": "instance",
 		"TagSpecification.1.Tag.1.Key":    "spawn:managed",
@@ -3389,7 +3389,7 @@ func TestEC2_DescribeInstances_MultiFilter(t *testing.T) {
 func TestEC2_DescribeInstances_FilterOrderIndependent(t *testing.T) {
 	ts := newEC2TestServer(t)
 	run := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-1", "InstanceType": "t3.micro",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"MinCount": "1", "MaxCount": "1",
 		"TagSpecification.1.ResourceType": "instance",
 		"TagSpecification.1.Tag.1.Key":    "k", "TagSpecification.1.Tag.1.Value": "v",
@@ -3451,7 +3451,7 @@ func TestEC2_CreateImage_SnapshotsAndFilter(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	run := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base",
+		"Action": "RunInstances", "ImageId": ec2TestImage,
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
@@ -3588,7 +3588,7 @@ func TestEC2_RegisterImage_SharedSnapshot(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	run := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base",
+		"Action": "RunInstances", "ImageId": ec2TestImage,
 		"InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
 	})
 	var runResult struct {
@@ -3699,7 +3699,7 @@ func newEC2SSMTestServer(t *testing.T) *httptest.Server {
 func runInstanceWithProfile(t *testing.T, ts *httptest.Server, profile string) string {
 	t.Helper()
 	params := map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base",
+		"Action": "RunInstances", "ImageId": ec2TestImage,
 		"InstanceType": "m7i.xlarge", "MinCount": "1", "MaxCount": "1",
 	}
 	if profile != "" {
@@ -3844,7 +3844,7 @@ func TestEC2_PlacementGroups(t *testing.T) {
 
 	// RunInstances into the known group → success.
 	ok := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base", "InstanceType": "c7i.xlarge",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "c7i.xlarge",
 		"MinCount": "1", "MaxCount": "1", "Placement.GroupName": "mpi-pg",
 	})
 	assert.Equal(t, http.StatusOK, ok.StatusCode)
@@ -3852,7 +3852,7 @@ func TestEC2_PlacementGroups(t *testing.T) {
 
 	// RunInstances into an unknown group → InvalidPlacementGroup.Unknown (400).
 	bad := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-base", "InstanceType": "c7i.xlarge",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "c7i.xlarge",
 		"MinCount": "1", "MaxCount": "1", "Placement.GroupName": "does-not-exist",
 	})
 	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
@@ -3886,7 +3886,7 @@ func TestEC2_RunInstances_ReturnsTagSet(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	run := ec2Request(t, ts, map[string]string{
-		"Action": "RunInstances", "ImageId": "ami-12345678", "InstanceType": "c6a.xlarge",
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "c6a.xlarge",
 		"MinCount": "1", "MaxCount": "1",
 		"TagSpecification.1.ResourceType": "instance",
 		"TagSpecification.1.Tag.1.Key":    "Name",
@@ -4027,7 +4027,7 @@ func TestEC2_RunInstances_MissingImageId(t *testing.T) {
 		{
 			name: "explicit ImageId still launches",
 			params: func(*testing.T, *httptest.Server) map[string]string {
-				return map[string]string{"MinCount": "1", "MaxCount": "1", "ImageId": "ami-regression-guard"}
+				return map[string]string{"MinCount": "1", "MaxCount": "1", "ImageId": ec2TestImage}
 			},
 			wantStatus: http.StatusOK,
 		},
@@ -4036,7 +4036,7 @@ func TestEC2_RunInstances_MissingImageId(t *testing.T) {
 			// the top of runInstances.
 			name: "launch template supplies the ImageId",
 			params: func(t *testing.T, ts *httptest.Server) map[string]string {
-				ltID := createTemplate(t, ts, "ami-tmpl", "ami-from-template")
+				ltID := createTemplate(t, ts, "ami-tmpl", ec2TestImage)
 				return map[string]string{
 					"MinCount": "1", "MaxCount": "1",
 					"LaunchTemplate.LaunchTemplateId": ltID,
@@ -4188,7 +4188,7 @@ func TestEC2_RunInstances_InstanceCounts(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				ts := newEC2TestServer(t)
-				params := map[string]string{"Action": "RunInstances", "ImageId": "ami-counts"}
+				params := map[string]string{"Action": "RunInstances", "ImageId": ec2TestImage}
 				for k, v := range tt.params {
 					params[k] = v
 				}
@@ -4254,7 +4254,7 @@ func TestEC2_RunInstances_InstanceCounts(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				ts := newEC2TestServer(t)
-				params := map[string]string{"Action": "RunInstances", "ImageId": "ami-counts"}
+				params := map[string]string{"Action": "RunInstances", "ImageId": ec2TestImage}
 				for k, v := range tt.params {
 					params[k] = v
 				}
@@ -4352,7 +4352,7 @@ func TestEC2_Instances_GroupSet(t *testing.T) {
 		net := newLTNetwork(t, ts, "10.20.0.0/16", "gs-call")
 
 		for _, v := range bothViews(t, ts, map[string]string{
-			"ImageId":           "ami-0gs000000000001",
+			"ImageId":           ec2TestImage,
 			"SubnetId":          net.subnetID,
 			"SecurityGroupId.1": net.sgID,
 		}) {
@@ -4366,7 +4366,7 @@ func TestEC2_Instances_GroupSet(t *testing.T) {
 		second := createSecurityGroup(t, ts, net.vpcID, "gs-multi-b")
 
 		for _, v := range bothViews(t, ts, map[string]string{
-			"ImageId":           "ami-0gs000000000002",
+			"ImageId":           ec2TestImage,
 			"SubnetId":          net.subnetID,
 			"SecurityGroupId.1": net.sgID,
 			"SecurityGroupId.2": second,
@@ -4381,7 +4381,7 @@ func TestEC2_Instances_GroupSet(t *testing.T) {
 		// No SubnetId and no group: the launch falls through to the auto-created
 		// default VPC and resolves its "default" group. That resolution happened
 		// before this fix too — it was simply invisible.
-		for _, v := range bothViews(t, ts, map[string]string{"ImageId": "ami-0gs000000000003"}) {
+		for _, v := range bothViews(t, ts, map[string]string{"ImageId": ec2TestImage}) {
 			if len(v.inst.Groups) != 1 {
 				t.Fatalf("%s: groupSet has %d items, want the default VPC group", v.from, len(v.inst.Groups))
 			}
@@ -4398,7 +4398,7 @@ func TestEC2_Instances_GroupSet(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.22.0.0/16", "gs-template")
 		ltID := createLaunchTemplate(t, ts, "gs-template", map[string]string{
-			"LaunchTemplateData.ImageId":                              "ami-0gs000000000004",
+			"LaunchTemplateData.ImageId":                              ec2TestImage,
 			"LaunchTemplateData.NetworkInterface.1.DeviceIndex":       "0",
 			"LaunchTemplateData.NetworkInterface.1.SubnetId":          net.subnetID,
 			"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1": net.sgID,
@@ -4414,7 +4414,7 @@ func TestEC2_Instances_GroupSet(t *testing.T) {
 		net := newLTNetwork(t, ts, "10.23.0.0/16", "gs-deleted")
 
 		launched := runInstancesLaunched(t, ts, map[string]string{
-			"ImageId":           "ami-0gs000000000005",
+			"ImageId":           ec2TestImage,
 			"SubnetId":          net.subnetID,
 			"SecurityGroupId.1": net.sgID,
 		})
