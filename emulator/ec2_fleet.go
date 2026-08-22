@@ -812,17 +812,25 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		DefaultTargetCapacityType string `xml:"defaultTargetCapacityType,omitempty"`
 	}
 	type fleetItem struct {
-		FleetID                     string             `xml:"fleetId"`
-		FleetState                  string             `xml:"fleetState"`
-		ActivityStatus              string             `xml:"activityStatus,omitempty"`
-		Type                        string             `xml:"type"`
-		CreateTime                  string             `xml:"createTime"`
-		FulfilledCapacity           int                `xml:"fulfilledCapacity"`
-		FulfilledOnDemandCapacity   int                `xml:"fulfilledOnDemandCapacity"`
-		TargetCapacitySpecification targetCapacityXML  `xml:"targetCapacitySpecification"`
-		ClientToken                 string             `xml:"clientToken,omitempty"`
-		Tags                        []ec2TagItem       `xml:"tagSet>item,omitempty"`
-		Errors                      []fleetDescribeErr `xml:"errorSet>item,omitempty"`
+		FleetID                     string            `xml:"fleetId"`
+		FleetState                  string            `xml:"fleetState"`
+		ActivityStatus              string            `xml:"activityStatus,omitempty"`
+		Type                        string            `xml:"type"`
+		CreateTime                  string            `xml:"createTime"`
+		FulfilledCapacity           int               `xml:"fulfilledCapacity"`
+		FulfilledOnDemandCapacity   int               `xml:"fulfilledOnDemandCapacity"`
+		TargetCapacitySpecification targetCapacityXML `xml:"targetCapacitySpecification"`
+		ClientToken                 string            `xml:"clientToken,omitempty"`
+		// An untagged fleet answers <tagSet></tagSet> here, where the seven renderers
+		// #708 converted answer with no tagSet at all. Not an oversight and not
+		// inconsistency for its own sake: API_DescribeFleets.html publishes no example
+		// response — the page has no Examples section — so there is no untagged sample to
+		// follow, where CreateLaunchTemplate's Example 1 and CreatePlacementGroup's
+		// Example 2 each show the element absent. Each response answers to the page that
+		// documents it, and this page documents nothing about the shape. Changing it would
+		// be substrate guessing rather than substrate reading. See [ec2TagSetXML].
+		Tags   []ec2TagItem       `xml:"tagSet>item,omitempty"`
+		Errors []fleetDescribeErr `xml:"errorSet>item,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name    `xml:"DescribeFleetsResponse"`

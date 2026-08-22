@@ -34,16 +34,43 @@ const (
 	ec2TagAuthzRTB      = "rtb-0aaa9999bbbb0000c"
 	ec2TagAuthzEIP      = "eipalloc-0bbb1111cccc2222d"
 	ec2TagAuthzNAT      = "nat-0ccc3333dddd4444e"
+
+	// The six types #708 added. A fleet ID carries four internal hyphens of its own,
+	// which is the shape that would break any prefix match that split on "-".
+	ec2TagAuthzSnapshot = "snap-0ddd5555eeee6666a"
+	ec2TagAuthzImage    = "ami-0eee7777ffff8888b"
+	ec2TagAuthzLT       = "lt-0fff9999aaaa0000c"
+	ec2TagAuthzFleet    = "fleet-12a34b56-7cd8-90ef-1a2b-3c4d5e6f7a8b"
+
+	// A placement group's and a key pair's ARNs name them by *name*, while CreateTags
+	// names them by ID, so each needs both spellings written out.
+	ec2TagAuthzPGID    = "pg-0aaa2222bbbb3333d"
+	ec2TagAuthzPGName  = "authz-placement-group"
+	ec2TagAuthzKeyID   = "key-0bbb4444cccc5555e"
+	ec2TagAuthzKeyName = "authz-key-pair"
 )
 
 // ec2TagARN builds the ARN a tagging call is authorized against.
 //
-// Written out here rather than derived from the state key on purpose: for five of
-// the nine taggable prefixes substrate's state key abbreviates the resource type
-// the Service Authorization Reference's ARN uses, and a test that derived one from
-// the other would agree with a wrong answer.
+// Written out here rather than derived from the state key on purpose: for seven of
+// the fifteen taggable prefixes substrate's state key abbreviates the resource type
+// the Service Authorization Reference's ARN uses, or names the resource by something
+// other than the ID the caller passed, and a test that derived one from the other
+// would agree with a wrong answer.
 func ec2TagARN(arnType, id string) string {
 	return "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":" + arnType + "/" + id
+}
+
+// ec2TagARNNoAccount builds the ARN for the two types whose account field AWS leaves
+// empty: arn:${Partition}:ec2:${Region}::image/${ImageId}, and the same shape for a
+// snapshot.
+//
+// A separate builder rather than a flag on [ec2TagARN], because the point is that these
+// two strings are not the shape the other thirteen have — an ARN with the account
+// stamped on matches no statement a caller wrote against AWS's template, so a Deny
+// naming an AMI would be inert. #689's snapshot arm shipped with exactly that defect.
+func ec2TagARNNoAccount(arnType, id string) string {
+	return "arn:aws:ec2:" + ec2AuthzRegion + "::" + arnType + "/" + id
 }
 
 // ec2TagAuthzResource is one taggable resource: the ID a caller passes as
@@ -58,8 +85,10 @@ type ec2TagAuthzResource struct {
 // ec2TagAuthzAllTypes is every resource type substrate can tag, in the order these
 // tests name them in ResourceId.N — which is the order the decision evaluates.
 //
-// All nine, not a sample: the ARN resource type is a hand-written string per type,
-// so a wrong one is only caught by a case that names that type.
+// All fifteen, not a sample: the ARN resource type is a hand-written string per type,
+// so a wrong one is only caught by a case that names that type. Six joined in #708, and
+// each of the three ways an ARN diverges from the state key is now represented — the
+// abbreviating five, the two with an empty account field, and the two named by name.
 func ec2TagAuthzAllTypes() []ec2TagAuthzResource {
 	return []ec2TagAuthzResource{
 		{ec2TagAuthzInstance, ec2TagARN("instance", ec2TagAuthzInstance), (*ec2AuthzFixture).putTagInstance},
@@ -75,6 +104,12 @@ func ec2TagAuthzAllTypes() []ec2TagAuthzResource {
 		{ec2TagAuthzRTB, ec2TagARN("route-table", ec2TagAuthzRTB), (*ec2AuthzFixture).putTagRouteTable},
 		{ec2TagAuthzEIP, ec2TagARN("elastic-ip", ec2TagAuthzEIP), (*ec2AuthzFixture).putTagElasticIP},
 		{ec2TagAuthzNAT, ec2TagARN("natgateway", ec2TagAuthzNAT), (*ec2AuthzFixture).putTagNATGateway},
+		{ec2TagAuthzSnapshot, ec2TagARNNoAccount("snapshot", ec2TagAuthzSnapshot), (*ec2AuthzFixture).putTagSnapshot},
+		{ec2TagAuthzImage, ec2TagARNNoAccount("image", ec2TagAuthzImage), (*ec2AuthzFixture).putTagImage},
+		{ec2TagAuthzLT, ec2TagARN("launch-template", ec2TagAuthzLT), (*ec2AuthzFixture).putTagLaunchTemplate},
+		{ec2TagAuthzFleet, ec2TagARN("fleet", ec2TagAuthzFleet), (*ec2AuthzFixture).putTagFleet},
+		{ec2TagAuthzPGID, ec2TagARN("placement-group", ec2TagAuthzPGName), (*ec2AuthzFixture).putTagPlacementGroup},
+		{ec2TagAuthzKeyID, ec2TagARN("key-pair", ec2TagAuthzKeyName), (*ec2AuthzFixture).putTagKeyPair},
 	}
 }
 
@@ -123,6 +158,50 @@ func (f *ec2AuthzFixture) putTagNATGateway(t *testing.T, tags map[string]string)
 		emulator.EC2NATGateway{NatGatewayID: ec2TagAuthzNAT, Tags: ec2AuthzTags(tags)})
 }
 
+func (f *ec2AuthzFixture) putTagSnapshot(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "snapshot:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzSnapshot,
+		emulator.EC2Snapshot{SnapshotID: ec2TagAuthzSnapshot, Tags: ec2AuthzTags(tags)})
+}
+
+func (f *ec2AuthzFixture) putTagImage(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "image:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzImage,
+		emulator.EC2Image{ImageID: ec2TagAuthzImage, Tags: ec2AuthzTags(tags)})
+}
+
+func (f *ec2AuthzFixture) putTagLaunchTemplate(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "lt:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzLT,
+		emulator.EC2LaunchTemplate{LaunchTemplateID: ec2TagAuthzLT, Tags: ec2AuthzTags(tags)})
+}
+
+func (f *ec2AuthzFixture) putTagFleet(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "fleet:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzFleet,
+		emulator.EC2Fleet{FleetID: ec2TagAuthzFleet, Tags: ec2AuthzTags(tags)})
+}
+
+// The last two are keyed by name, so the record has to carry the ID a caller passes as
+// well as the name the key and the ARN use — which is the whole point of the reverse scan
+// [ec2TagAuthzPGID] and [ec2TagAuthzKeyID] exercise. A record missing its ID member
+// resolves to nothing at all, and the resource drops silently out of the decision.
+func (f *ec2AuthzFixture) putTagPlacementGroup(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "placement_group:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzPGName,
+		emulator.EC2PlacementGroup{
+			GroupName: ec2TagAuthzPGName, GroupID: ec2TagAuthzPGID, Tags: ec2AuthzTags(tags),
+		})
+}
+
+func (f *ec2AuthzFixture) putTagKeyPair(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "keypair:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzKeyName,
+		emulator.EC2KeyPair{
+			KeyName: ec2TagAuthzKeyName, KeyPairID: ec2TagAuthzKeyID, Tags: ec2AuthzTags(tags),
+		})
+}
+
 // ec2TagAuthzFixture is the #662 fixture with every taggable resource present and
 // untagged, which is the state a tagging call is decided against.
 func ec2TagAuthzFixture(t *testing.T, user string) *ec2AuthzFixture {
@@ -162,12 +241,15 @@ func ec2TagAuthzStatement(effect, action string, resources ...string) emulator.P
 // because the call resolved to the resource "*" and resourceMatches asks globMatch
 // whether the *statement's* ARN matches that "*", which it does not.
 //
-// Each subtest denies exactly one of the nine resources the request names, so it
+// Each subtest denies exactly one of the fifteen resources the request names, so it
 // fails unless the decision both reaches that resource and spells its ARN the way
-// the Service Authorization Reference does. Five of the nine are the interesting
-// ones — sg, igw, rtb, eip and nat abbreviate in the state key and do not in the
-// ARN — and a Deny on security-group/sg-… matching nothing is exactly what a
-// string-munged ARN would produce.
+// the Service Authorization Reference does. Nine of the fifteen are the interesting
+// ones. Five abbreviate in the state key and do not in the ARN — sg, igw, rtb, eip
+// and nat — and a Deny on security-group/sg-… matching nothing is exactly what a
+// string-munged ARN would produce. Two have an empty account field, where stamping the
+// account on makes an ARN-scoped Deny inert (#689's snapshot arm did). Two are named by
+// name in the ARN and by ID in the request, so a Deny naming the ARN AWS documents only
+// matches if the decision translated.
 func TestEC2_TagAuthz_ScopedDenyOnAnyNamedResourceBlocks(t *testing.T) {
 	for _, res := range ec2TagAuthzAllTypes() {
 		t.Run(res.arn, func(t *testing.T) {
@@ -476,7 +558,7 @@ func TestEC2_TagAuthz_PermissionBoundaryCoversEveryResource(t *testing.T) {
 
 	callErr := f.call(t, "CreateTags", ec2TagAuthzParams())
 	if !ec2AuthzDenied(t, callErr) {
-		t.Fatal("a boundary allowing only the first resource did not block a call naming nine")
+		t.Fatal("a boundary allowing only the first resource did not block a call naming fifteen")
 	}
 	var awsErr *emulator.AWSError
 	require.ErrorAs(t, callErr, &awsErr)

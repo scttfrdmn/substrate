@@ -121,7 +121,9 @@ func ec2SubnetMatchesFilter(subnet EC2Subnet, name string, values []string) bool
 // encoding/xml emits the parent element of a nested path even for a nil slice, so the
 // omitempty form would render <tagSet></tagSet> on every untagged subnet — the very thing
 // the samples say is absent. A nil pointer is omitempty-empty, so it disappears. Callers
-// decoding tagSet>item see no difference between the two shapes.
+// decoding tagSet>item see no difference between the two shapes. The wrapper was this
+// operation's own until #708 needed it for four more; it now lives beside [ec2TagItems]
+// as [ec2TagSetXML].
 type ec2SubnetItem struct {
 	// SubnetID is the subnet's ID.
 	SubnetID string `xml:"subnetId"`
@@ -151,13 +153,7 @@ type ec2SubnetItem struct {
 	MapPublicIPOnLaunch bool `xml:"mapPublicIpOnLaunch"`
 
 	// Tags are the subnet's tags, absent when it has none.
-	Tags *ec2SubnetTagSet `xml:"tagSet,omitempty"`
-}
-
-// ec2SubnetTagSet wraps a subnet's tags so an untagged subnet can omit tagSet entirely.
-type ec2SubnetTagSet struct {
-	// Items are the tags themselves.
-	Items []ec2TagItem `xml:"item"`
+	Tags *ec2TagSetXML `xml:"tagSet,omitempty"`
 }
 
 // ec2SubnetXML renders one stored subnet as its response element.
@@ -173,8 +169,6 @@ func ec2SubnetXML(subnet EC2Subnet) ec2SubnetItem {
 		DefaultForAz:        subnet.IsDefault,
 		MapPublicIPOnLaunch: subnet.MapPublicIPOnLaunch,
 	}
-	if tags := ec2TagItems(subnet.Tags); len(tags) > 0 {
-		item.Tags = &ec2SubnetTagSet{Items: tags}
-	}
+	item.Tags = ec2TagSet(subnet.Tags)
 	return item
 }

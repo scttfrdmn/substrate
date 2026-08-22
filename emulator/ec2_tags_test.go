@@ -1093,28 +1093,50 @@ func TestEC2_CreateTags_TagLimitAppliesToEveryTaggableResource(t *testing.T) {
 // TestEC2_CreateTags_UncountedResourceIDs pins that an ID the apply step will not touch
 // is not counted against either.
 //
-// Substrate's CreateTags ignores an ID it cannot resolve rather than rejecting it, so
-// counting one would refuse a request real EC2 accepts as a no-op — turning a
-// silent-success infidelity into a spurious-rejection one. The two rows are the two
-// ways an ID goes unresolved: a prefix substrate does not tag, and a well-formed prefix
-// naming nothing.
+// Substrate's CreateTags ignores a well-formed ID that names nothing rather than
+// rejecting it, so counting one would refuse a request real EC2 accepts as a no-op —
+// turning a silent-success infidelity into a spurious-rejection one. Since #708 that is
+// the *only* way an ID goes unresolved: a prefix naming no taggable type is refused with
+// InvalidID, which the subtest below pins. Until then this test's first row read
+// "a prefix substrate does not tag", id: "ami-0notaggable000001" — a premise #708
+// inverted, since an ami- ID is now taggable, so the row passed for the wrong reason.
+//
+// The rows cover all four resolution shapes, because "names nothing" is reached
+// differently by each: a computed state key that reads back empty (i-, ami-), and the
+// reverse ID→name scan that finds no record at all (pg-, key-), which is the one case
+// [ec2Taggable.resolved] exists for.
 func TestEC2_CreateTags_UncountedResourceIDs(t *testing.T) {
 	tests := []struct {
 		name string
 		id   string
 	}{
-		{name: "a prefix substrate does not tag", id: "ami-0notaggable000001"},
-		{name: "a taggable prefix naming nothing", id: "i-0doesnotexist00001"},
+		{name: "an instance ID naming nothing", id: "i-0doesnotexist00001"},
+		{name: "an image ID naming nothing", id: "ami-0doesnotexist0001"},
+		{name: "a placement group ID naming nothing", id: "pg-0doesnotexist0001"},
+		{name: "a key pair ID naming nothing", id: "key-0doesnotexist001"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			status, _, _ := ec2CreateTags(t, ts, tc.id, ec2NumberedTags("key", ec2TagLimit+1))
+			status, code, message := ec2CreateTags(t, ts, tc.id, ec2NumberedTags("key", ec2TagLimit+1))
 			assert.Equal(t, http.StatusOK, status,
-				"an ID the apply step ignores must not be counted against")
+				"an ID the apply step ignores must not be counted against: %s %s", code, message)
 		})
 	}
+
+	t.Run("an untaggable prefix is refused before the count", func(t *testing.T) {
+		// A transit gateway: real EC2 tags one, substrate does not model it. The refusal
+		// names InvalidID rather than TagLimitExceeded even though the request carries one
+		// tag too many, which is the ordering [ec2CheckTagResourceIDs] documents — the
+		// whole request is refused before any per-resource count is read.
+		ts := newEC2TestServer(t)
+		status, code, message := ec2CreateTags(t, ts, "tgw-0abc11112222333d",
+			ec2NumberedTags("key", ec2TagLimit+1))
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidID", code)
+		assert.Equal(t, ec2InvalidTagIDMessage("tgw-0abc11112222333d"), message)
+	})
 }
 
 // The tag length limits, restated here because an external test package cannot see

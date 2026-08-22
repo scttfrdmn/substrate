@@ -125,7 +125,7 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 	// An interface the launch creates has no ID yet, so it is the wildcard; one the
 	// request brings by ID is named, because a policy can meaningfully scope to it.
 	// Neither carries tags: substrate stores no standalone taggable ENI record, and
-	// ec2TaggableStateKey has no eni- arm to read one through.
+	// ec2TaggableResource has no eni- arm to read one through.
 	//
 	// This is the resource AWS's own subnet guardrail is written against, so it is
 	// where ec2:Subnet and ec2:Vpc go — both of them, on every interface the launch
@@ -182,9 +182,15 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 // [ec2AuthzRunInstancesResources]' rule for a resource the request does not name,
 // and it is the ID's own handler that owes the answer: AWS documents an
 // unparseable tagging ID as InvalidID — "The specified ID for the resource you are
-// trying to tag is not valid" — not AccessDenied, and substrate's handler treats
-// it as a no-op. A request naming only such IDs returns nil and is decided exactly
-// as it was before.
+// trying to tag is not valid" — not AccessDenied, and substrate's handler answers
+// exactly that (#708). A request naming only such IDs returns nil and is refused by
+// the handler rather than by the policy.
+//
+// A well-formed pg- or key- ID that resolves to no record is skipped for a different
+// reason: AWS's ARN for a placement group and a key pair is by *name*, so with no
+// record there is no name to build one from. Inventing an ID-form ARN would decide the
+// call against a string AWS never emits; the handler treats an absent resource as a
+// no-op regardless, so nothing is authorized away.
 func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
 	if req.Operation != "CreateTags" && req.Operation != "DeleteTags" {
 		return nil
@@ -193,15 +199,15 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 	region := reqCtx.Region
 	var out []authzResource
 	for _, id := range extractIndexedParams(req.Params, "ResourceId") {
-		stateKey, arnType, ok := ec2TaggableResource(reqCtx, id)
-		if !ok {
+		target, ok := ec2TaggableResource(state, reqCtx, id)
+		if !ok || !target.resolved() {
 			continue
 		}
 		out = append(out, authzResource{
-			ARN: "arn:aws:ec2:" + region + ":" + acct + ":" + arnType + "/" + id,
+			ARN: target.arn(region, acct),
 			// The same state key the handler will read and write, so the tags a
 			// condition is evaluated against are the ones the call is about to change.
-			Tags: ec2AuthzTagsFor(state, stateKey),
+			Tags: ec2AuthzTagsFor(state, target.stateKey),
 		})
 	}
 	return out

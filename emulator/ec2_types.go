@@ -200,6 +200,14 @@ type EC2KeyPair struct {
 	// CreatedAt is the RFC3339 timestamp when the key pair was created.
 	CreatedAt string `json:"createdAt,omitempty"`
 
+	// Tags holds key-value metadata tags.
+	//
+	// Spelled "tags" like every other EC2 record's, rather than following this struct's
+	// camelCase members: that is the member [EC2Plugin.applyTagsToResource] and
+	// [EC2Plugin.scanTags] read and write on every type, and a key pair spelling it
+	// differently would be tagged into a member nothing reports (#708).
+	Tags []EC2Tag `json:"tags,omitempty"`
+
 	// AccountID is the AWS account that owns the key pair.
 	AccountID string `json:"accountId"`
 
@@ -613,8 +621,34 @@ func generatePlacementGroupID() string {
 
 // ec2PlacementGroupStateKey returns the state key for a placement group (keyed
 // by name, which is unique per account/region).
+//
+// Keyed by name rather than by ID because that is what every placement-group operation
+// takes: CreatePlacementGroup, DeletePlacementGroup and DescribePlacementGroups all name
+// a GroupName and none accepts a group ID. AWS's ARN for the type is by name too. Only
+// CreateTags names a pg- ID, and it resolves through [ec2NameKeyedResource] rather than
+// changing the key — a rekey would orphan every record an earlier substrate wrote.
 func ec2PlacementGroupStateKey(accountID, region, groupName string) string {
 	return "placement_group:" + accountID + "/" + region + "/" + groupName
+}
+
+// ec2KeyPairStateKey returns the state key for a key pair (keyed by name, which is unique
+// per account/region).
+//
+// The same shape a placement group's key has, for the same reason: KeyName is what
+// CreateKeyPair, ImportKeyPair and DescribeKeyPairs take, and AWS's ARN for the type is
+// arn:${Partition}:ec2:${Region}:${Account}:key-pair/${KeyPairName}. DeleteKeyPair accepts
+// either, and scans for a KeyPairId.
+func ec2KeyPairStateKey(accountID, region, keyName string) string {
+	return "keypair:" + accountID + "/" + region + "/" + keyName
+}
+
+// ec2LaunchTemplateStateKey returns the state key for a launch template.
+//
+// Extracted from six inline copies by #708, which needed a seventh for CreateTags' lt-
+// arm. The name index is a separate key ("lt_by_name:…") holding the ID, so a template is
+// reachable by either and stored once.
+func ec2LaunchTemplateStateKey(accountID, region, launchTemplateID string) string {
+	return "lt:" + accountID + "/" + region + "/" + launchTemplateID
 }
 
 // EC2ElasticIP represents an Amazon EC2 Elastic IP address.

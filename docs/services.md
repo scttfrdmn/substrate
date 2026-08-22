@@ -2787,7 +2787,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
-| CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking) |
+| CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
 | DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters |
 | DeleteLaunchTemplate | |
 | CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
@@ -2797,9 +2797,9 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); accepts a `vol-` or `snap-` ID like [any other taggable ID](#a-volume-carries-tags); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
-| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
-| DescribeTags | Every tag in the region, across thirteen resource types. Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken`, and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all fifteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same fifteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DescribeTags | Every tag in the region, across [the same fifteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken`, and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
 ### One rule for an unrecognized filter name
 
@@ -4623,6 +4623,92 @@ The rest of the `CreateSnapshot` family — `CreateSnapshots`, `CopySnapshot`,
 `ModifySnapshotAttribute`, `DescribeSnapshotAttribute` and `ResetSnapshotAttribute` — is
 still absent and answers `InvalidAction`.
 
+#### Every taggable ID prefix is reachable
+
+`CreateTags` resolved ten ID prefixes and **silently ignored the rest**: a request naming an
+`ami-`, `lt-`, `fleet-`, `pg-` or `key-` ID answered `<return>true</return>` and wrote
+nothing. Every one of the five was well-formed and named a resource substrate stores, so
+there was no way for a caller to tell — the answer a consumer's tag-everything step reads is
+the same answer it gets when the tags land.
+
+Fifteen prefixes now resolve, on `CreateTags` and `DeleteTags` alike:
+
+| Prefix | Resource type | Prefix | Resource type |
+|---|---|---|---|
+| `i-` | `instance` | `snap-` | `snapshot` |
+| `vpc-` | `vpc` | `ami-` | `image` |
+| `subnet-` | `subnet` | `lt-` | `launch-template` |
+| `sg-` | `security-group` | `fleet-` | `fleet` |
+| `igw-` | `internet-gateway` | `pg-` | `placement-group` |
+| `rtb-` | `route-table` | `key-` | `key-pair` |
+| `eipalloc-` | `elastic-ip` | `vol-` | `volume` |
+| `nat-` | `natgateway` | | |
+
+**A prefix naming no taggable type is now refused** rather than ignored, before anything is
+written:
+
+```
+InvalidID: The ID 'tgw-0abc11112222333d' for the resource you are trying to tag is not
+valid. Ensure that you provide the full resource ID; for example, ami-2bb65342 for an AMI.
+```
+
+The status is `400`, and the check runs over every `ResourceId.N` before the first tag is
+applied — so a request naming a good instance ID first and a bad ID second tags neither, the
+same all-or-nothing rule [the reserved-key check](#reserved-tag-keys) follows.
+
+A **well-formed prefix naming nothing** stays a no-op at HTTP 200, and is not counted against
+the [50-tag limit](#the-50-tag-per-resource-limit): there is nothing to apply the tags to, so
+refusing would reject a request real EC2 accepts.
+
+Two of the fifteen are keyed by **name** rather than by ID in substrate's state, and by name
+in AWS's ARN as well — `arn:aws:ec2:${Region}:${Account}:placement-group/${PlacementGroupName}`
+and `…:key-pair/${KeyPairName}`. `CreateTags` takes the `pg-`/`key-` form and translates by
+scanning the namespace for the ID inside each record; `DescribeTags` reports the `resourceId`
+member the record carries, not the name its key ends in, so what comes back is what a caller
+can pass in again.
+
+Whether real `CreateTags` takes a placement group by ID or by name **is not settled by AWS's
+documentation**: the ARN is by name and `DescribePlacementGroups` publishes no `group-id`
+filter, but the client-error table publishes `InvalidPlacementGroupId.Malformed` "in the form
+`pg-xxxxxxxxxxxxxxxxx`", which only an ID-taking operation can raise. Substrate accepts the
+`pg-` form.
+
+Three things had to change alongside the resolution:
+
+- **A launch template's own tags were settable by no path at all.** The `TagSpecification` in
+  `CreateLaunchTemplate`'s `LaunchTemplateData` is scoped to the resources a *launch* creates
+  — "for the resources that are created when an instance is launched" — which is a different
+  parameter from the top-level `TagSpecification.N`, "the tags to apply to the launch
+  template on creation. To tag the launch template, the resource type must be
+  `launch-template`". Substrate read only the inner one. It now reads both, each on its own
+  scope.
+- **`CreateKeyPair`, `ImportKeyPair` and `CreatePlacementGroup` honour `TagSpecification.N`**
+  and echo the result, and `DescribeKeyPairs`/`DescribePlacementGroups` render `tagSet`.
+  `EC2KeyPair` had no tags field to write to.
+- **An `image` and a `snapshot` ARN have an empty account field** —
+  `arn:${Partition}:ec2:${Region}::image/${ImageId}` — where the other thirteen carry
+  `${Account}`. The authorizer stamped the account on unconditionally, which makes an
+  ARN-scoped `Deny` naming an AMI inert and a least-privilege `Allow` unable to grant the
+  call. The `snap-` arm shipped with that defect in
+  [#689](https://github.com/scttfrdmn/substrate/issues/689) and is fixed here too.
+
+##### An untagged resource omits `tagSet`
+
+Seven renderers previously answered `<tagSet></tagSet>` for a resource with no tags and now
+omit the element: `CreateKeyPair`, `ImportKeyPair`, `DescribeKeyPairs`,
+`CreatePlacementGroup`, `DescribePlacementGroups`, `CreateLaunchTemplate` and
+`DescribeLaunchTemplates`. This is a **wire change**, and it follows AWS's own examples —
+`CreateLaunchTemplate`'s Example 1 and `CreatePlacementGroup`'s Example 2 each create an
+untagged resource and neither response carries a `tagSet` at all, while `CreateKeyPair`'s
+tagged example does. An SDK distinguishes an absent list from an empty one, which is the same
+distinction `DescribeTags` keeps `<value/>` present-but-empty for.
+
+`DescribeFleets` is the one place the old shape stays. Its API reference page publishes **no
+example response**, so there is no untagged sample to follow and changing it would be
+substrate guessing rather than substrate reading. `DescribeSnapshots` keeps its
+present-but-empty element for the opposite reason: its own page shows it. Each response
+answers to the page that documents it.
+
 #### Finding a resource by tag
 
 `DescribeTags` — the operation whose whole job is this question — did not exist until
@@ -4637,16 +4723,12 @@ It reports every tag stored in the request's account and region. Every EC2 recor
 `<namespace>:<account>/<region>/<id>`, so the scan is regional by construction, which is also
 real EC2's scope for this operation.
 
-**The scan is deliberately wider than what `CreateTags` can write.** `CreateTags` reaches
-ten resource types; `DescribeTags` reads thirteen, adding `image`, `launch-template` and
-`fleet` — types whose tags arrive through their own create call's `TagSpecification.N` and
-cannot be set through `CreateTags` at all
-([#695](https://github.com/scttfrdmn/substrate/issues/695) is the remaining three;
-`snapshot` was in this list until [#689](https://github.com/scttfrdmn/substrate/issues/689)
-gave `CreateTags` a `snap-` arm). Reporting only the
-writable types would hide tags a caller had successfully applied. `placement-group` is the one
-type carrying a `Tags` field that stays out: nothing writes it, and its records are keyed by
-group *name* where AWS's `TagDescription` reports an ID.
+**The scan and what `CreateTags` can write are now the same fifteen types.** They were not:
+`DescribeTags` read thirteen and `CreateTags` reached ten, so an `image`, `launch-template`
+or `fleet` tag could be *reported* and not *changed*, while a `placement-group` or `key-pair`
+tag could be neither — both were absent from the scan as well. See
+[every taggable ID prefix is reachable](#every-taggable-id-prefix-is-reachable) for the
+prefixes and for what a request naming something else now answers.
 
 | Behaviour | Answer |
 |---|---|
