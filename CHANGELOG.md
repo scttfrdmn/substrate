@@ -506,6 +506,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are substrate's.
 
 ### Fixed
+- **Condition key *names* are matched case-insensitively** (#704). AWS: "Context key **names**
+  are not case-sensitive. For example, including the `aws:SourceIP` context key is equivalent to
+  testing for `AWS:SourceIp`. Case-sensitivity of context key **values** depends on the
+  condition operator that you use." Substrate matched the name byte-for-byte, so a policy
+  spelling a key `ec2:createaction`, `AWS:RequestTag/Env` or `aws:tagkeys` — every one of which
+  real IAM evaluates — was silently unmatched. It failed in **both** directions: an `Allow`
+  written that way was an implicit deny, a false refusal a policy author sees immediately; a
+  `Deny` written that way was **inert**, allowing what AWS refuses, which a policy author does
+  not see at all. It was global to the evaluator rather than specific to any key, and was found
+  while implementing the second `ec2:CreateTags` pass (#691).
+
+  The fold is a **read-time** resolution in the three functions that already take both context
+  maps — `condContextValue`, `condRequestValues` and `unsetConditionKeys` — so no operator arm
+  changes and `Null` is fixed with them. An exact hit is still answered by a single map read, so
+  every canonically-spelled key (which is every key any substrate producer writes) costs nothing
+  and behaves byte-identically. Write-time canonicalization was rejected: `requestTagKeys` does a
+  case-sensitive `CutPrefix` on `aws:RequestTag/`, so lowercasing the stored name would empty
+  `aws:TagKeys` and flip every `ForAllValues:StringEquals` + `Null: false` policy — AWS's own
+  recommended pattern.
+
+  **The tag suffix folds too**, which is the opposite of what #704 asked for. AWS states it in
+  the same breath as the key–value form: "Key names are not case-sensitive. This means that if
+  you specify `"aws:ResourceTag/TagKey1": "Value1"` in the condition element of your policy, then
+  the condition matches a resource tag key named either `TagKey1` or `tagkey1`, but not both."
+  The case-sensitive rule #704 remembers governs a tag key used as a condition *value* —
+  `aws:TagKeys` — which is a different thing; both halves are now pinned so the distinction
+  cannot be collapsed. AWS's "but not both" leaves unstated which spelling wins, and AWS names
+  the resulting hazard rather than resolving it ("the key name matches both tags, but only one
+  value matches. This can result in unexpected condition failures"), so substrate answers with
+  the **first in sorted order** — never with whichever key Go's randomized map iteration reached,
+  which a decision that must replay identically from the event log cannot depend on.
+
+  What deliberately does **not** fold: the condition *value* (per each operator's own
+  definition, which is why `StringEqualsIgnoreCase` exists as a separate operator), and the
+  operator and its set qualifier — `stringequals` and `forallvalues:StringEquals` still deny,
+  since AWS's sentence is about key names. A simulation's caller-supplied `ContextEntries` is
+  the only way two spellings of one key can enter substrate at all, so two such entries are now
+  collapsed to one, the later winning under the earlier's spelling, and a `ContextEntry`
+  overrides a derived `aws:PrincipalArn`/`aws:ResourceAccount` whatever its case — previously
+  both survived side by side and which one decided was a matter of sort order.
+  `MissingContextValues` still reports the **policy's** spelling, because that string reaches
+  the wire and a caller compares it against the document they submitted; a key the evaluator
+  resolved by folding is no longer reported there at all.
+
 - **A zone ID takes the shape AWS publishes** (#712). The derivation produced `ue11-az1` for
   `us-east-1` — the wrong prefix and a doubled digit — where AWS publishes `use1-az1`, and the
   code's own comment claimed `use1`. Nothing caught it because a zone ID was only ever

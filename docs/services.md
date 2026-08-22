@@ -972,6 +972,57 @@ answer is worse than a missing one:
 A consumer whose preflight depends on an SCP boundary cannot get that answer here, and
 should not read an `allowed` as covering it.
 
+### Condition key *names* are matched case-insensitively
+
+AWS: "Context key **names** are not case-sensitive. For example, including the
+`aws:SourceIP` context key is equivalent to testing for `AWS:SourceIp`.
+Case-sensitivity of context key **values** depends on the condition operator that you
+use."
+
+Substrate follows both halves. A policy naming `ec2:createaction`, `AWS:RequestTag/Env`
+or `aws:tagkeys` is evaluated identically to its canonical spelling, in `Allow` and
+`Deny` position alike — and every operator still compares its *value* exactly as its own
+definition says, which is why `StringEquals` and `StringEqualsIgnoreCase` remain
+different operators.
+
+The name was previously matched byte-for-byte, which failed in both directions: an
+`Allow` written with a differently-cased name was an implicit deny — a false refusal —
+and a `Deny` written that way was **inert**, allowing what AWS refuses.
+
+| Folded | Not folded |
+|---|---|
+| The whole key name, including the tag suffix of `aws:RequestTag/<key>` and `aws:ResourceTag/<key>` | The condition **value**, per the operator's own definition |
+| The `aws:` / `ec2:` / `sts:` service prefix | A tag key carried as a value, in `aws:TagKeys` — and substrate's own tag rules, which AWS documents as case-sensitive |
+| Names supplied through a simulation's `ContextEntries` | The **operator** and its set qualifier: `stringequals` and `forallvalues:StringEquals` are not operators substrate evaluates, and [deny rather than being read as their canonical spellings](#multivalued-condition-keys-forallvalues-and-foranyvalue) |
+
+**The tag suffix folds too**, which is AWS's rule stated in the same breath as the
+key–value form: "Key names are not case-sensitive. This means that if you specify
+`"aws:ResourceTag/TagKey1": "Value1"` in the condition element of your policy, then the
+condition matches a resource tag key named either `TagKey1` or `tagkey1`, **but not
+both**." A tag key compared as a *value* is a different thing and stays case-sensitive.
+
+**When both spellings exist, substrate answers with the first in sorted order.** AWS
+names this hazard without resolving it — "you might tag an Amazon EC2 instance with
+`ec2=test1` and `EC2=test2` … the key name matches both tags, but only one value matches.
+This can result in unexpected condition failures" — so substrate makes the choice
+explicit rather than leaving it to Go's randomized map iteration, which a decision that
+must replay identically from the event log cannot depend on. An **exact** hit always wins
+over a folded one, whatever the folded one sorts as.
+
+Two notes for a caller reading a simulation:
+
+- A key the evaluator resolved by folding case is **not** reported in
+  `MissingContextValues`. Reporting it would make the simulation contradict the
+  enforcement it exists to predict.
+- A key that genuinely is absent is reported **as the policy spelled it**, not
+  canonicalized — that string is compared against the document the caller submitted.
+
+Only `ContextEntries` can introduce two spellings of one key on the way in; every
+producer inside substrate writes a canonical literal. Two entries whose names differ only
+by case are one key, and the later one wins, under the earlier one's spelling. A
+`ContextEntry` also overrides a derived `aws:PrincipalArn` or `aws:ResourceAccount`
+however it is cased.
+
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 
 A condition key is either **single-valued** — at most one value in the request context —
@@ -4011,10 +4062,12 @@ The key is **absent** on a direct `CreateTags` or `DeleteTags`, which is what ma
 statement mean "tag during a launch, and not otherwise" — AWS's "Users cannot tag existing
 resources". A policy wanting to refuse only standalone tagging gates on `"Null":
 {"ec2:CreateAction": "false"}`, the one construct that tells an absent key apart from one
-present with a different value. The value is case-sensitive; the key *name* is matched
-case-sensitively too, where AWS documents key names as case-insensitive — a pre-existing
-property of substrate's evaluator, global to every condition key rather than specific to this
-one, tracked as [#704](https://github.com/scttfrdmn/substrate/issues/704).
+present with a different value. The value is case-sensitive, so a grant written for
+`CreateVolume` does not admit a `RunInstances`; the key *name* is not, so a policy writing
+`ec2:createaction` is evaluated exactly as one writing `ec2:CreateAction` — see [condition
+key names are matched
+case-insensitively](#condition-key-names-are-matched-case-insensitively), which is global
+to the evaluator rather than specific to this key.
 
 **Tags a launch template supplies are authorized the same way**, per AWS: "The
 `ec2:CreateTags` action is also evaluated if tags are provided in a launch template." The

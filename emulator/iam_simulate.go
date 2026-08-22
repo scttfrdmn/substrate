@@ -258,6 +258,14 @@ func (p *IAMPlugin) parseSimulateRequest(req *AWSRequest) (*iamSimulateRequest, 
 //
 // ContextKeyType is recorded by AWS but not consulted here — every condition operator
 // substrate implements compares strings.
+//
+// Two entries whose names differ only by case are one key, since that is how the
+// evaluator resolves a name (#704) — so the later entry overwrites the earlier, under
+// the spelling the earlier used. Letting both survive would leave the answer to
+// [condResolveKey]'s sorted tie-break, making a caller who sent AWS:PrincipalArn and
+// aws:PrincipalArn simulated against whichever sorts first rather than against what
+// they last said. Entries arrive in wire-index order, so "later" is the caller's own
+// ordering and not Go's.
 func simulationContextEntries(params map[string]string) (single map[string]string, multi map[string][]string) {
 	entries := iamMemberStructs(params, "ContextEntries")
 	if len(entries) == 0 {
@@ -269,6 +277,9 @@ func simulationContextEntries(params map[string]string) (single map[string]strin
 		name := entry["ContextKeyName"]
 		if name == "" {
 			continue
+		}
+		if existing, ok := condResolveKey(name, single); ok {
+			name = existing
 		}
 		values := iamMemberList(entry, "ContextKeyValues")
 		if len(values) == 0 {
@@ -606,9 +617,12 @@ func simulationDecision(decision string) string {
 // would otherwise report the key as a missing context value when the caller had in
 // fact told substrate what it is, through a differently-named parameter.
 //
-// An explicit ContextEntry wins over both. A caller who names a key is stating what
-// to simulate with, and overriding that with a derived value would make the
-// parameter unusable.
+// An explicit ContextEntry wins over both, whatever case it is spelled in. A caller
+// who names a key is stating what to simulate with, and overriding that with a derived
+// value would make the parameter unusable — which is what a plain assignment would do
+// for AWS:PrincipalArn before #704, since it left the derived aws:PrincipalArn in the
+// map beside it and the evaluator would then resolve to whichever sorted first.
+// Deleting the folded-equal name is what makes the caller's entry win.
 func simulationConditionContext(params *iamSimulateRequest, callerArn string) map[string]string {
 	ctx := make(map[string]string, len(params.context)+2)
 	if callerArn != "" {
@@ -618,6 +632,9 @@ func simulationConditionContext(params *iamSimulateRequest, callerArn string) ma
 		ctx["aws:ResourceAccount"] = params.ResourceOwner
 	}
 	for key, value := range params.context {
+		if derived, ok := condResolveKey(key, ctx); ok && derived != key {
+			delete(ctx, derived)
+		}
 		ctx[key] = value
 	}
 	return ctx
