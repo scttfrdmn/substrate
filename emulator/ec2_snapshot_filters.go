@@ -13,9 +13,15 @@ import (
 // snapshot-id — and silently ignored the other thirteen, so "the snapshots of volume
 // vol-x" answered with every snapshot in the region. That is the failure mode an ignored
 // filter always has: a caller cannot tell an unfiltered answer from a filtered one.
-func ec2SnapshotMatchesFilters(snap EC2Snapshot, filters map[string][]string) bool {
+//
+// observed carries the state and progress *this* request reports for the snapshot, which is
+// what the status and progress filters compare against. They must not read the record: a
+// seeded snapshot's record still says completed while the observation says pending (#715), so
+// filtering on the record would make `status=pending` select nothing at the very moment a
+// caller's poll loop is being told the snapshot is pending.
+func ec2SnapshotMatchesFilters(snap EC2Snapshot, observed ec2SnapshotObservation, filters map[string][]string) bool {
 	for name, values := range filters {
-		if !ec2SnapshotMatchesFilter(snap, name, values) {
+		if !ec2SnapshotMatchesFilter(snap, observed, name, values) {
 			return false
 		}
 	}
@@ -24,12 +30,12 @@ func ec2SnapshotMatchesFilters(snap EC2Snapshot, filters map[string][]string) bo
 
 // ec2SnapshotMatchesFilter evaluates a single DescribeSnapshots filter against a snapshot.
 //
-// Ten of AWS's fourteen names are answerable from [EC2Snapshot]. The four that are not —
-// owner-alias, progress, storage-tier and transfer-type — are inert, per the rule
-// [ec2FilterSpec] states: substrate renders none of those members either, so a filter over
-// them has nothing to compare against. A name outside all fourteen never arrives, because
-// [ec2SnapshotFilterSpec] refuses it before the scan (#687).
-func ec2SnapshotMatchesFilter(snap EC2Snapshot, name string, values []string) bool {
+// Eleven of AWS's fourteen names are answerable from [EC2Snapshot] and the observation
+// alongside it. The three that are not — owner-alias, storage-tier and transfer-type — are
+// inert, per the rule [ec2FilterSpec] states: substrate renders none of those members either,
+// so a filter over them has nothing to compare against. A name outside all fourteen never
+// arrives, because [ec2SnapshotFilterSpec] refuses it before the scan (#687).
+func ec2SnapshotMatchesFilter(snap EC2Snapshot, observed ec2SnapshotObservation, name string, values []string) bool {
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range snap.Tags {
 			if t.Key == tagKey && ec2FilterAccepts(values, t.Value) {
@@ -50,6 +56,12 @@ func ec2SnapshotMatchesFilter(snap EC2Snapshot, name string, values []string) bo
 		// nothing. It is still evaluated rather than inert, because a caller who names
 		// another account is asking a question whose honest answer is "none".
 		return ec2FilterAccepts(values, snap.AccountID)
+	case "progress":
+		// "The progress of the snapshot, as a percentage (for example, 80%)" — compared as
+		// the string startTime's sibling element renders, so a caller filters on `100%`
+		// rather than on `100`. Answerable only since #715 gave substrate a progress to
+		// render at all; before that this name was one of four inert ones.
+		return ec2FilterAccepts(values, observed.Progress)
 	case "snapshot-id":
 		return ec2FilterAccepts(values, snap.SnapshotID)
 	case "start-time":
@@ -63,7 +75,13 @@ func ec2SnapshotMatchesFilter(snap EC2Snapshot, name string, values []string) bo
 	case "status":
 		// AWS names the filter "status" and the response element "status" while the API
 		// model calls the member State; EC2Snapshot follows the model.
-		return ec2FilterAccepts(values, snap.State)
+		//
+		// AWS's filter documents three valid values ("pending | completed | error") where
+		// its member documents five, adding recoverable and recovering. Nothing is
+		// validated here either way — a value outside both lists simply matches nothing,
+		// which is what a filter comparing strings does — but the divergence is real and
+		// [ec2SnapshotStates] records which of the two substrate follows.
+		return ec2FilterAccepts(values, observed.State)
 	case "tag-key":
 		for _, t := range snap.Tags {
 			if ec2FilterAccepts(values, t.Key) {

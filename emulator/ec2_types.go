@@ -557,7 +557,14 @@ type EC2Snapshot struct {
 	// VolumeSize is the size of the volume, in GiB.
 	VolumeSize int64 `json:"volume_size"`
 
-	// State is the snapshot state: always "completed" in Substrate.
+	// State is the snapshot state, one of [ec2SnapshotStates]. Every snapshot Substrate
+	// writes is "completed": nothing advances a snapshot asynchronously, so there is no
+	// transition for the record to hold.
+	//
+	// A seeded progression (#715) does not change that. It overlays what an *observation*
+	// reports — see [EC2Plugin.observeSnapshotStatus] — leaving this member "completed", so
+	// clearing the seed makes the snapshot read completed again and a snapshot with no seed
+	// against it is untouched.
 	State string `json:"state"`
 
 	// StartTime is the RFC3339 timestamp when the snapshot was started.

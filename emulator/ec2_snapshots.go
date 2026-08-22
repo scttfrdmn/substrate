@@ -66,16 +66,22 @@ func (p *EC2Plugin) ec2SnapshotResolver(reqCtx *RequestContext) func(string) (EC
 //
 // # The state it reports
 //
-// status is "completed" immediately, not the "pending" AWS's own sample response shows.
-// Substrate advances no snapshot asynchronously — CreateImage's snapshots have always
-// been born completed — so a caller's waiter succeeds on its first poll rather than
-// depending on wall-clock time. A seedable pending → completed progression is the shape
-// that would let a test exercise the waiting path, and it is a follow-up rather than
-// something this operation should invent.
+// status is "completed" immediately by default, not the "pending" AWS's own sample response
+// shows: substrate advances no snapshot asynchronously — CreateImage's snapshots have always
+// been born completed — so a caller's waiter succeeds on its first poll rather than depending
+// on wall-clock time.
 //
-// progress is not rendered, for the reason describeSnapshots does not render it either:
-// substrate stores none, and status already carries the whole of what a completed
-// snapshot's progress would say.
+// A "*" seed in place changes what this reports (#715), which is what makes the whole
+// create → poll → completed sequence testable rather than only its tail: a snapshot created
+// under a seed is born in the seeded pending state at 0%, so a consumer's waiter has something
+// to wait for. The record is still written as "completed" — a seed governs observations, never
+// state — and [EC2Plugin.peekSnapshotStatus] is deliberately the non-consuming read, so
+// creating a snapshot does not spend one of the polls the seed budgeted.
+//
+// progress is rendered here where it was not before #715, because CreateSnapshot returns a
+// Snapshot and AWS documents progress as one of its members — its own sample response shows
+// `<progress>60%</progress>`. statusMessage is not rendered, because AWS scopes it: "this
+// parameter is only returned by DescribeSnapshots".
 func (p *EC2Plugin) createSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	volumeID := req.Params["VolumeId"]
 	if volumeID == "" {
@@ -119,11 +125,18 @@ func (p *EC2Plugin) createSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("ec2 createSnapshot state.Put: %w", err)
 	}
 
+	observed, err := p.peekSnapshotStatus(snap)
+	if err != nil {
+		return nil, err
+	}
+
 	// Member order follows AWS's own sample response — snapshotId, volumeId, status,
-	// startTime, ownerId, volumeSize, description — with the two documented elements it
-	// does not show appended. tagSet carries no omitempty for the reason CreateVolume's
-	// does not: an SDK maps a present-but-empty element to an empty slice where it maps an
-	// omitted one to nil, so omitting it would report "unknown" where AWS reports "none".
+	// startTime, progress, ownerId, volumeSize, description — with the one documented element
+	// it does not show appended. progress carries no omitempty because it is always rendered:
+	// AWS's sample shows it beside a pending status, and an unseeded snapshot is complete.
+	// tagSet carries none either, for the reason CreateVolume's does not: an SDK maps a
+	// present-but-empty element to an empty slice where it maps an omitted one to nil, so
+	// omitting it would report "unknown" where AWS reports "none".
 	type response struct {
 		XMLName     xml.Name     `xml:"CreateSnapshotResponse"`
 		XMLNS       string       `xml:"xmlns,attr"`
@@ -131,6 +144,7 @@ func (p *EC2Plugin) createSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 		VolumeID    string       `xml:"volumeId"`
 		Status      string       `xml:"status"`
 		StartTime   string       `xml:"startTime"`
+		Progress    string       `xml:"progress"`
 		OwnerID     string       `xml:"ownerId"`
 		VolumeSize  int64        `xml:"volumeSize"`
 		Description string       `xml:"description,omitempty"`
@@ -141,8 +155,9 @@ func (p *EC2Plugin) createSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 		XMLNS:       "http://ec2.amazonaws.com/doc/2016-11-15/",
 		SnapshotID:  snap.SnapshotID,
 		VolumeID:    snap.VolumeID,
-		Status:      snap.State,
+		Status:      observed.State,
 		StartTime:   snap.StartTime,
+		Progress:    observed.Progress,
 		OwnerID:     snap.AccountID,
 		VolumeSize:  snap.VolumeSize,
 		Description: snap.Description,

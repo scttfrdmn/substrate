@@ -85,10 +85,15 @@ func (p *EC2Plugin) ec2InstanceAttachedVolumes(reqCtx *RequestContext, instanceI
 // DescribeSnapshots' responses both name it **status**. A caller unmarshalling
 // SnapshotInfo reads State; sharing a struct would hand them an empty string.
 //
+// progress arrived with the seedable progression (#715). AWS describes SnapshotInfo's member
+// as "progress this snapshot has made towards completing", where the Snapshot type's is "the
+// progress of the snapshot, as a percentage" — the same value, described twice; both render the
+// percent-suffixed form AWS's examples and its progress filter show.
+//
 // The members substrate does not render are omissions with reasons rather than oversights:
 //
-//   - progress — substrate stores none, the same reason DescribeSnapshots and CreateSnapshot
-//     render none. It arrives with the seedable progression in #715.
+//   - statusMessage — SnapshotInfo has no such member. AWS publishes it on Snapshot alone, and
+//     scopes it further still: "this parameter is only returned by DescribeSnapshots."
 //   - availabilityZone — documented as "The Availability Zone or Local Zone of the
 //     snapshots", and the singular CreateSnapshot response has no such member at all, so it
 //     reads as the placement member for a Location=local snapshot. Substrate models only
@@ -103,6 +108,7 @@ type ec2SnapshotInfoItem struct {
 	VolumeSize  int64        `xml:"volumeSize"`
 	State       string       `xml:"state"`
 	StartTime   string       `xml:"startTime"`
+	Progress    string       `xml:"progress"`
 	OwnerID     string       `xml:"ownerId"`
 	Description string       `xml:"description,omitempty"`
 	Encrypted   bool         `xml:"encrypted"`
@@ -145,7 +151,10 @@ type ec2SnapshotInfoItem struct {
 //
 // state is "completed" at once, as CreateSnapshot's status is, and for the same reason:
 // substrate advances no snapshot asynchronously, so a waiter succeeds on its first poll
-// instead of depending on wall-clock time.
+// instead of depending on wall-clock time. A "*" seed changes what every snapshot in the set
+// reports (#715), through the same non-consuming [EC2Plugin.peekSnapshotStatus] the singular
+// operation uses — so snapshotting a five-volume instance under a two-poll seed leaves each of
+// the five with its own full two polls, rather than spending the budget five times over.
 func (p *EC2Plugin) createSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	instanceID := req.Params["InstanceSpecification.InstanceId"]
 	if instanceID == "" {
@@ -238,12 +247,17 @@ func (p *EC2Plugin) createSnapshots(reqCtx *RequestContext, req *AWSRequest) (*A
 		if err := p.ec2PutSnapshot(reqCtx, snap); err != nil {
 			return nil, err
 		}
+		observed, obsErr := p.peekSnapshotStatus(snap)
+		if obsErr != nil {
+			return nil, obsErr
+		}
 		items = append(items, ec2SnapshotInfoItem{
 			SnapshotID:  snap.SnapshotID,
 			VolumeID:    snap.VolumeID,
 			VolumeSize:  snap.VolumeSize,
-			State:       snap.State,
+			State:       observed.State,
 			StartTime:   snap.StartTime,
+			Progress:    observed.Progress,
 			OwnerID:     snap.AccountID,
 			Description: snap.Description,
 			Encrypted:   snap.Encrypted,
