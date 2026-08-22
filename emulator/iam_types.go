@@ -1,9 +1,11 @@
 package emulator
 
 import (
+	"bytes"
 	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -174,22 +176,69 @@ func (p *PolicyPrincipal) MarshalJSON() ([]byte, error) {
 }
 
 // StringOrSlice unmarshals either a JSON string or an array of strings.
-// AWS policy fields Action, Resource, NotAction, and NotResource accept both forms.
+// AWS policy fields Action, Resource, NotAction, and NotResource accept both forms,
+// as does a condition value list.
 type StringOrSlice []string
 
 // UnmarshalJSON implements json.Unmarshaler for StringOrSlice.
+//
+// Numbers and Booleans are read as their text. The IAM grammar says so of every value
+// in a policy — "Values are enclosed in quotation marks. Quotation marks are optional
+// for numeric and Boolean values" — and a document substrate refused for writing them
+// unquoted is one real IAM accepts: `{"Bool": {"aws:SecureTransport": false}}` and
+// `{"NumericLessThanEquals": {"s3:max-keys": 10}}` are both legal, and both answered
+// MalformedPolicyDocument here before #714.
+//
+// A number keeps the spelling the document used, through [json.Number], rather than
+// being routed through a float: 10 must not become "1e+01" on its way to a comparison,
+// and a value too large for a float64 must not be silently rounded before
+// [condParseNumber] ever sees it.
+//
+// The tolerance reaches Action and Resource too, since they share this type, and there
+// a number is nonsense rather than shorthand. It is left in rather than scoped to
+// condition values because the effect is bounded and lies in the safe direction: an
+// `"Action": 5` becomes the action name "5", which matches no action, so the statement
+// grants nothing instead of being rejected.
 func (s *StringOrSlice) UnmarshalJSON(data []byte) error {
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		*s = StringOrSlice{str}
-		return nil
-	}
-	var arr []string
-	if err := json.Unmarshal(data, &arr); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var raw any
+	if err := dec.Decode(&raw); err != nil {
 		return fmt.Errorf("unmarshal StringOrSlice: %w", err)
 	}
-	*s = StringOrSlice(arr)
+	if list, ok := raw.([]any); ok {
+		out := make(StringOrSlice, 0, len(list))
+		for _, elem := range list {
+			text, ok := jsonScalarText(elem)
+			if !ok {
+				return fmt.Errorf("unmarshal StringOrSlice: element %v is not a string, number or boolean", elem)
+			}
+			out = append(out, text)
+		}
+		*s = out
+		return nil
+	}
+	text, ok := jsonScalarText(raw)
+	if !ok {
+		return fmt.Errorf("unmarshal StringOrSlice: %v is not a string, number or boolean", raw)
+	}
+	*s = StringOrSlice{text}
 	return nil
+}
+
+// jsonScalarText renders a decoded JSON scalar as the text a policy comparison uses,
+// reporting false for null, an object, or a nested array — none of which the grammar
+// admits where a string, a number or a Boolean is allowed.
+func jsonScalarText(value any) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, true
+	case json.Number:
+		return v.String(), true
+	case bool:
+		return strconv.FormatBool(v), true
+	}
+	return "", false
 }
 
 // MarshalJSON implements json.Marshaler for StringOrSlice.

@@ -115,7 +115,7 @@ func startTestServer(t testing.TB, creds *CredentialRegistry) *TestServer {
 	// Enforcement keys off whether the caller resolves to an IAM entity present in
 	// state, so an unsigned request, substrate's documented credentials, and any
 	// key that was never minted here are all unenforced.
-	auth := NewAuthController(state, logger)
+	auth := NewAuthController(state, logger, WithAuthTimeController(tc))
 
 	ctx := context.Background()
 	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, nil,

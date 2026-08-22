@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The IAM policy simulator: SimulatePrincipalPolicy and SimulateCustomPolicy.
@@ -526,7 +527,7 @@ func parseSimulationPolicyInputs(inputs []string, prefix string) ([]SourcedPolic
 func (p *IAMPlugin) simulateResponse(op string, params *iamSimulateRequest,
 	docs, boundaryDocs []SourcedPolicyDocument, callerArn string,
 ) (*AWSResponse, error) {
-	condCtx := simulationConditionContext(params, callerArn)
+	condCtx := simulationConditionContext(params, callerArn, p.now())
 
 	results := make([]iamSimulationResult, 0, len(params.ActionNames)*len(params.ResourceArns))
 	for _, action := range params.ActionNames {
@@ -617,20 +618,27 @@ func simulationDecision(decision string) string {
 // would otherwise report the key as a missing context value when the caller had in
 // fact told substrate what it is, through a differently-named parameter.
 //
+// aws:CurrentTime and aws:EpochTime come from the plugin's clock, for the same reason
+// and with the same rendering the enforcement path uses ([AuthController.authzTimeContext]):
+// a simulation that reported a date condition as a missing context value while the
+// request gate evaluated it would contradict the enforcement it exists to predict.
+//
 // An explicit ContextEntry wins over both, whatever case it is spelled in. A caller
 // who names a key is stating what to simulate with, and overriding that with a derived
 // value would make the parameter unusable — which is what a plain assignment would do
 // for AWS:PrincipalArn before #704, since it left the derived aws:PrincipalArn in the
 // map beside it and the evaluator would then resolve to whichever sorted first.
 // Deleting the folded-equal name is what makes the caller's entry win.
-func simulationConditionContext(params *iamSimulateRequest, callerArn string) map[string]string {
-	ctx := make(map[string]string, len(params.context)+2)
+func simulationConditionContext(params *iamSimulateRequest, callerArn string, now time.Time) map[string]string {
+	ctx := make(map[string]string, len(params.context)+4)
 	if callerArn != "" {
 		ctx["aws:PrincipalArn"] = callerArn
 	}
 	if params.ResourceOwner != "" {
 		ctx["aws:ResourceAccount"] = params.ResourceOwner
 	}
+	ctx["aws:CurrentTime"] = now.UTC().Format(time.RFC3339)
+	ctx["aws:EpochTime"] = strconv.FormatInt(now.Unix(), 10)
 	for key, value := range params.context {
 		if derived, ok := condResolveKey(key, ctx); ok && derived != key {
 			delete(ctx, derived)

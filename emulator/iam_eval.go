@@ -525,31 +525,85 @@ func conditionMatches(
 	return true
 }
 
-// conditionKeyMatches evaluates one key of one operator, applying the set qualifier.
+// conditionKeyMatches evaluates one key of one operator, applying the set qualifier
+// and the ...IfExists suffix.
+//
+// The operator is decided before the key is read, and an operator substrate does not
+// recognize matches nothing whatever the qualifier. It used to match *everything* under
+// a set qualifier over an absent key: the loop below ran zero times and returned true
+// without the operator ever being consulted, so `ForAllValues:NumericLessThan` on a key
+// substrate does not populate granted an Allow (#714). For a *recognized* operator that
+// vacuous truth is AWS's own rule, quoted below, and it stays — the two cases are only
+// distinguishable because [condEvaluate] reports recognition alongside its answer.
+//
+// Substrate accepts an unknown operator at write time, stores it, and discards it here.
+// Real IAM validates the name when the document is submitted, so a document reaching
+// this deny-by-default is one AWS would have refused with MalformedPolicyDocument;
+// treating it as a non-match rather than as AWS's absent-key match is substrate's
+// choice, and it is the only one that cannot turn a typo into a grant.
+//
+// Null is routed past the presence check because it is the operator that tests for
+// absence: telling it the key is missing instead of letting it see the empty value
+// would invert it. A *set-qualified* Null does not match at all — AWS defines no
+// ForAllValues:Null or ForAnyValue:Null, and quantifying an existence test over the
+// values whose existence it is testing has no meaning. That too was a vacuous grant
+// before #714.
 func conditionKeyMatches(
-	qualifier, base, condKey string,
+	qualifier, operator, condKey string,
 	condValues StringOrSlice,
 	ctx map[string]string,
 	multiCtx map[string][]string,
 ) bool {
+	base, ifExists := condSplitIfExists(operator)
+	if base == "Null" && ifExists {
+		// AWS: IfExists may be added to "any condition operator name except the Null
+		// condition". Null already answers the question IfExists asks.
+		return false
+	}
+
 	switch qualifier {
 	case "":
-		return evaluateConditionKey(base, condContextValue(condKey, ctx, multiCtx), condValues)
+		if base == "Null" {
+			matched, _ := condEvaluate(base, condContextValue(condKey, ctx, multiCtx), condValues)
+			return matched
+		}
+		if !condKeyPresent(condKey, ctx, multiCtx) {
+			return condAbsentMatches(base, ifExists)
+		}
+		matched, recognized := condEvaluate(base, condContextValue(condKey, ctx, multiCtx), condValues)
+		return recognized && matched
 
 	case condForAllValues:
-		// Absent or empty is a match, per AWS — which is why AWS's own Important note
-		// says to pair ForAllValues with `"Null": {"key": "false"}` on an Allow, and why
-		// every one of its aws:TagKeys examples does.
+		if base == "Null" || !condOperatorRecognized(base) {
+			return false
+		}
+		// Absent or empty is a match, per AWS — "The ForAllValues qualifier returns true
+		// if there are no context keys in the request or if the context key value
+		// resolves to a null dataset" — which is why AWS's own Important note says to
+		// pair ForAllValues with `"Null": {"key": "false"}` on an Allow, and why every
+		// one of its aws:TagKeys examples does.
 		for _, reqVal := range condRequestValues(condKey, ctx, multiCtx) {
-			if !evaluateConditionKey(base, reqVal, condValues) {
+			if matched, _ := condEvaluate(base, reqVal, condValues); !matched {
 				return false
 			}
 		}
 		return true
 
 	case condForAnyValue:
+		if base == "Null" || !condOperatorRecognized(base) {
+			return false
+		}
+		// The one place AWS's two rules genuinely conflict: ForAnyValue says an absent
+		// key is false, IfExists says an absent key is true. AWS resolves it nowhere, so
+		// substrate reads IfExists as the more specific annotation — the author wrote it
+		// about exactly this case, and AWS's own gloss is emphatic that "other condition
+		// elements in the statement can still result in a nonmatch, but *not a missing
+		// key* when checked with ...IfExists". Recorded as substrate's choice (#714).
+		if ifExists && !condKeyPresent(condKey, ctx, multiCtx) {
+			return true
+		}
 		for _, reqVal := range condRequestValues(condKey, ctx, multiCtx) {
-			if evaluateConditionKey(base, reqVal, condValues) {
+			if matched, _ := condEvaluate(base, reqVal, condValues); matched {
 				return true
 			}
 		}
@@ -557,6 +611,27 @@ func conditionKeyMatches(
 		return false
 	}
 
+	return false
+}
+
+// condKeyPresent reports whether the request context carries a usable value for the
+// name a policy spells.
+//
+// A key present with an empty value counts as absent, which is the reading Null has
+// always had here ("the key exists and its value is not null") and the one AWS's
+// ForAllValues note uses when it speaks of a value that "resolves to a null dataset,
+// such as an empty string".
+//
+// This is a different question from the one [unsetConditionKeys] answers. That one
+// reports what a *simulation* was not given, so a caller who supplied a key with an
+// empty value is not told it was missing; this one asks whether there is a value to
+// compare, and there is not.
+func condKeyPresent(condKey string, ctx map[string]string, multiCtx map[string][]string) bool {
+	for _, v := range condRequestValues(condKey, ctx, multiCtx) {
+		if v != "" {
+			return true
+		}
+	}
 	return false
 }
 
@@ -656,81 +731,6 @@ func condRequestValues(condKey string, ctx map[string]string, multiCtx map[strin
 		return []string{ctx[name]}
 	}
 	return nil
-}
-
-// evaluateConditionKey evaluates a single condition key against the context value.
-// Multiple values for the same key use OR semantics.
-func evaluateConditionKey(operator, ctxVal string, condValues StringOrSlice) bool {
-	switch operator {
-	case "StringEquals":
-		for _, v := range condValues {
-			if ctxVal == v {
-				return true
-			}
-		}
-		return false
-
-	case "StringNotEquals":
-		for _, v := range condValues {
-			if ctxVal == v {
-				return false
-			}
-		}
-		return true
-
-	case "StringLike":
-		for _, v := range condValues {
-			if globMatch(v, ctxVal) {
-				return true
-			}
-		}
-		return false
-
-	case "StringNotLike":
-		for _, v := range condValues {
-			if globMatch(v, ctxVal) {
-				return false
-			}
-		}
-		return true
-
-	case "ArnEquals", "ArnLike":
-		for _, v := range condValues {
-			if globMatch(v, ctxVal) {
-				return true
-			}
-		}
-		return false
-
-	case "ArnNotEquals":
-		for _, v := range condValues {
-			if ctxVal == v {
-				return false
-			}
-		}
-		return true
-
-	case "Bool":
-		for _, v := range condValues {
-			if ctxVal == v {
-				return true
-			}
-		}
-		return false
-
-	case "Null":
-		isNull := ctxVal == ""
-		for _, v := range condValues {
-			want := strings.ToLower(v) == "true"
-			if want == isNull {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Unknown operator — deny by default (safe).
-	return false
 }
 
 // globMatch returns true if pattern matches value using AWS glob rules:
