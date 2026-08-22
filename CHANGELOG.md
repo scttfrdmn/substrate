@@ -205,6 +205,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switches SigV4 enforcement on and would 403 substrate's own documented credentials — the
   decoupling is #630.
 
+  **Compatibility.** Every ARN returned to an unsigned or non-`AKIA` caller changes account, so
+  a fixture asserting on `000000000000` now sees `123456789012`. Several plugins prefix their
+  state keys with the account (`table:{account}/{name}`, `instance:{account}/{id}`), so
+  **persisted SQLite state written under the old account is unreachable** after upgrading:
+  re-seed it, or set `account.default: "000000000000"` to read it back.
+
 - **EventBridge is reachable from a real SDK** (#734). Found while verifying the above with the
   `aws` CLI: **every** EventBridge call answered `ServiceNotAvailable: service not emulated:
   awsevents`. The target prefix in EventBridge's model is `AWSEvents`, not `AmazonEventBridge`,
@@ -241,12 +247,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reason — `DescribeFleets`' `FleetId.N` and `DescribeRegions`' `RegionName.N` are permanent
   declines (AWS publishes no `InvalidFleetId.NotFound`, and `RegionName.N` explicitly permits
   naming any Region), while the other five are unimplemented rather than declined.
-
-  **Compatibility.** Every ARN returned to an unsigned or non-`AKIA` caller changes account, so
-  a fixture asserting on `000000000000` now sees `123456789012`. Several plugins prefix their
-  state keys with the account (`table:{account}/{name}`, `instance:{account}/{id}`), so
-  **persisted SQLite state written under the old account is unreachable** after upgrading:
-  re-seed it, or set `account.default: "000000000000"` to read it back.
 
 - **A grant written about `ec2:ResourceTag/<key>` no longer silently fails** (#730). Two of the
   bundled AWS-authored managed policies scope an EC2 delete by tag under EC2's own prefix
