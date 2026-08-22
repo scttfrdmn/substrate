@@ -400,22 +400,18 @@ func TestEC2_CopySnapshot_CopiesWithinTheRegion(t *testing.T) {
 		"the copy's volumeId is arbitrary, not the source's")
 	assert.NotEmpty(t, described[0].VolumeID, "AWS always renders the member")
 
-	// And it names no volume, which is what makes AWS's warning self-enforcing.
-	//
-	// The assertion is an empty volumeSet rather than InvalidVolume.NotFound because
-	// substrate's DescribeVolumes selects by ID without resolving one — an unknown VolumeId.N
-	// narrows the answer to nothing instead of being refused. That is a separate gap from
-	// #709 and is left standing rather than widened into this PR; it is recorded so a future
-	// reader does not mistake the weaker assertion for the stronger claim.
-	var volumes struct {
-		Volumes []struct {
-			VolumeID string `xml:"volumeId"`
-		} `xml:"volumeSet>item"`
-	}
-	ec2FleetXML(t, ts, map[string]string{
+	// And it names no volume, which is what makes AWS's warning self-enforcing. The
+	// assertion is InvalidVolume.NotFound as of #731: DescribeVolumes resolves an explicit
+	// VolumeId.N rather than merely selecting on it, so the arbitrary ID is refused rather
+	// than narrowing the answer to nothing. That is the stronger claim, and the one a
+	// caller who tried to use the ID would actually see. The comment here previously
+	// recorded the weaker assertion as a gap left standing; this is that gap closed.
+	status, code := ec2ErrorCode(t, ts, map[string]string{
 		"Action": "DescribeVolumes", "VolumeId.1": described[0].VolumeID,
-	}, &volumes)
-	assert.Empty(t, volumes.Volumes, "the copy's arbitrary volume ID resolves to nothing")
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidVolume.NotFound", code,
+		"the copy's arbitrary volume ID resolves to nothing")
 }
 
 // TestEC2_CopySnapshot_EncryptionFollowsTheDocumentedRules covers the three sentences AWS
