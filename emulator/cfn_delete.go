@@ -933,11 +933,16 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"InvalidInstanceID.NotFound":        true,
 	"InvalidInternetGatewayID.NotFound": true,
 	"InvalidLaunchTemplateId.NotFound":  true,
+	"InvalidNatGatewayID.NotFound":      true,
 	"InvalidRouteTableID.NotFound":      true,
 	"InvalidSubnetID.NotFound":          true,
 	"InvalidVpcID.NotFound":             true,
-	"NatGatewayNotFound":                true,
-	"NoSuchBucket":                      true,
+	// DeleteNatGateway's code before #713 routed it through ec2NatGatewayIDKind. The
+	// reference publishes both spellings, so this entry is not dead: an event log
+	// recorded by an older substrate replays the old code, and a stack mid-delete must
+	// still read it as an absence.
+	"NatGatewayNotFound": true,
+	"NoSuchBucket":       true,
 	// AWS Config's three not-found codes. Each is HTTP 400 rather than 404 — every
 	// Config exception is — so nothing but the code identifies them as an absence.
 	"NoSuchConfigRuleException":            true,

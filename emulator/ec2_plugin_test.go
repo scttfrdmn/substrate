@@ -2988,8 +2988,25 @@ func TestEC2_RunInstances_InvalidSG(t *testing.T) {
 	body2 := readBody(t, resp2)
 	subnetID := ec2ExtractXML(body2, "subnetId")
 
-	// RunInstances with nonexistent SG → error.
+	// RunInstances with nonexistent SG → error. The ID is well-formed hex so this
+	// exercises the absence path; "sg-nonexistent" is a malformed ID and since #713
+	// answers InvalidGroupId.Malformed, which is a different assertion (below).
 	resp3 := ec2Request(t, ts, map[string]string{
+		"Action":            "RunInstances",
+		"ImageId":           "ami-12345678",
+		"InstanceType":      "t2.micro",
+		"SubnetId":          subnetID,
+		"SecurityGroupId.1": "sg-0000000000000dead",
+		"MinCount":          "1",
+		"MaxCount":          "1",
+	})
+	assert.Equal(t, http.StatusBadRequest, resp3.StatusCode)
+	body3 := readBody(t, resp3)
+	assert.Contains(t, body3, "InvalidGroup.NotFound")
+
+	// A syntactically invalid group ID is refused before the lookup, with the kind's
+	// Malformed code — the same ordering every other ID family follows (#713).
+	resp4 := ec2Request(t, ts, map[string]string{
 		"Action":            "RunInstances",
 		"ImageId":           "ami-12345678",
 		"InstanceType":      "t2.micro",
@@ -2998,9 +3015,8 @@ func TestEC2_RunInstances_InvalidSG(t *testing.T) {
 		"MinCount":          "1",
 		"MaxCount":          "1",
 	})
-	assert.Equal(t, http.StatusBadRequest, resp3.StatusCode)
-	body3 := readBody(t, resp3)
-	assert.Contains(t, body3, "InvalidGroup.NotFound")
+	assert.Equal(t, http.StatusBadRequest, resp4.StatusCode)
+	assert.Contains(t, readBody(t, resp4), "InvalidGroupId.Malformed")
 }
 
 // ec2ExtractXML extracts the text content of the first occurrence of an XML tag.

@@ -4150,17 +4150,57 @@ string, so substrate mirrors each pair exactly:
 | Snapshot | `InvalidSnapshot.NotFound` | `InvalidSnapshotID.Malformed` |
 | Volume | `InvalidVolume.NotFound` | `InvalidVolumeID.Malformed` |
 | Elastic IP allocation | `InvalidAllocationID.NotFound` | — |
-| NAT gateway | `InvalidNatGatewayID.NotFound` | — |
+| NAT gateway | `InvalidNatGatewayID.NotFound` | `NatGatewayMalformed` |
 
-EC2 publishes no `Malformed` variant for allocation IDs or NAT gateway IDs; a
-malformed ID for those surfaces as the `NotFound` code.
+EC2 publishes no `Malformed` variant for allocation IDs; a malformed allocation ID
+surfaces as `InvalidAllocationID.NotFound`. NAT gateways are the one family whose
+malformed code sits outside the `Invalid*ID.Malformed` naming entirely — the reference
+publishes it as `NatGatewayMalformed`, "The specified NAT gateway ID is not formed
+correctly. Ensure that you specify the NAT gateway ID in the form
+nat-xxxxxxxxxxxxxxxxx."
 
-The volume row covers `CreateSnapshot`, which is where it arrived. Three older volume
-operations — `DeleteVolume`, `AttachVolume` and `DetachVolume` — raise the same
-`InvalidVolume.NotFound` code with a message they spell themselves ("The volume
-'vol-…' does not exist.", with a trailing period and no "ID"). They are left as they
-are deliberately: rewording a published message is a change a consumer matching on it
-would notice, for no gain. Unifying them is a follow-up.
+AWS publishes two absence codes for NAT gateways — `NatGatewayNotFound` ("The
+specified NAT gateway does not exist.") and `InvalidNatGatewayID.NotFound` — and no
+per-operation page says which operation raises which; `DeleteNatGateway`'s `Errors`
+section is empty, as EC2's pages generally are. Substrate answers
+`InvalidNatGatewayID.NotFound` everywhere, because that is the spelling every other
+row above follows and the one `DescribeNatGateways` has always published.
+
+**Mutations answer from the same table.** Every operation that names a resource of one
+of these families — a `Describe*` reading `<Type>Id.N`, or a mutation reading a single
+`<Type>Id` — produces its code, message and status from the one entry, so the two
+halves of the API cannot drift apart:
+
+- An absent ID → the row's `NotFound`, with the message `The <noun> ID '<id>' does not
+  exist`.
+- A syntactically invalid ID → the row's `Malformed`, with the message
+  `Invalid id: "<id>"`. This is checked before existence on a mutation exactly as it is
+  on a describe, which matters because the two branches mean different things to a
+  caller: `Invalid*.NotFound` can be retried after creating the resource, and
+  `*.Malformed` never can.
+- An **omitted** single ID parameter → `MissingParameter`, "The request must contain the
+  parameter `<Name>`" — not a `Malformed` naming a parameter the caller never sent.
+  `AttachVolume` names its two required IDs separately, so a caller who sent one of the
+  two learns which is missing.
+
+Four codes are outside the table and stay hand-written, because AWS gives their ID
+families no prefix rule of the shape above: `InvalidRoute.NotFound`,
+`InvalidAssociationID.NotFound`, `InvalidLaunchTemplateId.NotFound` and
+`InvalidLaunchTemplateName.NotFoundException`.
+
+One refusal reuses a code above for a different condition. A `RunInstances` naming a
+security group that exists but lives in another VPC answers `InvalidGroup.NotFound`
+with `does not belong to VPC …` — AWS's own gloss for that code is "the specified
+security group does not exist", and from the target VPC's point of view it does not.
+That is membership rather than absence, so it does not share the table's message.
+
+**A refused mutation writes nothing.** An operation naming two resources resolves both
+before its first write. `ReplaceRouteTableAssociation` is the one that had this wrong: it
+removed the source association and committed it before resolving the target
+`RouteTableId`, so a request naming an absent or malformed route table deleted the
+association it was asked to move, left the subnet with no route table at all, and then
+reported a failure — and a retry with the ID corrected answered
+`InvalidAssociationID.NotFound` for the association the first call had eaten.
 
 An ID is well formed when it has the resource's prefix followed by at least one
 lowercase hex digit. Length is deliberately not checked: substrate's generators

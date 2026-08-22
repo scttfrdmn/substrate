@@ -182,10 +182,12 @@ func TestEC2_DescribeByExplicitID_Malformed(t *testing.T) {
 			code:   "InvalidAllocationID.NotFound",
 		},
 		{
-			// Likewise for NAT gateways.
-			name:   "nat gateway wrong prefix falls back to NotFound",
+			// NAT gateways are the one family whose Malformed code sits outside the
+			// Invalid*ID.Malformed naming entirely: the reference publishes it as
+			// NatGatewayMalformed (#713).
+			name:   "nat gateway wrong prefix",
 			params: map[string]string{"Action": "DescribeNatGateways", "NatGatewayId.1": "not-an-id"},
-			code:   "InvalidNatGatewayID.NotFound",
+			code:   "NatGatewayMalformed",
 		},
 	}
 	for _, tt := range tests {

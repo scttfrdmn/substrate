@@ -24,7 +24,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented gloss is "A value specified in a parameter is not valid, is unsupported, or
   cannot be used."
 
+### Changed
+- **Eighteen mutating EC2 operations answer their `Invalid*.NotFound` from the kind table, not
+  from a hand-written literal** (#713). `ec2_resourceid.go`'s `ec2IDKind` table has been the
+  single source of an ID family's prefix rule, `NotFound` code, `Malformed` code and message
+  since #391, but only the `Describe*` path went through it. Every mutation that named a
+  resource wrote its own `&AWSError{}`, so a wording, status or request-ID change had to land
+  in nineteen places and four of the copies had already drifted. `AuthorizeSecurityGroupIngress`,
+  `RevokeSecurityGroupEgress`, `Attach`/`DetachInternetGateway`, `AssociateRouteTable`,
+  `Create`/`Replace`/`DeleteRoute`, `ReplaceRouteTableAssociation`, `ModifySubnetAttribute`,
+  `CreateNatGateway`, `ModifyVpcAttribute`, `Associate`/`ReleaseAddress`, `DeleteNatGateway`
+  and `Delete`/`Attach`/`DetachVolume` now call `ec2RequireNamedResource`, and the kind table
+  says outright that a hand-written copy is a bug.
+
+  **Four wordings changed**, which is why this is a `Changed` and not only a `Fixed`. "Security
+  group not found", "Internet gateway not found" and "Route table not found" become the kind's
+  `The <noun> ID '<id>' does not exist`; the volume family's `The volume 'vol-…' does not
+  exist.` gains `" ID"` and loses its trailing period. AWS's own reference publishes the
+  latter form for every family, and pinning it in one place is the whole point — the
+  alternative, teaching the kind three bespoke strings, would have spread a trailing period
+  nothing else in the tree uses.
+
+  **A malformed ID on a mutation now answers `Malformed` rather than `NotFound`.** Fifteen of
+  the eighteen reported an absence for `GroupId=sg-not-an-id`, which is the wrong branch for a
+  consumer to land in: `Invalid*.NotFound` is retryable-after-create, `*.Malformed` never is.
+  The `Describe*` path has drawn this distinction since #391, so the two halves of the API now
+  agree. Note the casing AWS itself is inconsistent about and substrate spells verbatim:
+  `InvalidGroup.NotFound` pairs with `InvalidGroupId.Malformed`, `InvalidRouteTableID.NotFound`
+  with `InvalidRouteTableId.Malformed`, and `InvalidVolume.NotFound` with
+  `InvalidVolumeID.Malformed`.
+
+  **Eleven operations answer `MissingParameter` for an omitted ID**, where the empty string
+  previously fell through to a `Malformed` naming a parameter the caller never sent, or to a
+  hand-written `InvalidParameterValue` + "VolumeId is required". `AttachVolume` names its two
+  required IDs separately, so a caller who sent one of the two learns which is missing.
+
+  `DeleteNatGateway` answered `NatGatewayNotFound`; it now answers
+  `InvalidNatGatewayID.NotFound`, the spelling every other kind follows and the one
+  `DescribeNatGateways` has always published. See Provenance below. `cfnDeleteAbsentCodes`
+  keeps both, because an event log recorded by an older substrate replays the old code and a
+  stack mid-delete must still read it as an absence.
+
+  Out of scope and named in the kind table: `InvalidRoute.NotFound`,
+  `InvalidAssociationID.NotFound`, `InvalidLaunchTemplateId.NotFound` and
+  `InvalidLaunchTemplateName.NotFoundException` have no kind entry, so they stay hand-written.
+  The one deliberate exception to the convergence is `ec2CheckSecurityGroups`' membership
+  refusal, which reuses `InvalidGroup.NotFound` for a group that exists in the wrong VPC — a
+  different condition from absence, so it cannot share the kind's message.
+
+  Provenance: `NatGatewayMalformed` is AWS's, newly used — NAT gateways are the one family
+  whose malformed code sits outside the `Invalid*ID.Malformed` naming, published as "The
+  specified NAT gateway ID is not formed correctly. Ensure that you specify the NAT gateway ID
+  in the form nat-xxxxxxxxxxxxxxxxx." The choice **between** AWS's two absence codes is
+  substrate's: the reference publishes `NatGatewayNotFound` and `InvalidNatGatewayID.NotFound`
+  both, and no per-operation page settles which operation raises which —
+  `API_DeleteNatGateway.html`'s Errors section is empty, as EC2's pages generally are.
+
 ### Fixed
+- **A refused `ReplaceRouteTableAssociation` no longer destroys the association it was asked
+  to move** (#713). The handler removed the source association and committed it *before*
+  resolving the target route table, so a request naming a `RouteTableId` that was absent or
+  malformed deleted the caller's association and then reported a failure — the subnet was left
+  with no route table at all, and a retry with the ID corrected answered
+  `InvalidAssociationID.NotFound` for an association the first call had eaten. Every write now
+  happens after both IDs resolve, which is the same "a refusal must leave no state behind"
+  rule #673 established for `RunInstances`. Found by writing the convergence test above: its
+  own second assertion was reached by a state the first assertion had already corrupted.
+
+  Two more defects in the same handler, both reachable: replacing an association with one on
+  its own route table left **two** associations rather than one, because the target was read
+  before the detach and the append built on the pre-detach list; and two `json.Unmarshal` and
+  `state.Get` failures inside the search loop were swallowed by a bare `continue`, so a
+  storage error read as "this route table holds no such association".
+
+- **`ec2AllocationIDKind` no longer says "ID" twice** (#713). Its `Noun` was `"allocation ID"`
+  and `notFoundError` appends `" ID"` of its own, so `DescribeAddresses` on an absent
+  `eipalloc-` answered `The allocation ID ID 'eipalloc-…' does not exist`. Reachable since
+  #391 and pinned by nothing. Fixed at the noun, which is also what let `AssociateAddress` and
+  `ReleaseAddress` converge onto the kind rather than propagating the doubled word.
+
+- **Twelve EC2 handlers no longer report a storage failure as a missing resource** (#713).
+  They tested `if err != nil || data == nil`, collapsing a real `StateManager` error into the
+  resource's `NotFound` — so a caller was told their route table did not exist when the read
+  had failed, and the actual error was discarded, which the house rules forbid outright. Each
+  now wraps with `fmt.Errorf("…: %w", err)` and checks existence separately.
+
 - **EC2 filter values honour AWS's wildcards on every describe, not on the two that happened
   to have them** (#697). AWS states the rule once for the whole family — "An asterisk (\*)
   matches zero or more characters, and a question mark (?) matches zero or one character" —
