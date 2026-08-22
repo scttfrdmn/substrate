@@ -8,18 +8,32 @@ import (
 	"time"
 )
 
-// testAccountID is the well-known AWS account ID used for test access keys.
-const testAccountID = "123456789012"
-
-// fallbackAccountID is used when no account can be determined.
-const fallbackAccountID = "000000000000"
+// defaultAccountID is the AWS account every request is attributed to unless the
+// server is told otherwise. It is AWS's documented example account ID.
+//
+// There is deliberately only one. Substrate used to run two: a request signed
+// with an "AKIA"-prefixed access key was filed under this account and everything
+// else — the documented test/test pair, an unsigned request, an "ASIA" session
+// key — under a zero fallback, so one server served two accounts depending on
+// which credential the client happened to pick and resources created under one
+// were invisible to the other (#734). Nothing about a request off the wire
+// carries an account, so inventing a second one from the shape of an access key
+// was a guess; the account now comes from configuration
+// ([AccountCfg.Default]), from a wired [CredentialRegistry], or from an STS
+// session record — each of which actually knows.
+const defaultAccountID = "123456789012"
 
 // defaultRegion is used when no region can be extracted from the request.
 const defaultRegion = "us-east-1"
 
-// ParseAWSRequest extracts service, operation, region, and account from r and
-// returns a populated [AWSRequest] and [RequestContext]. It is a pure function
-// that does not perform SigV4 signature verification (deferred to a later release).
+// ParseAWSRequest extracts service, operation and region from r and returns a
+// populated [AWSRequest] and [RequestContext]. It is a pure function that does
+// not perform SigV4 signature verification (deferred to a later release).
+//
+// The account is [defaultAccountID] for every request: nothing on the wire names
+// one, and this function has no configuration to consult. A server overrides it
+// from [AccountCfg.Default], from a wired [CredentialRegistry] and from an STS
+// session record, in that order.
 func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	if r == nil {
 		return nil, nil, fmt.Errorf("request must not be nil")
@@ -108,7 +122,6 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 
 	operation := extractOperation(target, params, r.Method, r.URL.Path)
 	region := extractRegion(host, authHeader)
-	account := extractAccount(authHeader)
 
 	req := &AWSRequest{
 		Service:    service,
@@ -134,7 +147,7 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 
 	reqCtx := &RequestContext{
 		RequestID: generateRequestID(),
-		AccountID: account,
+		AccountID: defaultAccountID,
 		Region:    region,
 		Timestamp: time.Now(),
 		Metadata:  make(map[string]interface{}),
@@ -232,6 +245,12 @@ var targetServiceAliases = map[string]string{
 	// "AmazonEventBridge" → strip "Amazon" → "eventbridge" (already correct), but
 	// the host "events.*" produces "events" which must alias to "eventbridge".
 	"events": "eventbridge",
+	// "AWSEvents" → no strip → "awsevents", which is what every SDK actually sends:
+	// the EventBridge model's target prefix is AWSEvents, not AmazonEventBridge. Host
+	// routing hid this until a live run pointed the CLI at --endpoint-url, where the
+	// host is localhost and the target is the only signal — so every EventBridge call
+	// answered ServiceNotAvailable (#734).
+	"awsevents": "eventbridge",
 	// "CertificateManager" is the ACM target namespace prefix.
 	"certificatemanager": "acm",
 	// "AmazonEC2ContainerServiceV20141113" → strip "Amazon" → "ec2containerservicev20141113"
@@ -735,25 +754,6 @@ func extractServiceFromAuth(authHeader string) string {
 		return canonical
 	}
 	return svc
-}
-
-// extractAccount determines the AWS account ID from the Authorization header.
-// Fake test access keys (starting with "AKIA") map to the well-known test
-// account ID; everything else falls back to the zero account.
-func extractAccount(authHeader string) string {
-	const credPrefix = "Credential="
-	idx := strings.Index(authHeader, credPrefix)
-	if idx < 0 {
-		return fallbackAccountID
-	}
-	cred := authHeader[idx+len(credPrefix):]
-	if end := strings.IndexAny(cred, "/, "); end > 0 {
-		accessKey := cred[:end]
-		if strings.HasPrefix(accessKey, "AKIA") {
-			return testAccountID
-		}
-	}
-	return fallbackAccountID
 }
 
 // generateRequestID produces a unique request ID string.

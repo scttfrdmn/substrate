@@ -578,7 +578,7 @@ func TestSQS_MessageAttributes_FifoRejectionPrecedesDedup(t *testing.T) {
 	status, code := createQueueWithAttrs(t, srv, "attr-rules.fifo",
 		map[string]string{"FifoQueue": "true"}, false)
 	require.Equal(t, http.StatusOK, status, "create failed: %s", code)
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/attr-rules.fifo"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/attr-rules.fifo"
 
 	send := func(attrName string) *http.Response {
 		t.Helper()
@@ -787,7 +787,7 @@ func storeIllegalAttributes(t *testing.T, state emulator.StateManager, queueName
 ) string {
 	t.Helper()
 	ctx := context.Background()
-	urlKey := "000000000000/" + queueName
+	urlKey := "123456789012/" + queueName
 
 	idsRaw, err := state.Get(ctx, "sqs", "msg_ids:"+urlKey)
 	require.NoError(t, err)

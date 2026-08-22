@@ -49,7 +49,7 @@ func NewCredentialRegistry() *CredentialRegistry {
 	r.store[defaultTestAccessKeyID] = CredentialEntry{
 		AccessKeyID:     defaultTestAccessKeyID,
 		SecretAccessKey: defaultTestSecretKey,
-		AccountID:       testAccountID,
+		AccountID:       defaultAccountID,
 	}
 	return r
 }
@@ -123,12 +123,10 @@ func buildCallerARN(accountID, accessKeyID string) string {
 // the principal, so a caller who never touched IAM is unaffected.
 //
 // The second return is an account ID to adopt, or "" to keep the one already
-// resolved. Only an STS session supplies one: extractAccount recognizes AKIA as
-// substrate's test account and maps everything else — ASIA session keys
-// included — to the fallback account, so a caller using AssumeRole credentials
-// was placed in a different partition from the resources it went on to create.
-// The session record names the account it was issued for, which is the one the
-// role's caller was in.
+// resolved. Only an STS session supplies one, and it is the only thing that can:
+// a temporary credential's account is recorded when the session is minted and
+// appears nowhere on the wire, so a cross-account AssumeRole would otherwise
+// leave the caller in the server's own account rather than the role's.
 func resolvePrincipal(ctx context.Context, state StateManager, accountID, accessKeyID string) (*Principal, string) {
 	if state == nil || accessKeyID == "" {
 		return nil, ""

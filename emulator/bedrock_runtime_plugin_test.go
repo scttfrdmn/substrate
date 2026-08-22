@@ -136,7 +136,7 @@ func TestBedrockRuntimePlugin_BlocklistIntervened(t *testing.T) {
 	setup := newBedrockRuntimeTestServer(t)
 
 	// Seed the blocklist with "forbidden" term.
-	blocklistKey := "guardrail:000000000000/guardrail-block/blocklist"
+	blocklistKey := "guardrail:123456789012/guardrail-block/blocklist"
 	blocklist, _ := json.Marshal([]string{"forbidden"})
 	if err := setup.state.Put(context.Background(), "bedrock-runtime", blocklistKey, blocklist); err != nil {
 		t.Fatalf("seed blocklist: %v", err)
@@ -162,7 +162,7 @@ func TestBedrockRuntimePlugin_BlocklistNonMatching(t *testing.T) {
 	setup := newBedrockRuntimeTestServer(t)
 
 	// Seed blocklist with term that won't match.
-	blocklistKey := "guardrail:000000000000/guardrail-nm/blocklist"
+	blocklistKey := "guardrail:123456789012/guardrail-nm/blocklist"
 	blocklist, _ := json.Marshal([]string{"badword"})
 	if err := setup.state.Put(context.Background(), "bedrock-runtime", blocklistKey, blocklist); err != nil {
 		t.Fatalf("seed blocklist: %v", err)

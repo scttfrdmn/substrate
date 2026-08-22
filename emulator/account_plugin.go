@@ -605,7 +605,7 @@ func (p *AccountPlugin) regionInput(req *AWSRequest) (*accountRegionRequest, err
 // must be the management account itself; a member naming another member is
 // refused.
 func (p *AccountPlugin) targetAccount(reqCtx *RequestContext, accountID string) (string, error) {
-	caller := fallbackAccountID
+	caller := defaultAccountID
 	if reqCtx != nil && reqCtx.AccountID != "" {
 		caller = reqCtx.AccountID
 	}

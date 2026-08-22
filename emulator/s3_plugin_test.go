@@ -484,7 +484,7 @@ func TestS3_PutObject_CostTracked(t *testing.T) {
 	s3Request(t, srv, http.MethodPut, "/cost-bucket/obj.txt", []byte("hello"), nil)
 
 	// Retrieve cost summary.
-	summary, err := store.GetCostSummary(context.Background(), "000000000000", time.Time{}, time.Time{})
+	summary, err := store.GetCostSummary(context.Background(), "123456789012", time.Time{}, time.Time{})
 	require.NoError(t, err)
 	// PutObject costs $0.000005.
 	assert.InDelta(t, 0.000005, summary.ByOperation["s3/PutObject"], 1e-9)
@@ -712,8 +712,8 @@ func TestS3Plugin_BucketNotification_FireSQS(t *testing.T) {
 		"Action":    "CreateQueue",
 		"QueueName": "s3-notify-queue",
 	})
-	queueARN := "arn:aws:sqs:us-east-1:000000000000:s3-notify-queue"
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/s3-notify-queue"
+	queueARN := "arn:aws:sqs:us-east-1:123456789012:s3-notify-queue"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/s3-notify-queue"
 
 	// Create S3 bucket.
 	s3Request(t, srv, http.MethodPut, "/fire-notif-bucket", nil, nil)

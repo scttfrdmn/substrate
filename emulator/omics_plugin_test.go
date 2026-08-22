@@ -82,7 +82,7 @@ func TestOmicsPlugin_StartGetCancelRun(t *testing.T) {
 		"workflowId":   "wf-12345",
 		"workflowType": "PRIVATE",
 		"name":         "my-run",
-		"roleArn":      "arn:aws:iam::000000000000:role/OmicsRole",
+		"roleArn":      "arn:aws:iam::123456789012:role/OmicsRole",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("startRun: expected 201, got %d; body: %s", resp.StatusCode, omicsBody(t, resp))
@@ -148,7 +148,7 @@ func TestOmicsPlugin_ListRuns(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		r := omicsRequest(t, ts, http.MethodPost, "/run", map[string]string{
 			"workflowId": "wf-1",
-			"roleArn":    "arn:aws:iam::000000000000:role/R",
+			"roleArn":    "arn:aws:iam::123456789012:role/R",
 		})
 		omicsBody(t, r)
 	}

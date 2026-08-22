@@ -32,7 +32,14 @@ func newBatchTestServer(t *testing.T) *httptest.Server {
 	registry.Register(p)
 
 	cfg := emulator.DefaultConfig()
-	srv := emulator.NewServer(*cfg, registry, store, state, tc, logger)
+	// A credential registry holding batchOtherAccount, so TestBatchDescribe_ScopedToTheCaller
+	// can be two accounts. Unsigned requests — every other test in these files — are
+	// unaffected: VerifySigV4 passes a request with no Authorization header, which
+	// resolves to the configured default account.
+	creds := emulator.NewCredentialRegistry()
+	creds.Register(testCredentialsFor(batchOtherAccount))
+	srv := emulator.NewServer(*cfg, registry, store, state, tc, logger,
+		emulator.ServerOptions{Credentials: creds})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts
@@ -80,8 +87,8 @@ func TestBatchPlugin_SubmitDescribeTerminateJob(t *testing.T) {
 	// SubmitJob
 	resp := batchRequest(t, ts, http.MethodPost, "/v1/submitjob", map[string]string{
 		"jobName":       "test-job",
-		"jobQueue":      "arn:aws:batch:us-east-1:000000000000:job-queue/q1",
-		"jobDefinition": "arn:aws:batch:us-east-1:000000000000:job-definition/jd1:1",
+		"jobQueue":      "arn:aws:batch:us-east-1:123456789012:job-queue/q1",
+		"jobDefinition": "arn:aws:batch:us-east-1:123456789012:job-definition/jd1:1",
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("submitJob: expected 200, got %d; body: %s", resp.StatusCode, batchBody(t, resp))

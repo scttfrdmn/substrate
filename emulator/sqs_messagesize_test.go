@@ -139,7 +139,7 @@ func createSizedQueue(t *testing.T, srv *emulator.Server, name, maxSize string) 
 	status, code := createQueueWithAttrs(t, srv, name,
 		map[string]string{"MaximumMessageSize": maxSize}, false)
 	require.Equal(t, http.StatusOK, status, "create failed: %s", code)
-	return "http://sqs.us-east-1.localhost/000000000000/" + name
+	return "http://sqs.us-east-1.localhost/123456789012/" + name
 }
 
 // TestSQS_SendMessage_EnforcesMaximumMessageSize is #454. No length check existed
@@ -418,7 +418,7 @@ func TestSQS_SendMessage_FifoQueueEnforcesBeforeDedup(t *testing.T) {
 		"FifoQueue": "true", "MaximumMessageSize": "1024",
 	}, false)
 	require.Equal(t, http.StatusOK, status, code)
-	queueURL := "http://sqs.us-east-1.localhost/000000000000/size-q.fifo"
+	queueURL := "http://sqs.us-east-1.localhost/123456789012/size-q.fifo"
 
 	send := func(body string) (int, string) {
 		return sqsErrorCode(t, sqsRequest(t, srv, map[string]string{

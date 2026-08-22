@@ -232,9 +232,9 @@ func TestCFNPlugin_ExportsAreScopedToTheCallersPartition(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
-	// An unsigned request resolves to the fallback account 000000000000, so the
-	// export is out of scope and invisible.
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	// A request signed as another account is out of the export's scope, so the export
+	// is invisible to it.
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "ListExports", "Version": "2010-05-15",
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
@@ -244,13 +244,13 @@ func TestCFNPlugin_ExportsAreScopedToTheCallersPartition(t *testing.T) {
 
 	// And an import from that account fails the resource rather than resolving
 	// against an export it is not entitled to see.
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateStack", "Version": "2010-05-15",
 		"StackName": "otheracct", "TemplateBody": cfnWireImportTemplate,
 	})
 	require.Equal(t, http.StatusOK, code, "the resource fails; the operation does not: %s", body)
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeStackResources", "Version": "2010-05-15",
 		"StackName": "otheracct",
 	})
@@ -259,7 +259,7 @@ func TestCFNPlugin_ExportsAreScopedToTheCallersPartition(t *testing.T) {
 	assert.Contains(t, body, "no exported output named")
 
 	// The refusal to delete is scoped the same way: the other account's stack
-	// imports nothing this account can see, so the exporting stack in the signed
+	// imports nothing this account can see, so the exporting stack in the default
 	// account is still deletable.
 	code, body = cfnAction(t, ts, "DeleteStack", map[string]string{"StackName": "wirenet"})
 	assert.Equal(t, http.StatusOK, code,
@@ -275,18 +275,19 @@ func TestCFNPlugin_ExportsAreScopedToTheCallersPartition(t *testing.T) {
 // consult the wrong namespace — and the direction that matters is this one: a
 // non-default caller's own import is invisible from the default namespace, so a
 // delete that must be refused would be allowed, quietly removing an export another
-// of that caller's stacks is holding. The signed-caller case cannot catch it,
-// because a signed caller's identity *is* the default.
+// of that caller's stacks is holding. A caller in the default account cannot catch
+// it, because its identity *is* the default — which is why both stacks here are
+// created by a caller signing as another account.
 func TestCFNPlugin_DeleteRefusalUsesTheCallersOwnNamespace(t *testing.T) {
 	ts := newCFNTestServer(t)
 
-	// Both stacks unsigned, so both live in the fallback account 000000000000 —
-	// not the default 123456789012 the plugin's own deployer would consult.
+	// Both stacks signed as cfnOtherAccount, so both live outside the default account
+	// the plugin's own deployer would consult.
 	for _, s := range []struct{ name, tmpl string }{
 		{"wirenet", cfnWireExportTemplate},
 		{"wireapp", cfnWireImportTemplate},
 	} {
-		code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+		code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 			"Action": "CreateStack", "Version": "2010-05-15",
 			"StackName": s.name, "TemplateBody": s.tmpl,
 		})
@@ -295,7 +296,7 @@ func TestCFNPlugin_DeleteRefusalUsesTheCallersOwnNamespace(t *testing.T) {
 
 	// The import resolved, which is what makes the refusal below meaningful: an
 	// unresolved import would leave nothing recorded and the delete would be legal.
-	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DescribeStackResources", "Version": "2010-05-15",
 		"StackName": "wireapp",
 	})
@@ -303,7 +304,7 @@ func TestCFNPlugin_DeleteRefusalUsesTheCallersOwnNamespace(t *testing.T) {
 	require.Contains(t, body, "CREATE_COMPLETE")
 	require.NotContains(t, body, "CREATE_FAILED")
 
-	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", "", map[string]string{
+	code, body = cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "DeleteStack", "Version": "2010-05-15", "StackName": "wirenet",
 	})
 	assert.Equal(t, http.StatusBadRequest, code, "body was %s", body)

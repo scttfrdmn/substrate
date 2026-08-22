@@ -64,3 +64,19 @@ type EBEvent struct {
 func ebRuleARN(region, accountID, ruleName string) string {
 	return "arn:aws:events:" + region + ":" + accountID + ":rule/" + ruleName
 }
+
+// ebEventBusARN constructs the ARN for an event bus in the caller's account and
+// Region. A nil context yields the parser's defaults, so a plugin driven directly
+// by a unit test gets the same ARN an HTTP caller would.
+func ebEventBusARN(reqCtx *RequestContext, busName string) string {
+	region, accountID := defaultRegion, defaultAccountID
+	if reqCtx != nil {
+		if reqCtx.Region != "" {
+			region = reqCtx.Region
+		}
+		if reqCtx.AccountID != "" {
+			accountID = reqCtx.AccountID
+		}
+	}
+	return "arn:aws:events:" + region + ":" + accountID + ":event-bus/" + busName
+}

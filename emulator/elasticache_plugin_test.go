@@ -350,7 +350,7 @@ func TestElastiCachePlugin_Tagging(t *testing.T) {
 		t.Fatalf("CreateCacheCluster status %d, body: %s", resp.StatusCode, body)
 	}
 
-	arn := "arn:aws:elasticache:us-east-1:000000000000:cluster:tag-cluster"
+	arn := "arn:aws:elasticache:us-east-1:123456789012:cluster:tag-cluster"
 
 	// AddTagsToResource
 	resp = ecRequest(t, ts, map[string]string{
@@ -513,7 +513,7 @@ func TestElastiCachePlugin_ReplicationGroupTagging(t *testing.T) {
 	}
 
 	// Tagging via replicationgroup ARN type.
-	arn := "arn:aws:elasticache:us-east-1:000000000000:replicationgroup:tag-rg"
+	arn := "arn:aws:elasticache:us-east-1:123456789012:replicationgroup:tag-rg"
 
 	resp = ecRequest(t, ts, map[string]string{
 		"Action":              "AddTagsToResource",
@@ -662,7 +662,7 @@ func TestElastiCachePlugin_ReplicationGroupTaggingARN(t *testing.T) {
 		t.Fatalf("CreateReplicationGroup status %d", resp.StatusCode)
 	}
 
-	rgARN := "arn:aws:elasticache:us-east-1:000000000000:replicationgroup:rg-tag-test"
+	rgARN := "arn:aws:elasticache:us-east-1:123456789012:replicationgroup:rg-tag-test"
 
 	resp = ecRequest(t, ts, map[string]string{
 		"Action":              "AddTagsToResource",

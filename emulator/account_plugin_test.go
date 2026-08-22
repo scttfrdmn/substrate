@@ -690,7 +690,7 @@ func TestAccount_AccountIDTargetsAMemberAccount(t *testing.T) {
 //
 // The rest-json path is part of the canonical request, so the signature covers it;
 // signing "/" here would produce a header the server refuses before any plugin
-// runs, which is why sigV4Header takes the path.
+// runs, which is why signAs signs the request's own path.
 func accountSignedRequest(t *testing.T, ts *emulator.TestServer, account, path string, body any) *http.Response {
 	t.Helper()
 
@@ -703,19 +703,14 @@ func accountSignedRequest(t *testing.T, ts *emulator.TestServer, account, path s
 		t.Fatalf("marshal %s: %v", path, err)
 	}
 
-	const (
-		host     = "account.us-east-1.amazonaws.com"
-		dateTime = "20260101T120000Z"
-	)
+	const host = "account.us-east-1.amazonaws.com"
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+path, bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("build %s request: %v", path, err)
 	}
 	req.Host = host
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Amz-Date", dateTime)
-	req.Header.Set("Authorization", sigV4Header(path, host, "account", dateTime, data,
-		creds.AccessKeyID, creds.SecretAccessKey))
+	signAs(req, creds, "account", "us-east-1", data)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

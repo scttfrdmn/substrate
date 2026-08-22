@@ -49,6 +49,9 @@ type Config struct {
 	// Region controls multi-region routing and resource isolation.
 	Region RegionCfg `mapstructure:"region"`
 
+	// Account controls the AWS account requests are attributed to.
+	Account AccountCfg `mapstructure:"account"`
+
 	// Lambda controls Lambda Docker execution behavior.
 	Lambda LambdaCfg `mapstructure:"lambda"`
 
@@ -429,6 +432,19 @@ type RegionCfg struct {
 	Allowed []string `mapstructure:"allowed"`
 }
 
+// AccountCfg controls the AWS account a request is attributed to.
+type AccountCfg struct {
+	// Default is the account ID every caller resolves to. Default "123456789012",
+	// AWS's documented example account.
+	//
+	// It is the *default*, not the answer: a wired [CredentialRegistry] names the
+	// account per access key and an STS session record names the account it was
+	// issued for, and both take precedence. Set this when a test needs the whole
+	// server to sit in a particular account without signing for it — a fixture
+	// asserting on ARNs captured from a real account, for one.
+	Default string `mapstructure:"default"`
+}
+
 // LambdaCfg controls Lambda Docker execution behavior.
 type LambdaCfg struct {
 	// DockerEnabled gates the Docker-based Lambda execution engine. Default false.
@@ -519,6 +535,9 @@ func DefaultConfig() *Config {
 		Region: RegionCfg{
 			Default: "us-east-1",
 		},
+		Account: AccountCfg{
+			Default: defaultAccountID,
+		},
 		Lambda: LambdaCfg{
 			DockerEnabled: false,
 			ReplayMode:    "live",
@@ -575,6 +594,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("fault.enabled", defaults.Fault.Enabled)
 	v.SetDefault("fault.seed", defaults.Fault.Seed)
 	v.SetDefault("region.default", defaults.Region.Default)
+	v.SetDefault("account.default", defaults.Account.Default)
 	v.SetDefault("lambda.docker_enabled", defaults.Lambda.DockerEnabled)
 	v.SetDefault("lambda.replay_mode", defaults.Lambda.ReplayMode)
 	v.SetDefault("lambda.warm_pool_ttl", defaults.Lambda.WarmPoolTTL)
@@ -672,6 +692,13 @@ func Validate(cfg *Config) error {
 		if _, err := time.ParseDuration(cfg.Lambda.WarmPoolTTL); err != nil {
 			return fmt.Errorf("lambda.warm_pool_ttl %q is not a valid duration: %w", cfg.Lambda.WarmPoolTTL, err)
 		}
+	}
+
+	// An empty value keeps the built-in default; anything else must be a real
+	// account ID, because it lands in every ARN the server hands back and a
+	// malformed one is a fixture that cannot be compared against AWS.
+	if cfg.Account.Default != "" && !isAccountIDPattern(cfg.Account.Default) {
+		return fmt.Errorf("account.default %q is not valid; an AWS account ID is 12 digits", cfg.Account.Default)
 	}
 
 	validRDSEngines := map[string]bool{"stub": true, "container": true}

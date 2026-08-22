@@ -765,8 +765,8 @@ func TestEC2_LaunchTemplate_RoundTripsTagsAndProfile(t *testing.T) {
 		{
 			name:         "Arn form",
 			profileParam: "LaunchTemplateData.IamInstanceProfile.Arn",
-			profile:      "arn:aws:iam::000000000000:instance-profile/tmpl-profile",
-			wantARN:      "arn:aws:iam::000000000000:instance-profile/tmpl-profile",
+			profile:      "arn:aws:iam::123456789012:instance-profile/tmpl-profile",
+			wantARN:      "arn:aws:iam::123456789012:instance-profile/tmpl-profile",
 		},
 	}
 	for _, tt := range tests {
@@ -835,7 +835,7 @@ func TestEC2_LaunchTemplate_TagsReachTheInstance(t *testing.T) {
 // response shape has no name member — so a bare template name is surfaced as the
 // ARN it implies, matching what a call-level IamInstanceProfile.Name already did.
 func TestEC2_LaunchTemplate_ProfileReachesTheInstance(t *testing.T) {
-	const arn = "arn:aws:iam::000000000000:instance-profile/tmpl-profile"
+	const arn = "arn:aws:iam::123456789012:instance-profile/tmpl-profile"
 	tests := []struct {
 		name  string
 		param string
@@ -879,8 +879,8 @@ func TestEC2_LaunchTemplate_ProfileReachesTheInstance(t *testing.T) {
 // general "overwrite the corresponding parameters" rule, so replacement is that rule
 // applied — a request naming Env=req does not also inherit the template's Team=x.
 func TestEC2_LaunchTemplate_TagAndProfilePrecedence(t *testing.T) {
-	const reqARN = "arn:aws:iam::000000000000:instance-profile/p-req"
-	const tmplARN = "arn:aws:iam::000000000000:instance-profile/p-tmpl"
+	const reqARN = "arn:aws:iam::123456789012:instance-profile/p-req"
+	const tmplARN = "arn:aws:iam::123456789012:instance-profile/p-tmpl"
 
 	tests := []struct {
 		name          string
@@ -1107,7 +1107,7 @@ func storeTemplateWithTags(t *testing.T, name, ltID string, tags []map[string]st
 	ts := httptest.NewServer(emulator.NewServer(*emulator.DefaultConfig(), registry, store, state, tc, logger))
 	t.Cleanup(ts.Close)
 
-	const acct, region = "000000000000", "us-east-1"
+	const acct, region = "123456789012", "us-east-1"
 	raw, err := json.Marshal(map[string]any{
 		"launchTemplateId":     ltID,
 		"launchTemplateName":   name,

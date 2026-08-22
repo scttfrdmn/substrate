@@ -243,7 +243,7 @@ func TestDebugExport(t *testing.T) {
 		Sequence:  0,
 		Service:   "sqs",
 		Operation: "CreateQueue",
-		AccountID: "000000000000",
+		AccountID: "123456789012",
 		Region:    "us-east-1",
 		StreamID:  "export-stream",
 		Request: &emulator.AWSRequest{

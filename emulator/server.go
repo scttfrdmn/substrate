@@ -598,6 +598,14 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// [ParseAWSRequest] is pure and has no configuration to read, so it fills in
+	// [defaultAccountID]; the configured account, if any, is the server's answer.
+	// Step 1.5 below may still override it from a credential registry or an STS
+	// session, both of which know more than a config file does.
+	if s.config.Account.Default != "" {
+		reqCtx.AccountID = s.config.Account.Default
+	}
+
 	// Assign body. For S3 and other REST-protocol services rawBody holds the
 	// full binary payload. For query-protocol services (IAM, STS) ParseAWSRequest
 	// consumes the form body; we rebuild req.Body as JSON from the parsed params.
@@ -659,10 +667,10 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		if principal, sessionAccount := resolvePrincipal(ctx, s.state, reqCtx.AccountID, accessKey); principal != nil {
 			reqCtx.Principal = principal
 			// An STS session names the account it was issued for. Adopt it unless
-			// the registry already spoke: parser.extractAccount recognizes only an
-			// AKIA prefix as substrate's test account, so an ASIA session key was
-			// otherwise filed under the fallback account — a different partition
-			// from the resources the role's caller had just created.
+			// the registry already spoke: the session record is the only thing that
+			// knows which account a temporary credential belongs to, and it may
+			// differ from the configured default — an AssumeRole across accounts is
+			// the case that matters.
 			if sessionAccount != "" && !registryHit {
 				reqCtx.AccountID = sessionAccount
 			}

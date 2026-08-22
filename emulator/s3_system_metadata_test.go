@@ -191,7 +191,7 @@ func TestS3_SystemMetadata_ExpiresStoredVerbatim(t *testing.T) {
 // through the server would arrive canonical and the test would prove nothing.
 func TestS3_SystemMetadata_HeaderCaseInsensitive(t *testing.T) {
 	p := newS3PluginDirect(t)
-	rctx := &emulator.RequestContext{AccountID: "000000000000", Region: "us-east-1"}
+	rctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
 
 	// Operation carries the HTTP verb on entry; the plugin resolves the semantic
 	// operation from it and the path, exactly as the server pipeline does.

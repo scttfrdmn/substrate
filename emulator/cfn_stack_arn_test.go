@@ -27,10 +27,11 @@ import (
 // A caller could not tell: no error to catch, no status to poll. The next
 // CreateStack answering AlreadyExists was the only symptom.
 
-// cfnTestAccount and cfnTestRegion are the identity cfnRequest's signed
-// Authorization header resolves to. The ARN assertions below are built from them
-// rather than from a pasted string, so a change to either shows up as a failure
-// here rather than as a test that no longer exercises the scope check.
+// cfnTestAccount and cfnTestRegion are the identity cfnRequest resolves to: it
+// signs nothing and addresses us-east-1, so it is the server's default account in
+// its default Region. The ARN assertions below are built from them rather than from
+// a pasted string, so a change to either shows up as a failure here rather than as a
+// test that no longer exercises the scope check.
 const (
 	cfnTestAccount = "123456789012"
 	cfnTestRegion  = "us-east-1"
@@ -332,14 +333,14 @@ func TestCFNStackARN_EveryOperationRefusesAnOutOfScopeARN(t *testing.T) {
 func TestCFNStackARN_AnotherCallersARNIsRefused(t *testing.T) {
 	ts := newCFNIdentityTestServer(t)
 
-	// Two callers on one server: unsigned resolves to 000000000000, an AKIA-signed
-	// request to 123456789012.
-	const unsigned = ""
-	signed := signedAuthHeader("cloudformation", cfnTestRegion)
+	// Two callers on one server: an unsigned request resolves to the default account,
+	// and a request signed as cfnOtherAccount to that one.
+	const defaultCaller = ""
+	const otherCaller = cfnOtherAccount
 
-	create := func(auth, region, name string) string {
+	create := func(account, region, name string) string {
 		t.Helper()
-		code, body := cfnIdentityRequest(t, ts, "cloudformation", region, auth, map[string]string{
+		code, body := cfnIdentityRequest(t, ts, "cloudformation", region, account, map[string]string{
 			"Action":       "CreateStack",
 			"Version":      "2010-05-15",
 			"StackName":    name,
@@ -349,47 +350,47 @@ func TestCFNStackARN_AnotherCallersARNIsRefused(t *testing.T) {
 		return cfnXMLValue(t, body, "StackId")
 	}
 
-	zeroARN := create(unsigned, cfnTestRegion, "zero-owned")
-	testARN := create(signed, cfnTestRegion, "test-owned")
-	westARN := create(signed, "eu-west-1", "west-owned")
+	defaultARN := create(defaultCaller, cfnTestRegion, "default-owned")
+	otherARN := create(otherCaller, cfnTestRegion, "other-owned")
+	westARN := create(otherCaller, "eu-west-1", "west-owned")
 
-	require.Contains(t, zeroARN, ":000000000000:stack/zero-owned/")
-	require.Contains(t, testARN, ":"+cfnTestAccount+":stack/test-owned/")
+	require.Contains(t, defaultARN, ":"+cfnTestAccount+":stack/default-owned/")
+	require.Contains(t, otherARN, ":"+cfnOtherAccount+":stack/other-owned/")
 	require.Contains(t, westARN, ":eu-west-1:")
 
 	cases := []struct {
-		name   string
-		auth   string
-		region string
-		arn    string
+		name    string
+		account string
+		region  string
+		arn     string
 	}{
 		{
-			name: "the unsigned caller's own ARN, offered by the signed caller",
-			auth: signed, region: cfnTestRegion, arn: zeroARN,
+			name:    "the default account's own ARN, offered by the other account",
+			account: otherCaller, region: cfnTestRegion, arn: defaultARN,
 		},
 		{
-			name: "the signed caller's own ARN, offered by the unsigned caller",
-			auth: unsigned, region: cfnTestRegion, arn: testARN,
+			name:    "the other account's own ARN, offered by the default account",
+			account: defaultCaller, region: cfnTestRegion, arn: otherARN,
 		},
 		{
-			name: "a us-east-1 ARN offered to the eu-west-1 endpoint",
-			auth: signedAuthHeader("cloudformation", "eu-west-1"), region: "eu-west-1", arn: testARN,
+			name:    "a us-east-1 ARN offered to the eu-west-1 endpoint",
+			account: otherCaller, region: "eu-west-1", arn: otherARN,
 		},
 		{
-			name: "an eu-west-1 ARN offered to the us-east-1 endpoint",
-			auth: signed, region: cfnTestRegion, arn: westARN,
+			name:    "an eu-west-1 ARN offered to the us-east-1 endpoint",
+			account: otherCaller, region: cfnTestRegion, arn: westARN,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, body := cfnIdentityRequest(t, ts, "cloudformation", tc.region, tc.auth,
+			code, body := cfnIdentityRequest(t, ts, "cloudformation", tc.region, tc.account,
 				map[string]string{
 					"Action": "DescribeStacks", "Version": "2010-05-15", "StackName": tc.arn,
 				})
 			require.Equal(t, http.StatusBadRequest, code, "body was %s", body)
 			assert.Contains(t, body, "<Code>ValidationError</Code>")
 
-			code, body = cfnIdentityRequest(t, ts, "cloudformation", tc.region, tc.auth,
+			code, body = cfnIdentityRequest(t, ts, "cloudformation", tc.region, tc.account,
 				map[string]string{
 					"Action": "DeleteStack", "Version": "2010-05-15", "StackName": tc.arn,
 				})
@@ -401,13 +402,13 @@ func TestCFNStackARN_AnotherCallersARNIsRefused(t *testing.T) {
 	// Each owner still reaches its own stack by its own ARN, which is what keeps the
 	// refusals above from being a blanket "no ARNs across identities".
 	for _, own := range []struct {
-		auth, region, arn, name string
+		account, region, arn, name string
 	}{
-		{unsigned, cfnTestRegion, zeroARN, "zero-owned"},
-		{signed, cfnTestRegion, testARN, "test-owned"},
-		{signedAuthHeader("cloudformation", "eu-west-1"), "eu-west-1", westARN, "west-owned"},
+		{defaultCaller, cfnTestRegion, defaultARN, "default-owned"},
+		{otherCaller, cfnTestRegion, otherARN, "other-owned"},
+		{otherCaller, "eu-west-1", westARN, "west-owned"},
 	} {
-		code, body := cfnIdentityRequest(t, ts, "cloudformation", own.region, own.auth,
+		code, body := cfnIdentityRequest(t, ts, "cloudformation", own.region, own.account,
 			map[string]string{
 				"Action": "DescribeStacks", "Version": "2010-05-15", "StackName": own.arn,
 			})

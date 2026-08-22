@@ -65,6 +65,12 @@ consistency:
 # When enabled, every incoming request must carry a valid AWS4-HMAC-SHA256 Authorization
 # header signed with a key registered here. Omitting this section disables both credential
 # resolution and signature verification (all requests are accepted, backward-compatible default).
+#
+# NOT YET READ FROM THIS FILE (#736). Config has no field for this section, so the
+# shipped `substrate server` discards it and starts with verification off. The
+# registry itself is real — reach it in-process through ServerOptions.Credentials.
+# Wiring it here waits on #630, because a registry also switches SigV4 enforcement
+# on, which would 403 substrate's own documented test/test credentials.
 credentials:
   # Set to true to enable SigV4 signature verification.
   # enabled: true
@@ -78,6 +84,10 @@ credentials:
 # When enabled, every request whose caller principal has been resolved via the credential
 # registry is checked against that principal's attached managed policies, inline policies,
 # and permission boundary before the request reaches the plugin layer.
+#
+# NOT YET READ FROM THIS FILE (#736), for the same reason as credentials: above.
+# AuthController is reachable in-process through ServerOptions.Auth, which is how
+# StartTestServer wires it.
 auth:
   # Set to true to enable cross-service IAM enforcement.
   # enabled: true
@@ -140,3 +150,11 @@ region:
   # allowed:
   #   - "us-east-1"
   #   - "us-west-2"
+
+# The AWS account requests are attributed to.
+# Every ARN substrate mints, and every state key it partitions by account, names
+# this one — unless the request identifies another account, which only a
+# credentials entry (above) or an STS session can do. AWS's documented example
+# account is the default; change it to match whatever your fixtures assert on.
+account:
+  default: "123456789012"

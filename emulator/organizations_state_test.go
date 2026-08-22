@@ -21,7 +21,7 @@ func newOrganizationsStateFixture(t *testing.T) *emulator.OrganizationsPlugin {
 	return emulator.NewOrganizationsPluginForTest(state, tc)
 }
 
-const orgTestAccount = "000000000000"
+const orgTestAccount = "123456789012"
 
 // newOrgBadBody returns a body no JSON decoder can parse.
 func newOrgBadBody() io.Reader { return strings.NewReader(`{"AccountId":`) }

@@ -148,7 +148,7 @@ func TestSTSPlugin_AssumeRole_Success(t *testing.T) {
 
 	now := tc.Now()
 	resp := stsRequest(t, srv, "AssumeRole", map[string]string{
-		"RoleArn":         "arn:aws:iam::000000000000:role/myrole",
+		"RoleArn":         "arn:aws:iam::123456789012:role/myrole",
 		"RoleSessionName": "test-session",
 		"DurationSeconds": "3600",
 	})
@@ -168,7 +168,7 @@ func TestSTSPlugin_AssumeRole_Success(t *testing.T) {
 func TestSTSPlugin_AssumeRole_RoleNotFound(t *testing.T) {
 	srv, _, _ := newSTSTestServer(t)
 	resp := stsRequest(t, srv, "AssumeRole", map[string]string{
-		"RoleArn":         "arn:aws:iam::000000000000:role/nonexistent",
+		"RoleArn":         "arn:aws:iam::123456789012:role/nonexistent",
 		"RoleSessionName": "session",
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -192,7 +192,7 @@ func TestSTSPlugin_AssumeRole_DurationTooShort(t *testing.T) {
 	srv.ServeHTTP(iamW, iamReq)
 
 	resp := stsRequest(t, srv, "AssumeRole", map[string]string{
-		"RoleArn":         "arn:aws:iam::000000000000:role/r",
+		"RoleArn":         "arn:aws:iam::123456789012:role/r",
 		"RoleSessionName": "session",
 		"DurationSeconds": "100", // < 900
 	})
@@ -208,7 +208,7 @@ func TestSTSPlugin_AssumeRole_DurationTooLong(t *testing.T) {
 	srv.ServeHTTP(iamW, iamReq)
 
 	resp := stsRequest(t, srv, "AssumeRole", map[string]string{
-		"RoleArn":         "arn:aws:iam::000000000000:role/r",
+		"RoleArn":         "arn:aws:iam::123456789012:role/r",
 		"RoleSessionName": "session",
 		"DurationSeconds": "99999", // > 43200
 	})

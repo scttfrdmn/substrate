@@ -333,7 +333,7 @@ func putTestSQSQueue(t *testing.T, state emulator.StateManager, name string, tag
 
 // taggingTestAccountID is the account ID used in tagging tests. Since the test
 // server has no auth configured, ParseAWSRequest resolves to fallbackAccountID.
-const taggingTestAccountID = "000000000000"
+const taggingTestAccountID = "123456789012"
 
 // putTestDynamoDBTable pre-populates state with a DynamoDB table.
 func putTestDynamoDBTable(t *testing.T, state emulator.StateManager, name string, tags map[string]string) {

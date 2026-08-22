@@ -330,7 +330,7 @@ func TestRDSPlugin_Tagging(t *testing.T) {
 		t.Fatalf("CreateDBInstance status %d, body: %s", resp.StatusCode, body)
 	}
 
-	arn := "arn:aws:rds:us-east-1:000000000000:db:tagdb"
+	arn := "arn:aws:rds:us-east-1:123456789012:db:tagdb"
 
 	// AddTagsToResource
 	resp = rdsRequest(t, ts, map[string]string{
@@ -744,7 +744,7 @@ func TestRDSPlugin_SnapshotTagging(t *testing.T) {
 		t.Fatalf("CreateDBSnapshot status %d", resp.StatusCode)
 	}
 
-	snapARN := "arn:aws:rds:us-east-1:000000000000:snapshot:snap-tag"
+	snapARN := "arn:aws:rds:us-east-1:123456789012:snapshot:snap-tag"
 
 	// AddTagsToResource on snapshot.
 	resp = rdsRequest(t, ts, map[string]string{
