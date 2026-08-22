@@ -213,6 +213,70 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 	return out
 }
 
+// ec2AuthzIDParams are the request parameters that name the resource an EC2 operation
+// acts on, in the order they are tried.
+//
+// Only four, and each is here because a bundled AWS managed policy conditions an action on
+// the tags of the resource that parameter names (#730). Substrate resolved a single EC2
+// resource from `InstanceId` alone, so every other operation was decided against the
+// literal "*" — and a tag condition about it could not be evaluated at all, because there
+// was no resource whose tags to read. That made both `ec2:ResourceTag/…` statements in
+// AWS's own `AmazonECSServiceRolePolicy`-shaped cleanup grants inert:
+// `DeleteInternetGateway`, `DeleteRoute`, `DeleteRouteTable` and `DeleteSecurityGroup` are
+// exactly the four actions they govern.
+//
+// Order is fixed so the decision is replay-stable, and it does not matter in practice:
+// no EC2 operation carries two of these four. `DeleteRoute` and `DeleteRouteTable` share
+// `RouteTableId`, which is the resource both act on.
+//
+// Deliberately absent, each for its own reason rather than by oversight:
+//
+//   - `NetworkInterfaceId`, which `AmazonEKSClusterPolicy` conditions
+//     `ec2:DeleteNetworkInterface` on. Substrate stores no standalone taggable ENI record —
+//     [ec2TaggableResource] has no `eni-` arm to read one through, as
+//     [ec2AuthzRunInstancesResources] already records — so there are no tags to compare and
+//     that statement stays inert. Fabricating an empty tag set would be worse than leaving
+//     it: it would turn "substrate cannot tell" into "the tag is absent", which decides the
+//     condition rather than admitting it cannot.
+//   - `VpcId` and `SubnetId`, which several *creates* carry (`CreateSubnet`, `CreateRoute`,
+//     `AttachInternetGateway`) as the container the new resource goes into rather than as
+//     the resource acted on. Resolving one there would authorize a create against its
+//     parent's ARN, which is not the ARN AWS evaluates it against.
+//   - The plural forms. An operation naming several resources of one type —
+//     `TerminateInstances` with three `InstanceId.N` — is still decided against the first
+//     alone, which is the #674-shaped gap [ec2AuthzTagResources] closed for tagging calls
+//     and #744 tracks for the rest.
+var ec2AuthzIDParams = []string{"InstanceId", "GroupId", "RouteTableId", "InternetGatewayId"}
+
+// ec2AuthzNamedResource resolves the resource an EC2 request names by ID, for the
+// operations that are not a launch and not a tagging call.
+//
+// It reads the parameter through [extractIndexedParams], so `GroupId` and `GroupId.1` are
+// the same request — which is the form the handlers themselves accept, and it is what
+// keeps the resource a policy is evaluated against the resource the handler will act on.
+//
+// ok=false means the request names no resource this can resolve, which sends the caller
+// back to the wildcard it used before. That is the only safe direction: "*" as the request
+// resource matches a statement whose own Resource starts with "*", so it can only ever
+// narrow a grant, never widen one.
+func ec2AuthzNamedResource(state StateManager, reqCtx *RequestContext, req *AWSRequest) (ec2Taggable, bool) {
+	for _, param := range ec2AuthzIDParams {
+		ids := extractIndexedParams(req.Params, param)
+		if len(ids) == 0 || ids[0] == "" {
+			continue
+		}
+		target, ok := ec2TaggableResource(state, reqCtx, ids[0])
+		if !ok || !target.resolved() {
+			// A prefix naming no taggable type, or a pg-/key- ID naming no record.
+			// Neither is a resource an ARN can be built for — see [ec2Taggable.resolved]
+			// — and neither is this function's to refuse: the handler owes that answer.
+			return ec2Taggable{}, false
+		}
+		return target, true
+	}
+	return ec2Taggable{}, false
+}
+
 // ec2CreateTagsAction is the action AWS authorizes a tag-carrying create against a
 // second time, in addition to the create itself.
 const ec2CreateTagsAction = "ec2:CreateTags"

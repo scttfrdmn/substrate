@@ -183,20 +183,31 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		requestMulti["aws:TagKeys"] = keys
 	}
 
+	// The prefixes this service reports a resource's tags under, resolved once: it is a
+	// property of the service, not of any one resource.
+	tagPrefixes := authzResourceTagPrefixes(req.Service)
+
 	// Every resource the request names must be allowed. A request naming several —
 	// organizations:MoveAccount and ec2:RunInstances — is denied unless the caller's
 	// policies admit all of them, which is how AWS evaluates a statement against
 	// "every resource that is required" for the action (#660, #662).
 	for _, res := range resources {
-		condCtx := make(map[string]string, len(requestTags)+len(res.Tags)+len(res.Context))
+		condCtx := make(map[string]string,
+			len(requestTags)+len(res.Tags)*len(tagPrefixes)+len(res.Context))
 		for k, v := range requestTags {
 			condCtx[k] = v
 		}
 		// The tags travel with the ARN they belong to: one merged map across several
 		// resources would let a tag on one satisfy a condition written about another,
 		// which is the false allow orgAuthzResourceID's comment exists to prevent.
+		//
+		// One tag is reported under every prefix the service publishes, because a policy
+		// may write the condition either way about the same tag and AWS answers both from
+		// the resource's single tag set.
 		for k, v := range res.Tags {
-			condCtx["aws:ResourceTag/"+k] = v
+			for _, prefix := range tagPrefixes {
+				condCtx[prefix+k] = v
+			}
 		}
 		// Keys that describe this resource, on the same reasoning: they are scoped to
 		// the resource the reference lists them on, so a condition written about a
@@ -781,10 +792,11 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 		// RunInstances does not reach here: it names five resources and is resolved
 		// by [ec2AuthzRunInstancesResources] (#662). Nor does a CreateTags or
 		// DeleteTags naming any resource substrate can tag, resolved by
-		// [ec2AuthzTagResources] (#674). What is left is the operations that name an
-		// instance by ID — and everything else, which still resolves to "*".
-		if id := req.Params["InstanceId.1"]; id != "" {
-			return "arn:aws:ec2:" + region + ":" + acct + ":instance/" + id
+		// [ec2AuthzTagResources] (#674). What is left is the operations that name one
+		// resource by ID — an instance, a security group, a route table or an internet
+		// gateway (#730) — and everything else, which still resolves to "*".
+		if target, ok := ec2AuthzNamedResource(a.state, reqCtx, req); ok {
+			return target.arn(region, acct)
 		}
 		return "*"
 	case "lambda":
@@ -923,14 +935,40 @@ func buildS3ARN(req *AWSRequest) string {
 	return "arn:aws:s3:::" + path
 }
 
+// authzAWSResourceTagPrefix is the global condition-key prefix every service reports a
+// resource's tags under.
+const authzAWSResourceTagPrefix = "aws:ResourceTag/"
+
+// authzResourceTagPrefixes returns the condition-key prefixes a service reports a
+// resource's tags under, in the order they are written.
+//
+// AWS documents aws:ResourceTag/tag-key as global — "the tag attached to the resource
+// that you specify in the policy" — and some services additionally publish a
+// service-specific duplicate of it. EC2 is one: two of the AWS-authored managed policies
+// substrate bundles condition on ec2:ResourceTag/<key> rather than the global form
+// (ManagedCloudformationResourcesCleanupPolicy on aws:cloudformation:stack-name,
+// AmazonEKSClusterPolicy on eks:eni:owner), so a policy written the way AWS writes it
+// sees nothing unless the tags are reported under that prefix too.
+//
+// The list is per-service and deliberately not a blanket second prefix: reporting an S3
+// bucket's tags under s3:ResourceTag/ would invent a condition key AWS does not publish,
+// and a policy that happened to use it would then be honored here and ignored by AWS —
+// a divergence in the more dangerous direction, since it grants.
+func authzResourceTagPrefixes(service string) []string {
+	if service == "ec2" {
+		return []string{authzAWSResourceTagPrefix, "ec2:ResourceTag/"}
+	}
+	return []string{authzAWSResourceTagPrefix}
+}
+
 // resourceTagsFor loads the tags on the resource a request names, keyed by the
-// bare tag key. [AuthController.CheckAccess] adds the aws:ResourceTag/ prefix,
+// bare tag key. [AuthController.CheckAccess] adds the aws:ResourceTag/ prefix —
+// and any service-specific duplicate of it, see [authzResourceTagPrefixes] —
 // once per resource in the list, so an operation naming several resources cannot
 // mix one resource's tags into another's condition context.
 func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest) map[string]string {
 	goCtx := context.Background()
 	acct := reqCtx.AccountID
-	region := reqCtx.Region
 	var tags map[string]string
 
 	switch req.Service {
@@ -1012,19 +1050,17 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		}
 
 	case "ec2":
-		id := req.Params["InstanceId.1"]
-		if id == "" {
+		// The same resolver [AuthController.buildResourceARN] uses, so the tags a
+		// condition is evaluated against always belong to the ARN the decision is made
+		// about. Reading them through [ec2AuthzTagsFor] is also what generalizes this
+		// arm past instances: it decodes the "tags" member every EC2 record spells the
+		// same way, which is how a security group's, route table's or internet gateway's
+		// tags become readable without a decoder per type (#730).
+		target, ok := ec2AuthzNamedResource(a.state, reqCtx, req)
+		if !ok {
 			return nil
 		}
-		raw, err := a.state.Get(goCtx, ec2Namespace, "instance:"+acct+"/"+region+"/"+id)
-		if err != nil || raw == nil {
-			return nil
-		}
-		var inst EC2Instance
-		if err := json.Unmarshal(raw, &inst); err != nil {
-			return nil
-		}
-		tags = ec2TagsToMap(inst.Tags)
+		tags = ec2AuthzTagsFor(a.state, target.stateKey)
 
 	case "dynamodb":
 		tbl := req.Params["TableName"]

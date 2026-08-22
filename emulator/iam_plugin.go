@@ -457,6 +457,9 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 				"AssumeRolePolicyDocument is not valid JSON.", http.StatusBadRequest), nil
 		}
+		if err := iamValidateConditionOperators(trustPolicy); err != nil {
+			return nil, err
+		}
 	}
 
 	if params.Path == "" {
@@ -564,6 +567,9 @@ func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest)
 	if err := json.Unmarshal([]byte(params.PolicyDocument), &trustPolicy); err != nil {
 		return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 			"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
+	}
+	if err := iamValidateConditionOperators(trustPolicy); err != nil {
+		return nil, err
 	}
 	role.AssumeRolePolicyDocument = trustPolicy
 
@@ -1220,6 +1226,9 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 				"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
 		}
+		if err := iamValidateConditionOperators(doc); err != nil {
+			return nil, err
+		}
 	}
 
 	now := p.now().UTC()
@@ -1761,6 +1770,9 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	if err := json.Unmarshal([]byte(params.PolicyDocument), &doc); err != nil {
 		return iamErrorResponse("MalformedPolicyDocument", //nolint:nilerr
 			"PolicyDocument is not valid JSON.", http.StatusBadRequest), nil
+	}
+	if err := iamValidateConditionOperators(doc); err != nil {
+		return nil, err
 	}
 
 	docRaw, err := json.Marshal(doc)
