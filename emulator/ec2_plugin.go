@@ -575,8 +575,12 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// VPC, subnet, security group, internet gateway, route table and four index
 	// mutations: a refusal past that point leaves state behind, which is worse than no
 	// validation at all because the next request in the same test sees it.
+	//
+	// peekSnapshotStatus, not observeSnapshotStatus: a launch is not a poll, and the
+	// countdown advances in one place, so observing here would spend one of a test's
+	// seeded observations per mapping — see [ec2CheckMappingSnapshot].
 	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
-	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings, resolveSnapshot); awsErr != nil {
+	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings, resolveSnapshot, p.peekSnapshotStatus); awsErr != nil {
 		return nil, awsErr
 	}
 
@@ -4126,7 +4130,7 @@ func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		if bdm.SnapshotID == "" {
 			continue
 		}
-		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot); awsErr != nil {
+		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot, p.peekSnapshotStatus); awsErr != nil {
 			return nil, awsErr
 		}
 	}
@@ -5846,8 +5850,12 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 		// Reported rather than refused: the template is created either way, because
 		// AWS's Errors section lists nothing for an invalid one and its `warning`
 		// member exists for exactly this. See [ec2CollectBlockDeviceMappings].
+		//
+		// The nil observer skips the snapshot-state rule, deliberately: a template is
+		// not a launch, and a snapshot pending now may be complete when the template is
+		// used — see [ec2CheckMappingSnapshot].
 		Warning: ec2ValidationWarningFor(
-			ec2CollectBlockDeviceMappings(ltData.BlockDeviceMappings, p.ec2SnapshotResolver(ctx))),
+			ec2CollectBlockDeviceMappings(ltData.BlockDeviceMappings, p.ec2SnapshotResolver(ctx), nil)),
 	})
 }
 

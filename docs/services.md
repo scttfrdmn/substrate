@@ -5643,13 +5643,33 @@ below it for a failure: AWS's one observable data point says so, its
 `"State": "recovering"`. So progress measures how far the progression ran, not whether it
 succeeded.
 
-Two operations read the state without consuming an observation, since neither is a poll:
+Several operations read the state without consuming an observation, since none of them is a
+poll:
 
 - **`CreateVolume`** refuses a snapshot that is not `completed` with `IncorrectState`. The rule
   is AWS's — its snapshot-states table says "a snapshot can't be used while it is in the
   `pending` state" and "a snapshot can't be used if it is in the `error` state" — though
   `CreateVolume`'s own page publishes no error for it, so the code is substrate's choice from
   EC2's client-error table, the one it already answers with for a volume in the wrong state.
+- **A block device mapping** naming such a snapshot is refused the same way, with the same code,
+  wherever the mapping is *consumed*: on the launch path (`RunInstances`, and `CreateFleet`
+  through it) and in `RegisterImage`. One rule, one place, two doors — because a launch that
+  restores a volume from a snapshot is doing what `CreateVolume` does, and the two disagreeing
+  meant a consumer restoring through a launch never reached its own error branch
+  ([#732](https://github.com/scttfrdmn/substrate/issues/732)). AWS's snapshot-states table covers
+  all four non-`completed` states: a `recoverable` snapshot "must first [be recovered] from the
+  Recycle Bin", and a `recovering` one is "ready for use" only once it reaches `completed`. So
+  the rule is `completed`-or-refused, not pending-and-error-only. `RegisterImage` publishes no
+  error for it either — its Errors section is empty — so again the code is substrate's choice.
+  This is the one of these reads a single request can make more than once, one mapping each, so
+  spending an observation on it would make `pendingObservations: 2` mean something different
+  depending on how many volumes a launch declared.
+- **The two `CreateLaunchTemplate` operations are exempt, deliberately.** A template *records* a
+  mapping rather than consuming one, both report mapping problems through AWS's documented
+  `warning` member and refuse nothing, and a snapshot that is `pending` when a template is
+  written may legitimately be `completed` by the time the template is used — so refusing at
+  write time would forbid an ordering AWS permits. A launch *from* such a template is refused,
+  which is where the mapping is used.
 - **`DeleteSnapshot`** does *not* refuse one, because AWS permits it in so many words:
   "although you can delete a snapshot that is still in progress, the snapshot must complete
   before the deletion takes effect." The deferred-effect half is not modelled — AWS publishes

@@ -166,17 +166,35 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 //
 // # The snapshot rules
 //
-// Two of them, both added by #689 once a snapshot had a real size to compare against:
-// a SnapshotId that is malformed or names nothing is refused, and a VolumeSize smaller
-// than the named snapshot's is refused. v0.105.0 deferred the second for the reason
-// #689 removes — EC2Snapshot.VolumeSize was the literal 8 at its single producer, so
-// the comparison would have tested a constant rather than the caller's request.
+// Three of them. Two were added by #689 once a snapshot had a real size to compare
+// against: a SnapshotId that is malformed or names nothing is refused, and a VolumeSize
+// smaller than the named snapshot's is refused. v0.105.0 deferred the second for the
+// reason #689 removes — EC2Snapshot.VolumeSize was the literal 8 at its single producer,
+// so the comparison would have tested a constant rather than the caller's request. The
+// third, added by #732, refuses a snapshot that is not `completed`, which is the same
+// refusal CreateVolume already makes from the same rule.
 //
-// resolveSnapshot is how both reach state: a lookup rather than a [StateManager], so
-// this stays a pure function over its arguments and a unit test can supply three
-// snapshots without a state fixture. It is required, not optional — a nil-means-skip
-// escape would silently disable a refusal, which is the failure mode #689 exists to
-// close. [EC2Plugin.ec2SnapshotResolver] builds the production one.
+// resolveSnapshot is how the first two reach state: a lookup rather than a
+// [StateManager], so this stays a pure function over its arguments and a unit test can
+// supply three snapshots without a state fixture. It is required, not optional — a
+// nil-means-skip escape would silently disable a refusal, which is the failure mode #689
+// exists to close. [EC2Plugin.ec2SnapshotResolver] builds the production one.
+//
+// observeSnapshot is how the third reaches it, and it is separate because the state a
+// snapshot *reports* is not the state its record carries: EC2Snapshot.State is
+// "completed" for every snapshot substrate writes, so a rule reading the record would be
+// dead code, and the observable state lives behind a seed. It must be
+// [EC2Plugin.peekSnapshotStatus] and never [EC2Plugin.observeSnapshotStatus] — the
+// countdown advances in one place, so an observing read here would burn one observation
+// *per mapping per request* and make "pendingObservations: 2" mean a different number of
+// polls depending on how many volumes a launch declared.
+//
+// Unlike resolveSnapshot, a nil observeSnapshot skips the state rule, and the two
+// CreateLaunchTemplate paths pass nil deliberately: a template is not a launch, they
+// report mapping problems through `warning` rather than refusing at all, and a snapshot
+// that is pending when a template is written may legitimately be complete when the
+// template is used. The rule still lives in one place — here — so the launch path and
+// RegisterImage cannot drift apart on it.
 //
 // # Provenance
 //
@@ -184,7 +202,9 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 // EbsBlockDevice.VolumeSize, "You can specify a volume size that is equal to or larger
 // than the snapshot size" on the same member, InvalidSnapshot.NotFound in the
 // client-error table, and "This parameter is valid only for gp3 volumes" on
-// Throughput. The Iops rule rests on the sibling launch-template shape; see
+// Throughput. The snapshot-state rule is AWS's too, from the snapshot-states table
+// rather than from either operation's page; only its code is substrate's, as
+// [ec2CheckMappingSnapshot] records. The Iops rule rests on the sibling launch-template shape; see
 // [ec2VolumeTypesWithoutIOPS]. Refusing a duplicate device name and a virtualName
 // beside an Ebs member rests on **substrate's own reading** — AWS documents no rule for
 // either, and neither is a thing real EC2 can act on, since one device cannot carry two
@@ -212,8 +232,9 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 func ec2CheckBlockDeviceMappings(
 	mappings []EC2BlockDeviceMapping,
 	resolveSnapshot func(string) (EC2Snapshot, bool),
+	observeSnapshot func(EC2Snapshot) (ec2SnapshotObservation, error),
 ) *AWSError {
-	if problems := ec2CollectBlockDeviceMappings(mappings, resolveSnapshot); len(problems) > 0 {
+	if problems := ec2CollectBlockDeviceMappings(mappings, resolveSnapshot, observeSnapshot); len(problems) > 0 {
 		return problems[0]
 	}
 	return nil
@@ -237,11 +258,12 @@ func ec2CheckBlockDeviceMappings(
 func ec2CollectBlockDeviceMappings(
 	mappings []EC2BlockDeviceMapping,
 	resolveSnapshot func(string) (EC2Snapshot, bool),
+	observeSnapshot func(EC2Snapshot) (ec2SnapshotObservation, error),
 ) []*AWSError {
 	var problems []*AWSError
 	seen := make(map[string]bool, len(mappings))
 	for _, bdm := range mappings {
-		problems = append(problems, ec2CollectBlockDeviceMapping(bdm, resolveSnapshot)...)
+		problems = append(problems, ec2CollectBlockDeviceMapping(bdm, resolveSnapshot, observeSnapshot)...)
 		// Only a mapping that materializes a volume can collide: NoDevice suppresses
 		// its device and a virtualName-only mapping names an instance store device, so
 		// neither occupies the device in a way a second mapping could contend for.
@@ -277,6 +299,7 @@ func ec2CollectBlockDeviceMappings(
 func ec2CollectBlockDeviceMapping(
 	bdm EC2BlockDeviceMapping,
 	resolveSnapshot func(string) (EC2Snapshot, bool),
+	observeSnapshot func(EC2Snapshot) (ec2SnapshotObservation, error),
 ) []*AWSError {
 	var problems []*AWSError
 	device := bdm.DeviceName
@@ -317,7 +340,7 @@ func ec2CollectBlockDeviceMapping(
 	}
 
 	if bdm.SnapshotID != "" {
-		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot); awsErr != nil {
+		if awsErr := ec2CheckMappingSnapshot(bdm, resolveSnapshot, observeSnapshot); awsErr != nil {
 			problems = append(problems, awsErr)
 		}
 	}
@@ -339,23 +362,49 @@ func ec2CollectBlockDeviceMapping(
 	return problems
 }
 
-// ec2CheckMappingSnapshot applies the two rules that concern the snapshot a mapping
+// ec2CheckMappingSnapshot applies the three rules that concern the snapshot a mapping
 // names. The caller has already established that it names one.
 //
-// The two refusals carry different codes on purpose, because they are different
-// mistakes: a snapshot substrate cannot find is an InvalidSnapshot.NotFound (or
+// The refusals carry different codes on purpose, because they are different mistakes: a
+// snapshot substrate cannot find is an InvalidSnapshot.NotFound (or
 // InvalidSnapshotID.Malformed) about the *ID*, which is what a caller naming a snapshot
 // from another account or a stale run has done, while a size below the snapshot's is an
 // InvalidBlockDeviceMapping about the *mapping*, which is what the rest of this
 // validator reports. Collapsing them into one code would tell a caller to look in the
-// wrong place.
+// wrong place. The state rule is a third thing again — nothing about the request is wrong,
+// the snapshot is simply not usable yet — so it answers IncorrectState, the code
+// CreateVolume already gives for the same condition.
+//
+// # Order
+//
+// Existence, then state, then size, each refusal being more fundamental than the next: a
+// caller told "size 8 is smaller than the snapshot" would fix the size and be refused
+// again for the state. This is CreateVolume's order too, deliberately.
 //
 // The size comparison reads the parsed VolumeSize and gates on it being positive, so a
 // mapping that names no size inherits the snapshot's rather than being refused for
 // naming 0 — see [ec2ResolveSnapshotSizes], which does the inheriting.
+//
+// # Provenance of the state rule
+//
+// AWS's snapshot-states table is the rule: "A snapshot can't be used while it is in the
+// pending state", "A snapshot can't be used if it is in the error state", a recoverable
+// one "must first [be recovered] from the Recycle Bin", and a recovering one becomes
+// "ready for use" only once it reaches completed. So every state but completed is refused,
+// and the four reasons are AWS's own. Neither operation's page states it —
+// API_RegisterImage.html's Errors section is empty and API_RunInstances.html publishes no
+// snapshot error — so IncorrectState is substrate's choice from EC2's client-error table,
+// the same provenance shape CreateVolume's copy of this rule carries (#715, #732).
+//
+// An unreadable seed answers InternalError/500 rather than being read as completed. This
+// is the opposite of [EC2Plugin.ec2SnapshotResolver]'s rule for an unreadable *record*,
+// and for the reason that one gives: reporting "absent" for an unreadable record is the
+// same answer a caller gets for one never written, whereas reading an unreadable seed as
+// "completed" would silently disable a refusal.
 func ec2CheckMappingSnapshot(
 	bdm EC2BlockDeviceMapping,
 	resolveSnapshot func(string) (EC2Snapshot, bool),
+	observeSnapshot func(EC2Snapshot) (ec2SnapshotObservation, error),
 ) *AWSError {
 	if !ec2SnapshotIDKind.wellFormed(bdm.SnapshotID) {
 		return ec2SnapshotIDKind.malformedError(bdm.SnapshotID)
@@ -363,6 +412,25 @@ func ec2CheckMappingSnapshot(
 	snap, found := resolveSnapshot(bdm.SnapshotID)
 	if !found {
 		return ec2SnapshotIDKind.notFoundError(bdm.SnapshotID)
+	}
+	if observeSnapshot != nil {
+		observed, err := observeSnapshot(snap)
+		if err != nil {
+			return &AWSError{
+				Code:       "InternalError",
+				Message:    "Failed to read the state of snapshot " + snap.SnapshotID,
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		}
+		if observed.State != "completed" {
+			return &AWSError{
+				Code: "IncorrectState",
+				Message: fmt.Sprintf(
+					"Snapshot %s is in %s state; a block device mapping can only name a completed snapshot",
+					snap.SnapshotID, observed.State),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
 	}
 	if bdm.VolumeSize > 0 && int64(bdm.VolumeSize) < snap.VolumeSize {
 		return ec2InvalidBlockDeviceMapping(bdm.DeviceName, fmt.Sprintf(
