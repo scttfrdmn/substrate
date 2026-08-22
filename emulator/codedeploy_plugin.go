@@ -59,11 +59,7 @@ func (p *CodeDeployPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest
 	case "GetDeployment":
 		return p.getDeployment(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CodeDeployPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

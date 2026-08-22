@@ -64,11 +64,7 @@ func (p *SSOPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	case "ListAccountAssignments":
 		return p.listAccountAssignments(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "SSOPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

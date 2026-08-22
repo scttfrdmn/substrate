@@ -86,11 +86,7 @@ func (p *ELBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "SetRulePriorities":
 		return p.setRulePriorities(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "ELBPlugin: unknown action " + action,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), action)
 	}
 }
 

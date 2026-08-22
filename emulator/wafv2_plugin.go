@@ -68,11 +68,7 @@ func (p *WAFv2Plugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*A
 	case "ListIPSets":
 		return p.listIPSets(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "WAFv2Plugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

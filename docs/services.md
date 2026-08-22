@@ -90,6 +90,70 @@ here.
 
 ---
 
+## An operation substrate does not implement
+
+No plugin covers its whole service, so every one of the 67 has an answer for a call it
+does not serve. That answer is decided by the **Protocol** column above and by nothing
+else — not by which plugin the call reached, and not by who wrote it.
+
+| Protocol | Code | HTTP | Message |
+|---|---|---|---|
+| JSON, REST/JSON | `UnknownOperationException` | **404** | `The action <name> is not recognized.` |
+| Query, `ec2`, REST/XML | `InvalidAction` | 400 | `The action <name> is not valid for this endpoint.` |
+
+`<name>` is the operation name for a service that dispatches on one, and the HTTP verb
+and path — `POST /substrate-no-such-path` — for a REST service whose router matched
+nothing. A REST operation is identified by the pair, so both halves are reported:
+`DELETE` and `POST` on one path are different operations, and the same verb on a
+mistyped path is the more common mistake.
+
+The name is always present. It is what lets a consumer tell *substrate has not
+implemented this call* from *this call was rejected*, which is the difference that
+decides whether to change the test or the code under test.
+
+### Where the two rows come from
+
+`UnknownOperationException` at 404 is AWS's, quoted from its Common Errors pages:
+"The action or operation isn't recognized. Verify that the action name is spelled
+correctly and that it's supported by the API version you're using." Both JSON families
+publish it and both publish the 404 — checked on
+[DynamoDB's](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/CommonErrors.html)
+for JSON and
+[Lambda's](https://docs.aws.amazon.com/lambda/latest/api/CommonErrors.html)
+for REST/JSON.
+
+`InvalidAction` is **substrate's choice, not a citation.** AWS's current Common Errors
+pages publish no unknown-action code at all for the Query, `ec2` and REST/XML families:
+the `InvalidAction` entry those pages once carried has been removed, and nothing was put
+in its place — checked on EC2's, IAM's and SNS's. Substrate keeps `InvalidAction` because
+it is the code the Query protocol has always used and an SDK caller's error branch is
+written against it, and because the reference offers no replacement to move to. If AWS
+publishes one, this row changes.
+
+### Two things this is not
+
+It is **not** a Go type name. Until
+[#716](https://github.com/scttfrdmn/substrate/issues/716) every plugin wrote this
+refusal itself — 59 sites in eight wordings, each leading with the plugin's Go type
+("`SSMPlugin: unknown operation "Foo"`"). No AWS endpoint emits that, so a consumer's
+error branch was matching on a substrate internal. A tripwire test now sweeps all 67
+plugins and fails if any answer contains the word `Plugin`.
+
+It is **not** `InvalidAction` on a JSON service. Forty-four of those 59 sites answered the
+Query protocol's code at 400 on a service whose protocol is JSON, which is what the
+table above corrects. **A test asserting `InvalidAction` or a 400 for an unimplemented
+call on a JSON or REST/JSON service needs both the code and the status from the first
+row** — see the release that landed #716 in `CHANGELOG.md` for the upgrade note. The
+change is visible for every service in the matrix except the nine Query, `ec2` and
+REST/XML ones.
+
+One shape difference survives on purpose: IAM answers a refusal as a 4xx response
+document rather than as an error object. Both conventions are in use across the tree
+([#516](https://github.com/scttfrdmn/substrate/issues/516) is about that), so #716
+changed where IAM's code, message and status come from and left the shape alone.
+
+---
+
 ## CloudFormation
 
 **Endpoint:** `cloudformation.{region}.amazonaws.com`
@@ -5970,7 +6034,7 @@ the only place the missing ARN surfaces, and the ARN a caller has to add.
 | An `aws:`-prefixed tag key | `InvalidInputException`/`INVALID_SYSTEM_TAGS_PARAMETER` |
 | An unreadable pagination token | `InvalidInputException`/`INVALID_NEXT_TOKEN` |
 | An unparseable request body | `InvalidInputException` |
-| An unimplemented operation | `InvalidAction` |
+| An unimplemented operation | `UnknownOperationException`, **404** — Organizations is JSON; see [An operation substrate does not implement](#an-operation-substrate-does-not-implement) |
 
 ### Quotas
 

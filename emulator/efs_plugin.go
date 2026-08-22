@@ -67,11 +67,7 @@ func (p *EFSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "UntagResource":
 		return p.untagResource(ctx, req, resourceID)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "EFSPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

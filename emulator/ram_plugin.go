@@ -57,11 +57,10 @@ func (p *RAMPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	case "ListResources":
 		return p.listResources(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "RAMPlugin: unsupported operation " + op,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		// parseRAMOperation falls back to the bare HTTP method for a path it does not
+		// recognize, which is not an operation name, so the refusal reports the verb and
+		// path that resolved to nothing rather than that fallback.
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

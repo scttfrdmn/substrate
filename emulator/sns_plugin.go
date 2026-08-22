@@ -86,11 +86,7 @@ func (p *SNSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("The action %s is not valid for this endpoint.", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

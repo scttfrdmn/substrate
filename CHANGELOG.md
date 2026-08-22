@@ -80,7 +80,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both, and no per-operation page settles which operation raises which —
   `API_DeleteNatGateway.html`'s Errors section is empty, as EC2's pages generally are.
 
+- **An unimplemented operation is refused by its service's protocol, from one place** (#716).
+  All 59 unknown-action arms across the tree — every plugin has one, since none covers its
+  whole service — now call `unknownActionError` (or `unknownRouteError` for a REST plugin whose
+  router matched nothing), so the answer is a property of the service's protocol rather than of
+  whoever wrote the plugin. They were 59 hand-written literals in **eight different wordings**,
+  each leading with the plugin's own Go type: `SSMPlugin: unknown operation "Foo"`. No AWS
+  endpoint emits a Go type name, so a consumer's error branch was matching on a substrate
+  internal, and a caller could not tell "substrate has not implemented this" from any other
+  refusal. A tripwire test now sweeps all 67 registered plugins and fails if any answer
+  contains the word `Plugin`.
+
+  **Forty-four services change both the code and the HTTP status. This is the upgrade note for
+  this release.** Those 44 answered `InvalidAction` at **400** — the Query protocol's code — on
+  a service whose protocol is JSON or REST/JSON. AWS publishes `UnknownOperationException` at
+  **404** for both JSON families, so that is what they answer now. Anything asserting
+  `InvalidAction` or a 400 for an unimplemented call on a JSON service needs both values
+  updated; the nine Query, `ec2` and REST/XML services are unchanged. The affected list is
+  every service in `docs/services.md`'s coverage matrix whose Protocol is JSON or REST/JSON.
+
+  The message names the operation in both arms, which is the point of it — that is what lets a
+  consumer tell an unimplemented call from a rejected one. A REST plugin reports the verb *and*
+  the path (`The action POST /substrate-no-such-path is not recognized.`), because a REST
+  operation is identified by the pair: `DELETE` and `POST` on one path are different
+  operations, and the same verb on a mistyped path is the more common mistake.
+
+  Two plugin-local helpers are retired, their reasoning moved to the call site:
+  `cfgsvcInvalidAction` and `orgInvalidAction`. `AccountPlugin`, `RAMPlugin` and
+  `SchedulerPlugin` switched to the route form, because their path resolvers hand the default
+  arm `""` (account, scheduler) or a bare HTTP verb (RAM) rather than an operation name. One
+  shape difference survives deliberately: IAM answers a refusal as a 4xx response document
+  rather than an error object, and both conventions are in use across the tree (#516 is about
+  that), so only IAM's code, message and status moved.
+
+  Provenance: `UnknownOperationException` and its 404 are AWS's — "The action or operation
+  isn't recognized. Verify that the action name is spelled correctly and that it's supported by
+  the API version you're using." — published on both a JSON service's Common Errors page
+  (DynamoDB) and a REST/JSON one's (Lambda), which agree on the code and the status.
+  **`InvalidAction` is substrate's choice, and #716's premise that it could be verified against
+  the reference is wrong: the code has been removed from every current Common Errors page.**
+  Checked on EC2's, IAM's, SNS's, DynamoDB's and Lambda's; the Query, `ec2` and REST/XML pages
+  now publish no unknown-action code at all, and nothing was put in `InvalidAction`'s place. It
+  is kept because it is the code the Query protocol has always used and an SDK caller's error
+  branch is written against it. The message wording in both arms is substrate's — AWS publishes
+  a description of the condition, never a wire message.
+
 ### Fixed
+- **Three plugins answered a wrong code for an unimplemented operation** (#716), all corrected
+  by routing through the shared refusal. DynamoDB returned `UnknownOperationException` — the
+  right code — at HTTP **400**, where AWS's own DynamoDB Common Errors page publishes 404.
+  Secrets Manager returned `UnrecognizedClientException`, which AWS's Common Errors pages
+  define as a *credentials* error — "The X.509 certificate or AWS access key ID you provided
+  doesn't exist in our records", HTTP 403 — sending a consumer to debug request signing for a
+  call substrate simply does not serve. Price List returned `InvalidParameterException`, the
+  code for a bad parameter rather than a bad operation. All three now answer
+  `UnknownOperationException` at 404, their protocol's documented refusal.
+
 - **A refused `ReplaceRouteTableAssociation` no longer destroys the association it was asked
   to move** (#713). The handler removed the source association and committed it *before*
   resolving the target route table, so a request naming a `RouteTableId` that was absent or

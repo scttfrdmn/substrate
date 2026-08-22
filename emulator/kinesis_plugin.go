@@ -90,11 +90,7 @@ func (p *KinesisPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 	case "DisableEnhancedMonitoring":
 		return p.disableEnhancedMonitoring(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("KinesisPlugin: unknown operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), op)
 	}
 }
 

@@ -65,11 +65,7 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "ListMetrics":
 		return p.listMetrics(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("CloudWatchPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

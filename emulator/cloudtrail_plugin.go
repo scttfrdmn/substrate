@@ -56,11 +56,7 @@ func (p *CloudTrailPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest
 	case "StopLogging":
 		return p.stopLogging(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CloudTrailPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

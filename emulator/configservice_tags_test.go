@@ -604,13 +604,15 @@ func TestConfigTags_AreClearedRatherThanStoredEmpty(t *testing.T) {
 
 func TestConfigTags_AnUnsupportedTagOperationIsRefusedByName(t *testing.T) {
 	// AWS Config has 97 operations; substrate implements the detective-controls subset.
-	// An unclaimed one names itself so a consumer discovers which call is missing.
+	// An unclaimed one names itself so a consumer discovers which call is missing. Config
+	// is JSON-RPC, so the code and status are the UnknownOperationException/404 AWS
+	// publishes for that protocol (#716).
 	ts := emulator.StartTestServer(t)
 
 	status, code, message := decodeConfigResponse(t,
 		configRequest(t, ts, "ListResourceEvaluations", map[string]any{}), nil)
-	assert.Equal(t, http.StatusBadRequest, status)
-	assert.Equal(t, "InvalidAction", code)
+	assert.Equal(t, http.StatusNotFound, status)
+	assert.Equal(t, "UnknownOperationException", code)
 	assert.Contains(t, message, "ListResourceEvaluations")
 }
 

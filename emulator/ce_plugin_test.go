@@ -278,14 +278,17 @@ func TestCE_GetCostAndUsage_BlendedCostMetric(t *testing.T) {
 	t.Errorf("EC2 group not found in: %+v", out.ResultsByTime[0].Groups)
 }
 
+// TestCE_UnsupportedOperation pins the default arm. Cost Explorer is JSON-RPC, so
+// the refusal is the UnknownOperationException at 404 that AWS's Common Errors page
+// publishes for that protocol, not the Query protocol's InvalidAction at 400 (#716).
 func TestCE_UnsupportedOperation(t *testing.T) {
 	ts := newCETestServer(t)
 
 	resp := ceRequest(t, ts, "UnknownOp", map[string]interface{}{})
 	defer resp.Body.Close() //nolint:errcheck
 
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 }
 

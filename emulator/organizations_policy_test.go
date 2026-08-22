@@ -1703,10 +1703,14 @@ func TestOrganizations_PolicyIDSyntaxUnits(t *testing.T) {
 }
 
 // TestOrganizations_PolicyOperationsAreClaimed pins that every operation in the lane
-// is dispatched, and that an operation outside it still falls through to
-// InvalidAction. A silently unclaimed operation would answer InvalidAction, which a
-// caller reads as "this API does not exist" rather than "substrate has not
+// is dispatched, and that an operation outside it still falls through to the
+// unknown-action refusal. A silently unclaimed operation would answer that refusal,
+// which a caller reads as "this API does not exist" rather than "substrate has not
 // implemented it".
+//
+// Organizations is JSON-RPC, so that refusal is the UnknownOperationException AWS
+// publishes for the protocol; it was InvalidAction, a Query-protocol code, until
+// #716.
 func TestOrganizations_PolicyOperationsAreClaimed(t *testing.T) {
 	ts := newOrganizationsTestServer(t)
 
@@ -1721,8 +1725,8 @@ func TestOrganizations_PolicyOperationsAreClaimed(t *testing.T) {
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&out) //nolint:errcheck
 		resp.Body.Close()                           //nolint:errcheck
-		if out.Type == "InvalidAction" {
-			t.Errorf("%s: expected the operation to be claimed, got InvalidAction", op)
+		if out.Type == "UnknownOperationException" {
+			t.Errorf("%s: expected the operation to be claimed, got UnknownOperationException", op)
 		}
 	}
 
@@ -1735,7 +1739,7 @@ func TestOrganizations_PolicyOperationsAreClaimed(t *testing.T) {
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&out) //nolint:errcheck
 	resp.Body.Close()                           //nolint:errcheck
-	if out.Type != "InvalidAction" {
-		t.Errorf("expected an unimplemented operation to answer InvalidAction, got %q", out.Type)
+	if out.Type != "UnknownOperationException" {
+		t.Errorf("expected an unimplemented operation to answer UnknownOperationException, got %q", out.Type)
 	}
 }

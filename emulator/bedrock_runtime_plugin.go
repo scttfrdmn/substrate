@@ -72,11 +72,7 @@ func (p *BedrockRuntimePlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	case "ListModelInvocationJobs":
 		return p.listModelInvocationJobs(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "BedrockRuntimePlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

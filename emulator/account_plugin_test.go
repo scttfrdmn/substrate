@@ -155,13 +155,20 @@ func TestAccount_IsReachableFromAnSDKShapedRequest(t *testing.T) {
 // of the four Region routes must not be answered as though it were: the eleven
 // contact and account-name operations are deliberately not emulated, and a
 // consumer calling one needs to see that rather than a plausible empty success.
+//
+// Account is REST-JSON, so the answer is the UnknownOperationException/404 that
+// AWS's Common Errors page publishes for that protocol (#716), and the message
+// names the verb and path because a REST operation is identified by the pair.
 func TestAccount_UnknownPathIsRefused(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 
-	status, code, _ := decodeAccountResponse(t,
+	status, code, message := decodeAccountResponse(t,
 		accountRequest(t, ts, "/putAlternateContact", map[string]any{}), nil)
-	if status != http.StatusBadRequest || code != "InvalidAction" {
-		t.Errorf("POST /putAlternateContact: %d %q, want 400/InvalidAction", status, code)
+	if status != http.StatusNotFound || code != "UnknownOperationException" {
+		t.Errorf("POST /putAlternateContact: %d %q, want 404/UnknownOperationException", status, code)
+	}
+	if !strings.Contains(message, "POST /putAlternateContact") {
+		t.Errorf("message %q does not name the verb and path that resolved to nothing", message)
 	}
 }
 

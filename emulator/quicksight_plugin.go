@@ -54,11 +54,7 @@ func (p *QuickSightPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "DescribeIngestion":
 		return p.describeIngestion(ctx, req, accountID, resourceID, secondaryID)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "QuickSightPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

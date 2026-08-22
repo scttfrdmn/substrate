@@ -534,23 +534,24 @@ func TestOrganizations_MalformedBodyIsInvalidInput(t *testing.T) {
 	}
 }
 
-// TestOrganizations_UnsupportedOperation checks the claim chain's fallthrough:
-// an operation no cluster claims is InvalidAction rather than a panic or a
-// silent empty success.
+// TestOrganizations_UnsupportedOperation checks the claim chain's fallthrough: an
+// operation no cluster claims is refused rather than panicking or answering a silent
+// empty success. Organizations is JSON-RPC, so the refusal is the
+// UnknownOperationException at 404 AWS publishes for that protocol (#716).
 func TestOrganizations_UnsupportedOperation(t *testing.T) {
 	ts := newOrganizationsTestServer(t)
 
 	resp := orgsRequest(t, ts, "LeaveOrganization", map[string]interface{}{})
 	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 	var out map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if code, _ := out["__type"].(string); code != "InvalidAction" {
-		t.Errorf("expected __type=InvalidAction, got %q", code)
+	if code, _ := out["__type"].(string); code != "UnknownOperationException" {
+		t.Errorf("expected __type=UnknownOperationException, got %q", code)
 	}
 }
 

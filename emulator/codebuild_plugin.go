@@ -55,11 +55,7 @@ func (p *CodeBuildPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest)
 	case "BatchGetBuilds":
 		return p.batchGetBuilds(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CodeBuildPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

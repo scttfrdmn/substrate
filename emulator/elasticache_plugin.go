@@ -85,11 +85,7 @@ func (p *ElastiCachePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 	case "RemoveTagsFromResource":
 		return p.removeTagsFromResource(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "ElastiCachePlugin: unknown action " + action,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), action)
 	}
 }
 

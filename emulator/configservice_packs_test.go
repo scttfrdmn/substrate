@@ -1368,11 +1368,12 @@ func TestConformancePacks_AnUnsupportedPackOperationIsRefusedByName(t *testing.T
 	// Config has 97 operations and substrate implements the detective-controls subset, so
 	// the organization-level pack operations are not claimed. Naming the operation is
 	// what lets a consumer discover which call is missing rather than reading a bare
-	// refusal.
+	// refusal. Config is JSON-RPC, so the code and status are the
+	// UnknownOperationException/404 AWS publishes for that protocol (#716).
 	resp := configRequest(t, ts, "PutOrganizationConformancePack", map[string]any{})
 	status, code, message := decodeConfigResponse(t, resp, nil)
-	require.Equal(t, http.StatusBadRequest, status)
-	require.Equal(t, "InvalidAction", code)
+	require.Equal(t, http.StatusNotFound, status)
+	require.Equal(t, "UnknownOperationException", code)
 	require.Contains(t, message, "PutOrganizationConformancePack")
 }
 

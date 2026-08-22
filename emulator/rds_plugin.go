@@ -109,11 +109,7 @@ func (p *RDSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "RemoveTagsFromResource":
 		return p.removeTagsFromResource(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "RDSPlugin: unknown action " + action,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), action)
 	}
 }
 

@@ -53,11 +53,7 @@ func (p *SESv2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 	case "SendEmail":
 		return p.sendEmail(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "SESv2Plugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

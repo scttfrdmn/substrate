@@ -245,11 +245,7 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "DescribeSnapshots":
 		return p.describeSnapshots(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "EC2Plugin: unknown action " + action,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), action)
 	}
 }
 

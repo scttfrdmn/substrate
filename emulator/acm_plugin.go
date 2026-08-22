@@ -65,11 +65,7 @@ func (p *ACMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "RenewCertificate":
 		return acmJSONResponse(http.StatusOK, struct{}{})
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("ACMPlugin: unknown operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), op)
 	}
 }
 

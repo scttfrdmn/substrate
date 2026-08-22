@@ -67,11 +67,7 @@ func (p *CloudWatchLogsPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	case "FilterLogEvents":
 		return p.filterLogEvents(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("CloudWatchLogsPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

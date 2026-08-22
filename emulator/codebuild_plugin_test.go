@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -270,6 +271,10 @@ func TestCodeBuildPlugin_StartBuild_ProjectNotFound(t *testing.T) {
 	}
 }
 
+// TestCodeBuildPlugin_UnsupportedOperation pins the default arm. CodeBuild is
+// JSON-RPC, so the refusal is AWS's documented UnknownOperationException at 404, not
+// the Query protocol's InvalidAction at 400 (#716). The message names the operation
+// so a consumer discovers which call is missing.
 func TestCodeBuildPlugin_UnsupportedOperation(t *testing.T) {
 	p, ctx := setupCodeBuildPlugin(t)
 	_, err := p.HandleRequest(ctx, codebuildRequest(t, "ListBuildsForProject", map[string]any{}))
@@ -277,7 +282,13 @@ func TestCodeBuildPlugin_UnsupportedOperation(t *testing.T) {
 		t.Fatal("want error for unsupported op, got nil")
 	}
 	awsErr, ok := err.(*emulator.AWSError)
-	if !ok || awsErr.Code != "InvalidAction" {
-		t.Errorf("want InvalidAction, got %v", err)
+	if !ok || awsErr.Code != "UnknownOperationException" {
+		t.Errorf("want UnknownOperationException, got %v", err)
+	}
+	if awsErr.HTTPStatus != http.StatusNotFound {
+		t.Errorf("HTTPStatus = %d, want 404", awsErr.HTTPStatus)
+	}
+	if !strings.Contains(awsErr.Message, "ListBuildsForProject") {
+		t.Errorf("message %q does not name the operation", awsErr.Message)
 	}
 }

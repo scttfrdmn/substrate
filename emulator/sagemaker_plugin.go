@@ -64,11 +64,7 @@ func (p *SageMakerPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*
 	case "ListTrainingJobs":
 		return p.listTrainingJobs(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "SageMakerPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

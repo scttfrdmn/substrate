@@ -79,11 +79,7 @@ func (p *SSMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "DescribeInstanceInformation":
 		return p.describeInstanceInformation(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("SSMPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

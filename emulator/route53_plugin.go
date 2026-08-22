@@ -66,11 +66,7 @@ func (p *Route53Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 	case "ListResourceRecordSets":
 		return p.listResourceRecordSets(ctx, req, zoneID)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "Route53Plugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 

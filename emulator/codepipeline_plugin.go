@@ -57,11 +57,7 @@ func (p *CodePipelinePlugin) HandleRequest(reqCtx *RequestContext, req *AWSReque
 	case "GetPipelineExecution":
 		return p.getPipelineExecution(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CodePipelinePlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

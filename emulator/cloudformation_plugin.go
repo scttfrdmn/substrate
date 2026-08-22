@@ -180,11 +180,7 @@ func (p *CloudFormationPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	case "DescribeStackEvents":
 		return p.describeStackEvents(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "CloudFormationPlugin: unknown action " + action,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), action)
 	}
 }
 

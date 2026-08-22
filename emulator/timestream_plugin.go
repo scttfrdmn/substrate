@@ -69,11 +69,7 @@ func (p *TimestreamPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "CancelQuery":
 		return p.cancelQuery(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "TimestreamPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

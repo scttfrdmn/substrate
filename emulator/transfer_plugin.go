@@ -59,11 +59,7 @@ func (p *TransferPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) 
 	case "ListUsers":
 		return p.listUsers(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "TransferPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

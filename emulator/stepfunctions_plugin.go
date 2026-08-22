@@ -95,11 +95,7 @@ func (p *StepFunctionsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "UnsupportedOperationException",
-			Message:    fmt.Sprintf("StepFunctionsPlugin: unknown operation %q", op),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), op)
 	}
 }
 

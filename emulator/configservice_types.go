@@ -290,15 +290,6 @@ func cfgsvcValidation(message string) *AWSError {
 	return cfgsvcErr("ValidationException", message)
 }
 
-// cfgsvcInvalidAction reports an operation the plugin does not implement.
-//
-// AWS Config has 97 operations and substrate implements the detective-controls
-// subset, so this is the answer for the rest. It names the operation so a consumer
-// discovers which call is missing rather than a bare refusal.
-func cfgsvcInvalidAction(op string) *AWSError {
-	return cfgsvcErr("InvalidAction", "ConfigServicePlugin: unsupported operation "+op)
-}
-
 // cfgsvcUnmarshal decodes a request body, answering ValidationException rather
 // than a generic malformed-data code: ValidationException is the input exception
 // every Config operation declares, so it is the branch a caller's error handling

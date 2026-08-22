@@ -547,12 +547,15 @@ func TestTagging_InvalidARN(t *testing.T) {
 	assert.NotEmpty(t, failures)
 }
 
+// TestTagging_InvalidOperation pins the default arm. The Resource Groups Tagging API
+// is JSON-RPC, so the refusal is the UnknownOperationException at 404 AWS publishes
+// for that protocol, not the Query protocol's InvalidAction at 400 (#716).
 func TestTagging_InvalidOperation(t *testing.T) {
 	ts, _ := newTaggingTestServer(t)
 
 	resp := taggingRequest(t, ts, "BadOperation", map[string]any{})
 	defer resp.Body.Close() //nolint:errcheck
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestTagging_GetResources_IAMUser(t *testing.T) {

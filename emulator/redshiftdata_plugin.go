@@ -67,11 +67,7 @@ func (p *RedshiftDataPlugin) HandleRequest(reqCtx *RequestContext, req *AWSReque
 	case "GetStatementResult":
 		return p.getStatementResult(reqCtx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "RedshiftDataPlugin: unsupported operation " + req.Operation,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

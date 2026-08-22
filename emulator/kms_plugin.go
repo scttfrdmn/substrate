@@ -95,11 +95,7 @@ func (p *KMSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ReEncrypt":
 		return p.reEncrypt(ctx, req)
 	default:
-		return nil, &AWSError{
-			Code:       "UnsupportedOperationException",
-			Message:    fmt.Sprintf("KMSPlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

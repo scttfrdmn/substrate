@@ -64,11 +64,7 @@ func (p *EventBridgePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 	case "ListEventBuses":
 		return p.listEventBuses(ctx)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    fmt.Sprintf("EventBridgePlugin: unknown operation %q", req.Operation),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownActionError(p.Name(), req.Operation)
 	}
 }
 

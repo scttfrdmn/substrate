@@ -58,11 +58,7 @@ func (p *MSKPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListNodes":
 		return p.listNodes(ctx, req, clusterARN)
 	default:
-		return nil, &AWSError{
-			Code:       "InvalidAction",
-			Message:    "MSKPlugin: unsupported path " + req.Path,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 
