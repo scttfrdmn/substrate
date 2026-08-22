@@ -149,7 +149,7 @@ func TestCFN_IAMInstanceProfile(t *testing.T) {
 			"Node": {
 				"Type": "AWS::EC2::Instance",
 				"Properties": {
-					"ImageId": "ami-0abc1234",
+					"ImageId": "` + ec2TestImage + `",
 					"InstanceType": "c5.large",
 					"IamInstanceProfile": {"Ref": "NodeProfile"}
 				}
@@ -390,7 +390,7 @@ func TestCFN_LaunchTemplateFeedsCreateFleet(t *testing.T) {
 				"Type": "AWS::EC2::LaunchTemplate",
 				"Properties": {
 					"LaunchTemplateName": "fleet-nodes",
-					"LaunchTemplateData": {"ImageId": "ami-0abc1234", "InstanceType": "c5.large"}
+					"LaunchTemplateData": {"ImageId": "` + ec2TestImage + `", "InstanceType": "c5.large"}
 				}
 			}
 		}

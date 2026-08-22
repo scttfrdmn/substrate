@@ -71,7 +71,7 @@ func TestEC2_CreateLaunchTemplate_WarnsAboutAnInvalidMapping(t *testing.T) {
 	out, body := ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "warned",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
 	})
@@ -106,7 +106,7 @@ func TestEC2_CreateLaunchTemplate_WarnsAboutEveryProblem(t *testing.T) {
 	out, body := ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "two-problems",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		// Names an Ebs member and neither a size nor a snapshot.
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
@@ -155,7 +155,7 @@ func TestEC2_CreateLaunchTemplate_ValidTemplateCarriesNoWarning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			params := map[string]string{
 				"Action":                     "CreateLaunchTemplate",
-				"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+				"LaunchTemplateData.ImageId": ec2TestImage,
 			}
 			for k, v := range tc.params {
 				params[k] = v
@@ -182,7 +182,7 @@ func TestEC2_CreateLaunchTemplateVersion_WarnsAboutAnInvalidMapping(t *testing.T
 	v1, _ := ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "versioned",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
 	})
@@ -195,7 +195,7 @@ func TestEC2_CreateLaunchTemplateVersion_WarnsAboutAnInvalidMapping(t *testing.T
 		{
 			name: "the version names the mapping itself",
 			params: map[string]string{
-				"LaunchTemplateData.ImageId":                             "ami-0abcdef1234567890",
+				"LaunchTemplateData.ImageId":                             ec2TestImage,
 				"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdg",
 				"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
 			},
@@ -204,7 +204,7 @@ func TestEC2_CreateLaunchTemplateVersion_WarnsAboutAnInvalidMapping(t *testing.T
 			name: "the version inherits it from SourceVersion",
 			params: map[string]string{
 				"SourceVersion":              "1",
-				"LaunchTemplateData.ImageId": "ami-11112222333344445",
+				"LaunchTemplateData.ImageId": ec2TestImageArm,
 			},
 		},
 	} {
@@ -237,7 +237,7 @@ func TestEC2_CreateLaunchTemplate_WarnsAboutAnUnknownSnapshot(t *testing.T) {
 	out, body := ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "unknown-snapshot",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.SnapshotId": "snap-0123456789abcdef0",
 	})
@@ -303,7 +303,7 @@ func TestEC2_LaunchTemplateVersion_ReadsBackItsBlockDeviceMappings(t *testing.T)
 	_, body := ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "readback",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		// A fully specified EBS mapping.
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":              "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize":          "40",
@@ -365,7 +365,7 @@ func TestEC2_LaunchTemplateVersion_SourceVersionCarriesMappingsAndVolumeTags(t *
 	_, body := ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "inheriting",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize": "25",
 		"LaunchTemplateData.TagSpecification.1.ResourceType":     "volume",
@@ -378,7 +378,7 @@ func TestEC2_LaunchTemplateVersion_SourceVersionCarriesMappingsAndVolumeTags(t *
 		"Action":                     "CreateLaunchTemplateVersion",
 		"LaunchTemplateName":         "inheriting",
 		"SourceVersion":              "1",
-		"LaunchTemplateData.ImageId": "ami-11112222333344445",
+		"LaunchTemplateData.ImageId": ec2TestImageArm,
 	})
 	require.Equal(t, int64(2), v2.VersionNumber)
 
@@ -426,14 +426,14 @@ func TestEC2_LaunchTemplateVersion_NoSourceVersionInheritsNothing(t *testing.T) 
 	_, _ = ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "no-inherit",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize": "25",
 	})
 	_, _ = ltWarningRequest(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplateVersion",
 		"LaunchTemplateName":         "no-inherit",
-		"LaunchTemplateData.ImageId": "ami-11112222333344445",
+		"LaunchTemplateData.ImageId": ec2TestImageArm,
 	})
 
 	mappings, body := ltDescribeMappings(t, ts, "no-inherit", "2")

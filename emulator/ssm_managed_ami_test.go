@@ -7,12 +7,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scttfrdmn/substrate/emulator"
 )
 
 // TestSSMPlugin_ManagedAMIParameter verifies that GetParameter resolves the
 // AWS-managed public AMI parameters under /aws/service/* (which are not
-// user-created) to a deterministic synthetic AMI id, rather than 404. Tools
-// like spawn auto-detect their AMI via these parameters.
+// user-created) to a deterministic AMI id, rather than 404. Tools like spawn
+// auto-detect their AMI via these parameters.
+//
+// The id is the bundled catalog's answer for (region, parameter) rather than a
+// hash taken in the resolver: since #733 RunInstances refuses an AMI it cannot
+// resolve, so the value here has to be one a launch accepts. That is why the
+// assertion compares against [emulator.BundledImageID] instead of merely
+// checking the ami- prefix — a resolver that minted an id of its own would still
+// pass a prefix check while handing out an AMI substrate then refuses.
 func TestSSMPlugin_ManagedAMIParameter(t *testing.T) {
 	srv := newSSMTestServer(t)
 
@@ -26,6 +35,8 @@ func TestSSMPlugin_ManagedAMIParameter(t *testing.T) {
 
 	val, _ := param["Value"].(string)
 	assert.True(t, strings.HasPrefix(val, "ami-"), "managed AMI param should resolve to an ami- value, got %q", val)
+	assert.Equal(t, emulator.BundledImageID(ec2TestRegion, name), val,
+		"the value must be the bundled catalog's AMI for this parameter, which is the one a launch resolves")
 	assert.Equal(t, name, param["Name"])
 
 	// Deterministic: a second lookup returns the same value.

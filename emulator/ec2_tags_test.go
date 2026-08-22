@@ -23,7 +23,7 @@ func ec2TagTestInstance(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
 	ids := ec2RunInstanceIDs(t, ts, map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-0tagtest00000001",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	})
@@ -314,7 +314,7 @@ func TestEC2_RunInstances_RejectsReservedTagKeys(t *testing.T) {
 			ts := newEC2TestServer(t)
 			params := map[string]string{
 				"Action":                          "RunInstances",
-				"ImageId":                         "ami-0reserved00000001",
+				"ImageId":                         ec2TestImage,
 				"MinCount":                        "1",
 				"MaxCount":                        "1",
 				"TagSpecification.1.ResourceType": "instance",
@@ -356,7 +356,7 @@ func TestEC2_RunInstances_ReservedTagRejectionCreatesNothing(t *testing.T) {
 	// legal tag is not applied to anything either.
 	status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-0rollback00000001",
+		"ImageId":                         ec2TestImage,
 		"MinCount":                        "3",
 		"MaxCount":                        "3",
 		"TagSpecification.1.ResourceType": "instance",
@@ -374,7 +374,7 @@ func TestEC2_RunInstances_ReservedTagRejectionCreatesNothing(t *testing.T) {
 	// tag, not just the first block's.
 	status, code, _ = ec2ErrorDetail(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-0rollback00000002",
+		"ImageId":                         ec2TestImage,
 		"MinCount":                        "1",
 		"MaxCount":                        "1",
 		"TagSpecification.1.ResourceType": "instance",
@@ -397,7 +397,7 @@ func TestEC2_RunInstances_ReservedTagRejectionCreatesNothing(t *testing.T) {
 	// launch loop, where the instance is written one iteration ahead of its volumes.
 	status, code, _ = ec2ErrorDetail(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-0rollback00000003",
+		"ImageId":                         ec2TestImage,
 		"MinCount":                        "1",
 		"MaxCount":                        "1",
 		"TagSpecification.1.ResourceType": "volume",
@@ -842,7 +842,7 @@ func TestEC2_TagOnCreate_EnforcesTagLimit(t *testing.T) {
 		ts := newEC2TestServer(t)
 		params := map[string]string{
 			"Action":   "RunInstances",
-			"ImageId":  "ami-0taglimit0000001",
+			"ImageId":  ec2TestImage,
 			"MinCount": "1",
 			"MaxCount": "1",
 		}
@@ -858,7 +858,7 @@ func TestEC2_TagOnCreate_EnforcesTagLimit(t *testing.T) {
 		ts := newEC2TestServer(t)
 		params := map[string]string{
 			"Action":   "RunInstances",
-			"ImageId":  "ami-0taglimit0000002",
+			"ImageId":  ec2TestImage,
 			"MinCount": "1",
 			"MaxCount": "1",
 		}
@@ -1463,7 +1463,7 @@ func TestEC2_TagOnCreate_EnforcesLengthLimits(t *testing.T) {
 		ts := newEC2TestServer(t)
 		status, code, message := ec2ErrorDetail(t, ts, map[string]string{
 			"Action":                          "RunInstances",
-			"ImageId":                         "ami-0taglength00000001",
+			"ImageId":                         ec2TestImage,
 			"MinCount":                        "2",
 			"MaxCount":                        "2",
 			"TagSpecification.1.ResourceType": "instance",
@@ -1640,7 +1640,7 @@ func TestEC2_LaunchTemplate_EnforcesTagLengthAtCreation(t *testing.T) {
 		// case without refusing the ordinary one, which is what a mis-scoped comparison
 		// would do.
 		ts := newEC2TestServer(t)
-		data := map[string]string{"LaunchTemplateData.ImageId": "ami-0lttaglength00004"}
+		data := map[string]string{"LaunchTemplateData.ImageId": ec2TestImage}
 		for k, v := range ltTagParams([2]string{
 			strings.Repeat("k", ec2TagKeyLimit),
 			strings.Repeat("v", ec2TagValueLimit),

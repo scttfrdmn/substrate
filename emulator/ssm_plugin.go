@@ -3,9 +3,7 @@ package emulator
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -277,20 +275,21 @@ func (p *SSMPlugin) getParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 // /aws/service/canonical/ubuntu/*, /aws/service/ecs/optimized-ami/*). The AMI id
 // is deterministic per (name, region) so repeated lookups are stable. Returns
 // nil for non-managed names.
+//
+// The id comes from the bundled image catalog rather than from a hash of the name
+// taken here, so that the AMI this hands a caller is one [EC2Plugin.resolveImage]
+// can also resolve. Those were independent computations through v0.107.0, which
+// was survivable only while nothing checked an AMI's existence: once RunInstances
+// began refusing an AMI that names nothing (#733), a GetParameter answer no
+// catalog entry backed would have been an AMI substrate itself handed out and
+// then refused to launch. See [bundledImageForParameter] for what an unlisted
+// path in a known family resolves to.
 func resolveManagedParameter(name, region string) map[string]interface{} {
-	if !strings.HasPrefix(name, "/aws/service/") {
+	img, ok := bundledImageForParameter(name)
+	if !ok {
 		return nil
 	}
-	isAMI := strings.Contains(name, "ami-") ||
-		strings.Contains(name, "/optimized-ami/") ||
-		strings.Contains(name, "/ubuntu/") ||
-		strings.Contains(name, "-latest")
-	if !isAMI {
-		return nil
-	}
-	// Deterministic 17-hex-char AMI id derived from name+region.
-	sum := sha256.Sum256([]byte(region + ":" + name))
-	amiID := "ami-" + hex.EncodeToString(sum[:])[:17]
+	amiID := img.idIn(region)
 	return map[string]interface{}{
 		"Name":             name,
 		"Type":             "String",

@@ -3286,7 +3286,14 @@ func (d *StackDeployer) deployEC2Instance(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	imageID := resolveStringProp(props, "ImageId", "ami-00000000", cctx)
+	// The default is a bundled AMI for the stack's Region rather than the literal
+	// "ami-00000000" this used through v0.107.0. That literal existed only because
+	// nothing checked an AMI's existence; now that RunInstances refuses one that names
+	// nothing (#733), a template omitting ImageId would have failed to deploy on
+	// substrate's own default. Falling back to the image a caller would have discovered
+	// through /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+	// keeps that deployment working and keeps the AMI one substrate can resolve.
+	imageID := resolveStringProp(props, "ImageId", BundledImageID(cctx.region, bundledImageDefaultParameter), cctx)
 	instanceType := resolveStringProp(props, "InstanceType", "t3.micro", cctx)
 	subnetID := resolveStringProp(props, "SubnetId", "", cctx)
 	params := map[string]string{

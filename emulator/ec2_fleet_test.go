@@ -98,7 +98,7 @@ func newFleetLaunchTemplate(t *testing.T, ts *httptest.Server, name string) stri
 	ec2FleetXML(t, ts, map[string]string{
 		"Action":                          "CreateLaunchTemplate",
 		"LaunchTemplateName":              name,
-		"LaunchTemplateData.ImageId":      "ami-0fleet0000000001",
+		"LaunchTemplateData.ImageId":      ec2TestImage,
 		"LaunchTemplateData.InstanceType": "t3.micro",
 	}, &lt)
 	if lt.LaunchTemplateID == "" {

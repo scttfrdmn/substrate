@@ -248,6 +248,73 @@ func TestTestServer_SeedSSMParameter(t *testing.T) {
 	}
 }
 
+// TestTestServer_SeedEC2Image covers the helper a test reaches for when it needs to launch
+// from an AMI ID of its own choosing.
+//
+// RunInstances refuses an AMI it cannot resolve (#733), so an ID a fixture invents no longer
+// launches by itself. Seeding is what makes it resolvable, and the unseeded half of this test
+// is what proves the seeding — rather than a permissive handler — is doing the work.
+func TestTestServer_SeedEC2Image(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	const seeded = "ami-0f00dbaadf00d0001"
+	const unseeded = "ami-0e11e11e11e11e11e"
+
+	ts.SeedEC2Image(seeded, "fixture-image")
+
+	runInstances := func(imageID string) (int, string) {
+		form := "Action=RunInstances&Version=2016-11-15&MinCount=1&MaxCount=1&ImageId=" + imageID
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/", strings.NewReader(form)) //nolint:noctx
+		req.Host = "ec2.us-east-1.amazonaws.com"
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/ec2/aws4_request, SignedHeaders=host;x-amz-date, Signature=fakesig")
+		req.Header.Set("X-Amz-Date", "20260101T000000Z")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("RunInstances %s: %v", imageID, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, string(body)
+	}
+
+	status, body := runInstances(seeded)
+	if status != http.StatusOK {
+		t.Fatalf("RunInstances from a seeded AMI: status %d body %s", status, body)
+	}
+	if !strings.Contains(body, seeded) {
+		t.Errorf("the launched instance does not report the seeded AMI: %s", body)
+	}
+
+	status, body = runInstances(unseeded)
+	if status != http.StatusBadRequest {
+		t.Fatalf("RunInstances from an unseeded AMI: status %d body %s", status, body)
+	}
+	if !strings.Contains(body, "InvalidAMIID.NotFound") {
+		t.Errorf("want InvalidAMIID.NotFound for an unseeded AMI, got %s", body)
+	}
+
+	// The record is a real image record, so DescribeImages lists it.
+	form := "Action=DescribeImages&Version=2016-11-15&ImageId.1=" + seeded
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/", strings.NewReader(form)) //nolint:noctx
+	req.Host = "ec2.us-east-1.amazonaws.com"
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/ec2/aws4_request, SignedHeaders=host;x-amz-date, Signature=fakesig")
+	req.Header.Set("X-Amz-Date", "20260101T000000Z")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DescribeImages: %v", err)
+	}
+	described, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeImages: status %d body %s", resp.StatusCode, described)
+	}
+	if !strings.Contains(string(described), "fixture-image") {
+		t.Errorf("DescribeImages does not name the seeded image: %s", described)
+	}
+}
+
 func TestTestServer_Accessors(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 

@@ -539,6 +539,33 @@ func (p *EC2Plugin) runInstancesWithTags(
 		return nil, ec2MissingParameter("ImageId")
 	}
 
+	// And it must be an AMI that exists. Through v0.107.0 substrate launched from any
+	// string beginning "ami-", and from several that did not, so a template naming a
+	// region-specific literal, a placeholder an AI left in, or an AMI that had never
+	// existed all launched here and failed on real AWS — the divergence #733 was filed
+	// for, found by a live run.
+	//
+	// Both codes come from the kind, so a caller distinguishes "that is not an AMI ID"
+	// from "that AMI is not here" the way EC2 does: ec2ImageIDKind.requireResource
+	// checks syntax before existence, which is the order EC2 reports them in.
+	//
+	// The check sits here, beside the emptiness refusal and after the launch-template
+	// merge, for the same two reasons that position exists at all. An AMI that reaches
+	// this launch through a template is refused at RunInstances time rather than
+	// materialized, and CreateFleet inherits the rule for free by going through
+	// runInstancesWithTags. And it is ahead of the ensureDefaultVPC branch below, which
+	// commits a VPC, subnet, security group, gateway and route table: refusing past
+	// that point would leave state behind for the next request in the same test to see.
+	//
+	// CreateLaunchTemplate deliberately does not carry this rule. It reports mapping
+	// problems through AWS's documented warning member rather than refusing, and an AMI
+	// named in a template is not yet a launch — so a refusal there would be one AWS
+	// does not make. The template's AMI is checked here, when it is used.
+	_, imageFound := p.resolveImage(reqCtx, imageID)
+	if awsErr := ec2ImageIDKind.requireResource(imageID, imageFound); awsErr != nil {
+		return nil, awsErr
+	}
+
 	// Block device mappings are validated here for two reasons that fix the position
 	// exactly (#671). It is after the template merge above, so a mapping that reaches
 	// this launch through a template is refused at RunInstances time rather than
@@ -3912,6 +3939,37 @@ func sgOwnerOrDefault(owner, accountID string) string {
 // ec2ImageStateKey returns the state key for an AMI.
 func ec2ImageStateKey(accountID, region, imageID string) string {
 	return "image:" + accountID + "/" + region + "/" + imageID
+}
+
+// resolveImage returns the AMI an ID names in one account and region, from state first and
+// then from the bundled catalog.
+//
+// It is the single answer to "does this AMI exist", so a launch, an authorization decision
+// and a describe cannot disagree about one ID. Registered images win over bundled ones:
+// a caller who registers an AMI whose ID collides with a derived one — reachable only by
+// naming the derived ID deliberately, since RegisterImage mints its own — sees their own
+// record, on the same precedence [SSMPlugin] gives a user-created parameter over a managed
+// one.
+//
+// A read error reports the image as absent rather than propagating, matching
+// [EC2Plugin.ec2SnapshotResolver]: substrate's state backends fail only for reasons a
+// caller cannot act on, and "no such AMI" is the same answer they would get for a record
+// that was never written.
+func (p *EC2Plugin) resolveImage(reqCtx *RequestContext, imageID string) (EC2Image, bool) {
+	if imageID == "" {
+		return EC2Image{}, false
+	}
+	key := ec2ImageStateKey(reqCtx.AccountID, reqCtx.Region, imageID)
+	if data, err := p.state.Get(context.Background(), ec2Namespace, key); err == nil && data != nil {
+		var img EC2Image
+		if json.Unmarshal(data, &img) == nil {
+			return img, true
+		}
+	}
+	if bundled, ok := bundledImageByID(reqCtx.Region, imageID); ok {
+		return bundled.image(reqCtx.Region), true
+	}
+	return EC2Image{}, false
 }
 
 // createImage creates an AMI from a running or stopped instance.

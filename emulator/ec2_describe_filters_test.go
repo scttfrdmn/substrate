@@ -1091,7 +1091,7 @@ func TestEC2_LaunchTemplateVersionFilters_FourOfFourteen(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                            "CreateLaunchTemplateVersion",
 		"LaunchTemplateId":                  ltID,
-		"LaunchTemplateData.ImageId":        "ami-0000000000000beef",
+		"LaunchTemplateData.ImageId":        ec2TestImageArm,
 		"LaunchTemplateData.InstanceType":   "m5.4xlarge",
 		"LaunchTemplateData.KeyName":        "irrelevant",
 		"LaunchTemplateData.EbsOptimized":   "false",
@@ -1123,10 +1123,10 @@ func TestEC2_LaunchTemplateVersionFilters_FourOfFourteen(t *testing.T) {
 	t.Run("image-id", func(t *testing.T) {
 		items := describe(map[string]string{
 			"Action": "DescribeLaunchTemplateVersions", "LaunchTemplateId": ltID,
-			"Filter.1.Name": "image-id", "Filter.1.Value.1": "ami-0000000000000beef",
+			"Filter.1.Name": "image-id", "Filter.1.Value.1": ec2TestImageArm,
 		})
 		require.Len(t, items, 1)
-		assert.Equal(t, "ami-0000000000000beef", items[0].ImageID)
+		assert.Equal(t, ec2TestImageArm, items[0].ImageID)
 	})
 
 	t.Run("instance-type", func(t *testing.T) {

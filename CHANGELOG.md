@@ -8,10 +8,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A bundled catalog of public AMIs, so an AMI discovered through SSM is an AMI that
+  launches** (#733). Substrate bundled no AMIs at all: the only way an `EC2Image` came into
+  existence was `CreateImage` or `RegisterImage`, and nothing seeded one. Nine AWS public
+  parameter names now resolve to a real image — Amazon Linux 2023 (full and minimal, x86_64 and
+  arm64), Windows Server 2022 Full Base, the ECS-optimized AL2023 and AL2 images, and Canonical
+  Ubuntu 24.04 and 22.04 — with every path taken verbatim from the AWS page that publishes it.
+  Any other AMI-shaped `/aws/service/…` path resolves to its family's entry, because substrate
+  has answered every such path since it gained `GetParameter` and an unlisted one must still
+  resolve to something launchable.
+
+  The ID is derived, `sha256(region + ":" + parameter)` rendered as `ami-` + 17 hex characters,
+  and it is the *same* computation `GetParameter` answers with — one table, so the AMI substrate
+  hands out cannot be an AMI it then refuses. Being derived rather than seeded, it needs no
+  startup write, works in every Region, and is stable across runs, processes and replays;
+  being Region-scoped, an ID resolves in exactly one Region, as on AWS. `emulator.BundledImageID(region, parameterName)`
+  returns it, and `TestServer.SeedEC2Image` registers a caller-owned one for a test that needs
+  a specific record in state.
+
+  Deliberately **not** bundled: `ami-0abcdef1234567890` and `ami-1234567890abcdef0`, the example
+  IDs AWS's own reference pages use and generated IaC copies. IaC that hardcodes one fails on
+  real AWS, so it has to fail here; a test pins their absence.
+
 - **`account.default` in `substrate.yaml` sets the account every request is attributed to**
   (#734). It defaults to `123456789012`, AWS's documented example account, and `Validate`
   refuses a value that is not 12 digits rather than letting a typo through to every ARN the
   server mints. `substrate.yaml.example` documents it beside `region:`, which it parallels.
+
+### Changed
+- **`RunInstances` refuses an AMI that is malformed or names nothing** (#733). Substrate
+  accepted **any** non-empty `ImageId` — `ami-test`, `not-an-ami`, `ami-EXAMPLE`,
+  `ami-0abcdef1234567890` — and launched an instance reporting it. The check that existed only
+  asked whether a value was present at all. So the one mistake generated infrastructure code
+  makes most often, naming an AMI that does not exist in the target Region, was invisible until
+  the same template reached real AWS, which is the opposite of what substrate is for.
+
+  A launch now answers `InvalidAMIID.Malformed` / 400 for an ID that is not `ami-` followed by a
+  run of lowercase hex, and `InvalidAMIID.NotFound` / 400 for a well-formed ID naming no image,
+  syntax before absence. Both codes come from a new `ec2ImageIDKind` in the same table the other
+  ten EC2 ID families answer through, so the wording, status and ordering are shared rather than
+  hand-written. `CreateFleet` inherits the rule through the launch path it already shares.
+
+  `InvalidAMIID.Unavailable` is deliberately not raised: substrate models no
+  deregistered-but-extant image — `DeregisterImage` deletes the record — so an unavailable AMI
+  reads as absent, which is what a caller polling for one observes.
+
+  `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` stay permissive, also deliberately.
+  AWS reports mapping problems on those operations through the response's `warning` member
+  rather than refusing, so an AMI rule there would be a refusal AWS does not make; a template
+  may carry an AMI that no longer resolves, and the launch from it is where that surfaces.
+
+  Bundled AMIs are resolvable and nameable but **not enumerated** — substrate's reading, not
+  AWS's behaviour. `DescribeImages` lists what an account owns, and a public AWS-owned image is
+  not that; real AWS would answer an unqualified describe with tens of thousands of public
+  images. A bundled image also reports no owner, so it is not taggable and an `Owners=self`
+  describe does not match it.
+
+  **Compatibility.** A launch naming an AMI that does not exist now fails where it used to
+  succeed. A fixture carrying a placeholder or a Region-specific literal must name a bundled AMI
+  (`emulator.BundledImageID`), register one with `CreateImage`/`RegisterImage`, or resolve one
+  through the SSM public parameter it would use on AWS — which is the workflow this makes
+  coherent. Substrate's own suite needed roughly 300 such edits across 40 test files, and not one
+  of them had been launching an AMI that existed.
 
 ### Fixed
 - **One server serves one account** (#734). `ParseAWSRequest` decided the account from the

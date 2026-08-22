@@ -64,7 +64,7 @@ func niRun(t *testing.T, ts *httptest.Server, params map[string]string) []niInst
 	t.Helper()
 	full := map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-12345678",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	}
@@ -496,7 +496,7 @@ func TestEC2NetworkInterfaces_LaunchTemplateAllInterfaces(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "two-nics",
-		"LaunchTemplateData.ImageId": "ami-12345678",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex":       "0",
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":          subnetA,
 		"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1": groupA,
@@ -541,7 +541,7 @@ func TestEC2NetworkInterfaces_RequestInterfacesBeatTemplate(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "tmpl-two",
-		"LaunchTemplateData.ImageId": "ami-12345678",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":    subnetB,
 		"LaunchTemplateData.NetworkInterface.2.DeviceIndex": "1",
@@ -571,7 +571,7 @@ func TestEC2NetworkInterfaces_TemplateFlatFieldsStillLaunch(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "flat",
-		"LaunchTemplateData.ImageId": "ami-12345678",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.NetworkInterface.1.SubnetId":          subnetA,
 		"LaunchTemplateData.NetworkInterface.1.SecurityGroupId.1": groupA,
 	})
@@ -614,7 +614,7 @@ func TestEC2NetworkInterfaces_PreSliceTemplateStateStillWorks(t *testing.T) {
 		"createdBy":            acct,
 		"createTime":           "2026-01-01T00:00:00Z",
 		"latestData": map[string]any{
-			"imageId":                  "ami-12345678",
+			"imageId":                  ec2TestImage,
 			"instanceType":             "t3.small",
 			"subnetId":                 subnetA,
 			"associatePublicIpAddress": "true",

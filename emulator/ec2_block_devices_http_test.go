@@ -78,7 +78,7 @@ func bdmRunInstances(t *testing.T, ts *httptest.Server, params map[string]string
 	t.Helper()
 	all := map[string]string{
 		"Action":   "RunInstances",
-		"ImageId":  "ami-0abcdef1234567890",
+		"ImageId":  ec2TestImage,
 		"MinCount": "1",
 		"MaxCount": "1",
 	}
@@ -350,7 +350,7 @@ func TestEC2_BlockDeviceMapping_FromLaunchTemplate(t *testing.T) {
 	ltResp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "with-storage",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.BlockDeviceMapping.1.DeviceName":     "/dev/xvda",
 		"LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize": "40",
 	})

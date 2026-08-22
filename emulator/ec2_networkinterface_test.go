@@ -23,7 +23,7 @@ func TestEC2_RunInstances_NetworkInterface(t *testing.T) {
 
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":       "RunInstances",
-		"ImageId":      "ami-12345678",
+		"ImageId":      ec2TestImage,
 		"InstanceType": "t3.small",
 		"MinCount":     "1",
 		"MaxCount":     "1",

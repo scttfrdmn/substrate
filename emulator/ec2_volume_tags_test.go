@@ -647,7 +647,7 @@ func TestEC2_RunInstances_VolumeTagRulesRefused(t *testing.T) {
 
 	status, code, msg := ec2ErrorDetail(t, ts, map[string]string{
 		"Action":                          "RunInstances",
-		"ImageId":                         "ami-0abcdef1234567890",
+		"ImageId":                         ec2TestImage,
 		"MinCount":                        "1",
 		"MaxCount":                        "1",
 		"TagSpecification.1.ResourceType": "volume",
@@ -677,7 +677,7 @@ func TestEC2_LaunchTemplate_VolumeTagSpecifications(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "tagged-volumes",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.TagSpecification.1.ResourceType": "instance",
 		"LaunchTemplateData.TagSpecification.1.Tag.1.Key":    "Name",
 		"LaunchTemplateData.TagSpecification.1.Tag.1.Value":  "from-template",
@@ -715,7 +715,7 @@ func TestEC2_LaunchTemplate_VolumeTagsAreReplacedNotMerged(t *testing.T) {
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":                     "CreateLaunchTemplate",
 		"LaunchTemplateName":         "merge-check",
-		"LaunchTemplateData.ImageId": "ami-0abcdef1234567890",
+		"LaunchTemplateData.ImageId": ec2TestImage,
 		"LaunchTemplateData.TagSpecification.1.ResourceType": "volume",
 		"LaunchTemplateData.TagSpecification.1.Tag.1.Key":    "Backup",
 		"LaunchTemplateData.TagSpecification.1.Tag.1.Value":  "weekly",

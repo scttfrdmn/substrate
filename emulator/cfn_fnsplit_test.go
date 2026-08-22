@@ -123,7 +123,7 @@ func TestCFN_FnSplit_ListValuedProperty(t *testing.T) {
 			"Node": {
 				"Type": "AWS::EC2::Instance",
 				"Properties": {
-					"ImageId": "ami-0abc1234",
+					"ImageId": "` + ec2TestImage + `",
 					"InstanceType": "c5.large",
 					"SubnetId": {"Ref": "Subnet"},
 					"SecurityGroupIds": {"Fn::Split": [",", {"Ref": "Groups"}]}
@@ -163,7 +163,7 @@ func TestCFN_FnIf_ListBranch(t *testing.T) {
 			"Node": {
 				"Type": "AWS::EC2::Instance",
 				"Properties": {
-					"ImageId": "ami-0abc1234",
+					"ImageId": "` + ec2TestImage + `",
 					"InstanceType": "c5.large",
 					"SubnetId": {"Ref": "Subnet"},
 					"SecurityGroupIds": {"Fn::If": [
@@ -225,7 +225,7 @@ func TestCFN_Ref_CommaDelimitedListParameter(t *testing.T) {
 			"Node": {
 				"Type": "AWS::EC2::Instance",
 				"Properties": {
-					"ImageId": "ami-0abc1234",
+					"ImageId": "` + ec2TestImage + `",
 					"InstanceType": "c5.large",
 					"SubnetId": {"Ref": "Subnet"},
 					"SecurityGroupIds": {"Ref": "Groups"}

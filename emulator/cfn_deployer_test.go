@@ -825,7 +825,7 @@ func TestCFN_EC2Instance(t *testing.T) {
 			"MyInstance": {
 				"Type": "AWS::EC2::Instance",
 				"Properties": {
-					"ImageId": "ami-cfntest",
+					"ImageId": "` + ec2TestImage + `",
 					"InstanceType": "t3.micro"
 				}
 			}

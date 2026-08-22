@@ -52,7 +52,7 @@ func TestJourney_EC2CreateTagsGuardrail(t *testing.T) {
 	// are readable back through a Describe: this journey has to see that a denial
 	// wrote nothing, not just that it answered 403.
 	run, err := admin.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

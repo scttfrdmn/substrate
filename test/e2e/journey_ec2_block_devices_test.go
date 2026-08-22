@@ -35,7 +35,7 @@ func TestJourney_EC2LaunchBlockDeviceMappings(t *testing.T) {
 	ctx := context.Background()
 
 	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -137,7 +137,7 @@ func TestJourney_EC2LaunchDataVolumeSurvivesTermination(t *testing.T) {
 	// Neither mapping names DeleteOnTermination, so both take a default and the two
 	// defaults differ.
 	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -248,7 +248,7 @@ func TestJourney_EC2InvalidBlockDeviceMappingRefused(t *testing.T) {
 	ctx := context.Background()
 
 	_, err = client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -342,7 +342,7 @@ func TestJourney_EC2VolumeTags(t *testing.T) {
 	// the instance scope must stay separate, which is what the second specification
 	// here proves.
 	run, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -445,7 +445,7 @@ func TestJourney_EC2VolumeTags(t *testing.T) {
 	// A reserved key is refused on the volume scope on the same terms as the instance
 	// scope, and the refusal is whole: no instance, no volume.
 	_, err = client.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:      aws.String("ami-0abcdef1234567890"),
+		ImageId:      aws.String(journeyImage),
 		InstanceType: ec2types.InstanceTypeT3Micro,
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),

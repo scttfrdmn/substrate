@@ -3004,7 +3004,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires a resolvable AMI](#runinstances-requires-a-resolvable-ami); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -3043,14 +3043,14 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DeleteSnapshot | `SnapshotId` is required and checked; refuses one a registered AMI still references with `InvalidSnapshot.InUse`, and is **not** idempotent — see [Deleting a snapshot](#deleting-a-snapshot-refuses-what-aws-refuses) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
-| CreateLaunchTemplate | Creates version 1. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
+| CreateLaunchTemplate | Creates version 1. [Does not validate the AMI](#runinstances-requires-a-resolvable-ami), matching AWS, which reports mapping problems here through `warning`. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
 | DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters. **All four** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `LaunchTemplateId.N` and `LaunchTemplateName.N` are read at every index and [union](#twelve-describes-gained-filters) |
 | DeleteLaunchTemplate | |
 | CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
 | ModifyLaunchTemplate | `SetDefaultVersion` only, which is AWS's only modifiable attribute |
 | DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken`, and the account-wide form. Four of fourteen filters, applied **before** pagination, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) before the template is resolved |
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
-| CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
+| CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, [need an AMI that resolves](#runinstances-requires-a-resolvable-ami), and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all fifteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
@@ -3357,8 +3357,88 @@ at all.
 Note that `ImageId` is an optional `*string` in the typed SDKs, so
 `aws.String("")` serializes as **absent from the wire**: an empty AMI reaches the
 service rather than being caught client-side. That is the shape this check exists
-for. The AMI value itself is not format-validated — substrate accepts any
-non-empty string, so fixtures like `ami-test` work.
+for.
+
+**The AMI must also exist.** Once a value is in hand, substrate answers the way
+EC2 does:
+
+| The value | Answer |
+|---|---|
+| `ami-` + a run of lowercase hex naming an AMI substrate can resolve | the launch proceeds |
+| `ami-` + a run of lowercase hex naming nothing | `InvalidAMIID.NotFound` / "The image ID '…' does not exist", HTTP 400 |
+| anything else — `not-an-ami`, `ami-EXAMPLE`, `ami-zzzzzzzz`, a bare `ami-` | `InvalidAMIID.Malformed` / `Invalid id: "…"`, HTTP 400 |
+
+Syntax is reported before absence, as everywhere else substrate names an EC2
+resource — see [Explicit resource IDs](#explicit-resource-ids), whose table this
+AMI pair now joins. Length is deliberately not part of the syntax rule: AWS itself
+accepts both the legacy 8-character and the current 17-character form.
+
+Substrate raises `InvalidAMIID.Unavailable` nowhere. AWS publishes it for an AMI
+"deregistered and no longer available", and substrate models no such state —
+`DeregisterImage` deletes the record — so an unavailable AMI reads as absent,
+which is what a caller polling for one observes anyway.
+
+`CreateFleet` inherits the rule, because its instances launch through the same
+path. `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` deliberately do
+**not**: AWS reports mapping problems on those operations through the response's
+`warning` member rather than by refusing, so an AMI rule there would be a refusal
+AWS does not make. A template may therefore carry an AMI that no longer resolves;
+the launch from it is where that surfaces.
+
+### Which AMIs resolve
+
+Three kinds of AMI resolve, and nothing else does.
+
+1. **One the caller made** — through `CreateImage` or `RegisterImage`, in the
+   caller's own account and region.
+2. **A bundled public AMI**, keyed by the SSM public parameter a consumer
+   discovers it through. Substrate answers nine parameter names with a real image:
+
+   | Parameter | Image |
+   |---|---|
+   | `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64` | Amazon Linux 2023, x86_64 |
+   | `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64` | Amazon Linux 2023, arm64 |
+   | `/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64` | Amazon Linux 2023 minimal, x86_64 |
+   | `/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64` | Amazon Linux 2023 minimal, arm64 |
+   | `/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base` | Windows Server 2022 Full Base |
+   | `/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id` | ECS-optimized Amazon Linux 2023 |
+   | `/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id` | ECS-optimized Amazon Linux 2 |
+   | `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id` | Ubuntu Server 24.04 LTS, amd64 |
+   | `/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id` | Ubuntu Server 22.04 LTS, amd64 |
+
+3. **Any other `/aws/service/…` AMI parameter path**, which resolves to its
+   family's entry above — a Windows path to the Windows image, an Ubuntu path to
+   Ubuntu 24.04, an ECS path to ECS-on-AL2023, anything else to Amazon Linux 2023
+   on x86_64. Substrate has answered every AMI-shaped `/aws/service/` path since
+   it gained `GetParameter`, and this is why: an unlisted path must still resolve
+   to something launchable, or `GetParameter` would hand out an AMI that
+   `RunInstances` then refuses. The cost is that two unlisted paths in one family
+   share an image.
+
+The AMI ID a bundled image gets is **derived** — `sha256(region + ":" +
+parameter)`, rendered as `ami-` + 17 hex characters — not random and not written
+into state at startup. So it is the same across runs, processes and replays, and
+it differs per region exactly as on AWS, where an AMI ID names an image in one
+region and nothing in any other. The Go helper `emulator.BundledImageID(region,
+parameterName)` returns it, which is what a fixture should name rather than
+inventing a literal.
+
+Two things follow from bundled images living outside state.
+
+- **They are not enumerated.** `DescribeImages` lists what the account owns, and a
+  public AWS-owned AMI is not that, so an unqualified `DescribeImages` does not
+  return them. This is substrate's reading, not AWS's behaviour — real AWS would
+  return every public image, tens of thousands of them. A bundled AMI is
+  resolvable and nameable; it is not inventory.
+- **They are not the caller's.** A bundled image reports no owner, so it is not
+  taggable and an `Owners=self` describe does not match it. Register your own AMI
+  when the test is about owning one.
+
+Deliberately **not** bundled: the example IDs AWS's own reference pages use,
+`ami-0abcdef1234567890` and `ami-1234567890abcdef0`. Generated IaC copies them,
+and it fails on real AWS when it does. Making them launch here would recreate the
+exact divergence this check removes, so substrate refuses them like any other AMI
+that names nothing.
 
 ### A launch template merges with the request, field by field
 
@@ -4667,8 +4747,16 @@ string, so substrate mirrors each pair exactly:
 | Route table | `InvalidRouteTableID.NotFound` | `InvalidRouteTableId.Malformed` |
 | Snapshot | `InvalidSnapshot.NotFound` | `InvalidSnapshotID.Malformed` |
 | Volume | `InvalidVolume.NotFound` | `InvalidVolumeID.Malformed` |
+| Image (AMI) | `InvalidAMIID.NotFound` | `InvalidAMIID.Malformed` |
 | Elastic IP allocation | `InvalidAllocationID.NotFound` | — |
 | NAT gateway | `InvalidNatGatewayID.NotFound` | `NatGatewayMalformed` |
+
+AMIs are the one family whose absence code names no ID — `InvalidAMIID.NotFound` is
+"The specified AMI doesn't exist" — the mirror image of the cross-naming snapshots
+carry. Which AMIs an ID can resolve to is
+[its own question](#which-amis-resolve); AWS's third AMI code,
+`InvalidAMIID.Unavailable`, is raised nowhere, because substrate models no
+deregistered-but-extant image.
 
 EC2 publishes no `Malformed` variant for allocation IDs; a malformed allocation ID
 surfaces as `InvalidAllocationID.NotFound`. NAT gateways are the one family whose
@@ -5707,6 +5795,19 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 | GetParametersByPath | Recursive path traversal |
 | DeleteParameter | |
 | DescribeParameters | |
+
+### AWS's public AMI parameters are answered
+
+A `/aws/service/…` path whose shape says "AMI" is answered without anyone having
+put it there, because that is how AWS documents AMI discovery — a template or a
+script reads `/aws/service/ami-amazon-linux-latest/…` rather than hardcoding an ID.
+The value is the AMI ID substrate resolves for that parameter in the request's
+region, and it is the *same* ID `RunInstances` accepts: the two answers come from
+one table, so `GetParameter` cannot hand out an AMI the launch then refuses. See
+[Which AMIs resolve](#which-amis-resolve) for the paths and the derivation.
+
+A parameter the caller wrote wins over a managed one at the same path, so
+`PutParameter` can override any of these.
 
 ### CloudFormation resource types
 
