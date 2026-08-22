@@ -427,3 +427,286 @@ func ec2FleetFilterSpec() ec2FilterSpec {
 func ec2InstanceTypeOfferingFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{evaluated: []string{"instance-type", "location"}}
 }
+
+// The twelve specs below are #695's: every remaining EC2 describe that read no Filter.N at
+// all. Until this change each of them accepted a Filter.N on the wire, parsed none of it and
+// answered with every resource in the region — the failure #685 fixed for subnets, twelve
+// times over. An "instance statuses in us-east-1b" question answered with every zone's, and
+// nothing in the response said so.
+//
+// Each spec's names are transcribed from that operation's own reference page, and **none of
+// the twelve pages documents an alias spelling** — no "You can also use" sentence appears on
+// any of them, unlike the subnet page's five. So unlike [ec2SubnetFilterSpec] these carry one
+// spelling per filter.
+
+// ec2InstanceStatusFilterSpec is DescribeInstanceStatus' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstanceStatus.html.
+//
+// Eighteen names and **no tag filter** — neither tag:<key> nor tag-key, which is AWS's set
+// even though the operation is over instances and DescribeInstances documents both. An
+// instance status is not the instance.
+//
+// Three are evaluated. The other fifteen name the health model substrate does not keep:
+// there is no reachability check, no scheduled event, and no managed-instance operator, so
+// system-status.status has nothing to compare a value against. That gap is why the response
+// renders instanceState and nothing else.
+func ec2InstanceStatusFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{
+			"availability-zone", "instance-state-code", "instance-state-name",
+		},
+		accepted: []string{
+			"application-status.status", "attached-ebs-status.status",
+			"availability-zone-id", "event.code", "event.description",
+			"event.instance-event-id", "event.not-after", "event.not-before",
+			"event.not-before-deadline", "instance-status.reachability",
+			"instance-status.status", "operator.managed", "operator.principal",
+			"system-status.reachability", "system-status.status",
+		},
+	}
+}
+
+// ec2VPCFilterSpec is DescribeVpcs' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcs.html.
+//
+// Six of fifteen evaluated. The nine that are not all name a CIDR *association* — the
+// cidr-block-association and ipv6-cidr-block-association families — or the DHCP option set,
+// and substrate models neither: [EC2VPC] carries one primary CIDR block and no association
+// records, so the association filters have nothing to walk. dhcp-options-id is inert for the
+// same reason the response renders no dhcpOptionsId.
+func ec2VPCFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated: []string{
+			"cidr", "is-default", "owner-id", "state", "tag-key", "vpc-id",
+		},
+		accepted: []string{
+			"cidr-block-association.association-id",
+			"cidr-block-association.cidr-block", "cidr-block-association.state",
+			"dhcp-options-id", "ipv6-cidr-block-association.association-id",
+			"ipv6-cidr-block-association.ipv6-cidr-block",
+			"ipv6-cidr-block-association.ipv6-pool",
+			"ipv6-cidr-block-association.state",
+		},
+	}
+}
+
+// ec2InternetGatewayFilterSpec is DescribeInternetGateways' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInternetGateways.html.
+//
+// Six names, **all six evaluated** — one of three operations in this batch with no inert
+// filter at all, and the only one of those three over a stored resource. [EC2InternetGateway]
+// happens to carry every member the page documents a filter over.
+func ec2InternetGatewayFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated: []string{
+			"attachment.state", "attachment.vpc-id", "internet-gateway-id", "owner-id",
+			"tag-key",
+		},
+	}
+}
+
+// ec2KeyPairFilterSpec is DescribeKeyPairs' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeKeyPairs.html.
+//
+// Five names, all evaluated. Two of them only became answerable in #708, which gave
+// [EC2KeyPair] a Tags field: before it a key pair could hold no tags at all, so tag:<key> and
+// tag-key would have had to be accepted and inert. Landing the two changes in this order is
+// what keeps a claim from being written and then retracted.
+func ec2KeyPairFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated:      []string{"fingerprint", "key-name", "key-pair-id", "tag-key"},
+	}
+}
+
+// ec2AvailabilityZoneFilterSpec is DescribeAvailabilityZones' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeAvailabilityZones.html.
+//
+// Eleven names, four evaluated — the four the synthesized zone actually carries. No tag
+// filter: a zone is not a taggable resource.
+//
+// The seven inert ones are inert for a reason worth stating, because it differs from every
+// other spec here: substrate could *invent* a value for most of them. It renders no
+// optInStatus, groupName, groupLongName or messageSet, and a Local Zone or Wavelength Zone
+// has no representation at all — so parent-zone-id, parent-zone-name and zone-type describe
+// a distinction substrate does not draw. Answering them would mean fabricating the answer
+// rather than reading it, which is the line [ec2SubnetItem] draws about
+// availableIpAddressCount.
+func ec2AvailabilityZoneFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{"region-name", "state", "zone-id", "zone-name"},
+		accepted: []string{
+			"group-long-name", "group-name", "message", "opt-in-status",
+			"parent-zone-id", "parent-zone-name", "zone-type",
+		},
+	}
+}
+
+// ec2PlacementGroupFilterSpec is DescribePlacementGroups' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribePlacementGroups.html.
+//
+// Seven names, six evaluated. Only spread-level is inert — substrate records a strategy but
+// not the host-or-rack level a spread group can be created at.
+//
+// The page documents **no group-id filter** even though GroupId.N is a request parameter, so
+// selection by ID is by parameter and never by filter. That asymmetry is AWS's, and it is the
+// same one DescribeLaunchTemplates has.
+func ec2PlacementGroupFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated: []string{
+			"group-arn", "group-name", "state", "strategy", "tag-key",
+		},
+		accepted: []string{"spread-level"},
+	}
+}
+
+// ec2AddressFilterSpec is DescribeAddresses' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeAddresses.html.
+//
+// Ten names, eight evaluated. network-border-group names a zone grouping substrate does not
+// model, and network-interface-owner-id names the *interface's* owner rather than the
+// address's: substrate records an attached interface ID but nothing about who owns it, and
+// answering it with the requesting account would be an invention rather than a read.
+func ec2AddressFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated: []string{
+			"allocation-id", "association-id", "instance-id", "network-interface-id",
+			"private-ip-address", "public-ip", "tag-key",
+		},
+		accepted: []string{"network-border-group", "network-interface-owner-id"},
+	}
+}
+
+// ec2RegionFilterSpec is DescribeRegions' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeRegions.html.
+//
+// Three names, all evaluated, and no tag filter — the narrowest complete set in EC2's
+// describe family, and the only spec here where "everything AWS documents" and "everything
+// substrate answers" are the same three strings.
+func ec2RegionFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{"endpoint", "opt-in-status", "region-name"},
+	}
+}
+
+// ec2InstanceTypeFilterSpec is DescribeInstanceTypes' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstanceTypes.html.
+//
+// Fifty-seven names, the widest set in EC2 after DescribeInstances', of which the seeded
+// catalog answers five. That ratio is the whole reason this operation went unfiltered
+// through v0.106.0: TODO(#495) recorded that applying the modellable handful and dropping
+// the rest would repeat #485's silent narrowing. It is no longer a silent drop — the five are
+// applied, and the fifty-two are accepted and listed, which is the distinction
+// [ec2FilterSpec] exists to draw.
+//
+// Every inert name describes an instance-type property [ec2InstanceTypeInfo] does not carry:
+// EBS optimization, NVMe support, ENA and EFA, hypervisor, boot mode, disk layout. The
+// catalog is deliberately small (#495) and this list is what that costs.
+func ec2InstanceTypeFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{
+			"instance-type", "memory-info.size-in-mib",
+			"processor-info.supported-architecture", "supported-usage-class",
+			"vcpu-info.default-vcpus",
+		},
+		accepted: []string{
+			"auto-recovery-supported", "bare-metal", "burstable-performance-supported",
+			"current-generation", "dedicated-hosts-supported",
+			"ebs-info.attachment-limit-type",
+			"ebs-info.ebs-optimized-info.baseline-bandwidth-in-mbps",
+			"ebs-info.ebs-optimized-info.baseline-iops",
+			"ebs-info.ebs-optimized-info.baseline-throughput-in-mbps",
+			"ebs-info.ebs-optimized-info.maximum-bandwidth-in-mbps",
+			"ebs-info.ebs-optimized-info.maximum-iops",
+			"ebs-info.ebs-optimized-info.maximum-throughput-in-mbps",
+			"ebs-info.ebs-optimized-support", "ebs-info.encryption-support",
+			"ebs-info.maximum-ebs-attachments", "ebs-info.nvme-support",
+			"free-tier-eligible", "hibernation-supported", "hypervisor",
+			"instance-storage-info.disk.count", "instance-storage-info.disk.size-in-gb",
+			"instance-storage-info.disk.type",
+			"instance-storage-info.encryption-support",
+			"instance-storage-info.nvme-support",
+			"instance-storage-info.total-size-in-gb", "instance-storage-supported",
+			"network-info.bandwidth-weightings",
+			"network-info.efa-info.maximum-efa-interfaces",
+			"network-info.efa-supported", "network-info.ena-support",
+			"network-info.encryption-in-transit-supported",
+			"network-info.flexible-ena-queues-support",
+			"network-info.ipv4-addresses-per-interface",
+			"network-info.ipv6-addresses-per-interface",
+			"network-info.ipv6-supported", "network-info.maximum-network-cards",
+			"network-info.maximum-network-interfaces",
+			"network-info.network-performance", "nitro-enclaves-support",
+			"nitro-tpm-info.supported-versions", "nitro-tpm-support",
+			"processor-info.supported-features",
+			"processor-info.sustained-clock-speed-in-ghz",
+			"reboot-migration-support", "supported-boot-mode",
+			"supported-root-device-type", "supported-virtualization-type",
+			"vcpu-info.default-cores", "vcpu-info.default-threads-per-core",
+			"vcpu-info.valid-cores", "vcpu-info.valid-threads-per-core",
+		},
+	}
+}
+
+// ec2SpotPriceFilterSpec is DescribeSpotPriceHistory' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSpotPriceHistory.html.
+//
+// Six names, five evaluated. Only availability-zone-id is inert: substrate derives a zone ID
+// for DescribeAvailabilityZones but records none against a price observation, and deriving it
+// here would make the two operations disagree about a zone whose name is not one of the
+// seeded suffixes.
+func ec2SpotPriceFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{
+			"availability-zone", "instance-type", "product-description", "spot-price",
+			"timestamp",
+		},
+		accepted: []string{"availability-zone-id"},
+	}
+}
+
+// ec2LaunchTemplateFilterSpec is DescribeLaunchTemplates' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeLaunchTemplates.html.
+//
+// Four names, all evaluated. Note what is *not* here: the page documents no
+// launch-template-id filter, so an ID selects only through LaunchTemplateId.N. A caller
+// reaching for `Filter.1.Name=launch-template-id` is refused, which is AWS's set and the most
+// likely wrong guess on this operation.
+//
+// The two tag filters, like DescribeKeyPairs', became answerable in #708 — which was also the
+// first change that let a launch template's own tags be set at all.
+func ec2LaunchTemplateFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		tagValueFilter: true,
+		evaluated:      []string{"create-time", "launch-template-name", "tag-key"},
+	}
+}
+
+// ec2LaunchTemplateVersionFilterSpec is DescribeLaunchTemplateVersions' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeLaunchTemplateVersions.html.
+//
+// Fourteen names, four evaluated, and **no tag filter** — a version is not separately
+// taggable, so the operation documents neither form even though its parent template's
+// describe documents both.
+//
+// The ten inert names are the launch-template data members substrate does not store: metadata
+// options (http-endpoint, http-protocol-ipv4, http-tokens), the kernel and RAM disk, EBS
+// optimization, and the three ARNs. [EC2LaunchTemplateData] carries the image, instance type,
+// key name, subnet, security groups, user data and block device mappings, and only the first
+// two of those have a documented filter.
+func ec2LaunchTemplateVersionFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{
+			"create-time", "image-id", "instance-type", "is-default-version",
+		},
+		accepted: []string{
+			"ebs-optimized", "host-resource-group-arn", "http-endpoint",
+			"http-protocol-ipv4", "http-tokens", "iam-instance-profile", "kernel-id",
+			"license-configuration-arn", "network-card-index", "ram-disk-id",
+		},
+	}
+}

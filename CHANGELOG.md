@@ -36,6 +36,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publishes `InvalidPlacementGroupId.Malformed` "in the form `pg-xxxxxxxxxxxxxxxxx`", which
   only an ID-taking operation can raise. Substrate accepts the `pg-` form and translates.
 
+- **Twelve more EC2 describes read `Filter.N`, so twenty-three of twenty-four now do** (#695).
+  Each of the twelve declared a `Filters` parameter on its reference page and never parsed one:
+  `DescribeInstanceStatus`, `DescribeVpcs`, `DescribeInternetGateways`, `DescribeKeyPairs`,
+  `DescribeAvailabilityZones`, `DescribePlacementGroups`, `DescribeAddresses`,
+  `DescribeRegions`, `DescribeInstanceTypes`, `DescribeSpotPriceHistory`,
+  `DescribeLaunchTemplates` and `DescribeLaunchTemplateVersions`. A filter reached the handler
+  and was discarded, so a request for one VPC by `cidr` got every VPC in the account — the
+  silent-widening half of the failure #685 and #688 fixed for subnets and tags. That is now
+  every EC2 describe substrate serves but one: `DescribeInstanceAttribute`, whose page
+  documents no `Filters` parameter at all.
+
+  Three of the twelve evaluate **every** name their page documents —
+  `DescribeInternetGateways` (6 of 6), `DescribeRegions` (3 of 3) and `DescribeLaunchTemplates`
+  (4 of 4). The rest evaluate what substrate's records can answer and accept the remainder as
+  inert, each inert name listed per operation in `docs/services.md` rather than left for a
+  caller to find by getting a wrong answer. An **undocumented** name is refused with
+  `InvalidParameterValue`, the rule #687 established. That evaluated/inert split is what closed
+  `TODO(#495)` on `DescribeInstanceTypes`: the objection to applying five of fifty-seven
+  filters was never the five, it was that dropping the fifty-two *silently* is
+  indistinguishable from applying them.
+
+  Eight of the twelve document no tag filter, which is why the choice is per operation and not
+  a package-wide assumption — `DescribeLaunchTemplates` documents both `tag:<key>` and
+  `tag-key` while `DescribeLaunchTemplateVersions`, on the same page family, documents neither.
+
+  Provenance: **AWS documents no rule for a paired identity list**, and five operations take
+  one — `KeyName.N`/`KeyPairId.N`, `ZoneName.N`/`ZoneId.N`, `GroupName.N`/`GroupId.N`,
+  `AllocationId.N`/`PublicIp.N` and `LaunchTemplateId.N`/`LaunchTemplateName.N`. Substrate
+  reads them as a **union**, not an intersection: naming one key by name and a second by ID
+  returns both. The reading comes from what AWS does document — an unresolvable name or ID
+  answers `NotFound` rather than an empty set, which only makes sense if every identifier named
+  is expected to appear in the response, and an intersection would answer nothing for two
+  identifiers that each resolve.
+
 - **EC2's documented filter limits, enforced in one place** (#697). Using_Filtering publishes
   three: "You can specify up to 50 filters and up to 200 total filter values in a single
   request" and "Filter strings can be up to 255 characters in length." All three are now
@@ -75,6 +109,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old shape deliberately: its reference page publishes no example response, so there is no
   untagged sample to follow and changing it would be a guess. `DescribeSnapshots` keeps its
   present-but-empty element because its own page shows it.
+
+- **`DescribeVpcs` and `CreateVpc` name the VPC's state element `state`, not `vpcState`**
+  (#695). A wire fix: both of AWS's sample responses render `<state>available</state>`, and
+  substrate had emitted `<vpcState>` since the operation was written. A consumer reading the
+  element by name — a raw XML or CloudFormation-style parser, not an SDK, which maps by the
+  model — saw an empty state. The two renderers also converged: `CreateVpc` and `DescribeVpcs`
+  had separate structs that had drifted, and `CreateInternetGateway`/`DescribeInternetGateways`
+  had the same split, so each pair now emits one shape by construction. Found by writing the
+  filter matcher, which had to select on a field the create path did not publish.
+
+- **Seven EC2 response members appear where they were absent** (#695), each because a filter
+  now selects on it and a caller who cannot read the value cannot check the filter's answer:
+  `ownerId` and `tagSet` on a VPC, `ownerId`, `attachmentSet` and `tagSet` on an internet
+  gateway, `groupArn` on a placement group, `tagSet` on an address, and `availabilityZone` on
+  an instance status. Additive — nothing is renamed or removed apart from the `vpcState` fix
+  above — but a consumer asserting on an exact response body will see the new elements.
+
+  The empty-value convention **follows each operation's own page rather than a house style**:
+  an unattached, untagged internet gateway renders `<attachmentSet/>` and `<tagSet/>` because
+  its reference sample does, while an untagged VPC or address omits `tagSet` entirely because
+  theirs do. That is deliberately inconsistent across operations and consistent with AWS.
+
+- **`DescribeLaunchTemplateVersions` filters before it paginates** (#695), so a page carries
+  `MaxResults` *matching* versions rather than `MaxResults` versions of which some match.
+  Paginating first is the defect that makes a filtered query look empty while `nextToken` is
+  still set — the same ordering every other paginated EC2 describe uses.
 
 - **Eighteen mutating EC2 operations answer their `Invalid*.NotFound` from the kind table, not
   from a hand-written literal** (#713). `ec2_resourceid.go`'s `ec2IDKind` table has been the
@@ -223,6 +283,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resource's `NotFound` — so a caller was told their route table did not exist when the read
   had failed, and the actual error was discarded, which the house rules forbid outright. Each
   now wraps with `fmt.Errorf("…: %w", err)` and checks existence separately.
+
+- **Three indexed EC2 list parameters were read at index 1 only** (#695).
+  `DescribeLaunchTemplates` consulted `LaunchTemplateId.1` and `LaunchTemplateName.1`, and
+  `DescribeSpotPriceHistory` consulted `ProductDescription.1`, so a caller naming three
+  templates was answered about one and every later element was dropped without a word. Each now
+  walks every index, and the union rule above governs the two launch-template lists. This is the
+  same defect class as the `Filter.N` walks themselves: a parameter accepted, partly read, and
+  answered as though it had been honoured.
 
 - **EC2 filter values honour AWS's wildcards on every describe, not on the two that happened
   to have them** (#697). AWS states the rule once for the whole family — "An asterisk (\*)
