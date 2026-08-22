@@ -4684,6 +4684,59 @@ tags on the AMI instead. A caller asserting on `DescribeImages` tags that were
 actually snapshot-scoped will now see them on `DescribeSnapshots`, which is where
 real EC2 puts them.
 
+#### `RegisterImage` records the whole block device mapping
+
+`RegisterImage` read exactly one thing out of the mapping it was sent — the first
+`BlockDeviceMapping.N.Ebs.SnapshotId`, found by a hand walk of indexes 1 to 32 — and
+discarded the rest of every entry: device names, sizes, volume types, and every mapping
+after the first that named a snapshot. AWS's own third example for this operation registers
+three volumes (two snapshots and an empty 100 GiB volume), so a caller sending AWS's
+documented request got one volume back, on a `/dev/sda1` the request need never have
+mentioned.
+
+| Request | Answer |
+|---|---|
+| Every `BlockDeviceMapping.N` entry | Stored as sent and rendered back by `DescribeImages` in request order |
+| A mapping naming a snapshot that is malformed or names nothing | `InvalidSnapshotID.Malformed` / `InvalidSnapshot.NotFound`, before anything is written |
+| `Ebs.VolumeSize` below the snapshot's size | `InvalidBlockDeviceMapping`, naming the device |
+| A mapping with a size and **no** snapshot | Registered — AWS's third example volume is exactly that |
+| A mapping absent a size but naming a snapshot | The snapshot's size, per `EbsBlockDevice.VolumeSize`: "If you specify a snapshot, the default is the snapshot size" |
+| `RootDeviceName` | Read, to decide which mapping is the root device's; absent, the first mapping naming a snapshot is |
+| `TagSpecification.N` with `ResourceType=image` | Tags the AMI, through the same walk and the same [tag rules](#reserved-tag-keys) as every other tag-on-create |
+| `TagSpecification.N` with any other `ResourceType` | `InvalidParameterValue`. AWS: "If you specify another value for `ResourceType`, the request fails" |
+| `Name` | Still the only required parameter, as AWS marks it |
+
+The mapping is now read by the same parser `RunInstances` and a launch template use, which
+brings two changes a caller can notice beyond getting its volumes back. The walk is
+**unbounded**, so a request with more than 32 mappings no longer has the remainder dropped;
+and it **stops at the first absent index** instead of tolerating a gap. AWS's query protocol
+indexes contiguously and every other indexed walk in substrate assumes it, so a sparse
+request is not one an SDK produces — but a hand-built request that skipped an index used to
+have its later mappings read, and no longer does.
+
+Three mapping shapes render differently, because they are different things: an EBS volume
+gets an `ebs` element, an instance store device gets a `virtualName` and **no** `ebs`, and a
+suppressed device gets a `noDevice` element whose value is empty. Giving every mapping an
+`ebs` element would report a phantom 0 GiB volume for the latter two.
+
+`block-device-mapping.snapshot-id` widened with this: it matches on **every** snapshot the
+AMI's mapping names, not only the root device's. Consulting the root alone meant a filter
+naming a volume `DescribeImages` had just rendered found no AMI — two operations
+contradicting each other about one record.
+
+Two things this does **not** do. It applies only the snapshot rule from the shared mapping
+validator, not the rest of it (duplicate device names, `virtualName` spellings, gp3-only
+`Throughput`): none of those is a rule AWS states for this operation, and arriving on a
+published path unannounced is how a consumer's working request starts failing. And
+`Name`'s documented character constraints ("3-128 alphanumeric characters, parentheses…")
+stay unenforced — only an empty `Name` is refused.
+
+Provenance: `API_RegisterImage.html`'s Errors section is empty, so no code here is quoted
+from the operation's own page. The snapshot codes come from EC2's client-error table and
+predate this change. The `ResourceType` code is **substrate's reading** — AWS says only that
+"the request fails" — chosen because `InvalidParameterValue` is EC2's gloss for "A value
+specified in a parameter is not valid, is unsupported, or cannot be used".
+
 #### `DescribeImages` filters
 
 Four filter names are applied: `image-id`, `block-device-mapping.snapshot-id`,
@@ -4814,8 +4867,11 @@ size and its ID — so an AMI made from a 40 GiB root volume reports 40 GiB thro
 `DescribeSnapshots` *and* through `DescribeImages`, which reads the snapshot record rather
 than rendering its own constant. An AMI whose snapshot is missing falls back to the 8 GiB
 default rather than reporting `0`, since a caller sizing a volume off that member can act on
-the default. `DeleteSnapshot` no longer produces that state — see below — so it is reached
-only by `RegisterImage` naming a snapshot that does not exist, or by a record written
+the default. Two things reach that state, and `RegisterImage` naming a snapshot that does not
+exist is no longer one of them — that request is refused, see
+[`RegisterImage` records the whole block device mapping](#registerimage-records-the-whole-block-device-mapping).
+What remains is deleting the snapshot a **non-root** mapping names, which `DeleteSnapshot`
+permits because AWS scopes its refusal to the root device (below), and an AMI record written
 directly into state.
 
 The rest of the `CreateSnapshot` family — `CreateSnapshots`, `CopySnapshot`,
@@ -4836,14 +4892,19 @@ it had removed a snapshot.
 | `SnapshotId` omitted | `MissingParameter` — AWS marks it `Required: Yes` |
 | Not a snapshot ID (`vol-…`, `ami-…`, no prefix, non-hex, uppercase) | `InvalidSnapshotID.Malformed` |
 | Well-formed, names nothing — **including a second delete of the same ID** | `InvalidSnapshot.NotFound` |
-| Named by a registered AMI's block device mapping | `InvalidSnapshot.InUse`, naming both the snapshot and the AMI |
+| A registered AMI's **root device** snapshot | `InvalidSnapshot.InUse`, naming both the snapshot and the AMI |
 | Anything else | Deleted; a subsequent `DescribeSnapshots` does not report it |
 
 The in-use rule is AWS's: "You cannot delete a snapshot of the root device of an EBS volume
 used by a registered AMI. You must first deregister the AMI before you can delete the
-snapshot." Substrate's images record exactly one snapshot and it is by construction the root
-device's, so AWS's narrower scoping — the *root* device specifically — happens not to bite;
-every snapshot an image references here is a root-device snapshot.
+snapshot." Its scoping — the *root* device specifically — is load-bearing, not incidental. An
+AMI records the whole mapping it was registered with, so it can reference snapshots that are
+not its root device's, and **those are not protected**: deleting one succeeds and leaves the
+mapping pointing at a snapshot that no longer exists, which `DescribeImages` then renders at
+the 8 GiB default. That is what AWS's sentence says, and following the API model rather than a
+wider guess is the standing rule here. Which mapping is the root device's is decided by the
+request's `RootDeviceName`, falling back to the first mapping that names a snapshot; a
+`CreateImage`-minted AMI has one snapshot and it is the instance's root volume's.
 
 Two consequences worth planning for:
 

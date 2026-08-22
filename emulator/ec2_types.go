@@ -515,8 +515,26 @@ type EC2Image struct {
 	CreationDate string `json:"creation_date,omitempty"`
 
 	// SnapshotID is the EBS snapshot backing the root device of this AMI, if any.
-	// CreateImage materializes one so snapshot-retention logic can be tested.
+	// CreateImage materializes one so snapshot-retention logic can be tested;
+	// RegisterImage takes it from the mapping RootDeviceName names, or from the first
+	// mapping naming a snapshot when it names none — see [ec2RootMappingSnapshot].
+	//
+	// It stays a scalar beside BlockDeviceMappings rather than being derived from them
+	// on every read because DeleteSnapshot's in-use rule is scoped to the *root*
+	// device's snapshot (#710), so the distinction is load-bearing rather than
+	// bookkeeping, and because it is the only snapshot member an AMI recorded before
+	// #711 has.
 	SnapshotID string `json:"snapshot_id,omitempty"`
+
+	// BlockDeviceMappings holds the mapping entries a RegisterImage request sent, in
+	// request order, so DescribeImages can render what the caller asked for rather than
+	// the single fabricated /dev/sda1 item it rendered through v0.106.0 (#711).
+	//
+	// It is empty for every CreateImage-minted AMI — that path materializes one root
+	// snapshot and has no caller mapping to record — and for any AMI registered before
+	// #711. DescribeImages renders those from SnapshotID, which is why both members
+	// exist; see [EC2Plugin.describeImages].
+	BlockDeviceMappings []EC2BlockDeviceMapping `json:"block_device_mappings,omitempty"`
 
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`

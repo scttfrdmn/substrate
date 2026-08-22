@@ -204,6 +204,42 @@ func ec2LaunchTagsForResource(params map[string]string, resourceType string) []E
 	return ec2TagSpecificationTags(params, "", resourceType)
 }
 
+// ec2CheckTagSpecificationTypes returns an error if any TagSpecification.N names a
+// ResourceType other than want, or nil.
+//
+// AWS states the rule on RegisterImage: "To tag the AMI, the value for ResourceType must be
+// image. If you specify another value for ResourceType, the request fails." That is a
+// refusal, and [ec2TagSpecificationTags] performs a silent skip instead — correct for an
+// operation that accepts several scopes, since CreateImage tags an AMI and its snapshots and
+// a snapshot-scoped specification is not a mistake there, and wrong for one that accepts a
+// single scope, where the skip drops the caller's tags and reports success.
+//
+// The walk ends on the first absent or empty ResourceType, matching
+// [ec2TagSpecificationTags] exactly: if the two disagreed about which specifications exist,
+// this check could pass a list whose tags that one then read, or refuse one it would ignore.
+//
+// Provenance: the code is substrate's reading. RegisterImage's Errors section is empty and
+// AWS says only that "the request fails", so nothing publishes one. InvalidParameterValue is
+// EC2's gloss for "A value specified in a parameter is not valid, is unsupported, or cannot
+// be used", which is what a resource type the operation does not accept is.
+func ec2CheckTagSpecificationTypes(params map[string]string, want string) *AWSError {
+	for n := 1; ; n++ {
+		rt, ok := params[fmt.Sprintf("TagSpecification.%d.ResourceType", n)]
+		if !ok || rt == "" {
+			return nil
+		}
+		if rt != want {
+			return &AWSError{
+				Code: "InvalidParameterValue",
+				Message: fmt.Sprintf(
+					"'%s' is not a valid resource type for this request; the value for ResourceType must be %s",
+					rt, want),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+	}
+}
+
 // ec2TagSpecificationTags collects the tags a TagSpecification.N list scopes to
 // resourceType, under an optional param-name prefix.
 //

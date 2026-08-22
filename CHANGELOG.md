@@ -87,6 +87,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be used."
 
 ### Changed
+- **`RegisterImage` records the whole block device mapping it is sent** (#711). It read exactly
+  one thing out of it — the first `BlockDeviceMapping.N.Ebs.SnapshotId`, found by a hand walk of
+  indexes 1 to 32 — and discarded the rest of every entry: device names, sizes, volume types,
+  and every mapping after the first that named a snapshot. AWS's own third example for this
+  operation registers three volumes (two distinct snapshots and an empty 100 GiB volume), so a
+  caller sending AWS's documented request got one volume back, rendered on a `/dev/sda1` the
+  request need never have mentioned. `EC2Image` gained a mappings field, `DescribeImages`
+  renders every entry in request order, and each entry naming a snapshot is validated by the
+  same checker the launch path uses — so a malformed or absent snapshot ID is
+  `InvalidSnapshotID.Malformed` / `InvalidSnapshot.NotFound` before anything is written,
+  instead of being stored and later rendered as a plausible volume of substrate's default size.
+
+  Three rules the operation had no reader for at all. `RootDeviceName` now decides which mapping
+  is the root device's, falling back to the first that names a snapshot — which matters beyond
+  bookkeeping, because that is the snapshot `DeleteSnapshot`'s in-use rule protects.
+  `TagSpecification.N` scoped to `image` now tags the AMI, where the tags previously went
+  nowhere; any other `ResourceType` is refused, per AWS's "If you specify another value for
+  `ResourceType`, the request fails". And a mapping that names a size and no snapshot — AWS's
+  third example volume — is registered rather than being ignored for naming no snapshot.
+
+  Two changes a caller can notice from the shared parser replacing the hand walk: it is
+  **unbounded**, so a request with more than 32 mappings no longer loses the remainder, and it
+  **stops at the first absent index** rather than tolerating a gap. AWS's query protocol indexes
+  contiguously and every other indexed walk in substrate assumes it, so a sparse request is not
+  one an SDK produces — but a hand-built request that skipped an index used to have its later
+  mappings read. Also widened: `block-device-mapping.snapshot-id` matches on every snapshot an
+  AMI's mapping names, not only the root device's, because consulting the root alone meant a
+  filter naming a volume `DescribeImages` had just rendered found no AMI.
+
+  #711's premises were both wrong and are corrected here. `DescribeImages` did **not** report
+  "a size of zero rather than the old constant 8" — it falls back to `ec2DefaultVolumeSizeGiB`
+  and documents why; what it lacked was a test, which it now has on both records that reach the
+  fallback. And the hand walk was not "a different convention from `extractEC2Filters`' and
+  `ec2CheckBlockDeviceMappings`' own walks": neither of those walks `BlockDeviceMapping.N` at
+  all. There was one convention, `ec2ParseBlockDeviceMappings`, and this path is now its third
+  caller rather than a fourth convention.
+
+  Deliberately **not** included: the rest of the shared mapping validator (duplicate device
+  names, `virtualName` spellings, gp3-only `Throughput`). None of it is a rule AWS states for
+  this operation, and bringing six unrelated refusals onto a published path unannounced is how
+  a consumer's working request starts failing. `Name`'s documented character constraints stay
+  unenforced too; only an empty `Name` is refused.
+
+  Provenance: `API_RegisterImage.html`'s Errors section is empty, so no code here comes from the
+  operation's own page. The snapshot codes come from EC2's client-error table and predate this
+  change. The `ResourceType` refusal's code is **substrate's reading** — AWS says only that "the
+  request fails" — chosen because `InvalidParameterValue`'s documented gloss is "A value
+  specified in a parameter is not valid, is unsupported, or cannot be used".
+
 - **`DeleteSnapshot` validates the ID it is given, and refuses one a registered AMI still
   references** (#710). The operation deleted the record correctly — it has since #325, whatever
   the doc comment saying "Substratefs does not persist snapshots; the operation succeeds" claimed
@@ -107,10 +156,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AMI referencing a snapshot that no longer existed — a state real EC2 cannot be put into, and
   the reason `DescribeImages` needed a fallback to render a volume size at all.
 
-  Substrate's images record exactly one snapshot and it is by construction the root device's, so
-  AWS's narrower scoping (the *root* device specifically) happens not to bite; that is stated
-  rather than glossed, because an image that could reference a non-root snapshot would need the
-  check narrowed. Where two AMIs share one snapshot — reachable since #328 — the refusal names
+  AWS's scoping — the *root* device specifically — is followed rather than widened, and #711 in
+  this same release makes that load-bearing: an AMI now records the whole mapping it was
+  registered with, so a snapshot it names on a non-root device is **not** protected. Deleting one
+  succeeds and leaves the mapping dangling, which `DescribeImages` renders at the 8 GiB default.
+  That is what AWS's sentence says. Where two AMIs share one snapshot — reachable since #328 — the refusal names
   the **lowest** image ID, so identical inputs produce an identical body on replay instead of one
   that follows Go's map iteration order.
 
