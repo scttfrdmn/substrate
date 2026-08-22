@@ -595,15 +595,20 @@ func TestOrganizations_ResourcePolicy_CorruptRecordIsAnError(t *testing.T) {
 // TestOrganizations_ResourcePolicyOperationsAreClaimed pins that all three
 // operations reach the new cluster.
 //
-// This is the failure #619 actually reported: an unclaimed operation falls through
-// to InvalidAction, which a caller reads as "no such API" rather than "substrate
-// has not implemented it", so it hunts for a bug in its own request.
+// This is the failure #619 actually reported: an unclaimed operation falls through to
+// the unknown-action refusal, which a caller reads as "no such API" rather than
+// "substrate has not implemented it", so it hunts for a bug in its own request.
+//
+// The code to watch for is Organizations' own protocol's: JSON, so
+// UnknownOperationException. It was InvalidAction until #716 routed every plugin's
+// refusal through one place, and a sentinel still naming that code would silently stop
+// catching anything.
 func TestOrganizations_ResourcePolicyOperationsAreClaimed(t *testing.T) {
 	ts := newOrganizationsTestServer(t)
 
 	for _, op := range []string{"PutResourcePolicy", "DescribeResourcePolicy", "DeleteResourcePolicy"} {
-		if _, _, code := orgResourcePolicyCall(t, ts, op, map[string]any{}); strings.HasPrefix(code, "InvalidAction") {
-			t.Errorf("%s: expected the operation to be claimed, got InvalidAction", op)
+		if _, _, code := orgResourcePolicyCall(t, ts, op, map[string]any{}); strings.HasPrefix(code, "UnknownOperationException") {
+			t.Errorf("%s: expected the operation to be claimed, got UnknownOperationException", op)
 		}
 	}
 }
