@@ -11,10 +11,13 @@ caller can make accurate, seedable, and time-ordered — never to execute the
 workload behind the API.
 
 - In scope: request/response shapes, error codes, resource state and its
-  transitions over the simulated clock (e.g. an instance moving
-  `pending → running`, a job reporting `Failed` with a seeded reason, a command
-  invocation going `Pending → InProgress → Success`), and seedable outcomes that
-  let a consumer's poll/retry/wait loop be tested.
+  transitions (e.g. an instance moving `pending → running`, a job reporting
+  `Failed` with a seeded reason, a snapshot reported `pending` for a seeded
+  number of observations before it reaches `completed`), and seedable outcomes
+  that let a consumer's poll/retry/wait loop be tested. A progression is driven
+  by the simulated clock or by a countdown of observations, whichever the
+  operation's own reference behaviour makes assertable without wall-clock
+  dependence.
 - Out of scope: actually running the work — executing user-data or cloud-init,
   running a Lambda's code, performing an inference, running a training job,
   bootstrapping a node. Capture such inputs as recorded intent and expose a

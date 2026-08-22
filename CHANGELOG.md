@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.107.0] - 2026-08-21
+
 ### Added
 - **`CreateTags` and `DeleteTags` reach every taggable EC2 resource type** (#708). Five ID
   prefixes were **silently ignored**: a request naming an `ami-`, `lt-`, `fleet-`, `pg-` or
@@ -800,6 +802,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the comparison ever saw it. The tolerance reaches `Action` and `Resource`, which share the type,
   and is left there because the effect is bounded and safe — an `"Action": 5` becomes the action
   name `"5"`, which matches nothing.
+
+- **`CLAUDE.md`'s scope section no longer cites a progression substrate does not model.** It
+  offered an SSM command invocation going `Pending → InProgress → Success` as an example of a
+  state transition in scope; `ssm_control.go`'s seed is a single flat `Status` written once, and
+  the string `InProgress` appears nowhere in the plugin. The example is replaced with the
+  snapshot progression this release actually added (#715), and the sentence no longer claims
+  every progression is clock-driven — #715's is a countdown of observations, deliberately, so
+  that an assertion about it cannot depend on wall-clock time.
 
 ## [v0.106.0] - 2026-08-21
 
@@ -8759,7 +8769,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.106.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.107.0...HEAD
+[v0.107.0]: https://github.com/scttfrdmn/substrate/compare/v0.106.0...v0.107.0
 [v0.106.0]: https://github.com/scttfrdmn/substrate/compare/v0.105.0...v0.106.0
 [v0.105.0]: https://github.com/scttfrdmn/substrate/compare/v0.104.0...v0.105.0
 [v0.104.0]: https://github.com/scttfrdmn/substrate/compare/v0.103.0...v0.104.0
