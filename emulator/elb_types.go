@@ -96,6 +96,9 @@ type ELBListener struct {
 	// DefaultActions is the list of default actions.
 	DefaultActions []ELBAction `json:"DefaultActions"`
 
+	// Tags holds key-value metadata.
+	Tags []ELBTag `json:"Tags,omitempty"`
+
 	// AccountID is the AWS account that owns the listener.
 	AccountID string `json:"AccountID"`
 
@@ -188,6 +191,9 @@ type ELBRule struct {
 
 	// IsDefault indicates whether this is the default rule.
 	IsDefault bool `json:"IsDefault"`
+
+	// Tags holds key-value metadata.
+	Tags []ELBTag `json:"Tags,omitempty"`
 
 	// AccountID is the AWS account that owns the rule.
 	AccountID string `json:"AccountID"`

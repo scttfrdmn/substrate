@@ -1447,7 +1447,7 @@ What has **no** producer, and therefore never matches on the enforcement path:
   would make it stable per-name rather than per-entity; `aws:PrincipalTag/` needs the
   principal's tags read where the credential is resolved, which is the cheaper of the two
   because `TagUser`/`TagRole` already record them.
-- Five of the seven keys the bundled AWS managed policies condition on, each for its own
+- Four of the seven keys the bundled AWS managed policies condition on, each for its own
   reason rather than as one omission:
 
   | Key | Blocks | Why it has no producer |
@@ -1456,15 +1456,25 @@ What has **no** producer, and therefore never matches on the enforcement path:
   | `codestar-notifications:NotificationsForResource` | 6 | No CodeStar Notifications plugin |
   | `aws:CalledViaLast` | 2 | `RequestContext` has no call-chain notion, and there is no service-to-service internal path to record one from |
   | `devops-guru:ServiceNames` | 2 | No DevOps Guru plugin |
-  | `elasticloadbalancing:CreateAction` | 1 | The ELB plugin has no tagging at all — no `AddTags`, and a load balancer's tags are never read or written — so the action the statement conditions does not exist |
 
-  Two now have one: `ec2:ResourceTag/<key>` (see [both
-  prefixes](#ec2-reports-a-resource-s-tags-under-both-prefixes)) and `iam:AWSServiceName`
-  (see [service-linked roles](#service-linked-roles-and-iam-awsservicename)). Between them
-  they were the largest group in the table — 11 of the 32 condition blocks turned on
+  Three now have one: `ec2:ResourceTag/<key>` (see [both
+  prefixes](#ec2-reports-a-resource-s-tags-under-both-prefixes)), `iam:AWSServiceName`
+  (see [service-linked roles](#service-linked-roles-and-iam-awsservicename)) and
+  `elasticloadbalancing:CreateAction` (see [ELB v2](#authorization)). Between them they
+  were the largest group in the table — 11 of the 32 condition blocks turned on
   `iam:AWSServiceName` alone — and each needed the same two things rather than one: a
   producer for the key, *and* a request resource specific enough for the statement's
-  `Resource` to match.
+  `Resource` to match. The ELB key needed a third: the tagging operations it conditions did
+  not exist, so the statement in `AmazonECS_FullAccess`'s `ELBTaggingPolicy` conditioned an
+  action no request could carry.
+
+  `elasticloadbalancing:CreateAction` was the one whose provenance looked thinnest and turned
+  out not to be. It is **absent** from the ELB user guide's own list of ELB-specific condition
+  keys, and both Service Authorization Reference pages for ELB render their key tables in
+  JavaScript and were unreachable — so the bundled managed policy read like the only citable
+  source. It is not: the guide's "Tag your Elastic Load Balancing resources during creation"
+  page documents the key, the `AddTags` second authorization it belongs to, and the bare
+  operation name as its value.
 
   Each remaining absence is a false deny in the safe direction: all 32 condition blocks in
   the bundled catalog sit on an `Allow`, so such a statement grants nothing rather than a
@@ -6403,21 +6413,160 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateLoadBalancer | ALB and NLB supported |
-| DescribeLoadBalancers | |
+| CreateLoadBalancer | ALB and NLB supported; accepts `Tags.member.N` |
+| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N` |
 | DeleteLoadBalancer | |
-| CreateTargetGroup | |
+| DescribeLoadBalancerAttributes | |
+| ModifyLoadBalancerAttributes | |
+| CreateTargetGroup | Accepts `Tags.member.N` |
 | DescribeTargetGroups | |
 | DeleteTargetGroup | |
+| ModifyTargetGroup | |
 | RegisterTargets | |
 | DeregisterTargets | |
 | DescribeTargetHealth | |
-| CreateListener | |
+| CreateListener | Accepts `Tags.member.N` |
 | DescribeListeners | |
 | DeleteListener | |
-| CreateRule | |
+| ModifyListener | |
+| CreateRule | Accepts `Tags.member.N` |
 | DescribeRules | |
 | DeleteRule | |
+| SetRulePriorities | |
+| AddTags | Up to 50 user tags per resource |
+| RemoveTags | |
+| DescribeTags | At most 20 resources per request |
+
+Every operation whose output shape carries no members answers
+`<OperationResponse><OperationResult/></OperationResponse>`. The empty result element is not
+decoration: ELBv2 speaks the Query protocol, where each output shape declares a
+`resultWrapper`, and botocore looks that wrapper up by name — so a bare
+`<OperationResponse/>` makes the AWS CLI and boto3 raise `KeyError` rather than report
+success. `DeleteLoadBalancer`, `DeleteTargetGroup`, `DeleteListener`, `DeleteRule`,
+`RegisterTargets` and `DeregisterTargets` answered that way and were unusable from a real
+client while substrate's own tests passed, because those tests read the XML directly instead
+of through an SDK's parser.
+
+### Tagging
+
+The four creates above store the `Tags.member.N` they are given, and `AddTags`,
+`RemoveTags` and `DescribeTags` operate on all four resource types. Before this the
+parameter was accepted and silently dropped, and the three tagging operations did not
+exist — a `Tags` on a `CreateLoadBalancer` produced an untagged load balancer with no
+error.
+
+Limits and shapes come from the `Tag` type's API reference: a key is 1–128 characters, a
+value 0–256, both matching `^([\p{L}\p{Z}\p{N}_.:/=+\-@]*)$`, and a resource holds at most
+50 tags. **AWS contradicts itself on the lengths and substrate follows the model:** the ELB
+user guide's restrictions list says "Maximum key length—127 Unicode characters" and
+"Maximum value length—255", where the API model says 128 and 256. A caller who trusts the
+user guide's smaller numbers is inside substrate's limits either way. A violated constraint
+answers `ValidationError`/400: the constraints are the model's, but the model publishes no
+error code for breaking one, so the code is the common one a real service answers for a
+member outside its constraints and the message text is substrate's own.
+
+Per-operation error sets are followed rather than unified, because AWS's are not uniform:
+
+- `DuplicateTagKeys` is refused on **`AddTags` and `CreateLoadBalancer` only** — the two
+  operations whose Errors sections list it. On `CreateTargetGroup`, `CreateListener` and
+  `CreateRule` a repeated key resolves last-wins, because inventing a code those three do
+  not publish would send a consumer's error branch down a path AWS never triggers.
+- `TooManyTags` is published by `AddTags` and by all four creates, so every path that can
+  apply a tag can raise it.
+- An ARN naming nothing answers the code for its type — `LoadBalancerNotFound`,
+  `TargetGroupNotFound`, `ListenerNotFound` or `RuleNotFound` — each at **HTTP 400**, which
+  is the ELB API's own choice and not the 404 a reader expects. `TrustStoreNotFound`, the
+  fifth code those operations list, cannot occur: substrate models no trust store.
+- An ARN naming no ELB resource type at all answers `ValidationError`.
+
+Two readings are substrate's rather than AWS's published text, both recorded because a
+consumer can observe them:
+
+- **A tagging call naming several resources applies to all of them or to none.** Every ARN
+  is resolved before any write, so an `AddTags` naming one live load balancer and one absent
+  one leaves the live one untouched. AWS documents no ordering for ELB's multi-resource
+  tagging calls; the alternative is a partial write a caller cannot undo from the error
+  alone. This mirrors `TerminateInstances`, where AWS *does* document the whole-request
+  refusal.
+- **A tag key beginning `aws:` is accepted.** The restrictions list says "You can't edit or
+  delete tag names or values with this prefix", but no reachable page publishes a code for
+  that refusal, so substrate does not invent one. The prefix *is* excluded from the 50-tag
+  count, which the same list states ("Tags with this prefix do not count against your tags
+  per resource limit") and which is byte-for-byte the rule EC2 already implements. This is
+  also what lets CloudFormation's `aws:cloudformation:*` stamp coexist with a caller's own
+  50 tags.
+
+`RemoveTags` ignores a key that is not present — the operation publishes no error for one —
+and refuses more than 128 keys in one request, its own documented array maximum. That cap is
+per request and unrelated to the per-resource limit: a request may legally name more keys
+than any one resource holds.
+
+### Authorization
+
+Every ELB request naming a resource by ARN is now authorized **against that ARN**. The
+members read are `ResourceArns.member.N` (the three tagging operations, up to 20 of them)
+and `LoadBalancerArn`, `TargetGroupArn`, `ListenerArn` and `RuleArn`. Previously every ELB
+request was decided against the literal string `*`, which is not a wildcard on the request
+side: a statement scoped to one load balancer's ARN matched nothing, so an ARN-scoped
+`Allow` denied every call and an ARN-scoped `Deny` was inert. A request naming several
+resources is denied unless every one of them is allowed.
+
+An ARN that resolves to nothing in state is still the resource the decision is about, with
+no tags. Substituting `*` for it would let a bogus ARN reach a statement scoped to `*` that
+the real ARN would not have matched; the handler refuses it afterwards on its own terms.
+
+A resource's tags are reported under **both** `aws:ResourceTag/<key>` and
+`elasticloadbalancing:ResourceTag/<key>`. The service-specific prefix is the ELB user
+guide's: "The `elasticloadbalancing:ResourceTag/{{key}}` condition key is specific to
+Elastic Load Balancing. All mutating actions support this condition key." Substrate reports
+it on reads too, since a read reporting fewer keys than a write could only make a condition
+on a describe unsatisfiable.
+
+`aws:RequestTag/<key>` and `aws:TagKeys` are produced from `Tags.member.N` on `AddTags` and
+on the four creates, and from `TagKeys.member.N` on `RemoveTags`. A removal supplies no
+value, so the key is recorded with an empty one — indistinguishable from absent to every
+condition operator, while still reaching `aws:TagKeys`, which is what a "may only remove
+approved tags" policy is written against.
+
+**A tagged create is authorized twice.** AWS: "If tags are specified in the resource-creating
+action, additional authorization is required on the `elasticloadbalancing:AddTags` action to
+verify if users have permissions to apply tags to the resources being created." So each of
+the four creates, when it carries `Tags.member.N`, is decided a second time against
+`elasticloadbalancing:AddTags` with `elasticloadbalancing:CreateAction` set to the bare
+operation name — and an untagged create needs no tagging grant at all, which is the converse
+AWS states explicitly. The second decision's resource is the wildcard for the created type
+(`…:loadbalancer/*`, `…:targetgroup/*`, `…:listener/*`, `…:listener-rule/*`); **that is
+substrate's reading**, on the same reasoning as EC2's — the resource does not exist yet, and
+AWS's own example policies write the `AddTags` statement's Resource as `*` or as a type
+wildcard. The pass runs after the create's own decision, honours a permission boundary, and
+does not report `aws:ResourceTag/*`: a condition about tags already on a resource that does
+not exist yet is unsatisfiable, and fabricating one would let the tags being applied stand
+in for tags already present.
+
+Provenance for `elasticloadbalancing:CreateAction`: it is documented on the ELB user guide's
+"Tag your Elastic Load Balancing resources during creation" page, which is also where the
+two quotations above come from, and it is **absent** from the same guide's own list of
+ELB-specific condition keys (which names `ListenerProtocol`, `SecurityPolicy`, `Scheme`,
+`SecurityGroup`, `Subnet` and `ResourceTag`). Both Service Authorization Reference pages for
+ELB render their key tables in JavaScript and were unreachable. The value is the bare
+operation name — AWS's examples write `"elasticloadbalancing:CreateAction": "CreateTargetGroup"`
+— not a service-prefixed action. The bundled `AmazonECS_FullAccess` policy's
+`ELBTaggingPolicy` statement names four values: `CreateTargetGroup`, `CreateRule`,
+`CreateListener` and `CreateLoadBalancer`.
+
+Two deliberate gaps:
+
+- **`Names.member.N` on `DescribeLoadBalancers` and `DescribeTargetGroups` is not resolved
+  to an ARN**, so those two requests are still decided against `*`. Whether ELB's describes
+  support resource-level permissions could not be verified — the pages that would say are
+  the unreachable ones above — and leaving them at `*` is the direction that cannot invent a
+  grant.
+- Substrate's listener and rule ARNs nest under the load balancer's
+  (`…:loadbalancer/app/<name>/<id>/listener/<suffix>`) where AWS mints flat
+  `…:listener/app/<name>/<id>/<suffix>` and `…:listener-rule/…` forms. The tagging code
+  accepts **both** shapes, and the tag-on-create pass authorizes against AWS's spelling, so a
+  policy written the way AWS writes one behaves correctly regardless. The ARN shape itself is
+  [#774](https://github.com/scttfrdmn/substrate/issues/774).
 
 ### CloudFormation resource types
 
@@ -6427,6 +6576,9 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | AWS::ElasticLoadBalancingV2::TargetGroup | TargetGroupArn | |
 | AWS::ElasticLoadBalancingV2::Listener | ListenerArn | |
 | AWS::ElasticLoadBalancingV2::ListenerRule | RuleArn | |
+
+The deployer does not send `Tags` for any of the four, so a template's resource tags are
+still dropped — as is the `aws:cloudformation:*` stamp, whose first cut covers EC2 only.
 
 ### Cost
 

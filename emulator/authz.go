@@ -283,8 +283,14 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	}
 
 	// The create is allowed. If it also applies tags, AWS authorizes those separately
-	// against ec2:CreateTags, and the caller needs that permission too (#691).
-	return a.checkEC2TagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock)
+	// against the service's tagging action, and the caller needs that permission too —
+	// ec2:CreateTags (#691) and elasticloadbalancing:AddTags (#748). Each pass answers nil
+	// for a request of the other's service, so the two are chained rather than switched on
+	// here, and a third service arriving adds a line rather than a branch.
+	if err := a.checkEC2TagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock); err != nil {
+		return err
+	}
+	return a.checkELBTagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock)
 }
 
 // checkEC2TagOnCreate runs the second authorization pass AWS performs on
@@ -377,6 +383,82 @@ func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSReq
 					reqCtx.Principal.ARN, ec2CreateTagsAction),
 				HTTPStatus: http.StatusForbidden,
 			}
+		}
+	}
+	return nil
+}
+
+// checkELBTagOnCreate runs the second authorization pass AWS performs on
+// elasticloadbalancing:AddTags when an ELBv2 create applies tags, returning nil when the
+// request applies none or when the caller is permitted to apply them.
+//
+// AWS: "If tags are specified in the resource-creating action, additional authorization is
+// required on the elasticloadbalancing:AddTags action to verify if users have permissions
+// to apply tags to the resources being created." Substrate authorized a tagged ELB create
+// as the creating action alone, so the bundled ELBTaggingPolicy — whose whole content is a
+// separate AddTags statement conditioned on elasticloadbalancing:CreateAction — permitted
+// more than it says.
+//
+// It mirrors [AuthController.checkEC2TagOnCreate] deliberately, because AWS documents the
+// two mechanisms in the same terms, but it is a copy rather than a shared helper: the
+// action, the condition key, the request member the tags arrive under and the resource ARN
+// are all service-specific, and folding them into one function would take four parameters
+// to express two behaviors. The two differences that are not cosmetic are that an ELB
+// create makes one resource rather than a list, and that ELB has no launch-template
+// equivalent — every tag it evaluates is in the request, so requestTags is the whole set.
+func (a *AuthController) checkELBTagOnCreate(reqCtx *RequestContext, req *AWSRequest,
+	docs []PolicyDocument, boundary *PolicyDocument, requestTags map[string]string, deniedCode string,
+	now time.Time, haveClock bool) error {
+	if req.Service != elbServiceName {
+		return nil
+	}
+	arn := elbAuthzCreateTagsPass(reqCtx, req)
+	if arn == "" {
+		return nil
+	}
+
+	condCtx := make(map[string]string, len(requestTags)+1)
+	for k, v := range requestTags {
+		condCtx[k] = v
+	}
+	// The key that separates tagging during a create from standalone tagging, set only
+	// here — which is what makes the bundled policy's StringEquals mean what it says, and
+	// what keeps a direct AddTags from satisfying it.
+	condCtx[elbCreateActionCondKey] = req.Operation
+	a.authzTimeContext(condCtx, now, haveClock)
+	// Same request, same caller, so this door must name the same principal as the primary
+	// decision; see checkEC2TagOnCreate (#714).
+	authzPrincipalContext(condCtx, reqCtx.Principal)
+
+	tagKeysMulti := make(map[string][]string, 1)
+	if keys := requestTagKeys(condCtx); len(keys) > 0 {
+		tagKeysMulti["aws:TagKeys"] = keys
+	}
+
+	// No aws:ResourceTag/* or elasticloadbalancing:ResourceTag/*: the resource does not
+	// exist yet, so a condition about tags already on it is unsatisfiable, and fabricating
+	// one would let the tags being applied stand in for tags already present.
+	evalReq := EvaluationRequest{
+		Principal:    reqCtx.Principal.ARN,
+		Action:       elbAddTagsAction,
+		Resource:     arn,
+		Context:      condCtx,
+		MultiContext: tagKeysMulti,
+	}
+	if Evaluate(docs, evalReq).Decision != DecisionAllow {
+		return &AWSError{
+			Code: deniedCode,
+			Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
+				reqCtx.Principal.ARN, elbAddTagsAction, arn),
+			HTTPStatus: http.StatusForbidden,
+		}
+	}
+	if boundary != nil && Evaluate([]PolicyDocument{*boundary}, evalReq).Decision != DecisionAllow {
+		return &AWSError{
+			Code: deniedCode,
+			Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by permission boundary)",
+				reqCtx.Principal.ARN, elbAddTagsAction),
+			HTTPStatus: http.StatusForbidden,
 		}
 	}
 	return nil
@@ -823,6 +905,11 @@ func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSReque
 			return multi
 		}
 	}
+	if req.Service == elbServiceName {
+		if multi := elbAuthzResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+	}
 	return []authzResource{{
 		ARN:  a.buildResourceARN(reqCtx, req),
 		Tags: a.resourceTagsFor(reqCtx, req),
@@ -1016,8 +1103,17 @@ const authzAWSResourceTagPrefix = "aws:ResourceTag/"
 // and a policy that happened to use it would then be honored here and ignored by AWS —
 // a divergence in the more dangerous direction, since it grants.
 func authzResourceTagPrefixes(service string) []string {
-	if service == "ec2" {
+	switch service {
+	case "ec2":
 		return []string{authzAWSResourceTagPrefix, "ec2:ResourceTag/"}
+	case elbServiceName:
+		// ELB is the other: "The elasticloadbalancing:ResourceTag/{{key}} condition key is
+		// specific to Elastic Load Balancing. All mutating actions support this condition
+		// key" (#748). Substrate reports it on every ELB action rather than only the
+		// mutating ones, because a read reporting fewer keys than a write could only make a
+		// condition on a describe unsatisfiable, and AWS's own list of what counts as
+		// mutating is not published operation by operation.
+		return []string{authzAWSResourceTagPrefix, elbResourceTagPrefix}
 	}
 	return []string{authzAWSResourceTagPrefix}
 }
@@ -1245,6 +1341,16 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 		// Reference, which is what makes a "may only apply approved tags" policy
 		// expressible here.
 		for k, v := range cfgsvcAuthzRequestTags(req) {
+			condCtx["aws:RequestTag/"+k] = v
+		}
+
+	case elbServiceName:
+		// ELB tags arrive as query params — Tags.member.N.Key / .Value on AddTags and on
+		// each of the four creates, TagKeys.member.N on RemoveTags — so one reader serves
+		// all six (#748). Without this, aws:RequestTag/* and aws:TagKeys were empty for
+		// every ELB call, so the tag-on-create pass below could not evaluate the key set
+		// that is the whole point of the second decision.
+		for k, v := range elbAuthzRequestTags(req) {
 			condCtx["aws:RequestTag/"+k] = v
 		}
 

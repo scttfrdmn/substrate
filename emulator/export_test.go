@@ -876,3 +876,10 @@ func IAMAccessKeyKeyForTest(accessKeyID string) string { return iamAccessKeyKey(
 func IAMInstanceProfileKeyForTest(accountID, name string) string {
 	return iamInstanceProfileKey(accountID, name)
 }
+
+// ELBTagsByARNForTest wraps elbLoadTagsByARN for external tests, so a test can assert what
+// a create or a tagging call actually persisted rather than re-reading it through
+// DescribeTags — which would let a bug in the reader hide a bug in the writer.
+func ELBTagsByARNForTest(state StateManager, accountID, region, arn string) ([]ELBTag, error) {
+	return elbLoadTagsByARN(state, accountID+"/"+region, arn)
+}
