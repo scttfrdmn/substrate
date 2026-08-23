@@ -511,6 +511,82 @@ type EC2Image struct {
 	// State is the image state: always "available" in Substrate.
 	State string `json:"state"`
 
+	// Architecture is the AMI's architecture, one of AWS's ArchitectureValues
+	// ("i386", "x86_64", "arm64", "x86_64_mac", "arm64_mac").
+	//
+	// RegisterImage records what the caller sent, defaulting to AWS's documented
+	// "Default: For Amazon EBS-backed AMIs, i386" rather than to the x86_64 a modern
+	// caller expects — see [EC2Plugin.registerImage] for why substrate keeps AWS's
+	// stale-looking default (#750).
+	Architecture string `json:"architecture,omitempty"`
+
+	// Platform is "windows" for a Windows AMI and empty for every other one.
+	//
+	// AWS documents the member as "set to windows for Windows AMIs; otherwise, it is
+	// blank", so empty is the answer for Linux rather than a value substrate failed to
+	// record — and [EC2Plugin.describeImages] omits the element rather than rendering
+	// it empty. AWS's own Image page contradicts itself here, listing the valid value
+	// as "Windows" while its prose, its DescribeImages example and the platform filter
+	// all spell it lowercase; substrate follows the three against the one (#750).
+	Platform string `json:"platform,omitempty"`
+
+	// PlatformDetails is the platform associated with the AMI's billing code, e.g.
+	// "Linux/UNIX" or "Windows", and UsageOperation is the matching billing code, e.g.
+	// "RunInstances" or "RunInstances:0002".
+	//
+	// Both are empty for an AMI a caller registered or created: they are billing data
+	// AWS derives from the AMI's product codes, and substrate models no product code,
+	// so a value here would be a claim about a bill nothing backs. Bundled images carry
+	// them because their platform is known from the published parameter (#750).
+	PlatformDetails string `json:"platform_details,omitempty"`
+	UsageOperation  string `json:"usage_operation,omitempty"`
+
+	// RootDeviceName is the device name of the AMI's root volume, and RootDeviceType is
+	// "ebs" or "instance-store".
+	//
+	// RegisterImage records the RootDeviceName the caller sent — the one place a caller
+	// states which device is root, which [ec2RootMappingSnapshot] already reads for the
+	// root snapshot. It is empty for a CreateImage-minted AMI that inherited nothing,
+	// and [EC2Plugin.describeImages] still fabricates a /dev/sda1 mapping for an AMI
+	// with a root snapshot and no recorded mapping.
+	RootDeviceName string `json:"root_device_name,omitempty"`
+	RootDeviceType string `json:"root_device_type,omitempty"`
+
+	// VirtualizationType is "hvm" or "paravirtual", and Hypervisor is "xen" — AWS
+	// documents "ovm" as the only other hypervisor value and says it is not supported.
+	//
+	// RegisterImage defaults VirtualizationType to AWS's documented "paravirtual", for
+	// the same reason Architecture defaults to i386.
+	VirtualizationType string `json:"virtualization_type,omitempty"`
+	Hypervisor         string `json:"hypervisor,omitempty"`
+
+	// ImageType is "machine", "kernel" or "ramdisk". Substrate mints only machine
+	// images: neither RegisterImage nor CreateImage exposes a way to register a kernel
+	// or a RAM disk here, and no bundled parameter names one.
+	ImageType string `json:"image_type,omitempty"`
+
+	// OwnerAlias is the AWS-maintained owner alias ("amazon", "aws-backup-vault" or
+	// "aws-marketplace"), set only on a bundled AMI Amazon publishes.
+	//
+	// It is empty for a caller's own AMI, and empty for the bundled Canonical Ubuntu
+	// entries — Canonical holds no AWS alias, and the aliases are "defined in an
+	// Amazon-maintained list", not inferable from a publisher's name (#750).
+	OwnerAlias string `json:"owner_alias,omitempty"`
+
+	// Public reports whether the AMI has public launch permissions. It is true for
+	// every bundled AMI, which is what makes them discoverable through a public SSM
+	// parameter, and false for one a caller registered or created — substrate models no
+	// ModifyImageAttribute launch-permission change, so nothing flips it.
+	Public bool `json:"public,omitempty"`
+
+	// PublicSsmParameterName is the AWS public Systems Manager parameter under
+	// aws/service/ that resolves to this AMI.
+	//
+	// It is the bundled catalog's own key, so a consumer that discovered an AMI through
+	// GetParameter can go the other way and get the same string back. It is empty for
+	// an AMI a caller registered or created, because no public parameter names one.
+	PublicSsmParameterName string `json:"public_ssm_parameter_name,omitempty"`
+
 	// CreationDate is the RFC3339 timestamp when the AMI was registered.
 	CreationDate string `json:"creation_date,omitempty"`
 

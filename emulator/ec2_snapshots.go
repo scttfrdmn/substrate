@@ -188,6 +188,32 @@ func (p *EC2Plugin) ec2Volume(reqCtx *RequestContext, volumeID string) (EC2Volum
 	return vol, true, nil
 }
 
+// ec2InstanceSourceImage is the AMI an instance was launched from, resolved through
+// [EC2Plugin.resolveImage] so a bundled public AMI answers as readily as a registered one.
+//
+// CreateImage needs it because the AMI it mints inherits the members the operating system
+// decides — architecture, platform, virtualization type, root device name — from the image
+// the source instance runs. It reports false rather than an error for an instance that is
+// gone or an AMI that no longer resolves: CreateImage's own answer does not depend on
+// either, and the members it would have inherited are all omitempty, so the AMI is
+// reported without them rather than with values nothing backs.
+//
+// It sits beside [EC2Plugin.ec2InstanceRootVolume] because the two are the same idea — read
+// the source instance rather than fabricate a constant for the AMI — and the constants that
+// idea replaced are what #689 and #750 each had to undo.
+func (p *EC2Plugin) ec2InstanceSourceImage(reqCtx *RequestContext, instanceID string) (EC2Image, bool) {
+	data, err := p.state.Get(context.Background(), ec2Namespace,
+		"instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+instanceID)
+	if err != nil || data == nil {
+		return EC2Image{}, false
+	}
+	var inst EC2Instance
+	if json.Unmarshal(data, &inst) != nil {
+		return EC2Image{}, false
+	}
+	return p.resolveImage(reqCtx, inst.ImageID)
+}
+
 // ec2InstanceRootVolume is the ID and size in GiB of the volume attached to instanceID at
 // a root device name. It reports an empty ID and [ec2DefaultVolumeSizeGiB] when the
 // instance has no root volume in state.

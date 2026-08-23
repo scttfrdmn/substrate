@@ -3272,7 +3272,7 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | Operation | Evaluated | Documented but inert |
 |---|---|---|
 | DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 125 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
-| DescribeImages | `block-device-mapping.snapshot-id`, `image-id`, `tag-key`, `tag:<key>` | the other 39 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `architecture`, `creation-date`, `description`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `root-device-name`, `root-device-type`, `state` and the rest |
+| DescribeImages | `architecture`, `block-device-mapping.snapshot-id`, `description`, `hypervisor`, `image-id`, `image-type`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state`, `tag-key`, `tag:<key>`, `virtualization-type` | the other 25 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `creation-date`, the ENA/sriov and kernel/ramdisk names, the Allowed-AMIs and Free-Tier markers and the rest |
 | DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
 | DescribeSnapshots | `description`, `encrypted`, `owner-id`, `progress`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `storage-tier`, `transfer-type` |
 | DescribeSubnets | `availability-zone`, `cidr-block`, `default-for-az`, `map-public-ip-on-launch`, `owner-id`, `state`, `subnet-arn`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id`, plus AWS's four alias spellings `availabilityZone`, `cidr`, `cidrBlock` and `defaultForAz` | `availability-zone-id`/`availabilityZoneId`, `available-ip-address-count`, `customer-owned-ipv4-pool`, `enable-dns64`, `enable-lni-at-device-index`, `ipv6-native`, `map-customer-owned-ip-on-launch`, `outpost-arn`, and the three `ipv6-cidr-block-association.*` and three `private-dns-name-options-on-launch.*` filters |
@@ -3592,8 +3592,11 @@ Two things follow from bundled images living outside state.
   exist — see [Explicit resource IDs](#explicit-resource-ids), whose rules
   `DescribeImages` follows for every other ID.
 - **They are not the caller's.** A bundled image reports no owner, so it is not
-  taggable and an `Owners=self` describe does not match it. Register your own AMI
-  when the test is about owning one.
+  taggable, an `Owners=self` describe does not match it, and the `owner-id` filter
+  selects nothing for it. It reports `imageOwnerAlias` instead where AWS publishes
+  one — see [An AMI reports its architecture, platform and root
+  device](#an-ami-reports-its-architecture-platform-and-root-device). Register your
+  own AMI when the test is about owning one.
 
 Deliberately **not** bundled: the example IDs AWS's own reference pages use,
 `ami-0abcdef1234567890` and `ami-1234567890abcdef0`. Generated IaC copies them,
@@ -5353,12 +5356,116 @@ predate this change. The `ResourceType` code is **substrate's reading** — AWS 
 "the request fails" — chosen because `InvalidParameterValue` is EC2's gloss for "A value
 specified in a parameter is not valid, is unsupported, or cannot be used".
 
+#### An AMI reports its architecture, platform and root device
+
+`DescribeImages` rendered six members — `imageId`, `name`, `description`, `imageState`,
+`imageOwnerId` and `creationDate` — and nothing about the image itself. So a caller that
+branched on architecture to pick an instance type, or on the platform to decide whether to
+send PowerShell or bash user data, or on the root device name to build a block device
+mapping, read an empty string out of an AMI substrate knew the answer for. Twelve members
+now render ([#750](https://github.com/scttfrdmn/substrate/issues/750)):
+
+| Member | Bundled AMI | Caller's AMI |
+|---|---|---|
+| `architecture` | from the catalog — `x86_64` or `arm64` | `RegisterImage`'s `Architecture`, or inherited by `CreateImage` |
+| `platform` | `windows` on the Windows entry, **omitted** on the eight Linux ones | omitted; `RegisterImage` takes no such parameter |
+| `platformDetails`, `usageOperation` | `Linux/UNIX`+`RunInstances`, or `Windows`+`RunInstances:0002` | omitted, unless inherited by `CreateImage` |
+| `rootDeviceName` | `/dev/xvda` on the Amazon Linux and ECS entries, `/dev/sda1` on Windows and Ubuntu | `RegisterImage`'s `RootDeviceName`, or inherited |
+| `rootDeviceType` | `ebs` | `instance-store` when `ImageLocation` was sent, otherwise `ebs` |
+| `virtualizationType` | `hvm` | `RegisterImage`'s `VirtualizationType`, or inherited |
+| `hypervisor` | `xen` | `xen` |
+| `imageType` | `machine` | `machine` |
+| `imageOwnerAlias` | `amazon` on the seven AWS-published entries, **omitted** on the two Canonical ones | omitted |
+| `isPublic` | `true` | `false` |
+| `publicSsmParameterName` | the parameter the AMI was discovered through | omitted |
+
+Four of those cells are the interesting ones, because they are where a default written for
+the bundled catalog's benefit would have been wrong for a registered image — both passes
+render through one closure, so a value written once attaches to both:
+
+- **`imageOwnerAlias` is not on the Ubuntu entries.** The alias is "an Amazon-maintained
+  list", and Canonical is not on it.
+- **`publicSsmParameterName` is not on a caller's AMI.** No public parameter names it, and
+  the member exists precisely to let a caller round-trip the parameter it resolved an AMI
+  through — which is now assertable in both directions, since substrate's SSM and EC2
+  plugins answer from the same catalog key.
+- **`platformDetails` and `usageOperation` are absent on a registered AMI.** Both are billing
+  facts AWS derives from the image's product codes, which substrate does not model, so
+  reporting `Linux/UNIX` for an AMI a caller registered would be a guess about what it
+  contains. `CreateImage` inherits them, because an image of a running instance runs the same
+  operating system its parent AMI does.
+- **`imageOwnerId` is now omitted rather than rendered empty** for a bundled AMI. The member
+  had no `omitempty`, so a named bundled image answered with an empty `<imageOwnerId>` — a
+  member present and blank, which an SDK reads as "the owner is the empty string" rather than
+  as "there is no owner". Amazon's AMI-owning account varies by Region and AWS publishes no
+  stable mapping, so the alias is rendered and the account is left out.
+
+`RegisterImage`'s defaults are **AWS's documented ones**: `Architecture` defaults to `i386`
+("Default: For Amazon EBS-backed AMIs, i386") and `VirtualizationType` to `paravirtual`. No
+AMI a caller would register today is either, and both will look wrong. They are used anyway,
+because inventing `x86_64`/`hvm` would mean a request that omits the parameter reports one
+thing here and another on AWS — a divergence in the direction that makes a passing test
+meaningless. Neither parameter's value is validated against AWS's enum, following the same
+reasoning the mapping rules do: a new refusal on a published path arrives unannounced.
+
+Each entry's root device name is **substrate's reading**, not AWS's published text. AWS's
+device naming reference says only "Differs by AMI — `/dev/sda1` or `/dev/xvda`" and publishes
+no per-AMI table, so the split above follows each publisher's own convention: Amazon Linux
+and the ECS-optimized AMIs use `/dev/xvda`, Windows and Canonical's Ubuntu images use
+`/dev/sda1`. The launch path still accepts either spelling as a root device, as it did before.
+
+Two places where AWS contradicts itself, and the side substrate took:
+
+- **`platform`'s casing.** The `Image` type page lists the valid value as `Windows` and in
+  the same entry says the member "is set to `windows` for Windows AMIs"; `DescribeImages`'
+  second example response renders `<platform>windows</platform>` and its `platform` filter
+  says "The only supported value is `windows`". Substrate renders lowercase — three
+  statements against one.
+- **`imageOwnerId`/`isPublic` against `ownerId`/`public`.** `DescribeImages`' first example
+  uses the short spellings; its second and third examples and the `Image` type page use the
+  long ones. Substrate follows the type page, which is the spelling it already used for the
+  owner.
+
+`CreateImage` inherits `architecture`, `platform`, `platformDetails`, `usageOperation`,
+`virtualizationType` and `rootDeviceName` from the AMI its source instance runs, rather than
+leaving them empty: an AMI made from an arm64 Amazon Linux instance runs arm64 Amazon Linux,
+and reporting nothing while its parent reported `arm64` would be two of substrate's own
+answers disagreeing about one lineage. What it does **not** inherit is ownership —
+`imageOwnerAlias`, `publicSsmParameterName` and `isPublic` are the new AMI's own, and it is
+the caller's private image whatever it was made from. The fabricated root mapping follows the
+inherited device name, so an AMI's `rootDeviceName` and its `blockDeviceMapping` cannot
+disagree.
+
+One thing this makes newly visible rather than fixes: a bundled AMI now names a
+`rootDeviceName` while its `blockDeviceMapping` stays empty. Bundled images live outside
+state, so no snapshot backs one, and fabricating a mapping would mean rendering an `ebs`
+element naming a snapshot ID that resolves to nothing — a worse answer than none. A caller
+that needs a mapping to read should register or image its own AMI.
+
 #### `DescribeImages` filters
 
-Four filter names are applied: `image-id`, `block-device-mapping.snapshot-id`,
-`tag:<key>` and `tag-key`. AWS documents thirty-nine more, which need state substrate
+Eighteen filter names are applied: `image-id`, `block-device-mapping.snapshot-id`,
+`tag:<key>`, `tag-key`, and — with the members above, because a rendered member a caller
+cannot filter on is half an answer — `architecture`, `description`, `hypervisor`,
+`image-type`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`,
+`public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state` and
+`virtualization-type`. Fourteen of those were previously *accepted and inert*, which is worse
+than the alternatives in both directions: a filter on `architecture` returned every AMI in
+the account, and a caller reads a non-empty answer as a match.
+
+AWS documents twenty-five more, which need state substrate
 does not keep: those are accepted and inert, and anything outside AWS's list is refused —
 see [One rule for an unrecognized filter name](#one-rule-for-an-unrecognized-filter-name).
+The remainder are the `product-code*`, `image-watermark.*`, `source-image*` and
+`state-reason-*` families, the `block-device-mapping.*` names other than `snapshot-id`, the
+ENA/sriov and kernel/ramdisk names, `manifest-location`, the Allowed-AMIs and Free-Tier
+markers, and `creation-date`, whose documented rule is an ISO-8601 prefix match with
+wildcards rather than the equality the others use.
+
+`owner-id` compares against the account that owns the AMI, so it matches nothing for a
+bundled image — which reports no owner — exactly as `Owners=self` does not. `is-public` is
+compared as the rendered `true`/`false`, so `is-public=false` selects the caller's own AMIs
+and excludes every bundled one.
 
 Two behaviour changes came with `tag-key`, both of which bring this operation into line
 with `DescribeInstances` and `DescribeVolumes` rather than leaving it with its own rules:

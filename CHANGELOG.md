@@ -7,7 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **An AMI reports its architecture, platform and root device** (#750). `DescribeImages`
+  rendered six members — ID, name, description, state, owner and creation date — and nothing
+  about the image itself, so a caller that branched on architecture to pick an instance type,
+  on the platform to decide between PowerShell and bash user data, or on the root device name
+  to build a block device mapping read an empty string out of an AMI substrate knew the answer
+  for. Twelve members now render: `architecture`, `platform`, `platformDetails`,
+  `usageOperation`, `rootDeviceName`, `rootDeviceType`, `virtualizationType`, `hypervisor`,
+  `imageType`, `imageOwnerAlias`, `isPublic` and `publicSsmParameterName`.
+
+  Neither `EC2Image` nor the bundled catalog held any of this, so both gained the fields —
+  and because one closure renders both the state walk and the bundled pass, every default is
+  a decision about *both* kinds of AMI. Four came out asymmetric: `imageOwnerAlias` is
+  `amazon` on the seven AWS-published entries and absent on the two Canonical ones, because
+  the alias is "an Amazon-maintained list" and Canonical is not on it; `publicSsmParameterName`
+  is the parameter an image was discovered through and is absent on a caller's own AMI, since
+  no public parameter names one; and `platformDetails`/`usageOperation` are absent on a
+  registered AMI, because AWS derives both from product codes substrate does not model and
+  reporting `Linux/UNIX` would be a guess about what the image contains.
+
+  `RegisterImage` now stores `Architecture`, `VirtualizationType` and `RootDeviceName`, which
+  it previously read and discarded or never read at all, and derives `rootDeviceType` from
+  whether `ImageLocation` was sent — AWS documents that parameter as the S3 manifest path, so
+  its presence is the caller's own signal for the instance-store registration form. Its
+  defaults are **AWS's documented ones**, `i386` and `paravirtual`: no AMI a caller would
+  register today is either and both will look wrong, but inventing `x86_64`/`hvm` would mean a
+  request that omits the parameter reports one thing here and another on AWS. Neither value is
+  validated against AWS's enum, following the reasoning the mapping rules already state — a
+  new refusal on a published path arrives unannounced.
+
+  `CreateImage` inherits architecture, platform, the billing pair, virtualization type and
+  root device name from the AMI its source instance runs, rather than leaving them empty: an
+  image of an arm64 Amazon Linux instance runs arm64 Amazon Linux, and reporting nothing while
+  its parent reported `arm64` would be two of substrate's own answers disagreeing about one
+  lineage. Ownership is not inherited — the new AMI is the caller's private image whatever it
+  was made from — and the fabricated root mapping follows the inherited device name, so an
+  AMI's `rootDeviceName` and its `blockDeviceMapping` cannot disagree.
+
+  Each bundled entry's root device name is **substrate's reading**: AWS's device naming
+  reference says only "Differs by AMI — `/dev/sda1` or `/dev/xvda`" and publishes no per-AMI
+  table, so the split follows each publisher's convention — `/dev/xvda` for Amazon Linux and
+  the ECS-optimized images, `/dev/sda1` for Windows and Ubuntu. Two AWS pages contradict
+  themselves and the side taken is recorded in `docs/services.md`: `platform` renders as the
+  lowercase `windows` (the member's own prose, `DescribeImages`' second example and the
+  `platform` filter, against the type page's Valid Values line), and the members are spelled
+  `imageOwnerId`/`isPublic` per the `Image` type page and Examples 2–3 rather than
+  `ownerId`/`public` per Example 1.
+
 ### Fixed
+- **Fourteen `DescribeImages` filters were accepted and never applied** (#750). `architecture`,
+  `description`, `hypervisor`, `image-type`, `is-public`, `name`, `owner-alias`, `owner-id`,
+  `platform`, `public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state` and
+  `virtualization-type` were all in the operation's accepted list — named without narrowing —
+  so a request filtering on `architecture` answered with every AMI in the account and a caller
+  read the non-empty result as a match. That is worse than a refusal in both directions, and it
+  is why the filters and the members above are one change: rendering `architecture` while
+  ignoring the `architecture` filter would have made the gap newly visible without closing it.
+  Eighteen of AWS's forty-three names are now evaluated; the remaining twenty-five select on
+  product codes, watermarks, source-image lineage, state reasons and other state substrate does
+  not keep, or on `creation-date`, whose ISO-8601-prefix-with-wildcards rule is its own.
+- **A named bundled AMI answered with an empty `<imageOwnerId>`** (#750). The member carried no
+  `omitempty` while a bundled image has no owner substrate can name, so the element was present
+  and blank — which an SDK decodes as "the owner is the empty string" rather than as "there is
+  no owner". A comment in the catalog claimed nothing rendered the member at all; it did. The
+  owner is now omitted and the alias rendered in its place: Amazon's AMI-owning account varies
+  by Region and AWS publishes no stable mapping, so it is not inventable.
 - **Four plugins were registered, unit-tested, and unreachable from a real AWS client**
   (#739). Substrate resolves which plugin serves a request by reducing four signals to one
   service name, and `X-Amz-Target` is checked first — so a namespace it does not recognize

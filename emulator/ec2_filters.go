@@ -248,27 +248,40 @@ func ec2InstanceFilterSpec() ec2FilterSpec {
 //
 // tag-key joined the evaluated list in #686, which also stopped a valueless tag:<key>
 // filter from standing in for it.
+//
+// Fourteen more joined it in #750, when [EC2Image] gained the members they select on. Every
+// one of them was already *accepted* — named without narrowing — so a caller filtering on
+// architecture got every AMI back and read it as a match. That is the failure mode an
+// accepted-but-unevaluated filter always has, and it is why the members and the filters
+// belong in one change: rendering architecture while ignoring the architecture filter would
+// have made the gap newly visible without closing it.
+//
+// The ones still merely accepted select on state substrate does not model at all — product
+// codes, watermarks, ENA/sriov support, kernel and RAM disk IDs, the S3 manifest location,
+// the Allowed-AMIs and Free-Tier flags, source-image lineage, state reasons — or on
+// creation-date, whose ISO-8601-with-wildcard matching is its own rule rather than a string
+// compare.
 func ec2ImageFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		tagValueFilter: true,
 		evaluated: []string{
-			"block-device-mapping.snapshot-id", "image-id", "tag-key",
+			"architecture", "block-device-mapping.snapshot-id", "description",
+			"hypervisor", "image-id", "image-type", "is-public", "name", "owner-alias",
+			"owner-id", "platform", "public-ssm-parameter-name", "root-device-name",
+			"root-device-type", "state", "tag-key", "virtualization-type",
 		},
 		accepted: []string{
-			"architecture", "block-device-mapping.delete-on-termination",
+			"block-device-mapping.delete-on-termination",
 			"block-device-mapping.device-name", "block-device-mapping.encrypted",
 			"block-device-mapping.volume-size", "block-device-mapping.volume-type",
-			"creation-date", "description", "ena-support", "free-tier-eligible",
-			"hypervisor", "image-allowed", "image-type",
+			"creation-date", "ena-support", "free-tier-eligible", "image-allowed",
 			"image-watermark.source-image-creation-time",
 			"image-watermark.source-image-id", "image-watermark.source-image-region",
 			"image-watermark.watermark-creation-time", "image-watermark.watermark-key",
-			"is-public", "kernel-id", "manifest-location", "name", "owner-alias",
-			"owner-id", "platform", "product-code", "product-code.type",
-			"public-ssm-parameter-name", "ramdisk-id", "root-device-name",
-			"root-device-type", "source-image-id", "source-image-region",
-			"source-instance-id", "sriov-net-support", "state", "state-reason-code",
-			"state-reason-message", "virtualization-type",
+			"kernel-id", "manifest-location", "product-code", "product-code.type",
+			"ramdisk-id", "source-image-id", "source-image-region",
+			"source-instance-id", "sriov-net-support", "state-reason-code",
+			"state-reason-message",
 		},
 	}
 }

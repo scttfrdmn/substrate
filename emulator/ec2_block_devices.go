@@ -10,8 +10,12 @@ import (
 )
 
 // Root device names. Substrate recognizes a mapping as configuring the root volume
-// by device name, because it has no per-AMI root device to compare against:
-// EC2Image records none, and DescribeImages fabricates /dev/sda1 for every AMI.
+// by device name rather than by comparing it against the AMI's own root device.
+// [EC2Image.RootDeviceName] records one as of #750 — RegisterImage stores what the
+// caller sent and a bundled descriptor names its publisher's convention — but the
+// launch path still accepts either spelling, because an AMI minted by CreateImage or
+// registered before #750 has none to compare against and refusing those launches
+// would be a regression a caller cannot act on.
 //
 // Both spellings are AWS's own. Its device naming reference gives the HVM root
 // device as "Differs by AMI — /dev/sda1 or /dev/xvda" and the paravirtual one as
