@@ -197,7 +197,7 @@ func (f *ec2AuthzFixture) setPolicy(t *testing.T, statements ...emulator.PolicyS
 	if err != nil {
 		t.Fatalf("marshal policy: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "policy:"+arn, raw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(arn), raw); err != nil { //nolint:contextcheck
 		t.Fatalf("store policy: %v", err)
 	}
 }
@@ -423,7 +423,7 @@ func TestEC2_Authz_PermissionBoundaryCoversEveryResource(t *testing.T) {
 	}
 	raw, err := json.Marshal(boundary)
 	require.NoError(t, err)
-	require.NoError(t, f.state.Put(context.Background(), "iam", "policy:"+boundaryARN, raw))
+	require.NoError(t, f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(boundaryARN), raw))
 
 	user := emulator.IAMUser{
 		UserName:            "nina",
@@ -434,7 +434,7 @@ func TestEC2_Authz_PermissionBoundaryCoversEveryResource(t *testing.T) {
 	}
 	userRaw, err := json.Marshal(user)
 	require.NoError(t, err)
-	require.NoError(t, f.state.Put(context.Background(), "iam", "user:nina", userRaw))
+	require.NoError(t, f.state.Put(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, "nina"), userRaw))
 
 	launchErr := f.launch(t, nominalLaunch())
 	if !ec2AuthzDenied(t, launchErr) {

@@ -286,12 +286,12 @@ func seedUserWithPolicy(t *testing.T, state emulator.StateManager, user string, 
 		Path:     "/",
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "user:"+user, userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, user), userRaw))
 
 	policyARN := "arn:aws:iam::123456789012:policy/" + user + "Policy"
 	arnsRaw, err := json.Marshal([]string{policyARN})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "user_policies:"+user, arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", user), arnsRaw))
 
 	polRaw, err := json.Marshal(emulator.IAMPolicy{
 		PolicyName: user + "Policy",
@@ -306,7 +306,7 @@ func seedUserWithPolicy(t *testing.T, state emulator.StateManager, user string, 
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 }
 
 func TestFaultRule_CanNameARESTOperation(t *testing.T) {

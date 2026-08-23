@@ -167,7 +167,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
-	raw, err := p.state.Get(goCtx, iamNamespace, "role:"+roleName)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamRoleKey(arnAccountID(roleARN), roleName))
 	if err != nil {
 		return nil, fmt.Errorf("get role: %w", err)
 	}

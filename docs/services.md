@@ -302,14 +302,39 @@ because several plugins prefix their state keys with the account —
 under the old account is unreachable** after upgrading. Re-seed it, or set
 `account.default: "000000000000"` to read it back.
 
-### What is deliberately not covered
+### IAM entities belong to an account
 
-- **IAM's state keys are account-blind.** A user is stored under `user:{name}` with no
-  account in the key, so `resolveIAMEntity` resolves a principal by name across
-  accounts and two accounts cannot both hold a role of the same name. Filed as
-  [#737](https://github.com/scttfrdmn/substrate/issues/737). It is now reachable from
-  the shipped binary as well as in-process, since a `credentials:` block can put two
-  access keys in two accounts.
+Every IAM state key carries the account it belongs to —
+`user:{account}/{name}`, `role_policies:{account}/{name}`,
+`group_inline:{account}/{group}:{policy}` — the same `{kind}:{account}/{rest}` shape
+DynamoDB and the other account-aware plugins already used. Before
+[#737](https://github.com/scttfrdmn/substrate/issues/737) they did not, and an IAM
+entity belonged to the emulator rather than to an account. Three things follow, all of
+them now observable:
+
+- **Two accounts can hold the same name.** `CreateRole deploy` in a second account
+  answered `EntityAlreadyExists`; it now succeeds, and the two roles are distinct
+  records with distinct ARNs.
+- **A listing reports one account.** `ListUsers`, `ListRoles`, `ListGroups`,
+  `ListInstanceProfiles` and `ListPolicies` with `Scope=Local` scan the caller's
+  account only. `ListPolicies` in particular used to scan every account's policies.
+- **A principal resolves against its own account.** `resolveIAMEntity` takes the
+  account from the principal ARN, not from the request, so a cross-account principal
+  is evaluated against its own account's policies rather than a same-named entity in
+  the account the request resolved to. `AssumeRole` likewise reads the role named by
+  `RoleArn` from *that* ARN's account, which is the case cross-account role assumption
+  exists for.
+
+One IAM key has no account and cannot have one: `accesskey:{id}`. An access key ID is
+what *determines* an account, so a signed request looks the record up before any
+account is known. The owning account is a field on the record instead. A record written
+before this release has that field empty and falls back to the account the request
+resolved to — which is what it always used, so nothing that worked stops working.
+
+Because the keys changed shape, **IAM state written before this release is
+unreachable**: a snapshot or exported fixture holding `user:alice` is not read by a
+handler now looking for `user:123456789012/alice`. Re-seed it through the API. This is
+the same class of break as the account-default change above, for the same reason.
 
 ### Configuring the registry from `substrate.yaml`
 

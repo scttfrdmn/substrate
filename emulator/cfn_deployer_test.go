@@ -2688,7 +2688,7 @@ func TestCFN_DriftDetection_IAMRole_Modified(t *testing.T) {
 
 	// Reorder the stored trust-policy statements (semantically identical) and
 	// confirm this does NOT register as drift.
-	key := "role:drift-role"
+	key := emulator.IAMRoleKeyForTest(authzTestAccount, "drift-role")
 	raw, err := state.Get(context.Background(), "iam", key)
 	require.NoError(t, err)
 	require.NotNil(t, raw)

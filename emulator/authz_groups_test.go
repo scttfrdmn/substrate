@@ -59,26 +59,26 @@ func newAuthzGroupState(t *testing.T, userName, groupName string, spec authzGrou
 		require.NoError(t, state.Put(ctx, "iam", key, raw))
 	}
 
-	put("user:"+userName, emulator.IAMUser{
+	put(emulator.IAMUserKeyForTest(authzTestAccount, userName), emulator.IAMUser{
 		UserName: userName,
 		UserID:   "AIDATEST",
 		ARN:      "arn:aws:iam::123456789012:user/" + userName,
 		Path:     "/",
 	})
-	put("group:"+groupName, emulator.IAMGroup{
+	put(emulator.IAMGroupKeyForTest(authzTestAccount, groupName), emulator.IAMGroup{
 		GroupName: groupName,
 		GroupID:   "AGPATEST",
 		ARN:       "arn:aws:iam::123456789012:group/" + groupName,
 		Path:      "/",
 	})
 	if !spec.OmitMembership {
-		put("group_users:"+groupName, []string{userName})
-		put("user_groups:"+userName, []string{groupName})
+		put(emulator.IAMGroupUsersKeyForTest(authzTestAccount, groupName), []string{userName})
+		put(emulator.IAMUserGroupsKeyForTest(authzTestAccount, userName), []string{groupName})
 	}
 	if spec.GroupManaged != "" {
-		put("group_policies:"+groupName, []string{spec.GroupManaged})
+		put(emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "group", groupName), []string{spec.GroupManaged})
 		if spec.GroupManagedDoc != nil {
-			put("policy:"+spec.GroupManaged, emulator.IAMPolicy{
+			put(emulator.IAMPolicyKeyForTest(spec.GroupManaged), emulator.IAMPolicy{
 				PolicyName:       "grouppolicy",
 				ARN:              spec.GroupManaged,
 				Path:             "/",
@@ -89,12 +89,12 @@ func newAuthzGroupState(t *testing.T, userName, groupName string, spec authzGrou
 		}
 	}
 	if spec.GroupInline != nil {
-		put("group_inline:"+groupName+":inline", *spec.GroupInline)
-		put("group_inline_names:"+groupName, []string{"inline"})
+		put(emulator.IAMInlinePolicyKeyForTest(authzTestAccount, "group", groupName, "inline"), *spec.GroupInline)
+		put(emulator.IAMInlinePolicyNamesKeyForTest(authzTestAccount, "group", groupName), []string{"inline"})
 	}
 	if spec.UserInline != nil {
-		put("user_inline:"+userName+":inline", *spec.UserInline)
-		put("user_inline_names:"+userName, []string{"inline"})
+		put(emulator.IAMInlinePolicyKeyForTest(authzTestAccount, "user", userName, "inline"), *spec.UserInline)
+		put(emulator.IAMInlinePolicyNamesKeyForTest(authzTestAccount, "user", userName), []string{"inline"})
 	}
 	return state
 }
@@ -210,17 +210,17 @@ func TestAuthController_RoleIgnoresGroupMemberships(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, state.Put(ctx, "iam", key, raw))
 	}
-	put("role:worker", emulator.IAMRole{
+	put(emulator.IAMRoleKeyForTest(authzTestAccount, "worker"), emulator.IAMRole{
 		RoleName: "worker",
 		RoleID:   "AROATEST",
 		ARN:      "arn:aws:iam::123456789012:role/worker",
 		Path:     "/",
 	})
-	put("group:devs", emulator.IAMGroup{GroupName: "devs", ARN: "arn:aws:iam::123456789012:group/devs", Path: "/"})
-	put("group_inline:devs:inline", *authzDoc(emulator.IAMEffectAllow, "s3:GetObject", "*"))
-	put("group_inline_names:devs", []string{"inline"})
+	put(emulator.IAMGroupKeyForTest(authzTestAccount, "devs"), emulator.IAMGroup{GroupName: "devs", ARN: "arn:aws:iam::123456789012:group/devs", Path: "/"})
+	put(emulator.IAMInlinePolicyKeyForTest(authzTestAccount, "group", "devs", "inline"), *authzDoc(emulator.IAMEffectAllow, "s3:GetObject", "*"))
+	put(emulator.IAMInlinePolicyNamesKeyForTest(authzTestAccount, "group", "devs"), []string{"inline"})
 	// A membership keyed by the role's name, which nothing writes but state could hold.
-	put("user_groups:worker", []string{"devs"})
+	put(emulator.IAMUserGroupsKeyForTest(authzTestAccount, "worker"), []string{"devs"})
 
 	auth := emulator.NewAuthController(state, emulator.NewDefaultLogger(slog.LevelError, false))
 	err := auth.CheckAccess(

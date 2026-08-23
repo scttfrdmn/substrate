@@ -360,6 +360,14 @@ func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSReq
 // policies of its own: IAM resolves an assumed-role's permissions against the
 // role it assumed, so a session's Kind is "role" and its Name is the role's.
 type iamEntity struct {
+	// Account is the account the entity belongs to, taken from the principal ARN.
+	//
+	// It is part of the identity of the entity, not context about the request: two
+	// accounts may both hold a role called "deploy", and every key below is scoped by
+	// this (#737). Taking it from the ARN rather than from the request is what makes a
+	// cross-account principal resolve against its own account's policies.
+	Account string
+
 	// Kind is the entity type, matching the prefix IAM stores policies under.
 	Kind string
 
@@ -388,10 +396,13 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 	if entityName == "" {
 		return iamEntity{}, false, nil
 	}
+	// The account is in the ARN and was previously discarded, which is what made one
+	// account's policies apply to another account's principal of the same name (#737).
+	account := arnAccountID(principalARN)
 
 	switch entityType {
 	case "user", "role":
-		entity = iamEntity{Kind: entityType, Name: entityName}
+		entity = iamEntity{Account: account, Kind: entityType, Name: entityName}
 	case "assumed-role":
 		// arn:aws:sts::<acct>:assumed-role/<RoleName>/<SessionName>. Only the role
 		// carries policies, and parsePrincipalARN splits on the first slash — so
@@ -406,7 +417,7 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 		if roleName == "" {
 			return iamEntity{}, false, nil
 		}
-		entity = iamEntity{Kind: "role", Name: roleName}
+		entity = iamEntity{Account: account, Kind: "role", Name: roleName}
 	default:
 		// A principal substrate does not model as a policy-holding entity — a
 		// service principal, a federated user, the account root. Not enforced,
@@ -415,7 +426,7 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 		return iamEntity{}, false, nil
 	}
 
-	raw, err := state.Get(ctx, iamNamespace, entity.Kind+":"+entity.Name)
+	raw, err := state.Get(ctx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
 	if err != nil {
 		return entity, false, fmt.Errorf("load %s %q: %w", entity.Kind, entity.Name, err)
 	}
@@ -446,18 +457,18 @@ func (a *AuthController) loadPoliciesForPrincipal(entity iamEntity) ([]PolicyDoc
 	// for the callers that report them.
 	sources := []iamEntity{entity}
 	if entity.Kind == "user" {
-		groups, err := a.loadAuthzStringList(goCtx, iamUserGroupsKey(entity.Name))
+		groups, err := a.loadAuthzStringList(goCtx, iamUserGroupsKey(entity.Account, entity.Name))
 		if err != nil {
 			return nil, fmt.Errorf("load group memberships: %w", err)
 		}
 		for _, name := range groups {
-			sources = append(sources, iamEntity{Kind: "group", Name: name})
+			sources = append(sources, iamEntity{Account: entity.Account, Kind: "group", Name: name})
 		}
 	}
 
 	arnsBySource := make([][]string, 0, len(sources))
 	for _, source := range sources {
-		arns, err := a.loadAuthzStringList(goCtx, source.Kind+"_policies:"+source.Name)
+		arns, err := a.loadAuthzStringList(goCtx, iamAttachedPoliciesKey(source.Account, source.Kind, source.Name))
 		if err != nil {
 			return nil, fmt.Errorf("load policy list: %w", err)
 		}
@@ -520,7 +531,7 @@ func (a *AuthController) resolveManagedPolicyDoc(goCtx context.Context, arn stri
 	if mp, ok := GetManagedPolicy(arn); ok {
 		return mp.Document, true
 	}
-	polRaw, err := a.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	polRaw, err := a.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil || polRaw == nil {
 		return PolicyDocument{}, false
 	}
@@ -537,7 +548,7 @@ func (a *AuthController) resolveManagedPolicyDoc(goCtx context.Context, arn stri
 // behavior this replaced: an unreadable inline policy must not turn into a
 // blanket deny, and CheckAccess already fails open on the errors it does see.
 func (a *AuthController) loadInlinePolicyDocs(goCtx context.Context, entity iamEntity) []PolicyDocument {
-	namesRaw, err := a.state.Get(goCtx, iamNamespace, entity.Kind+"_inline_names:"+entity.Name)
+	namesRaw, err := a.state.Get(goCtx, iamNamespace, iamInlinePolicyNamesKey(entity.Account, entity.Kind, entity.Name))
 	if err != nil || namesRaw == nil {
 		return nil
 	}
@@ -547,7 +558,7 @@ func (a *AuthController) loadInlinePolicyDocs(goCtx context.Context, entity iamE
 	}
 	var docs []PolicyDocument
 	for _, name := range names {
-		docRaw, err := a.state.Get(goCtx, iamNamespace, entity.Kind+"_inline:"+entity.Name+":"+name)
+		docRaw, err := a.state.Get(goCtx, iamNamespace, iamInlinePolicyKey(entity.Account, entity.Kind, entity.Name, name))
 		if err != nil || docRaw == nil {
 			continue
 		}
@@ -570,7 +581,7 @@ func (a *AuthController) loadInlinePolicyDocs(goCtx context.Context, entity iamE
 func (a *AuthController) loadPermissionBoundary(entity iamEntity) (*PolicyDocument, error) {
 	goCtx := context.Background()
 
-	entityRaw, err := a.state.Get(goCtx, iamNamespace, entity.Kind+":"+entity.Name)
+	entityRaw, err := a.state.Get(goCtx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
 	if err != nil || entityRaw == nil {
 		return nil, err
 	}
@@ -590,7 +601,7 @@ func (a *AuthController) loadPermissionBoundary(entity iamEntity) (*PolicyDocume
 	if mp, ok := GetManagedPolicy(arn); ok {
 		return &mp.Document, nil
 	}
-	polRaw, err := a.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	polRaw, err := a.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil || polRaw == nil {
 		return nil, err
 	}
@@ -1028,9 +1039,13 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 
 	case "iam":
 		entityType, entityName := parsePrincipalARN(reqCtx.Principal.ARN)
+		// The entity's own account, which is the one its ARN names rather than the one
+		// the request resolved to — the two agree for every call substrate routes today,
+		// and the ARN is the authority when they do not (#737).
+		entityAccount := arnAccountID(reqCtx.Principal.ARN)
 		switch entityType {
 		case "user":
-			raw, err := a.state.Get(goCtx, iamNamespace, "user:"+entityName)
+			raw, err := a.state.Get(goCtx, iamNamespace, iamUserKey(entityAccount, entityName))
 			if err != nil || raw == nil {
 				return nil
 			}
@@ -1040,7 +1055,7 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 			}
 			tags = iamTagsToMap(u.Tags)
 		case "role":
-			raw, err := a.state.Get(goCtx, iamNamespace, "role:"+entityName)
+			raw, err := a.state.Get(goCtx, iamNamespace, iamRoleKey(entityAccount, entityName))
 			if err != nil || raw == nil {
 				return nil
 			}

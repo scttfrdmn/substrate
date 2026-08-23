@@ -182,6 +182,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to no policies. With `verify_signatures: false` the answer stays `…:root`.
 
 ### Fixed
+- **An IAM entity belonged to the emulator rather than to an account** (#737). Every IAM state
+  key was account-blind — a user lived at `user:{name}`, a role's attachments at
+  `role_policies:{name}` — so one server held one IAM directory no matter how many accounts it
+  served. Three things followed, all of them reachable from the shipped binary now that a
+  `credentials:` block can put two access keys in two accounts (#736). Two accounts could not
+  both hold a role called `deploy`: the second `CreateRole` answered `EntityAlreadyExists`.
+  `ListUsers` in one account reported another account's users, and `ListPolicies` scanned every
+  account's policies even though a policy ARN already named its owner. And `resolveIAMEntity`
+  discarded the account in the principal ARN it was handed, so a cross-account principal was
+  authorized against whatever same-named entity the request's own account happened to hold.
+
+  Every key now reads `{kind}:{account}/{rest}` — the shape DynamoDB's `table:{account}/{name}`
+  and the other account-aware plugins already used, with the account *after* the kind so a
+  per-account listing is one prefix scan rather than a full sweep and filter. The account comes
+  from the ARN wherever an ARN is the authority: `resolveIAMEntity` and `SimulatePrincipalPolicy`
+  take it from the principal ARN, `AssumeRole` reads the role named by `RoleArn` from that ARN's
+  account rather than the caller's — which is the case cross-account assumption exists for — and
+  a policy record is addressed by the account inside its own ARN, so a caller holding only an
+  attachment's ARN can still reach it without knowing whose request it is.
+
+  The ~90 sites that used to concatenate these strings inline now go through builders in one
+  file, because a missed one is invisible: it compiles, it reads and writes state, and it simply
+  addresses a key nothing else uses. Two of them were invisible to a grep for `iamNamespace`
+  because they spelled the namespace `"iam"` as a literal, inside `StackDeployer`'s drift
+  comparison. One key deliberately keeps no account: `accesskey:{id}`, because an access key ID
+  is what *determines* an account and a signed request resolves the record before any account is
+  known. That account is a field on the record instead, and a record written before this release
+  has it empty and falls back to the account the request resolved to — which is the account it
+  always used.
+
 - **An EC2 operation naming several resources was decided against the first alone** (#744).
   `TerminateInstances` with three `InstanceId.N` was authorized against `InstanceId.1`'s ARN
   and `InstanceId.1`'s tags; the other two were not authorized at all. So a policy allowing

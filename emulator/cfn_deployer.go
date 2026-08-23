@@ -2052,8 +2052,8 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 		data, _ := d.state.Get(ctx, "lambda", "function:"+physicalID)
 		return data != nil
 	},
-	"AWS::IAM::Role": func(d *StackDeployer, ctx context.Context, _, _, physicalID string) bool {
-		data, _ := d.state.Get(ctx, "iam", "role:"+physicalID)
+	"AWS::IAM::Role": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
+		data, _ := d.state.Get(ctx, iamNamespace, iamRoleKey(acct, physicalID))
 		return data != nil
 	},
 }
@@ -2226,7 +2226,7 @@ func compareIAMRoleDrift(ctx context.Context, d *StackDeployer, stack *CFNStackS
 	if !ok {
 		return nil
 	}
-	data, _ := d.state.Get(ctx, "iam", "role:"+dr.PhysicalID)
+	data, _ := d.state.Get(ctx, iamNamespace, iamRoleKey(stack.AccountID, dr.PhysicalID))
 	if data == nil {
 		return nil
 	}

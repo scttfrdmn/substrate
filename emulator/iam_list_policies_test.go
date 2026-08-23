@@ -535,21 +535,25 @@ func TestListPolicies_StateFailureIsNotAnEmptyList(t *testing.T) {
 		{
 			// The Local arm's own listing.
 			name: "the policy listing fails",
-			arm:  func(s *iamFaultState) { s.listErrPrefix = "policy:" },
+			arm:  func(s *iamFaultState) { s.listErrPrefix = emulator.IAMPolicyPrefixForTest(authzTestAccount) },
 		},
 		{
 			name: "a policy record cannot be read",
-			arm:  func(s *iamFaultState) { s.getErrKeySubstr = "policy:arn:" },
+			arm:  func(s *iamFaultState) { s.getErrKeySubstr = "/arn:aws:iam:" },
 		},
 		{
 			// The attachment counts walk their own prefixes, so a failure there is a
 			// separate arm from the policy listing.
 			name: "the attachment listing fails",
-			arm:  func(s *iamFaultState) { s.listErrPrefix = "user_policies:" },
+			arm: func(s *iamFaultState) {
+				s.listErrPrefix = emulator.IAMAttachedPoliciesPrefixForTest(authzTestAccount, "user")
+			},
 		},
 		{
 			name: "an attachment list cannot be read",
-			arm:  func(s *iamFaultState) { s.getErrKeySubstr = "user_policies:" },
+			arm: func(s *iamFaultState) {
+				s.getErrKeySubstr = emulator.IAMAttachedPoliciesPrefixForTest(authzTestAccount, "user")
+			},
 		},
 	}
 
@@ -596,7 +600,7 @@ func TestListPolicies_ACorruptRecordDoesNotHideTheRest(t *testing.T) {
 		"PolicyName":     "mine",
 		"PolicyDocument": iamPolicyJSON(t, "Allow", []string{"s3:GetObject"}, "*"),
 	})
-	state.corruptKeySubstr = "policy:arn:"
+	state.corruptKeySubstr = "/arn:aws:iam:"
 
 	got := iamListPolicies(t, srv, map[string]any{"MaxItems": 1000})
 	assert.Len(t, got.Policies, len(emulator.ListManagedPolicies()),

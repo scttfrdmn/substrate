@@ -316,6 +316,9 @@ func (p *IAMPlugin) simulationPolicySet(goCtx context.Context, params *iamSimula
 	docs, boundaryDocs []SourcedPolicyDocument, errResp *AWSResponse, err error,
 ) {
 	entityType, entityName := parsePrincipalARN(params.PolicySourceArn)
+	// The simulated entity belongs to the account its own ARN names, which is what
+	// lets a caller simulate a principal in another account (#737).
+	entityAccount := arnAccountID(params.PolicySourceArn)
 	switch entityType {
 	case "user", "group", "role":
 		// "The entity can be an IAM user, group, or role."
@@ -330,7 +333,7 @@ func (p *IAMPlugin) simulationPolicySet(goCtx context.Context, params *iamSimula
 			http.StatusBadRequest), nil
 	}
 
-	raw, err := p.state.Get(goCtx, iamNamespace, entityType+":"+entityName)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamEntityKey(entityAccount, entityType, entityName))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load %s %s: %w", entityType, entityName, err)
 	}
@@ -340,7 +343,7 @@ func (p *IAMPlugin) simulationPolicySet(goCtx context.Context, params *iamSimula
 			http.StatusNotFound), nil
 	}
 
-	docs, err = p.simulationIdentityDocs(goCtx, iamEntity{Kind: entityType, Name: entityName})
+	docs, err = p.simulationIdentityDocs(goCtx, iamEntity{Account: entityAccount, Kind: entityType, Name: entityName})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -421,18 +424,18 @@ func simulationResourcePolicyDocs(resourcePolicy string) ([]SourcedPolicyDocumen
 func (p *IAMPlugin) simulationIdentityDocs(goCtx context.Context, entity iamEntity) ([]SourcedPolicyDocument, error) {
 	sources := []iamEntity{entity}
 	if entity.Kind == "user" {
-		groups, err := p.loadStringList(goCtx, iamUserGroupsKey(entity.Name))
+		groups, err := p.loadStringList(goCtx, iamUserGroupsKey(entity.Account, entity.Name))
 		if err != nil {
 			return nil, fmt.Errorf("load group memberships for simulation: %w", err)
 		}
 		for _, name := range groups {
-			sources = append(sources, iamEntity{Kind: "group", Name: name})
+			sources = append(sources, iamEntity{Account: entity.Account, Kind: "group", Name: name})
 		}
 	}
 
 	var docs []SourcedPolicyDocument
 	for _, source := range sources {
-		arns, err := p.loadPolicyList(goCtx, source.Kind+"_policies:"+source.Name)
+		arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(source.Account, source.Kind, source.Name))
 		if err != nil {
 			return nil, fmt.Errorf("load attached policies for simulation: %w", err)
 		}
@@ -452,12 +455,12 @@ func (p *IAMPlugin) simulationIdentityDocs(goCtx context.Context, entity iamEnti
 			})
 		}
 
-		names, err := p.loadInlinePolicyNames(goCtx, source.Kind, source.Name)
+		names, err := p.loadInlinePolicyNames(goCtx, source.Account, source.Kind, source.Name)
 		if err != nil {
 			return nil, fmt.Errorf("load inline policy names for simulation: %w", err)
 		}
 		for _, name := range names {
-			doc, err := p.loadInlinePolicyDoc(goCtx, source.Kind, source.Name, name)
+			doc, err := p.loadInlinePolicyDoc(goCtx, source.Account, source.Kind, source.Name, name)
 			if err != nil {
 				return nil, fmt.Errorf("load inline policy for simulation: %w", err)
 			}
@@ -481,7 +484,7 @@ func (p *IAMPlugin) resolveSimulationManagedDoc(goCtx context.Context, arn strin
 	if mp, ok := GetManagedPolicy(arn); ok {
 		return mp.Document, true
 	}
-	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil || raw == nil {
 		return PolicyDocument{}, false
 	}

@@ -93,7 +93,7 @@ func (p *IAMPlugin) iamWarnUnresolvedPolicyARN(goCtx context.Context, operation,
 	}
 	// A state failure is treated as "does not resolve": the warning is advisory and the attach
 	// proceeds either way, so a read error must not turn an accepted call into an error.
-	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err == nil && raw != nil {
 		return
 	}

@@ -44,25 +44,25 @@ func newRoleAuthState(t *testing.T, roleName string, doc *emulator.PolicyDocumen
 			Document:   *boundary,
 		})
 		require.NoError(t, err)
-		require.NoError(t, state.Put(ctx, "iam", "policy:"+boundaryARN, polRaw))
+		require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(boundaryARN), polRaw))
 	}
 
 	roleRaw, err := json.Marshal(role)
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "role:"+roleName, roleRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMRoleKeyForTest(authzTestAccount, roleName), roleRaw))
 
 	if doc != nil {
 		policyARN := "arn:aws:iam::123456789012:policy/RolePolicy"
 		arnsRaw, marshalErr := json.Marshal([]string{policyARN})
 		require.NoError(t, marshalErr)
-		require.NoError(t, state.Put(ctx, "iam", "role_policies:"+roleName, arnsRaw))
+		require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "role", roleName), arnsRaw))
 		polRaw, marshalErr := json.Marshal(emulator.IAMPolicy{
 			PolicyName: "RolePolicy",
 			ARN:        policyARN,
 			Document:   *doc,
 		})
 		require.NoError(t, marshalErr)
-		require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+		require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 	}
 
 	return state
