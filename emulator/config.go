@@ -28,6 +28,9 @@ type Config struct {
 	// Consistency controls eventual-consistency simulation.
 	Consistency ConsistencyCfg `mapstructure:"consistency"`
 
+	// Credentials controls the credential registry and SigV4 verification.
+	Credentials CredentialsCfg `mapstructure:"credentials"`
+
 	// Costs controls per-request cost estimation.
 	Costs CostCfg `mapstructure:"costs"`
 
@@ -288,6 +291,94 @@ func (c ConsistencyCfg) ToConsistencyConfig() (ConsistencyConfig, error) {
 	}, nil
 }
 
+// CredentialsCfg is the YAML-friendly configuration for the credential
+// registry. Use [CredentialsCfg.ToCredentialRegistry] to build the registry it
+// describes.
+type CredentialsCfg struct {
+	// Enabled gates the whole section. Default false, which wires no registry at
+	// all: every caller resolves to Account.Default and no signature is checked.
+	Enabled bool `mapstructure:"enabled"`
+
+	// VerifySignatures gates SigV4 enforcement. Default true, because this
+	// section has documented `enabled` as "enable SigV4 signature verification"
+	// since it was written and `enabled: true` on its own must keep meaning that.
+	//
+	// Set it to false for the combination [ServerOptions.VerifySignatures] opened
+	// up (#630): resolve an account per access key without requiring any request
+	// to be signed. That is the useful setting for a multi-account test, where the
+	// point of the registry is attribution rather than authentication.
+	//
+	// It does nothing while Enabled is false — there is no key material to check a
+	// signature against.
+	VerifySignatures bool `mapstructure:"verify_signatures"`
+
+	// Entries are the credentials the registry holds in addition to the built-in
+	// ones [NewCredentialRegistry] seeds. An entry whose AccessKeyID collides with
+	// a built-in replaces it, which is how a test moves AKIATEST12345678901 into
+	// another account.
+	Entries []CredentialEntryCfg `mapstructure:"entries"`
+}
+
+// CredentialEntryCfg is one credential in a [CredentialsCfg], the YAML-friendly
+// spelling of [CredentialEntry].
+type CredentialEntryCfg struct {
+	// AccessKeyID is the access key a request signs with. Required.
+	AccessKeyID string `mapstructure:"access_key_id"`
+
+	// SecretAccessKey is the secret the signature is checked against. Required
+	// when VerifySignatures is on, and pointless without it.
+	SecretAccessKey string `mapstructure:"secret_access_key"`
+
+	// AccountID is the account this credential resolves to. An empty value adopts
+	// Account.Default, which is the whole point of the field being optional: an
+	// entry that exists only to make a key signable needs no account of its own.
+	AccountID string `mapstructure:"account_id"`
+
+	// SessionToken is non-empty for a temporary credential. Substrate does not
+	// check it; it is recorded so a fixture can carry one.
+	SessionToken string `mapstructure:"session_token"`
+}
+
+// ToCredentialRegistry builds the [CredentialRegistry] this section describes, or
+// nil when Enabled is false. A nil registry is what [ServerOptions.Credentials]
+// takes to mean "attribute every caller to the default account".
+//
+// defaultAccount fills in an entry that names none; pass Account.Default.
+func (c CredentialsCfg) ToCredentialRegistry(defaultAccount string) *CredentialRegistry {
+	if !c.Enabled {
+		return nil
+	}
+	reg := NewCredentialRegistry()
+	c.RegisterInto(reg, defaultAccount)
+	return reg
+}
+
+// RegisterInto adds this section's entries to an existing registry, replacing any
+// entry with the same access key ID. It exists for SIGHUP reload, where the
+// registry the server holds cannot be swapped but can be added to — so a
+// consumer who appends an entry and signals the process reaches it without a
+// restart. Enabled and VerifySignatures are read once at startup and are not
+// reconsidered here.
+//
+// defaultAccount fills in an entry that names none; pass Account.Default.
+func (c CredentialsCfg) RegisterInto(reg *CredentialRegistry, defaultAccount string) {
+	if reg == nil {
+		return
+	}
+	for _, e := range c.Entries {
+		accountID := e.AccountID
+		if accountID == "" {
+			accountID = defaultAccount
+		}
+		reg.Register(CredentialEntry{
+			AccessKeyID:     e.AccessKeyID,
+			SecretAccessKey: e.SecretAccessKey,
+			AccountID:       accountID,
+			SessionToken:    e.SessionToken,
+		})
+	}
+}
+
 // CostCfg is the YAML-friendly configuration for cost tracking.
 // Use [CostCfg.ToCostConfig] to convert it for use with [NewCostController].
 type CostCfg struct {
@@ -505,6 +596,12 @@ func DefaultConfig() *Config {
 			PropagationDelay: "2s",
 			AffectedServices: []string{"iam"},
 		},
+		Credentials: CredentialsCfg{
+			Enabled: false,
+			// True so that `credentials: {enabled: true}` alone means what the
+			// section has always documented it to mean (#736).
+			VerifySignatures: true,
+		},
 		Costs: CostCfg{
 			Enabled: true,
 		},
@@ -581,6 +678,8 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("consistency.enabled", defaults.Consistency.Enabled)
 	v.SetDefault("consistency.propagation_delay", defaults.Consistency.PropagationDelay)
 	v.SetDefault("consistency.affected_services", defaults.Consistency.AffectedServices)
+	v.SetDefault("credentials.enabled", defaults.Credentials.Enabled)
+	v.SetDefault("credentials.verify_signatures", defaults.Credentials.VerifySignatures)
 	v.SetDefault("costs.enabled", defaults.Costs.Enabled)
 	v.SetDefault("metrics.enabled", defaults.Metrics.Enabled)
 	v.SetDefault("metrics.path", defaults.Metrics.Path)
@@ -672,6 +771,33 @@ func Validate(cfg *Config) error {
 		if _, err := time.ParseDuration(cfg.Consistency.PropagationDelay); err != nil {
 			return fmt.Errorf("consistency.propagation_delay %q is not a valid duration: %w",
 				cfg.Consistency.PropagationDelay, err)
+		}
+	}
+
+	// Entries are checked whether or not the section is enabled: a typo in a
+	// credential should not stay hidden until someone flips the flag, and the
+	// registry's Register would silently accept every one of these mistakes.
+	seenAccessKeys := make(map[string]int, len(cfg.Credentials.Entries))
+	for i, entry := range cfg.Credentials.Entries {
+		if entry.AccessKeyID == "" {
+			return fmt.Errorf("credentials.entries[%d].access_key_id must not be empty", i)
+		}
+		if first, dup := seenAccessKeys[entry.AccessKeyID]; dup {
+			return fmt.Errorf("credentials.entries[%d].access_key_id %q duplicates entries[%d]",
+				i, entry.AccessKeyID, first)
+		}
+		seenAccessKeys[entry.AccessKeyID] = i
+		// An empty account_id adopts account.default, so only a non-empty one can
+		// be wrong. A malformed one lands in every ARN the caller signing with this
+		// key gets back.
+		if entry.AccountID != "" && !isAccountIDPattern(entry.AccountID) {
+			return fmt.Errorf("credentials.entries[%d].account_id %q is not valid; an AWS account ID is 12 digits",
+				i, entry.AccountID)
+		}
+		// Only refused when it would actually be used: an entry that exists to
+		// attribute an account needs no secret while verification is off.
+		if cfg.Credentials.Enabled && cfg.Credentials.VerifySignatures && entry.SecretAccessKey == "" {
+			return fmt.Errorf("credentials.entries[%d].secret_access_key must not be empty when credentials.verify_signatures is true", i)
 		}
 	}
 

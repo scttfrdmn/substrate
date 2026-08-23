@@ -266,7 +266,7 @@ single answer. Substrate resolves it in one place and in this order:
 |---|---|
 | `123456789012` | Always, as the starting point. AWS's documented example account. |
 | `account.default` in `substrate.yaml` | Whenever it is set and 12 digits. Set it to whatever your fixtures assert on. |
-| A `CredentialRegistry` entry | When the request is signed with an access key the registry holds. |
+| A `CredentialRegistry` entry | When the request is signed with an access key the registry holds. Wire one with `credentials:` in `substrate.yaml` or `ServerOptions.Credentials`. |
 | An STS session record | When the request is signed with credentials `AssumeRole` minted. |
 
 Later rows win. The order is what it is because each row knows strictly more than the
@@ -307,12 +307,64 @@ under the old account is unreachable** after upgrading. Re-seed it, or set
 - **IAM's state keys are account-blind.** A user is stored under `user:{name}` with no
   account in the key, so `resolveIAMEntity` resolves a principal by name across
   accounts and two accounts cannot both hold a role of the same name. Filed as
-  [#737](https://github.com/scttfrdmn/substrate/issues/737); it is reachable only with
-  a credential registry, which is in-process only today.
-- **`substrate.yaml`'s `credentials:` and `auth:` sections are not read.** `Config` has
-  no fields for them, so the shipped `substrate server` discards both. Both subsystems
-  are real and reachable in-process through `ServerOptions`. Filed as
-  [#736](https://github.com/scttfrdmn/substrate/issues/736).
+  [#737](https://github.com/scttfrdmn/substrate/issues/737). It is now reachable from
+  the shipped binary as well as in-process, since a `credentials:` block can put two
+  access keys in two accounts.
+
+### Configuring the registry from `substrate.yaml`
+
+```yaml
+account:
+  default: "123456789012"
+credentials:
+  enabled: true              # build the registry; without it there is none
+  verify_signatures: true    # the default — see below
+  entries:
+    - access_key_id: "AKIAEXAMPLE00000001"
+      secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      account_id: "111122223333"
+```
+
+`enabled: false` — the shipped default — wires no registry at all, so every caller
+resolves to `account.default` and no signature is checked. Nothing about an existing
+deployment changes.
+
+`verify_signatures` defaults to **true**, because this section has documented `enabled`
+as *"enable SigV4 signature verification"* since it was written and `enabled: true`
+alone has to keep meaning that. Set it to `false` for the combination
+[#630](https://github.com/scttfrdmn/substrate/issues/630) opened up: resolve an account
+per access key without authenticating anyone. That is the setting a multi-account test
+usually wants, since the registry is there to answer *which account* and no call needs a
+real signature.
+
+`account_id` is optional and falls back to `account.default`, so an entry can exist only
+to make a key signable. `secret_access_key` is required while verification is on and
+unused otherwise. A malformed entry — an empty `access_key_id`, an `account_id` that is
+not twelve digits, a duplicated key — is a startup error rather than a silently dropped
+row, and it is checked whether or not the section is enabled, so a typo does not stay
+hidden until someone flips the flag.
+
+Every registry — configured or built in-process — is seeded with the three credentials
+substrate's own documentation tells a caller to use, all in `account.default`:
+`AKIATEST12345678901`, `test`/`test` (README, endpoint configuration) and
+`AKIAIOSFODNN7EXAMPLE` (testing guide, `test/e2e`). Without that, turning verification
+on would make the quickstart wrong — a consumer would have followed the documentation
+exactly and been answered `InvalidClientTokenId` 403. Reusing one of those access key
+IDs in `entries:` replaces it, which is how a test moves the built-in key into another
+account.
+
+`SIGHUP` re-reads the file and adds any new `entries:` to the live registry. `enabled`
+and `verify_signatures` are read once at startup; changing either logs a warning saying
+so and takes effect on restart.
+
+**Cross-service IAM authorization has no flag, and there is nothing to enable.**
+`substrate server` always builds an `AuthController`. Enforcement is opt-in by
+*existence* instead: a request is checked against attached policies, inline policies and
+a permission boundary only once its access key resolves to an IAM entity substrate
+actually holds, and a caller that never created a user or role is authorized against
+nothing. An `auth.enabled` flag would overpromise in both directions — it could not turn
+enforcement off for a principal that exists, because IAM's own authorization resolves
+against state directly rather than through the controller.
 
 ### Attributing accounts and enforcing signatures are separate
 
@@ -320,10 +372,12 @@ under the old account is unreachable** after upgrading. Re-seed it, or set
 `ServerOptions.VerifySignatures` answers *is this signature valid*. One field used to
 mean both ([#630](https://github.com/scttfrdmn/substrate/issues/630)), so wiring a
 registry in order to reach a second account also refused every credential substrate
-documents — `test`/`test` and `AKIAIOSFODNN7EXAMPLE` are in no registry, and an
+documents — `test`/`test` and `AKIAIOSFODNN7EXAMPLE` were in no registry, and an
 unregistered key is `InvalidClientTokenId` 403. All four combinations are expressible
 now, and the one that did not exist before — a registry with verification off — is
-what every test server uses.
+what every test server uses. Both of those credentials are seeded into every registry
+as of [#736](https://github.com/scttfrdmn/substrate/issues/736), so signing with one is
+no longer refused either way.
 
 One consequence worth knowing, because it decides what `GetCallerIdentity` reports. A
 key the registry holds but IAM does not know names a principal only when its signature
