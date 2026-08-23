@@ -217,6 +217,32 @@ func (f *ec2IDFilter) match(id string) bool {
 	return true
 }
 
+// matchOrNamed is [ec2IDFilter.match] for a describe whose resources a caller can also name
+// by a non-ID selector: it takes that selector's requested list and this resource's value for
+// it, and reports whether the resource belongs in the response.
+//
+// The two lists **union**, for the reason [ec2SelectedByEither] gives — DescribeSecurityGroups'
+// GroupId.N and GroupName.N are two spellings of one question, so intersecting them would
+// answer with the empty set while both named groups exist. That helper cannot be used directly
+// here, because it takes two plain lists and this one half of the pair carries the ID filter's
+// malformed-form and NotFound contract.
+//
+// match is called unconditionally, so the ID list's resolution bookkeeping still runs whichever
+// half selected the resource: an ID a name-union let through was still resolved, and one the
+// walk never saw is still the NotFound [ec2IDFilter.unresolved] reports. That cannot let a
+// resource in wrongly, because match returning true already means the request named its ID.
+//
+// The name list has no such contract: a name matching nothing narrows the answer to nothing
+// rather than refusing (#749). It is exact membership, never a glob, for the reason
+// [ec2SelectedByEither] states.
+func (f *ec2IDFilter) matchOrNamed(id string, names []string, name string) bool {
+	matched := f.match(id)
+	if len(names) == 0 {
+		return matched
+	}
+	return (len(f.order) > 0 && matched) || containsStr(names, name)
+}
+
 // unresolved returns the kind's NotFound error for the first requested ID that
 // match never saw, or nil if every requested ID resolved. Call it after the
 // describe loop.

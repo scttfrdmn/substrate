@@ -56,6 +56,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ownerId`/`public` per Example 1.
 
 ### Fixed
+- **`DescribeSecurityGroups` ignored `GroupName.N`** (#749). AWS documents the parameter and
+  substrate read it nowhere, so a caller naming one group by name was answered about **every**
+  group in the account — the superset failure #731 fixed for `DescribeImages`' `ImageId.N`, and
+  the worse of the two failure directions, because an error is visible where a superset reads as
+  a successful narrowing. Both spellings are now read, and the name list unions with `GroupId.N`
+  rather than intersecting it, matching the reading already recorded for the other paired
+  identity selectors.
+
+  Two decisions here are substrate's reading of AWS rather than its published text. A name is
+  matched **account-wide**, where AWS scopes the parameter to the default VPC: substrate does
+  model a default VPC but creates it lazily, only when a launch path asks for one, so a
+  default-VPC scope would make the parameter answer nothing in a fresh account — the same
+  invisible wrong answer as the superset, in the other direction. A consequence worth knowing is
+  that a name may match several groups, because `CreateSecurityGroup` enforces no name
+  uniqueness where AWS's is per-VPC; narrow with the `vpc-id` filter, which composes.
+
+  And a name matching nothing answers an **empty set** rather than `InvalidGroup.NotFound`. The
+  operation's Errors section is empty, and both AWS's client-error table and substrate's own
+  message for that code describe a missing security group *ID*, so refusing would mean inventing
+  wording AWS does not publish here on top of asserting a scope substrate does not implement —
+  the same declined invention `DescribeKeyPairs` already records. The ID half keeps its full
+  contract regardless: a malformed `GroupId.N` is refused before the walk and an unresolved one
+  after it, whether or not a name selected something.
 - **Fourteen `DescribeImages` filters were accepted and never applied** (#750). `architecture`,
   `description`, `hypervisor`, `image-type`, `is-public`, `name`, `owner-alias`, `owner-id`,
   `platform`, `public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state` and

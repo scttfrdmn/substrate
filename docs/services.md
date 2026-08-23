@@ -3437,11 +3437,12 @@ unattached, untagged gateway, because its AWS sample does. `DescribeVpcs` and
 and reproducing it per page is the point: a sweep "for consistency" would break one of them
 against its own reference.
 
-**Paired identity parameters union rather than intersect.** Five operations take two lists that
+**Paired identity parameters union rather than intersect.** Six operations take two lists that
 name the same resource two ways — `KeyName.N`+`KeyPairId.N`, `ZoneName.N`+`ZoneId.N`,
-`GroupName.N`+`GroupId.N`, `AllocationId.N`+`PublicIp.N`, and
-`LaunchTemplateId.N`+`LaunchTemplateName.N`. A request carrying both is answered with the
-resources named by **either**:
+`AllocationId.N`+`PublicIp.N`, `LaunchTemplateId.N`+`LaunchTemplateName.N`, and
+`GroupName.N`+`GroupId.N` on both `DescribePlacementGroups` and — since
+[#749](https://github.com/scttfrdmn/substrate/issues/749) — `DescribeSecurityGroups`. A request
+carrying both is answered with the resources named by **either**:
 
 ```
 DescribeKeyPairs&KeyPairId.1=key-0abc…&KeyName.1=deploy   → both key pairs
@@ -3480,11 +3481,12 @@ the template is resolved, so a typo answers `InvalidParameterValue` rather than
   `opt-in-not-required`, so the opt-in filtering the parameter controls has nothing to exclude.
 - **`IncludeUnsupportedInRegion` is not read** on `DescribeInstanceTypes`; the seeded catalog is
   the same in every region.
-- **Seven selector families answer an empty set where AWS answers `NotFound`.** `KeyName.N`
+- **Eight selector families answer an empty set where AWS answers `NotFound`.** `KeyName.N`
   and `KeyPairId.N` (AWS: `InvalidKeyPair.NotFound`), `GroupName.N` and `GroupId.N` on
   `DescribePlacementGroups` (`InvalidPlacementGroup.Unknown`), `ZoneName.N`/`ZoneId.N`,
-  `PublicIp.N`, `DescribeLaunchTemplates`' selectors, `DescribeFleets`' `FleetId.N` and
-  `DescribeRegions`' `RegionName.N` all select by membership rather than through an
+  `PublicIp.N`, `DescribeLaunchTemplates`' selectors, `DescribeFleets`' `FleetId.N`,
+  `DescribeRegions`' `RegionName.N` and `DescribeSecurityGroups`' `GroupName.N` (whose
+  `GroupId.N` **does** assert) all select by membership rather than through an
   [ID assertion](#explicit-resource-ids) — so naming one that does not exist narrows the
   answer to nothing instead of failing. This read "six of the new selectors" and named
   four families until #731, which added `DescribeLaunchTemplates` and the two whose
@@ -5055,14 +5057,15 @@ because an error is visible and a superset reads as a successful narrowing.
 `DescribeInstanceTypes`' `InstanceType.N` also asserts existence, answering
 `InvalidInstanceType`.
 
-**Seven selector families deliberately do not**, and answer an empty set where AWS
-answers `NotFound`. Two have reasons that would not change if a kind were registered
+**Eight selector families deliberately do not**, and answer an empty set where AWS
+answers `NotFound`. Three have reasons that would not change if a kind were registered
 for them:
 
 | Selector | Why not |
 |---|---|
 | `DescribeFleets`' `FleetId.N` | AWS publishes **no** `InvalidFleetId.NotFound`. The only fleet-ID absence code in the reference is `InvalidSpotFleetRequestId.*`, which is a `sfr-` request, not a `fleet-` fleet. |
 | `DescribeRegions`' `RegionName.N` | The parameter explicitly permits naming any Region, enabled for the account or not, so "this Region is not in your answer" is not absence. |
+| `DescribeSecurityGroups`' `GroupName.N` | The kind **is** registered and its `GroupId.N` asserts, but the code is `InvalidGroup.NotFound` and both AWS's client-error table and substrate's message for it describe a missing security group *ID*. This operation's own Errors section is empty, so a name-shaped refusal would be invented wording. AWS also scopes the parameter to the default VPC where substrate matches account-wide, so absence here is not the absence AWS would be reporting. |
 
 Five more have a published code but no registered `ec2IDKind`, so the assertion is
 unimplemented rather than declined: `DescribeKeyPairs`' `KeyName.N`/`KeyPairId.N`
@@ -5072,9 +5075,27 @@ unimplemented rather than declined: `DescribeKeyPairs`' `KeyName.N`/`KeyPairId.N
 `DescribeLaunchTemplates`, whose `InvalidLaunchTemplateId.NotFound` is one of the four
 hand-written codes above.
 
-`DescribeSecurityGroups` documents a `GroupName.N` alongside `GroupId.N` and substrate
-**does not read it**: only the ID list selects. A caller naming a group by name is
-answered about every group, so filter on `group-name` instead, which is evaluated.
+`DescribeSecurityGroups`' `GroupName.N` selects as of
+[#749](https://github.com/scttfrdmn/substrate/issues/749) — it was read by nothing before, so a
+caller naming one group by name was answered about **every** group in the account — and it
+unions with `GroupId.N` like the [other paired identity
+parameters](#twelve-describes-gained-filters). Two things about it are substrate's reading:
+
+- **A name is matched account-wide**, where AWS scopes the parameter to the default VPC
+  ("[Default VPC] The names of the security groups"). Substrate does model a default VPC, but
+  creates it *lazily* — only when a launch path asks for one — so scoping the parameter to it
+  would make `GroupName.N` answer nothing at all in a fresh account. That is the same
+  invisible-wrong-answer failure as the superset it replaces, in the other direction. A
+  consequence: a name may legitimately match **several** groups here, because
+  `CreateSecurityGroup` enforces no name uniqueness where AWS's is per-VPC. Narrow with the
+  `vpc-id` filter, which composes with the name.
+- **A name matching nothing answers an empty set**, not `InvalidGroup.NotFound`. This
+  operation's Errors section is empty, and EC2's client-error table describes that code as a
+  missing security group *ID* — which is what substrate's own message for it says — so refusing
+  here would mean inventing wording AWS does not publish for this operation, on top of
+  asserting a default-VPC scope substrate does not implement. The ID half keeps its full
+  contract either way: a malformed `GroupId.N` is refused before the walk and an unresolved one
+  after it, whether or not a name selected something.
 
 `DescribeImages` also does not read `Owner.N` or `ExecutableBy.N`. Substrate stores only
 images the account owns, so `self` is the answer to every describe and AWS's other three
