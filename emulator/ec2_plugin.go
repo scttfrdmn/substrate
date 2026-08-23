@@ -1762,11 +1762,37 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", GroupID: sgID, Return: true})
 }
 
+// describeSecurityGroups reports the security groups the account holds in the region.
+//
+// Selects on GroupId.N, GroupName.N and Filter.N. GroupName.N was read by nothing before #749
+// — a caller naming one group by name was answered about every group in the account, the
+// superset failure #731 fixed for DescribeImages — and the two identity lists union rather
+// than intersect, per [ec2IDFilter.matchOrNamed].
+//
+// Two things about the name half are substrate's reading rather than AWS's text, both recorded
+// in docs/services.md:
+//
+// A name is matched **account-wide**, where AWS scopes the parameter to the default VPC
+// ("[Default VPC] The names of the security groups"). Substrate does model a default VPC —
+// [EC2VPC.IsDefault], [EC2Plugin.ensureDefaultVPC] — but creates it lazily, only when a launch
+// path asks for one, so scoping the parameter to it would make GroupName.N answer nothing in a
+// fresh account. Account-wide also means a name may legitimately match several groups here,
+// because [EC2Plugin.createSecurityGroup] enforces no name uniqueness where AWS's is per-VPC.
+//
+// A name matching nothing answers an **empty set** rather than InvalidGroup.NotFound. This
+// operation's Errors section is empty, and EC2's client-error table describes that code as a
+// missing security group *ID* — which is what [ec2SecurityGroupIDKind]'s own message says — so
+// refusing here would mean inventing wording for a refusal AWS does not publish on this
+// operation, and asserting a default-VPC scope substrate does not implement. It follows
+// [EC2Plugin.describeKeyPairs], which declines the same invention for the same reason. The ID
+// half keeps its full contract: a malformed ID is refused before the walk and an unresolved one
+// after it.
 func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ids := newEC2IDFilter(extractIndexedParams(req.Params, "GroupId"), ec2SecurityGroupIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	names := extractIndexedParams(req.Params, "GroupName")
 	if err := ec2SecurityGroupFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
@@ -1814,7 +1840,7 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if json.Unmarshal(data, &sg) != nil {
 			continue
 		}
-		if !ids.match(sg.GroupID) {
+		if !ids.matchOrNamed(sg.GroupID, names, sg.GroupName) {
 			continue
 		}
 		// A filter naming no values matches nothing, as it does everywhere else: these
