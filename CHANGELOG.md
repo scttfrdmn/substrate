@@ -182,6 +182,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to no policies. With `verify_signatures: false` the answer stays `…:root`.
 
 ### Fixed
+- **A `${aws:username}` in a policy was compared as literal text** (#745). AWS substitutes a
+  policy variable before it compares, so `arn:aws:s3:::home/${aws:username}/*` is the documented
+  shape for "a prefix per user". Substrate compared the fifteen characters `${aws:username}`
+  against the ARN in hand, which matched nothing — so a policy of exactly that shape granted
+  nothing at all, including the bundled `IAMUserChangePassword`, the one bundled policy that uses
+  a variable. Under the positive forms that is a false deny; under the negated ones it is a false
+  **allow**, because `StringNotEquals` comparing a tag against `${aws:ResourceTag/Team}` is false
+  on AWS when the two agree and true here, which makes such a statement inert on a `Deny` and
+  granting on an `Allow`. That was reachable with no new producer at all, since
+  `SimulateCustomPolicy` copies a caller's `ContextEntries` into the context the same evaluator
+  reads.
+
+  Substitution now runs in the elements AWS names and nowhere else: `Resource`, `NotResource`,
+  and condition values under the string and ARN operators. AWS's sentence on the rest is
+  exhaustive — "You can't use a policy variable with other operators, such as Numeric, Date,
+  Boolean, Binary, IP Address, or Null operators" — so the test is the operator family's prefix
+  rather than a name list that would drift from the evaluator's own switch, and a `${…}` under a
+  `Numeric` operator stays the text it was. `Action` is not on AWS's list either and keeps its
+  plain glob.
+
+  Four rules decide the edges, each from AWS's *Variables and tags* page. The `Version` element
+  gates the feature: "If you don't include the `Version` element and set it to an appropriate
+  version date, variables like `${aws:username}` are treated as literal strings in the policy",
+  so a document with an older version — or none — reads exactly as it did before. Key names are
+  case-insensitive, so resolution goes through the same lookup a condition key uses rather than a
+  raw map index. `${key, 'default'}` resolves to the default when the key has no value. And only
+  the single-valued context is consulted, per "You can use any single-valued condition key as a
+  variable. You can't use a multivalued condition key as a variable".
+
+  `${*}`, `${?}` and `${$}` are AWS's escapes for characters the glob would otherwise read as
+  pattern, and substituting them into a plain string and handing it to the matcher would turn an
+  escape for a literal asterisk into a wildcard — widening a statement, the one direction a
+  deliberate escape must never take. A resolved value carries a per-byte record of which of its
+  characters are pattern and which are text, so an escape stays literal and **a `*` inside a
+  resolved value is literal too**: a tag value is data the request carried, not pattern the policy
+  author wrote. AWS documents no rule for that second case; it is substrate's reading, and it is
+  the reading that cannot widen a statement on behalf of whoever set the tag. The recursive glob
+  matcher was replaced by an iterative one that consults the mask, so there is one matcher rather
+  than two that could disagree.
+
+  A variable with no value voids what contains it, which is one AWS rule stated for two element
+  kinds: a `Resource` entry "will not match any resource", and the same sentence names
+  `NotResource`, where excluding nothing means the statement matches everything. In a condition
+  value "there is no equal or like value", so a positive operator finds no match and a negated one
+  is satisfied — "Inverted condition operators like `StringNotEquals` or `StringNotLike` do match
+  against a null value". Substrate reached all four answers correctly while comparing literally,
+  because an ARN never contains a `${…}`; they are now reached by the rule instead of by
+  coincidence, which matters because a resolved value can contain a wildcard and coincidence does
+  not survive that.
+
+  `aws:username` is the producer this needed, and it is recorded rather than derived. `Principal`
+  gained a `UserName` carried from the credential lookup, which had the IAM user's name in hand
+  and spent it into an ARN. Deriving it back out of that ARN would have been wrong twice over: a
+  registry hit with no IAM entity behind it synthesizes `…:user/<access-key-id>`, so the last
+  segment is a credential ID, and an assumed role's is a session name where AWS publishes no
+  `aws:username` at all. Presence is keyed off the recorded name and not off `Principal.Type`,
+  because a `GetSessionToken` session and an `AssumeRole` session are both typed `AssumedRole`
+  while AWS publishes the key for the first and not the second — so `STSSessionCredentials` gained
+  the field too. A stack's own resource calls carry the creator's name, recorded on the stack so a
+  rollback's deletes authorize as the create did. The simulator is the one place a name is read out
+  of an ARN, because there `CallerArn` is the caller's own assertion of who to simulate as. IAM's
+  second authorization door — the one that passes `"*"` and builds its own two-key context — now
+  publishes `aws:username` as well, for the reason it was taught `aws:PrincipalArn` in #714: an
+  `iam:` statement scoped to `${aws:username}`, the shape of "let a user manage their own
+  credentials", resolved at one door and matched nothing at the other.
+
+  Substitution alone does not make `IAMUserChangePassword` grant anything. Its `Resource` now
+  correctly reads `arn:aws:iam::*:user/alice`, but every IAM request's resource is built as
+  `arn:aws:iam::<account>:*`, so there is nothing user-shaped to match. That is a separate gap in
+  how IAM's request resource is derived, filed as #770. The two caller keys that still have no
+  producer, `aws:userid` and `aws:PrincipalTag/`, are #771 — each needs the same shape of
+  prerequisite `aws:username` needed, which is to record the value where it exists rather than
+  parse it back out of an ARN.
 - **An IAM entity belonged to the emulator rather than to an account** (#737). Every IAM state
   key was account-blind — a user lived at `user:{name}`, a role's attachments at
   `role_policies:{name}` — so one server held one IAM directory no matter how many accounts it

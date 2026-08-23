@@ -1621,12 +1621,15 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	// satisfied through this door even though [CheckAccess] populates both — which is
 	// worth knowing before writing a condition against an iam: action (#690).
 	//
-	// aws:PrincipalArn is the exception, for [authzPrincipalContext]'s reason: it is not
-	// read from the request at all, it is who signed it, and this door knows that as
-	// surely as the other three. Leaving it out let a negated operator over it hold
-	// vacuously here while failing at the main gate (#714).
-	condCtx := make(map[string]string, 1)
-	authzPrincipalContext(condCtx, reqCtx.Principal.ARN)
+	// The caller's own keys are the exception, for [authzPrincipalContext]'s reason: they
+	// are not read from the request at all, they name who signed it, and this door knows
+	// that as surely as the other three. Leaving aws:PrincipalArn out let a negated
+	// operator over it hold vacuously here while failing at the main gate (#714), and
+	// leaving aws:username out is what made `${aws:username}` in an iam: statement — the
+	// shape of "let a user manage their own credentials" — match nothing at this door
+	// while resolving at the other (#745).
+	condCtx := make(map[string]string, 2)
+	authzPrincipalContext(condCtx, reqCtx.Principal)
 
 	result := Evaluate(docs, EvaluationRequest{
 		Principal: reqCtx.Principal.ARN,

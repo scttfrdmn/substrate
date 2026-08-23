@@ -632,10 +632,21 @@ func simulationDecision(decision string) string {
 // for AWS:PrincipalArn before #704, since it left the derived aws:PrincipalArn in the
 // map beside it and the evaluator would then resolve to whichever sorted first.
 // Deleting the folded-equal name is what makes the caller's entry win.
+//
+// aws:username is derived from CallerArn, and this is the one place substrate derives it
+// from an ARN. The enforcement path refuses to ([authzPrincipalContext]) because the ARN
+// it holds may have been synthesized from an access key ID; here the ARN *is* the
+// caller's own assertion of who to simulate as, so reading a user name out of it states
+// back exactly what was asked for. A CallerArn naming anything but a user contributes no
+// key, matching AWS's table, where `aws:username` reads "(not present)" for a role
+// session and for the account root (#745).
 func simulationConditionContext(params *iamSimulateRequest, callerArn string, now time.Time) map[string]string {
-	ctx := make(map[string]string, len(params.context)+4)
+	ctx := make(map[string]string, len(params.context)+5)
 	if callerArn != "" {
 		ctx["aws:PrincipalArn"] = callerArn
+		if name := simulationUserName(callerArn); name != "" {
+			ctx["aws:username"] = name
+		}
 	}
 	if params.ResourceOwner != "" {
 		ctx["aws:ResourceAccount"] = params.ResourceOwner
@@ -649,6 +660,25 @@ func simulationConditionContext(params *iamSimulateRequest, callerArn string, no
 		ctx[key] = value
 	}
 	return ctx
+}
+
+// simulationUserName returns the IAM user name a CallerArn names, or "" when it names
+// something that is not a user.
+//
+// AWS defines aws:username as "the friendly name of the current user", and a user's
+// friendly name is the last segment of its ARN rather than the whole resource part: the
+// user `arn:aws:iam::123456789012:user/division/engineering/alice` has the path
+// `/division/engineering/` and the name `alice`, and it is the name that appears in
+// `${aws:username}`.
+func simulationUserName(callerArn string) string {
+	entityType, name := parsePrincipalARN(callerArn)
+	if entityType != "user" {
+		return ""
+	}
+	if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+		return name[slash+1:]
+	}
+	return name
 }
 
 // paginateSimulationResults applies the Marker cursor and MaxItems to the flattened

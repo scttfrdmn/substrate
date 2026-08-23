@@ -1404,6 +1404,7 @@ nothing else:
 | `ec2:Subnet`, `ec2:Vpc` | [A launch's networking resources](#a-launch-s-networking-resources-carry-ec2-subnet-and-ec2-vpc) |
 | `sts:ExternalId` | An `AssumeRole` that supplied one |
 | `aws:PrincipalArn` | The caller, at every gate — identity policy, permission boundary, [tag-on-create](#a-tagged-create-is-authorized-twice), the IAM control plane and a role's trust policy |
+| `aws:username` | The caller's IAM user name, at the same gates — **absent** for every principal that has none; see [policy variables](#policy-variables-resolve-from-the-request-context) |
 | `aws:ResourceAccount` | A **simulation** only, from `ResourceOwner` |
 | Anything at all | A simulation's `ContextEntries` |
 
@@ -1422,18 +1423,27 @@ everyone.
 
 What has **no** producer, and therefore never matches on the enforcement path:
 
-- `aws:SecureTransport`, `aws:username`, `aws:userid`, `aws:MultiFactorAuthPresent`,
+- `aws:SecureTransport`, `aws:userid`, `aws:MultiFactorAuthPresent`,
   `aws:MultiFactorAuthAge`, `aws:SourceIp`, `aws:SourceVpc`, `aws:PrincipalOrgID` and
   every other key not in the table above. The IP family is therefore correct but
   satisfiable only through a simulation's `ContextEntries`. (S3's
   [public-access analysis](#block-public-access) reads an `aws:SourceIp` condition out of a
   *bucket policy* to judge how broad it is, which is a different question from evaluating
   one against a request.)
-- `aws:PrincipalAccount`, `aws:userid` and `aws:username`, even though `aws:PrincipalArn`
-  is populated beside them. Each needs a derivation substrate cannot make honestly for
-  every principal kind — it mints no unique ID, and a role session's user name is not the
-  last component of its ARN — and a key guessed wrong is worse than one a policy can test
-  for with `Null`.
+- `aws:PrincipalAccount` and `aws:userid`, even though `aws:PrincipalArn` and `aws:username`
+  are populated beside them. Each needs a derivation substrate cannot make honestly for
+  every principal kind — it mints no unique ID, and a cross-account credential makes the
+  account ambiguous — and a key guessed wrong is worse than one a policy can test for with
+  `Null`. `aws:username` was in this list until
+  [#745](https://github.com/scttfrdmn/substrate/issues/745), and the reason it left is worth
+  keeping: the derivation that made it honest was to *record* the name at the credential
+  lookup, not to parse it back out of an ARN. The same shape of prerequisite is what the
+  other two still need, and what
+  [#771](https://github.com/scttfrdmn/substrate/issues/771) tracks: `aws:userid` needs a
+  unique ID minted at create time, since substrate stores none and deriving one from a name
+  would make it stable per-name rather than per-entity; `aws:PrincipalTag/` needs the
+  principal's tags read where the credential is resolved, which is the cheaper of the two
+  because `TagUser`/`TagRole` already record them.
 - Six of the seven keys the bundled AWS managed policies condition on, each for its own
   reason rather than as one omission:
 
@@ -1453,46 +1463,82 @@ What has **no** producer, and therefore never matches on the enforcement path:
   the bundled catalog sit on an `Allow`, so such a statement grants nothing rather than a
   `Deny` going inert.
 
-**Substrate performs no policy-variable substitution**, deliberately rather than by
-omission. A `${aws:username}` in a resource ARN or a condition value is compared literally.
+### Policy variables resolve from the request context
 
-For the one bundled policy that uses a variable — the `${aws:username}` in
-`IAMUserChangePassword`, the only `${` across all 47 — that is not observable: AWS's rule is
-that an unresolved variable in `Resource` "will not match any resource", `aws:username` has
-no producer, and substrate's literal comparison reaches the same answer by a different
-route. The statement matches nothing either way.
+**A `${…}` in a policy is substituted before the comparison**
+([#745](https://github.com/scttfrdmn/substrate/issues/745)), so
+`arn:aws:s3:::home/${aws:username}/*` grants alice her own prefix and refuses bob's. Until
+that release it was compared as literal text, which matched no ARN at all — a policy of that
+shape, the shape AWS's own documentation gives for "a prefix per user", granted nothing.
 
-**An unresolved variable diverges nowhere**, in either element and under either polarity —
-which corrects a rule this page previously published backwards
-([#744](https://github.com/scttfrdmn/substrate/issues/744)). AWS
-applies one sentence to both elements: "If a variable that has no value in the authorization
-context is used as part of the `Resource` **or** `NotResource` element of a policy, the
-resource that includes a policy variable with no value will not match any resource." An ARN
-still carrying a literal `${…}` matches no resource under either element here either, so
-both routes reach the same answer. Under a negated *condition operator* AWS is equally
-explicit that the comparison **does** match — "Inverted condition operators like
-`StringNotEquals` or `StringNotLike` do match against a null value, as the value of the
-condition key they are testing against is not equal to or like the effectively null value" —
-and substrate's literal comparison matches too, because no context value equals the string
-`${aws:PrincipalTag/Team}`. The one way to tell them apart is to pass that literal string
-*as* a context value, which only a hand-written `SimulateCustomPolicy` `ContextEntry` can do.
+Substitution runs in exactly the elements AWS names, and nowhere else:
 
-**What does diverge is a variable that would have resolved**, which is what
-[#745](https://github.com/scttfrdmn/substrate/issues/745) tracks. Under the positive forms —
-`Resource`, `StringEquals`, `ArnLike` — the literal matches nothing where AWS would have
-matched, so the statement grants less than it says: a false deny, and the safe direction.
-Under the negated forms it is the reverse and it is not safe. A
-`StringNotEquals` comparing `s3:ExistingObjectTag/Team` against `${aws:ResourceTag/Team}`
-is *false* on AWS when the two agree, and *true* here, because "red" does not equal the
-un-substituted literal — so such a statement is inert on a `Deny` and grants on an `Allow`.
-That is reachable today with no new producer at all, since `SimulateCustomPolicy` copies a
-caller's `ContextEntries` straight into the context the same evaluator reads.
+| Element | Substituted? | Rule |
+|---|---|---|
+| `Resource`, `NotResource` | Yes | AWS names both, in the resource portion of the ARN |
+| `Condition` values under `String*` and `Arn*` | Yes | "any condition that involves the string operators or the ARN operators" |
+| `Condition` values under `Numeric`, `Date`, `Bool`, `Binary`, `IpAddress`, `Null` | **No** | "You can't use a policy variable with other operators" — the text is compared as written, which for those types is a comparison that cannot be made |
+| `Action`, `NotAction`, `Principal`, `Sid` | **No** | Not on AWS's list |
 
-An honest `aws:username` is what the request-signing path still owes, and the two obvious
-candidates are both wrong: the ARN's last component is the *session* name for an assumed
-role, where AWS documents `aws:username` as absent altogether, and the value the caller ARN
-is built from is an access key ID. The honest producer is the resolved IAM user name, set
-where the credential lookup already has it in hand and currently discards it.
+Four rules that decide the edge cases, each taken from AWS's *IAM policy elements: Variables
+and tags* page:
+
+- **The `Version` element gates the whole feature.** "Variables were introduced in version
+  `2012-10-17`… If you don't include the `Version` element and set it to an appropriate
+  version date, variables like `${aws:username}` are treated as literal strings in the
+  policy." A document with an older `Version`, or none, is read exactly as it was before this
+  release. All 52 bundled AWS managed policies declare `2012-10-17`, so nothing bundled
+  changed meaning by accident.
+- **Key names are case-insensitive**, so `${aws:userName}` and `${AWS:USERNAME}` resolve the
+  same key a producer wrote as `aws:username`.
+- **Defaults are honoured**: `${aws:PrincipalTag/team, 'company-wide'}` resolves to
+  `company-wide` when the tag has no value, so a variable with a default is never unresolved.
+- **`${*}`, `${?}` and `${$}` stay literal.** They are AWS's escapes for those characters, so
+  substrate tracks per byte whether a `*` was written by the policy author or arrived from a
+  substitution. **A wildcard inside a resolved value is text too** — a tag value is data the
+  request carried, not pattern the author wrote. AWS documents no rule for that case; reading
+  it as text is substrate's choice, and it is the reading that cannot widen a statement on
+  behalf of whoever set the tag.
+
+**A variable with no value voids what contains it**, which is one AWS rule stated twice for
+the two element kinds:
+
+| Where | AWS's rule | Effect |
+|---|---|---|
+| `Resource` | "the resource that includes a policy variable with no value will not match any resource" | The entry grants nothing |
+| `NotResource` | the same sentence names both elements | The entry excludes nothing — so the statement matches **every** resource |
+| Condition value, positive operator | "the value is effectively null. There is no equal or like value" | No match |
+| Condition value, negated operator | "Inverted condition operators like `StringNotEquals` or `StringNotLike` do match against a null value" | Match |
+
+This page published the `NotResource` half of that backwards before
+[#744](https://github.com/scttfrdmn/substrate/issues/744) corrected it. Substrate reached all
+four answers correctly even while comparing literally, because an ARN never contains a
+`${…}` — but by coincidence rather than by the rule, which is why the rule is now applied
+deliberately: a resolved value can itself contain a wildcard, and coincidence does not
+survive that.
+
+`aws:username` is the producer this needed, and it is recorded rather than derived:
+
+| Caller | `aws:username` |
+|---|---|
+| A long-term access key | The IAM user that holds it |
+| `GetSessionToken` | The **same** user — its principal is unchanged, and AWS publishes the key |
+| `AssumeRole` | **Absent.** The session name is not a user name |
+| A registered credential with no IAM entity behind it | **Absent.** That ARN's last segment is the access key ID |
+| A CloudFormation stack's own resource calls | The stack's creator, carried in the stack record so a rollback's deletes are authorized as the create was |
+| `SimulateCustomPolicy` / `SimulatePrincipalPolicy` | Derived from `CallerArn` when it names a user — the one place substrate reads a name out of an ARN, because there the ARN is the caller's own assertion of who to simulate as |
+
+Substitution reads only the single-valued context, per AWS's "You can use any single-valued
+condition key as a variable. You can't use a multivalued condition key as a variable" — so
+`${aws:TagKeys}` never resolves.
+
+One consequence worth stating, because it looks like a bug: substitution alone does not make
+the bundled `IAMUserChangePassword` grant anything. Its `Resource` is now correctly
+`arn:aws:iam::*:user/alice`, but every IAM request's resource is built as
+`arn:aws:iam::<account>:*`, so there is nothing user-shaped to match. That is a separate
+gap in how IAM's request resource is derived
+([#770](https://github.com/scttfrdmn/substrate/issues/770)), not something substitution
+could have fixed.
 
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 

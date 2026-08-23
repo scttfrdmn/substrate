@@ -179,6 +179,9 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 			return &Principal{
 				ARN:  fmt.Sprintf("arn:aws:iam::%s:user/%s", account, key.UserName),
 				Type: "IAMUser",
+				// The name AWS publishes as aws:username, taken from the record rather
+				// than re-derived from the ARN above (#745). See [Principal.UserName].
+				UserName: key.UserName,
 			}, adopt
 		}
 	}
@@ -190,7 +193,16 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 	if raw, err := state.Get(ctx, stsNamespace, "session:"+accessKeyID); err == nil && raw != nil {
 		var sess STSSessionCredentials
 		if unmarshalErr := json.Unmarshal(raw, &sess); unmarshalErr == nil && sess.PrincipalARN != "" {
-			return &Principal{ARN: sess.PrincipalARN, Type: "AssumedRole"}, sess.AccountID
+			// UserName is set only for a GetSessionToken session, whose principal *is*
+			// an IAM user and for which AWS does publish aws:username; assumeRole
+			// leaves it empty, because an assumed role has no user name. Type is
+			// "AssumedRole" for both, which is why presence is keyed off the recorded
+			// name rather than off Type (#745).
+			return &Principal{
+				ARN:      sess.PrincipalARN,
+				Type:     "AssumedRole",
+				UserName: sess.UserName,
+			}, sess.AccountID
 		}
 	}
 
