@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Service-linked roles, and with them a producer for `iam:AWSServiceName`** (#747).
+  `CreateServiceLinkedRole`, `DeleteServiceLinkedRole` and
+  `GetServiceLinkedRoleDeletionStatus` answered `InvalidAction`/400, which made eleven of the
+  32 condition blocks in the bundled managed-policy catalog unevaluatable — the largest single
+  group in the producerless-key census, all eleven turning on a parameter of an operation that
+  did not exist. A create mints the role under the reserved
+  `/aws-service-role/<principal>/` path with a trust policy naming the linked service, so it is
+  an ordinary role to `GetRole`, `ListRoles` and the `AssumeRole` trust gate.
+
+  Making those statements *evaluate* took two producers, not one, because IAM authorizes
+  through two doors that would otherwise disagree — the same one-ARN-two-answers class as #411.
+  The key is published at the generic gate, read off the request, **and** passed by the handler
+  alongside the action. And the request resource had to become the role's own ARN: four of the
+  eleven statements scope `Resource` to `arn:aws:iam::*:role/aws-service-role/…` and two of
+  those to an exact ARN with no trailing `*`, none of which the flat `arn:aws:iam::<account>:*`
+  every IAM request previously carried can match. All three operations now name a real ARN —
+  including the status poll, whose `DeletionTaskId` embeds the service and the role, so its
+  resource resolves with no state read and therefore still resolves after the role is gone,
+  which is the normal case for the poll that finally reports `SUCCEEDED`. This resolves the
+  resource for the service-linked-role operations only; IAM's general per-operation request
+  resource is #770.
+
+  The key is published for the create and the delete and **not** for the status operation,
+  matching where the Service Authorization Reference lists it. The asymmetry is deliberate:
+  publishing a key AWS does not would let a `StringEquals` on it succeed here and fail there,
+  which is the permissive direction and the one a privilege boundary must not drift in.
+
+  Three refusals are worth naming because none is the obvious one. A duplicate name is
+  `InvalidInput`/400, not `EntityAlreadyExists` — `CreateServiceLinkedRole` publishes four
+  errors and that is not among them, so the refusal cannot be a copy of `CreateRole`'s. A role
+  that exists but is not service-linked is `NoSuchEntity`/404 on the delete, since the
+  operation publishes no `InvalidInput` and there is indeed no *service-linked* role by that
+  name; the message says which, so a caller is not left hunting a role that plainly exists.
+  And `DeleteRole` now refuses a service-linked role with `UnmodifiableEntity` at HTTP **400**
+  — not the 409 its two `DeleteConflict` arms use — without which
+  `DeleteServiceLinkedRole` would be decorative, a caller being able to delete the role
+  through the ordinary path and never submit a task.
+
+  The deletion outcome is seedable through `POST`/`DELETE /v1/iam/slr-deletion-status`, keyed
+  by role name or `"*"`. The failure AWS documents is a linked service still using the role,
+  which is unreachable in an emulator that runs no linked service, so a `FAILED` status with
+  its `Reason` and `RoleUsageList` is the only way a consumer's poll loop's failure branch is
+  testable. The seed is read at submission rather than at each poll because the deletion is
+  conditional on it — only a `SUCCEEDED` task removes the role record, which is the observable
+  difference the two outcomes turn on.
+
+  **The `AWSServiceRoleFor…` name is substrate's convention, not AWS's rule.** AWS publishes
+  no derivation from a service principal to a role name and the User Guide warns against
+  inferring even the principal, so substrate carries a table of exactly the six principals a
+  bundled statement names inside a `Resource` — `AWSServiceRoleForElastiCache`,
+  `AWSServiceRoleForAmazonSSM` and the rest, spelled as AWS spells them — and derives the
+  name for everything else by stripping `.amazonaws.com` and title-casing each segment. The
+  table is deliberately not padded out with the other well-known names: a guessed row would
+  be indistinguishable from a cited one, whereas a derived name is documented as substrate's
+  own. It will differ from AWS where the real name is not mechanical, `spot.amazonaws.com`
+  being `AWSServiceRoleForEC2Spot` on AWS. `CustomSuffix` is joined with `_`, which is
+  observed behaviour — AWS says only that it "is combined with the service-provided prefix".
+
 - **An AMI reports its architecture, platform and root device** (#750). `DescribeImages`
   rendered six members — ID, name, description, state, owner and creation date — and nothing
   about the image itself, so a caller that branched on architecture to pick an instance type,

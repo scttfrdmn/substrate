@@ -149,6 +149,23 @@ func iamUserGroupsKey(accountID, userName string) string {
 	return iamStateKey("user_groups", accountID, userName)
 }
 
+// iamSLRDeletionTaskKey returns the state key for a service-linked-role deletion
+// task, whose ID is what GetServiceLinkedRoleDeletionStatus is given.
+//
+// The task ID contains "/" — AWS's format is
+// `task/aws-service-role/<principal>/<role>/<uuid>` — which is harmless here: nothing
+// prefix-scans within a task ID, and the account still delimits the scan that reaches
+// one account's tasks.
+func iamSLRDeletionTaskKey(accountID, taskID string) string {
+	return iamStateKey("slr_deletion_task", accountID, taskID)
+}
+
+// iamSLRDeletionTaskPrefix returns the List prefix reaching every service-linked-role
+// deletion task in one account.
+func iamSLRDeletionTaskPrefix(accountID string) string {
+	return iamStatePrefix("slr_deletion_task", accountID)
+}
+
 // iamGroupPoliciesKey returns the state key holding the managed policy ARNs
 // attached to one group.
 func iamGroupPoliciesKey(accountID, groupName string) string {

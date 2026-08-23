@@ -83,6 +83,51 @@ func IAMAuthorizeForTest(p *IAMPlugin, ctx *RequestContext, action, resource str
 	return p.authorize(context.Background(), ctx, action, resource)
 }
 
+// IAMAuthorizeWithForTest exercises IAMPlugin.authorizeWith, the door that publishes a
+// request-specific condition key alongside the caller's own (#747).
+func IAMAuthorizeWithForTest(p *IAMPlugin, ctx *RequestContext, action, resource string,
+	extra map[string]string) error {
+	return p.authorizeWith(context.Background(), ctx, action, resource, extra)
+}
+
+// IAMSLRRoleNameForTest wraps iamSLRRoleName for external tests.
+func IAMSLRRoleNameForTest(serviceName, customSuffix string) string {
+	return iamSLRRoleName(serviceName, customSuffix)
+}
+
+// IAMSLRDerivedRoleNameForTest wraps iamSLRDerivedRoleName for external tests, which is
+// what asserts that substrate's convention for an untabled principal stays stable.
+func IAMSLRDerivedRoleNameForTest(serviceName string) string {
+	return iamSLRDerivedRoleName(serviceName)
+}
+
+// IAMSLRPathForTest wraps iamSLRPath for external tests.
+func IAMSLRPathForTest(serviceName string) string { return iamSLRPath(serviceName) }
+
+// IAMSLRServiceFromRoleNameForTest wraps iamSLRServiceFromRoleName for external tests.
+func IAMSLRServiceFromRoleNameForTest(roleName string) string {
+	return iamSLRServiceFromRoleName(roleName)
+}
+
+// IAMSLRRoleFromDeletionTaskIDForTest wraps iamSLRRoleFromDeletionTaskID for external
+// tests.
+func IAMSLRRoleFromDeletionTaskIDForTest(taskID string) (string, string, bool) {
+	return iamSLRRoleFromDeletionTaskID(taskID)
+}
+
+// IAMAuthzRequestContextForTest wraps iamAuthzRequestContext for external tests, which
+// is what pins which operations publish iam:AWSServiceName.
+func IAMAuthzRequestContextForTest(req *AWSRequest) map[string]string {
+	ctx := make(map[string]string, 1)
+	iamAuthzRequestContext(ctx, req)
+	return ctx
+}
+
+// IAMSLRResourceARNForTest wraps iamAuthzSLRResourceARN for external tests.
+func IAMSLRResourceARNForTest(state StateManager, ctx *RequestContext, req *AWSRequest) string {
+	return iamAuthzSLRResourceARN(state, ctx, req)
+}
+
 // RecordEventAtTimeForTest records a pre-built Event into store, allowing
 // tests to inject events with arbitrary Timestamp values for time-series
 // coverage of forecast helpers.
