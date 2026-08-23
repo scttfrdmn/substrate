@@ -73,6 +73,13 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	case "ListRoles":
 		return p.listRoles(ctx, req)
 
+	case "CreateServiceLinkedRole":
+		return p.createServiceLinkedRole(ctx, req)
+	case "DeleteServiceLinkedRole":
+		return p.deleteServiceLinkedRole(ctx, req)
+	case "GetServiceLinkedRoleDeletionStatus":
+		return p.getServiceLinkedRoleDeletionStatus(ctx, req)
+
 	case "CreateGroup":
 		return p.createGroup(ctx, req)
 	case "GetGroup":
@@ -609,6 +616,21 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("The role with name %s cannot be found.", params.RoleName),
 			http.StatusNotFound), nil
+	}
+
+	// A service-linked role is deleted through DeleteServiceLinkedRole, not here. AWS
+	// publishes UnmodifiableEntity on this operation for exactly that — "The request was
+	// rejected because service-linked roles are protected AWS resources. Only the service
+	// that depends on the service-linked role can modify or delete the role on your
+	// behalf" — at HTTP 400, not the 409 the two DeleteConflict arms below use. Without
+	// this guard DeleteServiceLinkedRole would be decorative: a caller could delete the
+	// role through the ordinary path and never submit a deletion task (#747).
+	if iamIsSLRPath(role.Path) {
+		return iamErrorResponse("UnmodifiableEntity",
+			"Service linked roles are protected AWS resources. "+
+				"Only the service that depends on the service-linked role can modify or delete "+
+				"the role on your behalf.",
+			http.StatusBadRequest), nil
 	}
 
 	arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(ctx.AccountID, "role", params.RoleName))
@@ -1522,6 +1544,25 @@ const iamAccessDeniedCode = "AccessDenied"
 // authorize checks whether the caller (reqCtx.Principal) is allowed to perform
 // action on resource. A nil Principal always passes (bootstrap/test mode).
 func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, action, resource string) error {
+	return p.authorizeWith(goCtx, reqCtx, action, resource, nil)
+}
+
+// authorizeWith is [IAMPlugin.authorize] with extra condition keys published for this
+// one request.
+//
+// It exists because this door and [AuthController.CheckAccess] must agree. The generic
+// gate publishes `iam:AWSServiceName` for a service-linked-role request
+// ([iamAuthzRequestContext]); if this door did not, a policy whose StringLike on that
+// key is the whole point of the statement would be allowed there and refused here, and
+// the caller would see a 403 from a request the gate had already permitted — the
+// one-ARN-two-answers class of #411 and #714, arrived at through the condition context
+// rather than through the resource (#747).
+//
+// extra may be nil, which is the case for all 37 existing call sites: an IAM operation
+// with no service-specific request key of its own publishes only the caller's keys, as
+// before.
+func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
+	action, resource string, extra map[string]string) error {
 	if reqCtx.Principal == nil {
 		return nil
 	}
@@ -1628,8 +1669,14 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	// leaving aws:username out is what made `${aws:username}` in an iam: statement — the
 	// shape of "let a user manage their own credentials" — match nothing at this door
 	// while resolving at the other (#745).
-	condCtx := make(map[string]string, 2)
+	//
+	// A request-specific key reaches here through extra, which is how the two doors are
+	// kept in step for the keys the gate does publish (#747).
+	condCtx := make(map[string]string, 2+len(extra))
 	authzPrincipalContext(condCtx, reqCtx.Principal)
+	for k, v := range extra {
+		condCtx[k] = v
+	}
 
 	result := Evaluate(docs, EvaluationRequest{
 		Principal: reqCtx.Principal.ARN,

@@ -202,6 +202,13 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		requestMulti["aws:TagKeys"] = keys
 	}
 
+	// Service-specific keys that describe the request rather than any resource it names
+	// — currently iam:AWSServiceName (#747). Request-level for the same reason
+	// requestTags is: the value is one reading of one request, so it is read once and
+	// merged under every resource below.
+	requestKeys := make(map[string]string, 1)
+	iamAuthzRequestContext(requestKeys, req)
+
 	// The prefixes this service reports a resource's tags under, resolved once: it is a
 	// property of the service, not of any one resource.
 	tagPrefixes := authzResourceTagPrefixes(req.Service)
@@ -212,8 +219,11 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	// "every resource that is required" for the action (#660, #662).
 	for _, res := range resources {
 		condCtx := make(map[string]string,
-			len(requestTags)+len(res.Tags)*len(tagPrefixes)+len(res.Context))
+			len(requestTags)+len(requestKeys)+len(res.Tags)*len(tagPrefixes)+len(res.Context))
 		for k, v := range requestTags {
+			condCtx[k] = v
+		}
+		for k, v := range requestKeys {
 			condCtx[k] = v
 		}
 		// The tags travel with the ARN they belong to: one merged map across several
@@ -779,8 +789,14 @@ type authzResource struct {
 //     [ec2AuthzIDParams] — was decided against the first ID alone, leaving the
 //     rest of the batch unauthorized (#744).
 //
+// The IAM arm is a different shape of exception: it still names one resource, but the
+// one [buildResourceARN] answers for IAM is a flat `arn:aws:iam::<acct>:*` that a
+// statement scoped to a role path cannot match. [iamAuthzResources] answers the three
+// service-linked-role operations properly, and only those — the general per-operation
+// IAM resource is #770.
+//
 // Each exception is gated on len(multi) > 0, which is what keeps every other
-// operation of those two services on the single-resource path below.
+// operation of those services on the single-resource path below.
 //
 // The list is never empty. An empty list would skip the decision loop entirely
 // and allow the request, which is the one direction a privilege boundary must
@@ -799,6 +815,11 @@ func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSReque
 			return multi
 		}
 		if multi := ec2AuthzNamedResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+	}
+	if req.Service == "iam" {
+		if multi := iamAuthzResources(a.state, reqCtx, req); len(multi) > 0 {
 			return multi
 		}
 	}
@@ -824,6 +845,12 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 	case "s3":
 		return buildS3ARN(req)
 	case "iam":
+		// Every IAM operation but the three service-linked-role ones, which
+		// [iamAuthzResources] answers before this is reached. This is a flat `*` in the
+		// resource position, so a statement scoped to a user, a role or a path matches
+		// nothing here — which is why `${aws:username}` in IAMUserChangePassword's
+		// Resource still grants nothing even with #745's substitution in place. Deriving
+		// a per-operation resource for the rest of IAM is #770.
 		return "arn:aws:iam::" + acct + ":*"
 	case "ec2":
 		// No EC2 request that names a resource substrate can resolve reaches here. A

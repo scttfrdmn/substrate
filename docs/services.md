@@ -1135,8 +1135,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | CreateRole | Supports trust policy document |
 | GetRole | Reports `AssumeRolePolicyDocument`, re-marshalled from the stored document rather than returned verbatim, so an equivalent form can come back (a `{"AWS":"1234"}` principal reads back as `"1234"`) |
 | UpdateAssumeRolePolicy | Replaces the trust policy in place; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
-| DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles |
+| DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles. Refuses a service-linked role with `UnmodifiableEntity`/400 — note 400, not the 409 the conflicts use |
 | ListRoles | |
+| CreateServiceLinkedRole | Mints the role under `/aws-service-role/<principal>/` with a trust policy naming the linked service. A duplicate name is `InvalidInput`/400, not `EntityAlreadyExists` (see below) |
+| DeleteServiceLinkedRole | Returns a `DeletionTaskId`; an incomplete task for the same role is returned again rather than duplicated. A role that exists but is not service-linked is `NoSuchEntity`/404 |
+| GetServiceLinkedRoleDeletionStatus | Reports `SUCCEEDED` unless [seeded](#seeding-a-service-linked-role-deletion-outcome); a `FAILED` task also reports the `Reason` and `RoleUsageList` |
 | CreateGroup | |
 | GetGroup | Reports the group's actual members |
 | DeleteGroup | Refuses with `DeleteConflict`/409 while the group has members or policies |
@@ -1444,24 +1447,125 @@ What has **no** producer, and therefore never matches on the enforcement path:
   would make it stable per-name rather than per-entity; `aws:PrincipalTag/` needs the
   principal's tags read where the credential is resolved, which is the cheaper of the two
   because `TagUser`/`TagRole` already record them.
-- Six of the seven keys the bundled AWS managed policies condition on, each for its own
+- Five of the seven keys the bundled AWS managed policies condition on, each for its own
   reason rather than as one omission:
 
   | Key | Blocks | Why it has no producer |
   |---|---|---|
-  | `iam:AWSServiceName` | 11 | The most feasible of the six — it is a direct read of `CreateServiceLinkedRole`'s own parameter. Blocked only on that operation not existing |
   | `iam:PassedToService` | 8 | No `PassRole` operation exists anywhere in substrate, and the value comes from the *calling* API's service principal, which substrate has no analogue for |
   | `codestar-notifications:NotificationsForResource` | 6 | No CodeStar Notifications plugin |
   | `aws:CalledViaLast` | 2 | `RequestContext` has no call-chain notion, and there is no service-to-service internal path to record one from |
   | `devops-guru:ServiceNames` | 2 | No DevOps Guru plugin |
   | `elasticloadbalancing:CreateAction` | 1 | The ELB plugin has no tagging at all — no `AddTags`, and a load balancer's tags are never read or written — so the action the statement conditions does not exist |
 
-  The seventh, `ec2:ResourceTag/<key>`, now has one; see [both
-  prefixes](#ec2-reports-a-resource-s-tags-under-both-prefixes).
+  Two now have one: `ec2:ResourceTag/<key>` (see [both
+  prefixes](#ec2-reports-a-resource-s-tags-under-both-prefixes)) and `iam:AWSServiceName`
+  (see [service-linked roles](#service-linked-roles-and-iam-awsservicename)). Between them
+  they were the largest group in the table — 11 of the 32 condition blocks turned on
+  `iam:AWSServiceName` alone — and each needed the same two things rather than one: a
+  producer for the key, *and* a request resource specific enough for the statement's
+  `Resource` to match.
 
   Each remaining absence is a false deny in the safe direction: all 32 condition blocks in
   the bundled catalog sit on an `Allow`, so such a statement grants nothing rather than a
   `Deny` going inert.
+
+### Service-linked roles and `iam:AWSServiceName`
+
+The three service-linked-role operations exist principally as the producer for
+`iam:AWSServiceName` ([#747](https://github.com/scttfrdmn/substrate/issues/747)). Eleven of
+the 32 condition blocks in the bundled managed-policy catalog turn on that key — the largest
+single group — and before this release every one of them was unevaluatable, because the
+operation carrying the parameter answered `InvalidAction`/400.
+
+Making them evaluate needed two things, not one. The key is published at both authorization
+doors: the generic gate reads it off the request, and the handler passes it alongside the
+action, because a request that passes two gates must get one answer from both
+([#411](https://github.com/scttfrdmn/substrate/issues/411)). And the request **resource** had
+to become the role's own ARN — four of those statements scope `Resource` to
+`arn:aws:iam::*:role/aws-service-role/…` and two of the four to an exact ARN with no
+trailing `*`, none of which a flat `arn:aws:iam::<account>:*` can match. All three operations
+get a real ARN, including the status poll, whose `DeletionTaskId` embeds the service and the
+role so the resource resolves without reading state — which is what makes it still resolve
+after the role is gone, the normal case for the poll that finally reports `SUCCEEDED`.
+
+The key is published for `CreateServiceLinkedRole` and `DeleteServiceLinkedRole` and **not**
+for `GetServiceLinkedRoleDeletionStatus`, matching where the Service Authorization Reference
+lists it. Publishing a key AWS does not is the permissive direction: it would let a
+`StringEquals` succeed here and fail on AWS.
+
+**The role name is substrate's convention, not AWS's rule.** AWS publishes no derivation from
+a service principal to a role name, and the IAM User Guide warns against inferring even the
+principal — *"Do not try to guess the service principal, because it is case sensitive and the
+format can vary across AWS services."* So substrate carries a table of exactly the six
+principals a bundled statement names inside a `Resource`:
+
+| Service principal | Role name |
+|---|---|
+| `lambda.amazonaws.com` | `AWSServiceRoleForLambda` |
+| `elasticache.amazonaws.com` | `AWSServiceRoleForElastiCache` |
+| `events.amazonaws.com` | `AWSServiceRoleForCloudWatchEvents` |
+| `ssm.amazonaws.com` | `AWSServiceRoleForAmazonSSM` |
+| `cognito-idp.amazonaws.com` | `AWSServiceRoleForAmazonCognitoIdp` |
+| `email.cognito-idp.amazonaws.com` | `AWSServiceRoleForAmazonCognitoIdpEmail` |
+
+Every other principal gets a derived name: the `.amazonaws.com` suffix stripped and each
+remaining `.`/`-`/`_` segment title-cased, so `someservice.amazonaws.com` yields
+`AWSServiceRoleForSomeservice`. That will differ from AWS for a service whose real name is
+not mechanical — `spot.amazonaws.com` is `AWSServiceRoleForEC2Spot` on AWS, which no
+transformation of "spot" produces. The table is deliberately **not** padded out with the
+other well-known names: a guessed row would be indistinguishable from a cited one, whereas a
+derived name is documented as substrate's own. One bundled statement scopes a `Resource`
+around an untabled principal — AWSBatchFullAccess pairs `batch.amazonaws.com` with
+`arn:aws:iam::*:role/*Batch*` — and the derived `AWSServiceRoleForBatch` satisfies it,
+because that pattern is a contains-glob rather than a path.
+
+`CustomSuffix` is joined to the name with `_`, which is observed behaviour: AWS says only
+that the suffix "is combined with the service-provided prefix to form the complete role
+name". A combined name over 64 characters is refused rather than stored, so
+`GetRole` and `DeleteServiceLinkedRole` can always name what the create made.
+
+**A duplicate name is `InvalidInput`/400.** `CreateServiceLinkedRole` publishes exactly four
+errors — `InvalidInput` 400, `LimitExceeded` 409, `NoSuchEntity` 404, `ServiceFailure` 500 —
+and notably not `EntityAlreadyExists`, which is what `CreateRole` answers. So the refusal
+cannot be a copy of `CreateRole`'s; `InvalidInput` is substrate's reading of AWS's "the
+request fails with a duplicate role name error" against the four codes the operation actually
+publishes.
+
+`DeleteRole` refuses a service-linked role with `UnmodifiableEntity` at HTTP **400**. Without
+that guard `DeleteServiceLinkedRole` would be decorative — a caller could delete the role
+through the ordinary path and never submit a task.
+
+#### Seeding a service-linked-role deletion outcome
+
+Deletion is asynchronous on AWS, and the failure it documents — *"If you submit a deletion
+request for a service-linked role whose linked service is still accessing a resource, then
+the deletion task fails"* — is unreachable in an emulator that runs no linked service. So
+substrate reports `SUCCEEDED` by default and the outcome is seedable, which is the only way a
+consumer's poll loop's `FAILED` branch is testable without wall-clock time:
+
+```bash
+curl -X POST http://localhost:4566/v1/iam/slr-deletion-status \
+  -d '{"roleName":"AWSServiceRoleForLambda","status":"FAILED",
+       "reason":"Cannot delete the role because it is still in use.",
+       "roleUsageList":[{"Region":"us-east-1",
+         "Resources":["arn:aws:lambda:us-east-1:123456789012:function:live"]}]}'
+
+curl -X DELETE 'http://localhost:4566/v1/iam/slr-deletion-status?roleName=AWSServiceRoleForLambda'
+```
+
+`roleName` defaults to `"*"`, which applies to every role; an exact name wins over the
+wildcard. `status` must be one of AWS's four documented values, so a typo is refused where it
+is written rather than reported later as a status no SDK models. Omitting `roleName` on the
+`DELETE` clears every seed.
+
+The seed is read at **submission**, not at each poll, because the deletion is conditional on
+it: only a `SUCCEEDED` task removes the role record. That is the observable difference the
+two outcomes turn on — a caller who polls to `FAILED` and then reads the role must still find
+it. A task held at `IN_PROGRESS` or `NOT_STARTED` also makes a resubmission return the same
+`DeletionTaskId`, per AWS's "if the deletion task is not yet complete, the `DeletionTaskId` of
+the existing task is returned". A `FAILED` task does not block a resubmission, or a caller who
+removed the blocking resources could never retry.
 
 ### Policy variables resolve from the request context
 
