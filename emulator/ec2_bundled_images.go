@@ -30,7 +30,59 @@ type bundledImage struct {
 
 	// Description is the human-readable description AWS renders for the image family.
 	Description string
+
+	// Architecture is the AMI's architecture, read from the parameter path's own
+	// x86_64/arm64/amd64 suffix rather than guessed: the path is the publisher's
+	// statement of what the image is.
+	Architecture string
+
+	// Platform is "windows" for the Windows entry and empty for every other one, which
+	// is the distinction AWS's platform member draws. PlatformDetails and
+	// UsageOperation are the billing pair from AWS's "usage operation by platform"
+	// table: Windows is "Windows" / "RunInstances:0002" and everything else here is
+	// "Linux/UNIX" / "RunInstances".
+	//
+	// The Ubuntu entries are plain Ubuntu Server rather than Ubuntu Pro, so they bill as
+	// Linux/UNIX; the Pro row's "RunInstances:0g00" would name a subscription these
+	// parameters do not resolve to.
+	Platform        string
+	PlatformDetails string
+	UsageOperation  string
+
+	// RootDeviceName is the device name of the image's root volume.
+	//
+	// AWS's device naming reference gives an HVM AMI's root device as "Differs by AMI —
+	// /dev/sda1 or /dev/xvda" and publishes no per-AMI table, so the assignment here is
+	// substrate's reading of each publisher's convention: Amazon Linux uses /dev/xvda,
+	// Windows Server and Canonical's Ubuntu images use /dev/sda1. Both spellings are
+	// AWS's own (see ec2_block_devices.go's constants) and a launch naming either still
+	// configures the root volume, so a caller that branches on this member gets a real
+	// answer while a caller that ignores it is unaffected.
+	RootDeviceName string
+
+	// OwnerAlias is the AWS-maintained owner alias the image is published under.
+	//
+	// "amazon" for the AWS-published parameters, and deliberately empty for the two
+	// Canonical Ubuntu entries: the aliases are "defined in an Amazon-maintained list"
+	// of which Canonical is not a member, so aliasing them would be an observation
+	// nothing backs (#750).
+	OwnerAlias string
 }
+
+// Values every bundled image shares, named rather than repeated ten times.
+//
+// Each is invariant across the catalog for a reason a reader can check rather than by
+// coincidence: every bundled parameter names an EBS-backed HVM machine image (AWS
+// publishes no paravirtual public parameter, and instance-store AMIs are registered from
+// an S3 manifest, which no parameter resolves to), and AWS documents xen as the only
+// supported hypervisor value. A future entry that breaks one of these belongs on
+// [bundledImage] as a field, not here.
+const (
+	bundledImageRootDeviceType     = "ebs"
+	bundledImageVirtualizationType = "hvm"
+	bundledImageHypervisor         = "xen"
+	bundledImageType               = "machine"
+)
 
 // bundledImages is the catalog, with every parameter name taken verbatim from AWS's own
 // documentation:
@@ -52,49 +104,93 @@ type bundledImage struct {
 // to an ID nothing backs.
 var bundledImages = []bundledImage{
 	{
-		Parameter:   "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
-		Name:        "al2023-ami-kernel-default-x86_64",
-		Description: "Amazon Linux 2023 AMI, kernel default, x86_64",
+		Parameter:       "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+		Name:            "al2023-ami-kernel-default-x86_64",
+		Description:     "Amazon Linux 2023 AMI, kernel default, x86_64",
+		Architecture:    "x86_64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
-		Name:        "al2023-ami-kernel-default-arm64",
-		Description: "Amazon Linux 2023 AMI, kernel default, arm64",
+		Parameter:       "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+		Name:            "al2023-ami-kernel-default-arm64",
+		Description:     "Amazon Linux 2023 AMI, kernel default, arm64",
+		Architecture:    "arm64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64",
-		Name:        "al2023-ami-minimal-kernel-default-x86_64",
-		Description: "Amazon Linux 2023 minimal AMI, kernel default, x86_64",
+		Parameter:       "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64",
+		Name:            "al2023-ami-minimal-kernel-default-x86_64",
+		Description:     "Amazon Linux 2023 minimal AMI, kernel default, x86_64",
+		Architecture:    "x86_64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64",
-		Name:        "al2023-ami-minimal-kernel-default-arm64",
-		Description: "Amazon Linux 2023 minimal AMI, kernel default, arm64",
+		Parameter:       "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64",
+		Name:            "al2023-ami-minimal-kernel-default-arm64",
+		Description:     "Amazon Linux 2023 minimal AMI, kernel default, arm64",
+		Architecture:    "arm64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base",
-		Name:        "Windows_Server-2022-English-Full-Base",
-		Description: "Microsoft Windows Server 2022 Full Locale English AMI",
+		Parameter:       "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base",
+		Name:            "Windows_Server-2022-English-Full-Base",
+		Description:     "Microsoft Windows Server 2022 Full Locale English AMI",
+		Architecture:    "x86_64",
+		Platform:        "windows",
+		PlatformDetails: "Windows",
+		UsageOperation:  "RunInstances:0002",
+		RootDeviceName:  ec2RootDeviceSDA1,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id",
-		Name:        "amazon-linux-2023-ecs-optimized",
-		Description: "Amazon ECS-optimized Amazon Linux 2023 AMI",
+		Parameter:       "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id",
+		Name:            "amazon-linux-2023-ecs-optimized",
+		Description:     "Amazon ECS-optimized Amazon Linux 2023 AMI",
+		Architecture:    "x86_64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id",
-		Name:        "amazon-linux-2-ecs-optimized",
-		Description: "Amazon ECS-optimized Amazon Linux 2 AMI",
+		Parameter:       "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id",
+		Name:            "amazon-linux-2-ecs-optimized",
+		Description:     "Amazon ECS-optimized Amazon Linux 2 AMI",
+		Architecture:    "x86_64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
 	},
 	{
-		Parameter:   "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
-		Name:        "ubuntu-noble-24.04-amd64-server",
-		Description: "Canonical Ubuntu Server 24.04 LTS, amd64",
+		Parameter:       "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
+		Name:            "ubuntu-noble-24.04-amd64-server",
+		Description:     "Canonical Ubuntu Server 24.04 LTS, amd64",
+		Architecture:    "x86_64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceSDA1,
 	},
 	{
-		Parameter:   "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id",
-		Name:        "ubuntu-jammy-22.04-amd64-server",
-		Description: "Canonical Ubuntu Server 22.04 LTS, amd64",
+		Parameter:       "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id",
+		Name:            "ubuntu-jammy-22.04-amd64-server",
+		Description:     "Canonical Ubuntu Server 22.04 LTS, amd64",
+		Architecture:    "x86_64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceSDA1,
 	},
 }
 
@@ -156,15 +252,33 @@ func (b bundledImage) idIn(region string) string {
 // AccountID is deliberately empty. A public AWS-owned AMI is not owned by the caller, and
 // substrate holds no account for the "amazon" owner alias — so attributing it to the
 // requesting account would be a claim nothing backs and would make an Owners=self
-// DescribeImages match an image the caller does not own. Nothing renders the member for a
-// bundled image yet; DescribeImages lists state, which holds no record for these.
+// DescribeImages match an image the caller does not own. DescribeImages renders
+// imageOwnerId omitted rather than empty for exactly that reason (#750); through v0.108.0
+// it rendered an empty element, because the member had no omitempty and this comment
+// claimed nothing rendered it at all.
+//
+// The invariants come from the consts above and the varying members from the descriptor,
+// so a caller reading a bundled AMI and a caller reading a registered one read the same
+// shape — [EC2Plugin.describeImages] renders both through one function for the same reason.
 func (b bundledImage) image(region string) EC2Image {
 	return EC2Image{
-		ImageID:     b.idIn(region),
-		Name:        b.Name,
-		Description: b.Description,
-		State:       "available",
-		Region:      region,
+		ImageID:                b.idIn(region),
+		Name:                   b.Name,
+		Description:            b.Description,
+		State:                  "available",
+		Region:                 region,
+		Architecture:           b.Architecture,
+		Platform:               b.Platform,
+		PlatformDetails:        b.PlatformDetails,
+		UsageOperation:         b.UsageOperation,
+		RootDeviceName:         b.RootDeviceName,
+		RootDeviceType:         bundledImageRootDeviceType,
+		VirtualizationType:     bundledImageVirtualizationType,
+		Hypervisor:             bundledImageHypervisor,
+		ImageType:              bundledImageType,
+		OwnerAlias:             b.OwnerAlias,
+		Public:                 true,
+		PublicSsmParameterName: b.Parameter,
 	}
 }
 

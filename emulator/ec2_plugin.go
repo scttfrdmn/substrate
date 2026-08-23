@@ -4054,6 +4054,27 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		Tags:         tags,
 		AccountID:    reqCtx.AccountID,
 		Region:       reqCtx.Region,
+		Hypervisor:   bundledImageHypervisor,
+		ImageType:    bundledImageType,
+	}
+	// An AMI created from an instance runs the same operating system on the same
+	// architecture as the AMI that instance was launched from, so those members are
+	// inherited rather than defaulted (#750). Without this, imaging a bundled arm64 AL2023
+	// instance would produce an AMI reporting no architecture at all while its parent
+	// reported arm64 — two of substrate's own answers disagreeing about one lineage.
+	//
+	// Only the members the operating system decides are inherited. OwnerAlias,
+	// PublicSsmParameterName and Public are not: the new AMI belongs to the caller's
+	// account, no public parameter names it, and nothing has granted it public launch
+	// permissions. RootDeviceType is "ebs" because this path always materializes a snapshot.
+	img.RootDeviceType = "ebs"
+	if parent, ok := p.ec2InstanceSourceImage(reqCtx, instanceID); ok {
+		img.Architecture = parent.Architecture
+		img.Platform = parent.Platform
+		img.PlatformDetails = parent.PlatformDetails
+		img.UsageOperation = parent.UsageOperation
+		img.VirtualizationType = parent.VirtualizationType
+		img.RootDeviceName = parent.RootDeviceName
 	}
 	data, err := json.Marshal(img)
 	if err != nil {
@@ -4135,6 +4156,26 @@ func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
+	// AWS's documented defaults for this operation — "Default: For Amazon EBS-backed AMIs,
+	// i386" and "Default: paravirtual" — and not the x86_64/hvm a modern caller expects.
+	// They look wrong, and substrate uses them anyway: a caller that omits the parameter
+	// here gets the same answer AWS gives it, and a caller that wants x86_64 has to say so
+	// in both places. A friendlier default is exactly the divergence that makes a test
+	// passing here mean nothing there.
+	//
+	// Neither value is checked against AWS's enum. That refusal is real on AWS and is
+	// deliberately not added here, for the reason this function's doc comment already gives
+	// about [ec2CheckBlockDeviceMappings]: a new refusal on a published path would arrive
+	// unannounced, and it is not what #750 asked for.
+	architecture := req.Params["Architecture"]
+	if architecture == "" {
+		architecture = "i386"
+	}
+	virtualizationType := req.Params["VirtualizationType"]
+	if virtualizationType == "" {
+		virtualizationType = "paravirtual"
+	}
+
 	imageID := generateImageID()
 	img := EC2Image{
 		ImageID:             imageID,
@@ -4147,6 +4188,20 @@ func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		Tags:                tags,
 		AccountID:           reqCtx.AccountID,
 		Region:              reqCtx.Region,
+
+		Architecture:       architecture,
+		VirtualizationType: virtualizationType,
+		RootDeviceName:     req.Params["RootDeviceName"],
+		RootDeviceType:     ec2RegisteredRootDeviceType(req.Params),
+		Hypervisor:         bundledImageHypervisor,
+		ImageType:          bundledImageType,
+
+		// Platform, PlatformDetails and UsageOperation stay empty. RegisterImage takes no
+		// Platform parameter — AWS derives the member from the image itself — and the
+		// other two are billing codes derived from product codes substrate does not
+		// model, so a value would be a claim about a bill nothing backs. Public stays
+		// false: a newly registered AMI has no public launch permissions, and substrate
+		// models no ModifyImageAttribute that would grant them.
 	}
 	data, err := json.Marshal(img)
 	if err != nil {
@@ -4165,6 +4220,23 @@ func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
 		ImageID: imageID,
 	})
+}
+
+// ec2RegisteredRootDeviceType reports whether a RegisterImage request describes an
+// EBS-backed AMI or an instance-store-backed one.
+//
+// AWS draws the line at ImageLocation: it is "the full path to your AMI manifest in Amazon
+// S3 storage", which is the instance-store registration form, while the EBS form sends
+// RootDeviceName plus a block device mapping instead. So the presence of the parameter is
+// the whole test, and it is a signal the caller sent rather than one substrate inferred.
+//
+// A request naming neither is answered "ebs", which is the form AWS's own RegisterImage
+// examples use and the one every mapping substrate stores describes.
+func ec2RegisteredRootDeviceType(params map[string]string) string {
+	if params["ImageLocation"] != "" {
+		return "instance-store"
+	}
+	return "ebs"
 }
 
 // describeImages lists the AMIs the account owns in the request's Region, narrowed by an
@@ -4224,15 +4296,42 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		NoDevice    *string         `xml:"noDevice,omitempty"`
 		EBS         *ebsBlockDevice `xml:"ebs,omitempty"`
 	}
+	// The member names are AWS's XML element names from API_Image.html, which are not the
+	// SDK-facing names: isPublic, not public, and imageOwnerId, not ownerId. AWS's own
+	// DescribeImages page disagrees with itself — its Example 1 response uses <ownerId> and
+	// <public> while Examples 2 and 3 and the Image type page use <imageOwnerId> and
+	// <isPublic>. Substrate follows the type page and the two examples that agree with it,
+	// which is also the spelling it already used for imageOwnerId (#750).
+	//
+	// imageOwnerId is omitempty as of #750. A bundled public AMI has no owner substrate can
+	// name — see [bundledImage.image] — and rendering an empty element claimed an account ID
+	// of "" rather than reporting no owner.
+	//
+	// platform is omitempty because AWS documents it as "set to windows for Windows AMIs;
+	// otherwise, it is blank", and an omitted element is what a caller branching on it can
+	// act on. isPublic is not omitempty-able as a bool without losing the false case, so it
+	// is rendered always, which is what AWS's examples do.
 	type imageItem struct {
-		ImageID             string            `xml:"imageId"`
-		Name                string            `xml:"name"`
-		Description         string            `xml:"description,omitempty"`
-		State               string            `xml:"imageState"`
-		OwnerID             string            `xml:"imageOwnerId"`
-		CreationDate        string            `xml:"creationDate,omitempty"`
-		BlockDeviceMappings []blockDeviceItem `xml:"blockDeviceMapping>item,omitempty"`
-		Tags                []ec2TagItem      `xml:"tagSet>item"`
+		ImageID                string            `xml:"imageId"`
+		Name                   string            `xml:"name"`
+		Description            string            `xml:"description,omitempty"`
+		State                  string            `xml:"imageState"`
+		OwnerID                string            `xml:"imageOwnerId,omitempty"`
+		OwnerAlias             string            `xml:"imageOwnerAlias,omitempty"`
+		Public                 bool              `xml:"isPublic"`
+		CreationDate           string            `xml:"creationDate,omitempty"`
+		Architecture           string            `xml:"architecture,omitempty"`
+		Platform               string            `xml:"platform,omitempty"`
+		PlatformDetails        string            `xml:"platformDetails,omitempty"`
+		UsageOperation         string            `xml:"usageOperation,omitempty"`
+		ImageType              string            `xml:"imageType,omitempty"`
+		RootDeviceType         string            `xml:"rootDeviceType,omitempty"`
+		RootDeviceName         string            `xml:"rootDeviceName,omitempty"`
+		VirtualizationType     string            `xml:"virtualizationType,omitempty"`
+		Hypervisor             string            `xml:"hypervisor,omitempty"`
+		PublicSsmParameterName string            `xml:"publicSsmParameterName,omitempty"`
+		BlockDeviceMappings    []blockDeviceItem `xml:"blockDeviceMapping>item,omitempty"`
+		Tags                   []ec2TagItem      `xml:"tagSet>item"`
 	}
 	type response struct {
 		XMLName xml.Name    `xml:"DescribeImagesResponse"`
@@ -4256,12 +4355,24 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	// a registered one.
 	renderImage := func(img EC2Image) imageItem {
 		item := imageItem{
-			ImageID:      img.ImageID,
-			Name:         img.Name,
-			Description:  img.Description,
-			State:        img.State,
-			OwnerID:      img.AccountID,
-			CreationDate: img.CreationDate,
+			ImageID:                img.ImageID,
+			Name:                   img.Name,
+			Description:            img.Description,
+			State:                  img.State,
+			OwnerID:                img.AccountID,
+			OwnerAlias:             img.OwnerAlias,
+			Public:                 img.Public,
+			CreationDate:           img.CreationDate,
+			Architecture:           img.Architecture,
+			Platform:               img.Platform,
+			PlatformDetails:        img.PlatformDetails,
+			UsageOperation:         img.UsageOperation,
+			ImageType:              img.ImageType,
+			RootDeviceType:         img.RootDeviceType,
+			RootDeviceName:         img.RootDeviceName,
+			VirtualizationType:     img.VirtualizationType,
+			Hypervisor:             img.Hypervisor,
+			PublicSsmParameterName: img.PublicSsmParameterName,
 		}
 		// A RegisterImage AMI renders the mapping the caller sent, entry for entry, in
 		// request order (#711). ec2ResolveSnapshotSizes fills in a size the mapping left to
@@ -4291,8 +4402,11 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if len(img.BlockDeviceMappings) == 0 && img.SnapshotID != "" {
 			// Every CreateImage-minted AMI, and any AMI registered before #711, has a root
 			// snapshot and no recorded mapping — so substrate fabricates the root device
-			// entry for it. /dev/sda1 rather than a stored name because that path has none
-			// to store: it images an instance, and EC2Image records no root device.
+			// entry for it. The AMI's own RootDeviceName names the device when there is one
+			// to read: as of #750 a CreateImage AMI inherits its parent's, so an image made
+			// from a bundled Amazon Linux instance reports /dev/xvda in both the mapping and
+			// the rootDeviceName member rather than contradicting itself. /dev/sda1 remains
+			// the answer when the AMI records none, which is every AMI written before #750.
 			//
 			// An AMI whose snapshot record is gone falls back to the default rather than
 			// reporting 0, which is what a caller sizing a volume off this member can act
@@ -4304,8 +4418,12 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			if snap, found := resolveSnapshot(img.SnapshotID); found && snap.VolumeSize > 0 {
 				size = snap.VolumeSize
 			}
+			rootDevice := img.RootDeviceName
+			if rootDevice == "" {
+				rootDevice = ec2RootDeviceSDA1
+			}
 			item.BlockDeviceMappings = []blockDeviceItem{{
-				DeviceName: ec2RootDeviceSDA1,
+				DeviceName: rootDevice,
 				EBS:        &ebsBlockDevice{SnapshotID: img.SnapshotID, VolumeSize: size},
 			}}
 		}
@@ -4410,6 +4528,46 @@ func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
 			}
 		case name == "image-id":
 			matched = ec2FilterAccepts(vals, img.ImageID)
+
+		// The scalar members, each compared against the value the response renders, so a
+		// filter and the answer it narrows cannot disagree (#750).
+		//
+		// is-public is spelled as the boolean AWS documents rather than as Go's %t by
+		// accident: the filter's values are "true" and "false" and nothing else, so
+		// formatting it any other way would silently answer no.
+		//
+		// owner-id reads AccountID, which is empty for a bundled public AMI — so
+		// owner-id=<the caller's account> excludes the bundled images, which is the same
+		// distinction imageOwnerId's omitted element reports. A caller wanting those asks
+		// for owner-alias=amazon.
+		case name == "architecture":
+			matched = ec2FilterAccepts(vals, img.Architecture)
+		case name == "description":
+			matched = ec2FilterAccepts(vals, img.Description)
+		case name == "hypervisor":
+			matched = ec2FilterAccepts(vals, img.Hypervisor)
+		case name == "image-type":
+			matched = ec2FilterAccepts(vals, img.ImageType)
+		case name == "is-public":
+			matched = ec2FilterAccepts(vals, strconv.FormatBool(img.Public))
+		case name == "name":
+			matched = ec2FilterAccepts(vals, img.Name)
+		case name == "owner-alias":
+			matched = ec2FilterAccepts(vals, img.OwnerAlias)
+		case name == "owner-id":
+			matched = ec2FilterAccepts(vals, img.AccountID)
+		case name == "platform":
+			matched = ec2FilterAccepts(vals, img.Platform)
+		case name == "public-ssm-parameter-name":
+			matched = ec2FilterAccepts(vals, img.PublicSsmParameterName)
+		case name == "root-device-name":
+			matched = ec2FilterAccepts(vals, img.RootDeviceName)
+		case name == "root-device-type":
+			matched = ec2FilterAccepts(vals, img.RootDeviceType)
+		case name == "state":
+			matched = ec2FilterAccepts(vals, img.State)
+		case name == "virtualization-type":
+			matched = ec2FilterAccepts(vals, img.VirtualizationType)
 		default:
 			continue
 		}
