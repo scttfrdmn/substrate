@@ -194,30 +194,24 @@ configured address will have their requests emulated and recorded.`,
 			// nil unless credentials.enabled is set, which is the shipped default —
 			// so an existing deployment resolves every caller to account.default and
 			// checks no signature, exactly as before (#736).
-			credRegistry := cfg.Credentials.ToCredentialRegistry(cfg.Account.Default)
+			credRegistry, verifySignatures := cfg.Credentials.ToServerCredentials(cfg.Account.Default)
 			if credRegistry != nil {
 				logger.Info("credential registry enabled",
 					"entries", len(cfg.Credentials.Entries),
-					"verify_signatures", cfg.Credentials.VerifySignatures)
+					"verify_signatures", verifySignatures)
 			}
 
 			srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
 				substrate.ServerOptions{
-					Quota:       quotaCtrl,
-					Consistency: consistencyCtrl,
-					Costs:       costCtrl,
-					Auth:        authCtrl,
-					Metrics:     metricsCollector,
-					Tracer:      tracer,
-					Fault:       faultCtrl,
-					Credentials: credRegistry,
-					// Gated on the registry rather than passed straight through:
-					// credentials.verify_signatures defaults to true so that
-					// `enabled: true` alone enforces signatures, so a bare copy would
-					// hand NewServer verify-without-registry on every default startup
-					// and log its downgrade warning at a consumer who configured
-					// nothing.
-					VerifySignatures: credRegistry != nil && cfg.Credentials.VerifySignatures,
+					Quota:            quotaCtrl,
+					Consistency:      consistencyCtrl,
+					Costs:            costCtrl,
+					Auth:             authCtrl,
+					Metrics:          metricsCollector,
+					Tracer:           tracer,
+					Fault:            faultCtrl,
+					Credentials:      credRegistry,
+					VerifySignatures: verifySignatures,
 				})
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -246,8 +240,7 @@ configured address will have their requests emulated and recorded.`,
 					// added to, so an appended entry is reachable without a restart.
 					// Whether the section is on at all is not (#736).
 					newCfg.Credentials.RegisterInto(credRegistry, newCfg.Account.Default)
-					if newCfg.Credentials.Enabled != cfg.Credentials.Enabled ||
-						newCfg.Credentials.VerifySignatures != cfg.Credentials.VerifySignatures {
+					if newCfg.Credentials.StartupOnlyDiffers(cfg.Credentials) {
 						logger.Warn("credentials.enabled and credentials.verify_signatures are read at startup; restart to change them",
 							"enabled", cfg.Credentials.Enabled,
 							"verify_signatures", cfg.Credentials.VerifySignatures)

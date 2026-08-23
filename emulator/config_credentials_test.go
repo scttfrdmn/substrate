@@ -201,6 +201,82 @@ func TestCredentialsCfg_RegisterInto(t *testing.T) {
 		"the server may hold no registry at all")
 }
 
+func TestCredentialsCfg_ToServerCredentials(t *testing.T) {
+	// The whole of what the shipped binary has to decide, so the four
+	// combinations are decided here rather than in an untestable RunE closure.
+	tests := []struct {
+		name          string
+		cfg           emulator.CredentialsCfg
+		wantRegistry  bool
+		wantVerifying bool
+	}{
+		{
+			name:          "the shipped default",
+			cfg:           emulator.CredentialsCfg{Enabled: false, VerifySignatures: true},
+			wantRegistry:  false,
+			wantVerifying: false, // never verify-without-registry, whatever the flag says
+		},
+		{
+			name:          "off in both",
+			cfg:           emulator.CredentialsCfg{Enabled: false, VerifySignatures: false},
+			wantRegistry:  false,
+			wantVerifying: false,
+		},
+		{
+			name:          "enabled means what the section has always documented",
+			cfg:           emulator.CredentialsCfg{Enabled: true, VerifySignatures: true},
+			wantRegistry:  true,
+			wantVerifying: true,
+		},
+		{
+			name:          "attribution without authentication",
+			cfg:           emulator.CredentialsCfg{Enabled: true, VerifySignatures: false},
+			wantRegistry:  true,
+			wantVerifying: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg, verifying := tt.cfg.ToServerCredentials("111122223333")
+			assert.Equal(t, tt.wantRegistry, reg != nil)
+			assert.Equal(t, tt.wantVerifying, verifying)
+		})
+	}
+}
+
+func TestCredentialsCfg_StartupOnlyDiffers(t *testing.T) {
+	on := emulator.CredentialsCfg{Enabled: true, VerifySignatures: true}
+
+	tests := []struct {
+		name  string
+		newer emulator.CredentialsCfg
+		want  bool
+	}{
+		{
+			name:  "an appended entry is applied by a reload",
+			newer: emulator.CredentialsCfg{Enabled: true, VerifySignatures: true, Entries: []emulator.CredentialEntryCfg{{AccessKeyID: "AKIARELOADED00000001"}}},
+			want:  false,
+		},
+		{
+			name:  "turning the section off is not",
+			newer: emulator.CredentialsCfg{Enabled: false, VerifySignatures: true},
+			want:  true,
+		},
+		{
+			name:  "nor is turning verification off",
+			newer: emulator.CredentialsCfg{Enabled: true, VerifySignatures: false},
+			want:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.newer.StartupOnlyDiffers(on))
+		})
+	}
+}
+
 func TestValidate_CredentialsEntries(t *testing.T) {
 	tests := []struct {
 		name    string

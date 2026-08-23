@@ -353,6 +353,33 @@ func (c CredentialsCfg) ToCredentialRegistry(defaultAccount string) *CredentialR
 	return reg
 }
 
+// StartupOnlyDiffers reports whether the two settings a reload cannot apply
+// differ between c and other.
+//
+// [CredentialsCfg.RegisterInto] can add an entry to the registry a running server
+// holds, but nothing can hand it a registry it was not built with or change
+// whether it verifies. A caller that reloads configuration uses this to say so
+// rather than appearing to have applied the change.
+func (c CredentialsCfg) StartupOnlyDiffers(other CredentialsCfg) bool {
+	return c.Enabled != other.Enabled || c.VerifySignatures != other.VerifySignatures
+}
+
+// ToServerCredentials returns what [ServerOptions.Credentials] and
+// [ServerOptions.VerifySignatures] should be set to for this section — the whole
+// of what a server has to do to honor it.
+//
+// The second return is gated on the registry rather than being VerifySignatures
+// copied out: that field defaults to true so `enabled: true` alone enforces
+// signatures, so passing it through unconditionally would hand [NewServer]
+// verify-without-registry on every default startup and log its downgrade warning
+// at a consumer who configured nothing.
+//
+// defaultAccount fills in an entry that names none; pass Account.Default.
+func (c CredentialsCfg) ToServerCredentials(defaultAccount string) (*CredentialRegistry, bool) {
+	reg := c.ToCredentialRegistry(defaultAccount)
+	return reg, reg != nil && c.VerifySignatures
+}
+
 // RegisterInto adds this section's entries to an existing registry, replacing any
 // entry with the same access key ID. It exists for SIGHUP reload, where the
 // registry the server holds cannot be swapped but can be added to — so a
