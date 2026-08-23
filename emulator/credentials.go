@@ -111,12 +111,14 @@ func buildCallerARN(accountID, accessKeyID string) string {
 // which matches no user_policies key, so a user with a perfectly good inline
 // policy evaluated as though it had none.
 //
-// Keeping this independent of ServerOptions.Credentials is deliberate: the
-// registry also gates SigV4 verification, and an access key it does not hold is
-// rejected with InvalidClientTokenId. Wiring a registry in order to identify
-// callers would therefore 403 every credential substrate documents
-// (AKIAIOSFODNN7EXAMPLE, test/test). Reading state instead costs one Get on a
-// request that carries an Authorization header and refuses nothing.
+// Keeping this independent of ServerOptions.Credentials is deliberate. It was
+// once necessary as well: the registry also gated SigV4 verification, so wiring
+// one in order to identify callers would have 403'd every credential substrate
+// documents (AKIAIOSFODNN7EXAMPLE, test/test). That coupling is gone — see
+// [ServerOptions.VerifySignatures] and #630 — but the separation stands on its
+// own, because a registry entry answers "which account" and only IAM's records
+// answer "which principal". Reading state costs one Get on a request that
+// carries an Authorization header and refuses nothing.
 //
 // A nil principal means "no IAM identity", which [AuthController.CheckAccess]
 // treats as unenforced rather than denied — enforcement is opt-in by creating

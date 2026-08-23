@@ -93,6 +93,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mechanism. The triple is therefore **observed behavior rather than the API model**, and
   `docs/services.md` records it as such.
 
+- **Signature verification is its own server option** (#630). `ServerOptions.Credentials`
+  did two unrelated jobs and there was no way to ask for one without the other: non-nil
+  meant both *"resolve accounts from this table"* and *"enforce SigV4 on every request"*.
+  So a test that needed to call as a second account had to accept that every request in it
+  be signed with a pre-loaded key — including substrate's own documented credentials,
+  which are in no registry and answer `InvalidClientTokenId` 403. The new
+  `ServerOptions.VerifySignatures` makes all four combinations expressible, and the one
+  that did not exist before — a registry with verification off — is what every test server
+  now uses.
+
+  One consequence had to be decided rather than discovered, because it is what made the
+  wiring repo-wide rather than local. A registry key with no IAM entity behind it was
+  named as a principal derived from the access key; doing that for a server that wires a
+  registry only to attribute accounts would flip `GetCallerIdentity`'s ARN off `:root` and
+  turn `GetUser`/`CreateAccessKey`/`ListAccessKeys` from a validation error into a
+  `NoSuchEntity` lookup, everywhere at once. **That fallback belongs to verification**, not
+  to account resolution: a verified key has proven the caller holds the secret, so naming
+  it is a statement about someone substrate authenticated, while a key merely present in a
+  table has proven nothing. With that split, wiring a registry into every test server
+  changes no existing test's behavior — which was the issue's own criterion and is
+  otherwise unreachable.
+
+  `StartTestServer` now takes options: `WithAccounts` names further accounts and
+  `WithSignatureVerification` asks for enforcement. `TestServer.RegisterAccount` works on
+  any test server rather than only on one started through the opt-in door, and
+  `StartTestServerWithAccounts` is a thin wrapper that keeps the stricter
+  verification-on contract its callers were written against.
+
+  `VerifySignatures` with a nil registry has no key material to check against, so
+  `NewServer` logs a warning and downgrades to verification-off. The issue asked for a
+  construction-time refusal; `NewServer` returns `*Server` with no error, and changing that
+  signature reaches ~42 test files plus the CLI for a mistake a warning describes just as
+  precisely, while a panic in an emulator library would be worse than either. The
+  acceptance criterion is recorded as rewritten rather than met.
+
+  **A consumer who set `ServerOptions.Credentials` in-process to get signature
+  enforcement must now also set `VerifySignatures: true`**, since the registry no longer
+  implies it. The shipped `substrate server` never set either field, so nothing about the
+  binary's behavior changes: every documented credential still resolves to
+  `arn:aws:iam::123456789012:root` and an IAM-minted key still resolves to its user.
+
 ### Fixed
 - **An EC2 operation naming several resources was decided against the first alone** (#744).
   `TerminateInstances` with three `InstanceId.N` was authorized against `InstanceId.1`'s ARN
