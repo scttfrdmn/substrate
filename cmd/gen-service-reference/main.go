@@ -10,10 +10,10 @@
 //
 // in docs/services.md. Everything outside the markers — including the
 // hand-written per-service operation, CloudFormation, and cost detail — is left
-// untouched. Per-plugin display names and protocols come from the maintained
-// metadata map below; the tool fails if a registered plugin has no metadata
-// entry (or an entry names a plugin that is not registered), which is what a CI
-// drift check enforces.
+// untouched. Per-plugin display names and protocols come from the emulator's own
+// routing table ([emu.PluginRoutingCatalog], emulator/routing.go); the tool fails
+// if a registered plugin has no entry there (or an entry names a plugin that is
+// not registered), which is what a CI drift check enforces.
 //
 // Usage:
 //
@@ -39,85 +39,14 @@ const (
 	endMarker   = "<!-- END GENERATED COVERAGE MATRIX -->"
 )
 
-// pluginMeta is the maintained per-plugin documentation metadata.
-type pluginMeta struct {
-	// Display is the human-facing AWS service name.
-	Display string
-	// Protocol is the wire protocol the plugin speaks.
-	Protocol string
-}
-
-// meta maps each registered plugin name to its documentation metadata. Adding a
-// plugin to the registry without a matching entry here fails generation (and CI).
-var meta = map[string]pluginMeta{
-	"account":              {"Account Management", "REST/JSON"},
-	"acm":                  {"ACM", "JSON"},
-	"apigateway":           {"API Gateway (REST)", "REST/JSON"},
-	"apigatewayv2":         {"API Gateway (HTTP)", "REST/JSON"},
-	"appsync":              {"AppSync", "REST/JSON"},
-	"athena":               {"Athena", "JSON"},
-	"backup":               {"Backup", "REST/JSON"},
-	"batch":                {"Batch", "REST/JSON"},
-	"bedrock-runtime":      {"Bedrock Runtime", "REST/JSON"},
-	"budgets":              {"Budgets", "JSON"},
-	"ce":                   {"Cost Explorer", "JSON"},
-	"cloudformation":       {"CloudFormation", "Query"},
-	"cloudfront":           {"CloudFront", "REST/XML"},
-	"cloudtrail":           {"CloudTrail", "JSON"},
-	"codebuild":            {"CodeBuild", "JSON"},
-	"codedeploy":           {"CodeDeploy", "JSON"},
-	"codepipeline":         {"CodePipeline", "JSON"},
-	"cognito-identity":     {"Cognito Identity", "JSON"},
-	"cognito-idp":          {"Cognito Identity Provider", "JSON"},
-	"config":               {"Config", "JSON"},
-	"dynamodb":             {"DynamoDB", "JSON"},
-	"ec2":                  {"EC2 / VPC", "Query"},
-	"ecr":                  {"ECR", "JSON"},
-	"ecs":                  {"ECS", "JSON"},
-	"efs":                  {"EFS", "REST/JSON"},
-	"elasticache":          {"ElastiCache", "Query"},
-	"elasticloadbalancing": {"ELBv2", "Query"},
-	"emrserverless":        {"EMR Serverless", "REST/JSON"},
-	"eventbridge":          {"EventBridge", "JSON"},
-	"execute-api":          {"API Gateway (execute-api)", "REST/JSON"},
-	"firehose":             {"Kinesis Data Firehose", "JSON"},
-	"fsx":                  {"FSx", "JSON"},
-	"glue":                 {"Glue", "JSON"},
-	"health":               {"Health", "JSON"},
-	"iam":                  {"IAM", "Query"},
-	"kinesis":              {"Kinesis Data Streams", "JSON"},
-	"kms":                  {"KMS", "JSON"},
-	"lambda":               {"Lambda", "REST/JSON"},
-	"logs":                 {"CloudWatch Logs", "JSON"},
-	"monitoring":           {"CloudWatch", "Query"},
-	"msk":                  {"MSK", "REST/JSON"},
-	"omics":                {"HealthOmics", "REST/JSON"},
-	"opensearch":           {"OpenSearch", "REST/JSON"},
-	"organizations":        {"Organizations", "JSON"},
-	"pricing":              {"Price List Query API", "JSON"},
-	"quicksight":           {"QuickSight", "REST/JSON"},
-	"ram":                  {"RAM", "REST/JSON"},
-	"rds":                  {"RDS", "Query"},
-	"redshift":             {"Redshift", "Query"},
-	"redshift-data":        {"Redshift Data API", "JSON"},
-	"route53":              {"Route 53", "REST/XML"},
-	"s3":                   {"S3", "REST/XML"},
-	"sagemaker":            {"SageMaker", "JSON"},
-	"scheduler":            {"EventBridge Scheduler", "REST/JSON"},
-	"secretsmanager":       {"Secrets Manager", "JSON"},
-	"servicequotas":        {"Service Quotas", "JSON"},
-	"sesv2":                {"SES v2", "REST/JSON"},
-	"sns":                  {"SNS", "Query"},
-	"sqs":                  {"SQS", "JSON"},
-	"ssm":                  {"SSM", "JSON"},
-	"sso":                  {"SSO / Identity Store", "REST/JSON"},
-	"states":               {"Step Functions", "JSON"},
-	"sts":                  {"STS", "Query"},
-	"tagging":              {"Resource Groups Tagging", "JSON"},
-	"timestream":           {"Timestream", "JSON"},
-	"transfer":             {"Transfer Family", "JSON"},
-	"wafv2":                {"WAFv2", "JSON"},
-}
+// routing is the per-plugin routing and documentation metadata, read from the
+// emulator's own table (emulator/routing.go) rather than kept in a second copy
+// here. One table then serves three consumers: this matrix, the drift check
+// below, and the reachability sweep test that asserts every identifier in it
+// resolves to a registered plugin (#739). A duplicate map in cmd/ could agree
+// with the docs while disagreeing with what an SDK actually sends, which is the
+// class of failure #739 exists to close.
+var routing = emu.PluginRoutingCatalog()
 
 func main() {
 	check := flag.Bool("check", false, "exit non-zero if the file is out of date instead of writing it")
@@ -173,22 +102,31 @@ func registeredPlugins() ([]string, error) {
 	if err := emu.RegisterDefaultPlugins(context.Background(), reg, state, tc, logger, store, nil); err != nil {
 		return nil, fmt.Errorf("register default plugins: %w", err)
 	}
-	names := reg.Names()
+	return checkRouting(reg.Names(), routing)
+}
 
+// checkRouting verifies that the routing table and the registered plugin names
+// agree in both directions and returns the names sorted. It takes the table as a
+// parameter rather than reading the package-level [routing] so that both refusals
+// are reachable from a test — the drift check is the whole point of the -check
+// flag, and an untested drift check is one nobody knows still fires (#739).
+func checkRouting(names []string, table map[string]emu.PluginRouting) ([]string, error) {
 	registered := make(map[string]bool, len(names))
 	for _, n := range names {
 		registered[n] = true
-		if _, ok := meta[n]; !ok {
-			return nil, fmt.Errorf("plugin %q is registered but has no metadata entry in cmd/gen-service-reference/main.go; add one", n)
+		if _, ok := table[n]; !ok {
+			return nil, fmt.Errorf("plugin %q is registered but has no entry in emulator/routing.go; add one, citing the source of its target prefix, hosts and signing names", n)
 		}
 	}
-	for n := range meta {
+	for n := range table {
 		if !registered[n] {
-			return nil, fmt.Errorf("metadata entry %q does not correspond to a registered plugin; remove it from cmd/gen-service-reference/main.go", n)
+			return nil, fmt.Errorf("routing entry %q does not correspond to a registered plugin; remove it from emulator/routing.go", n)
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sorted := make([]string, len(names))
+	copy(sorted, names)
+	sort.Strings(sorted)
+	return sorted, nil
 }
 
 // replaceMatrix swaps the content between the begin/end markers in doc for a
@@ -211,7 +149,7 @@ func replaceMatrix(doc []byte, names []string) ([]byte, error) {
 	fmt.Fprintln(&matrix, "| # | Service | Plugin name | Protocol |")
 	fmt.Fprintln(&matrix, "|---|---------|-------------|----------|")
 	for i, n := range names {
-		m := meta[n]
+		m := routing[n]
 		fmt.Fprintf(&matrix, "| %d | %s | `%s` | %s |\n", i+1, m.Display, n, m.Protocol)
 	}
 	fmt.Fprint(&matrix, endMarker)

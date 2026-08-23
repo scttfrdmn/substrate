@@ -90,6 +90,108 @@ here.
 
 ---
 
+## How a request reaches a plugin
+
+A plugin that is registered is not necessarily reachable. Substrate resolves which
+plugin serves a request by reducing what the client sent to one lowercase service
+name, using four signals in priority order:
+
+| # | Signal | Example | Notes |
+|---|--------|---------|-------|
+| 1 | `X-Amz-Target` namespace | `DynamoDB_20120810.GetItem` | The only signal a `--endpoint-url` caller supplies beyond the credential scope |
+| 2 | `Host` | `dynamodb.us-east-1.amazonaws.com` | Useless against substrate, where the host is `localhost` |
+| 3 | URL path | `/service/GraniteServiceVersion20100801/operation/GetMetricData` | Smithy RPC v2 CBOR transport |
+| 4 | SigV4 credential scope | `…/us-east-1/dynamodb/aws4_request` | The signing name, which is not always the endpoint prefix |
+
+The order is what makes a routing bug hard to see. The target is checked first, so an
+unrecognized namespace **short-circuits** signals 2 and 4, both of which would often
+have answered correctly. Substrate is reached by pointing a client at
+`--endpoint-url http://localhost:4566`, where signal 2 is `localhost` and signal 3 is
+absent — so for a JSON service the target is effectively the only signal, and a
+namespace substrate does not recognize answers `ServiceNotAvailable` for every
+operation of that service while the plugin's own tests stay green.
+
+That has happened repeatedly: `sso` (#561), `organizations` and `config` (#580),
+`eventbridge` (#734), and then `monitoring`, `health`, `cloudtrail` and `timestream`
+(#739). Each was found by pointing a real client at a running server, not by the test
+suite.
+
+### The routing table
+
+`emulator/routing.go` records, for every registered plugin, the identifiers a real AWS
+client sends: the target namespace, one example endpoint host per distinct shape, and
+the SigV4 signing names. Every row cites the source it was read from, and the citation
+names *which* source — see CloudTrail below for why that matters.
+
+The table has three consumers, so it cannot rot quietly:
+
+- the generated coverage matrix above reads its display names and protocols;
+- `make docs-reference-check` fails if a registered plugin has no row, or a row names
+  no registered plugin;
+- a sweep test drives every identifier in every row through the parser and asserts the
+  result is a **registered** plugin — not merely the expected string.
+
+Adding a plugin therefore means recording how a client addresses it. That is the check
+whose absence let four plugins ship unreachable.
+
+### The four that were unreachable
+
+| Plugin | What the client sends | What it reduced to | Who saw the failure |
+|---|---|---|---|
+| `monitoring` | `X-Amz-Target: GraniteServiceVersion20100801.{Op}` | nothing — the name was in the Smithy path table and absent from the target table | every AWS CLI and boto3 caller |
+| `health` | `X-Amz-Target: AWSHealth_20160804.{Op}` | nothing — the table held an invented `healthservice` instead | every SDK |
+| `health` | `Host: global.health.amazonaws.com` | `global` | a caller using the real endpoint |
+| `cloudtrail` | `X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.{Op}` | `com` | the AWS CLI and boto3 only |
+| `timestream` | `Host: ingest.` / `query.timestream.{region}.amazonaws.com` | `ingest` / `query` | a caller using endpoint discovery |
+
+Two of these are worth understanding rather than just recording.
+
+**CloudTrail is why a source citation must name the SDK.** botocore sends the model's
+fully-qualified namespace; `aws-sdk-go-v2` sends the terse `CloudTrail_20131101`. The
+Go SDK's form always worked, so substrate's suite and its real-SDK end-to-end tier —
+both of which drive `aws-sdk-go-v2` — were green while every CLI and boto3 CloudTrail
+call answered `ServiceNotAvailable`. An alias could not fix the long form, because its
+first label is `com`, which prefixes every fully-qualified namespace and would hijack
+any other service that adopted one. Substrate now reduces a dot-qualified namespace to
+its **last** segment, mirroring what operation extraction already did. Of the 430
+botocore models only three carry a dotted prefix — `cloudtrail`, `codeconnections` and
+`codestar-connections`, the latter two not substrate plugins — and their last segments
+do not collide.
+
+**CloudWatch's fix is routing only, and the gap behind it is real.** `monitoring` now
+receives the AWS CLI's request, but `CloudWatchPlugin` reads query-form parameters and
+answers XML, so a JSON-RPC client gets HTTP 200 with a body it cannot parse, and its
+refusals arrive as `<ErrorResponse>` rather than a JSON error code. Do not read
+"CloudWatch is routed" as "the AWS CLI can drive CloudWatch": it cannot yet. That is
+tracked as #757. Similarly, `sso` is classified as REST/JSON for error shaping while
+the plugin emulates sso-admin, which is JSON 1.1 — #758.
+
+### Plugins that are deliberately not addressable three ways
+
+Three rows cannot assert all three signals, and say so in prose rather than being
+skipped:
+
+- **`apigatewayv2`** shares `apigateway`'s endpoint host *and* signing name, and neither
+  client sends a target. The two are separated by the `/v2/` path segment instead (#529).
+- **`execute-api`** is addressed by a host whose first label is the API's ID — data, not
+  a service name — so the match is on the `execute-api` label. There is no service model;
+  this is the runtime endpoint, which no SDK-generated client calls.
+- **`opensearch`** is data-plane only. A managed domain's host and a Serverless
+  collection's host both carry the resource name ahead of the `es`/`aoss` label, and the
+  OpenSearch Serverless control-plane target prefix names operations substrate does not
+  implement, so it is absent on purpose.
+
+### Coverage limits
+
+All 67 rows were read from the botocore models bundled in a locally installed AWS CLI
+v2. The JSON ones were cross-checked against `aws-sdk-go-v2` serializers. The Java,
+JavaScript and .NET SDKs were **not** checked, so a namespace only they send would not
+have been caught here. Where a per-service section below states a target prefix, that
+prefix is what the model declares; substrate also accepts the older spellings it used
+to document, so correcting one of them cannot break a caller.
+
+---
+
 ## An operation substrate does not implement
 
 No plugin covers its whole service, so every one of the 67 has an answer for a call it
@@ -6304,7 +6406,11 @@ API Gateway HTTP API calls: $1.00 per million calls.
 ## Step Functions
 
 **Endpoint:** `states.{region}.amazonaws.com`
-**Protocol:** JSON (`X-Amz-Target: AmazonStates.{Op}`)
+**Protocol:** JSON (`X-Amz-Target: AWSStepFunctions.{Op}`)
+
+`AmazonStates` was documented here previously and is not what any client sends;
+the Step Functions model's target prefix is `AWSStepFunctions` (#739). Substrate
+routes both.
 
 ### Supported operations
 
@@ -6333,7 +6439,10 @@ Step Functions state transitions: $0.025 per 1,000 transitions.
 ## ECR
 
 **Endpoint:** `ecr.{region}.amazonaws.com`
-**Protocol:** JSON (`X-Amz-Target: AmazonEC2ContainerRegistry_V1_1_0.{Op}`)
+**Protocol:** JSON (`X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.{Op}`)
+
+`_V1_1_0` was documented here previously; `_V20150921` is what the ECR model
+declares (#739). Both reduce to `ec2containerregistry`, so substrate routes either.
 
 ### Supported operations
 
@@ -6838,7 +6947,12 @@ Price List API calls are free.
 ## Organizations
 
 **Endpoint:** `organizations.us-east-1.amazonaws.com`
-**Protocol:** JSON (`X-Amz-Target: Organizations_20161128.{Op}`)
+**Protocol:** JSON (`X-Amz-Target: AWSOrganizationsV20161128.{Op}`)
+
+`Organizations_20161128` was documented here previously and reduces to
+`organizations` by the generic version strip; the prefix every SDK actually sends is
+`AWSOrganizationsV20161128`, which carries its version inline and needed an explicit
+alias (#739).
 
 On the first call, the plugin auto-creates an organization, its management
 account, and its root. All three are persisted, so the root's ID and ARN are
