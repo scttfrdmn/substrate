@@ -21,7 +21,7 @@ type ELBPlugin struct {
 }
 
 // Name returns the service name "elasticloadbalancing".
-func (p *ELBPlugin) Name() string { return "elasticloadbalancing" }
+func (p *ELBPlugin) Name() string { return elbServiceName }
 
 // Initialize sets up the ELBPlugin with the provided configuration.
 func (p *ELBPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
@@ -85,6 +85,12 @@ func (p *ELBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteRule(ctx, req)
 	case "SetRulePriorities":
 		return p.setRulePriorities(ctx, req)
+	case "AddTags":
+		return p.addTags(ctx, req)
+	case "RemoveTags":
+		return p.removeTags(ctx, req)
+	case "DescribeTags":
+		return p.describeTags(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), action)
 	}
@@ -121,6 +127,15 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 		azs = []string{reqCtx.Region + "a"}
 	}
 
+	// Tags are validated before the record is written, so a create carrying a tag it
+	// cannot legally apply leaves no load balancer behind. CreateLoadBalancer is the one
+	// create of the four that publishes DuplicateTagKeys, which is why it is the one
+	// passing true here.
+	tags, tagErr := elbTagsForCreate(req, true)
+	if tagErr != nil {
+		return nil, tagErr
+	}
+
 	lb := ELBLoadBalancer{
 		Name:              name,
 		ARN:               arn,
@@ -131,6 +146,7 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 		State:             ELBState{Code: "active"},
 		AvailabilityZones: azs,
 		SecurityGroups:    sgs,
+		Tags:              tags,
 		AccountID:         reqCtx.AccountID,
 		Region:            reqCtx.Region,
 		CreatedTime:       p.tc.Now(),
@@ -223,11 +239,7 @@ func (p *ELBPlugin) deleteLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 		p.removeFromList(scope, "lb_names", lb.Name)
 		break
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteLoadBalancerResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elbXMLResponse(http.StatusOK, response{XMLNS: elbXMLNS})
+	return elbEmptyOKResponse("DeleteLoadBalancer")
 }
 
 func (p *ELBPlugin) describeLoadBalancerAttributes(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -276,6 +288,11 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 	suffix := generateELBSuffix()
 	arn := elbTargetGroupARN(reqCtx.Region, reqCtx.AccountID, name, suffix)
 
+	tags, tagErr := elbTagsForCreate(req, false)
+	if tagErr != nil {
+		return nil, tagErr
+	}
+
 	tg := ELBTargetGroup{
 		ARN:                 arn,
 		Name:                name,
@@ -286,6 +303,7 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 		HealthCheckPath:     req.Params["HealthCheckPath"],
 		HealthCheckProtocol: req.Params["HealthCheckProtocol"],
 		HealthCheckPort:     req.Params["HealthCheckPort"],
+		Tags:                tags,
 		AccountID:           reqCtx.AccountID,
 		Region:              reqCtx.Region,
 		Suffix:              suffix,
@@ -376,11 +394,7 @@ func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 		p.removeFromList(scope, "tg_names", tg.Name)
 		break
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteTargetGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elbXMLResponse(http.StatusOK, response{XMLNS: elbXMLNS})
+	return elbEmptyOKResponse("DeleteTargetGroup")
 }
 
 func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -457,11 +471,7 @@ func (p *ELBPlugin) registerTargets(reqCtx *RequestContext, req *AWSRequest) (*A
 		break
 	}
 
-	type response struct {
-		XMLName xml.Name `xml:"RegisterTargetsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elbXMLResponse(http.StatusOK, response{XMLNS: elbXMLNS})
+	return elbEmptyOKResponse("RegisterTargets")
 }
 
 func (p *ELBPlugin) deregisterTargets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -503,11 +513,7 @@ func (p *ELBPlugin) deregisterTargets(reqCtx *RequestContext, req *AWSRequest) (
 		break
 	}
 
-	type response struct {
-		XMLName xml.Name `xml:"DeregisterTargetsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elbXMLResponse(http.StatusOK, response{XMLNS: elbXMLNS})
+	return elbEmptyOKResponse("DeregisterTargets")
 }
 
 func (p *ELBPlugin) describeTargetHealth(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -577,6 +583,11 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		})
 	}
 
+	tags, tagErr := elbTagsForCreate(req, false)
+	if tagErr != nil {
+		return nil, tagErr
+	}
+
 	suffix := generateELBSuffix()
 	arn := elbListenerARN(lbARN, suffix)
 	listener := ELBListener{
@@ -585,6 +596,7 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Port:            port,
 		Protocol:        protocol,
 		DefaultActions:  actions,
+		Tags:            tags,
 		AccountID:       reqCtx.AccountID,
 		Region:          reqCtx.Region,
 		Suffix:          suffix,
@@ -676,11 +688,7 @@ func (p *ELBPlugin) deleteListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 		break
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteListenerResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elbXMLResponse(http.StatusOK, response{XMLNS: elbXMLNS})
+	return elbEmptyOKResponse("DeleteListener")
 }
 
 func (p *ELBPlugin) modifyListener(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -767,6 +775,11 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		})
 	}
 
+	tags, tagErr := elbTagsForCreate(req, false)
+	if tagErr != nil {
+		return nil, tagErr
+	}
+
 	suffix := generateELBSuffix()
 	arn := elbRuleARN(listenerARN, suffix)
 	rule := ELBRule{
@@ -776,6 +789,7 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		Conditions:  conditions,
 		Actions:     actions,
 		IsDefault:   false,
+		Tags:        tags,
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 		Suffix:      suffix,
@@ -867,11 +881,7 @@ func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		}
 		break
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteRuleResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elbXMLResponse(http.StatusOK, response{XMLNS: elbXMLNS})
+	return elbEmptyOKResponse("DeleteRule")
 }
 
 func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1074,6 +1084,31 @@ func (p *ELBPlugin) removeFromList(scope, listName, id string) {
 }
 
 // elbXMLResponse serializes v to XML and returns an AWSResponse.
+// elbEmptyOKResponse answers an ELBv2 operation whose output shape carries no members,
+// as <OperationResponse><OperationResult/></OperationResponse>.
+//
+// The empty result element is not decoration. ELBv2 speaks the Query protocol, where every
+// output shape declares a resultWrapper, and botocore looks that wrapper up by name in the
+// parsed body — so a bare <OperationResponse/> makes the AWS CLI and boto3 raise
+// KeyError: 'DeleteLoadBalancerResult' instead of reporting success. Six operations answered
+// that way and were unusable from a real client while passing substrate's own tests, which
+// read the XML directly rather than through an SDK's parser (#748).
+func elbEmptyOKResponse(operation string) (*AWSResponse, error) {
+	type result struct {
+		XMLName xml.Name
+	}
+	type response struct {
+		XMLName xml.Name
+		XMLNS   string `xml:"xmlns,attr"`
+		Result  result
+	}
+	return elbXMLResponse(http.StatusOK, response{
+		XMLName: xml.Name{Local: operation + "Response"},
+		XMLNS:   elbXMLNS,
+		Result:  result{XMLName: xml.Name{Local: operation + "Result"}},
+	})
+}
+
 func elbXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := xml.Marshal(v)
 	if err != nil {

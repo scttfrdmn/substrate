@@ -239,6 +239,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule — a verified key has proven the caller holds the secret — and the ARN still resolves
   to no policies. With `verify_signatures: false` the answer stays `…:root`.
 
+- **ELBv2 tagging, and with it the last of the seven bundled condition keys that had no
+  producer** (#748). `AddTags`, `RemoveTags` and `DescribeTags` did not exist, and the
+  `Tags.member.N` on each of the four creates was accepted and silently dropped — a
+  `CreateLoadBalancer` carrying tags answered success and produced an untagged load balancer.
+  The `Tags` field was dead on two of the four records and absent from the other two. All four
+  creates now store what they are given, and the three tagging operations reach all four
+  resource types.
+
+  The limits are the API model's: a key of 1–128 characters, a value of 0–256, both matching
+  `^([\p{L}\p{Z}\p{N}_.:/=+\-@]*)$`, 50 tags per resource with `aws:`-prefixed keys excluded
+  from the count — byte-for-byte the rule EC2 already implements, which is also what lets
+  CloudFormation's stamp coexist with a caller's own 50. `DescribeTags` takes at most 20
+  resources and `RemoveTags` at most 128 keys, each its own documented array maximum; the
+  128-key cap is per request and unrelated to the per-resource limit, since a key that is not
+  present is ignored rather than refused.
+
+  Per-operation error sets are followed rather than unified, because AWS's are not uniform.
+  `DuplicateTagKeys` is refused on `AddTags` and `CreateLoadBalancer` only — the two operations
+  that publish it — while `CreateTargetGroup`, `CreateListener` and `CreateRule` resolve a
+  repeated key last-wins, because inventing a code those three do not publish would send a
+  consumer's error branch down a path AWS never takes. An ARN naming nothing answers the code
+  for its type at HTTP **400**, which is ELB's own choice rather than the 404 a reader expects.
+
+  Two readings are substrate's. A call naming several resources applies to all of them or to
+  none — every ARN resolves before any write, so an `AddTags` naming one live and one absent
+  resource leaves the live one untouched; AWS documents no ordering here, and the alternative
+  is a partial write a caller cannot undo from the error alone, which is the same reasoning
+  `TerminateInstances` makes explicit. And a key beginning `aws:` is accepted: the restriction
+  is documented but no reachable page publishes a code for refusing one, so substrate excludes
+  the prefix from the count, as documented, and does not invent the refusal.
+
+  Authorization changes with it, in three ways. Every ELB request naming a resource by ARN —
+  `ResourceArns.member.N`, `LoadBalancerArn`, `TargetGroupArn`, `ListenerArn`, `RuleArn` — is
+  now decided against **that ARN**, where every ELB request was previously decided against the
+  literal string `*`. That is not a wildcard on the request side, so a statement scoped to one
+  load balancer's ARN matched nothing: an ARN-scoped `Allow` denied every call and an
+  ARN-scoped `Deny` was inert. A request naming several resources is denied unless every one is
+  allowed (#660's false-allow class). A resource's tags are reported under
+  `elasticloadbalancing:ResourceTag/<key>` as well as `aws:ResourceTag/<key>`, the guide's
+  "All mutating actions support this condition key" — on reads too, since a read reporting
+  fewer keys than a write could only make a condition on a describe unsatisfiable.
+
+  And a **tagged** create is authorized twice: AWS states that tags specified in a
+  resource-creating action require additional authorization on
+  `elasticloadbalancing:AddTags`, and that the second decision happens only when tags are
+  applied during the create. So each of the four creates carrying `Tags.member.N` is decided a
+  second time against that action with `elasticloadbalancing:CreateAction` set to the bare
+  operation name, and an untagged create needs no tagging grant at all. The second decision's
+  resource is the wildcard for the created type, which is substrate's reading on the same
+  reasoning as EC2's — the resource does not exist yet, and AWS's own examples write that
+  statement's `Resource` as `*` or a type wildcard. It reports no `aws:ResourceTag/*`, because a
+  condition about tags already on a resource that does not exist would otherwise be satisfied
+  by the tags being applied.
+
+  **The plan's provenance for `elasticloadbalancing:CreateAction` was wrong and the correction
+  is worth recording.** The key is absent from the ELB user guide's own list of ELB-specific
+  condition keys, and both Service Authorization Reference pages for ELB render their tables in
+  JavaScript and were unreachable — which made the bundled `AmazonECS_FullAccess` policy look
+  like the only citable source. It is not: the guide's "Tag your Elastic Load Balancing
+  resources during creation" page documents the key, the second `AddTags` authorization, and
+  the bare operation name as the value. Only the four values the bundled statement names come
+  from the policy.
+
+  Two gaps are deliberate and named in `docs/services.md`. `Names.member.N` on
+  `DescribeLoadBalancers` and `DescribeTargetGroups` is not resolved to an ARN, so those two
+  stay at `*` — whether ELB's describes support resource-level permissions is on the
+  unreachable pages, and leaving them alone is the direction that cannot invent a grant. And
+  substrate's listener and rule ARNs nest under the load balancer's where AWS mints flat ones
+  (#774); the tagging code accepts both shapes and the create pass authorizes against AWS's
+  spelling, so a policy written the way AWS writes one behaves correctly either way. The ELB
+  section's hand-written operation table was also five operations out of date and now lists all
+  23.
+
 ### Fixed
 - **A `${aws:username}` in a policy was compared as literal text** (#745). AWS substitutes a
   policy variable before it compares, so `arn:aws:s3:::home/${aws:username}/*` is the documented
@@ -422,6 +495,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no owner". A comment in the catalog claimed nothing rendered the member at all; it did. The
   owner is now omitted and the alias rendered in its place: Amazon's AMI-owning account varies
   by Region and AWS publishes no stable mapping, so it is not inventable.
+- **Six ELBv2 operations made the AWS CLI and boto3 raise `KeyError` on success** (#748).
+  ELBv2 speaks the Query protocol, where every output shape declares a `resultWrapper`, and
+  botocore looks that wrapper up by name in the parsed body. `DeleteLoadBalancer`,
+  `DeleteTargetGroup`, `DeleteListener`, `DeleteRule`, `RegisterTargets` and
+  `DeregisterTargets` answered a bare `<OperationResponse/>` with no result element, so a real
+  client raised `KeyError: 'DeleteLoadBalancerResult'` for a call that had in fact succeeded —
+  the state change landed and the caller saw a crash. Found by the live-CLI proof for this
+  release's ELB tagging work, which is also the only way it could be found: substrate's own
+  ELB tests read the response XML directly rather than through an SDK's parser, so all six
+  were green. The regression test now asserts the wire bytes, and the one place that builds
+  these responses is shared, so a seventh such operation cannot get it wrong.
 - **Four plugins were registered, unit-tested, and unreachable from a real AWS client**
   (#739). Substrate resolves which plugin serves a request by reducing four signals to one
   service name, and `X-Amz-Target` is checked first — so a namespace it does not recognize
