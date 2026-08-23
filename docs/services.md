@@ -4541,13 +4541,48 @@ key compared case-insensitively, and only EC2 gets a second prefix. Reporting, s
 bucket's tags under an `s3:ResourceTag/` key AWS does not publish would honor a policy real
 AWS ignores, which is a divergence in the granting direction.
 
-One caveat on the bundled statement that motivated the prefix: it conditions on
+The bundled statement that motivated the prefix conditions on
 `ec2:ResourceTag/aws:cloudformation:stack-name`, and that tag is not one a caller can set —
-`CreateTags` refuses a key beginning with `aws:`, as AWS does, and substrate's CloudFormation
-deployer does not apply stack tags to the resources it creates. So the prefix and the
-resolution work, and a policy you write against `ec2:ResourceTag/<your key>` evaluates, but
-`ManagedCloudformationResourcesCleanupPolicy`'s own statement stays unsatisfiable until the
-deployer tags what it creates ([#746](https://github.com/scttfrdmn/substrate/issues/746)).
+`CreateTags` refuses a key beginning with `aws:`, as AWS does. <a id="cloudformation-stamps-its-own-tags-on-the-ec2-resources-it-creates"></a>**CloudFormation
+stamps its own tags on the EC2 resources it creates**
+([#746](https://github.com/scttfrdmn/substrate/issues/746)), which is what makes
+`ManagedCloudformationResourcesCleanupPolicy`'s statement satisfiable rather than inert: a
+resource a stack creates carries `aws:cloudformation:stack-name`,
+`aws:cloudformation:stack-id` and `aws:cloudformation:logical-id`, so the bundled statement's
+`StringLike` on `EC2ContainerService-*` now grants the four EC2 deletes for a resource an
+`EC2ContainerService-…` stack created and still refuses them elsewhere.
+
+The stamp is written to state by the deployer rather than sent as a `TagSpecification`, for
+two reasons a consumer can observe: a synthesized `CreateTags` would refuse the `aws:` keys it
+is carrying, and every synthesized request is authorized, so the parameter route would newly
+require `ec2:CreateTags` of every principal whose deployment succeeds today. The three values
+are the stack's own — the stack ID is the same ARN `AWS::StackId` resolves to, not a second
+derivation of it — and the write is an upsert, so re-deploying a stack rewrites the three
+rather than accumulating them. `aws:` keys are already excluded from the 50-tag limit, so the
+stamp cannot push a caller's own tags over it.
+
+Four limits on the stamp, each named because a policy or an assertion written against it will
+otherwise assume more:
+
+- **EC2 only.** The resolver maps an ID prefix to a state key, and only EC2 keeps tags in a
+  store shaped that way; S3, DynamoDB, Lambda and SQS each keep them differently and ELBv2
+  keeps none. A non-EC2 physical ID is skipped silently — a stack creates far more non-EC2
+  resources than EC2 ones, so a warning per resource would bury a real one. Extending the
+  stamp is [#765](https://github.com/scttfrdmn/substrate/issues/765).
+- **A resource that failed to deploy is not stamped**, and neither is one with no physical ID.
+  Tagging it would put a stack's bookkeeping on something the stack does not own.
+- **Caller-supplied stack tags are still unmodelled.** `CreateStack`'s `Tags.member.N` is
+  dropped, and nothing propagates a stack tag to a created resource. That is the other half of
+  the mechanism and is [#764](https://github.com/scttfrdmn/substrate/issues/764).
+- **A physical ID that merely looks like an EC2 ID is stamped.** The resolver keys on the
+  prefix alone, so an S3 bucket a template names `i-something` would resolve as an instance.
+  No AWS naming rule prevents it and substrate does not check for it.
+
+Provenance: of the three keys, only `aws:cloudformation:stack-name` appears on any AWS
+CloudFormation page that was reachable when this was implemented — every user-guide page
+documenting the set returned an empty body, and `API_CreateStack.html` documents caller-supplied
+stack-tag propagation, which is the different mechanism above. So the triple is observed
+behavior rather than the API model, and is recorded here as such.
 
 What still resolves to `*`, each named because a policy written against it will not behave
 as AWS would:
@@ -4559,6 +4594,7 @@ as AWS would:
 - **`VpcId` and `SubnetId`.** Several creates carry one as the *container* the new resource
   goes into rather than as the resource acted on, and authorizing a create against its
   parent's ARN is not what AWS evaluates it against.
+
 An ID whose prefix names no type substrate can tag, or a `pg-`/`key-` ID naming no record, is
 **skipped**: it contributes no resource to the decision, so a batch of one resolvable and one
 unparseable ID is authorized as the batch of one. The refusal such an ID is owed is the

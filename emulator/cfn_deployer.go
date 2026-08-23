@@ -2375,6 +2375,9 @@ func (d *StackDeployer) deployResource(
 	dr, cost, err := d.dispatchResource(ctx, logicalID, res, streamID, cctx)
 	failures := cctx.takeFailures()
 	if err != nil || len(failures) == 0 {
+		// Stamped after the helper has run and before the result is reported, so
+		// the tags are on the resource by the time any Describe can observe it.
+		d.stampCFNResourceTags(dr, cctx)
 		return dr, cost, err
 	}
 	// A resolution failure takes precedence over a dispatch error: the request
@@ -2388,6 +2391,92 @@ func (d *StackDeployer) deployResource(
 	d.logger.Warn("cfn: resource failed to resolve an intrinsic",
 		"logical_id", logicalID, "type", res.Type, "reason", reason)
 	return dr, cost, nil
+}
+
+// cfnStackResourceTagKeys are the three tags CloudFormation puts on every resource it
+// creates, in the order [cfnStackResourceTags] renders them.
+//
+// Named as constants so the state writer, the docs and the tests cannot drift: a policy
+// conditioning on `ec2:ResourceTag/aws:cloudformation:stack-name` — which AWS's own
+// `ManagedCloudformationResourcesCleanupPolicy` does — reads the key literally, and a typo
+// here would make it silently unsatisfiable rather than wrong.
+const (
+	cfnTagStackName = "aws:cloudformation:stack-name"
+	cfnTagStackID   = "aws:cloudformation:stack-id"
+	cfnTagLogicalID = "aws:cloudformation:logical-id"
+)
+
+// cfnStackResourceTags is the stamp CloudFormation applies to the resources a stack
+// creates, for the one resource named by logicalID.
+//
+// Provenance: of the three, only `aws:cloudformation:stack-name` appears on a reachable AWS
+// page. Every CloudFormation user-guide page documenting the set returned an empty body, and
+// `API_CreateStack.html` documents *stack tag propagation*, which is the other mechanism —
+// caller-supplied `Tags.member.N` flowing down, which substrate does not model at all
+// ([#764](https://github.com/scttfrdmn/substrate/issues/764) tracks it). So the triple is
+// observed AWS behavior rather than published API model, and is labeled as such in
+// `docs/services.md`. The values are AWS's: the stack's name, the stack's ARN — which is what
+// `AWS::StackId` resolves to and what `CreateStack` reports — and the resource's logical ID.
+//
+// Ordering is fixed and alphabetical by key so a test can assert the rendered tag list
+// without depending on map iteration. AWS publishes no order, and a real caller sorts.
+func cfnStackResourceTags(stackName, stackID, logicalID string) []EC2Tag {
+	return []EC2Tag{
+		{Key: cfnTagLogicalID, Value: logicalID},
+		{Key: cfnTagStackID, Value: stackID},
+		{Key: cfnTagStackName, Value: stackName},
+	}
+}
+
+// stampCFNResourceTags writes CloudFormation's own three tags onto a resource the deployer
+// just created, for the resource types substrate can tag.
+//
+// Called from the single place that has everything it needs: [StackDeployer.deployResource]
+// is the sole caller of [StackDeployer.dispatchResource] and already holds the physical ID,
+// the logical ID and the stack's name, account and region. So none of the deploy helpers is
+// touched, and a helper added later is stamped without being changed.
+//
+// **A state write, not a synthesized `CreateTags`.** Two reasons, both fatal to the request
+// route: [StackDeployer.dispatch] runs `CheckAccess` on every request it builds, so a
+// `CreateTags` would newly require every already-authorized deployment to hold
+// `ec2:CreateTags`; and `CreateTags` refuses a key beginning with `aws:`, as AWS does, so the
+// stamp would have to punch a hole in the check that exists to keep callers out of AWS's own
+// namespace. CloudFormation on AWS is likewise not observed issuing a tagging call — the
+// tags are simply on the resource — so the state write is also the closer model.
+//
+// Scoped to EC2, because [ec2TaggableResource] resolves a physical ID to a state key by
+// prefix and therefore covers all nine EC2 resource types the deployer creates at once, plus
+// any tenth that arrives. S3, DynamoDB, Lambda and SQS each keep tags in a store with a
+// different key shape and ELBv2 keeps none at all, so each needs its own resolver
+// ([#765](https://github.com/scttfrdmn/substrate/issues/765)). EC2 is what the bundled
+// cleanup policy conditions on, which is the statement this makes satisfiable.
+//
+// A physical ID that is not an EC2 ID resolves to nothing and is skipped silently — a bucket
+// name is the common case, and it must not log. A physical ID that merely *looks* like one
+// (a bucket named "i-something") resolves to a state key holding no record, which
+// [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource as.
+//
+// A failed resource is not stamped: there may be nothing to stamp, and a tag on a resource
+// CloudFormation reports as CREATE_FAILED would claim a resource exists.
+func (d *StackDeployer) stampCFNResourceTags(dr DeployedResource, cctx *cfnContext) {
+	if dr.Error != "" || dr.PhysicalID == "" || dr.LogicalID == "" {
+		return
+	}
+	reqCtx := &RequestContext{AccountID: cctx.accountID, Region: cctx.region}
+	if target, ok := ec2TaggableResource(d.state, reqCtx, dr.PhysicalID); !ok || !target.resolved() {
+		return
+	}
+	tags := cfnStackResourceTags(
+		cctx.stackName,
+		cfnStackARN(cctx.region, cctx.accountID, cctx.stackName),
+		dr.LogicalID,
+	)
+	if err := ec2ApplyTagsToResource(d.state, reqCtx, dr.PhysicalID, tags, false); err != nil {
+		// Recorded, not returned: the resource itself deployed, and a stack does not fail
+		// because CloudFormation could not stamp its own bookkeeping tag.
+		d.logger.Warn("cfn: could not stamp aws:cloudformation tags",
+			"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
+	}
 }
 
 // dispatchResource routes a CFN resource type to its deploy helper.

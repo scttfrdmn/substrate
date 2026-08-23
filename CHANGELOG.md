@@ -55,6 +55,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `imageOwnerId`/`isPublic` per the `Image` type page and Examples 2–3 rather than
   `ownerId`/`public` per Example 1.
 
+- **CloudFormation stamps its own tags on the EC2 resources it creates** (#746). AWS puts
+  `aws:cloudformation:stack-name`, `aws:cloudformation:stack-id` and
+  `aws:cloudformation:logical-id` on every resource a stack creates; substrate's deployer put
+  none. That is not only a missing member — it left a bundled policy permanently unsatisfiable.
+  `AmazonECS_FullAccess`'s `ManagedCloudformationResourcesCleanupPolicy` allows four EC2 deletes
+  on any resource whose `ec2:ResourceTag/aws:cloudformation:stack-name` is like
+  `EC2ContainerService-*`; the resolution for that key already worked (#730), `CreateTags`
+  refuses an `aws:` key as AWS does, and no path existed by which the tag could ever exist — so
+  the statement granted nothing at all and no test could tell that apart from a policy bug. It
+  now grants the deletes for a resource an `EC2ContainerService-…` stack created and still
+  refuses them for one created by a stack whose name does not match.
+
+  The stamp is a state write from the single place that already holds everything it needs — the
+  one caller of the resource dispatcher, which has the logical ID, the physical ID and the
+  stack's name, account and region — so none of the 110 dispatch arms is touched. It is
+  deliberately not a synthesized `CreateTags`: that call refuses the `aws:` keys it would be
+  carrying, and every synthesized request is authorized, so the parameter route would newly
+  require `ec2:CreateTags` of every principal whose deployment succeeds today. The stack ID
+  written is the same ARN `AWS::StackId` resolves to rather than a second derivation of it,
+  which is the defect #517 was; the write is an upsert, so re-deploying a stack rewrites the
+  three tags rather than accumulating them; and `aws:` keys are already outside the 50-tag
+  limit, so the stamp cannot push a caller's own tags over it.
+
+  Scoped to EC2, which is what the bundled statement needs: the resolver maps an ID prefix to a
+  state key and only EC2 keeps tags in a store shaped that way, so all nine EC2 resource types
+  the deployer creates are covered by prefix and a tenth arrives free. A non-EC2 physical ID is
+  skipped silently — a stack creates far more non-EC2 resources than EC2 ones, so a warning per
+  resource would bury a real one — as is a resource that failed to deploy or has no physical
+  ID, since tagging one would put a stack's bookkeeping on something the stack does not own.
+  Extending the stamp beyond EC2 is #765, and caller-supplied stack tags, which `CreateStack`
+  still drops, are #764.
+
+  Of the three keys, only `aws:cloudformation:stack-name` appears on any AWS CloudFormation
+  page that was reachable: every user-guide page documenting the set returned an empty body, and
+  `API_CreateStack.html` documents caller-supplied stack-tag propagation, which is the other
+  mechanism. The triple is therefore **observed behavior rather than the API model**, and
+  `docs/services.md` records it as such.
+
 ### Fixed
 - **An EC2 operation naming several resources was decided against the first alone** (#744).
   `TerminateInstances` with three `InstanceId.N` was authorized against `InstanceId.1`'s ARN

@@ -203,7 +203,7 @@ type EC2KeyPair struct {
 	// Tags holds key-value metadata tags.
 	//
 	// Spelled "tags" like every other EC2 record's, rather than following this struct's
-	// camelCase members: that is the member [EC2Plugin.applyTagsToResource] and
+	// camelCase members: that is the member [ec2ApplyTagsToResource] and
 	// [EC2Plugin.scanTags] read and write on every type, and a key pair spelling it
 	// differently would be tagged into a member nothing reports (#708).
 	Tags []EC2Tag `json:"tags,omitempty"`
