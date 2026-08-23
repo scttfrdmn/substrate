@@ -766,3 +766,68 @@ func AddRequestTagsForTest(req *AWSRequest) (map[string]string, []string) {
 	addRequestTags(tags, req)
 	return tags, requestTagKeys(tags)
 }
+
+// --- IAM state keys (#737) -------------------------------------------------
+//
+// A test that seeds IAM state directly needs to spell the same key the plugin
+// does, and since #737 that key carries an account. Exporting the builders is
+// what keeps a test from hardcoding the layout: when the layout changes again,
+// the tests move with the production code instead of drifting into addressing
+// keys nothing reads.
+
+// IAMUserKeyForTest wraps iamUserKey for external tests.
+func IAMUserKeyForTest(accountID, userName string) string { return iamUserKey(accountID, userName) }
+
+// IAMRoleKeyForTest wraps iamRoleKey for external tests.
+func IAMRoleKeyForTest(accountID, roleName string) string { return iamRoleKey(accountID, roleName) }
+
+// IAMGroupKeyForTest wraps iamGroupKey for external tests.
+func IAMGroupKeyForTest(accountID, groupName string) string {
+	return iamGroupKey(accountID, groupName)
+}
+
+// IAMPolicyKeyForTest wraps iamPolicyKey for external tests. The account comes from
+// the ARN, as it does in production.
+func IAMPolicyKeyForTest(arn string) string { return iamPolicyKey(arn) }
+
+// IAMPolicyPrefixForTest wraps iamPolicyPrefix for external tests.
+func IAMPolicyPrefixForTest(accountID string) string { return iamPolicyPrefix(accountID) }
+
+// IAMAttachedPoliciesKeyForTest wraps iamAttachedPoliciesKey for external tests.
+func IAMAttachedPoliciesKeyForTest(accountID, kind, name string) string {
+	return iamAttachedPoliciesKey(accountID, kind, name)
+}
+
+// IAMAttachedPoliciesPrefixForTest wraps iamAttachedPoliciesPrefix for external tests.
+func IAMAttachedPoliciesPrefixForTest(accountID, kind string) string {
+	return iamAttachedPoliciesPrefix(accountID, kind)
+}
+
+// IAMInlinePolicyKeyForTest wraps iamInlinePolicyKey for external tests.
+func IAMInlinePolicyKeyForTest(accountID, kind, entityName, policyName string) string {
+	return iamInlinePolicyKey(accountID, kind, entityName, policyName)
+}
+
+// IAMInlinePolicyNamesKeyForTest wraps iamInlinePolicyNamesKey for external tests.
+func IAMInlinePolicyNamesKeyForTest(accountID, kind, entityName string) string {
+	return iamInlinePolicyNamesKey(accountID, kind, entityName)
+}
+
+// IAMGroupUsersKeyForTest wraps iamGroupUsersKey for external tests.
+func IAMGroupUsersKeyForTest(accountID, groupName string) string {
+	return iamGroupUsersKey(accountID, groupName)
+}
+
+// IAMUserGroupsKeyForTest wraps iamUserGroupsKey for external tests.
+func IAMUserGroupsKeyForTest(accountID, userName string) string {
+	return iamUserGroupsKey(accountID, userName)
+}
+
+// IAMAccessKeyKeyForTest wraps iamAccessKeyKey for external tests. It takes no
+// account: an access key ID determines one, so the record carries it instead.
+func IAMAccessKeyKeyForTest(accessKeyID string) string { return iamAccessKeyKey(accessKeyID) }
+
+// IAMInstanceProfileKeyForTest wraps iamInstanceProfileKey for external tests.
+func IAMInstanceProfileKeyForTest(accountID, name string) string {
+	return iamInstanceProfileKey(accountID, name)
+}

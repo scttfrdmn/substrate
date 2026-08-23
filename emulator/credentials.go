@@ -154,10 +154,11 @@ func buildCallerARN(accountID, accessKeyID string) string {
 // the principal, so a caller who never touched IAM is unaffected.
 //
 // The second return is an account ID to adopt, or "" to keep the one already
-// resolved. Only an STS session supplies one, and it is the only thing that can:
-// a temporary credential's account is recorded when the session is minted and
-// appears nowhere on the wire, so a cross-account AssumeRole would otherwise
-// leave the caller in the server's own account rather than the role's.
+// resolved. Both arms supply one, for the same reason: a credential's account is
+// recorded when the credential is minted and appears nowhere on the wire, so a
+// cross-account AssumeRole — or a long-term key belonging to another account's
+// user — would otherwise leave the caller in the server's own account rather
+// than the credential's (#737).
 func resolvePrincipal(ctx context.Context, state StateManager, accountID, accessKeyID string) (*Principal, string) {
 	if state == nil || accessKeyID == "" {
 		return nil, ""
@@ -165,13 +166,20 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 
 	// A long-term key: IAMPlugin.CreateAccessKey stores the owning user's name
 	// beside it, which is the link from a signed request to a set of policies.
-	if raw, err := state.Get(ctx, iamNamespace, "accesskey:"+accessKeyID); err == nil && raw != nil {
+	if raw, err := state.Get(ctx, iamNamespace, iamAccessKeyKey(accessKeyID)); err == nil && raw != nil {
 		var key IAMAccessKey
 		if unmarshalErr := json.Unmarshal(raw, &key); unmarshalErr == nil && key.UserName != "" {
+			// The key's own account, when it has one. A record written before #737 does
+			// not, and falls back to the account the request resolved to — which is what
+			// it always used, so nothing that worked stops working.
+			account, adopt := key.AccountID, key.AccountID
+			if account == "" {
+				account, adopt = accountID, ""
+			}
 			return &Principal{
-				ARN:  fmt.Sprintf("arn:aws:iam::%s:user/%s", accountID, key.UserName),
+				ARN:  fmt.Sprintf("arn:aws:iam::%s:user/%s", account, key.UserName),
 				Type: "IAMUser",
-			}, ""
+			}, adopt
 		}
 	}
 

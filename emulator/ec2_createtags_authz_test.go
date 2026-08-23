@@ -129,7 +129,7 @@ func (f *ec2AuthzFixture) setBoundary(t *testing.T, doc emulator.PolicyDocument)
 	if err != nil {
 		t.Fatalf("marshal boundary: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "policy:"+arn, raw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(arn), raw); err != nil { //nolint:contextcheck
 		t.Fatalf("store boundary: %v", err)
 	}
 	user := emulator.IAMUser{
@@ -143,7 +143,7 @@ func (f *ec2AuthzFixture) setBoundary(t *testing.T, doc emulator.PolicyDocument)
 	if err != nil {
 		t.Fatalf("marshal user: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "user:"+f.user, userRaw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, f.user), userRaw); err != nil { //nolint:contextcheck
 		t.Fatalf("store user: %v", err)
 	}
 }

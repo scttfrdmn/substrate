@@ -143,7 +143,7 @@ func (p *IAMPlugin) resolveManagedPolicy(goCtx context.Context, arn string) (*IA
 	if mp, ok := GetManagedPolicy(arn); ok {
 		return mp, nil, nil
 	}
-	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil {
 		return nil, nil, fmt.Errorf("get policy: %w", err)
 	}

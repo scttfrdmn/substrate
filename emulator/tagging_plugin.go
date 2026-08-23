@@ -389,19 +389,22 @@ func (p *TaggingPlugin) scanEC2Instances(_ context.Context, reqCtx *RequestConte
 	return out, nil
 }
 
-func (p *TaggingPlugin) scanIAMEntities(_ context.Context, _ *RequestContext) ([]resourceTagMapping, error) {
+// scanIAMEntities returns the users and roles of the caller's own account.
+//
+// The two scans are per-account since #737: an IAM key carries the account it
+// belongs to, so a resource listing made by one account no longer reports another's
+// entities. Nothing filters index keys out of either sweep because nothing has to —
+// "user_policies:" and its siblings do not begin with "user:", so the prefix has
+// always excluded them, and the guard that claimed to do it never fired.
+func (p *TaggingPlugin) scanIAMEntities(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	var out []resourceTagMapping
 
-	userKeys, err := p.state.List(goCtx, iamNamespace, "user:")
+	userKeys, err := p.state.List(goCtx, iamNamespace, iamUserPrefix(reqCtx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list iam users: %w", err)
 	}
 	for _, k := range userKeys {
-		// Skip index keys (user_policies:, user_inline:, etc.).
-		if !strings.HasPrefix(k, "user:") || strings.ContainsAny(strings.TrimPrefix(k, "user:"), ":") {
-			continue
-		}
 		raw, err := p.state.Get(goCtx, iamNamespace, k)
 		if err != nil || raw == nil {
 			continue
@@ -416,14 +419,11 @@ func (p *TaggingPlugin) scanIAMEntities(_ context.Context, _ *RequestContext) ([
 		})
 	}
 
-	roleKeys, err := p.state.List(goCtx, iamNamespace, "role:")
+	roleKeys, err := p.state.List(goCtx, iamNamespace, iamRolePrefix(reqCtx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list iam roles: %w", err)
 	}
 	for _, k := range roleKeys {
-		if !strings.HasPrefix(k, "role:") || strings.ContainsAny(strings.TrimPrefix(k, "role:"), ":") {
-			continue
-		}
 		raw, err := p.state.Get(goCtx, iamNamespace, k)
 		if err != nil || raw == nil {
 			continue
@@ -837,13 +837,16 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		return "", "", fmt.Errorf("unsupported EC2 resource type in ARN: %q", resource)
 
 	case "iam":
+		// The account comes from the ARN, as it does for every other arm here: an IAM
+		// key carries the account it belongs to since #737, and the ARN is what names it.
+		acct := parts[4]
 		if strings.HasPrefix(resource, "user/") {
 			name := strings.TrimPrefix(resource, "user/")
-			return iamNamespace, "user:" + name, nil
+			return iamNamespace, iamUserKey(acct, name), nil
 		}
 		if strings.HasPrefix(resource, "role/") {
 			name := strings.TrimPrefix(resource, "role/")
-			return iamNamespace, "role:" + name, nil
+			return iamNamespace, iamRoleKey(acct, name), nil
 		}
 		return "", "", fmt.Errorf("unsupported IAM resource type in ARN: %q", resource)
 

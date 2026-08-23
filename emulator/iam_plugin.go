@@ -231,7 +231,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	key := "user:" + params.UserName
+	key := iamUserKey(ctx.AccountID, params.UserName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
@@ -290,7 +290,7 @@ func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
-	user, err := p.loadUser(goCtx, userName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, userName)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +320,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	user, err := p.loadUser(goCtx, params.UserName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +331,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 
 	// Check for attached policies.
-	arns, err := p.loadPolicyList(goCtx, "user_policies:"+params.UserName)
+	arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(ctx.AccountID, "user", params.UserName))
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +345,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	// memberships (RemoveUserFromGroup)" — the DeleteUser reference. Deleting a
 	// member would otherwise leave the group's side of the index naming a user that
 	// no longer exists, and GetGroup would silently skip it.
-	groups, err := p.loadStringList(goCtx, iamUserGroupsKey(params.UserName))
+	groups, err := p.loadStringList(goCtx, iamUserGroupsKey(ctx.AccountID, params.UserName))
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +358,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			http.StatusConflict), nil
 	}
 
-	if err := p.state.Delete(goCtx, iamNamespace, "user:"+params.UserName); err != nil {
+	if err := p.state.Delete(goCtx, iamNamespace, iamUserKey(ctx.AccountID, params.UserName)); err != nil {
 		return nil, fmt.Errorf("delete user: %w", err)
 	}
 
@@ -381,7 +381,7 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	keys, err := p.state.List(goCtx, iamNamespace, "user:")
+	keys, err := p.state.List(goCtx, iamNamespace, iamUserPrefix(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -440,7 +440,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	key := "role:" + params.RoleName
+	key := iamRoleKey(ctx.AccountID, params.RoleName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("get role: %w", err)
@@ -508,7 +508,7 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -553,7 +553,7 @@ func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest)
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +577,7 @@ func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest)
 	if err != nil {
 		return nil, fmt.Errorf("marshal role: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "role:"+params.RoleName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamRoleKey(ctx.AccountID, params.RoleName), raw); err != nil {
 		return nil, fmt.Errorf("put role: %w", err)
 	}
 
@@ -601,7 +601,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -611,7 +611,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			http.StatusNotFound), nil
 	}
 
-	arns, err := p.loadPolicyList(goCtx, "role_policies:"+params.RoleName)
+	arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(ctx.AccountID, "role", params.RoleName))
 	if err != nil {
 		return nil, err
 	}
@@ -628,7 +628,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	// profile listing a role that no longer exists, and DeleteInstanceProfile then
 	// refused with DeleteConflict — so the failure surfaced on the resource that was
 	// still present rather than on the one that broke the invariant (#581).
-	holders, err := p.instanceProfilesHoldingRole(goCtx, params.RoleName)
+	holders, err := p.instanceProfilesHoldingRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +642,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			http.StatusConflict), nil
 	}
 
-	if err := p.state.Delete(goCtx, iamNamespace, "role:"+params.RoleName); err != nil {
+	if err := p.state.Delete(goCtx, iamNamespace, iamRoleKey(ctx.AccountID, params.RoleName)); err != nil {
 		return nil, fmt.Errorf("delete role: %w", err)
 	}
 
@@ -665,7 +665,7 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	keys, err := p.state.List(goCtx, iamNamespace, "role:")
+	keys, err := p.state.List(goCtx, iamNamespace, iamRolePrefix(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
@@ -715,7 +715,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	key := "group:" + params.GroupName
+	key := iamGroupKey(ctx.AccountID, params.GroupName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("get group: %w", err)
@@ -767,7 +767,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	raw, err := p.state.Get(goCtx, iamNamespace, "group:"+params.GroupName)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamGroupKey(ctx.AccountID, params.GroupName))
 	if err != nil {
 		return nil, fmt.Errorf("get group: %w", err)
 	}
@@ -785,7 +785,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	// that are in the specified IAM group" — and this passed iamUserListXML(nil)
 	// unconditionally, so every group was observably empty. Nothing noticed because
 	// no operation could add a member until now.
-	memberNames, err := p.loadStringList(goCtx, iamGroupUsersKey(params.GroupName))
+	memberNames, err := p.loadStringList(goCtx, iamGroupUsersKey(ctx.AccountID, params.GroupName))
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +793,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 
 	users := make([]*IAMUser, 0, len(page))
 	for _, name := range page {
-		user, err := p.loadUser(goCtx, name)
+		user, err := p.loadUser(goCtx, ctx.AccountID, name)
 		if err != nil {
 			return nil, err
 		}
@@ -830,7 +830,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	existing, err := p.state.Get(goCtx, iamNamespace, "group:"+params.GroupName)
+	existing, err := p.state.Get(goCtx, iamNamespace, iamGroupKey(ctx.AccountID, params.GroupName))
 	if err != nil {
 		return nil, fmt.Errorf("get group: %w", err)
 	}
@@ -845,7 +845,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	// and DeleteRole. Without them a delete would leave a user_groups entry naming a
 	// group that no longer exists, and that membership would still be read by
 	// loadPoliciesForPrincipal.
-	members, err := p.loadStringList(goCtx, iamGroupUsersKey(params.GroupName))
+	members, err := p.loadStringList(goCtx, iamGroupUsersKey(ctx.AccountID, params.GroupName))
 	if err != nil {
 		return nil, err
 	}
@@ -855,7 +855,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 				"Users in %s: %s", params.GroupName, strings.Join(members, ", ")),
 			http.StatusConflict), nil
 	}
-	arns, err := p.loadPolicyList(goCtx, iamGroupPoliciesKey(params.GroupName))
+	arns, err := p.loadPolicyList(goCtx, iamGroupPoliciesKey(ctx.AccountID, params.GroupName))
 	if err != nil {
 		return nil, err
 	}
@@ -865,7 +865,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			http.StatusConflict), nil
 	}
 
-	if err := p.state.Delete(goCtx, iamNamespace, "group:"+params.GroupName); err != nil {
+	if err := p.state.Delete(goCtx, iamNamespace, iamGroupKey(ctx.AccountID, params.GroupName)); err != nil {
 		return nil, fmt.Errorf("delete group: %w", err)
 	}
 
@@ -888,7 +888,7 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	keys, err := p.state.List(goCtx, iamNamespace, "group:")
+	keys, err := p.state.List(goCtx, iamNamespace, iamGroupPrefix(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
@@ -939,7 +939,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	user, err := p.loadUser(goCtx, params.UserName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +953,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	// after the user lookup so an attach that is going to fail anyway does not also warn.
 	p.iamWarnUnresolvedPolicyARN(goCtx, "AttachUserPolicy", params.PolicyArn)
 
-	listKey := "user_policies:" + params.UserName
+	listKey := iamAttachedPoliciesKey(ctx.AccountID, "user", params.UserName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
 	if err != nil {
 		return nil, err
@@ -989,7 +989,7 @@ func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	listKey := "user_policies:" + params.UserName
+	listKey := iamAttachedPoliciesKey(ctx.AccountID, "user", params.UserName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
 	if err != nil {
 		return nil, err
@@ -1035,7 +1035,7 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	arns, err := p.loadPolicyList(goCtx, "user_policies:"+params.UserName)
+	arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(ctx.AccountID, "user", params.UserName))
 	if err != nil {
 		return nil, err
 	}
@@ -1073,7 +1073,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -1087,7 +1087,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	// after the role lookup so an attach that is going to fail anyway does not also warn.
 	p.iamWarnUnresolvedPolicyARN(goCtx, "AttachRolePolicy", params.PolicyArn)
 
-	listKey := "role_policies:" + params.RoleName
+	listKey := iamAttachedPoliciesKey(ctx.AccountID, "role", params.RoleName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
 	if err != nil {
 		return nil, err
@@ -1123,7 +1123,7 @@ func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	listKey := "role_policies:" + params.RoleName
+	listKey := iamAttachedPoliciesKey(ctx.AccountID, "role", params.RoleName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
 	if err != nil {
 		return nil, err
@@ -1169,7 +1169,7 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	arns, err := p.loadPolicyList(goCtx, "role_policies:"+params.RoleName)
+	arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(ctx.AccountID, "role", params.RoleName))
 	if err != nil {
 		return nil, err
 	}
@@ -1210,7 +1210,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	arn := iamPolicyARN(ctx.AccountID, params.Path, params.PolicyName)
 
-	existing, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	existing, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil {
 		return nil, fmt.Errorf("get policy: %w", err)
 	}
@@ -1249,7 +1249,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if err != nil {
 		return nil, fmt.Errorf("marshal policy: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "policy:"+arn, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamPolicyKey(arn), raw); err != nil {
 		return nil, fmt.Errorf("put policy: %w", err)
 	}
 
@@ -1278,7 +1278,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(mp))
 	}
 
-	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+params.PolicyArn)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn))
 	if err != nil {
 		return nil, fmt.Errorf("get policy: %w", err)
 	}
@@ -1312,7 +1312,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+params.PolicyArn)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn))
 	if err != nil {
 		return nil, fmt.Errorf("get policy: %w", err)
 	}
@@ -1322,7 +1322,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusNotFound), nil
 	}
 
-	if err := p.state.Delete(goCtx, iamNamespace, "policy:"+params.PolicyArn); err != nil {
+	if err := p.state.Delete(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn)); err != nil {
 		return nil, fmt.Errorf("delete policy: %w", err)
 	}
 
@@ -1357,7 +1357,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
-	user, err := p.loadUser(goCtx, userName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, userName)
 	if err != nil {
 		return nil, err
 	}
@@ -1373,18 +1373,21 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		Status:          "Active",
 		UserName:        userName,
 		CreateDate:      p.now().UTC(),
+		// The account is on the record because it cannot be in the key — an access key
+		// ID is resolved before any account is known (#737).
+		AccountID: ctx.AccountID,
 	}
 
 	raw, err := json.Marshal(accessKey)
 	if err != nil {
 		return nil, fmt.Errorf("marshal access key: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "accesskey:"+accessKey.AccessKeyID, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamAccessKeyKey(accessKey.AccessKeyID), raw); err != nil {
 		return nil, fmt.Errorf("put access key: %w", err)
 	}
 
 	// Update user's key index.
-	indexKey := "user_accesskeys:" + userName
+	indexKey := iamUserAccessKeysKey(ctx.AccountID, userName)
 	keyIDs, err := p.loadStringList(goCtx, indexKey)
 	if err != nil {
 		return nil, err
@@ -1415,7 +1418,7 @@ func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	raw, err := p.state.Get(goCtx, iamNamespace, "accesskey:"+params.AccessKeyID)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamAccessKeyKey(params.AccessKeyID))
 	if err != nil {
 		return nil, fmt.Errorf("get access key: %w", err)
 	}
@@ -1429,12 +1432,12 @@ func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("unmarshal access key: %w", err)
 	}
 
-	if err := p.state.Delete(goCtx, iamNamespace, "accesskey:"+params.AccessKeyID); err != nil {
+	if err := p.state.Delete(goCtx, iamNamespace, iamAccessKeyKey(params.AccessKeyID)); err != nil {
 		return nil, fmt.Errorf("delete access key: %w", err)
 	}
 
 	// Remove from user index.
-	indexKey := "user_accesskeys:" + key.UserName
+	indexKey := iamUserAccessKeysKey(ctx.AccountID, key.UserName)
 	keyIDs, err := p.loadStringList(goCtx, indexKey)
 	if err != nil {
 		return nil, err
@@ -1478,7 +1481,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
-	keyIDs, err := p.loadStringList(goCtx, "user_accesskeys:"+userName)
+	keyIDs, err := p.loadStringList(goCtx, iamUserAccessKeysKey(ctx.AccountID, userName))
 	if err != nil {
 		return nil, err
 	}
@@ -1486,7 +1489,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	// Build metadata-only list (no SecretAccessKey).
 	keys := make([]map[string]any, 0, len(keyIDs))
 	for _, id := range keyIDs {
-		raw, err := p.state.Get(goCtx, iamNamespace, "accesskey:"+id)
+		raw, err := p.state.Get(goCtx, iamNamespace, iamAccessKeyKey(id))
 		if err != nil || raw == nil {
 			continue
 		}
@@ -1547,12 +1550,12 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	// there. That is the #411 split exactly: one ARN, two loaders, two answers.
 	sources := []iamEntity{entity}
 	if entityType == "user" {
-		groups, err := p.loadStringList(goCtx, iamUserGroupsKey(entityName))
+		groups, err := p.loadStringList(goCtx, iamUserGroupsKey(entity.Account, entityName))
 		if err != nil {
 			return fmt.Errorf("load group memberships for authorization: %w", err)
 		}
 		for _, name := range groups {
-			sources = append(sources, iamEntity{Kind: "group", Name: name})
+			sources = append(sources, iamEntity{Account: entity.Account, Kind: "group", Name: name})
 		}
 	}
 
@@ -1561,7 +1564,7 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	arnsBySource := make([][]string, 0, len(sources))
 	hasAdminAccess := false
 	for _, source := range sources {
-		arns, err := p.loadPolicyList(goCtx, source.Kind+"_policies:"+source.Name)
+		arns, err := p.loadPolicyList(goCtx, iamAttachedPoliciesKey(source.Account, source.Kind, source.Name))
 		if err != nil {
 			return fmt.Errorf("load policies for authorization: %w", err)
 		}
@@ -1591,7 +1594,7 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 				docs = append(docs, mp.Document)
 				continue
 			}
-			raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+			raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 			if err != nil || raw == nil {
 				continue
 			}
@@ -1603,9 +1606,9 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 		}
 
 		// Also load inline policies for the entity.
-		inlineNames, _ := p.loadInlinePolicyNames(goCtx, source.Kind, source.Name)
+		inlineNames, _ := p.loadInlinePolicyNames(goCtx, source.Account, source.Kind, source.Name)
 		for _, name := range inlineNames {
-			doc, _ := p.loadInlinePolicyDoc(goCtx, source.Kind, source.Name, name)
+			doc, _ := p.loadInlinePolicyDoc(goCtx, source.Account, source.Kind, source.Name, name)
 			if doc != nil {
 				docs = append(docs, *doc)
 			}
@@ -1644,7 +1647,7 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	// above guarantees Kind is "user" or "role" and that the record exists, so this
 	// is one read rather than a switch that had to repeat the same entity-type
 	// decision a third time.
-	entityRaw, _ := p.state.Get(goCtx, iamNamespace, entityType+":"+entityName)
+	entityRaw, _ := p.state.Get(goCtx, iamNamespace, iamEntityKey(entity.Account, entityType, entityName))
 	if entityRaw != nil {
 		var stored struct {
 			PermissionsBoundary *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
@@ -1755,7 +1758,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	// Verify the entity exists. The key prefix is the entity type itself, so a new
 	// type needs no arm here — the previous form branched on "user" with a default
 	// arm reading "role:", which would have silently looked a group up as a role.
-	entityRaw, getErr := p.state.Get(goCtx, iamNamespace, entityType+":"+entityName)
+	entityRaw, getErr := p.state.Get(goCtx, iamNamespace, iamEntityKey(ctx.AccountID, entityType, entityName))
 	if getErr != nil {
 		return nil, fmt.Errorf("get %s: %w", entityType, getErr)
 	}
@@ -1779,13 +1782,13 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	if err != nil {
 		return nil, fmt.Errorf("marshal inline policy: %w", err)
 	}
-	stateKey := entityType + "_inline:" + entityName + ":" + params.PolicyName
+	stateKey := iamInlinePolicyKey(ctx.AccountID, entityType, entityName, params.PolicyName)
 	if err := p.state.Put(goCtx, iamNamespace, stateKey, docRaw); err != nil {
 		return nil, fmt.Errorf("put inline policy: %w", err)
 	}
 
 	// Update the names list.
-	namesKey := entityType + "_inline_names:" + entityName
+	namesKey := iamInlinePolicyNamesKey(ctx.AccountID, entityType, entityName)
 	names, err := p.loadStringList(goCtx, namesKey)
 	if err != nil {
 		return nil, err
@@ -1831,7 +1834,7 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	raw, err := p.state.Get(goCtx, iamNamespace, entityType+"_inline:"+entityName+":"+params.PolicyName)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamInlinePolicyKey(ctx.AccountID, entityType, entityName, params.PolicyName))
 	if err != nil {
 		return nil, fmt.Errorf("get inline policy: %w", err)
 	}
@@ -1872,7 +1875,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	stateKey := entityType + "_inline:" + entityName + ":" + params.PolicyName
+	stateKey := iamInlinePolicyKey(ctx.AccountID, entityType, entityName, params.PolicyName)
 	existing, err := p.state.Get(goCtx, iamNamespace, stateKey)
 	if err != nil {
 		return nil, fmt.Errorf("check inline policy: %w", err)
@@ -1887,7 +1890,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 	}
 
 	// Remove from names list.
-	namesKey := entityType + "_inline_names:" + entityName
+	namesKey := iamInlinePolicyNamesKey(ctx.AccountID, entityType, entityName)
 	names, err := p.loadStringList(goCtx, namesKey)
 	if err != nil {
 		return nil, err
@@ -1929,7 +1932,7 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	names, err := p.loadStringList(goCtx, entityType+"_inline_names:"+entityName)
+	names, err := p.loadStringList(goCtx, iamInlinePolicyNamesKey(ctx.AccountID, entityType, entityName))
 	if err != nil {
 		return nil, err
 	}
@@ -1993,10 +1996,10 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 		PolicyName: arnPolicyName(params.PermissionsBoundary),
 	}
 
-	stateKey := entityType + ":" + entityName
+	stateKey := iamEntityKey(ctx.AccountID, entityType, entityName)
 	switch entityType {
 	case "user":
-		user, err := p.loadUser(goCtx, entityName)
+		user, err := p.loadUser(goCtx, ctx.AccountID, entityName)
 		if err != nil {
 			return nil, err
 		}
@@ -2014,7 +2017,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 			return nil, fmt.Errorf("put user: %w", err)
 		}
 	default:
-		role, err := p.loadRole(goCtx, entityName)
+		role, err := p.loadRole(goCtx, ctx.AccountID, entityName)
 		if err != nil {
 			return nil, err
 		}
@@ -2061,10 +2064,10 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	stateKey := entityType + ":" + entityName
+	stateKey := iamEntityKey(ctx.AccountID, entityType, entityName)
 	switch entityType {
 	case "user":
-		user, err := p.loadUser(goCtx, entityName)
+		user, err := p.loadUser(goCtx, ctx.AccountID, entityName)
 		if err != nil {
 			return nil, err
 		}
@@ -2082,7 +2085,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 			return nil, fmt.Errorf("put user: %w", err)
 		}
 	default:
-		role, err := p.loadRole(goCtx, entityName)
+		role, err := p.loadRole(goCtx, ctx.AccountID, entityName)
 		if err != nil {
 			return nil, err
 		}
@@ -2132,7 +2135,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	user, err := p.loadUser(goCtx, params.UserName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -2161,7 +2164,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if err != nil {
 		return nil, fmt.Errorf("tagUser marshal: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "user:"+params.UserName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamUserKey(ctx.AccountID, params.UserName), raw); err != nil {
 		return nil, fmt.Errorf("tagUser put: %w", err)
 	}
 
@@ -2190,7 +2193,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	user, err := p.loadUser(goCtx, params.UserName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -2216,7 +2219,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if err != nil {
 		return nil, fmt.Errorf("untagUser marshal: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "user:"+params.UserName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamUserKey(ctx.AccountID, params.UserName), raw); err != nil {
 		return nil, fmt.Errorf("untagUser put: %w", err)
 	}
 
@@ -2242,7 +2245,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	user, err := p.loadUser(goCtx, params.UserName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -2311,7 +2314,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -2340,7 +2343,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if err != nil {
 		return nil, fmt.Errorf("tagRole marshal: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "role:"+params.RoleName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamRoleKey(ctx.AccountID, params.RoleName), raw); err != nil {
 		return nil, fmt.Errorf("tagRole put: %w", err)
 	}
 
@@ -2369,7 +2372,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -2395,7 +2398,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if err != nil {
 		return nil, fmt.Errorf("untagRole marshal: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "role:"+params.RoleName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamRoleKey(ctx.AccountID, params.RoleName), raw); err != nil {
 		return nil, fmt.Errorf("untagRole put: %w", err)
 	}
 
@@ -2421,7 +2424,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	role, err := p.loadRole(goCtx, params.RoleName)
+	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
 	}
@@ -2469,8 +2472,8 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 // --- State helpers ---------------------------------------------------------
 
-func (p *IAMPlugin) loadUser(goCtx context.Context, name string) (*IAMUser, error) {
-	raw, err := p.state.Get(goCtx, iamNamespace, "user:"+name)
+func (p *IAMPlugin) loadUser(goCtx context.Context, accountID, name string) (*IAMUser, error) {
+	raw, err := p.state.Get(goCtx, iamNamespace, iamUserKey(accountID, name))
 	if err != nil {
 		return nil, fmt.Errorf("load user %s: %w", name, err)
 	}
@@ -2484,8 +2487,8 @@ func (p *IAMPlugin) loadUser(goCtx context.Context, name string) (*IAMUser, erro
 	return &u, nil
 }
 
-func (p *IAMPlugin) loadRole(goCtx context.Context, name string) (*IAMRole, error) {
-	raw, err := p.state.Get(goCtx, iamNamespace, "role:"+name)
+func (p *IAMPlugin) loadRole(goCtx context.Context, accountID, name string) (*IAMRole, error) {
+	raw, err := p.state.Get(goCtx, iamNamespace, iamRoleKey(accountID, name))
 	if err != nil {
 		return nil, fmt.Errorf("load role %s: %w", name, err)
 	}
@@ -2505,14 +2508,14 @@ func (p *IAMPlugin) loadPolicyList(goCtx context.Context, key string) ([]string,
 
 // loadInlinePolicyNames returns the sorted list of inline policy names for the
 // given entity (entityType = "user" or "role").
-func (p *IAMPlugin) loadInlinePolicyNames(goCtx context.Context, entityType, entityName string) ([]string, error) {
-	return p.loadStringList(goCtx, entityType+"_inline_names:"+entityName)
+func (p *IAMPlugin) loadInlinePolicyNames(goCtx context.Context, accountID, entityType, entityName string) ([]string, error) {
+	return p.loadStringList(goCtx, iamInlinePolicyNamesKey(accountID, entityType, entityName))
 }
 
 // loadInlinePolicyDoc loads and parses an inline policy document. Returns nil
 // when the key is not found.
-func (p *IAMPlugin) loadInlinePolicyDoc(goCtx context.Context, entityType, entityName, policyName string) (*PolicyDocument, error) {
-	raw, err := p.state.Get(goCtx, iamNamespace, entityType+"_inline:"+entityName+":"+policyName)
+func (p *IAMPlugin) loadInlinePolicyDoc(goCtx context.Context, accountID, entityType, entityName, policyName string) (*PolicyDocument, error) {
+	raw, err := p.state.Get(goCtx, iamNamespace, iamInlinePolicyKey(accountID, entityType, entityName, policyName))
 	if err != nil {
 		return nil, fmt.Errorf("load inline policy %s/%s/%s: %w", entityType, entityName, policyName, err)
 	}
@@ -2532,7 +2535,7 @@ func (p *IAMPlugin) loadBoundaryPolicyDocs(goCtx context.Context, arn string) []
 	if mp, ok := GetManagedPolicy(arn); ok {
 		return []PolicyDocument{mp.Document}
 	}
-	raw, err := p.state.Get(goCtx, iamNamespace, "policy:"+arn)
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil || raw == nil {
 		return nil
 	}
@@ -2677,7 +2680,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	}
 
 	goCtx := context.Background()
-	key := "instance_profile:" + params.InstanceProfileName
+	key := iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
@@ -2707,7 +2710,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	return iamXMLResponse(http.StatusOK, "CreateInstanceProfile", iamSingleInstanceProfileXML(profile))
 }
 
-func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *IAMPlugin) getInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {
 		InstanceProfileName string `json:"InstanceProfileName"`
 	}
@@ -2719,7 +2722,7 @@ func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	data, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
@@ -2735,7 +2738,7 @@ func (p *IAMPlugin) getInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWS
 	return iamXMLResponse(http.StatusOK, "GetInstanceProfile", iamSingleInstanceProfileXML(&profile))
 }
 
-func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *IAMPlugin) deleteInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {
 		InstanceProfileName string `json:"InstanceProfileName"`
 	}
@@ -2747,7 +2750,7 @@ func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*
 	}
 
 	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	data, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
@@ -2765,13 +2768,13 @@ func (p *IAMPlugin) deleteInstanceProfile(_ *RequestContext, req *AWSRequest) (*
 			"Cannot delete entity, must detach all roles first.",
 			http.StatusConflict), nil
 	}
-	if err := p.state.Delete(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName); err != nil {
+	if err := p.state.Delete(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName)); err != nil {
 		return nil, fmt.Errorf("delete instance profile: %w", err)
 	}
 	return iamXMLEmptyResponse("DeleteInstanceProfile"), nil
 }
 
-func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *IAMPlugin) addRoleToInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {
 		InstanceProfileName string `json:"InstanceProfileName"`
 		RoleName            string `json:"RoleName"`
@@ -2784,7 +2787,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 	}
 
 	goCtx := context.Background()
-	profData, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	profData, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
@@ -2803,7 +2806,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 			http.StatusConflict), nil
 	}
 
-	roleData, err := p.state.Get(goCtx, iamNamespace, "role:"+params.RoleName)
+	roleData, err := p.state.Get(goCtx, iamNamespace, iamRoleKey(ctx.AccountID, params.RoleName))
 	if err != nil {
 		return nil, fmt.Errorf("get role: %w", err)
 	}
@@ -2822,13 +2825,13 @@ func (p *IAMPlugin) addRoleToInstanceProfile(_ *RequestContext, req *AWSRequest)
 	if err != nil {
 		return nil, fmt.Errorf("marshal instance profile: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName), raw); err != nil {
 		return nil, fmt.Errorf("put instance profile: %w", err)
 	}
 	return iamXMLEmptyResponse("AddRoleToInstanceProfile"), nil
 }
 
-func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *IAMPlugin) removeRoleFromInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {
 		InstanceProfileName string `json:"InstanceProfileName"`
 		RoleName            string `json:"RoleName"`
@@ -2841,7 +2844,7 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSReq
 	}
 
 	goCtx := context.Background()
-	profData, err := p.state.Get(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName)
+	profData, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
 	}
@@ -2870,7 +2873,7 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSReq
 	if err != nil {
 		return nil, fmt.Errorf("marshal instance profile: %w", err)
 	}
-	if err := p.state.Put(goCtx, iamNamespace, "instance_profile:"+params.InstanceProfileName, raw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName), raw); err != nil {
 		return nil, fmt.Errorf("put instance profile: %w", err)
 	}
 	return iamXMLEmptyResponse("RemoveRoleFromInstanceProfile"), nil
@@ -2886,9 +2889,9 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(_ *RequestContext, req *AWSReq
 // skipped, matching listInstanceProfiles — one corrupt record must not make a role
 // undeletable.
 func (p *IAMPlugin) instanceProfilesHoldingRole(
-	ctx context.Context, roleName string,
+	ctx context.Context, accountID, roleName string,
 ) ([]string, error) {
-	keys, err := p.state.List(ctx, iamNamespace, "instance_profile:")
+	keys, err := p.state.List(ctx, iamNamespace, iamInstanceProfilePrefix(accountID))
 	if err != nil {
 		return nil, fmt.Errorf("list instance profiles: %w", err)
 	}
@@ -2914,9 +2917,9 @@ func (p *IAMPlugin) instanceProfilesHoldingRole(
 }
 
 // listInstanceProfiles returns persisted IAM instance profiles.
-func (p *IAMPlugin) listInstanceProfiles(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, iamNamespace, "instance_profile:")
+	keys, err := p.state.List(goCtx, iamNamespace, iamInstanceProfilePrefix(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list instance profiles: %w", err)
 	}

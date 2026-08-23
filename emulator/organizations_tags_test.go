@@ -1054,7 +1054,7 @@ func (f *orgAuthzFixture) setResourcePolicy(t *testing.T, user, action string, r
 	if err != nil {
 		t.Fatalf("marshal policy: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(pol.ARN), raw); err != nil { //nolint:contextcheck
 		t.Fatalf("store policy: %v", err)
 	}
 }
@@ -1246,7 +1246,7 @@ func TestOrganizations_Authz_ResourceScopedStatementNarrows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal policy: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(pol.ARN), raw); err != nil { //nolint:contextcheck
 		t.Fatalf("store policy: %v", err)
 	}
 
@@ -1342,7 +1342,7 @@ func TestOrganizations_Authz_ARNsMatchWhatTheAPIReports(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal policy: %v", err)
 			}
-			if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, polRaw); err != nil { //nolint:contextcheck
+			if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(pol.ARN), polRaw); err != nil { //nolint:contextcheck
 				t.Fatalf("store policy: %v", err)
 			}
 			reqCtx := newAuthTestReqCtx("arn:aws:iam::123456789012:user/orgarns")
@@ -1576,7 +1576,7 @@ func TestOrganizations_Authz_MoveAccountParentScopedDenyBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal policy: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(pol.ARN), raw); err != nil { //nolint:contextcheck
 		t.Fatalf("store policy: %v", err)
 	}
 
@@ -1633,7 +1633,7 @@ func TestOrganizations_Authz_MoveAccountTagsPairWithTheirOwnResource(t *testing.
 	if err != nil {
 		t.Fatalf("marshal policy: %v", err)
 	}
-	if err := f.state.Put(context.Background(), "iam", "policy:"+pol.ARN, raw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(pol.ARN), raw); err != nil { //nolint:contextcheck
 		t.Fatalf("store policy: %v", err)
 	}
 
@@ -1797,7 +1797,7 @@ func TestOrganizations_Authz_MoveAccountBoundaryCoversEveryResource(t *testing.T
 		t.Fatalf("marshal boundary: %v", err)
 	}
 	ctx := context.Background()
-	if err := f.state.Put(ctx, "iam", "policy:"+boundaryARN, boundaryRaw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(boundaryARN), boundaryRaw); err != nil { //nolint:contextcheck
 		t.Fatalf("store boundary: %v", err)
 	}
 	// Attach it to the user, which is what makes CheckAccess load it.
@@ -1814,7 +1814,7 @@ func TestOrganizations_Authz_MoveAccountBoundaryCoversEveryResource(t *testing.T
 	if err != nil {
 		t.Fatalf("marshal user: %v", err)
 	}
-	if err := f.state.Put(ctx, "iam", "user:orgbounded", userRaw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "orgbounded"), userRaw); err != nil { //nolint:contextcheck
 		t.Fatalf("store user: %v", err)
 	}
 
@@ -1850,7 +1850,7 @@ func TestOrganizations_Authz_MoveAccountBoundaryCoversEveryResource(t *testing.T
 	if err != nil {
 		t.Fatalf("re-marshal boundary: %v", err)
 	}
-	if err := f.state.Put(ctx, "iam", "policy:"+boundaryARN, boundaryRaw); err != nil { //nolint:contextcheck
+	if err := f.state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(boundaryARN), boundaryRaw); err != nil { //nolint:contextcheck
 		t.Fatalf("re-store boundary: %v", err)
 	}
 	if err := f.move(t, "orgbounded", f.ouID, otherOU); err != nil {

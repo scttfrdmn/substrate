@@ -50,11 +50,11 @@ func (p *IAMPlugin) addUserToGroup(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	if resp, err := p.requireGroupAndUser(goCtx, params.GroupName, params.UserName); resp != nil || err != nil {
+	if resp, err := p.requireGroupAndUser(goCtx, ctx.AccountID, params.GroupName, params.UserName); resp != nil || err != nil {
 		return resp, err
 	}
 
-	if err := p.addGroupMembership(goCtx, params.GroupName, params.UserName); err != nil {
+	if err := p.addGroupMembership(goCtx, ctx.AccountID, params.GroupName, params.UserName); err != nil {
 		return nil, err
 	}
 
@@ -79,14 +79,14 @@ func (p *IAMPlugin) removeUserFromGroup(ctx *RequestContext, req *AWSRequest) (*
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	if resp, err := p.requireGroupAndUser(goCtx, params.GroupName, params.UserName); resp != nil || err != nil {
+	if resp, err := p.requireGroupAndUser(goCtx, ctx.AccountID, params.GroupName, params.UserName); resp != nil || err != nil {
 		return resp, err
 	}
 
 	// AWS declares only NoSuchEntity for the group and the user, not for the
 	// membership: removing a user who is not a member is not an error, so the write
 	// is idempotent in both directions.
-	if err := p.removeGroupMembership(goCtx, params.GroupName, params.UserName); err != nil {
+	if err := p.removeGroupMembership(goCtx, ctx.AccountID, params.GroupName, params.UserName); err != nil {
 		return nil, err
 	}
 
@@ -112,7 +112,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	user, err := p.loadUser(goCtx, params.UserName)
+	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 			http.StatusNotFound), nil
 	}
 
-	names, err := p.loadStringList(goCtx, iamUserGroupsKey(params.UserName))
+	names, err := p.loadStringList(goCtx, iamUserGroupsKey(ctx.AccountID, params.UserName))
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 
 	groups := make([]*IAMGroup, 0, len(page))
 	for _, name := range page {
-		group, err := p.loadGroup(goCtx, name)
+		group, err := p.loadGroup(goCtx, ctx.AccountID, name)
 		if err != nil {
 			return nil, err
 		}
@@ -176,7 +176,7 @@ func (p *IAMPlugin) attachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	group, err := p.loadGroup(goCtx, params.GroupName)
+	group, err := p.loadGroup(goCtx, ctx.AccountID, params.GroupName)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func (p *IAMPlugin) attachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 	// after the group lookup so an attach that is going to fail anyway does not also warn.
 	p.iamWarnUnresolvedPolicyARN(goCtx, "AttachGroupPolicy", params.PolicyArn)
 
-	listKey := iamGroupPoliciesKey(params.GroupName)
+	listKey := iamGroupPoliciesKey(ctx.AccountID, params.GroupName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
 	if err != nil {
 		return nil, err
@@ -226,7 +226,7 @@ func (p *IAMPlugin) detachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	listKey := iamGroupPoliciesKey(params.GroupName)
+	listKey := iamGroupPoliciesKey(ctx.AccountID, params.GroupName)
 	arns, err := p.loadPolicyList(goCtx, listKey)
 	if err != nil {
 		return nil, err
@@ -272,7 +272,7 @@ func (p *IAMPlugin) listAttachedGroupPolicies(ctx *RequestContext, req *AWSReque
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	arns, err := p.loadPolicyList(goCtx, iamGroupPoliciesKey(params.GroupName))
+	arns, err := p.loadPolicyList(goCtx, iamGroupPoliciesKey(ctx.AccountID, params.GroupName))
 	if err != nil {
 		return nil, err
 	}
@@ -306,20 +306,12 @@ func (p *IAMPlugin) listGroupPolicies(ctx *RequestContext, req *AWSRequest) (*AW
 
 // --- State helpers ---------------------------------------------------------
 
-// iamGroupUsersKey is the state key holding a group's member user names.
-func iamGroupUsersKey(groupName string) string { return "group_users:" + groupName }
-
-// iamUserGroupsKey is the state key holding the group names a user belongs to.
-func iamUserGroupsKey(userName string) string { return "user_groups:" + userName }
-
-// iamGroupPoliciesKey is the state key holding a group's attached managed policy
-// ARNs. It follows the "<kind>_policies:<name>" form the user and role keys use,
-// which is what lets loadPoliciesForPrincipal read it with the same code.
-func iamGroupPoliciesKey(groupName string) string { return "group_policies:" + groupName }
+// The three group key builders live in iam_state_keys.go with every other IAM key,
+// since #737 gave all of them an account.
 
 // loadGroup returns the stored group, or nil when it does not exist.
-func (p *IAMPlugin) loadGroup(goCtx context.Context, name string) (*IAMGroup, error) {
-	raw, err := p.state.Get(goCtx, iamNamespace, "group:"+name)
+func (p *IAMPlugin) loadGroup(goCtx context.Context, accountID, name string) (*IAMGroup, error) {
+	raw, err := p.state.Get(goCtx, iamNamespace, iamGroupKey(accountID, name))
 	if err != nil {
 		return nil, fmt.Errorf("load group %s: %w", name, err)
 	}
@@ -338,8 +330,8 @@ func (p *IAMPlugin) loadGroup(goCtx context.Context, name string) (*IAMGroup, er
 //
 // The group is checked first because it is the operation's first parameter, so a
 // call naming two unknown entities reports the one a caller reads first.
-func (p *IAMPlugin) requireGroupAndUser(goCtx context.Context, groupName, userName string) (*AWSResponse, error) {
-	group, err := p.loadGroup(goCtx, groupName)
+func (p *IAMPlugin) requireGroupAndUser(goCtx context.Context, accountID, groupName, userName string) (*AWSResponse, error) {
+	group, err := p.loadGroup(goCtx, accountID, groupName)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +340,7 @@ func (p *IAMPlugin) requireGroupAndUser(goCtx context.Context, groupName, userNa
 			fmt.Sprintf("The group with name %s cannot be found.", groupName),
 			http.StatusNotFound), nil
 	}
-	user, err := p.loadUser(goCtx, userName)
+	user, err := p.loadUser(goCtx, accountID, userName)
 	if err != nil {
 		return nil, err
 	}
@@ -367,20 +359,20 @@ func (p *IAMPlugin) requireGroupAndUser(goCtx context.Context, groupName, userNa
 // A membership visible to GetGroup but not to ListGroupsForUser — or worse, one
 // that grants the group's policies through CheckAccess while the API reports the
 // user as not a member — would be a state invariant broken by a missing line.
-func (p *IAMPlugin) addGroupMembership(goCtx context.Context, groupName, userName string) error {
-	if err := p.addToSortedList(goCtx, iamGroupUsersKey(groupName), userName); err != nil {
+func (p *IAMPlugin) addGroupMembership(goCtx context.Context, accountID, groupName, userName string) error {
+	if err := p.addToSortedList(goCtx, iamGroupUsersKey(accountID, groupName), userName); err != nil {
 		return err
 	}
-	return p.addToSortedList(goCtx, iamUserGroupsKey(userName), groupName)
+	return p.addToSortedList(goCtx, iamUserGroupsKey(accountID, userName), groupName)
 }
 
 // removeGroupMembership drops the membership from both sides of the index. It is
 // idempotent: removing a non-member changes nothing.
-func (p *IAMPlugin) removeGroupMembership(goCtx context.Context, groupName, userName string) error {
-	if err := p.removeFromList(goCtx, iamGroupUsersKey(groupName), userName); err != nil {
+func (p *IAMPlugin) removeGroupMembership(goCtx context.Context, accountID, groupName, userName string) error {
+	if err := p.removeFromList(goCtx, iamGroupUsersKey(accountID, groupName), userName); err != nil {
 		return err
 	}
-	return p.removeFromList(goCtx, iamUserGroupsKey(userName), groupName)
+	return p.removeFromList(goCtx, iamUserGroupsKey(accountID, userName), groupName)
 }
 
 // addToSortedList adds value to the string list at key, keeping it sorted and

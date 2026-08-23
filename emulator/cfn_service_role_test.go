@@ -81,7 +81,7 @@ func cfnSeedRole(t *testing.T, state emulator.StateManager, roleName string, act
 		Path:     "/",
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "role:"+roleName, roleRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMRoleKeyForTest(authzTestAccount, roleName), roleRaw))
 
 	if len(actions) == 0 {
 		return
@@ -89,7 +89,7 @@ func cfnSeedRole(t *testing.T, state emulator.StateManager, roleName string, act
 	policyARN := "arn:aws:iam::123456789012:policy/" + roleName + "Policy"
 	arnsRaw, err := json.Marshal([]string{policyARN})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "role_policies:"+roleName, arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "role", roleName), arnsRaw))
 
 	polRaw, err := json.Marshal(emulator.IAMPolicy{
 		PolicyName: roleName + "Policy",
@@ -104,7 +104,7 @@ func cfnSeedRole(t *testing.T, state emulator.StateManager, roleName string, act
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 }
 
 // cfnStackStatus reads a stack's status and RoleARN out of a DescribeStacks body.
@@ -452,12 +452,12 @@ func cfnSeedUserWithKey(t *testing.T, state emulator.StateManager, user, keyID s
 		Path:     "/",
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "user:"+user, userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, user), userRaw))
 
 	policyARN := "arn:aws:iam::123456789012:policy/" + user + "Policy"
 	arnsRaw, err := json.Marshal([]string{policyARN})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "user_policies:"+user, arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", user), arnsRaw))
 
 	polRaw, err := json.Marshal(emulator.IAMPolicy{
 		PolicyName: user + "Policy",
@@ -472,7 +472,7 @@ func cfnSeedUserWithKey(t *testing.T, state emulator.StateManager, user, keyID s
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 
 	keyRaw, err := json.Marshal(emulator.IAMAccessKey{
 		AccessKeyID: keyID,
@@ -480,7 +480,7 @@ func cfnSeedUserWithKey(t *testing.T, state emulator.StateManager, user, keyID s
 		Status:      "Active",
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "accesskey:"+keyID, keyRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAccessKeyKeyForTest(keyID), keyRaw))
 	return keyID
 }
 
@@ -555,12 +555,12 @@ func TestCFN_CreatorPrincipalDeploysWhenThereIsNoRole(t *testing.T) {
 		Path:     "/",
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "user:deployer", userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "deployer"), userRaw))
 
 	policyARN := "arn:aws:iam::123456789012:policy/CFNOnly"
 	arnsRaw, err := json.Marshal([]string{policyARN})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "user_policies:deployer", arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", "deployer"), arnsRaw))
 	polRaw, err := json.Marshal(emulator.IAMPolicy{
 		PolicyName: "CFNOnly",
 		ARN:        policyARN,
@@ -574,7 +574,7 @@ func TestCFN_CreatorPrincipalDeploysWhenThereIsNoRole(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 
 	const keyID = "AKIADEPLOYER00000001"
 	keyRaw, err := json.Marshal(emulator.IAMAccessKey{
@@ -583,7 +583,7 @@ func TestCFN_CreatorPrincipalDeploysWhenThereIsNoRole(t *testing.T) {
 		Status:      "Active",
 	})
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "iam", "accesskey:"+keyID, keyRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAccessKeyKeyForTest(keyID), keyRaw))
 
 	client := &cfnRoleTestClient{t: t, baseURL: ts.URL, accessKey: keyID}
 

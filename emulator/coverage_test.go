@@ -453,7 +453,7 @@ func TestReplayEngine_InspectState(t *testing.T) {
 	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
 	sm := newMemStateManager()
 
-	require.NoError(t, sm.Put(context.Background(), "iam", "user:alice", []byte(`{"name":"alice"}`)))
+	require.NoError(t, sm.Put(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, "alice"), []byte(`{"name":"alice"}`)))
 
 	tc := emulator.NewTimeController(time.Now())
 	engine := emulator.NewReplayEngine(store, sm, tc, emulator.NewPluginRegistry(),
@@ -461,7 +461,7 @@ func TestReplayEngine_InspectState(t *testing.T) {
 
 	state, err := engine.InspectState(context.Background(), "iam")
 	require.NoError(t, err)
-	assert.Contains(t, state, "user:alice")
+	assert.Contains(t, state, emulator.IAMUserKeyForTest(authzTestAccount, "alice"))
 }
 
 func TestReplayEngine_StopRecording_WithEvents(t *testing.T) {
@@ -610,7 +610,7 @@ func TestIAMPlugin_Authorize_WithInlinePolicy(t *testing.T) {
 		Path:     "/",
 	}
 	userRaw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(ctx, "iam", "user:inlined", userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "inlined"), userRaw))
 
 	// Inline policy: allow s3:GetObject.
 	doc := emulator.PolicyDocument{
@@ -622,9 +622,9 @@ func TestIAMPlugin_Authorize_WithInlinePolicy(t *testing.T) {
 		}},
 	}
 	docRaw, _ := json.Marshal(doc)
-	require.NoError(t, state.Put(ctx, "iam", "user_inline:inlined:ReadPolicy", docRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMInlinePolicyKeyForTest(authzTestAccount, "user", "inlined", "ReadPolicy"), docRaw))
 	namesRaw, _ := json.Marshal([]string{"ReadPolicy"})
-	require.NoError(t, state.Put(ctx, "iam", "user_inline_names:inlined", namesRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMInlinePolicyNamesKeyForTest(authzTestAccount, "user", "inlined"), namesRaw))
 
 	plugin := &emulator.IAMPlugin{}
 	require.NoError(t, plugin.Initialize(context.Background(), emulator.PluginConfig{State: state, Logger: logger}))
@@ -669,7 +669,7 @@ func TestIAMPlugin_Authorize_WithBoundary(t *testing.T) {
 		Document:         boundaryDoc,
 	}
 	bRaw, _ := json.Marshal(boundaryPolicy)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+boundaryARN, bRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(boundaryARN), bRaw))
 
 	// User with AdministratorAccess + boundary set.
 	boundaryRef := &emulator.IAMAttachedPolicy{PolicyARN: boundaryARN, PolicyName: "ReadOnlyBoundary"}
@@ -681,11 +681,11 @@ func TestIAMPlugin_Authorize_WithBoundary(t *testing.T) {
 		PermissionsBoundary: boundaryRef,
 	}
 	uRaw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(ctx, "iam", "user:bounded", uRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "bounded"), uRaw))
 
 	// Attach AdministratorAccess.
 	arnsRaw, _ := json.Marshal([]string{"arn:aws:iam::aws:policy/AdministratorAccess"})
-	require.NoError(t, state.Put(ctx, "iam", "user_policies:bounded", arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", "bounded"), arnsRaw))
 
 	plugin := &emulator.IAMPlugin{}
 	require.NoError(t, plugin.Initialize(context.Background(), emulator.PluginConfig{State: state, Logger: logger}))

@@ -543,7 +543,7 @@ func TestEC2_TagAuthz_PermissionBoundaryCoversEveryResource(t *testing.T) {
 	}
 	raw, err := json.Marshal(boundary)
 	require.NoError(t, err)
-	require.NoError(t, f.state.Put(context.Background(), "iam", "policy:"+boundaryARN, raw))
+	require.NoError(t, f.state.Put(context.Background(), "iam", emulator.IAMPolicyKeyForTest(boundaryARN), raw))
 
 	user := emulator.IAMUser{
 		UserName:            "opal",
@@ -554,7 +554,7 @@ func TestEC2_TagAuthz_PermissionBoundaryCoversEveryResource(t *testing.T) {
 	}
 	userRaw, err := json.Marshal(user)
 	require.NoError(t, err)
-	require.NoError(t, f.state.Put(context.Background(), "iam", "user:opal", userRaw))
+	require.NoError(t, f.state.Put(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, "opal"), userRaw))
 
 	callErr := f.call(t, "CreateTags", ec2TagAuthzParams())
 	if !ec2AuthzDenied(t, callErr) {

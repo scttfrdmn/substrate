@@ -569,7 +569,7 @@ func TestTagging_GetResources_IAMUser(t *testing.T) {
 		Tags:     []emulator.IAMTag{{Key: "Dept", Value: "eng"}},
 	}
 	raw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(context.Background(), "iam", "user:alice", raw))
+	require.NoError(t, state.Put(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, "alice"), raw))
 
 	resp := taggingRequest(t, ts, "GetResources", map[string]any{
 		"TagFilters": []map[string]any{
@@ -597,7 +597,7 @@ func TestTagging_TagResources_IAMUser(t *testing.T) {
 		Path:     "/",
 	}
 	raw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(context.Background(), "iam", "user:bob", raw))
+	require.NoError(t, state.Put(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, "bob"), raw))
 
 	resp := taggingRequest(t, ts, "TagResources", map[string]any{
 		"ResourceARNList": []string{"arn:aws:iam::123456789012:user/bob"},
@@ -610,7 +610,7 @@ func TestTagging_TagResources_IAMUser(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Empty(t, out["FailedResourcesMap"])
 
-	updated, err := state.Get(context.Background(), "iam", "user:bob")
+	updated, err := state.Get(context.Background(), "iam", emulator.IAMUserKeyForTest(authzTestAccount, "bob"))
 	require.NoError(t, err)
 	var u emulator.IAMUser
 	require.NoError(t, json.Unmarshal(updated, &u))
@@ -633,7 +633,7 @@ func TestTagging_TagResources_IAMRole(t *testing.T) {
 		Path:     "/",
 	}
 	raw, _ := json.Marshal(role)
-	require.NoError(t, state.Put(context.Background(), "iam", "role:deploy-role", raw))
+	require.NoError(t, state.Put(context.Background(), "iam", emulator.IAMRoleKeyForTest(authzTestAccount, "deploy-role"), raw))
 
 	resp := taggingRequest(t, ts, "TagResources", map[string]any{
 		"ResourceARNList": []string{"arn:aws:iam::123456789012:role/deploy-role"},
@@ -646,7 +646,7 @@ func TestTagging_TagResources_IAMRole(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Empty(t, out["FailedResourcesMap"])
 
-	updated, err := state.Get(context.Background(), "iam", "role:deploy-role")
+	updated, err := state.Get(context.Background(), "iam", emulator.IAMRoleKeyForTest(authzTestAccount, "deploy-role"))
 	require.NoError(t, err)
 	var r emulator.IAMRole
 	require.NoError(t, json.Unmarshal(updated, &r))

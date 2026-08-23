@@ -73,6 +73,17 @@ type IAMAccessKey struct {
 	Status          string    `json:"Status"`
 	UserName        string    `json:"UserName"`
 	CreateDate      time.Time `json:"CreateDate"`
+
+	// AccountID is the account owning the user this key belongs to.
+	//
+	// Every other IAM record carries its account in the state key, but an access key
+	// cannot: its ID is what *determines* the account, so [resolvePrincipal] looks the
+	// record up before any account is known (#737). The account is a field here
+	// instead. It is absent from the wire in both directions — AWS's CreateAccessKey
+	// and ListAccessKeys responses publish no account member — so it is stored and
+	// never rendered. A record written before #737 has it empty, and the reader falls
+	// back to the account the request resolved to.
+	AccountID string `json:"AccountId,omitempty"`
 }
 
 // IAMTag represents an AWS resource tag key-value pair.

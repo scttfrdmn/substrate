@@ -87,7 +87,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
-	candidates, err := p.iamPolicyCandidates(goCtx, scope)
+	candidates, err := p.iamPolicyCandidates(goCtx, ctx.AccountID, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	// The attachment counts are computed once for the whole listing rather than per policy,
 	// because they come from walking the same state: one pass over the attachment lists
 	// reaches every ARN. Counting per policy would re-read every list 52 times.
-	attachments, err := p.iamPolicyAttachmentCounts(goCtx)
+	attachments, err := p.iamPolicyAttachmentCounts(goCtx, ctx.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 // ambiguous and a page could repeat or skip. A bundled ARN is under "::aws:" and
 // CreatePolicy builds a "::<account>:" one, so the two arms cannot collide through the API —
 // only a state key written directly could.
-func (p *IAMPlugin) iamPolicyCandidates(goCtx context.Context, scope string) ([]*IAMPolicy, error) {
+func (p *IAMPlugin) iamPolicyCandidates(goCtx context.Context, accountID, scope string) ([]*IAMPolicy, error) {
 	seen := make(map[string]bool)
 	candidates := make([]*IAMPolicy, 0, len(ListManagedPolicies()))
 
@@ -161,7 +161,7 @@ func (p *IAMPlugin) iamPolicyCandidates(goCtx context.Context, scope string) ([]
 		}
 	}
 	if scope == "All" || scope == "Local" {
-		keys, err := p.state.List(goCtx, iamNamespace, "policy:")
+		keys, err := p.state.List(goCtx, iamNamespace, iamPolicyPrefix(accountID))
 		if err != nil {
 			return nil, fmt.Errorf("list policies: %w", err)
 		}
@@ -196,13 +196,14 @@ func (p *IAMPlugin) iamPolicyCandidates(goCtx context.Context, scope string) ([]
 // on the entity's list and never touch a count on the policy, and the bundled catalog is
 // immutable — so a stored count would be zero for a bundled policy and could go stale for a
 // created one. Deriving it means an attach and a detach are both immediately visible.
-func (p *IAMPlugin) iamPolicyAttachmentCounts(goCtx context.Context) (map[string]int, error) {
+func (p *IAMPlugin) iamPolicyAttachmentCounts(goCtx context.Context, accountID string) (map[string]int, error) {
 	counts := make(map[string]int)
 
 	// Read from the attachment lists themselves rather than by enumerating entities:
 	// "<kind>_policies:<name>" is where every attach writes, so three prefixes reach users,
 	// groups and roles without loading a single entity record.
-	for _, prefix := range []string{"user_policies:", "group_policies:", "role_policies:"} {
+	for _, kind := range []string{"user", "group", "role"} {
+		prefix := iamAttachedPoliciesPrefix(accountID, kind)
 		keys, err := p.state.List(goCtx, iamNamespace, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("list %s: %w", prefix, err)

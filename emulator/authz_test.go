@@ -12,6 +12,15 @@ import (
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
+// authzTestAccount is the account every test in this package seeds IAM state for.
+//
+// It is [emulator]'s own default — the account a request with nothing naming one is
+// attributed to — so a record written under it is the record the request under test
+// reads. Since #737 an IAM state key carries the account, and a test that seeded a
+// different one would write a key the handler never looks at, so this is stated once
+// rather than repeated at each Put.
+const authzTestAccount = "123456789012"
+
 // newAuthTestState builds a MemoryStateManager with a pre-created user and
 // optionally an attached managed/custom policy.
 func newAuthTestState(t *testing.T, userName, policyARN string, policyDoc emulator.PolicyDocument) emulator.StateManager {
@@ -26,13 +35,13 @@ func newAuthTestState(t *testing.T, userName, policyARN string, policyDoc emulat
 		Path:     "/",
 	}
 	userRaw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(ctx, "iam", "user:"+userName, userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, userName), userRaw))
 
 	if policyARN != "" {
 		// Attach the policy to the user.
 		arns := []string{policyARN}
 		arnsRaw, _ := json.Marshal(arns)
-		require.NoError(t, state.Put(ctx, "iam", "user_policies:"+userName, arnsRaw))
+		require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", userName), arnsRaw))
 
 		// Store the policy document if it's a custom (non-managed) ARN.
 		if len(policyDoc.Statement) > 0 {
@@ -46,7 +55,7 @@ func newAuthTestState(t *testing.T, userName, policyARN string, policyDoc emulat
 				Document:         policyDoc,
 			}
 			polRaw, _ := json.Marshal(pol)
-			require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+			require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 		}
 	}
 
@@ -174,7 +183,7 @@ func TestAuthController_InlinePolicy_Allow(t *testing.T) {
 		Path:     "/",
 	}
 	userRaw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(ctx, "iam", "user:eve", userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "eve"), userRaw))
 
 	// Inline policy document stored directly.
 	inlineDoc := emulator.PolicyDocument{
@@ -186,9 +195,9 @@ func TestAuthController_InlinePolicy_Allow(t *testing.T) {
 		}},
 	}
 	docRaw, _ := json.Marshal(inlineDoc)
-	require.NoError(t, state.Put(ctx, "iam", "user_inline:eve:ReadPolicy", docRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMInlinePolicyKeyForTest(authzTestAccount, "user", "eve", "ReadPolicy"), docRaw))
 	namesRaw, _ := json.Marshal([]string{"ReadPolicy"})
-	require.NoError(t, state.Put(ctx, "iam", "user_inline_names:eve", namesRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMInlinePolicyNamesKeyForTest(authzTestAccount, "user", "eve"), namesRaw))
 
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)
@@ -225,7 +234,7 @@ func TestAuthController_PermissionBoundary_Deny(t *testing.T) {
 		Document:         boundaryDoc,
 	}
 	boundaryRaw, _ := json.Marshal(boundary)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+boundaryARN, boundaryRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(boundaryARN), boundaryRaw))
 
 	// User has allow-all managed policy and the boundary set.
 	allowAllARN := "arn:aws:iam::aws:policy/AdministratorAccess"
@@ -240,8 +249,8 @@ func TestAuthController_PermissionBoundary_Deny(t *testing.T) {
 		PermissionsBoundary: boundaryRef,
 	}
 	userRaw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(ctx, "iam", "user:frank", userRaw))
-	require.NoError(t, state.Put(ctx, "iam", "user_policies:frank", arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "frank"), userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", "frank"), arnsRaw))
 
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)
@@ -404,9 +413,9 @@ func TestABAC_IAMRole_ResourceTag(t *testing.T) {
 		Path:     "/",
 	}
 	userRaw, _ := json.Marshal(user)
-	require.NoError(t, state.Put(ctx, "iam", "user:frank", userRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMUserKeyForTest(authzTestAccount, "frank"), userRaw))
 	arnsRaw, _ := json.Marshal([]string{policyARN})
-	require.NoError(t, state.Put(ctx, "iam", "user_policies:frank", arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "user", "frank"), arnsRaw))
 
 	pol := emulator.IAMPolicy{
 		PolicyName:       "InfraTeam",
@@ -418,7 +427,7 @@ func TestABAC_IAMRole_ResourceTag(t *testing.T) {
 		Document:         policyDoc,
 	}
 	polRaw, _ := json.Marshal(pol)
-	require.NoError(t, state.Put(ctx, "iam", "policy:"+policyARN, polRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMPolicyKeyForTest(policyARN), polRaw))
 
 	// Role tagged Team=infra.
 	role := emulator.IAMRole{
@@ -429,7 +438,7 @@ func TestABAC_IAMRole_ResourceTag(t *testing.T) {
 		Tags:     []emulator.IAMTag{{Key: "Team", Value: "infra"}},
 	}
 	roleRaw, _ := json.Marshal(role)
-	require.NoError(t, state.Put(ctx, "iam", "role:my-role", roleRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMRoleKeyForTest(authzTestAccount, "my-role"), roleRaw))
 
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)
@@ -446,7 +455,7 @@ func TestABAC_IAMRole_ResourceTag(t *testing.T) {
 		Metadata:  make(map[string]interface{}),
 	}
 	// Attach the policy list to the role too.
-	require.NoError(t, state.Put(ctx, "iam", "role_policies:my-role", arnsRaw))
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "role", "my-role"), arnsRaw))
 
 	req := &emulator.AWSRequest{Service: "iam", Operation: "PassRole", Path: "/"}
 	err := auth.CheckAccess(reqCtx, req)
