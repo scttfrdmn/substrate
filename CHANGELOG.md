@@ -134,6 +134,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary's behavior changes: every documented credential still resolves to
   `arn:aws:iam::123456789012:root` and an IAM-minted key still resolves to its user.
 
+- **`substrate.yaml`'s `credentials:` section is read** (#736). It had been documented
+  from the beginning with an `enabled` flag and a list of `entries` carrying
+  `access_key_id` / `secret_access_key` / `account_id`, and `Config` had no field for any of
+  it — so viper read the keys, nothing consumed them, and a consumer who configured a
+  registry got no registry, no verification and no error. `CredentialRegistry` was reachable
+  only in-process through `ServerOptions`. It now has `CredentialsCfg`,
+  `CredentialEntryCfg`, `CredentialsCfg.ToCredentialRegistry` and `CredentialsCfg.RegisterInto`,
+  and `cmd/substrate` passes the result through `ServerOptions`.
+
+  `verify_signatures` was added beside `enabled` and defaults to **true**, because the
+  section has documented `enabled` as *"enable SigV4 signature verification"* since it was
+  written and `enabled: true` on its own has to keep meaning that. Setting it to `false` is
+  the combination #630 opened up — resolve an account per access key without authenticating
+  anyone — which is what a multi-account test usually wants.
+
+  `Validate` refuses an empty `access_key_id`, an `account_id` that is not twelve digits, a
+  duplicated access key, and a missing `secret_access_key` while verification is on. Entries
+  are checked whether or not the section is enabled, so a typo does not stay hidden until
+  someone flips the flag. `SIGHUP` adds newly listed entries to the live registry; `enabled`
+  and `verify_signatures` are startup-only and changing either logs a warning saying so.
+
+  `NewCredentialRegistry` now seeds the three credentials substrate's own documentation
+  tells a caller to use — `AKIATEST12345678901`, `test`/`test` and `AKIAIOSFODNN7EXAMPLE`,
+  all in the default account — rather than only the first. Without that, turning
+  verification on would have made substrate's own quickstart wrong: a consumer who followed
+  `README.md` or the testing guide exactly would have been answered
+  `InvalidClientTokenId` 403. Their secrets are documented too, so signing with one still
+  proves the caller holds the secret; this widens who may sign, not what a signature has to
+  satisfy. An `entries:` row reusing one of those access key IDs replaces it, which is how a
+  test moves the built-in key into another account.
+
+  **The `auth:` section was removed from `substrate.yaml.example` rather than wired**, and
+  the issue's expectation there is recorded as wrong. `substrate server` already builds an
+  `AuthController` unconditionally, and `IAMPlugin.authorize` holds no controller at all —
+  it resolves against state directly — so `auth.enabled: false` could never have meant
+  "off". Enforcement is opt-in by *existence*: a request is checked only once its access key
+  resolves to an IAM entity substrate holds. A flag would have overpromised in both
+  directions, so the example file now says there is nothing to enable and why.
+
+  Nothing changes for an existing deployment: `credentials.enabled` ships `false`, which
+  wires no registry, attributes every caller to `account.default` and checks no signature.
+  One thing to expect on turning it on with verification: a verified key that IAM does not
+  know names *itself* as the principal, so `GetCallerIdentity` reports
+  `arn:aws:iam::111122223333:user/AKIAEXAMPLE00000001` rather than `…:root`. That is #630's
+  rule — a verified key has proven the caller holds the secret — and the ARN still resolves
+  to no policies. With `verify_signatures: false` the answer stays `…:root`.
+
 ### Fixed
 - **An EC2 operation naming several resources was decided against the first alone** (#744).
   `TerminateInstances` with three `InstanceId.N` was authorized against `InstanceId.1`'s ARN

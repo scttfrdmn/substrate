@@ -95,6 +95,41 @@ func newFaultController(cfg substrate.FaultCfg) *substrate.FaultController {
 	return substrate.NewFaultController(cfg.ToFaultConfig(), cfg.Seed)
 }
 
+// newCredentialWiring builds the server's credential options from the
+// credentials: section and reports that the registry is on.
+//
+// Both returns are nil/false unless credentials.enabled is set, and off is the
+// shipped default — so an existing deployment resolves every caller to
+// account.default and checks no signature, exactly as before (#736).
+//
+// This is a function rather than three inline lines for the same reason as
+// [newFaultController]: a RunE closure cannot be called from a test, and what the
+// shipped binary does with this section is the whole of what #736 changed.
+func newCredentialWiring(cfg *substrate.Config, logger substrate.Logger) (*substrate.CredentialRegistry, bool) {
+	registry, verifySignatures := cfg.Credentials.ToServerCredentials(cfg.Account.Default)
+	if registry != nil {
+		logger.Info("credential registry enabled",
+			"entries", len(cfg.Credentials.Entries),
+			"verify_signatures", verifySignatures)
+	}
+	return registry, verifySignatures
+}
+
+// reloadCredentials applies to a running server what a reload of the credentials:
+// section can apply, and warns about what it cannot.
+//
+// The registry the server holds cannot be swapped, but it can be added to, so an
+// appended entry is reachable without a restart. Whether the section is on at all,
+// and whether it verifies, are read once at startup (#736).
+func reloadCredentials(registry *substrate.CredentialRegistry, newCfg, cfg *substrate.Config, logger substrate.Logger) {
+	newCfg.Credentials.RegisterInto(registry, newCfg.Account.Default)
+	if newCfg.Credentials.StartupOnlyDiffers(cfg.Credentials) {
+		logger.Warn("credentials.enabled and credentials.verify_signatures are read at startup; restart to change them",
+			"enabled", cfg.Credentials.Enabled,
+			"verify_signatures", cfg.Credentials.VerifySignatures)
+	}
+}
+
 func newServerCmd() *cobra.Command {
 	var configPath string
 	var address string
@@ -191,15 +226,19 @@ configured address will have their requests emulated and recorded.`,
 				defer func() { _ = tracerShutdown(context.Background()) }()
 			}
 
+			credRegistry, verifySignatures := newCredentialWiring(cfg, logger)
+
 			srv := substrate.NewServer(*cfg, registry, store, state, tc, logger,
 				substrate.ServerOptions{
-					Quota:       quotaCtrl,
-					Consistency: consistencyCtrl,
-					Costs:       costCtrl,
-					Auth:        authCtrl,
-					Metrics:     metricsCollector,
-					Tracer:      tracer,
-					Fault:       faultCtrl,
+					Quota:            quotaCtrl,
+					Consistency:      consistencyCtrl,
+					Costs:            costCtrl,
+					Auth:             authCtrl,
+					Metrics:          metricsCollector,
+					Tracer:           tracer,
+					Fault:            faultCtrl,
+					Credentials:      credRegistry,
+					VerifySignatures: verifySignatures,
 				})
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -224,6 +263,7 @@ configured address will have their requests emulated and recorded.`,
 					if faultCtrl != nil {
 						faultCtrl.UpdateConfig(newCfg.Fault.ToFaultConfig())
 					}
+					reloadCredentials(credRegistry, newCfg, cfg, logger)
 					logger.Info("config reloaded")
 				}
 			}()

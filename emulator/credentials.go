@@ -39,17 +39,46 @@ type CredentialRegistry struct {
 // defaultTestAccessKeyID is the access key for the built-in test credential.
 const defaultTestAccessKeyID = "AKIATEST12345678901"
 
-// defaultTestSecretKey is the secret for the built-in test credential.
+// defaultTestSecretKey is the secret for the built-in test credential. It is
+// AWS's own documented example secret, which is also what substrate's docs pair
+// with documentedExampleAccessKeyID.
 const defaultTestSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
+// documentedShortAccessKeyID is the access key README.md and
+// docs/endpoint-configuration.md tell a caller to configure, paired with an
+// identical secret.
+const documentedShortAccessKeyID = "test"
+
+// documentedShortSecretKey is the secret paired with documentedShortAccessKeyID.
+const documentedShortSecretKey = "test"
+
+// documentedExampleAccessKeyID is AWS's canonical example access key, which
+// substrate's testing guide and every e2e check sign with.
+const documentedExampleAccessKeyID = "AKIAIOSFODNN7EXAMPLE"
+
 // NewCredentialRegistry creates a CredentialRegistry pre-loaded with the
-// built-in test credential (AKIATEST12345678901 → account 123456789012).
+// credentials substrate's own documentation tells a caller to use, each bound to
+// account 123456789012: AKIATEST12345678901, "test" (README.md,
+// docs/endpoint-configuration.md) and AKIAIOSFODNN7EXAMPLE (docs/testing-guide.md,
+// test/e2e).
+//
+// All three are seeded because a registry is what
+// [ServerOptions.VerifySignatures] checks a signature against, and a key it does
+// not hold is InvalidClientTokenId 403 (#736). A registry that omitted them would
+// make substrate's own quickstart wrong the moment a consumer set
+// credentials.enabled in substrate.yaml — the caller would have followed the
+// documentation exactly and been refused. Their secrets are documented too, so
+// signing with them still proves the caller holds the secret; seeding them
+// widens who can sign, not what a signature has to satisfy.
 func NewCredentialRegistry() *CredentialRegistry {
 	r := &CredentialRegistry{store: make(map[string]CredentialEntry)}
-	r.store[defaultTestAccessKeyID] = CredentialEntry{
-		AccessKeyID:     defaultTestAccessKeyID,
-		SecretAccessKey: defaultTestSecretKey,
-		AccountID:       defaultAccountID,
+	for _, e := range []CredentialEntry{
+		{AccessKeyID: defaultTestAccessKeyID, SecretAccessKey: defaultTestSecretKey},
+		{AccessKeyID: documentedShortAccessKeyID, SecretAccessKey: documentedShortSecretKey},
+		{AccessKeyID: documentedExampleAccessKeyID, SecretAccessKey: defaultTestSecretKey},
+	} {
+		e.AccountID = defaultAccountID
+		r.store[e.AccessKeyID] = e
 	}
 	return r
 }
