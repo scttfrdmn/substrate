@@ -10,10 +10,10 @@
 //
 // in docs/services.md. Everything outside the markers — including the
 // hand-written per-service operation, CloudFormation, and cost detail — is left
-// untouched. Per-plugin display names and protocols come from the maintained
-// metadata map below; the tool fails if a registered plugin has no metadata
-// entry (or an entry names a plugin that is not registered), which is what a CI
-// drift check enforces.
+// untouched. Per-plugin display names and protocols come from the emulator's own
+// routing table ([emu.PluginRoutingCatalog], emulator/routing.go); the tool fails
+// if a registered plugin has no entry there (or an entry names a plugin that is
+// not registered), which is what a CI drift check enforces.
 //
 // Usage:
 //
@@ -102,22 +102,31 @@ func registeredPlugins() ([]string, error) {
 	if err := emu.RegisterDefaultPlugins(context.Background(), reg, state, tc, logger, store, nil); err != nil {
 		return nil, fmt.Errorf("register default plugins: %w", err)
 	}
-	names := reg.Names()
+	return checkRouting(reg.Names(), routing)
+}
 
+// checkRouting verifies that the routing table and the registered plugin names
+// agree in both directions and returns the names sorted. It takes the table as a
+// parameter rather than reading the package-level [routing] so that both refusals
+// are reachable from a test — the drift check is the whole point of the -check
+// flag, and an untested drift check is one nobody knows still fires (#739).
+func checkRouting(names []string, table map[string]emu.PluginRouting) ([]string, error) {
 	registered := make(map[string]bool, len(names))
 	for _, n := range names {
 		registered[n] = true
-		if _, ok := routing[n]; !ok {
+		if _, ok := table[n]; !ok {
 			return nil, fmt.Errorf("plugin %q is registered but has no entry in emulator/routing.go; add one, citing the source of its target prefix, hosts and signing names", n)
 		}
 	}
-	for n := range routing {
+	for n := range table {
 		if !registered[n] {
 			return nil, fmt.Errorf("routing entry %q does not correspond to a registered plugin; remove it from emulator/routing.go", n)
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sorted := make([]string, len(names))
+	copy(sorted, names)
+	sort.Strings(sorted)
+	return sorted, nil
 }
 
 // replaceMatrix swaps the content between the begin/end markers in doc for a
