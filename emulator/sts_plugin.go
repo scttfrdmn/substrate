@@ -296,7 +296,7 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 	// narrowed to particular callers — and with the key absent, a negated operator over it
 	// was satisfied by every caller, exempting nobody and, on an Allow, admitting all
 	// (#714). See [authzPrincipalContext].
-	authzPrincipalContext(condCtx, ctx.Principal.ARN)
+	authzPrincipalContext(condCtx, ctx.Principal)
 
 	// Resource is empty because a trust policy carries no Resource element — the
 	// role it is attached to *is* the resource. resourceMatches treats an empty
@@ -368,6 +368,10 @@ func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	if ctx.Principal != nil {
 		creds.PrincipalARN = ctx.Principal.ARN
+		// GetSessionToken returns credentials for the *same* IAM user, so the session
+		// carries that user's name forward and `aws:username` keeps its value across the
+		// call. assumeRole deliberately sets no UserName (#745).
+		creds.UserName = ctx.Principal.UserName
 	}
 
 	goCtx := context.Background()
@@ -423,6 +427,16 @@ type STSSessionCredentials struct {
 	Expiration      time.Time `json:"Expiration"`
 	PrincipalARN    string    `json:"PrincipalArn"`
 	AccountID       string    `json:"AccountId"`
+
+	// UserName is the IAM user name behind the session, set for GetSessionToken and
+	// empty for AssumeRole.
+	//
+	// AWS publishes `aws:username` for a GetSessionToken session — its principal is
+	// the calling IAM user, unchanged — and publishes none for an assumed role. The
+	// distinction cannot be recovered from PrincipalARN, whose GetSessionToken form is
+	// the user's own ARN and whose AssumeRole form is an assumed-role ARN, so it is
+	// recorded when the session is minted (#745).
+	UserName string `json:"UserName,omitempty"`
 }
 
 // responseMetadata is the XML response metadata included in all STS responses.

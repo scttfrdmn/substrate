@@ -73,7 +73,7 @@ func (a *AuthController) authzTimeContext(ctx map[string]string, now time.Time, 
 	ctx["aws:EpochTime"] = strconv.FormatInt(now.Unix(), 10)
 }
 
-// authzPrincipalContext writes the condition key that names the caller.
+// authzPrincipalContext writes the condition keys that name the caller.
 //
 // AWS documents aws:PrincipalArn as "the ARN of the principal that made the request",
 // present in the context of every request a principal signs. Substrate knows it with
@@ -89,15 +89,34 @@ func (a *AuthController) authzTimeContext(ctx map[string]string, now time.Time, 
 // herself, and as an Allow it granted everyone. The absence turned an exemption into its
 // opposite, which is why the producer lands with the operators rather than after them.
 //
-// aws:PrincipalAccount, aws:userid and aws:username are deliberately still absent: each
-// needs a derivation this function cannot do honestly for every principal kind — a unique
-// ID substrate does not mint, a name that is not the last ARN component for a role
-// session — and a key guessed wrong is worse than one a policy can test for with Null.
-func authzPrincipalContext(ctx map[string]string, principalARN string) {
-	if principalARN == "" {
+// aws:username is written only when the caller *has* a user name, which is the second
+// half of #745: a policy naming ${aws:username} — the shape of AWS's own
+// IAMUserChangePassword, and of every "let a user manage their own things" statement —
+// resolved to nothing, so the statement matched no resource and every such grant was a
+// false deny. The name comes from [Principal.UserName], recorded when the credential was
+// resolved, and never from the ARN: [Server.resolveCallerPrincipal] synthesizes
+// `…:user/<access-key-id>` for a registry hit with no IAM entity behind it, so parsing
+// this ARN would publish a credential ID as a user name.
+//
+// It is absent, not empty, for every principal for which AWS's own table reads
+// "(not present)" — the account root, an assumed role, an EC2 instance role, and a
+// federated or SAML/OIDC caller. Absent is what makes the negated forms answer as AWS
+// specifies, since [condKeyPresent] reads an empty value as absent anyway; writing "" and
+// omitting the key are the same observation, and omitting it is the honest one.
+//
+// aws:PrincipalAccount and aws:userid are deliberately still absent: each needs a
+// derivation this function cannot do honestly for every principal kind — a unique ID
+// substrate does not mint, an account that a cross-account credential makes ambiguous —
+// and a key guessed wrong is worse than one a policy can test for with Null. Tracked as
+// its own issue rather than left as an unstated gap.
+func authzPrincipalContext(ctx map[string]string, principal *Principal) {
+	if principal == nil || principal.ARN == "" {
 		return
 	}
-	ctx["aws:PrincipalArn"] = principalARN
+	ctx["aws:PrincipalArn"] = principal.ARN
+	if principal.UserName != "" {
+		ctx["aws:username"] = principal.UserName
+	}
 }
 
 // now reports the controlled time, and whether there is a clock to read it from.
@@ -216,7 +235,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 			condCtx[k] = v
 		}
 		a.authzTimeContext(condCtx, now, haveClock)
-		authzPrincipalContext(condCtx, reqCtx.Principal.ARN)
+		authzPrincipalContext(condCtx, reqCtx.Principal)
 
 		result := Evaluate(docs, EvaluationRequest{
 			Principal:    reqCtx.Principal.ARN,
@@ -309,7 +328,7 @@ func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSReq
 	// The same caller signed the same request, so this gate must name the same principal
 	// as the primary decision — a request authorized twice against two different answers
 	// for aws:PrincipalArn would deny on one door and allow on the other (#714).
-	authzPrincipalContext(condCtx, reqCtx.Principal.ARN)
+	authzPrincipalContext(condCtx, reqCtx.Principal)
 
 	// Derived from the merged map above rather than reused from the primary decision, so
 	// a template-supplied key is in aws:TagKeys too — AWS's combined example conditions

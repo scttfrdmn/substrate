@@ -715,6 +715,11 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			// GetCallerIdentity's ARN from :root and turn GetUser from a validation
 			// error into a NoSuchEntity lookup for every test server that wires a
 			// registry only to attribute accounts.
+			//
+			// UserName is deliberately left empty, so aws:username is absent rather
+			// than wrong: the ARN's last segment here is the access key ID, and a
+			// substituted ${aws:username} carrying a credential ID into a resource
+			// comparison would be a worse answer than no key at all (#745).
 			reqCtx.Principal = &Principal{
 				ARN:  buildCallerARN(reqCtx.AccountID, accessKey),
 				Type: "IAMUser",

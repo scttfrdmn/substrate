@@ -39,25 +39,30 @@ import (
 // negated one, on the reasoning that a comparison that cannot be made has not been
 // satisfied. AWS documents neither case, on the policy side or the request side; both
 // are substrate's recorded choices (#714).
-func condEvaluate(base, ctxVal string, condValues StringOrSlice) (matched, recognized bool) {
+//
+// condValues are the policy's values with their ${…} variables already resolved by
+// [condPolicyValues], which is also where a value whose variable had no value was
+// dropped. So a list this function sees is one every element of which AWS would
+// compare (#745).
+func condEvaluate(base, ctxVal string, condValues []policyPattern) (matched, recognized bool) {
 	switch base {
 	case "StringEquals":
-		return condAnyValue(condValues, func(v string) bool { return ctxVal == v }), true
+		return condAnyValue(condValues, func(v policyPattern) bool { return ctxVal == v.text }), true
 	case "StringNotEquals":
-		return !condAnyValue(condValues, func(v string) bool { return ctxVal == v }), true
+		return !condAnyValue(condValues, func(v policyPattern) bool { return ctxVal == v.text }), true
 	case "StringEqualsIgnoreCase":
-		return condAnyValue(condValues, func(v string) bool { return strings.EqualFold(ctxVal, v) }), true
+		return condAnyValue(condValues, func(v policyPattern) bool { return strings.EqualFold(ctxVal, v.text) }), true
 	case "StringNotEqualsIgnoreCase":
-		return !condAnyValue(condValues, func(v string) bool { return strings.EqualFold(ctxVal, v) }), true
+		return !condAnyValue(condValues, func(v policyPattern) bool { return strings.EqualFold(ctxVal, v.text) }), true
 	case "StringLike":
-		return condAnyValue(condValues, func(v string) bool { return globMatch(v, ctxVal) }), true
+		return condAnyValue(condValues, func(v policyPattern) bool { return v.matches(ctxVal) }), true
 	case "StringNotLike":
-		return !condAnyValue(condValues, func(v string) bool { return globMatch(v, ctxVal) }), true
+		return !condAnyValue(condValues, func(v policyPattern) bool { return v.matches(ctxVal) }), true
 
 	case "ArnEquals", "ArnLike":
-		return condAnyValue(condValues, func(v string) bool { return condARNMatches(v, ctxVal) }), true
+		return condAnyValue(condValues, func(v policyPattern) bool { return condARNMatches(v, ctxVal) }), true
 	case "ArnNotEquals", "ArnNotLike":
-		return !condAnyValue(condValues, func(v string) bool { return condARNMatches(v, ctxVal) }), true
+		return !condAnyValue(condValues, func(v policyPattern) bool { return condARNMatches(v, ctxVal) }), true
 
 	case "NumericEquals", "NumericNotEquals", "NumericLessThan", "NumericLessThanEquals",
 		"NumericGreaterThan", "NumericGreaterThanEquals":
@@ -68,9 +73,9 @@ func condEvaluate(base, ctxVal string, condValues StringOrSlice) (matched, recog
 		return condDateMatches(base, ctxVal, condValues), true
 
 	case "IpAddress":
-		return condAnyValue(condValues, func(v string) bool { return condIPMatches(v, ctxVal) }), true
+		return condAnyValue(condValues, func(v policyPattern) bool { return condIPMatches(v.text, ctxVal) }), true
 	case "NotIpAddress":
-		return !condAnyValue(condValues, func(v string) bool { return condIPMatches(v, ctxVal) }), true
+		return !condAnyValue(condValues, func(v policyPattern) bool { return condIPMatches(v.text, ctxVal) }), true
 
 	case "Bool":
 		// AWS publishes only the lowercase forms, and substrate's own producers write
@@ -78,7 +83,7 @@ func condEvaluate(base, ctxVal string, condValues StringOrSlice) (matched, recog
 		// there because an unquoted JSON `true` and the string "TRUE" are the same
 		// assertion by a caller, and [StringOrSlice.UnmarshalJSON] renders the first
 		// as "true" — the two forms must not disagree.
-		return condAnyValue(condValues, func(v string) bool { return strings.EqualFold(ctxVal, v) }), true
+		return condAnyValue(condValues, func(v policyPattern) bool { return strings.EqualFold(ctxVal, v.text) }), true
 
 	case "BinaryEquals":
 		// AWS: BinaryEquals "compares the value of the specified key byte for byte
@@ -87,9 +92,9 @@ func condEvaluate(base, ctxVal string, condValues StringOrSlice) (matched, recog
 		// on the encoded text, and a policy value that is not valid base64 encodes no
 		// binary value and cannot match. No substrate producer writes a binary context
 		// key, so this operator is reachable only through a simulation's ContextEntries.
-		return condAnyValue(condValues, func(v string) bool {
-			_, err := base64.StdEncoding.DecodeString(v)
-			return err == nil && ctxVal == v
+		return condAnyValue(condValues, func(v policyPattern) bool {
+			_, err := base64.StdEncoding.DecodeString(v.text)
+			return err == nil && ctxVal == v.text
 		}), true
 
 	case "Null":
@@ -99,8 +104,8 @@ func condEvaluate(base, ctxVal string, condValues StringOrSlice) (matched, recog
 		// (the key exists and its value is not null)" — so a key present with an empty
 		// value is null, the reading substrate has always had here.
 		isNull := ctxVal == ""
-		return condAnyValue(condValues, func(v string) bool {
-			return (strings.ToLower(v) == "true") == isNull
+		return condAnyValue(condValues, func(v policyPattern) bool {
+			return (strings.ToLower(v.text) == "true") == isNull
 		}), true
 	}
 
@@ -113,7 +118,7 @@ func condEvaluate(base, ctxVal string, condValues StringOrSlice) (matched, recog
 // operator is the same scan with the answer inverted, which is what makes AWS's "the
 // ArnNotEquals and ArnNotLike condition operators behave identically" to the negation
 // of their positive pair true by construction rather than by two parallel loops.
-func condAnyValue(condValues StringOrSlice, match func(string) bool) bool {
+func condAnyValue(condValues []policyPattern, match func(policyPattern) bool) bool {
 	for _, v := range condValues {
 		if match(v) {
 			return true
@@ -181,17 +186,21 @@ const condARNComponents = 6
 // narrowing a Deny is the direction that cannot be recovered from. A *context* value
 // with fewer than six components is not padded — it is the request's own ARN, and a
 // short one is malformed rather than abbreviated.
-func condARNMatches(pattern, value string) bool {
+//
+// The pattern arrives as a [policyPattern] so that a `*` a variable resolved to stays
+// literal here too; the padding this function adds is authored by substrate on AWS's
+// behalf and is therefore a wildcard (#745).
+func condARNMatches(pattern policyPattern, value string) bool {
 	valueParts := strings.SplitN(value, ":", condARNComponents)
-	patternParts := strings.SplitN(pattern, ":", condARNComponents)
+	patternParts := pattern.splitN(":", condARNComponents)
 	for len(patternParts) < len(valueParts) {
-		patternParts = append(patternParts, "*")
+		patternParts = append(patternParts, rawPolicyPattern("*"))
 	}
 	if len(patternParts) != len(valueParts) {
 		return false
 	}
 	for i := range patternParts {
-		if !globMatch(patternParts[i], valueParts[i]) {
+		if !patternParts[i].matches(valueParts[i]) {
 			return false
 		}
 	}
@@ -204,13 +213,13 @@ func condARNMatches(pattern, value string) bool {
 // decimal value". Both sides are read as decimals, so a policy that quotes its number
 // and one that does not — legal IAM either way, see [StringOrSlice.UnmarshalJSON] —
 // compare identically.
-func condNumericMatches(base, ctxVal string, condValues StringOrSlice) bool {
+func condNumericMatches(base, ctxVal string, condValues []policyPattern) bool {
 	ctxNum, ok := condParseNumber(ctxVal)
 	if !ok {
 		return condOperatorNegated(base)
 	}
-	return condCompare(base, condValues, func(v string) (int, bool) {
-		n, ok := condParseNumber(v)
+	return condCompare(base, condValues, func(v policyPattern) (int, bool) {
+		n, ok := condParseNumber(v.text)
 		if !ok {
 			return 0, false
 		}
@@ -230,13 +239,13 @@ func condNumericMatches(base, ctxVal string, condValues StringOrSlice) bool {
 // AWS: "You must specify date/time values with one of the W3C implementations of the
 // ISO 8601 date formats or in epoch (UNIX) time." Either notation is accepted on either
 // side, so the two can be compared against each other; see [condParseTime].
-func condDateMatches(base, ctxVal string, condValues StringOrSlice) bool {
+func condDateMatches(base, ctxVal string, condValues []policyPattern) bool {
 	ctxTime, ok := condParseTime(ctxVal)
 	if !ok {
 		return condOperatorNegated(base)
 	}
-	return condCompare(base, condValues, func(v string) (int, bool) {
-		t, ok := condParseTime(v)
+	return condCompare(base, condValues, func(v policyPattern) (int, bool) {
+		t, ok := condParseTime(v.text)
 		if !ok {
 			return 0, false
 		}
@@ -251,7 +260,7 @@ func condDateMatches(base, ctxVal string, condValues StringOrSlice) bool {
 // families because the six operator suffixes mean the same thing in both, and writing
 // them twice would let the two families disagree about, say, whether LessThanEquals
 // includes equality.
-func condCompare(base string, condValues StringOrSlice, cmp func(string) (int, bool)) bool {
+func condCompare(base string, condValues []policyPattern, cmp func(policyPattern) (int, bool)) bool {
 	// A negated operator is satisfied unless some value matches, so its scan cannot
 	// short-circuit on the first parse failure the way a positive one does.
 	if strings.HasSuffix(base, "NotEquals") {

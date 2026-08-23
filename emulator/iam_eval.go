@@ -183,12 +183,15 @@ func EvaluateSourced(documents []SourcedPolicyDocument, req EvaluationRequest) E
 	missing := make(map[string]struct{})
 
 	for _, doc := range documents {
+		// Variables resolve per document, because whether they resolve at all is a
+		// property of the document's own Version element (#745).
+		vars := policyVars{ctx: req.Context, enabled: policyVarsSupported(doc.Document.Version)}
 		for _, stmt := range doc.Document.Statement {
-			if !statementMatches(stmt, req) {
+			if !statementMatches(stmt, req, vars) {
 				// A statement that covers the action and resource but was ruled out by a
 				// condition on an unset key is the reportable case: the answer would
 				// change given a value.
-				if actionResourcePrincipalMatch(stmt, req) {
+				if actionResourcePrincipalMatch(stmt, req, vars) {
 					for _, key := range unsetConditionKeys(stmt.Condition, req.Context, req.MultiContext) {
 						missing[key] = struct{}{}
 					}
@@ -261,10 +264,10 @@ func sortedKeys(set map[string]struct{}) []string {
 // actionResourcePrincipalMatch reports whether stmt covers req apart from its
 // conditions. It is the "would this statement apply, given the right context"
 // question MissingContextValues answers.
-func actionResourcePrincipalMatch(stmt PolicyStatement, req EvaluationRequest) bool {
+func actionResourcePrincipalMatch(stmt PolicyStatement, req EvaluationRequest, vars policyVars) bool {
 	return principalMatches(stmt, req.Principal) &&
 		actionMatches(stmt, req.Action) &&
-		resourceMatches(stmt, req.Resource)
+		resourceMatches(stmt, req.Resource, vars)
 }
 
 // unsetConditionKeys returns the condition keys stmt tests that the request context
@@ -306,17 +309,22 @@ func unsetConditionKeys(
 
 // statementMatches returns true if stmt covers the principal, action, resource,
 // and conditions specified in req.
-func statementMatches(stmt PolicyStatement, req EvaluationRequest) bool {
+//
+// vars is what the statement's ${…} variables resolve against, and it reaches only
+// the two elements AWS substitutes in: "You can use policy variables in the Resource
+// element and in string comparisons in the Condition element." Action and Principal
+// are compared as written.
+func statementMatches(stmt PolicyStatement, req EvaluationRequest, vars policyVars) bool {
 	if !principalMatches(stmt, req.Principal) {
 		return false
 	}
 	if !actionMatches(stmt, req.Action) {
 		return false
 	}
-	if !resourceMatches(stmt, req.Resource) {
+	if !resourceMatches(stmt, req.Resource, vars) {
 		return false
 	}
-	if !conditionMatches(stmt.Condition, req.Context, req.MultiContext) {
+	if !conditionMatches(stmt.Condition, req.Context, req.MultiContext, vars) {
 		return false
 	}
 	return true
@@ -445,20 +453,30 @@ func actionMatches(stmt PolicyStatement, action string) bool {
 
 // resourceMatches returns true when req.Resource is covered by stmt.Resource or,
 // for NotResource statements, when req.Resource is NOT in stmt.NotResource.
-func resourceMatches(stmt PolicyStatement, resource string) bool {
+//
+// An entry whose variables do not all resolve is skipped, in **either** element, which
+// is AWS's own rule stated once for both: "If a variable that has no value in the
+// authorization context is used as part of the Resource or NotResource element of a
+// policy, the resource that includes a policy variable with no value will not match
+// any resource." So such an entry grants nothing where it is a Resource, and excludes
+// nothing where it is a NotResource. Substrate reached the same two answers before
+// #745 by leaving the `${…}` in place and matching it literally against an ARN that
+// never contains one; doing it by the rule rather than by coincidence is what makes it
+// hold once the variable's *value* can contain a wildcard.
+func resourceMatches(stmt PolicyStatement, resource string, vars policyVars) bool {
 	if resource == "" {
 		return true
 	}
 	if len(stmt.NotResource) > 0 {
 		for _, r := range stmt.NotResource {
-			if globMatch(r, resource) {
+			if pattern, ok := vars.resolve(r); ok && pattern.matches(resource) {
 				return false
 			}
 		}
 		return true
 	}
 	for _, r := range stmt.Resource {
-		if globMatch(r, resource) {
+		if pattern, ok := vars.resolve(r); ok && pattern.matches(resource) {
 			return true
 		}
 	}
@@ -513,11 +531,12 @@ func conditionMatches(
 	conditions map[string]map[string]StringOrSlice,
 	ctx map[string]string,
 	multiCtx map[string][]string,
+	vars policyVars,
 ) bool {
 	for operator, keyValues := range conditions {
 		qualifier, base := splitConditionOperator(operator)
 		for condKey, condValues := range keyValues {
-			if !conditionKeyMatches(qualifier, base, condKey, condValues, ctx, multiCtx) {
+			if !conditionKeyMatches(qualifier, base, condKey, condValues, ctx, multiCtx, vars) {
 				return false
 			}
 		}
@@ -553,6 +572,7 @@ func conditionKeyMatches(
 	condValues StringOrSlice,
 	ctx map[string]string,
 	multiCtx map[string][]string,
+	vars policyVars,
 ) bool {
 	base, ifExists := condSplitIfExists(operator)
 	if base == "Null" && ifExists {
@@ -561,16 +581,20 @@ func conditionKeyMatches(
 		return false
 	}
 
+	// The policy's own values, with their variables resolved once for every arm below
+	// (#745).
+	values := condPolicyValues(base, condValues, vars)
+
 	switch qualifier {
 	case "":
 		if base == "Null" {
-			matched, _ := condEvaluate(base, condContextValue(condKey, ctx, multiCtx), condValues)
+			matched, _ := condEvaluate(base, condContextValue(condKey, ctx, multiCtx), values)
 			return matched
 		}
 		if !condKeyPresent(condKey, ctx, multiCtx) {
 			return condAbsentMatches(base, ifExists)
 		}
-		matched, recognized := condEvaluate(base, condContextValue(condKey, ctx, multiCtx), condValues)
+		matched, recognized := condEvaluate(base, condContextValue(condKey, ctx, multiCtx), values)
 		return recognized && matched
 
 	case condForAllValues:
@@ -583,7 +607,7 @@ func conditionKeyMatches(
 		// pair ForAllValues with `"Null": {"key": "false"}` on an Allow, and why every
 		// one of its aws:TagKeys examples does.
 		for _, reqVal := range condRequestValues(condKey, ctx, multiCtx) {
-			if matched, _ := condEvaluate(base, reqVal, condValues); !matched {
+			if matched, _ := condEvaluate(base, reqVal, values); !matched {
 				return false
 			}
 		}
@@ -603,7 +627,7 @@ func conditionKeyMatches(
 			return true
 		}
 		for _, reqVal := range condRequestValues(condKey, ctx, multiCtx) {
-			if matched, _ := condEvaluate(base, reqVal, condValues); matched {
+			if matched, _ := condEvaluate(base, reqVal, values); matched {
 				return true
 			}
 		}
@@ -735,44 +759,10 @@ func condRequestValues(condKey string, ctx map[string]string, multiCtx map[strin
 
 // globMatch returns true if pattern matches value using AWS glob rules:
 // '*' matches any sequence of characters, '?' matches exactly one character.
+//
+// Every character of pattern is the policy author's own, so every `*` and `?` in it
+// is a wildcard. A pattern that has had a variable substituted into it carries text
+// that is not, and matches through [policyPattern.matches] instead (#745).
 func globMatch(pattern, value string) bool {
-	return globMatchRec(pattern, value)
-}
-
-// globMatchRec is the recursive implementation of globMatch.
-func globMatchRec(pattern, value string) bool {
-	for len(pattern) > 0 {
-		switch pattern[0] {
-		case '*':
-			// Skip consecutive stars.
-			for len(pattern) > 0 && pattern[0] == '*' {
-				pattern = pattern[1:]
-			}
-			if len(pattern) == 0 {
-				return true
-			}
-			// Try matching the rest of the pattern at every position.
-			for i := 0; i <= len(value); i++ {
-				if globMatchRec(pattern, value[i:]) {
-					return true
-				}
-			}
-			return false
-
-		case '?':
-			if len(value) == 0 {
-				return false
-			}
-			pattern = pattern[1:]
-			value = value[1:]
-
-		default:
-			if len(value) == 0 || pattern[0] != value[0] {
-				return false
-			}
-			pattern = pattern[1:]
-			value = value[1:]
-		}
-	}
-	return len(value) == 0
+	return globMatchMask(pattern, nil, value)
 }

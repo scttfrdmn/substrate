@@ -321,6 +321,17 @@ type CFNStackState struct {
 	// reintroduce exactly the blind spot #411 exists to remove, since a rollback
 	// would then be able to delete what the creator could not.
 	CreatorPrincipalARN string `json:"CreatorPrincipalARN,omitempty"`
+
+	// CreatorUserName is the creating principal's IAM user name, empty when it had
+	// none.
+	//
+	// Persisted beside the ARN rather than derived from it, for the reason
+	// [Principal.UserName] gives: the ARN may have been synthesized from an access key
+	// ID, so parsing it back would publish a credential ID as `aws:username`. Without
+	// this, a rollback's deletes ran with the key absent while the create that made the
+	// resources ran with it present — so a policy naming ${aws:username} authorized the
+	// create and refused to clean up after it (#745).
+	CreatorUserName string `json:"CreatorUserName,omitempty"`
 }
 
 // attribution returns who the stack's resource calls are made as, from what was
@@ -333,8 +344,9 @@ func (s CFNStackState) attribution() cfnAttribution {
 	att := cfnAttribution{roleARN: s.RoleARN}
 	if s.CreatorPrincipalARN != "" {
 		att.creator = &Principal{
-			ARN:  s.CreatorPrincipalARN,
-			Type: cfnPrincipalType(s.CreatorPrincipalARN),
+			ARN:      s.CreatorPrincipalARN,
+			Type:     cfnPrincipalType(s.CreatorPrincipalARN),
+			UserName: s.CreatorUserName,
 		}
 	}
 	return att
@@ -350,6 +362,7 @@ func (s *CFNStackState) setAttribution(att cfnAttribution) {
 	s.RoleARN = att.roleARN
 	if att.creator != nil {
 		s.CreatorPrincipalARN = att.creator.ARN
+		s.CreatorUserName = att.creator.UserName
 	}
 }
 

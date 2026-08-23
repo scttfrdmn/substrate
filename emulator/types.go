@@ -104,6 +104,19 @@ type Principal struct {
 
 	// Type is the principal type: "User", "Role", "Service", or "AssumedRole".
 	Type string
+
+	// UserName is the IAM user name behind the request, or empty when there is
+	// none.
+	//
+	// It is what [authzPrincipalContext] publishes as `aws:username`, and it is
+	// carried here rather than parsed back out of ARN because not every ARN in
+	// that field names a user: a registry hit with no IAM entity behind it
+	// synthesizes `…:user/<access-key-id>` (see [Server.resolveCallerPrincipal]),
+	// and publishing that as a user name would put a credential ID in a policy
+	// comparison. Empty for every principal for which AWS publishes no
+	// `aws:username` — the account root, an assumed role, and a federated or
+	// service-linked caller (#745).
+	UserName string
 }
 
 // StateManager defines the interface for reading and writing emulator state.
