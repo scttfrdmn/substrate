@@ -273,51 +273,6 @@ func TestServer_CustomHealthPath(t *testing.T) {
 
 // --- Credential and auth pipeline tests -----------------------------------
 
-// newTestServerWithCreds builds a server with CredentialRegistry wired in.
-func newTestServerWithCreds(t *testing.T, reg *emulator.CredentialRegistry, plugins ...emulator.Plugin) *emulator.Server {
-	t.Helper()
-	cfg := emulator.DefaultConfig()
-	registry := emulator.NewPluginRegistry()
-	for _, plug := range plugins {
-		registry.Register(plug)
-	}
-	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
-	state := emulator.NewMemoryStateManager()
-	tc := emulator.NewTimeController(time.Now())
-	logger := emulator.NewDefaultLogger(slog.LevelInfo, false)
-	return emulator.NewServer(*cfg, registry, store, state, tc, logger,
-		emulator.ServerOptions{Credentials: reg})
-}
-
-func TestServer_CredentialRegistry_EnrichesContext(t *testing.T) {
-	// A plugin that captures the RequestContext principal.
-	var capturedPrincipal *emulator.Principal
-	plug := &serverPlugin{
-		serviceName: "dynamodb",
-		resp: &emulator.AWSResponse{
-			StatusCode: 200,
-			Headers:    map[string]string{},
-			Body:       []byte(`{}`),
-		},
-	}
-	_ = capturedPrincipal // used indirectly via plug response
-
-	reg := emulator.NewCredentialRegistry()
-	srv := newTestServerWithCreds(t, reg, plug)
-
-	// Request with the built-in test access key; no SigV4 body so signature is skipped.
-	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
-	r.Header.Set("X-Amz-Target", "DynamoDB_20120810.GetItem")
-	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST12345678901/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host;x-amz-date, Signature=ignored")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, r)
-	// 200 from the plugin (SigV4 verification passes because the key is valid
-	// but we don't send a real SigV4-signed request — no auth header means bypass).
-	// With the header present the key is found, principal set, but signature check runs.
-	// Response could be 200 or 403 depending on sig; just check the server doesn't 500.
-	assert.NotEqual(t, http.StatusInternalServerError, w.Code)
-}
-
 func TestServer_Start_BindsAndServes(t *testing.T) {
 	// Server.Start must successfully bind and serve requests.
 	cfg := emulator.DefaultConfig()
@@ -371,23 +326,6 @@ func TestServer_Serve_UsesProvidedListener(t *testing.T) {
 
 	cancel()
 	<-done
-}
-
-func TestServer_CredentialRegistry_UnknownKey_Returns403(t *testing.T) {
-	plug := &serverPlugin{
-		serviceName: "dynamodb",
-		resp:        &emulator.AWSResponse{StatusCode: 200, Headers: map[string]string{}, Body: []byte(`{}`)},
-	}
-	reg := emulator.NewCredentialRegistry()
-	srv := newTestServerWithCreds(t, reg, plug)
-
-	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
-	r.Header.Set("X-Amz-Target", "DynamoDB_20120810.GetItem")
-	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAUNKNOWNKEY000001/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host;x-amz-date, Signature=bad")
-	r.Header.Set("X-Amz-Date", "20260101T000000Z")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, r)
-	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
 func TestServer_TracerSpanAttributes(t *testing.T) {

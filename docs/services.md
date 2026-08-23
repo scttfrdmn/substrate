@@ -313,12 +313,35 @@ under the old account is unreachable** after upgrading. Re-seed it, or set
   no fields for them, so the shipped `substrate server` discards both. Both subsystems
   are real and reachable in-process through `ServerOptions`. Filed as
   [#736](https://github.com/scttfrdmn/substrate/issues/736).
-- **Wiring a registry also switches SigV4 enforcement on**, because `Server` verifies
-  signatures exactly when `ServerOptions.Credentials` is non-nil. That coupling is why
-  the registry cannot simply be wired into the binary: substrate's documented
-  `test`/`test` credentials are in no registry and would start answering
-  `InvalidClientTokenId` 403. Decoupling the two is
-  [#630](https://github.com/scttfrdmn/substrate/issues/630).
+
+### Attributing accounts and enforcing signatures are separate
+
+`ServerOptions.Credentials` answers *which account does this access key belong to*;
+`ServerOptions.VerifySignatures` answers *is this signature valid*. One field used to
+mean both ([#630](https://github.com/scttfrdmn/substrate/issues/630)), so wiring a
+registry in order to reach a second account also refused every credential substrate
+documents — `test`/`test` and `AKIAIOSFODNN7EXAMPLE` are in no registry, and an
+unregistered key is `InvalidClientTokenId` 403. All four combinations are expressible
+now, and the one that did not exist before — a registry with verification off — is
+what every test server uses.
+
+One consequence worth knowing, because it decides what `GetCallerIdentity` reports. A
+key the registry holds but IAM does not know names a principal only when its signature
+was **verified**. A verified key has proven the caller holds the secret, so naming it
+is a statement about someone substrate authenticated; a key merely present in a table
+has proven nothing, and naming it would flip `GetCallerIdentity`'s ARN off `:root` and
+turn `GetUser` from a validation error into a `NoSuchEntity` lookup for a server that
+wired a registry only to attribute accounts. Either way the synthesized ARN names the
+*key*, not a user, so it resolves to no policies and authorizes nothing.
+
+`VerifySignatures` with no registry has no key material to check against. The server
+logs a warning and runs with verification off rather than refusing every signed
+request. Refusing at construction would be better, but `NewServer` returns no error and
+a panic in an emulator library is worse than either.
+
+In tests, `StartTestServer` wires a registry with verification off, so
+`TestServer.RegisterAccount` works on any server it returns; ask for enforcement with
+`StartTestServer(t, WithSignatureVerification())`.
 
 ---
 

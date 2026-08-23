@@ -36,9 +36,27 @@ type ServerOptions struct {
 	Costs *CostController
 
 	// Credentials resolves access key IDs to account IDs and secrets.
-	// When non-nil, the server enriches RequestContext with the caller's
-	// account and principal and verifies the SigV4 signature.
+	// When non-nil, a request whose access key the registry holds is attributed
+	// to that key's account. Signature verification is a separate decision; see
+	// VerifySignatures.
 	Credentials *CredentialRegistry
+
+	// VerifySignatures enforces SigV4 on every request carrying an
+	// Authorization header, refusing an access key Credentials does not hold
+	// with InvalidClientTokenId 403.
+	//
+	// This is separate from Credentials because the two are unrelated questions
+	// — "which account is this key's" and "is this signature valid" — and
+	// answering only the first is the combination a multi-account test needs
+	// (#630). While one field meant both, wiring a registry in order to
+	// attribute accounts also refused every credential substrate documents.
+	//
+	// True with a nil Credentials has no key material to check against, so
+	// [NewServer] logs a warning and downgrades it to off rather than returning
+	// a server that refuses every signed request. Refusing at construction
+	// would be the better answer, but NewServer returns no error and changing
+	// its signature is out of proportion to the mistake.
+	VerifySignatures bool
 
 	// Auth enforces IAM policy decisions across all services.
 	// When non-nil, every request is checked against the caller's attached
@@ -96,6 +114,16 @@ func NewServer(
 	}
 	if len(opts) > 0 {
 		s.opts = opts[0]
+	}
+	if s.opts.VerifySignatures && s.opts.Credentials == nil {
+		// Nothing to verify against: every signed request would be refused with
+		// InvalidClientTokenId. Downgrade rather than serve that, and say so —
+		// see [ServerOptions.VerifySignatures] for why this is not an error.
+		s.opts.VerifySignatures = false
+		if s.logger != nil {
+			s.logger.Warn("verify_signatures is set with no credential registry; " +
+				"signature verification is off")
+		}
 	}
 	s.router = s.buildRouter()
 	return s
@@ -565,7 +593,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //  1. Parse → AWSRequest + RequestContext
 //     1.5. Credential resolution — account from Credentials (when non-nil),
 //     principal from state (always; see [resolvePrincipal])
-//     1.6. SigV4 signature verification (when Credentials != nil)
+//     1.6. SigV4 signature verification (when VerifySignatures is set)
 //  2. auth.CheckAccess()        → 403 AccessDenied / AccessDeniedException
 //     (per the service's wire protocol; see accessDeniedCodeFor)
 //  3. quota.CheckQuota()        → 429 ThrottlingException
@@ -651,11 +679,9 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// account and principal.
 	//
 	// The two are resolved from different places on purpose. The account comes
-	// from the registry, which is also what gates SigV4 below. The *principal*
-	// comes from state, because only IAM's own records map an access key to the
-	// entity holding it — and because coupling identity to the registry would mean
-	// a server that identifies callers is a server that rejects every access key
-	// it was not pre-loaded with. See [resolvePrincipal] and #411.
+	// from the registry. The *principal* comes from state, because only IAM's own
+	// records map an access key to the entity holding it. See [resolvePrincipal]
+	// and #411.
 	if accessKey := extractAccessKeyFromAuth(r.Header.Get("Authorization")); accessKey != "" {
 		registryHit := false
 		if s.opts.Credentials != nil {
@@ -674,11 +700,21 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			if sessionAccount != "" && !registryHit {
 				reqCtx.AccountID = sessionAccount
 			}
-		} else if registryHit {
+		} else if registryHit && s.opts.VerifySignatures {
 			// A registered key with no IAM entity behind it. The ARN names the key
 			// rather than a user, so it resolves to no policies and authorizes
 			// nothing — which is the pre-#411 behavior every existing caller of a
 			// credential-wired server relies on, and what GetCallerIdentity reports.
+			//
+			// Gated on verification, not on the registry hit alone, because this
+			// fallback belongs to *verification* rather than to account resolution
+			// (#630). A key whose signature was checked has proven it holds the
+			// secret, so naming it as a principal is a statement about a caller
+			// substrate authenticated. A key merely present in a table has proven
+			// nothing, and synthesizing a principal for it would flip
+			// GetCallerIdentity's ARN from :root and turn GetUser from a validation
+			// error into a NoSuchEntity lookup for every test server that wires a
+			// registry only to attribute accounts.
 			reqCtx.Principal = &Principal{
 				ARN:  buildCallerARN(reqCtx.AccountID, accessKey),
 				Type: "IAMUser",
@@ -687,7 +723,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1.6: SigV4 signature verification.
-	if s.opts.Credentials != nil {
+	if s.opts.VerifySignatures {
 		if sigErr := VerifySigV4(r, rawBody, s.opts.Credentials); sigErr != nil {
 			s.writeError(w, sigErr, r, req.Service)
 			return
