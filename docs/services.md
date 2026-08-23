@@ -1360,12 +1360,33 @@ that an unresolved variable in `Resource` "will not match any resource", `aws:us
 no producer, and substrate's literal comparison reaches the same answer by a different
 route. The statement matches nothing either way.
 
-The divergence that **is** real is `NotResource` and the negated operators, where AWS says
-an unresolved variable *does* match — so the negation excludes everything on AWS and nothing
-here, and a policy written that way is more permissive under substrate. Nothing in the
-bundled catalog is written that way; a caller's own policy could be.
+**An unresolved variable diverges nowhere**, in either element and under either polarity —
+which corrects a rule this page previously published backwards
+([#744](https://github.com/scttfrdmn/substrate/issues/744)). AWS
+applies one sentence to both elements: "If a variable that has no value in the authorization
+context is used as part of the `Resource` **or** `NotResource` element of a policy, the
+resource that includes a policy variable with no value will not match any resource." An ARN
+still carrying a literal `${…}` matches no resource under either element here either, so
+both routes reach the same answer. Under a negated *condition operator* AWS is equally
+explicit that the comparison **does** match — "Inverted condition operators like
+`StringNotEquals` or `StringNotLike` do match against a null value, as the value of the
+condition key they are testing against is not equal to or like the effectively null value" —
+and substrate's literal comparison matches too, because no context value equals the string
+`${aws:PrincipalTag/Team}`. The one way to tell them apart is to pass that literal string
+*as* a context value, which only a hand-written `SimulateCustomPolicy` `ContextEntry` can do.
 
-Substitution cannot land before `aws:username` has an honest producer, and the two obvious
+**What does diverge is a variable that would have resolved**, which is what
+[#745](https://github.com/scttfrdmn/substrate/issues/745) tracks. Under the positive forms —
+`Resource`, `StringEquals`, `ArnLike` — the literal matches nothing where AWS would have
+matched, so the statement grants less than it says: a false deny, and the safe direction.
+Under the negated forms it is the reverse and it is not safe. A
+`StringNotEquals` comparing `s3:ExistingObjectTag/Team` against `${aws:ResourceTag/Team}`
+is *false* on AWS when the two agree, and *true* here, because "red" does not equal the
+un-substituted literal — so such a statement is inert on a `Deny` and grants on an `Allow`.
+That is reachable today with no new producer at all, since `SimulateCustomPolicy` copies a
+caller's `ContextEntries` straight into the context the same evaluator reads.
+
+An honest `aws:username` is what the request-signing path still owes, and the two obvious
 candidates are both wrong: the ARN's last component is the *session* name for an assumed
 role, where AWS documents `aws:username` as absent altogether, and the value the caller ARN
 is built from is an access key ID. The honest producer is the resolved IAM user name, set
@@ -4462,24 +4483,54 @@ evaluates. See [multivalued condition
 keys](#multivalued-condition-keys-forallvalues-and-foranyvalue) for the set-qualifier rules
 those examples depend on, including why AWS pairs them with `Null`.
 
-#### An operation naming one resource by ID is decided against that resource
+#### An operation naming resources by ID is decided against every one of them
 
-Four request parameters resolve to the resource they name, so the operations carrying them
-are authorized against a real ARN and against that resource's own tags rather than against
+Four request parameters resolve to the resources they name, so the operations carrying them
+are authorized against real ARNs and against those resources' own tags rather than against
 the literal `*`:
 
 | Parameter | Resolves to | The bundled actions that need it |
 |---|---|---|
-| `InstanceId` | `instance/<id>` | — (it is the one parameter that already resolved) |
-| `GroupId` | `security-group/<id>` | `ec2:DeleteSecurityGroup` |
-| `RouteTableId` | `route-table/<id>` | `ec2:DeleteRouteTable`, `ec2:DeleteRoute` |
-| `InternetGatewayId` | `internet-gateway/<id>` | `ec2:DeleteInternetGateway` |
+| `InstanceId.N` | `instance/<id>` | — (it is the one parameter that already resolved) |
+| `GroupId.N` | `security-group/<id>` | `ec2:DeleteSecurityGroup` |
+| `RouteTableId.N` | `route-table/<id>` | `ec2:DeleteRouteTable`, `ec2:DeleteRoute` |
+| `InternetGatewayId.N` | `internet-gateway/<id>` | `ec2:DeleteInternetGateway` |
 
 The list is short for a reason: each entry is a parameter one of the two `ec2:ResourceTag`
 statements in the bundled AWS managed policies names its target with. `DeleteRoute` appears
 under `RouteTableId` because the route table is the resource AWS authorizes a route change
 against. The indexed and un-indexed spellings are the same request, matching what the
 handlers themselves accept.
+
+**Every ID a request names is authorized, not the first alone**
+([#744](https://github.com/scttfrdmn/substrate/issues/744)). A `TerminateInstances` naming
+three instances was decided against `InstanceId.1`'s ARN and `InstanceId.1`'s tags, so a
+policy allowing instances tagged `Env=dev` and denying the rest permitted a call naming one
+dev instance and two production ones — provided the dev one came first. Each named resource
+now carries its own ARN and its own tags into its own decision, which is the same reading
+[tagging](#tagging-is-authorized-against-every-resource-it-names) already applies to
+`ResourceId.N` and AWS applies to any action naming several resources. Two consequences a
+consumer's test will see:
+
+- **The denial names the first resource the policy does not allow**, in fixed parameter order
+  and then request-index order. That is deterministic and replay-stable, and it is the
+  resource a caller can act on: drop it from the batch and the call proceeds.
+- **A permission boundary sees the whole batch too.** It is loaded once and evaluated against
+  each resource, so a boundary naming only the first instance refuses the rest.
+
+`GroupId` is overloaded and the expansion pulls one more operation in:
+`DescribePlacementGroups` reads `pg-` IDs through that parameter, so it is now decided
+against the groups it names. Nothing mis-resolves — the resolver keys on the ID's prefix, so
+a `pg-` ID becomes a `placement-group/<name>` ARN and an `sg-` one a `security-group/<id>`
+ARN in the same request.
+
+One pre-existing divergence is deliberately left in place rather than narrowed here.
+AWS's *Example policies to control access to the Amazon EC2 API* says `ec2:DescribeInstances`
+does not support resource-level permissions, so a real describe's request resource is `*`
+where substrate's is the instances it names. Expanding all four parameters uniformly keeps
+this one decision in one place; whether the resolver should be gated to the operations that
+support resource-level permissions is a question about the resolution itself, not about the
+batch, and is tracked as #762.
 
 `aws:ResourceTag/<key>` and `ec2:ResourceTag/<key>` both report the resolved resource's
 tags. <a id="ec2-reports-a-resource-s-tags-under-both-prefixes"></a>**EC2 reports a
@@ -4508,17 +4559,28 @@ as AWS would:
 - **`VpcId` and `SubnetId`.** Several creates carry one as the *container* the new resource
   goes into rather than as the resource acted on, and authorizing a create against its
   parent's ARN is not what AWS evaluates it against.
-- **The plural forms.** An operation naming several resources of one type is still decided
-  against the first ID alone — a `TerminateInstances` with three `InstanceId.N` is decided
-  against `InstanceId.1`. This is the shape [tagging](#tagging-is-authorized-against-every-resource-it-names)
-  already handles for `ResourceId.N` and it is tracked for the rest.
+An ID whose prefix names no type substrate can tag, or a `pg-`/`key-` ID naming no record, is
+**skipped**: it contributes no resource to the decision, so a batch of one resolvable and one
+unparseable ID is authorized as the batch of one. The refusal such an ID is owed is the
+handler's, as `Malformed` or `NotFound`, not an `AccessDenied` naming a resource that does not
+exist — and for the operation where it would matter most it cannot launder a state change
+past a policy, because AWS documents `TerminateInstances` as all-or-nothing ("If you specify
+multiple instances and the request fails (for example, because of a single incorrect instance
+ID), none of the instances are terminated") and substrate resolves every ID before it
+terminates any. `StopInstances` and `StartInstances` are not atomic, so there the batch is
+simply authorized as the resources that exist. Substrate states no ordering between the 403
+and the 404: no AWS page publishes one.
 
-An ID that resolves to no record, or whose prefix names no type substrate can tag, falls
-back to `*` rather than being refused — the handler owes that answer, as `NotFound`. The
-fallback is safe in one direction only, which is why it is the fallback: `*` as the
-*request* resource is not a wildcard, because `resourceMatches` uses the statement's own
-`Resource` as the pattern, so `*` matched only a statement whose `Resource` began with `*`.
-Replacing it with a concrete ARN can therefore narrow a grant but never widen one.
+The case is narrower than it sounds, and worth stating so a policy is not written against a
+wrong reading of it: a *well-formed* ID naming no record is not skipped. An instance's ARN is
+built from its ID rather than looked up, so `i-0123…` naming nothing still gets its own ARN
+with an empty tag set, and a least-privilege policy still has to name it.
+
+A request naming no resolvable ID at all falls back to `*`. That fallback is safe in one
+direction only, which is why it is the fallback: `*` as the *request* resource is not a
+wildcard, because `resourceMatches` uses the statement's own `Resource` as the pattern, so
+`*` matches only a statement whose `Resource` begins with `*`. Replacing it with concrete
+ARNs can therefore narrow a grant but never widen one.
 
 #### A tagged create is authorized twice
 

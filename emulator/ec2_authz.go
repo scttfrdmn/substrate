@@ -229,6 +229,9 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 // no EC2 operation carries two of these four. `DeleteRoute` and `DeleteRouteTable` share
 // `RouteTableId`, which is the resource both act on.
 //
+// Each is plural: [ec2AuthzNamedResources] resolves every ID a request names under one of
+// them, not the first alone (#744).
+//
 // Deliberately absent, each for its own reason rather than by oversight:
 //
 //   - `NetworkInterfaceId`, which `AmazonEKSClusterPolicy` conditions
@@ -242,39 +245,73 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 //     `AttachInternetGateway`) as the container the new resource goes into rather than as
 //     the resource acted on. Resolving one there would authorize a create against its
 //     parent's ARN, which is not the ARN AWS evaluates it against.
-//   - The plural forms. An operation naming several resources of one type —
-//     `TerminateInstances` with three `InstanceId.N` — is still decided against the first
-//     alone, which is the #674-shaped gap [ec2AuthzTagResources] closed for tagging calls
-//     and #744 tracks for the rest.
+//
+// One more is overloaded rather than absent: `GroupId` names a *placement* group on
+// `DescribePlacementGroups`, which reads `pg-` IDs through it. Nothing mis-resolves —
+// [ec2TaggableResource] keys on the ID's prefix, so a `pg-` ID becomes a placement-group
+// ARN and an `sg-` one a security-group ARN — but it does mean that operation is decided
+// against the groups it names rather than against "*".
 var ec2AuthzIDParams = []string{"InstanceId", "GroupId", "RouteTableId", "InternetGatewayId"}
 
-// ec2AuthzNamedResource resolves the resource an EC2 request names by ID, for the
-// operations that are not a launch and not a tagging call.
+// ec2AuthzNamedResources returns every resource an EC2 request names by ID under one of
+// [ec2AuthzIDParams], each paired with its own tags. It returns nil for a request that
+// names none, which is what leaves those on buildResourceARNs' single-resource path.
 //
-// It reads the parameter through [extractIndexedParams], so `GroupId` and `GroupId.1` are
+// It reads each parameter through [extractIndexedParams], so `GroupId` and `GroupId.1` are
 // the same request — which is the form the handlers themselves accept, and it is what
-// keeps the resource a policy is evaluated against the resource the handler will act on.
+// keeps the resources a policy is evaluated against the resources the handler will act on.
 //
-// ok=false means the request names no resource this can resolve, which sends the caller
-// back to the wildcard it used before. That is the only safe direction: "*" as the request
-// resource matches a statement whose own Resource starts with "*", so it can only ever
-// narrow a grant, never widen one.
-func ec2AuthzNamedResource(state StateManager, reqCtx *RequestContext, req *AWSRequest) (ec2Taggable, bool) {
+// **Every** named ID is resolved, not the first alone (#744). Deciding a
+// `TerminateInstances` naming three instances against `InstanceId.1` left the other two
+// unauthorized, so a policy allowing `Env=dev` instances and denying the rest permitted a
+// call naming one dev instance and two production ones — provided the dev one came first.
+// That is the #674-shaped gap [ec2AuthzTagResources] closed for tagging calls, on the same
+// reading of AWS's rule for an action naming several resources that #660 and #662 follow
+// here: every resource required for the action must be allowed.
+//
+// Order is fixed parameter order, then the request's own index order within a parameter,
+// which makes the denial message — which names the first resource the policy does not
+// allow — deterministic and replay-stable. The parameter order is inert today, since no EC2
+// operation carries two of the four.
+//
+// An unresolvable ID mid-batch is **skipped**, not denied and not widened to "*", which is
+// [ec2AuthzTagResources]' rule and for the same reason: there is no ARN to build, and the
+// refusal the caller is owed is the handler's `NotFound`, not an `AccessDenied` naming a
+// resource that does not exist. Skipping cannot launder a state change past a policy for
+// the operation where it would matter most, because AWS documents `TerminateInstances` as
+// all-or-nothing — "If you specify multiple instances and the request fails (for example,
+// because of a single incorrect instance ID), none of the instances are terminated" — and
+// substrate implements it with a resolve-everything pre-pass, so the bogus ID fails the
+// whole call. `StopInstances` and `StartInstances` are *not* atomic, so there the batch is
+// simply authorized as the batch of resources that exist.
+//
+// A request naming only unresolvable IDs returns nil and falls back to the wildcard it used
+// before. That is the only safe direction: "*" as the request resource matches a statement
+// whose own Resource starts with "*", so it can only ever narrow a grant, never widen one.
+func ec2AuthzNamedResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
+	acct := reqCtx.AccountID
+	region := reqCtx.Region
+	var out []authzResource
 	for _, param := range ec2AuthzIDParams {
-		ids := extractIndexedParams(req.Params, param)
-		if len(ids) == 0 || ids[0] == "" {
-			continue
+		for _, id := range extractIndexedParams(req.Params, param) {
+			if id == "" {
+				continue
+			}
+			target, ok := ec2TaggableResource(state, reqCtx, id)
+			if !ok || !target.resolved() {
+				// A prefix naming no taggable type, or a pg-/key- ID naming no record.
+				// See [ec2Taggable.resolved] and the skip rule above.
+				continue
+			}
+			out = append(out, authzResource{
+				ARN: target.arn(region, acct),
+				// The same state key the handler will read, so a tag condition is
+				// evaluated against the tags of the resource the ARN names.
+				Tags: ec2AuthzTagsFor(state, target.stateKey),
+			})
 		}
-		target, ok := ec2TaggableResource(state, reqCtx, ids[0])
-		if !ok || !target.resolved() {
-			// A prefix naming no taggable type, or a pg-/key- ID naming no record.
-			// Neither is a resource an ARN can be built for — see [ec2Taggable.resolved]
-			// — and neither is this function's to refuse: the handler owes that answer.
-			return ec2Taggable{}, false
-		}
-		return target, true
 	}
-	return ec2Taggable{}, false
+	return out
 }
 
 // ec2CreateTagsAction is the action AWS authorizes a tag-carrying create against a
