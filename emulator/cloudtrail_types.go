@@ -17,14 +17,17 @@ type CloudTrailTrail struct {
 	IncludeGlobalServiceEvents bool `json:"IncludeGlobalServiceEvents"`
 	// IsMultiRegionTrail specifies whether the trail is multi-region.
 	IsMultiRegionTrail bool `json:"IsMultiRegionTrail"`
-	// EnableLogFileValidation specifies whether log file validation is enabled.
-	EnableLogFileValidation bool `json:"EnableLogFileValidation"`
+	// LogFileValidationEnabled specifies whether log file validation is enabled.
+	// EnableLogFileValidation is CreateTrail's and UpdateTrail's *input* name; every
+	// response publishes the setting as LogFileValidationEnabled.
+	LogFileValidationEnabled bool `json:"LogFileValidationEnabled"`
 	// CloudWatchLogsLogGroupArn is the ARN of the CloudWatch Logs log group.
 	CloudWatchLogsLogGroupArn string `json:"CloudWatchLogsLogGroupArn,omitempty"`
 	// CloudWatchLogsRoleArn is the ARN of the IAM role for CloudWatch Logs delivery.
 	CloudWatchLogsRoleArn string `json:"CloudWatchLogsRoleArn,omitempty"`
-	// KMSKeyID is the ARN or alias of the KMS key used for encryption.
-	KMSKeyID string `json:"KMSKeyId,omitempty"`
+	// KMSKeyID is the ARN or alias of the KMS key used for encryption. CloudTrail
+	// publishes it as KmsKeyId, while the trail's own ARN really is TrailARN.
+	KMSKeyID string `json:"KmsKeyId,omitempty"`
 	// TrailARN is the Amazon Resource Name of the trail.
 	TrailARN string `json:"TrailARN"`
 	// HomeRegion is the region where the trail was originally created.

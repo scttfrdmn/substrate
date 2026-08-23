@@ -1095,11 +1095,14 @@ type ESMConfig struct {
 	// UUID is the unique identifier for this event source mapping.
 	UUID string `json:"UUID"`
 
-	// FunctionARN is the Lambda function that will receive events.
-	FunctionARN string `json:"FunctionARN"`
+	// FunctionARN is the Lambda function that will receive events. Lambda publishes it
+	// as FunctionArn on EventSourceMappingConfiguration.
+	FunctionARN string `json:"FunctionArn"`
 
 	// EventSourceARN is the ARN of the event source (DynamoDB stream or Kinesis stream).
-	EventSourceARN string `json:"EventSourceARN"`
+	// Lambda publishes it as EventSourceArn. The lowercase eventSourceARN used in a
+	// stream record's event payload is a different, and correct, spelling.
+	EventSourceARN string `json:"EventSourceArn"`
 
 	// BatchSize is the maximum number of records in each batch.
 	BatchSize int `json:"BatchSize"`

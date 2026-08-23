@@ -47,7 +47,7 @@ func TestDynamoDBStreams_GetShardIteratorAndRecords(t *testing.T) {
 	var createResult map[string]any
 	decodeDynamoDB(t, createResp, &createResult)
 	tableDesc, _ := createResult["TableDescription"].(map[string]any)
-	streamARN, _ := tableDesc["LatestStreamARN"].(string)
+	streamARN, _ := tableDesc["LatestStreamArn"].(string)
 	if streamARN == "" {
 		t.Skip("stream ARN not set; skipping stream test")
 	}
@@ -165,7 +165,7 @@ func TestDynamoDBStreams_DeleteItemRecord(t *testing.T) {
 	var dtResult map[string]any
 	decodeDynamoDB(t, dtResp, &dtResult)
 	tbl, _ := dtResult["Table"].(map[string]any)
-	streamARN, _ := tbl["LatestStreamARN"].(string)
+	streamARN, _ := tbl["LatestStreamArn"].(string)
 	if streamARN == "" {
 		t.Skip("stream ARN not populated; skipping")
 	}

@@ -359,16 +359,100 @@ func TestWAFv2Plugin_AssociateGetWebACLForResource(t *testing.T) {
 	}
 }
 
+// TestWAFv2Plugin_IPSet_AddressVersionRoundTrips pins the member name WAFv2 actually
+// publishes. CreateIPSet reads IPAddressVersion, not IPVersion; reading the wrong name
+// made an SDK's IPV6 request silently fall through to the IPV4 default (#738).
+func TestWAFv2Plugin_IPSet_AddressVersionRoundTrips(t *testing.T) {
+	tests := []struct {
+		name    string
+		request map[string]any
+		want    string
+	}{
+		{
+			name: "IPV6 is honored",
+			request: map[string]any{
+				"Name":             "v6-set",
+				"Scope":            "REGIONAL",
+				"IPAddressVersion": "IPV6",
+				"Addresses":        []string{"2001:db8::/32"},
+			},
+			want: "IPV6",
+		},
+		{
+			name: "IPV4 is honored",
+			request: map[string]any{
+				"Name":             "v4-set",
+				"Scope":            "REGIONAL",
+				"IPAddressVersion": "IPV4",
+				"Addresses":        []string{"192.0.2.0/24"},
+			},
+			want: "IPV4",
+		},
+		{
+			name: "an omitted version still defaults to IPV4",
+			request: map[string]any{
+				"Name":      "default-set",
+				"Scope":     "REGIONAL",
+				"Addresses": []string{"192.0.2.0/24"},
+			},
+			want: "IPV4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, ctx := setupWAFv2Plugin(t)
+
+			resp, err := p.HandleRequest(ctx, wafv2Request(t, "CreateIPSet", tt.request))
+			if err != nil {
+				t.Fatalf("CreateIPSet: %v", err)
+			}
+			var created struct {
+				Summary struct {
+					Id string `json:"Id"` //nolint:revive
+				} `json:"Summary"`
+			}
+			if err := json.Unmarshal(resp.Body, &created); err != nil {
+				t.Fatalf("unmarshal create: %v", err)
+			}
+
+			resp, err = p.HandleRequest(ctx, wafv2Request(t, "GetIPSet", map[string]any{
+				"Id":    created.Summary.Id,
+				"Name":  tt.request["Name"],
+				"Scope": "REGIONAL",
+			}))
+			if err != nil {
+				t.Fatalf("GetIPSet: %v", err)
+			}
+
+			// Decoded through a raw map so the assertion is against the wire name a
+			// real SDK reads, not against substrate's Go field.
+			var got struct {
+				IPSet map[string]any `json:"IPSet"`
+			}
+			if err := json.Unmarshal(resp.Body, &got); err != nil {
+				t.Fatalf("unmarshal get: %v", err)
+			}
+			if _, ok := got.IPSet["IPVersion"]; ok {
+				t.Error("IPSet renders IPVersion, which WAFv2 does not publish")
+			}
+			if got.IPSet["IPAddressVersion"] != tt.want {
+				t.Errorf("want IPAddressVersion=%q, got %v", tt.want, got.IPSet["IPAddressVersion"])
+			}
+		})
+	}
+}
+
 func TestWAFv2Plugin_IPSet_CRUD(t *testing.T) {
 	p, ctx := setupWAFv2Plugin(t)
 
 	// Create IPSet.
 	resp, err := p.HandleRequest(ctx, wafv2Request(t, "CreateIPSet", map[string]any{
-		"Name":        "my-ipset",
-		"Scope":       "REGIONAL",
-		"Description": "test ip set",
-		"IPVersion":   "IPV4",
-		"Addresses":   []string{"192.168.0.0/16"},
+		"Name":             "my-ipset",
+		"Scope":            "REGIONAL",
+		"Description":      "test ip set",
+		"IPAddressVersion": "IPV4",
+		"Addresses":        []string{"192.168.0.0/16"},
 	}))
 	if err != nil {
 		t.Fatalf("CreateIPSet: %v", err)

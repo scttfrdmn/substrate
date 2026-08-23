@@ -419,11 +419,11 @@ func (p *WAFv2Plugin) getWebACLForResource(reqCtx *RequestContext, req *AWSReque
 
 func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		Name        string   `json:"Name"`
-		Scope       string   `json:"Scope"`
-		Description string   `json:"Description"`
-		IPVersion   string   `json:"IPVersion"`
-		Addresses   []string `json:"Addresses"`
+		Name             string   `json:"Name"`
+		Scope            string   `json:"Scope"`
+		Description      string   `json:"Description"`
+		IPAddressVersion string   `json:"IPAddressVersion"`
+		Addresses        []string `json:"Addresses"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -436,8 +436,8 @@ func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
 	}
-	if input.IPVersion == "" {
-		input.IPVersion = "IPV4"
+	if input.IPAddressVersion == "" {
+		input.IPAddressVersion = "IPV4"
 	}
 	if input.Addresses == nil {
 		input.Addresses = []string{}
@@ -448,16 +448,16 @@ func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	arn := fmt.Sprintf("arn:aws:wafv2:%s:%s:regional/ipset/%s/%s", reqCtx.Region, reqCtx.AccountID, input.Name, id)
 
 	ipset := WAFv2IPSet{
-		ID:          id,
-		Name:        input.Name,
-		ARN:         arn,
-		Description: input.Description,
-		Scope:       input.Scope,
-		LockToken:   lockToken,
-		IPVersion:   input.IPVersion,
-		Addresses:   input.Addresses,
-		AccountID:   reqCtx.AccountID,
-		Region:      reqCtx.Region,
+		ID:               id,
+		Name:             input.Name,
+		ARN:              arn,
+		Description:      input.Description,
+		Scope:            input.Scope,
+		LockToken:        lockToken,
+		IPAddressVersion: input.IPAddressVersion,
+		Addresses:        input.Addresses,
+		AccountID:        reqCtx.AccountID,
+		Region:           reqCtx.Region,
 	}
 
 	data, err := json.Marshal(ipset)

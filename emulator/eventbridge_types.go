@@ -8,8 +8,10 @@ type EBRule struct {
 	// Name is the name of the rule.
 	Name string `json:"Name"`
 
-	// ARN is the Amazon Resource Name for the rule.
-	ARN string `json:"ARN,omitempty"`
+	// ARN is the Amazon Resource Name for the rule. EventBridge publishes it as Arn
+	// on the Rule type, which DescribeRule and ListRules render; PutRule wraps the
+	// same value under RuleArn.
+	ARN string `json:"Arn,omitempty"`
 
 	// EventPattern is the JSON event pattern the rule matches.
 	EventPattern string `json:"EventPattern,omitempty"`

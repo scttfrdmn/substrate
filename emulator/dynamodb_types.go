@@ -47,8 +47,9 @@ type DynamoDBTable struct {
 	// TableName is the name of the table.
 	TableName string `json:"TableName"`
 
-	// TableARN is the Amazon Resource Name of the table.
-	TableARN string `json:"TableARN"`
+	// TableARN is the Amazon Resource Name of the table. DynamoDB publishes it as
+	// TableArn; see the TableDescription API reference.
+	TableARN string `json:"TableArn"`
 
 	// TableStatus is the current table status (always "ACTIVE" in this emulator).
 	TableStatus string `json:"TableStatus"`
@@ -77,8 +78,9 @@ type DynamoDBTable struct {
 	// StreamSpecification holds the Streams configuration.
 	StreamSpecification *DynamoDBStreamSpecification `json:"StreamSpecification,omitempty"`
 
-	// LatestStreamARN is the ARN of the latest stream, if enabled.
-	LatestStreamARN string `json:"LatestStreamARN,omitempty"`
+	// LatestStreamARN is the ARN of the latest stream, if enabled. DynamoDB publishes
+	// it as LatestStreamArn.
+	LatestStreamARN string `json:"LatestStreamArn,omitempty"`
 
 	// TableSizeBytes is estimated as ItemCount×100.
 	TableSizeBytes int64 `json:"TableSizeBytes"`
@@ -152,8 +154,8 @@ type DynamoDBGlobalSecondaryIndexDesc struct {
 	// ProvisionedThroughput holds read/write capacity for this GSI.
 	ProvisionedThroughput DynamoDBProvisionedThroughputDesc `json:"ProvisionedThroughput"`
 
-	// IndexARN is the Amazon Resource Name of the GSI.
-	IndexARN string `json:"IndexARN,omitempty"`
+	// IndexARN is the Amazon Resource Name of the GSI. DynamoDB publishes it as IndexArn.
+	IndexARN string `json:"IndexArn,omitempty"`
 }
 
 // DynamoDBLocalSecondaryIndexDesc describes a local secondary index on a table.
@@ -167,8 +169,8 @@ type DynamoDBLocalSecondaryIndexDesc struct {
 	// Projection describes which attributes are projected into the index.
 	Projection DynamoDBProjection `json:"Projection"`
 
-	// IndexARN is the Amazon Resource Name of the LSI.
-	IndexARN string `json:"IndexARN,omitempty"`
+	// IndexARN is the Amazon Resource Name of the LSI. DynamoDB publishes it as IndexArn.
+	IndexARN string `json:"IndexArn,omitempty"`
 }
 
 // DynamoDBProjection specifies which attributes are projected into an index.

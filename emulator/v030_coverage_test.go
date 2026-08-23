@@ -169,7 +169,7 @@ func TestDynamoDBStreams_UpdateItemRecord(t *testing.T) {
 	var dtResult map[string]any
 	decodeDynamoDB(t, dtResp, &dtResult)
 	tbl, _ := dtResult["Table"].(map[string]any)
-	streamARN, _ := tbl["LatestStreamARN"].(string)
+	streamARN, _ := tbl["LatestStreamArn"].(string)
 	if streamARN == "" {
 		t.Skip("stream ARN not populated; skipping")
 	}
