@@ -108,7 +108,7 @@ func (p *CloudTrailPlugin) createTrail(reqCtx *RequestContext, req *AWSRequest) 
 		S3KeyPrefix:                input.S3KeyPrefix,
 		IncludeGlobalServiceEvents: input.IncludeGlobalServiceEvents,
 		IsMultiRegionTrail:         input.IsMultiRegionTrail,
-		EnableLogFileValidation:    input.EnableLogFileValidation,
+		LogFileValidationEnabled:   input.EnableLogFileValidation,
 		CloudWatchLogsLogGroupArn:  input.CloudWatchLogsLogGroupArn,
 		CloudWatchLogsRoleArn:      input.CloudWatchLogsRoleArn,
 		KMSKeyID:                   input.KMSKeyID,
@@ -216,7 +216,7 @@ func (p *CloudTrailPlugin) updateTrail(reqCtx *RequestContext, req *AWSRequest) 
 		trail.IsMultiRegionTrail = *input.IsMultiRegionTrail
 	}
 	if input.EnableLogFileValidation != nil {
-		trail.EnableLogFileValidation = *input.EnableLogFileValidation
+		trail.LogFileValidationEnabled = *input.EnableLogFileValidation
 	}
 	if input.CloudWatchLogsLogGroupArn != "" {
 		trail.CloudWatchLogsLogGroupArn = input.CloudWatchLogsLogGroupArn

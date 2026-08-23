@@ -3090,7 +3090,9 @@ func (d *StackDeployer) deployDynamoDBTable(
 	} else if resp != nil {
 		var result struct {
 			TableDescription struct {
-				TableARN string `json:"TableARN"`
+				// TableArn is DynamoDB's published member name, and must track the
+				// tag on DynamoDBTable.TableARN or this decode silently reads empty.
+				TableARN string `json:"TableArn"`
 			} `json:"TableDescription"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {

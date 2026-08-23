@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Nine response members were published under a name no AWS SDK reads** (#738). A Go `json`
+  tag is only a bug when three things hold at once — the plugin's protocol serializes Go tags,
+  the struct actually reaches a response body, and AWS spells the member differently — so every
+  one of these was checked against the member name in the official API reference rather than
+  swept mechanically. Of 158 candidate tag lines, 24 turned out to be cases where AWS really
+  does publish the capitalized form: the bare spelling `ARN` appears on 16 lines and is correct
+  on 15 of them (Secrets Manager, SSM, WAFv2's Web ACL, CloudFront and ElastiCache all publish
+  `ARN`), and FSx genuinely publishes `ResourceARN` and `DNSName`. A blanket `ARN` → `Arn`
+  rename would have broken six correct fields to fix one.
+
+  The nine that were wrong, per service:
+  - DynamoDB — `TableArn`, `LatestStreamArn`, and `IndexArn` on both the global and the local
+    secondary-index descriptor. A real SDK decoded all four as nil, so a consumer reading
+    `TableArn` got an empty string and no error. `StackDeployer`'s own decode of substrate's
+    `CreateTable` response is fixed in the same commit, or it would have stopped recording table
+    ARNs the moment the tag changed.
+  - EventBridge — a rule's `Arn`. `PutRule`, which wraps the same value under `RuleArn`, was
+    already correct and is unchanged.
+  - Lambda — an event-source mapping's `FunctionArn` and `EventSourceArn`. The lowercase
+    `eventSourceARN` inside a stream-record event payload is a different and correct spelling,
+    and is untouched.
+  - CloudTrail — `KmsKeyId`, and the log-file-validation flag, which every response publishes as
+    `LogFileValidationEnabled`; `EnableLogFileValidation` is `CreateTrail`'s and `UpdateTrail`'s
+    *input* name, and the input parsing still reads it. A trail's own `TrailARN` is correct.
+  - WAFv2 — an IP set's `IPAddressVersion`.
+
+- **`CreateIPSet` honors the IP address version the caller asked for** (#738). WAFv2's wrong
+  member name was used to *parse* the request as well as to render the response, so a typed
+  SDK — which can only send `IPAddressVersion` — had its `IPV6` request read as absent and
+  silently replaced by substrate's `IPV4` default. The set was created successfully holding the
+  wrong address family, so a consumer's error branch never ran. This is why the fix is a
+  behaviour change and not only a rendering one.
+
+  The real-SDK tier had no DynamoDB or WAFv2 client at all, which is exactly how both defects
+  stayed green through every release: the unit tier asserts on substrate's own spelling, and only
+  a typed SDK can decide whether a member decodes. `test/e2e` gains a journey that creates a
+  table with a stream and a GSI and reads all three ARNs off the SDK's `TableDescription`, plus a
+  `CreateIPSet`/`GetIPSet` round-trip asserting an IPv6 set stays IPv6; both fail against the
+  previous code. The e2e module gains the `dynamodb` and `wafv2` clients, which requires
+  `aws-sdk-go-v2` v1.43.7 there.
+
 ## [v0.108.0] - 2026-08-22
 
 ### Added

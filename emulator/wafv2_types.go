@@ -47,8 +47,9 @@ type WAFv2IPSet struct {
 	Scope string `json:"Scope"`
 	// LockToken is a CAS token required for update and delete operations.
 	LockToken string `json:"LockToken"`
-	// IPVersion is the IP address version: IPV4 or IPV6.
-	IPVersion string `json:"IPVersion"`
+	// IPAddressVersion is the IP address version: IPV4 or IPV6. WAFv2 publishes and
+	// accepts it under this name; the IPSet type's ARN really is ARN.
+	IPAddressVersion string `json:"IPAddressVersion"`
 	// Addresses is the list of IP addresses or CIDR ranges in the set.
 	Addresses []string `json:"Addresses"`
 	// AccountID is the AWS account that owns this IP set.

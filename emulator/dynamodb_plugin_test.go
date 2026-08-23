@@ -98,7 +98,7 @@ func TestDynamoDB_TableLifecycle(t *testing.T) {
 	desc := createResult["TableDescription"].(map[string]any)
 	assert.Equal(t, "Users", desc["TableName"])
 	assert.Equal(t, "ACTIVE", desc["TableStatus"])
-	assert.Contains(t, desc["TableARN"].(string), "arn:aws:dynamodb")
+	assert.Contains(t, desc["TableArn"].(string), "arn:aws:dynamodb")
 
 	// Describe table.
 	resp = dynamodbRequest(t, srv, "DescribeTable", map[string]any{
@@ -745,8 +745,8 @@ func TestDynamoDB_Streams(t *testing.T) {
 	var createResult map[string]any
 	decodeDynamoJSON(t, resp, &createResult)
 	desc := createResult["TableDescription"].(map[string]any)
-	assert.NotEmpty(t, desc["LatestStreamARN"])
-	streamARN := desc["LatestStreamARN"].(string)
+	assert.NotEmpty(t, desc["LatestStreamArn"])
+	streamARN := desc["LatestStreamArn"].(string)
 
 	// ListStreams — should include our table's stream.
 	resp = dynamodbRequest(t, srv, "ListStreams", map[string]any{
