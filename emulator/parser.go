@@ -259,16 +259,37 @@ var targetServiceAliases = map[string]string{
 	"ec2containerregistry": "ecr",
 	// "elasticfilesystem" is the subdomain name for Amazon EFS.
 	"elasticfilesystem": "efs",
-	// "AWSGlue" → strip "AWS" → "glue".
+	// "AWSGlue" → no strip → "awsglue".
 	"awsglue": "glue",
-	// "AWSInsightsIndexService" → strip "AWS" → "insightsindexservice" → "ce".
+	// "AWSInsightsIndexService" → no strip → "awsinsightsindexservice" → "ce".
 	"awsinsightsindexservice": "ce",
 	// "AmazonBudgetServiceGateway" → strip "Amazon" → "budgetservicegateway" → "budgets".
-	// "AWSBudgetServiceGateway" → strip "AWS" → "budgetservicegateway" → "budgets".
+	// "AWSBudgetServiceGateway" → no strip → "awsbudgetservicegateway", which is
+	// the prefix the model actually declares and every client sends.
 	"budgetservicegateway":    "budgets",
 	"awsbudgetservicegateway": "budgets",
-	// "AmazonHealthService" → strip "Amazon" → "healthservice" → "health".
-	"healthservice": "health",
+	// "AWSHealth_20160804" → no strip → strip version → "awshealth". The table
+	// held an invented "healthservice" in this slot instead — a guessed prefix no
+	// client sends, sitting exactly where the real one was needed, which is the
+	// #561 failure repeated and is what hid HealthPlugin's unreachability until
+	// the sweep in #739. AWS Health is also not regionalized, so its partition
+	// endpoint "global.health.amazonaws.com" missed the host path as well.
+	"awshealth": "health",
+	// "GraniteServiceVersion20100801" → no strip, no "_" version suffix →
+	// "graniteserviceversion20100801". Granite is the internal code-name for
+	// CloudWatch, the way Trent is for KMS. The name was already in
+	// smithyServiceAliases for the rpc-v2-cbor URL path but absent here, and
+	// CloudWatch's model declares protocols ['smithy-rpc-v2-cbor','json','query']:
+	// botocore resolves "json" first and sends this target, while aws-sdk-go-v2
+	// takes the CBOR path that substrate already routed. So substrate's own suite
+	// and test/e2e were green over an endpoint no AWS CLI or boto3 caller could
+	// reach — every such call answered ServiceNotAvailable (#739).
+	//
+	// Routing the target is not the whole story: the CLI then sends
+	// application/x-amz-json-1.0 to a handler that reads query-form parameters and
+	// answers XML. That is a protocol gap in CloudWatchPlugin, filed separately;
+	// this alias only makes the request arrive.
+	"graniteserviceversion20100801": "monitoring",
 	// "email" is the subdomain name for Amazon SES v2.
 	"email": "sesv2",
 	// "Kafka_20181101" → strip version → "Kafka" → lowercase → "kafka" → "msk".
@@ -348,17 +369,36 @@ var targetServiceAliases = map[string]string{
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as
-// "AmazonDynamoDB.GetItem" or "DynamoDB_20120810.GetItem" into a lowercase
-// service name.
+// "AmazonDynamoDB.GetItem", "DynamoDB_20120810.GetItem" or
+// "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DescribeTrails" into a
+// lowercase service name.
 func extractServiceFromTarget(target string) string {
-	// Split on "." to get the namespace part.
-	dot := strings.IndexByte(target, '.')
+	// The operation is whatever follows the final dot, which is where
+	// extractOperation splits too, so the namespace is everything before it.
+	dot := strings.LastIndexByte(target, '.')
 	if dot < 0 {
 		return ""
 	}
 	ns := target[:dot]
 
-	// Strip known prefixes: "Amazon" prefix (AmazonDynamoDB → dynamodb).
+	// A namespace may itself be dot-qualified, and only its final segment names
+	// the service: botocore sends CloudTrail's as
+	// "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101", which splitting at
+	// the *first* dot reduced to "com", so every AWS CLI and boto3 CloudTrail call
+	// answered ServiceNotAvailable while aws-sdk-go-v2's terser
+	// "CloudTrail_20131101" resolved (#739). An alias could not fix it: "com"
+	// prefixes every fully-qualified namespace, so aliasing it would hijack any
+	// other service that sends the long form. Of the 430 botocore models only
+	// three carry a dotted prefix — cloudtrail, codeconnections and
+	// codestar-connections, the latter two not substrate plugins — and their final
+	// segments do not collide, so the reduction is safe.
+	if seg := strings.LastIndexByte(ns, '.'); seg >= 0 {
+		ns = ns[seg+1:]
+	}
+
+	// Strip known prefixes: "Amazon" prefix (AmazonDynamoDB → dynamodb). Note
+	// that "AWS" is *not* stripped — an "AWS…" namespace resolves through
+	// targetServiceAliases with the prefix intact.
 	ns = strings.TrimPrefix(ns, "Amazon")
 
 	// Strip version suffix: "DynamoDB_20120810" → "DynamoDB".
@@ -404,6 +444,23 @@ func extractServiceFromHost(host string) string {
 	// API Gateway runtime endpoint: {apiId}.execute-api.{region}
 	if strings.Contains(host, ".execute-api.") {
 		return "execute-api"
+	}
+
+	// Timestream endpoint discovery hands a client a host whose first label is the
+	// operation class rather than the service: "ingest.timestream.{region}" for
+	// writes, "query.timestream.{region}" for queries. Both reduced to "ingest" or
+	// "query" and reached no plugin (#739). A caller passing --endpoint-url was
+	// unaffected, which is why the suite never saw it.
+	if strings.HasPrefix(host, "ingest.timestream.") || strings.HasPrefix(host, "query.timestream.") {
+		return "timestream"
+	}
+
+	// "global.<service>": a non-regionalized service's partition endpoint carries
+	// a literal "global" label ahead of the service name — AWS Health's is
+	// "global.health.amazonaws.com" (endpoints.json, partitionEndpoint
+	// "aws-global"). Taking the first label routed it to a service named "global".
+	if rest, ok := strings.CutPrefix(host, "global."); ok && rest != "" {
+		host = rest
 	}
 
 	// "api.<service>.<region>": several services front their endpoint with a

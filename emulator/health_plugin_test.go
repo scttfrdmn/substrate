@@ -42,7 +42,12 @@ func healthRequest(t *testing.T, ts *httptest.Server, op string, body string) *h
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
-	req.Header.Set("X-Amz-Target", "AmazonHealthService."+op)
+	// AWSHealth_20160804 is the target prefix AWS Health's model declares and every
+	// SDK sends. These tests previously sent "AmazonHealthService", a name invented
+	// here, and targetServiceAliases carried a matching "healthservice" entry — so
+	// the suite proved only that substrate routes a prefix substrate made up, while
+	// every real client's call answered ServiceNotAvailable (#739).
+	req.Header.Set("X-Amz-Target", "AWSHealth_20160804."+op)
 	req.Host = "health.us-east-1.amazonaws.com"
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

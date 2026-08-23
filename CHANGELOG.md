@@ -8,6 +8,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Four plugins were registered, unit-tested, and unreachable from a real AWS client**
+  (#739). Substrate resolves which plugin serves a request by reducing four signals to one
+  service name, and `X-Amz-Target` is checked first — so a namespace it does not recognize
+  short-circuits the `Host` and SigV4 paths that would both have answered correctly. Since
+  substrate is reached with `--endpoint-url`, where the host is `localhost`, the target is
+  effectively the only signal a JSON caller supplies. Every such call then answers
+  `ServiceNotAvailable` while the plugin's own tests stay green. That had already shipped
+  four times (#561, #580, #734); this is the sweep that makes the check systematic instead
+  of incidental. All 67 plugins' identifiers were read from the botocore models bundled in a
+  locally installed AWS CLI v2, and each miss was confirmed against a live `aws` run before
+  and after the fix.
+  - **CloudWatch** (`monitoring`) was unreachable from **every AWS CLI and boto3 caller**.
+    Its model declares `protocols: ['smithy-rpc-v2-cbor','json','query']`; botocore resolves
+    `json` first and sends `X-Amz-Target: GraniteServiceVersion20100801.{Op}`, a name that was
+    present in the Smithy path table (the rpc-v2-cbor transport `aws-sdk-go-v2` takes) and
+    absent from the target table. Substrate's suite and its real-SDK end-to-end tier both
+    drive `aws-sdk-go-v2`, which is why they were green over a dead endpoint.
+  - **Health** was unreachable from every SDK. Its real target prefix is
+    `AWSHealth_20160804`; the alias table held an invented `healthservice` in that slot, and
+    the plugin's own tests sent the invented prefix — so the suite proved only that substrate
+    routes a name substrate made up. Health is also not regionalized, so its partition
+    endpoint `global.health.amazonaws.com` reduced to `global` and missed the host path too.
+  - **CloudTrail** was unreachable from the AWS CLI and boto3, which send the model's
+    fully-qualified `com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.{Op}` — split at
+    the first dot, that reduced to `com`. `aws-sdk-go-v2` sends the terse
+    `CloudTrail_20131101` and always worked. An alias could not fix the long form, because
+    `com` prefixes every fully-qualified namespace; substrate now reduces a dot-qualified
+    namespace to its last segment, mirroring what operation extraction already did. Of the 430
+    botocore models only three carry a dotted prefix and their last segments do not collide.
+  - **Timestream** missed the host path: endpoint discovery hands a client
+    `ingest.timestream.{region}` or `query.timestream.{region}`, whose first label is the
+    operation class rather than the service. A `--endpoint-url` caller was unaffected, which
+    is why the suite never saw it.
+
+  The identifiers now live in a table, `emulator/routing.go`, with a cited source per row —
+  and the citation names *which* SDK, because botocore and `aws-sdk-go-v2` disagree about
+  CloudTrail. Three consumers keep it honest: the generated coverage matrix reads its display
+  names and protocols (replacing a second copy that lived in `cmd/gen-service-reference`),
+  `make docs-reference-check` fails when a registered plugin has no row or a row names no
+  plugin, and a sweep test drives every target prefix, host and signing name through the
+  parser and asserts the result is a **registered** plugin rather than an expected string.
+  `docs/services.md` gains a section on the four signals, the reason the priority order hides
+  a routing bug, the three plugins that legitimately cannot be addressed three ways
+  (`apigatewayv2`, `execute-api`, `opensearch`), and the coverage limit that Java, JavaScript
+  and .NET were not checked. Three target prefixes documented in per-service sections were
+  also wrong — Step Functions' is `AWSStepFunctions` not `AmazonStates`, ECR's is
+  `_V20150921` not `_V1_1_0`, and Organizations' is `AWSOrganizationsV20161128` not
+  `Organizations_20161128`; substrate accepts the old spellings too, so no caller breaks.
+
+  Routing CloudWatch is not the same as serving it: the AWS CLI's JSON body now reaches a
+  handler that reads query-form parameters and answers XML, which is filed as #757 rather
+  than fixed here — a protocol rewrite of `CloudWatchPlugin` is a release of its own. `sso`'s
+  error protocol is classified REST/JSON while the plugin emulates sso-admin (JSON 1.1),
+  filed as #758.
 - **Nine response members were published under a name no AWS SDK reads** (#738). A Go `json`
   tag is only a bug when three things hold at once — the plugin's protocol serializes Go tags,
   the struct actually reaches a response body, and AWS spells the member differently — so every
