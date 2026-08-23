@@ -744,6 +744,10 @@ type authzResource struct {
 //   - `ec2:CreateTags` and `ec2:DeleteTags` name up to 1000 resources of mixed
 //     types in ResourceId.N, and were decided against that same absent
 //     InstanceId.1 — so against "*" (#674).
+//   - Every other EC2 operation naming resources by ID — `TerminateInstances` with
+//     three InstanceId.N, and the three other plural parameters in
+//     [ec2AuthzIDParams] — was decided against the first ID alone, leaving the
+//     rest of the batch unauthorized (#744).
 //
 // Each exception is gated on len(multi) > 0, which is what keeps every other
 // operation of those two services on the single-resource path below.
@@ -762,6 +766,9 @@ func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSReque
 			return multi
 		}
 		if multi := ec2AuthzTagResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+		if multi := ec2AuthzNamedResources(a.state, reqCtx, req); len(multi) > 0 {
 			return multi
 		}
 	}
@@ -789,15 +796,12 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 	case "iam":
 		return "arn:aws:iam::" + acct + ":*"
 	case "ec2":
-		// RunInstances does not reach here: it names five resources and is resolved
-		// by [ec2AuthzRunInstancesResources] (#662). Nor does a CreateTags or
-		// DeleteTags naming any resource substrate can tag, resolved by
-		// [ec2AuthzTagResources] (#674). What is left is the operations that name one
-		// resource by ID — an instance, a security group, a route table or an internet
-		// gateway (#730) — and everything else, which still resolves to "*".
-		if target, ok := ec2AuthzNamedResource(a.state, reqCtx, req); ok {
-			return target.arn(region, acct)
-		}
+		// No EC2 request that names a resource substrate can resolve reaches here. A
+		// launch names five and is answered by [ec2AuthzRunInstancesResources] (#662);
+		// a tagging call's up-to-1000 by [ec2AuthzTagResources] (#674); and every ID
+		// named under one of [ec2AuthzIDParams] by [ec2AuthzNamedResources] (#730,
+		// #744), which returns a non-empty list whenever any of them resolves. What is
+		// left is an operation naming none of them, whose request resource is "*".
 		return "*"
 	case "lambda":
 		name := lambdaNameFromPath(req.Path)
@@ -1049,18 +1053,15 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 			return nil
 		}
 
-	case "ec2":
-		// The same resolver [AuthController.buildResourceARN] uses, so the tags a
-		// condition is evaluated against always belong to the ARN the decision is made
-		// about. Reading them through [ec2AuthzTagsFor] is also what generalizes this
-		// arm past instances: it decodes the "tags" member every EC2 record spells the
-		// same way, which is how a security group's, route table's or internet gateway's
-		// tags become readable without a decoder per type (#730).
-		target, ok := ec2AuthzNamedResource(a.state, reqCtx, req)
-		if !ok {
-			return nil
-		}
-		tags = ec2AuthzTagsFor(a.state, target.stateKey)
+	// EC2 has no arm here, and its absence is deliberate rather than a gap. Every EC2
+	// request naming a resource substrate can resolve is answered by one of
+	// buildResourceARNs' multi-resource arms, each of which reads that resource's own tags
+	// through [ec2AuthzTagsFor] beside its ARN — so the tags always belong to the ARN the
+	// decision is made about, which one arm here could not guarantee for a request naming
+	// several resources. An ec2 arm did exist for the single-resource path until
+	// [ec2AuthzNamedResources] made that path unreachable for any request with a resolvable
+	// ID (#744); leaving it would have been a second reading of the same request that no
+	// call could reach.
 
 	case "dynamodb":
 		tbl := req.Params["TableName"]

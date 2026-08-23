@@ -741,11 +741,16 @@ func TestEC2_Authz_ImageARNCarriesNoAccountID(t *testing.T) {
 	assert.Equal(t, ec2AuthzImageARN, deniedResource(t, err))
 }
 
-// TestEC2_Authz_SingleResourceOperationsAreUnchanged pins which operations take the
-// multi-resource path: RunInstances (#662) and the two tagging operations (#674),
-// and nothing else. Every other EC2 operation keeps the decision it had before —
-// these changes are about resolving the resources a request names, not about
-// tightening EC2 as a whole.
+// TestEC2_Authz_SingleResourceOperationsAreUnchanged pins the floor of the resolution:
+// an EC2 operation that names no resource substrate can resolve is still decided against
+// the literal "*", exactly as it was. These changes are about resolving the resources a
+// request names, not about tightening EC2 as a whole.
+//
+// Its rows name one ID each, so the two instance rows go through
+// [ec2AuthzNamedResources] and come back with the single resource that parameter names —
+// which is what #744 left unchanged for a batch of one. The multi-resource paths a request
+// can take are RunInstances' five (#662), a tagging call's up-to-1000 (#674) and every ID
+// under one of [ec2AuthzIDParams] (#730, #744); everything else is here.
 func TestEC2_Authz_SingleResourceOperationsAreUnchanged(t *testing.T) {
 	instanceARN := "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzAccount + ":instance/i-0abc"
 	tests := []struct {

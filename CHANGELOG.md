@@ -56,6 +56,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ownerId`/`public` per Example 1.
 
 ### Fixed
+- **An EC2 operation naming several resources was decided against the first alone** (#744).
+  `TerminateInstances` with three `InstanceId.N` was authorized against `InstanceId.1`'s ARN
+  and `InstanceId.1`'s tags; the other two were not authorized at all. So a policy allowing
+  instances tagged `Env=dev` and denying the rest permitted a call naming one dev instance and
+  two production ones, provided the dev one came first — and a `Deny` fencing off a production
+  instance was inert behind any instance the caller was allowed to touch. Every ID a request
+  names under one of the four resolving parameters — `InstanceId.N`, `GroupId.N`,
+  `RouteTableId.N`, `InternetGatewayId.N` — now carries its own ARN and its own tags into its
+  own decision, which is the reading #660 and #662 established and #674 already applied to a
+  tagging call's `ResourceId.N`. The permission boundary sees the whole batch too.
+
+  The denial names the first resource the policy does not allow, in fixed parameter order and
+  then request-index order, so it is deterministic across replays and it is a resource the
+  caller can act on. `GroupId` is overloaded, which pulls one more operation in:
+  `DescribePlacementGroups` reads `pg-` IDs through it and is now decided against the groups it
+  names, resolving each by prefix — a `pg-` ID to a name-form `placement-group/<name>` ARN and
+  an `sg-` ID to `security-group/<id>` — in the same request.
+
+  An ID that resolves to no ARN is **skipped**, as a tagging call's already was: a batch of one
+  resolvable and one unparseable ID is authorized as the batch of one, because the refusal such
+  an ID is owed is the handler's `Malformed`/`NotFound` rather than an `AccessDenied` naming a
+  resource that does not exist. For `TerminateInstances` that cannot launder a state change
+  past a policy — AWS documents it all-or-nothing and substrate resolves every ID before
+  terminating any — while `StopInstances`/`StartInstances` are not atomic, so there the batch is
+  authorized as the resources that exist. No ordering between the 403 and the 404 is asserted,
+  because no AWS page publishes one. The skip is narrower than it reads: a well-formed `i-` ID
+  naming no instance is still its own resource, since its ARN is built from the ID rather than
+  looked up, so a least-privilege policy must still name it.
+- **`docs/services.md` published the unresolved-policy-variable rule backwards** (#744). The
+  page claimed a divergence in `NotResource` and the negated operators, where an unresolved
+  variable was said to match on AWS and not here. AWS's *Variables and tags* page applies one
+  sentence to both elements — "used as part of the `Resource` **or** `NotResource` element …
+  will not match any resource" — and states that inverted condition operators "do match against
+  a null value", which is what substrate's literal comparison already answers. So there is no
+  unresolved-variable divergence in either direction. The divergence that *is* real is a
+  variable that would have **resolved**: safe under the positive forms, which grant less than
+  they say, and unsafe under the negated ones, where a `StringNotEquals` against an
+  un-substituted literal is inert on a `Deny` and grants on an `Allow`. That is reachable today
+  through `SimulateCustomPolicy`'s own `ContextEntries`, and is what #745 tracks.
 - **`DescribeSecurityGroups` ignored `GroupName.N`** (#749). AWS documents the parameter and
   substrate read it nowhere, so a caller naming one group by name was answered about **every**
   group in the account — the superset failure #731 fixed for `DescribeImages`' `ImageId.N`, and
