@@ -190,7 +190,7 @@ func (p *EC2Plugin) describeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 //
 // Each record is decoded into a member map, so a new resource type joins the scan by being
 // listed in [ec2TagScanTargets] and needs no decoder of its own: "tags" is the
-// type-agnostic shape [EC2Plugin.applyTagsToResource] writes and [ec2AuthzTagsFor] reads,
+// type-agnostic shape [ec2ApplyTagsToResource] writes and [ec2AuthzTagsFor] reads,
 // and a name-keyed type's ID member is named by the target rather than by a Go type.
 //
 // A record that cannot be read or decoded is skipped rather than failing the request: a

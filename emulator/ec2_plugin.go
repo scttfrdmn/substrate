@@ -2675,7 +2675,7 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, awsErr
 	}
 	for _, id := range resourceIDs {
-		existing, found, err := p.resourceTags(reqCtx, id)
+		existing, found, err := ec2ResourceTags(p.state, reqCtx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -2690,7 +2690,7 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		}
 	}
 	for _, id := range resourceIDs {
-		if err := p.applyTagsToResource(reqCtx, id, tags, false); err != nil {
+		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, false); err != nil {
 			return nil, err
 		}
 	}
@@ -2726,7 +2726,7 @@ func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, awsErr
 	}
 	for _, id := range resourceIDs {
-		if err := p.applyTagsToResource(reqCtx, id, tags, true); err != nil {
+		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, true); err != nil {
 			return nil, err
 		}
 	}
@@ -2895,7 +2895,7 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 		// Volumes were the one taggable resource with no arm here, so CreateTags on a
 		// vol- ID fell through to the default and answered <return>true</return> having
 		// written nothing (#670). Nothing else needed changing:
-		// [EC2Plugin.applyTagsToResource] is type-agnostic — it reads and writes the
+		// [ec2ApplyTagsToResource] is type-agnostic — it reads and writes the
 		// record's "tags" JSON member — and [EC2Volume.Tags] already serializes there.
 		return ec2Taggable{stateKey: ec2VolumeStateKey(acct, region, id), arnType: "volume", arnID: id}, true
 	case strings.HasPrefix(id, "snap-"):
@@ -3014,7 +3014,7 @@ func ec2InvalidTagResourceID(id string) *AWSError {
 // ec2CheckTagResourceIDs refuses the whole request when any ResourceId names a resource
 // type substrate cannot tag, before anything is written.
 //
-// Ordering, not redundancy: [EC2Plugin.applyTagsToResource] answers the same refusal from
+// Ordering, not redundancy: [ec2ApplyTagsToResource] answers the same refusal from
 // the same constructor, but it answers it partway through the apply loop, which would
 // leave the resources named ahead of the bad ID tagged. That is the partially-tagged state
 // CreateTags' three other whole-request checks exist to prevent, and real EC2 never
@@ -3028,20 +3028,25 @@ func ec2CheckTagResourceIDs(state StateManager, reqCtx *RequestContext, ids []st
 	return nil
 }
 
-// resourceTags returns the tags currently on the resource named by id, and whether the
+// ec2ResourceTags returns the tags currently on the resource named by id, and whether the
 // resource was found at all.
 //
 // A missing resource reports found=false rather than an error, matching
-// [EC2Plugin.applyTagsToResource]: CreateTags on an absent resource is a no-op in
+// [ec2ApplyTagsToResource]: CreateTags on an absent resource is a no-op in
 // substrate rather than a rejection, so the tag-limit check has nothing to count.
-func (p *EC2Plugin) resourceTags(reqCtx *RequestContext, id string) ([]EC2Tag, bool, error) {
-	target, ok := ec2TaggableResource(p.state, reqCtx, id)
+//
+// A free function taking the state rather than an [EC2Plugin] method, as
+// [ec2LookupDefaultVPC] already is, because the CloudFormation deployer stamps its own
+// tags on the EC2 resources it creates (#746) and holds no plugin — only a
+// [StateManager]. Nothing about reading a record's tags needs the plugin.
+func ec2ResourceTags(state StateManager, reqCtx *RequestContext, id string) ([]EC2Tag, bool, error) {
+	target, ok := ec2TaggableResource(state, reqCtx, id)
 	if !ok || !target.resolved() {
 		return nil, false, nil
 	}
-	data, err := p.state.Get(context.Background(), ec2Namespace, target.stateKey)
+	data, err := state.Get(context.Background(), ec2Namespace, target.stateKey)
 	if err != nil || data == nil {
-		return nil, false, nil //nolint:nilerr // Absent resource — ignored, as by applyTagsToResource.
+		return nil, false, nil //nolint:nilerr // Absent resource — ignored, as by ec2ApplyTagsToResource.
 	}
 	var resource map[string]json.RawMessage
 	if err := json.Unmarshal(data, &resource); err != nil {
@@ -3054,21 +3059,30 @@ func (p *EC2Plugin) resourceTags(reqCtx *RequestContext, id string) ([]EC2Tag, b
 	return existing, true, nil
 }
 
-// applyTagsToResource loads the EC2 resource identified by id, merges or
+// ec2ApplyTagsToResource loads the EC2 resource identified by id, merges or
 // removes the provided tags, and saves the updated resource back to state.
 // When remove is true, matching tag keys are deleted; otherwise tags are upserted.
 //
 // An ID whose prefix names no taggable type is refused with [ec2InvalidTagResourceID]
 // rather than silently ignored, which is what it was until #708 — the comment there read
-// "matches AWS behavior", and AWS's behavior is InvalidID. Both callers check every ID
-// through [ec2CheckTagResourceIDs] first, so the refusal here is reached only by a caller
-// that skipped that pass; it is kept so no future one can reintroduce the silent success.
+// "matches AWS behavior", and AWS's behavior is InvalidID. The two `CreateTags`/
+// `DeleteTags` callers check every ID through [ec2CheckTagResourceIDs] first, so the
+// refusal here is reached only by a caller that skipped that pass; it is kept so no future
+// one can reintroduce the silent success.
 //
 // An ID that resolves to no record is still a no-op, deliberately: substrate does not
 // verify a taggable resource's existence, so a tag applied to an absent resource is
 // discarded rather than refused.
-func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags []EC2Tag, remove bool) error {
-	target, ok := ec2TaggableResource(p.state, reqCtx, id)
+//
+// A free function taking the state, for the reason given on [ec2ResourceTags]: the
+// CloudFormation deployer writes the `aws:cloudformation:*` stamp through here (#746) and
+// holds no [EC2Plugin]. It reads and writes the record's "tags" JSON member rather than a
+// typed field, so it is type-agnostic and every taggable type is covered by whatever
+// [ec2TaggableResource] resolves.
+func ec2ApplyTagsToResource(
+	state StateManager, reqCtx *RequestContext, id string, tags []EC2Tag, remove bool,
+) error {
+	target, ok := ec2TaggableResource(state, reqCtx, id)
 	if !ok {
 		return ec2InvalidTagResourceID(id)
 	}
@@ -3077,7 +3091,7 @@ func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags 
 	}
 	stateKey := target.stateKey
 
-	data, err := p.state.Get(context.Background(), ec2Namespace, stateKey)
+	data, err := state.Get(context.Background(), ec2Namespace, stateKey)
 	if err != nil || data == nil {
 		return nil //nolint:nilerr // Resource not found — ignore (matches AWS behavior).
 	}
@@ -3129,7 +3143,7 @@ func (p *EC2Plugin) applyTagsToResource(reqCtx *RequestContext, id string, tags 
 	if err != nil {
 		return fmt.Errorf("ec2 applyTagsToResource marshal %s: %w", id, err)
 	}
-	return p.state.Put(context.Background(), ec2Namespace, stateKey, updated)
+	return state.Put(context.Background(), ec2Namespace, stateKey, updated)
 }
 
 // extractEC2Tags extracts Tag.N.Key / Tag.N.Value pairs from query params.
