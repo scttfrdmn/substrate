@@ -44,6 +44,24 @@ type AWSRequest struct {
 	// Path is the effective URL path of the HTTP request. For S3 virtual-hosted
 	// requests the bucket is prepended so the plugin always sees /bucket[/key].
 	Path string
+
+	// Protocol is the wire serialization the caller used, classified by
+	// [detectWireProtocol] during parsing.
+	//
+	// It matters for a service whose model declares more than one — CloudWatch
+	// declares awsQuery, awsJson1_0 and rpcv2Cbor at once, and its clients disagree
+	// about which to send — because the answer's serialization has to follow the
+	// question's. A single-protocol plugin can ignore this field; the zero value,
+	// [WireQuery], is what a request carrying none of the newer protocols' markers
+	// is (#757).
+	Protocol WireProtocol
+
+	// QueryMode reports whether the caller sent X-Amzn-Query-Mode: true, which a
+	// client of an aws.protocols#awsQueryCompatible service sets when its own callers
+	// may still be matching on the Query protocol's error codes. A server seeing it
+	// must return those codes in an x-amzn-query-error response header; substrate does
+	// that in [marshalAWSError] rather than in each plugin.
+	QueryMode bool
 }
 
 // AWSResponse represents an AWS API response produced by the emulator.

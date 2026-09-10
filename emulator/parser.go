@@ -130,6 +130,12 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 		Headers:    headers,
 		Params:     params,
 		Path:       effectivePath,
+		// Classified here rather than at response time so every step of the pipeline
+		// — authorization, fault injection, the plugin, and the error serializer —
+		// agrees about what the caller sent. Both are pure reads of r's headers and
+		// path, so they cost nothing on the query path that ignores them (#757).
+		Protocol:  detectWireProtocol(r),
+		QueryMode: detectQueryMode(r),
 	}
 
 	// A REST service supplies none of extractOperation's first three signals, so

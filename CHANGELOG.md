@@ -8,6 +8,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A request's wire protocol is now recorded and errors are shaped to follow it** (#757).
+  `AWSRequest` gains two exported fields — `Protocol` (`WireQuery`, `WireJSONRPC`,
+  `WireRPCV2CBOR`) and `QueryMode` — filled in during parsing, and the error serializer consults
+  the request rather than only the service name.
+
+  Substrate classified error protocol per *service*, which is right for almost every service
+  because almost every service model declares one protocol. CloudWatch declares four traits at
+  once — `awsQuery`, `awsJson1_0`, `rpcv2Cbor` and `awsQueryCompatible` — and its clients
+  disagree: `aws-sdk-go-v2` sends `Smithy-Protocol: rpc-v2-cbor` to
+  `/service/GraniteServiceVersion20100801/operation/{Op}`, the AWS CLI and boto3 send an
+  `X-Amz-Target` with `application/x-amz-json-1.0`, and a hand-rolled client sends a Query form.
+  One answer cannot serve all three. Verified against a running emulator before the change: a
+  refused `SetAlarmState` reached the Go SDK as `deserialization failed, unexpected minor value
+  28` (the `<` of `<ErrorResponse>` read as a CBOR head) and reached the AWS CLI as
+  `An error occurred (400)` — the stringified HTTP status, with the XML document leaking into the
+  message. Both now report `InvalidParameterValue: AlarmName is required`, and the Go SDK
+  deserializes it into the modeled `types.InvalidParameterValueException`.
+
+  Which protocols a service may be classified into by its caller is an enumerated set of one
+  (`monitoring`), not a sniff. Deciding by Content-Type is exactly what #392 removed: a REST-JSON
+  service sends a bare `application/json` on the way in, indistinguishable from a plain JSON
+  body, so letting the request speak for a single-protocol service would reclassify Lambda's
+  errors as Query and undo that fix. Tests pin the asymmetry in both directions.
+
+  The two protocols that identify an error by *shape* rather than by code now name the shape.
+  `emulator/cloudwatch_errors.go` holds CloudWatch's 17 error shapes read off the AWS-published
+  Smithy model, mapping each Query code to its shape ID, fault, HTTP status and — the detail that
+  is easy to get wrong — the casing of its message member, which the model spells `Message` on
+  `InternalServiceFault` and `message` on `InvalidParameterValueException`. A CBOR client
+  deserializes by exact member name, so guessing loses the message. Codes with no shape behind
+  them, which is every code the pipeline itself raises (`AccessDenied`, `InternalFailure`,
+  `ThrottlingException`, …), pass through unqualified; a reference client sanitizes `__type` by
+  taking the text after `#`, so an unqualified value yields the same discriminant a qualified one
+  would.
+
+  `X-Amzn-Query-Mode: true` is now honored. A client of an `awsQueryCompatible` service sets it
+  when its own callers may still be matching on the Query protocol's codes, and a server seeing
+  it must answer with `x-amzn-query-error: <Code>;Sender|Receiver`. Substrate read that header
+  nowhere. With both halves in place the AWS CLI raises a typed
+  `botocore.errorfactory.InvalidParameterValueException` and displays the Query code, which is
+  precisely the split `awsQueryCompatible` exists to bridge: the modeled shape in the body for
+  the SDK, the legacy code in the header for whoever reads the SDK's output.
+
+  A request declaring `Smithy-Protocol: rpc-v2-cbor` *and* carrying a target header is refused
+  with a shaped 400 rather than plain text. The specification requires the rejection without
+  naming a code; substrate answers `SerializationException` and says so here, because the code is
+  its choice and not the spec's. The rejection is not pedantry: substrate routes on
+  `X-Amz-Target` before anything else, so honoring such a request would mean invoking whatever
+  the target named while answering in the serialization the path asked for.
+
+  CloudWatch's *successful* responses are still XML on every protocol — that half is #785. What
+  changes here is that a refusal is now readable by the client that made the request.
 - **A CBOR codec** (`emulator/cbor.go`), the first half of teaching CloudWatch to answer the
   protocol its clients speak (#785). Nothing is wired to it yet; it lands on its own so it can
   be reviewed against RFC 8949 and Smithy's protocol tests rather than alongside a plugin
@@ -48,6 +100,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the two implementations produce byte-identical timestamps.
 
 ### Fixed
+- **`sso` answered the wrong protocol, because substrate was reading it as the wrong service**
+  (#758). The plugin emulates `sso-admin`: it dispatches on `X-Amz-Target` with the
+  `SWBExternalService` prefix, and `sso-admin`'s model is `"protocol": "json"` with
+  `"jsonVersion": "1.1"`. It was classified as REST-JSON, which is what the *`sso`* service — the
+  unrelated OIDC token and account-list API — uses.
+
+  Two things followed from the misreading, and both are now corrected. Errors were shaped as
+  REST-JSON, putting the code in an `x-amzn-errortype` header that botocore's JSON parser never
+  reads, so a refused call reported the stringified HTTP status instead of the error code; they
+  are now AWS JSON RPC, with the code in the body's `__type` member. And successful responses
+  sent an unversioned `Content-Type: application/json` where a JSON RPC service sends
+  `application/x-amz-json-1.1`. Verified against a running emulator: a `DescribePermissionSet`
+  for a missing permission set now answers `application/x-amz-json-1.1` with
+  `"__type":"ResourceNotFoundException"` in the body.
+
+  No test asserted either value, which is how both survived #561's routing fix — that release
+  found the guessed `AWSSSOAdminService` target prefix and replaced it with the real one, but
+  left the two consequences of the same mistake in place. The generated service reference now
+  reads `JSON` rather than `REST/JSON` for `sso`, so `make docs-reference-check` holds it.
 - **Substrate did not test clean on Go 1.27** (#787). `go.mod` pins `go 1.26` and the CI matrix
   ran only 1.26, so two caller-visible `encoding/json` v2 behavior changes made `main` red on a
   clean checkout for anyone with a current toolchain installed — four failures, none of which
