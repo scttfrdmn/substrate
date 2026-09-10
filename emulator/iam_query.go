@@ -72,7 +72,7 @@ func (v *iamInt) UnmarshalJSON(data []byte) error {
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil {
-		return iamParamError(fmt.Sprintf("must be an integer, got %q", s))
+		return &iamParamError{message: fmt.Sprintf("must be an integer, got %q", s)}
 	}
 	*v = iamInt(n)
 	return nil
@@ -109,36 +109,109 @@ func (v *iamBool) UnmarshalJSON(data []byte) error {
 	case "false":
 		*v = false
 	default:
-		return iamParamError(fmt.Sprintf("must be true or false, got %q", s))
+		return &iamParamError{message: fmt.Sprintf("must be true or false, got %q", s)}
 	}
 	return nil
 }
 
-// iamParamError wraps a scalar-decoding message in a *json.UnmarshalTypeError so
-// encoding/json fills in the field name.
+// iamParamError is a scalar-decoding refusal from [iamInt] or [iamBool]. It carries
+// the sentence fragment that follows the parameter's name, which [iamParamMessage]
+// turns into "MaxItems must be an integer, got \"abc\"".
 //
-// Returning a plain error would lose it: json.Unmarshal reports a custom
-// unmarshaler's error verbatim, so the caller would see "must be an integer" with
-// no clue *which* parameter was wrong. UnmarshalTypeError is the one error type the
-// decoder annotates with the path it was decoding, and it nests correctly
-// ("Tags.N") for a scalar inside a list member. [iamParamMessage] reads the result
-// back out.
-func iamParamError(message string) error {
-	return &json.UnmarshalTypeError{Value: message, Type: reflect.TypeOf(0)}
+// It is a dedicated type rather than a *json.UnmarshalTypeError carrying a smuggled
+// message, which is what this was until #787. UnmarshalTypeError is the one error the
+// decoder itself annotates with the field it was decoding, so encoding/json filled in
+// the name for free — until Go 1.27, whose encoding/json leaves Field empty for an
+// error returned from a custom UnmarshalJSON. Every caller on that toolchain read
+// "json: cannot unmarshal must be an integer, got \"abc\" into Go value of type int",
+// the internal the mechanism existed to avoid. The name is now resolved explicitly,
+// which depends on no decoder behavior at all.
+type iamParamError struct {
+	// message is the fragment that follows the parameter's name.
+	message string
 }
+
+// Error implements the error interface, returning the fragment with no name. A caller
+// that never resolves one still sees something meaningful.
+func (e *iamParamError) Error() string { return e.message }
 
 // iamParamMessage turns a body-decoding error into a parameter-shaped message, so a
 // caller sees "MaxItems must be an integer, got \"abc\"" rather than an
 // encoding/json internal.
 //
-// An error from any other cause is returned as-is: this is presentation for the one
-// case that has a parameter name, not a general error rewrite.
-func iamParamMessage(err error) string {
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) && typeErr.Field != "" && typeErr.Value != "" {
-		return typeErr.Field + " " + typeErr.Value
+// body and dst must be the values that were handed to json.Unmarshal; they are what
+// let the offending parameter be named. An error from any other cause is returned
+// as-is: this is presentation for the one case that has a parameter name, not a
+// general error rewrite.
+func iamParamMessage(err error, body []byte, dst any) string {
+	var paramErr *iamParamError
+	if !errors.As(err, &paramErr) {
+		return err.Error()
 	}
-	return err.Error()
+	if name := iamParamField(body, dst, paramErr); name != "" {
+		return name + " " + paramErr.message
+	}
+	return paramErr.message
+}
+
+// iamParamField reports which of dst's members refused to decode, by decoding each one
+// on its own and matching the refusal against the one that failed.
+//
+// It walks dst's fields rather than the body's keys so the answer is deterministic —
+// struct declaration order, not Go's randomized map iteration — and it considers only
+// members the body actually carries, so a field the caller never sent cannot be blamed.
+//
+// The name is the outermost member carrying the refusal, not the full path to it: a
+// bad scalar inside a list member is reported as "Nested", not "Nested.1.Count". That
+// is enough for the protocol this file decodes, which delivers every scalar at the top
+// level — parser.go flattens "Tags.member.1.Key" into a key of that literal name (see
+// iamMemberStructs), so a genuinely nested scalar arrives only from a hand-marshaled
+// test body, never from a client. Walking deeper to build a path no client can provoke
+// would be speculative.
+func iamParamField(body []byte, dst any, want *iamParamError) string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return ""
+	}
+	v := reflect.ValueOf(dst)
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	structType := v.Type()
+	for i := range structType.NumField() {
+		field := structType.Field(i)
+		value, sent := raw[iamFieldName(field)]
+		if !sent {
+			continue
+		}
+		probe := reflect.New(field.Type)
+		var probeErr *iamParamError
+		if err := json.Unmarshal(value, probe.Interface()); err != nil &&
+			errors.As(err, &probeErr) && probeErr.message == want.message {
+			return iamFieldName(field)
+		}
+	}
+	return ""
+}
+
+// iamFieldName returns the wire name of a struct field: its json tag if it has one,
+// otherwise the Go field name, which is what encoding/json itself matches on.
+func iamFieldName(field reflect.StructField) string {
+	tag, ok := field.Tag.Lookup("json")
+	if !ok {
+		return field.Name
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "" || name == "-" {
+		return field.Name
+	}
+	return name
 }
 
 // Bool returns the value as a plain bool.

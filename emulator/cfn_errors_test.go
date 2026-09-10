@@ -142,10 +142,16 @@ func TestCFN_TemplateParseFailureKeepsItsCause(t *testing.T) {
 // through a real template rather than by building the error, so the wrapping at
 // the call site is asserted too.
 //
-// A YAML mapping with a non-string key decodes fine and then cannot be
+// A YAML float that JSON cannot represent decodes fine and then cannot be
 // JSON-marshaled into a plugin request, which is a resource that failed to
 // deploy for a reason the caller did cause but that no pre-flight catches — the
 // one shape reaching Deploy's error return.
+//
+// The vehicle is `.nan` rather than the non-string mapping key ("- 1: pk") this
+// used until #787. Go 1.27's encoding/json marshals map[interface{}]interface{}
+// by stringifying the keys instead of refusing it, so that template deployed
+// cleanly and the test asserted an error that no longer happened. NaN is refused
+// by both toolchains, which is the property the test actually needs.
 func TestCFN_ResourceDeployFailureFromATemplate(t *testing.T) {
 	d := newTestDeployer(t)
 
@@ -155,7 +161,7 @@ func TestCFN_ResourceDeployFailureFromATemplate(t *testing.T) {
 		"    Properties:\n" +
 		"      TableName: unmarshalable\n" +
 		"      KeySchema:\n" +
-		"        - 1: pk\n"
+		"        - AttributeName: .nan\n"
 
 	_, err := d.Deploy(context.Background(), tmpl, "resource-fail", nil)
 	require.Error(t, err)
@@ -170,7 +176,7 @@ func TestCFN_ResourceDeployFailureFromATemplate(t *testing.T) {
 	assert.Equal(t, "Table", deployErr.LogicalID,
 		"the failing resource must be named without re-parsing the message")
 	assert.Equal(t, "deploy resource Table: marshal dynamodb body: "+
-		"json: unsupported type: map[interface {}]interface {}", err.Error())
+		"json: unsupported value: NaN", err.Error())
 
 	awsErr := emulator.CFNMapDeployerErrorForTest(err)
 	require.NotNil(t, awsErr)
