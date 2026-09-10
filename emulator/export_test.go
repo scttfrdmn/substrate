@@ -891,3 +891,30 @@ func IAMInstanceProfileKeyForTest(accountID, name string) string {
 func ELBTagsByARNForTest(state StateManager, accountID, region, arn string) ([]ELBTag, error) {
 	return elbLoadTagsByARN(state, accountID+"/"+region, arn)
 }
+
+// CBORPairForTest is one member of a map built by [CBORMapForTest].
+type CBORPairForTest struct {
+	// Key is the member name.
+	Key string
+
+	// Value is the member's value.
+	Value any
+}
+
+// CBORMapForTest builds the codec's ordered map type from pairs, so an external test can
+// pin the bytes of a structure without cborMap itself being exported. Order is preserved,
+// which is the property under test.
+func CBORMapForTest(pairs ...CBORPairForTest) any {
+	m := make(cborMap, 0, len(pairs))
+	for _, p := range pairs {
+		m = append(m, cborEntry(p))
+	}
+	return m
+}
+
+// CBOREncodeForTest wraps cborEncode for external tests, which is where the wire bytes are
+// asserted.
+func CBOREncodeForTest(v any) ([]byte, error) { return cborEncode(v) }
+
+// CBORDecodeForTest wraps cborDecode for external tests.
+func CBORDecodeForTest(data []byte) (any, error) { return cborDecode(data) }
