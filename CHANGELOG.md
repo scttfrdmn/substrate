@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A CBOR codec** (`emulator/cbor.go`), the first half of teaching CloudWatch to answer the
+  protocol its clients speak (#785). Nothing is wired to it yet; it lands on its own so it can
+  be reviewed against RFC 8949 and Smithy's protocol tests rather than alongside a plugin
+  rewrite.
+
+  Substrate had no CBOR at all. The only CBOR in the repo was a hardcoded `[]byte{0xa0}` in
+  CloudWatch's `GetMetricData`, so the other nine operations answered XML to a client that had
+  asked for CBOR and `aws-sdk-go-v2` reported `deserialization failed, expected map for struct,
+  got major type 1` — the `<` of `<GetMetricDataResponse` being read as a CBOR head.
+
+  It is written here rather than taken from `github.com/aws/smithy-go` for two reasons. The root
+  module has no AWS SDK dependency, and adding one to emit a response format is a large surface
+  for a small need. More to the point, substrate's premise is that the same inputs produce the
+  same bytes: a library free to choose length form, member order or float width per call makes a
+  recorded response non-reproducible, and none offers a contract that says otherwise. This
+  encoder has exactly one output for any input — definite length with minimal arguments,
+  smallest-representation integers, doubles always `0xfb`, timestamps always tag 1 over a
+  float64, and member order taken from an explicit ordered type rather than from Go's randomized
+  map iteration, which is refused outright.
+
+  The reader is deliberately liberal where the writer is strict, because the specification
+  requires it: indefinite-length maps, arrays and strings; non-minimal length arguments (the AWS
+  query-compatible vectors encode a two-entry map as `b9 00 02`); a double arriving as float16,
+  float32, float64 or an integer; a tag 1 payload in either numeric form; `0xf7` as null; and an
+  unrecognized tag decoding to its payload, so a member substrate does not model is consumed
+  structurally rather than failing the request that carried it. Reserved additional information
+  28–30 is refused as not well-formed, and both a declared element count larger than the input
+  and nesting past 64 levels are refused before they size an allocation or recurse — a body is
+  attacker-controlled, and `9b ffffffffffffffff` is nine bytes asking for 2⁶⁴ elements.
+
+  Tests assert wire bytes, not round trips: a codec that is self-consistently wrong passes every
+  round trip and fails against every real client. The vectors come from RFC 8949 Appendix A and
+  Smithy's normative rpcv2Cbor tests, and one table holds the literal output of
+  `smithy-go` v1.28.1's `encoding/cbor.Encode` — the encoder `aws-sdk-go-v2` actually uses — so
+  agreement with the peer is recorded rather than inferred. That cross-check corrected a premise
+  along the way: `smithy-go`'s encoder has no indefinite-length path, so substrate's
+  definite-length choice matches what the Go SDK puts on the wire rather than diverging from it,
+  and the two implementations produce byte-identical timestamps.
+
 ### Fixed
 - **Substrate did not test clean on Go 1.27** (#787). `go.mod` pins `go 1.26` and the CI matrix
   ran only 1.26, so two caller-visible `encoding/json` v2 behavior changes made `main` red on a
