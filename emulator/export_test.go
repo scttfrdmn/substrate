@@ -302,18 +302,19 @@ func CheckPresignedExpiryForTest(q url.Values, now time.Time) bool {
 // Error-protocol names exposed so external tests can assert the classification
 // without depending on the unexported enum's numeric values.
 const (
-	ErrProtoQueryXMLForTest = "query-xml"
-	ErrProtoJSONRPCForTest  = "json-rpc"
-	ErrProtoRESTJSONForTest = "rest-json"
-	ErrProtoS3XMLForTest    = "s3-xml"
-	ErrProtoEC2XMLForTest   = "ec2-xml"
-	ErrProtoUnknownForTest  = "unknown"
+	ErrProtoQueryXMLForTest  = "query-xml"
+	ErrProtoJSONRPCForTest   = "json-rpc"
+	ErrProtoRESTJSONForTest  = "rest-json"
+	ErrProtoS3XMLForTest     = "s3-xml"
+	ErrProtoEC2XMLForTest    = "ec2-xml"
+	ErrProtoRPCV2CBORForTest = "rpc-v2-cbor"
+	ErrProtoUnknownForTest   = "unknown"
 )
 
-// ErrorProtocolForTest wraps errorProtocolFor, returning one of the
-// ErrProto*ForTest names.
-func ErrorProtocolForTest(service, contentType string) string {
-	switch errorProtocolFor(service, contentType) {
+// errProtoNameForTest is the shared translation from the internal constant to the
+// ErrProto*ForTest names, so the two wrappers below cannot drift apart.
+func errProtoNameForTest(proto awsErrorProtocol) string {
+	switch proto {
 	case errProtoQueryXML:
 		return ErrProtoQueryXMLForTest
 	case errProtoJSONRPC:
@@ -324,10 +325,70 @@ func ErrorProtocolForTest(service, contentType string) string {
 		return ErrProtoS3XMLForTest
 	case errProtoEC2XML:
 		return ErrProtoEC2XMLForTest
+	case errProtoRPCV2CBOR:
+		return ErrProtoRPCV2CBORForTest
 	default:
 		return ErrProtoUnknownForTest
 	}
 }
+
+// ErrorProtocolForTest wraps errorProtocolFor, returning one of the
+// ErrProto*ForTest names.
+func ErrorProtocolForTest(service, contentType string) string {
+	return errProtoNameForTest(errorProtocolFor(service, contentType))
+}
+
+// ErrorProtocolForRequestForTest wraps errorProtocolForRequest, returning one of the
+// ErrProto*ForTest names. This is the classification the emulator actually uses, so a
+// test asserting that a multi-protocol service follows its caller — and that a
+// single-protocol one does not — has to go through this rather than through
+// ErrorProtocolForTest.
+func ErrorProtocolForRequestForTest(service string, r *http.Request) string {
+	return errProtoNameForTest(errorProtocolForRequest(service, r))
+}
+
+// MultiProtocolServicesForTest returns every service that lets the request decide its
+// error protocol, so a test can assert the set is the intended one rather than sampling
+// it. Keeping the set small is the property under test: #392's fix depends on a
+// single-protocol service never being reclassified by its Content-Type.
+func MultiProtocolServicesForTest() []string {
+	names := make([]string, 0, len(multiProtocolServices))
+	for svc := range multiProtocolServices {
+		names = append(names, svc)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ErrorShapeForTest wraps errorShapeFor, returning the shape ID a "__type" member would
+// carry, the message member's spelling, whether the model calls the fault a server one,
+// and the shape's modeled HTTP status.
+func ErrorShapeForTest(service, code string, status int) (shapeID, messageMember string, serverFault bool, httpStatus int) {
+	shape := errorShapeFor(service, code, status)
+	return shape.ShapeID(), shape.MessageMember, shape.ServerFault, shape.HTTPStatus
+}
+
+// CloudWatchErrorCodesForTest returns every Query code CloudWatch's error table
+// translates, so a test can assert a property over the whole table instead of a sample.
+func CloudWatchErrorCodesForTest() []string {
+	codes := make([]string, 0, len(cloudWatchErrorShapes))
+	for code := range cloudWatchErrorShapes {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// DetectWireProtocolForTest wraps detectWireProtocol so a test can pin the
+// classification directly, which is where the protocol's own signals are asserted.
+func DetectWireProtocolForTest(r *http.Request) WireProtocol { return detectWireProtocol(r) }
+
+// DetectQueryModeForTest wraps detectQueryMode.
+func DetectQueryModeForTest(r *http.Request) bool { return detectQueryMode(r) }
+
+// RPCV2CBORTargetConflictForTest wraps rpcV2CBORTargetConflict, the malformed-request
+// check the specification requires a server to make.
+func RPCV2CBORTargetConflictForTest(r *http.Request) bool { return rpcV2CBORTargetConflict(r) }
 
 // AccessDeniedCodeForTest wraps accessDeniedCodeFor so an external test can pin
 // the protocol-to-code mapping directly, rather than only through the two
@@ -362,7 +423,17 @@ const PricingAccessDeniedCodeForTest = pricingErrAccessDenied
 // MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
 // the ErrProto*ForTest names. status is the HTTP status the error carries, which
 // the S3 arm needs because it builds a whole response rather than a body alone.
+//
+// It names no service and no query mode, which is the right context for the five arms
+// that do not consult either. Use MarshalAWSErrorWireForTest for the two that do.
 func MarshalAWSErrorForTest(code, message, proto, jsonContentType string, status int) (body []byte, contentType string, headers map[string]string) {
+	return MarshalAWSErrorWireForTest(code, message, proto, jsonContentType, "", false, status)
+}
+
+// MarshalAWSErrorWireForTest wraps marshalAWSError with the full serializer context, so
+// a test can pin the shape-ID translation and the query-compatibility header — the two
+// things that depend on which service raised the error and on what the caller asked for.
+func MarshalAWSErrorWireForTest(code, message, proto, jsonContentType, service string, queryMode bool, status int) (body []byte, contentType string, headers map[string]string) {
 	p := errProtoQueryXML
 	switch proto {
 	case ErrProtoJSONRPCForTest:
@@ -373,8 +444,15 @@ func MarshalAWSErrorForTest(code, message, proto, jsonContentType string, status
 		p = errProtoS3XML
 	case ErrProtoEC2XMLForTest:
 		p = errProtoEC2XML
+	case ErrProtoRPCV2CBORForTest:
+		p = errProtoRPCV2CBOR
 	}
-	return marshalAWSError(&AWSError{Code: code, Message: message, HTTPStatus: status}, p, jsonContentType)
+	return marshalAWSError(&AWSError{Code: code, Message: message, HTTPStatus: status}, errorWireContext{
+		Protocol:        p,
+		JSONContentType: jsonContentType,
+		Service:         service,
+		QueryMode:       queryMode,
+	})
 }
 
 // S3ErrorResponseForTest wraps s3ErrorResponseWith so a test can compare an

@@ -11,7 +11,9 @@ import (
 
 // SSOPlugin emulates the AWS IAM Identity Center (SSO) service.
 // It handles permission set and account assignment CRUD operations using the
-// JSON-target protocol (X-Amz-Target: AWSSSOAdminService.{Op}).
+// AWS JSON 1.1 protocol (X-Amz-Target: SWBExternalService.{Op}) — sso-admin's real
+// target prefix, which replaced a guessed AWSSSOAdminService in #561 and is still what
+// this comment named until #758.
 type SSOPlugin struct {
 	state  StateManager
 	logger Logger
@@ -487,7 +489,13 @@ func indexString(s, substr string) int {
 	return -1
 }
 
-// ssoJSONResponse serializes v to JSON and returns an AWSResponse with Content-Type application/json.
+// ssoJSONResponse serializes v to JSON and returns an AWSResponse.
+//
+// The Content-Type is application/x-amz-json-1.1, not application/json: the plugin
+// emulates sso-admin, whose model is "protocol": "json" with "jsonVersion": "1.1", and
+// an AWS JSON RPC service answers in the versioned media type. It sent the unversioned
+// one until #758, which is of a piece with sso's errors having been shaped as REST-JSON
+// — the same misreading of which service this plugin is.
 func ssoJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	body, err := json.Marshal(v)
 	if err != nil {
@@ -495,7 +503,7 @@ func ssoJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	}
 	return &AWSResponse{
 		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "application/json"},
+		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
 		Body:       body,
 	}, nil
 }

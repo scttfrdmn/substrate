@@ -630,6 +630,26 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 1.1: refuse a request that declares RPC v2 CBOR and also carries a target
+	// header. The specification requires a server to reject it, and substrate has a
+	// concrete reason to: it routes on X-Amz-Target before anything else, so honoring
+	// such a request would mean invoking whatever the target named while answering in
+	// the serialization the path asked for — silently ignoring the operation the client
+	// actually addressed. Refusing is the only answer that cannot be wrong.
+	//
+	// The code is substrate's choice: the specification mandates the rejection without
+	// naming a code, so this is SerializationException, which is what AWS returns for a
+	// framing-level protocol violation and what both reference clients classify as a
+	// non-retryable client error (#757).
+	if rpcV2CBORTargetConflict(r) {
+		s.writeError(w, &AWSError{
+			Code:       "SerializationException",
+			Message:    "a request declaring Smithy-Protocol: rpc-v2-cbor must not carry an X-Amz-Target header",
+			HTTPStatus: http.StatusBadRequest,
+		}, r, req.Service)
+		return
+	}
+
 	// [ParseAWSRequest] is pure and has no configuration to read, so it fills in
 	// [defaultAccountID]; the configured account, if any, is the server's answer.
 	// Step 1.5 below may still override it from a credential registry or an STS
@@ -641,9 +661,16 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// Assign body. For S3 and other REST-protocol services rawBody holds the
 	// full binary payload. For query-protocol services (IAM, STS) ParseAWSRequest
 	// consumes the form body; we rebuild req.Body as JSON from the parsed params.
+	//
+	// "monitoring" left this list with #757. It was a no-op — a CBOR or JSON-RPC
+	// CloudWatch request has no form body and no query string, so req.Params is empty
+	// and the guard above never fires — but it said the opposite of what is now true:
+	// CloudWatch reads its request body directly on those two protocols, and a rule
+	// that would overwrite the body with a re-encoding of the parsed form is exactly
+	// the thing that must not be here when it does.
 	req.Body = rawBody
 	if len(req.Params) > 0 && (req.Service == "iam" || req.Service == "sts" ||
-		req.Service == "sqs" || req.Service == "sns" || req.Service == "monitoring") {
+		req.Service == "sqs" || req.Service == "sns") {
 		if jsonBody, jsonErr := json.Marshal(req.Params); jsonErr == nil {
 			req.Body = jsonBody
 		}
@@ -879,9 +906,10 @@ func (s *Server) writeResponse(w http.ResponseWriter, resp *AWSResponse) {
 
 // writeError converts err into an AWS-style error response, serialized in the
 // wire format the target service's protocol uses. The service name selects the
-// protocol (see errorProtocolFor) because the incoming Content-Type cannot
+// protocol (see errorProtocolForRequest) because the incoming Content-Type cannot
 // distinguish REST-JSON from a plain JSON body, and picking the wrong shape
-// leaves the SDK unable to recover the error code at all (#392).
+// leaves the SDK unable to recover the error code at all (#392). For a service whose
+// model declares several protocols the request selects it instead (#757).
 func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, service string) {
 	var awsErr *AWSError
 	if asAWSErr, ok := err.(*AWSError); ok {
@@ -894,12 +922,7 @@ func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, s
 		}
 	}
 
-	ct := ""
-	if r != nil {
-		ct = r.Header.Get("Content-Type")
-	}
-
-	body, respCT, extraHeaders := marshalAWSError(awsErr, errorProtocolFor(service, ct), ct)
+	body, respCT, extraHeaders := marshalAWSError(awsErr, errorWireContextFor(service, r))
 	if body == nil {
 		http.Error(w, awsErr.Message, awsErr.HTTPStatus)
 		return

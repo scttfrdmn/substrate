@@ -71,7 +71,7 @@ CloudFormation, and cost detail follows below the matrix.
 | 58 | SNS | `sns` | Query |
 | 59 | SQS | `sqs` | JSON |
 | 60 | SSM | `ssm` | JSON |
-| 61 | SSO / Identity Store | `sso` | REST/JSON |
+| 61 | SSO / Identity Store | `sso` | JSON |
 | 62 | Step Functions | `states` | JSON |
 | 63 | STS | `sts` | Query |
 | 64 | Resource Groups Tagging | `tagging` | JSON |
@@ -158,13 +158,15 @@ botocore models only three carry a dotted prefix — `cloudtrail`, `codeconnecti
 `codestar-connections`, the latter two not substrate plugins — and their last segments
 do not collide.
 
-**CloudWatch's fix is routing only, and the gap behind it is real.** `monitoring` now
-receives the AWS CLI's request, but `CloudWatchPlugin` reads query-form parameters and
-answers XML, so a JSON-RPC client gets HTTP 200 with a body it cannot parse, and its
-refusals arrive as `<ErrorResponse>` rather than a JSON error code. Do not read
-"CloudWatch is routed" as "the AWS CLI can drive CloudWatch": it cannot yet. That is
-tracked as #757. Similarly, `sso` is classified as REST/JSON for error shaping while
-the plugin emulates sso-admin, which is JSON 1.1 — #758.
+**CloudWatch's remaining gap is the success body, not the error.** `monitoring` receives
+every client's request, and since #757 its *refusals* are shaped by the protocol the
+caller used rather than by the service name: a CBOR caller gets a CBOR error naming the
+modeled shape in `__type`, a JSON-RPC caller gets a JSON one, a Query caller still gets
+`<ErrorResponse>`, and a caller that sent `X-Amzn-Query-Mode: true` also gets the Query
+code back in an `x-amzn-query-error` header. `CloudWatchPlugin` itself still reads
+query-form parameters and answers XML on every protocol, so a *successful* call returns
+HTTP 200 with a body a CBOR or JSON client cannot parse. Do not yet read "CloudWatch is
+routed" as "the AWS CLI can drive CloudWatch"; the response half is tracked as #785.
 
 ### Plugins that are deliberately not addressable three ways
 
@@ -8587,6 +8589,15 @@ Batch itself is free; the compute it launches is not, and substrate launches non
 in any published SDK surface, but what every client sends. Substrate accepts the
 plausible-looking `AWSSSOAdminService` as well, so a caller that constructs the target
 header by hand from the service name also reaches this plugin.
+
+Responses carry `Content-Type: application/x-amz-json-1.1` and errors are shaped as AWS
+JSON RPC, with the code in the body's `__type` member. Both were wrong until #758:
+substrate sent the unversioned `application/json` and shaped errors as REST-JSON, which
+puts the code in an `x-amzn-errortype` header that botocore's JSON parser never reads —
+so a refused call reported the stringified HTTP status instead of the error code. The
+cause of both was reading this plugin as the `sso` service (the OIDC token and
+account-list API, which really is REST-JSON) rather than as `sso-admin`, whose model is
+`"protocol": "json"` with `"jsonVersion": "1.1"`.
 
 ### Supported operations
 

@@ -547,14 +547,16 @@ var pluginRouting = map[string]PluginRouting{
 	},
 	"sso": {
 		Display:      "SSO / Identity Store",
-		Protocol:     "REST/JSON",
+		Protocol:     "JSON",
 		TargetPrefix: "SWBExternalService",
 		Hosts:        []string{"sso.us-east-1.amazonaws.com"},
 		SigningNames: []string{"sso"},
-		Why: "The plugin emulates sso-admin, whose model is JSON 1.1 — substrate answers " +
-			"REST/JSON and classifies its errors that way, which is filed as its own issue. " +
-			"The guessed AWSSSOAdminService prefix that no client sends is what made the " +
-			"plugin unreachable in #561.",
+		Why: "The plugin emulates sso-admin, not sso: it dispatches on X-Amz-Target with the " +
+			"SWBExternalService prefix, and sso-admin's model is JSON 1.1. Until #758 substrate " +
+			"answered REST/JSON and classified its errors that way, which puts the code in an " +
+			"x-amzn-errortype header that botocore's JSON parser does not read; it now sends " +
+			"JSON 1.1 with the code in the body's __type member. The guessed AWSSSOAdminService " +
+			"prefix that no client sends is what made the plugin unreachable in #561.",
 		Source: "botocore sso-admin service-2.json",
 	},
 	"states": {
