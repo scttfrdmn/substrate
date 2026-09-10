@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Substrate did not test clean on Go 1.27** (#787). `go.mod` pins `go 1.26` and the CI matrix
+  ran only 1.26, so two caller-visible `encoding/json` v2 behavior changes made `main` red on a
+  clean checkout for anyone with a current toolchain installed — four failures, none of which
+  any CI job could see.
+
+  The first is caller-visible in a response. `iam_query.go` smuggled its scalar-refusal message
+  inside a `*json.UnmarshalTypeError` because that is the one error type the decoder annotates
+  with the field it was decoding, which named the offending parameter for free. Go 1.27 no
+  longer populates `Field` for an error returned from a custom `UnmarshalJSON`, so a client
+  sending `MaxItems=abc` got `json: cannot unmarshal must be an integer, got "abc" into Go
+  value of type int` — the internal that #642 introduced the mechanism to avoid. The parameter
+  is now named by an explicit resolution pass over the destination struct, which depends on no
+  decoder behavior at all. It reports the outermost member carrying the refusal rather than a
+  full path (`Nested`, not `Nested.1.Count`), which is all the flat query protocol can produce.
+
+  The second was a test asserting a refusal that had stopped happening: `json.Marshal` used to
+  reject a YAML mapping with a non-string key, and Go 1.27 marshals it by stringifying the keys
+  instead. The CloudFormation deploy-failure test now provokes the same path with `.nan`, which
+  both toolchains refuse.
+
+  The CI matrix is now `["1.26", "1.27"]`, so the next such divergence surfaces on the PR that
+  meets it rather than three releases later.
+
 ### Changed
 - **Dependencies bumped across both modules.** Root: `go-chi/chi/v5` 5.3.1→5.3.2,
   `stretchr/testify` 1.12.0→1.12.1, the OpenTelemetry group 1.45.0→1.46.0,

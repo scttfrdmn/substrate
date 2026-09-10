@@ -372,6 +372,21 @@ func TestIAMScalarParams(t *testing.T) {
 			wantErr: `invalid request body: Flag must be true or false, got "1"`,
 		},
 		{
+			name:    "a fractional integer names its parameter",
+			body:    `{"Count":"1.5"}`,
+			wantErr: `invalid request body: Count must be an integer, got "1.5"`,
+		},
+		{
+			// iamParamField resolves the outermost member that carries the refusal, not
+			// the full path to it. "Nested" is more useful than nothing and is all the
+			// flat query protocol ever needs, since parser.go delivers every scalar at
+			// the top level — a nested one arrives only from a hand-marshaled test body
+			// (#787).
+			name:    "a nested scalar names the member that contains it",
+			body:    `{"Nested":[{"Count":"abc"}]}`,
+			wantErr: `invalid request body: Nested must be an integer, got "abc"`,
+		},
+		{
 			// A malformed body has no parameter to name, so it must still report
 			// something a caller can act on rather than an empty message.
 			name:    "a malformed body still reports an error",

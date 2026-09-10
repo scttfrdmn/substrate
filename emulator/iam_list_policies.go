@@ -49,7 +49,8 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		MaxItems          iamInt  `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
-		return iamErrorResponse("ValidationError", iamParamMessage(err), http.StatusBadRequest), nil
+		// parseIAMBody has already named the parameter, so the wrapped message is final.
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
 	scope := params.Scope

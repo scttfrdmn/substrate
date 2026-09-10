@@ -2643,7 +2643,7 @@ func parseIAMBody(body []byte, dst any) error {
 		return nil
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("invalid request body: %s", iamParamMessage(err))
+		return fmt.Errorf("invalid request body: %s", iamParamMessage(err, body, dst))
 	}
 	return nil
 }

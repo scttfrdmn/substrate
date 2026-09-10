@@ -760,6 +760,14 @@ type IAMScalarParamsForTest struct {
 
 	// Flag is a boolean parameter, standing in for OnlyAttached.
 	Flag iamBool `json:"Flag"`
+
+	// Nested is a list of structures holding a scalar, standing in for a shape whose
+	// scalar is not a top-level member. It exists to pin how far iamParamField
+	// resolves a name (#787).
+	Nested []struct {
+		// Count is a scalar one level down from the body's top level.
+		Count iamInt `json:"Count"`
+	} `json:"Nested"`
 }
 
 // IAMScalarValuesForTest returns the decoded scalars as plain Go values.

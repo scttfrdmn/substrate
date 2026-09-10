@@ -39,7 +39,8 @@ func (p *IAMPlugin) getPolicyVersion(ctx *RequestContext, req *AWSRequest) (*AWS
 		VersionId string `json:"VersionId"` //nolint:revive,staticcheck // matches the API member name.
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
-		return iamErrorResponse("ValidationError", iamParamMessage(err), http.StatusBadRequest), nil
+		// parseIAMBody has already named the parameter, so the wrapped message is final.
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 	if params.PolicyArn == "" || params.VersionId == "" {
 		return iamErrorResponse("ValidationError",
@@ -97,7 +98,8 @@ func (p *IAMPlugin) listPolicyVersions(ctx *RequestContext, req *AWSRequest) (*A
 		MaxItems  iamInt `json:"MaxItems"`
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
-		return iamErrorResponse("ValidationError", iamParamMessage(err), http.StatusBadRequest), nil
+		// parseIAMBody has already named the parameter, so the wrapped message is final.
+		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 	if params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "PolicyArn is required", http.StatusBadRequest), nil

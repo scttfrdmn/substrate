@@ -15,7 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ["1.26"]
+        # 1.26 is the toolchain go.mod pins; 1.27 is what a contributor on a current
+        # release actually has installed. Only 1.26 ran until #787, so two
+        # encoding/json v2 behaviour changes made main red on a clean checkout for
+        # three weeks without CI noticing.
+        go: ["1.26", "1.27"]
     steps:
       - uses: actions/checkout@v7
 
