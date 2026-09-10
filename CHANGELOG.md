@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Dependencies bumped across both modules.** Root: `go-chi/chi/v5` 5.3.1→5.3.2,
+  `stretchr/testify` 1.12.0→1.12.1, the OpenTelemetry group 1.45.0→1.46.0,
+  `modernc.org/sqlite` 1.56.0→1.57.0, `google.golang.org/grpc` 1.83.0→1.83.2. `test/e2e`:
+  `aws-sdk-go-v2` 1.43.7→1.45.1 with sixteen service clients, and the same testify and grpc
+  bumps. Taken as one change across both modules rather than as the four Dependabot PRs that
+  proposed them, because the E2E job asserts `test/e2e/go.mod` is tidy — so a root-only bump
+  cannot pass CI on its own.
+
 ## [v0.109.0] - 2026-08-23
 
 ### Added
