@@ -993,9 +993,16 @@ func TestEC2_SpotPriceFilters_FiveOfSix(t *testing.T) {
 
 // TestEC2_LaunchTemplateFilters_AllFourEvaluated pins the four filters this page documents
 // and the multi-index selector fix.
+//
+// The clock is frozen because the create-time subtest below filters on a value read out of
+// an earlier response, and a template's createTime renders at second resolution, so three
+// separate creates against a running clock do not reliably share one — see
+// [newEC2TestServerFrozenClock]. Without this the subtest failed whenever the three
+// requests straddled a second boundary, reading as an EC2 filter regression when the
+// emulator was right and the test's premise was wrong (#793).
 func TestEC2_LaunchTemplateFilters_AllFourEvaluated(t *testing.T) {
 	t.Parallel()
-	ts := newEC2TestServer(t)
+	ts := newEC2TestServerFrozenClock(t)
 	wantedID := newFleetLaunchTemplate(t, ts, "filter-wanted-lt")
 	otherID := newFleetLaunchTemplate(t, ts, "filter-other-lt")
 	thirdID := newFleetLaunchTemplate(t, ts, "filter-third-lt")
@@ -1037,6 +1044,11 @@ func TestEC2_LaunchTemplateFilters_AllFourEvaluated(t *testing.T) {
 	t.Run("create-time selects every template", func(t *testing.T) {
 		assert.Len(t, describe(ec2OneFilter("DescribeLaunchTemplates", "create-time", createTime)), 3,
 			"all three were created at the same simulated instant")
+		// Selecting all three is on its own no evidence the filter ran: an unrecognized
+		// name is inert and also answers with every template (see the inert-name subtests).
+		// A timestamp nothing carries has to select nothing.
+		assert.Empty(t, describe(ec2OneFilter("DescribeLaunchTemplates", "create-time", "2001-02-03T04:05:06Z")),
+			"a create-time no template carries must exclude all three, or the filter is being ignored")
 	})
 
 	t.Run("every index of both identity lists is read", func(t *testing.T) {
