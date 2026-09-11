@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,5 +211,75 @@ func TestLoad_ReadsTheCommittedSnapshots(t *testing.T) {
 		if len(svc.Resources) == 0 {
 			t.Errorf("%s: snapshot lists no resource types, so no ARN format can be cited", svc.Name)
 		}
+	}
+}
+
+// TestDownload_PrunesWhatItFetchesAndRefusesWhatItCannotUse exercises the fetch path
+// against a local test server, so the parse, prune and refusal branches are covered without
+// a test that reaches the internet — the constraint the vendored-snapshot design exists to
+// satisfy. Only `-fetch`'s own loop over the fixed endpoint is left untested, and it is the
+// one part that cannot run offline.
+func TestDownload_PrunesWhatItFetchesAndRefusesWhatItCannotUse(t *testing.T) {
+	const good = `{"Name":"iam","Version":"v1.4",
+		"Actions":[
+			{"Name":"ListUsers"},
+			{"Name":"GetUser","Resources":[{"Name":"user","ConditionKeys":["iam:ResourceTag/x"]}]}
+		],
+		"Resources":[{"Name":"user","ARNFormats":["arn:${Partition}:iam::${Account}:user/${UserNameWithPath}"]}],
+		"ConditionKeys":[{"Name":"aws:RequestTag/${TagKey}"}]}`
+
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{name: "a document AWS serves", status: http.StatusOK, body: good},
+		{name: "a service that is not published", status: http.StatusNotFound, body: "", wantErr: "HTTP 404"},
+		{name: "a body that is not JSON", status: http.StatusOK, body: "<html>", wantErr: "parse"},
+		{
+			name: "a document for another service", status: http.StatusOK,
+			body:    `{"Name":"ecs","Version":"v1.4","Actions":[]}`,
+			wantErr: `names service "ecs"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			svc, err := download(srv.Client(), srv.URL, "iam")
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("download accepted %s", tt.name)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("download error is %q, want it to mention %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("download: %v", err)
+			}
+			// Sorted, and the condition keys AWS also publishes are dropped: substrate reads
+			// its condition keys from the API reference, and a second differently-shaped copy
+			// would be a source to keep in sync for no gain.
+			if len(svc.Actions) != 2 || svc.Actions[0].Name != "GetUser" || svc.Actions[1].Name != "ListUsers" {
+				t.Fatalf("actions are %+v", svc.Actions)
+			}
+			if got := svc.Actions[0].Resources; len(got) != 1 || got[0] != "user" {
+				t.Errorf("GetUser resolved to %v, want [user]", got)
+			}
+			if got := svc.Actions[1].Resources; len(got) != 0 {
+				t.Errorf("ListUsers resolved to %v, want no resource types", got)
+			}
+			if got := svc.Resources; len(got) != 1 || got[0].Name != "user" || len(got[0].ARNFormats) != 1 {
+				t.Errorf("resource types are %+v", got)
+			}
+		})
 	}
 }
