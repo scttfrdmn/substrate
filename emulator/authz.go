@@ -538,9 +538,18 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 // only one of them wants that function's existence check: [iamPrincipalTags] reads the
 // record itself, for its tags, and would otherwise repeat the assumed-role unwrapping
 // below — the one piece of this that is easy to get wrong.
+//
+// The two arms below read the same ARN component in opposite directions, and AWS's
+// identifiers reference is why. An IAM entity ARN is
+// arn:${Partition}:iam::${Account}:user/${UserNameWithPath}, one component in which the
+// friendly name is the *last* segment — so the name comes through [iamFriendlyName], and
+// reading it as everything after "user/" is what left a caller stored at a non-default path
+// resolving to nothing and going unenforced (#801). An assumed-role ARN is
+// arn:aws:sts::${Account}:assumed-role/${RoleName}/${RoleSessionName}, exactly two
+// segments that exclude the role's path, so its role name is the *first*.
 func iamEntityForPrincipalARN(principalARN string) (iamEntity, bool) {
-	entityType, entityName := parsePrincipalARN(principalARN)
-	if entityName == "" {
+	entityType, nameWithPath := parsePrincipalARN(principalARN)
+	if nameWithPath == "" {
 		return iamEntity{}, false
 	}
 	// The account is in the ARN and was previously discarded, which is what made one
@@ -549,7 +558,15 @@ func iamEntityForPrincipalARN(principalARN string) (iamEntity, bool) {
 
 	switch entityType {
 	case "user", "role":
-		return iamEntity{Account: account, Kind: entityType, Name: entityName}, true
+		// The path is stored on the record and is not part of the key: the user at
+		// /division/engineering/ named alice is stored at user:alice, whatever their
+		// ARN says.
+		name := iamFriendlyName(nameWithPath)
+		if name == "" {
+			// An ARN ending in a slash names a path and no entity.
+			return iamEntity{}, false
+		}
+		return iamEntity{Account: account, Kind: entityType, Name: name}, true
 	case "assumed-role":
 		// arn:aws:sts::<acct>:assumed-role/<RoleName>/<SessionName>. Only the role
 		// carries policies, and parsePrincipalARN splits on the first slash — so
@@ -557,7 +574,13 @@ func iamEntityForPrincipalARN(principalARN string) (iamEntity, bool) {
 		// role_policies:worker/sess1, a key nothing is ever stored under. Every
 		// session of the same role would then evaluate as a distinct nameless
 		// entity.
-		roleName := entityName
+		//
+		// This keeps the *first* segment, deliberately, where the user/role arm above
+		// keeps the last: AWS excludes the role's path from an assumed-role ARN, so
+		// there is no path here to skip past, and substrate cannot mint a
+		// counter-example either — [STSPlugin.assumeRole] builds this ARN from a role
+		// name, which contains no slash (#801).
+		roleName := nameWithPath
 		if slash := strings.IndexByte(roleName, '/'); slash >= 0 {
 			roleName = roleName[:slash]
 		}
@@ -1217,7 +1240,11 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		tags = q.Tags
 
 	case "iam":
-		entityType, entityName := parsePrincipalARN(reqCtx.Principal.ARN)
+		entityType, nameWithPath := parsePrincipalARN(reqCtx.Principal.ARN)
+		// The friendly name, not the name-with-path: the record is keyed by name
+		// whatever path the ARN carries (#801). Reading the caller here at all is a
+		// separate defect, tracked as #804.
+		entityName := iamFriendlyName(nameWithPath)
 		// The entity's own account, which is the one its ARN names rather than the one
 		// the request resolved to — the two agree for every call substrate routes today,
 		// and the ARN is the authority when they do not (#737).

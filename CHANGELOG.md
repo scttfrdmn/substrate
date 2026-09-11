@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A caller whose IAM entity lives at a path is enforced, and their principal ARN carries that
+  path** (#801). AWS writes an entity ARN as `arn:aws:iam::<account>:user/<UserNameWithPath>` —
+  one component in which the friendly name is the **last** segment — so
+  `…:user/division/engineering/alice` names the user `alice` at `/division/engineering/`.
+  Substrate read the whole component as the name, so such a caller resolved to an entity called
+  `division/engineering/alice`, which exists nowhere; a principal that resolves to nothing is
+  unenforced by the existence-is-the-opt-in rule, so **every request such a caller made was
+  allowed**. This is the principal side of the divergence #770 fixed on the resource side, and
+  the release notes for v0.111.0 said it was still open.
+
+  Two callers reached the false allow with no misconfiguration at all. A CloudFormation stack
+  whose `RoleARN` names a service role at `/service-role/` — where AWS's own console creates one
+  — had every resource call of that stack allowed, so a template asking for a permission its
+  service role does not grant deployed cleanly, which is the exact failure class #411 and #562
+  exist to catch. And `sts:AssumeRole` on a role at any path answered `NoSuchEntityException`
+  for a perfectly valid ARN, because the lookup was for a role named `service-role/CfnRole`.
+
+  A second defect masked the first for long-term keys and had to move with it: `resolvePrincipal`
+  built a signed IAM user's ARN from the access key's record *without* the path, so such a call
+  was enforced by accident while publishing `aws:PrincipalArn` and `GetCallerIdentity`'s `Arn`
+  as `…:user/alice` — an ARN naming no entity. Fixing only the parse would have left both wrong;
+  fixing only the ARN would have turned the accident into #801's false allow for every signed
+  call. The principal's ARN is now built from the stored record's `Path`, at **no extra state
+  read**: the read that already recovered the entity's tags for `aws:PrincipalTag/<key>` (#771)
+  now returns the path beside them.
+
+  The friendly name is recovered in one documented place, which `simulationUserName` already
+  implemented for `CallerArn` and every other reader had missed. **The assumed-role ARN is the
+  deliberate exception**: `arn:aws:sts::<account>:assumed-role/<RoleName>/<RoleSessionName>` has
+  exactly two segments and excludes the role's path, so its role name is the *first* — the
+  existing unwrapping is correct, and is now pinned by a test citing the format rather than left
+  to look like an oversight. An `assumed-role/<path>/<role>/<session>` ARN is one AWS never mints
+  and substrate cannot mint, so the two-segment parse is kept and the reasoning recorded.
+
+  `GetUser`, `CreateAccessKey` and `ListAccessKeys` take the implicit user name from the name
+  recorded on the principal rather than re-reading it out of an ARN, per #745's
+  record-don't-derive rule. A side effect worth stating: a caller who is **not** an IAM user and
+  omits `UserName` now gets AWS's `ValidationError` instead of a `NoSuchEntity` for a user named
+  after their role session.
+
+  Compatibility, in the direction that changes an answer: **a policy matching `…:user/alice`
+  exactly stops matching a caller at `/division/engineering/`**, and a pathful caller's own
+  resource ARN carries the path, so a statement scoped to `user/${aws:username}` does not match
+  it. Both are AWS's behavior — and it is why AWS's own `IAMUserChangePassword` names a second
+  resource, `user/*/${aws:username}`, which does match, so the bundled policy grants a pathful
+  user their own password exactly as it grants a default-path one.
+
 ## [v0.111.0] - 2026-09-10
 
 ### Fixed

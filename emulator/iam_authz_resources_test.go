@@ -40,11 +40,14 @@ const iamResourcePath = "/division/engineering/"
 // iamResourceCaller is the user every case here authorizes *as*, and it is deliberately stored
 // at the default path while every entity a request names carries [iamResourcePath].
 //
-// The split is not decoration. A principal ARN carrying a path resolves to no IAM entity —
-// [iamEntityForPrincipalARN] reads everything after `user/` as the name — so such a caller is
-// not enforced at all and every assertion below would pass vacuously. That is a real gap on the
-// principal side of the same divergence #770 fixes on the resource side, filed as #801 rather
-// than folded in here.
+// The split is not decoration, though the reason for it changed with #801. It was that a
+// principal ARN carrying a path resolved to no IAM entity at all, so such a caller was
+// unenforced and every assertion here would have passed vacuously. That gap is closed — a
+// pathful caller is enforced, and `emulator/iam_principal_path_test.go` covers them — and the
+// caller stays at the default path for a second reason the cases below depend on: a pathful
+// caller's own resource ARN carries the path, so `user/${aws:username}` does not match it. That
+// is AWS's behavior, which is why its IAMUserChangePassword names `user/*/${aws:username}` as
+// well, and it would make the headline case here assert the path rule rather than #770's.
 const iamResourceCaller = "caller"
 
 // iamARNPlaceholder matches the trailing `${…WithPath}` in an AWS ARN format, the one component

@@ -1117,6 +1117,24 @@ func IAMPrincipalTagsForTest(state StateManager, principalARN string) map[string
 	return iamPrincipalTags(context.Background(), state, principalARN)
 }
 
+// IAMEntityForPrincipalARNForTest wraps iamEntityForPrincipalARN, returning the account, kind
+// and friendly name a principal ARN resolves to and whether it names an entity at all.
+//
+// Exported because the two arms disagree deliberately — a user or role ARN's name is its
+// *last* segment while an assumed-role ARN's is its *first*, since that form carries no path
+// (#801) — and a decision test cannot tell "resolved to nothing" from "resolved and was
+// permitted": both allow.
+func IAMEntityForPrincipalARNForTest(principalARN string) (account, kind, name string, ok bool) {
+	entity, found := iamEntityForPrincipalARN(principalARN)
+	return entity.Account, entity.Kind, entity.Name, found
+}
+
+// IAMCallerUserNameForTest wraps iamCallerUserName, the user an operation acts on when its
+// UserName parameter is absent.
+func IAMCallerUserNameForTest(principal *Principal) string {
+	return iamCallerUserName(&RequestContext{Principal: principal})
+}
+
 // AuthzServiceActionResourcesForTest returns every action AWS's reference publishes for a
 // service, mapped to the resource types it publishes for that action.
 //
