@@ -4789,19 +4789,39 @@ consumer's test will see:
 - **A permission boundary sees the whole batch too.** It is loaded once and evaluated against
   each resource, so a boundary naming only the first instance refuses the rest.
 
-`GroupId` is overloaded and the expansion pulls one more operation in:
-`DescribePlacementGroups` reads `pg-` IDs through that parameter, so it is now decided
-against the groups it names. Nothing mis-resolves — the resolver keys on the ID's prefix, so
-a `pg-` ID becomes a `placement-group/<name>` ARN and an `sg-` one a `security-group/<id>`
-ARN in the same request.
+<a id="the-operation-decides-whether-a-request-has-a-resource"></a>**The operation decides
+whether a request has a resource at all**
+([#762](https://github.com/scttfrdmn/substrate/issues/762)). An ID is resolved only when AWS
+documents the operation as supporting that resource type. Whether a request has a resource is
+not a property of its parameters: AWS publishes, per action, which resource types the action
+supports, and an action supporting none is authorized against `*` however many identifiers
+the request carries. `ec2:DescribeInstances` is exactly that action, so a policy scoping it
+to an instance ARN grants nothing on AWS — and granted precisely those instances here, which
+is the direction that matters, because a test written against substrate passed while the
+deployment behind it failed.
 
-One pre-existing divergence is deliberately left in place rather than narrowed here.
-AWS's *Example policies to control access to the Amazon EC2 API* says `ec2:DescribeInstances`
-does not support resource-level permissions, so a real describe's request resource is `*`
-where substrate's is the instances it names. Expanding all four parameters uniformly keeps
-this one decision in one place; whether the resolver should be gated to the operations that
-support resource-level permissions is a question about the resolution itself, not about the
-batch, and is tracked as #762.
+The classification is **not a hand-written operation list**. It comes from AWS's
+[Service Reference Information](https://servicereference.us-east-1.amazonaws.com/), whose
+per-service JSON names the resource types each action supports and where an action with no
+`Resources` list supports none. Snapshots of `ec2` and `iam` are vendored under
+`emulator/authzref`, generated into a Go table, and `make authz-reference-check` fails if the
+table and its snapshots disagree — so a refreshed snapshot cannot silently widen a decision.
+The Service Authorization Reference HTML pages carry the same data but render their tables in
+JavaScript and cannot be read by a fetch — the dead end recorded for both ELB pages under
+[ELB v2](#elb-v2), which is why ELB's `Names.member.N` is still decided against `*`.
+
+An operation **absent** from that table is also decided against `*` — the same answer AWS
+gives an action with no published resource types, and the safe direction of the two: a
+resource narrower than the one AWS would use is a grant substrate would be inventing, and
+inventing a grant is worse than inventing a refusal.
+
+Two consequences worth stating. `GroupId` is overloaded — `DescribePlacementGroups` reads
+`pg-` IDs through it — and that operation supports no resource-level permissions, so it is
+decided against `*` and the placement-group ARN is never built for it; the name-form ARN
+translation is still exercised by `CreateTags`, which AWS does scope to `placement-group`.
+And an `ec2:ResourceTag/<key>` condition on a describe can no longer match, because with the
+request resource `*` there is no resource whose tags to read. That is AWS's behavior too, and
+it is why the bundled policies put those conditions on the mutating operations.
 
 `aws:ResourceTag/<key>` and `ec2:ResourceTag/<key>` both report the resolved resource's
 tags. <a id="ec2-reports-a-resource-s-tags-under-both-prefixes"></a>**EC2 reports a

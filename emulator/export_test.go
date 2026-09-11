@@ -1077,3 +1077,23 @@ func EC2TaggableARNTypeForTest(id string) string {
 	}
 	return target.arnType
 }
+
+// EC2AuthzNamedResourceARNsForTest returns the ARNs [ec2AuthzNamedResources] resolves for an
+// operation and its parameters, in the order the decision walks them.
+//
+// It exists for the one case the plugin cannot reach: an operation AWS's reference does not
+// publish cannot be dispatched, since substrate does not route it, yet the resolver's answer
+// for such an operation is exactly what stops a stale snapshot from widening a grant (#762).
+func EC2AuthzNamedResourceARNsForTest(state StateManager, operation string, params map[string]string) []string {
+	reqCtx := &RequestContext{AccountID: "123456789012", Region: "us-east-1"}
+	resources := ec2AuthzNamedResources(state, reqCtx, &AWSRequest{
+		Service:   "ec2",
+		Operation: operation,
+		Params:    params,
+	})
+	arns := make([]string, 0, len(resources))
+	for _, r := range resources {
+		arns = append(arns, r.ARN)
+	}
+	return arns
+}

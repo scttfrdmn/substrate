@@ -249,8 +249,9 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 // One more is overloaded rather than absent: `GroupId` names a *placement* group on
 // `DescribePlacementGroups`, which reads `pg-` IDs through it. Nothing mis-resolves —
 // [ec2TaggableResource] keys on the ID's prefix, so a `pg-` ID becomes a placement-group
-// ARN and an `sg-` one a security-group ARN — but it does mean that operation is decided
-// against the groups it names rather than against "*".
+// ARN and an `sg-` one a security-group ARN — and since #762 the operation itself decides
+// whether the resolved ARN is used at all, so `DescribePlacementGroups` is authorized
+// against "*" the way AWS authorizes it.
 var ec2AuthzIDParams = []string{"InstanceId", "GroupId", "RouteTableId", "InternetGatewayId"}
 
 // ec2AuthzNamedResources returns every resource an EC2 request names by ID under one of
@@ -288,7 +289,31 @@ var ec2AuthzIDParams = []string{"InstanceId", "GroupId", "RouteTableId", "Intern
 // A request naming only unresolvable IDs returns nil and falls back to the wildcard it used
 // before. That is the only safe direction: "*" as the request resource matches a statement
 // whose own Resource starts with "*", so it can only ever narrow a grant, never widen one.
+//
+// # The operation decides, not the parameter (#762)
+//
+// A resolved ARN is used only when AWS documents the operation as supporting that resource
+// type. Whether a request has a resource is not a property of the request's parameters:
+// AWS publishes, per action, which resource types the action supports, and an action
+// supporting none is authorized against "*" no matter what identifiers the request carries.
+// `ec2:DescribeInstances` is exactly that action, so a policy scoping it to an instance ARN
+// grants nothing on AWS — and granted precisely those instances here, because this function
+// read `InstanceId` without ever looking at `req.Operation`.
+//
+// The classification comes from AWS's Service Reference Information, vendored and generated
+// into [authzActionSupportsResourceType]; it is not a hand-written operation list, so it
+// cannot fall behind an operation substrate adds later. An operation **absent** from that
+// table is also authorized against "*" — the same answer AWS gives an action with no
+// published resource types, and the safe direction of the two, since a narrower resource
+// than AWS would use is a grant substrate would be inventing. `make authz-reference-check`
+// is what stops a stale snapshot from widening behavior quietly.
 func ec2AuthzNamedResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
+	// An operation AWS scopes to "*", or one it does not publish at all, has no resource to
+	// resolve — returning here also skips the state reads [ec2TaggableResource] performs for
+	// a `pg-` or `key-` ID.
+	if types, ok := authzActionResourceTypes("ec2", req.Operation); !ok || len(types) == 0 {
+		return nil
+	}
 	acct := reqCtx.AccountID
 	region := reqCtx.Region
 	var out []authzResource
@@ -301,6 +326,12 @@ func ec2AuthzNamedResources(state StateManager, reqCtx *RequestContext, req *AWS
 			if !ok || !target.resolved() {
 				// A prefix naming no taggable type, or a pg-/key- ID naming no record.
 				// See [ec2Taggable.resolved] and the skip rule above.
+				continue
+			}
+			if !authzActionSupportsResourceType("ec2", req.Operation, target.arnType) {
+				// The operation does not support this resource type, so AWS would not
+				// evaluate it against this ARN — `GroupId` on an operation that reads
+				// security groups it does not act on, for instance.
 				continue
 			}
 			out = append(out, authzResource{
