@@ -115,6 +115,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   This landed before the response half and covered refusals only; the successful responses are
   the #785 entry above, released together with it.
+- **A botocore-driven CloudWatch check** (`python/tests/test_cloudwatch_botocore.py`, #757),
+  covering the wire protocol no Go test can reach. `aws-sdk-go-v2` resolves CloudWatch to
+  Smithy RPC v2 CBOR, so every Go test — unit, `httptest` and `test/e2e` journey alike —
+  exercises CBOR and none exercises `awsJson1_0`. That is not a thin gap: it is how substrate
+  shipped a CloudWatch that answered XML to the AWS CLI while its own suite stayed green, and
+  the failure mode was silence rather than an error, because the call returned HTTP 200,
+  botocore's JSON parser found no members, and `aws cloudwatch list-metrics` printed nothing at
+  all. The new tests drive boto3 against a real substrate process for a metric round trip, the
+  `MetricName` filter, an alarm's modeled types (`Threshold` reads back `80.5`, not `80`),
+  `GetMetricData`'s two present-and-empty lists, and a refusal arriving as a `ClientError`
+  whose `Code` is `ResourceNotFoundException` — all five fail against the previous commit.
+
+  They live in the Python suite because that is where a non-Go client already runs: the CI job
+  builds the binary and exports `SUBSTRATE_BINARY` today. boto3 becomes a `test` extra rather
+  than a dependency — the plugin itself does not need it — and the CI install becomes
+  `pip install -e './python[test]'`, without which the tests would `importorskip` and the gap
+  would reopen silently. This is also the first Python test that launches a substrate process
+  rather than a mock.
 - **A CBOR codec** (`emulator/cbor.go`), the first half of teaching CloudWatch to answer the
   protocol its clients speak (#785). Nothing is wired to it yet; it lands on its own so it can
   be reviewed against RFC 8949 and Smithy's protocol tests rather than alongside a plugin
