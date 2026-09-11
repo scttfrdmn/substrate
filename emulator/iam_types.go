@@ -291,6 +291,20 @@ func iamPolicyARN(accountID, path, name string) string {
 	return fmt.Sprintf("arn:aws:iam::%s:policy%s%s", accountID, normalisePath(path), name)
 }
 
+// iamInstanceProfileARN returns the ARN for an IAM instance profile.
+//
+// It joins the other four late, because until #770 the only place an instance-profile ARN
+// was built was CreateInstanceProfile's own response, which interpolated the request's path
+// directly and so skipped [normalisePath]. That was nearly harmless there — the handler
+// defaults an absent Path to "/", and substrate does not validate the parameter, so only a
+// path AWS would itself have rejected reached the interpolation. It is not harmless in an
+// authorization resolver, which reads paths back out of records written by earlier versions:
+// one missing slash is the difference between matching a statement scoped to
+// `instance-profile/*` and matching nothing.
+func iamInstanceProfileARN(accountID, path, name string) string {
+	return fmt.Sprintf("arn:aws:iam::%s:instance-profile%s%s", accountID, normalisePath(path), name)
+}
+
 // normalisePath ensures a path starts and ends with "/".
 func normalisePath(path string) string {
 	if path == "" {

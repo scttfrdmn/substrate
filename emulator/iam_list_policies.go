@@ -84,7 +84,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:ListPolicies", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListPolicies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 

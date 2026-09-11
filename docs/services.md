@@ -1705,13 +1705,73 @@ Substitution reads only the single-valued context, per AWS's "You can use any si
 condition key as a variable. You can't use a multivalued condition key as a variable" — so
 `${aws:TagKeys}` never resolves.
 
-One consequence worth stating, because it looks like a bug: substitution alone does not make
-the bundled `IAMUserChangePassword` grant anything. Its `Resource` is now correctly
-`arn:aws:iam::*:user/alice`, but every IAM request's resource is built as
-`arn:aws:iam::<account>:*`, so there is nothing user-shaped to match. That is a separate
-gap in how IAM's request resource is derived
-([#770](https://github.com/scttfrdmn/substrate/issues/770)), not something substitution
-could have fixed.
+For one release, substitution alone did not make the bundled `IAMUserChangePassword` grant
+anything: its `Resource` resolved correctly to `arn:aws:iam::*:user/alice`, but every IAM
+request's resource was built as `arn:aws:iam::<account>:*`, so there was nothing user-shaped to
+match. That was a separate gap in how IAM's request resource is derived, closed by
+[#770](https://github.com/scttfrdmn/substrate/issues/770) — see
+[what resource an IAM request is decided against](#what-resource-an-iam-request-is-decided-against),
+below. The bundled policy now grants the caller their own password and nothing else.
+
+### What resource an IAM request is decided against
+
+**An IAM request is authorized against the entity it names**
+([#770](https://github.com/scttfrdmn/substrate/issues/770)), so a statement whose `Resource`
+is `arn:aws:iam::123456789012:user/alice` grants exactly alice. Until that release every IAM
+request was decided against `arn:aws:iam::<account>:*` — a literal `*` in the resource
+position, which no statement naming a user, a role or a path can match. The consequence was a
+false *deny*: every narrowly scoped IAM statement was inert, including AWS's own managed
+policies for letting a user manage their own credentials.
+
+Resolution is one table of 59 operations, keyed by operation name, plus the three
+service-linked-role operations that are resolved separately because their resource comes from
+a service principal or a deletion-task ID rather than from a name on the wire:
+
+| Resource type | Where the name comes from |
+|---|---|
+| `user` | `UserName`, or the **caller's own user** when the parameter is absent — `GetUser`, `CreateAccessKey`, `DeleteAccessKey`, `ListAccessKeys` and `ChangePassword`, each because AWS documents that default for that operation |
+| `role` | `RoleName` |
+| `group` | `GroupName` — including `AddUserToGroup` and `RemoveUserFromGroup`, which publish `group` and only `group` |
+| `policy` | `PolicyArn` as it stands, or `PolicyName` for `CreatePolicy` |
+| `instance-profile` | `InstanceProfileName` |
+| whichever of the three | `PolicySourceArn` for `SimulatePrincipalPolicy`, which is a finished ARN |
+
+Two things about that table are checked rather than claimed. Every row's resource type is one
+AWS publishes for that action, and every IAM action AWS publishes *no* resource types for is
+**absent** from the table — both read from the vendored *Service Reference Information*
+snapshot ([#797](https://github.com/scttfrdmn/substrate/issues/797)), so a row that drifts
+from AWS's own data fails the build. The minted ARNs are checked the same way, against AWS's
+published format strings.
+
+**An IAM ARN embeds the entity's path**, and only the `Create*` operations carry `Path` on the
+wire. So a request naming an entity costs one state read to recover the stored path: a policy
+scoped to `arn:aws:iam::123456789012:role/division/engineering/worker` matches
+`GetRole(RoleName=worker)` when that is where the role lives, and a policy scoped to
+`…:role/worker` does not. On a state miss the request stays on the account path rather than
+being decided against an ARN that only looks specific.
+
+An operation the table does not cover is decided against `arn:aws:iam::<account>:*`, which is
+also AWS's answer for the operations that name no resource: `ListUsers`, `ListRoles`,
+`ListGroups`, `ListPolicies`, `ListInstanceProfiles` and `SimulateCustomPolicy`. A statement
+scoped to one user grants nothing on those — the account wildcard is deliberately not a bare
+`*`, which would match every statement's `Resource` and quietly satisfy a `Deny`.
+
+**Both authorization doors call one resolver.** The generic `AuthController` gate and the IAM
+plugin's own gate see the same request and derive the same ARN, which is what keeps them from
+answering one request two ways — the failure behind
+[#411](https://github.com/scttfrdmn/substrate/issues/411),
+[#714](https://github.com/scttfrdmn/substrate/issues/714) and
+[#745](https://github.com/scttfrdmn/substrate/issues/745). The plugin door passed a literal
+`"*"` at 48 of its gates before this release, and the six instance-profile operations did not
+call it at all: `AddRoleToInstanceProfile` — the classic privilege-escalation step, attaching a more
+privileged role to a profile an instance already carries — had no plugin-side gate. All six are
+gated now.
+
+One limit on the principal side, which resource resolution does not reach: **a caller whose own
+user or role lives at a non-default path is not enforced**, because the principal ARN is parsed
+back to a name by reading everything after `user/`, so the lookup misses and the request is
+treated as one no policy governs. Tracked as
+[#801](https://github.com/scttfrdmn/substrate/issues/801).
 
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 

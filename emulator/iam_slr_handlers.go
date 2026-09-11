@@ -107,10 +107,12 @@ func (p *IAMPlugin) createServiceLinkedRole(ctx *RequestContext, req *AWSRequest
 	// ([iamAuthzResources], [iamAuthzRequestContext]). A statement scoped to
 	// `arn:aws:iam::*:role/aws-service-role/lambda.amazonaws.com/AWSServiceRoleForLambda`
 	// with a StringLike on the service name is the exact shape five of the bundled
-	// policies use, and it has to reach the same verdict at both doors (#747).
+	// policies use, and it has to reach the same verdict at both doors (#747). Asking
+	// [IAMPlugin.authzResource] for it, rather than minting a second copy here, is what
+	// makes "the same" mechanical: one resolver, one request, one answer (#770).
 	slrPath := iamSLRPath(params.AWSServiceName)
 	roleARN := iamRoleARN(ctx.AccountID, slrPath, roleName)
-	if err := p.authorizeWith(goCtx, ctx, "iam:CreateServiceLinkedRole", roleARN,
+	if err := p.authorizeWith(goCtx, ctx, "iam:CreateServiceLinkedRole", p.authzResource(ctx, req),
 		map[string]string{iamSLRAWSServiceNameCondKey: params.AWSServiceName}); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
@@ -180,18 +182,18 @@ func (p *IAMPlugin) deleteServiceLinkedRole(ctx *RequestContext, req *AWSRequest
 	}
 
 	// The role's own path names the service, so authorization can name the same ARN the
-	// gate built — and can publish iam:AWSServiceName for the delete half of the two
-	// bundled statements that condition on it. A role that does not exist yields no path
-	// and authorizes against "*", so the refusal that follows is NoSuchEntity rather than
-	// a denial that would leak whether the role is there.
-	resource, extra := "*", map[string]string(nil)
+	// gate built — [IAMPlugin.authzResource] performs that same read — and can publish
+	// iam:AWSServiceName for the delete half of the two bundled statements that condition
+	// on it. A role that does not exist yields no path and authorizes against every IAM
+	// resource in the account, so the refusal that follows is NoSuchEntity rather than a
+	// denial that would leak whether the role is there.
+	var extra map[string]string
 	if role != nil && iamIsSLRPath(role.Path) {
-		resource = role.ARN
 		if service := iamSLRServiceFromPath(role.Path); service != "" {
 			extra = map[string]string{iamSLRAWSServiceNameCondKey: service}
 		}
 	}
-	if err := p.authorizeWith(goCtx, ctx, "iam:DeleteServiceLinkedRole", resource, extra); err != nil {
+	if err := p.authorizeWith(goCtx, ctx, "iam:DeleteServiceLinkedRole", p.authzResource(ctx, req), extra); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -284,11 +286,8 @@ func (p *IAMPlugin) getServiceLinkedRoleDeletionStatus(ctx *RequestContext, req 
 	// No iam:AWSServiceName is published: the reference lists the key on the create and
 	// the delete, not here, and publishing one AWS does not is the permissive direction.
 	// See [iamAuthzRequestContext], which makes the same split at the other door.
-	resource := "*"
-	if service, roleName, ok := iamSLRRoleFromDeletionTaskID(params.DeletionTaskID); ok {
-		resource = iamRoleARN(ctx.AccountID, iamSLRPath(service), roleName)
-	}
-	if err := p.authorize(goCtx, ctx, "iam:GetServiceLinkedRoleDeletionStatus", resource); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:GetServiceLinkedRoleDeletionStatus",
+		p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 

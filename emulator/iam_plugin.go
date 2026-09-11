@@ -234,7 +234,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:CreateUser", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:CreateUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -282,7 +282,7 @@ func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:GetUser", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:GetUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -323,7 +323,7 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DeleteUser", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DeleteUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -384,7 +384,7 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListUsers", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListUsers", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -443,7 +443,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:CreateRole", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:CreateRole", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -511,7 +511,7 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:GetRole", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:GetRole", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -556,7 +556,7 @@ func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest)
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:UpdateAssumeRolePolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:UpdateAssumeRolePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -604,7 +604,7 @@ func (p *IAMPlugin) deleteRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DeleteRole", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DeleteRole", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -683,7 +683,7 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListRoles", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListRoles", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -733,7 +733,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:CreateGroup", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:CreateGroup", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -785,7 +785,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:GetGroup", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:GetGroup", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -848,7 +848,7 @@ func (p *IAMPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DeleteGroup", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DeleteGroup", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -906,7 +906,7 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListGroups", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListGroups", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -957,7 +957,7 @@ func (p *IAMPlugin) attachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:AttachUserPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:AttachUserPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1007,7 +1007,7 @@ func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DetachUserPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DetachUserPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1053,7 +1053,7 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListAttachedUserPolicies", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListAttachedUserPolicies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1091,7 +1091,7 @@ func (p *IAMPlugin) attachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:AttachRolePolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:AttachRolePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1141,7 +1141,7 @@ func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DetachRolePolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DetachRolePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1187,7 +1187,7 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListAttachedRolePolicies", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListAttachedRolePolicies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1223,7 +1223,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:CreatePolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:CreatePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1291,7 +1291,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:GetPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:GetPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1330,7 +1330,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DeletePolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DeletePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1365,7 +1365,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:CreateAccessKey", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:CreateAccessKey", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1439,7 +1439,7 @@ func (p *IAMPlugin) deleteAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:DeleteAccessKey", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DeleteAccessKey", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1492,7 +1492,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListAccessKeys", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListAccessKeys", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1550,6 +1550,24 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 	return p.authorizeWith(goCtx, reqCtx, action, resource, nil)
 }
 
+// authzResource returns the resource every gate in this plugin passes: the entity the
+// request names, or every IAM resource in the account when substrate cannot resolve one.
+//
+// It takes the request rather than the handler's own name variable, and that is the whole
+// point. [AuthController.CheckAccess] decides against [iamAuthzRequestResource] of this
+// same request, so calling it here makes the two doors agree by construction instead of by
+// 48 call sites each passing a string that happens to match — and #411, #714 and #745 are
+// all the same failure of one request getting two answers from two doors.
+//
+// It also gets the path right, which a handler's local could not. At almost every gate the
+// name is in hand and the entity's record is not — it is loaded after authorization, if at
+// all — so minting from the local would produce the `/`-path ARN for every entity, and a
+// statement scoped to a real path would match nothing. The resolver reads the path; see
+// [iamAuthzMintResourceARN] for the one extra Get that costs.
+func (p *IAMPlugin) authzResource(reqCtx *RequestContext, req *AWSRequest) string {
+	return iamAuthzRequestResource(p.state, reqCtx, req)
+}
+
 // authorizeWith is [IAMPlugin.authorize] with extra condition keys published for this
 // one request.
 //
@@ -1561,9 +1579,16 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 // one-ARN-two-answers class of #411 and #714, arrived at through the condition context
 // rather than through the resource (#747).
 //
-// extra may be nil, which is the case for all 37 existing call sites: an IAM operation
-// with no service-specific request key of its own publishes only the caller's keys, as
-// before.
+// extra may be nil, which is the case for all but two of the plugin's 57 gates: an IAM
+// operation with no service-specific request key of its own publishes only the caller's keys,
+// as before. The two that pass one are CreateServiceLinkedRole and DeleteServiceLinkedRole,
+// which publish `iam:AWSServiceName`.
+//
+// resource comes from [IAMPlugin.authzResource] at every gate, which is the whole of #770: it
+// used to be a literal `"*"` at 48 of them, so a statement naming a user, a role or a path
+// matched nothing here even when the generic gate's answer would have been the same. Passing
+// the request to one resolver rather than a string per call site is what keeps the two doors
+// from drifting again.
 func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 	action, resource string, extra map[string]string) error {
 	if reqCtx.Principal == nil {
@@ -1804,7 +1829,7 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"Policy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"Policy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1883,7 +1908,7 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:Get"+actionSuffix+"Policy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:Get"+actionSuffix+"Policy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1924,7 +1949,7 @@ func (p *IAMPlugin) deleteInlinePolicy(ctx *RequestContext, req *AWSRequest, ent
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"Policy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"Policy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -1981,7 +2006,7 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:List"+actionSuffix+"Policies", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:List"+actionSuffix+"Policies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2040,7 +2065,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"PermissionsBoundary", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"PermissionsBoundary", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2113,7 +2138,7 @@ func (p *IAMPlugin) deletePermissionsBoundary(ctx *RequestContext, req *AWSReque
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"PermissionsBoundary", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:Delete"+actionSuffix+"PermissionsBoundary", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2184,7 +2209,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:TagUser", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:TagUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2242,7 +2267,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:UntagUser", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:UntagUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2294,7 +2319,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListUserTags", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListUserTags", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2363,7 +2388,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:TagRole", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:TagRole", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2421,7 +2446,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:UntagRole", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:UntagRole", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2473,7 +2498,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	goCtx := context.Background()
 
-	if err := p.authorize(goCtx, ctx, "iam:ListRoleTags", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListRoleTags", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -2716,6 +2741,13 @@ func arnPolicyName(arn string) string {
 // --- Instance profiles -------------------------------------------------------
 
 // --- Instance profile operations ---
+//
+// All six of these called no authorization gate at all before #770 — the generic
+// [AuthController] gate upstream was the only thing deciding them. That was worth fixing
+// alongside the resource resolution rather than after it: AddRoleToInstanceProfile is the
+// classic privilege-escalation step (attach a more privileged role to a profile an instance
+// already carries), and "both doors agree" cannot be asserted for `instance-profile` while one
+// of the doors is not there.
 
 func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {
@@ -2733,6 +2765,16 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	}
 
 	goCtx := context.Background()
+
+	// This is the one instance-profile operation whose full ARN is constructible from the wire,
+	// because it is the only one carrying Path — which is exactly why
+	// [IAMPlugin.authzResource] is asked for it rather than the ARN being built here: the
+	// resolver reads Path from the request too when no record exists yet, so the create and the
+	// five operations that follow it are decided against one string built one way (#770).
+	if err := p.authorize(goCtx, ctx, "iam:CreateInstanceProfile", p.authzResource(ctx, req)); err != nil {
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
 	key := iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
 	if err != nil {
@@ -2747,7 +2789,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	profile := &IAMInstanceProfile{
 		InstanceProfileName: params.InstanceProfileName,
 		InstanceProfileID:   generateIAMID("AIPA"),
-		ARN:                 fmt.Sprintf("arn:aws:iam::%s:instance-profile%s%s", ctx.AccountID, params.Path, params.InstanceProfileName),
+		ARN:                 iamInstanceProfileARN(ctx.AccountID, params.Path, params.InstanceProfileName),
 		Path:                params.Path,
 		Roles:               []IAMRole{},
 		CreateDate:          p.now().UTC(),
@@ -2775,6 +2817,11 @@ func (p *IAMPlugin) getInstanceProfile(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:GetInstanceProfile", p.authzResource(ctx, req)); err != nil {
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
 	data, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
@@ -2803,6 +2850,11 @@ func (p *IAMPlugin) deleteInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	}
 
 	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:DeleteInstanceProfile", p.authzResource(ctx, req)); err != nil {
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
 	data, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
@@ -2840,6 +2892,15 @@ func (p *IAMPlugin) addRoleToInstanceProfile(ctx *RequestContext, req *AWSReques
 	}
 
 	goCtx := context.Background()
+
+	// The resource is the profile, not the role, because that is what AWS publishes for this
+	// action — see [iamAuthzOperationResource]. A policy that means to stop a caller escalating
+	// through an instance profile has to name the profile, and until #770 there was nothing on
+	// this path to name it to.
+	if err := p.authorize(goCtx, ctx, "iam:AddRoleToInstanceProfile", p.authzResource(ctx, req)); err != nil {
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
 	profData, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
@@ -2897,6 +2958,11 @@ func (p *IAMPlugin) removeRoleFromInstanceProfile(ctx *RequestContext, req *AWSR
 	}
 
 	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:RemoveRoleFromInstanceProfile", p.authzResource(ctx, req)); err != nil {
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
 	profData, err := p.state.Get(goCtx, iamNamespace, iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName))
 	if err != nil {
 		return nil, fmt.Errorf("get instance profile: %w", err)
@@ -2970,8 +3036,18 @@ func (p *IAMPlugin) instanceProfilesHoldingRole(
 }
 
 // listInstanceProfiles returns persisted IAM instance profiles.
-func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+//
+// AWS publishes no resource types for this action, so [IAMPlugin.authzResource] answers every
+// IAM resource in the account and a statement scoped to one profile grants nothing here — the
+// same treatment ListUsers, ListRoles, ListGroups and ListPolicies get, and for the same
+// reason: a list operation names no resource to scope to.
+func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
+
+	if err := p.authorize(goCtx, ctx, "iam:ListInstanceProfiles", p.authzResource(ctx, req)); err != nil {
+		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
 	keys, err := p.state.List(goCtx, iamNamespace, iamInstanceProfilePrefix(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("list instance profiles: %w", err)

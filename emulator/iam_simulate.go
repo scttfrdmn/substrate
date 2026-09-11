@@ -109,7 +109,7 @@ func (p *IAMPlugin) simulatePrincipalPolicy(ctx *RequestContext, req *AWSRequest
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:SimulatePrincipalPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:SimulatePrincipalPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -151,7 +151,7 @@ func (p *IAMPlugin) simulateCustomPolicy(ctx *RequestContext, req *AWSRequest) (
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:SimulateCustomPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:SimulateCustomPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
