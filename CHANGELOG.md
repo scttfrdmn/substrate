@@ -173,6 +173,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the two implementations produce byte-identical timestamps.
 
 ### Fixed
+- **A launch-template filter test depended on wall-clock time and was not asserting what it
+  claimed** (#793). `TestEC2_LaunchTemplateFilters_AllFourEvaluated`'s `create-time` subtest read
+  one template's `createTime` out of an earlier response and asserted the filter selected all
+  three, on the premise that "all three were created at the same simulated instant". A template
+  is stamped `p.tc.Now().UTC().Format(time.RFC3339)` — second resolution — and the three
+  templates come from three separate requests against a running clock, so the premise held only
+  as long as those requests landed inside one wall-clock second. It failed on CI in a pull
+  request that touched no Go files, reading as an EC2 filter regression when the emulator was
+  right and the test was wrong. It now uses the frozen-clock server, which is the helper that
+  already exists for exactly this and is documented as such on the sibling
+  `DescribeSpotPriceHistory` test.
+
+  Freezing the clock exposed a second defect: selecting all three was no evidence the filter had
+  run at all, because an *unrecognized* filter name is inert and also answers with every
+  template. Deleting the `create-time` arm from `ec2LaunchTemplateMatchesFilter` left the subtest
+  green. The subtest now also asserts that a timestamp no template carries selects none, which
+  fails when the arm is removed.
 - **The service reference listed a CloudWatch operation substrate has never handled.**
   `GetMetricStatistics` appeared in CloudWatch's supported-operations table, but no dispatch
   arm has ever existed for it, so a caller reading the table would have got
