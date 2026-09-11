@@ -10,6 +10,13 @@ pip install pytest-substrate
 pip install -e /path/to/substrate/python
 ```
 
+The plugin does not depend on boto3 — bring your own client. To run *this package's* own
+tests, install the `test` extra, which adds the boto3 the botocore-driven tests need:
+
+```bash
+pip install -e '/path/to/substrate/python[test]'
+```
+
 ## Usage
 
 Add the `substrate` fixture to any test that needs AWS services:
