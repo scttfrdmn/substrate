@@ -131,6 +131,12 @@ jobs:
       - name: Check docs/services.md is in sync with the plugin registry
         run: make docs-reference-check
 
+      # Offline: regenerates from the vendored snapshots under emulator/authzref and
+      # diffs. A refreshed snapshot committed without regenerating would leave the
+      # authorization table disagreeing with its own source.
+      - name: Check the authorization reference table is in sync with its snapshots
+        run: make authz-reference-check
+
   python:
     name: Python (pytest-substrate)
     runs-on: ubuntu-latest

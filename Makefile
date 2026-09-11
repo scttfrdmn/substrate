@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions version-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch version-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -48,6 +48,15 @@ docs-reference: ## Regenerate docs/services.md from the plugin registry
 
 docs-reference-check: ## Fail if docs/services.md is out of date with the registry
 	go run ./cmd/gen-service-reference -check
+
+authz-reference: ## Regenerate emulator/authz_reference_gen.go from the vendored AWS snapshots
+	go run ./cmd/gen-authz-reference
+
+authz-reference-check: ## Fail if authz_reference_gen.go is out of date with emulator/authzref (offline)
+	go run ./cmd/gen-authz-reference -check
+
+authz-reference-fetch: ## Refresh emulator/authzref/*.json from AWS (REQUIRES NETWORK; run by hand, never in CI)
+	go run ./cmd/gen-authz-reference -fetch
 
 docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh
