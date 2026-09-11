@@ -479,6 +479,216 @@ func TestGetCallerIdentity_ReportsTheEntitysRealARN(t *testing.T) {
 	assert.NotContains(t, identity.UserID, "/")
 }
 
+func TestIAMEntityForPrincipalARN_WhatEachARNFormResolvesTo(t *testing.T) {
+	// The parse itself, pinned in both directions, because a decision test cannot see the
+	// difference: an ARN that resolves to nothing is *allowed*, exactly like an ARN that
+	// resolves to an entity a policy permits. That indistinguishability is what let #801
+	// live.
+	tests := []struct {
+		name     string
+		arn      string
+		wantKind string
+		wantName string
+		wantOK   bool
+	}{
+		{
+			name:     "a user at the default path",
+			arn:      "arn:aws:iam::123456789012:user/alice",
+			wantKind: "user",
+			wantName: "alice",
+			wantOK:   true,
+		},
+		{
+			// The friendly name is the ARN's last segment, per AWS's
+			// arn:${Partition}:iam::${Account}:user/${UserNameWithPath}. Reading the whole
+			// component gave "division/engineering/alice", which is stored nowhere.
+			name:     "a user at a path is the last segment",
+			arn:      "arn:aws:iam::123456789012:user/division/engineering/alice",
+			wantKind: "user",
+			wantName: "alice",
+			wantOK:   true,
+		},
+		{
+			name:     "a role at the path AWS's console uses for a service role",
+			arn:      "arn:aws:iam::123456789012:role/service-role/CfnRole",
+			wantKind: "role",
+			wantName: "CfnRole",
+			wantOK:   true,
+		},
+		{
+			// The documented exception, kept deliberately:
+			// arn:aws:sts::${Account}:assumed-role/${RoleName}/${RoleSessionName} is two
+			// segments and the role's path does not appear in it, so the role name is the
+			// *first* one. Taking the last would look up a role named after the session.
+			name:     "an assumed-role session names the role first, not last",
+			arn:      "arn:aws:sts::123456789012:assumed-role/CfnRole/sess1",
+			wantKind: "role",
+			wantName: "CfnRole",
+			wantOK:   true,
+		},
+		{
+			// An ARN ending in a slash names a path and no entity. Resolving it to the
+			// empty name would key the lookup at user:, which is a real key shape.
+			name:   "an ARN ending in a slash names no entity",
+			arn:    "arn:aws:iam::123456789012:user/division/engineering/",
+			wantOK: false,
+		},
+		{
+			name:   "the account root is not an entity policies attach to",
+			arn:    "arn:aws:iam::123456789012:root",
+			wantOK: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account, kind, name, ok := emulator.IAMEntityForPrincipalARNForTest(tt.arn)
+			require.Equal(t, tt.wantOK, ok)
+			if !tt.wantOK {
+				return
+			}
+			assert.Equal(t, authzTestAccount, account)
+			assert.Equal(t, tt.wantKind, kind)
+			assert.Equal(t, tt.wantName, name)
+		})
+	}
+}
+
+func TestIAMPrincipalTags_AnUnreadableEntityRecordYieldsNoTags(t *testing.T) {
+	// A record substrate cannot decode must not take the request down with it: the tags
+	// come out empty, which denies anything conditioned on one, and the read is the same
+	// one the caller's ARN takes its path from — so a corrupt record has to be survivable
+	// on both (#801).
+	state := emulator.NewMemoryStateManager()
+	require.NoError(t, state.Put(context.Background(), "iam",
+		emulator.IAMUserKeyForTest(authzTestAccount, "alice"), []byte("not json at all")))
+
+	assert.Empty(t, emulator.IAMPrincipalTagsForTest(state,
+		"arn:aws:iam::"+authzTestAccount+":user/division/engineering/alice"))
+
+	// And a signed request still identifies its caller, falling back to the path-less ARN
+	// exactly as it does when the record is absent.
+	keyRaw, err := json.Marshal(emulator.IAMAccessKey{
+		AccessKeyID: "AKIACORRUPTRECORD001",
+		Status:      "Active",
+		UserName:    "alice",
+		AccountID:   authzTestAccount,
+	})
+	require.NoError(t, err)
+	require.NoError(t, state.Put(context.Background(), "iam",
+		emulator.IAMAccessKeyKeyForTest("AKIACORRUPTRECORD001"), keyRaw))
+
+	principal, _ := emulator.ResolvePrincipalForTest(state, authzTestAccount, "AKIACORRUPTRECORD001")
+	require.NotNil(t, principal)
+	assert.Equal(t, "arn:aws:iam::123456789012:user/alice", principal.ARN)
+}
+
+func TestIAMCallerUserName_WhoAnAbsentUserNameMeans(t *testing.T) {
+	// GetUser, CreateAccessKey and ListAccessKeys each document UserName as optional, with
+	// AWS deriving it "implicitly based on the AWS access key ID used to sign the request".
+	// Deriving it by reading the whole ARN component was the same defect one layer up: a
+	// pathful caller's implicit name became "division/engineering/alice", a user that does
+	// not exist.
+	tests := []struct {
+		name      string
+		principal *emulator.Principal
+		want      string
+	}{
+		{
+			name: "no principal at all has no implicit name",
+		},
+		{
+			name:      "the recorded name is preferred over the ARN",
+			principal: iamPathPrincipal("alice", "arn:aws:iam::123456789012:user/division/engineering/alice", nil),
+			want:      "alice",
+		},
+		{
+			// A principal substrate did not mint the credential for — CloudFormation
+			// builds one from a stack's creator ARN — carries no recorded name, so the
+			// ARN is the fallback and its last segment is the name.
+			name:      "an unrecorded name falls back to the ARN's friendly name",
+			principal: &emulator.Principal{ARN: "arn:aws:iam::123456789012:user/division/engineering/alice"},
+			want:      "alice",
+		},
+		{
+			// An assumed role is not a user and has no implicit user name; "" is what
+			// makes the handler answer AWS's ValidationError rather than look up a user
+			// named after a role session.
+			name:      "an assumed role has no implicit user name",
+			principal: &emulator.Principal{ARN: "arn:aws:sts::123456789012:assumed-role/CfnRole/sess1", Type: "AssumedRole"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, emulator.IAMCallerUserNameForTest(tt.principal))
+		})
+	}
+}
+
+func TestIAM_APathfulCallerReadsItselfWithNoUserName(t *testing.T) {
+	// End to end for the same rule, on the operation a consumer actually reaches: `aws iam
+	// get-user` with no argument. Both halves of #801 are in play — the caller's ARN now
+	// carries the path, and the implicit name has to be the friendly segment of it.
+	srv, _ := newPrincipalTestServer(t)
+
+	require.Equal(t, http.StatusOK, principalIAMCall(t, srv, "CreateUser", map[string]any{
+		"UserName": "alice",
+		"Path":     iamPathTestPath,
+	}).StatusCode)
+	// She needs a policy, because she is now enforced — which is the rest of this change.
+	require.Equal(t, http.StatusOK, principalIAMCall(t, srv, "PutUserPolicy", map[string]any{
+		"UserName":   "alice",
+		"PolicyName": "SelfService",
+		"PolicyDocument": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
+			`"Action":["iam:GetUser","iam:CreateAccessKey","iam:ListAccessKeys"],"Resource":"*"}]}`,
+	}).StatusCode)
+
+	resp := principalIAMCall(t, srv, "CreateAccessKey", map[string]any{"UserName": "alice"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var created struct {
+		AccessKeyID string `xml:"CreateAccessKeyResult>AccessKey>AccessKeyId"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&created))
+	require.NoError(t, resp.Body.Close())
+
+	// Signed as alice, with no UserName in the body.
+	implicit := iamPathCallAs(t, srv, created.AccessKeyID, "GetUser", map[string]any{})
+	require.Equal(t, http.StatusOK, implicit.StatusCode, "an implicit UserName must resolve")
+	var got struct {
+		UserName string `xml:"GetUserResult>User>UserName"`
+		ARN      string `xml:"GetUserResult>User>Arn"`
+	}
+	require.NoError(t, xml.NewDecoder(implicit.Body).Decode(&got))
+	require.NoError(t, implicit.Body.Close())
+	assert.Equal(t, "alice", got.UserName)
+	assert.Equal(t, "arn:aws:iam::123456789012:user/division/engineering/alice", got.ARN)
+
+	// The other two operations documenting the same optional parameter.
+	keys := iamPathCallAs(t, srv, created.AccessKeyID, "ListAccessKeys", map[string]any{})
+	require.NoError(t, keys.Body.Close())
+	assert.Equal(t, http.StatusOK, keys.StatusCode)
+
+	minted := iamPathCallAs(t, srv, created.AccessKeyID, "CreateAccessKey", map[string]any{})
+	require.NoError(t, minted.Body.Close())
+	assert.Equal(t, http.StatusOK, minted.StatusCode)
+}
+
+// iamPathCallAs issues an IAM request signed with a specific access key, so the handler
+// resolves a principal and can derive an implicit UserName from it.
+func iamPathCallAs(t *testing.T, srv *emulator.Server, accessKeyID, operation string,
+	body any) *http.Response {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(raw)))
+	r.Host = "iam.amazonaws.com"
+	r.Header.Set("X-Amz-Target", "AmazonIdentityManagementService."+operation)
+	r.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	r.Header.Set("Authorization", principalAuthHeader(accessKeyID, "iam"))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w.Result()
+}
+
 func TestCFN_AServiceRoleAtAPathIsEnforced(t *testing.T) {
 	// The live-reachable false allow, end to end. cfn_deployer builds a role principal
 	// from the stack's RoleARN verbatim, so a stack whose service role is at
