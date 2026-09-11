@@ -46,7 +46,7 @@ func (p *IAMPlugin) addUserToGroup(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:AddUserToGroup", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:AddUserToGroup", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -75,7 +75,7 @@ func (p *IAMPlugin) removeUserFromGroup(ctx *RequestContext, req *AWSRequest) (*
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:RemoveUserFromGroup", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:RemoveUserFromGroup", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -108,7 +108,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:ListGroupsForUser", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListGroupsForUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -172,7 +172,7 @@ func (p *IAMPlugin) attachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:AttachGroupPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:AttachGroupPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -222,7 +222,7 @@ func (p *IAMPlugin) detachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:DetachGroupPolicy", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:DetachGroupPolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -268,7 +268,7 @@ func (p *IAMPlugin) listAttachedGroupPolicies(ctx *RequestContext, req *AWSReque
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:ListAttachedGroupPolicies", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListAttachedGroupPolicies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 

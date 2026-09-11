@@ -8,6 +8,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **An IAM request is authorized against the entity it names, at both doors** (#770). Every
+  IAM request was decided against `arn:aws:iam::<account>:*` — a literal `*` in the resource
+  position, which no statement naming a user, a role or a path can match. So a policy scoped
+  to `arn:aws:iam::123456789012:user/alice` was inert, and so was every AWS managed policy for
+  letting a user manage their own credentials: the bundled `IAMUserChangePassword` granted
+  nothing at all, which #745's policy-variable substitution made *visible* without being able
+  to fix it. `docs/services.md` said as much, pointing here.
+
+  The resource now comes from a table of 59 operations, plus the three service-linked-role
+  operations resolved separately since #747, and the citation for it is mechanical in both
+  directions: every row's resource type is one AWS publishes for that action, every IAM action
+  AWS publishes *no* resource types for is absent from the table, and every ARN substrate
+  mints matches AWS's published format string for that type — all three read from the
+  vendored Service Reference Information snapshot, so a row that drifts from AWS's own data
+  fails the build rather than quietly deciding requests against the wrong resource. Where AWS
+  lists several types for one action the row names the one the action is about, and that too
+  is read off AWS's data rather than chosen: `AddUserToGroup` publishes only `group`,
+  `AttachUserPolicy` only `user`.
+
+  An IAM ARN embeds the entity's path and only the `Create*` operations carry `Path` on the
+  wire, so a request naming an entity costs one state read to recover it — the
+  `iamAuthzRolePath` pattern #747 established, generalized to all five entity types. A policy
+  scoped to `…:role/division/engineering/worker` now matches `GetRole(RoleName=worker)` when
+  that is where the role lives, and one scoped to `…:role/worker` does not. On a state miss
+  the request stays on the account path rather than being decided against an ARN that only
+  looks specific, which is `iamAuthzSLRResourceARN`'s existing rule.
+
+  **Both doors call one resolver**, on the same request. The plugin door passed a literal
+  `"*"` at 48 of its 57 gates while the generic gate answered the account wildcard, so one
+  request got two resources — the divergence behind #411, #714 and #745, arrived at from a
+  third side. Passing the request to one resolver rather than a string per call site is what
+  keeps them from drifting again, and a table test drives both doors over every row and
+  asserts one ARN, computed from the fixture rather than from the resolver. Verified against a
+  running emulator with the AWS CLI, the one place a Go test can agree with itself and still be
+  wrong: alice, holding a customer-managed policy allowing `iam:GetUser` on
+  `arn:aws:iam::123456789012:user/alice`, reads her own user and is refused bob's. Before the
+  change both were refused, against `arn:aws:iam::123456789012:*`. Five operations
+  that name no resource keep the account wildcard, which is AWS's own answer for them:
+  `ListUsers`, `ListRoles`, `ListGroups`, `ListPolicies` and `SimulateCustomPolicy`. It is
+  deliberately `arn:aws:iam::<account>:*` and not a bare `*`, because a bare `*` in the
+  resource position matches every statement — harmless for an `Allow` and wrong for a `Deny`.
+
+  Five operations resolve to the **caller's own user** when they carry no name:
+  `GetUser`, `CreateAccessKey`, `DeleteAccessKey`, `ListAccessKeys` and `ChangePassword`. That
+  is per-operation from AWS's documentation, not a general rule — `GetUser`'s `UserName` "is
+  optional. If it is not included, it defaults to the user making the request" — and it is
+  what makes a statement scoped to `user/${aws:username}` mean what it says. The name comes
+  from `Principal.UserName`, recorded when the credential is minted, so a caller that is not
+  an IAM user leaves the resource unresolved rather than guessed.
+
+  One limit surfaced by writing the tests for this and **filed rather than folded in** (#801):
+  the same divergence exists on the *principal* side, where a caller whose own user or role
+  lives at a non-default path is not enforced at all, because a principal ARN is parsed back to
+  a name by reading everything after `user/`, so the entity lookup misses and both doors treat
+  the request as one no policy governs. The tests here therefore authorize as a caller stored
+  at the default path, and say why in place, so that none of them can pass vacuously.
+
+- **The six instance-profile operations are gated at the plugin door** (#770). They called it
+  zero times: `CreateInstanceProfile`, `GetInstanceProfile`, `DeleteInstanceProfile`,
+  `AddRoleToInstanceProfile`, `RemoveRoleFromInstanceProfile` and `ListInstanceProfiles` left
+  the decision entirely to the generic gate upstream. This is beyond #770's literal text and
+  belongs with it rather than after it, for two reasons: `AddRoleToInstanceProfile` is the
+  classic privilege-escalation step — attach a more privileged role to a profile an instance
+  already carries — and "both doors agree" cannot be asserted for `instance-profile` while one
+  of the doors is not there. The test proving the gates is driven through a server built with
+  **no** `AuthController`, since with the generic gate present a refusal proves nothing about
+  the plugin's.
+
+  `iamInstanceProfileARN` joins the four minters it should have shipped with. The profile's ARN
+  was assembled inline in `CreateInstanceProfile`, skipping `normalisePath`, which was nearly
+  harmless while the only reader was that handler's own response — a `Path` missing its slashes
+  is one AWS rejects, and substrate does not validate it — but not harmless in a resolver that
+  reads paths back out of stored records to decide requests.
+
 - **The caller substrate could not describe: `aws:userid` and `aws:PrincipalTag/<key>` are
   published** (#771). The condition context named the caller with `aws:PrincipalArn` and
   `aws:username` and nothing else, so a policy conditioning on either of these was evaluated

@@ -1,7 +1,6 @@
 package emulator
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 )
@@ -97,12 +96,18 @@ func iamAuthzParam(req *AWSRequest, name string) string {
 // Service Authorization Reference's resource-type column for these actions could not be
 // read, because the page renders client-side.
 //
-// This resolves the resource **only for the service-linked-role operations**. Deriving a
-// per-operation resource for the rest of IAM is its own piece of work (#770) and
-// deliberately not attempted here: a half-done version would move the wrong-answer
-// boundary rather than remove it.
+// The service-linked-role operations are resolved first and separately, by
+// [iamAuthzSLRResourceARN], because their resource is derived from a service principal or a
+// deletion-task ID rather than from a name the request carries. Every other IAM operation
+// goes through [iamAuthzOperationResourceARN] and the table AWS's own data checks (#770).
+// Nothing resolves for an operation in neither, and the request stays on the
+// single-resource path below, where [AuthController.buildResourceARN]'s iam arm answers
+// [iamAuthzAccountResourceARN].
 func iamAuthzResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
 	arn := iamAuthzSLRResourceARN(state, reqCtx, req)
+	if arn == "" {
+		arn = iamAuthzOperationResourceARN(state, reqCtx, req)
+	}
 	if arn == "" {
 		return nil
 	}
@@ -157,22 +162,12 @@ func iamAuthzSLRResourceARN(state StateManager, reqCtx *RequestContext, req *AWS
 
 // iamAuthzRolePath returns the stored path of a role, or "" when there is no such role.
 //
-// It reads through the raw [StateManager] rather than through IAMPlugin, for the reason
-// the other authz resolvers do: [AuthController] holds no plugin, and a decision must
-// not depend on one being registered.
+// It survives #770's generalization as a named function because the caller above reads
+// better for it — the question there is "is this role a service-linked one", and the path is
+// how that is answered — but the read itself is [iamAuthzEntityPath]'s, which every other
+// resource type now needs for the same reason.
 func iamAuthzRolePath(state StateManager, accountID, roleName string) string {
-	if state == nil {
-		return ""
-	}
-	raw, err := state.Get(context.Background(), iamNamespace, iamRoleKey(accountID, roleName))
-	if err != nil || raw == nil {
-		return ""
-	}
-	var role IAMRole
-	if err := json.Unmarshal(raw, &role); err != nil {
-		return ""
-	}
-	return role.Path
+	return iamAuthzEntityPath(state, accountID, "role", roleName)
 }
 
 // iamSLRServiceFromRoleName recovers a service principal from a service-linked role's

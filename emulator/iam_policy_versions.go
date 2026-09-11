@@ -57,7 +57,7 @@ func (p *IAMPlugin) getPolicyVersion(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:GetPolicyVersion", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:GetPolicyVersion", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
@@ -106,7 +106,7 @@ func (p *IAMPlugin) listPolicyVersions(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	goCtx := context.Background()
-	if err := p.authorize(goCtx, ctx, "iam:ListPolicyVersions", "*"); err != nil {
+	if err := p.authorize(goCtx, ctx, "iam:ListPolicyVersions", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 

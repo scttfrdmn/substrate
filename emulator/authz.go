@@ -901,11 +901,14 @@ type authzResource struct {
 //     [ec2AuthzIDParams] — was decided against the first ID alone, leaving the
 //     rest of the batch unauthorized (#744).
 //
-// The IAM arm is a different shape of exception: it still names one resource, but the
-// one [buildResourceARN] answers for IAM is a flat `arn:aws:iam::<acct>:*` that a
-// statement scoped to a role path cannot match. [iamAuthzResources] answers the three
-// service-linked-role operations properly, and only those — the general per-operation
-// IAM resource is #770.
+// The IAM arm is a different shape of exception: it still names one resource, but that
+// resource has to be read rather than pattern-matched off an ID, because an IAM ARN embeds
+// the entity's path and only the `Create*` operations carry one on the wire.
+// [iamAuthzResources] answers it — the service-linked-role operations from a service
+// principal or a deletion-task ID (#747), and every other operation from
+// [iamAuthzOperationResource], the table AWS's own published data checks (#770). What
+// [buildResourceARN]'s iam arm answers is now only the fallback for an operation naming no
+// resource at all.
 //
 // Each exception is gated on len(multi) > 0, which is what keeps every other
 // operation of those services on the single-resource path below.
@@ -962,13 +965,17 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 	case "s3":
 		return buildS3ARN(req)
 	case "iam":
-		// Every IAM operation but the three service-linked-role ones, which
-		// [iamAuthzResources] answers before this is reached. This is a flat `*` in the
-		// resource position, so a statement scoped to a user, a role or a path matches
-		// nothing here — which is why `${aws:username}` in IAMUserChangePassword's
-		// Resource still grants nothing even with #745's substitution in place. Deriving
-		// a per-operation resource for the rest of IAM is #770.
-		return "arn:aws:iam::" + acct + ":*"
+		// An IAM operation whose resource [iamAuthzResources] could not resolve: one AWS
+		// publishes no resource types for, such as ListUsers, or one whose name parameter
+		// the request left empty. Every operation that does name a resource is answered
+		// before this is reached (#770).
+		//
+		// This is every IAM resource in the account, which is the widest honest answer and
+		// deliberately not a bare `*` — [resourceMatches] reads an empty or bare wildcard
+		// resource as matching every statement, which is the permissive direction for a
+		// Deny. The same string is [iamAuthzAccountResourceARN] so that this arm and the
+		// plugin door's fallback cannot drift apart.
+		return iamAuthzAccountResourceARN(acct)
 	case "ec2":
 		// No EC2 request that names a resource substrate can resolve reaches here. A
 		// launch names five and is answered by [ec2AuthzRunInstancesResources] (#662);

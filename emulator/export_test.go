@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -1114,4 +1115,88 @@ func AuthzPrincipalContextForTest(principal *Principal) map[string]string {
 // entity a principal ARN names.
 func IAMPrincipalTagsForTest(state StateManager, principalARN string) map[string]string {
 	return iamPrincipalTags(context.Background(), state, principalARN)
+}
+
+// AuthzServiceActionResourcesForTest returns every action AWS's reference publishes for a
+// service, mapped to the resource types it publishes for that action.
+//
+// It reads the generated map directly, which [authzActionResourceTypes]' own file forbids
+// production code from doing — the point of that rule is that the *meaning* of an absent key
+// stays in one place, and enumeration asks nothing about absence. A test needs the enumeration
+// to check the other direction of #770's claim: that every IAM action AWS publishes no resource
+// types for is absent from [iamAuthzOperationResource]. Asserting only the rows that exist
+// would pass a table that had quietly acquired a row for ListUsers.
+func AuthzServiceActionResourcesForTest(service string) map[string][]string {
+	prefix := service + ":"
+	actions := make(map[string][]string)
+	for key, types := range authzActionResources {
+		if operation, ok := strings.CutPrefix(key, prefix); ok {
+			actions[operation] = types
+		}
+	}
+	return actions
+}
+
+// AuthzResourceARNsForTest returns the resource ARNs [AuthController.buildResourceARNs]
+// decides a request against.
+//
+// It is the generic gate's half of #770's both-doors invariant: the same request put to
+// [IAMAuthzResourceForTest] must produce the same string, or one policy gets two answers
+// depending on which door the caller arrived at.
+func AuthzResourceARNsForTest(a *AuthController, reqCtx *RequestContext, req *AWSRequest) []string {
+	resources := a.buildResourceARNs(reqCtx, req)
+	arns := make([]string, 0, len(resources))
+	for _, res := range resources {
+		arns = append(arns, res.ARN)
+	}
+	return arns
+}
+
+// IAMAuthzResourceForTest wraps [IAMPlugin.authzResource], the resource every gate inside the
+// IAM plugin passes — the plugin door's half of the same invariant.
+func IAMAuthzResourceForTest(p *IAMPlugin, reqCtx *RequestContext, req *AWSRequest) string {
+	return p.authzResource(reqCtx, req)
+}
+
+// IAMAuthzAccountResourceARNForTest wraps iamAuthzAccountResourceARN, the resource an IAM
+// request whose own resource substrate cannot resolve is decided against.
+func IAMAuthzAccountResourceARNForTest(accountID string) string {
+	return iamAuthzAccountResourceARN(accountID)
+}
+
+// IAMInstanceProfileARNForTest wraps iamInstanceProfileARN, which joined the other four
+// minters with #770.
+func IAMInstanceProfileARNForTest(accountID, path, name string) string {
+	return iamInstanceProfileARN(accountID, path, name)
+}
+
+// IAMAuthzResourceRowForTest is one row of [iamAuthzOperationResource], flattened into
+// exported fields so a test outside the package can sweep the whole table.
+type IAMAuthzResourceRowForTest struct {
+	// Operation is the row's key.
+	Operation string
+	// Type is the resource type AWS publishes for the action, or "" for a row whose parameter
+	// carries a finished ARN of varying type.
+	Type string
+	// NameParams are the request parameters that may carry the resource's name.
+	NameParams []string
+	// CallerIsResource reports that an absent name means the calling user.
+	CallerIsResource bool
+}
+
+// IAMAuthzOperationResourceRowsForTest returns every row of [iamAuthzOperationResource].
+//
+// The order is unspecified, matching the map it comes from: every assertion written against it
+// is per row or a set membership, so nothing may depend on the runtime's iteration order.
+func IAMAuthzOperationResourceRowsForTest() []IAMAuthzResourceRowForTest {
+	rows := make([]IAMAuthzResourceRowForTest, 0, len(iamAuthzOperationResource))
+	for operation, ref := range iamAuthzOperationResource {
+		rows = append(rows, IAMAuthzResourceRowForTest{
+			Operation:        operation,
+			Type:             ref.Type,
+			NameParams:       ref.NameParams,
+			CallerIsResource: ref.CallerIsResource,
+		})
+	}
+	return rows
 }
