@@ -262,6 +262,11 @@ func TestCW_GetMetricData_Empty(t *testing.T) {
 func TestCW_GetMetricData_SmithyRPCV2CBOR(t *testing.T) {
 	// Verify that GetMetricData returns a CBOR response when called via the
 	// Smithy RPC v2 CBOR protocol (as used by cloudwatch SDK Go v2 v1.55+).
+	//
+	// This used to assert a single 0xa0 byte, which was the whole of substrate's CBOR
+	// support: a hardcoded empty map, with the request body never parsed. It now asserts
+	// the modeled members, which is what lets a client tell "no data points" from "the
+	// operation returned nothing at all" (#785).
 	t.Parallel()
 	srv := newCWAlarmTestServer(t)
 
@@ -280,12 +285,19 @@ func TestCW_GetMetricData_SmithyRPCV2CBOR(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "application/cbor")
+	assert.Equal(t, "rpc-v2-cbor", resp.Header.Get("Smithy-Protocol"))
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	resp.Body.Close() //nolint:errcheck
-	// 0xa0 = empty CBOR map {}.
-	require.Len(t, body, 1)
-	assert.Equal(t, byte(0xa0), body[0])
+
+	decoded, err := emulator.CBORDecodeForTest(body)
+	require.NoError(t, err)
+	doc, ok := decoded.(map[string]any)
+	require.True(t, ok, "a Smithy structure encodes as a CBOR map, got %T", decoded)
+	// Both lists are present and empty: substrate records a metric's identity but not
+	// its time series, so there are no results rather than no answer.
+	assert.Equal(t, []any{}, doc["MetricDataResults"])
+	assert.Equal(t, []any{}, doc["Messages"])
 }
 
 // TestCW_PutMetricData_ListMetrics verifies that metrics published via

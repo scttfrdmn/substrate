@@ -8,6 +8,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CloudWatch answers all three of the protocols its model declares** (#785). Every one of its
+  ten operations now serves Smithy RPC v2 CBOR, `awsJson1_0` and AWS Query, so
+  `aws-sdk-go-v2`, the AWS CLI and boto3 can drive CloudWatch — none of them could before.
+
+  The service shape `com.amazonaws.cloudwatch#GraniteServiceVersion20100801` carries
+  `awsQuery`, `awsJson1_0`, `rpcv2Cbor` and `awsQueryCompatible` at once, and its clients
+  disagree about which to use. Substrate read query-form parameters and answered XML no matter
+  what had been asked for. Verified against a running emulator before the change: the Go SDK
+  failed every call with `deserialization failed, expected map for struct, got major type 1`
+  (`0x3C`, the leading `<`, read as a CBOR head), the AWS CLI exited 0 and printed nothing at
+  all for `put-metric-data`, `list-metrics`, `describe-alarms` and `get-metric-data`, and
+  `put-metric-alarm` and `set-alarm-state` were refused `AlarmName is required` because the
+  request body was never parsed. After the change all three clients complete the same journey,
+  and the Go SDK reads `Threshold` back as `80.5`, `EvaluationPeriods` as `2` and `Period` as
+  `300` — a double and two 32-bit integers, as the model spells them.
+
+  The lever that kept this proportionate is that input is normalized rather than handlers
+  rewritten. A JSON or CBOR body is flattened into the query protocol's own spelling
+  (`MetricData.member.1.MetricName`) before dispatch, so all ten handlers read `req.Params`
+  unchanged. That is only correct because the CloudWatch model declares no
+  `smithy.api#xmlName` and no `smithy.api#xmlFlattened` trait anywhere — checked across the
+  whole model rather than assumed — which is what makes a member's query key equal to its
+  member name and every list wrapped in `member`. Output moves the other way: a handler builds
+  one ordered neutral document and three renderers consume it, so the three serializations
+  cannot drift apart in thirty places. The document is an ordered slice rather than a map for
+  the same reason the codec is: ranging a Go map would order members by randomized iteration,
+  and one response would encode two ways.
+
+  **An operation with a `smithy.api#Unit` output now answers with no body and no
+  `Content-Type`** on the CBOR path — six of the ten do. The rule is not on the protocol spec
+  page; it comes from the `no_output` test in
+  `smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy`, which lists `Content-Type`
+  in its `forbidHeaders`. This corrects what #785 asked for: the empty CBOR map substrate used
+  to send from `GetMetricData` is *tolerated* by the companion `NoOutputClientAllowsEmptyCbor`
+  test, not conformant, and said nothing about the output's members, so a client could not tell
+  "no data points" from "not implemented". On the JSON path the same operations answer `{}`,
+  because `awsJson1_0` has no equivalent rule and botocore reads a zero-length JSON body as a
+  parse failure. A body substrate cannot decode is refused `SerializationException` with HTTP
+  400 — substrate's choice, since neither the protocol nor the model names a shape for it.
+
+  Two Query-path defects surfaced while rewriting and are fixed with it.
+  `DescribeAlarmsForMetric` answered a `DescribeAlarmsResponse`/`DescribeAlarmsResult` wrapper
+  borrowed from `DescribeAlarms`, which the query protocol does not permit; it now uses its own
+  element names. `EnableAlarmActions` and `DisableAlarmActions` emitted a document opening with
+  the literal tag `<placeholder>` and closing with the operation's name — not well-formed XML,
+  produced by a string-replacement hack that a real XML parser would have rejected outright.
+  `StateReasonData` was stored by `SetAlarmState` and never returned; it is now rendered.
+
+  The missing test tier is the reason this shipped at all: every CloudWatch unit test posted a
+  form body and read the XML back as a string, and `test/e2e` had no CloudWatch journey, so the
+  suite was green over a service no modern client could use. There is now a journey driving the
+  real `aws-sdk-go-v2` client through all ten operations, which asserts the requests genuinely
+  went out as `rpc-v2-cbor`, that each `Unit` response carried no body and no `Content-Type`,
+  and that absent and present-but-empty members stay distinguishable — an unset `OKActions` is
+  nil where an empty `Dimensions` is a zero-length slice.
 - **A request's wire protocol is now recorded and errors are shaped to follow it** (#757).
   `AWSRequest` gains two exported fields — `Protocol` (`WireQuery`, `WireJSONRPC`,
   `WireRPCV2CBOR`) and `QueryMode` — filled in during parsing, and the error serializer consults
@@ -58,8 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `X-Amz-Target` before anything else, so honoring such a request would mean invoking whatever
   the target named while answering in the serialization the path asked for.
 
-  CloudWatch's *successful* responses are still XML on every protocol — that half is #785. What
-  changes here is that a refusal is now readable by the client that made the request.
+  This landed before the response half and covered refusals only; the successful responses are
+  the #785 entry above, released together with it.
 - **A CBOR codec** (`emulator/cbor.go`), the first half of teaching CloudWatch to answer the
   protocol its clients speak (#785). Nothing is wired to it yet; it lands on its own so it can
   be reviewed against RFC 8949 and Smithy's protocol tests rather than alongside a plugin
@@ -100,6 +155,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the two implementations produce byte-identical timestamps.
 
 ### Fixed
+- **The service reference listed a CloudWatch operation substrate has never handled.**
+  `GetMetricStatistics` appeared in CloudWatch's supported-operations table, but no dispatch
+  arm has ever existed for it, so a caller reading the table would have got
+  `InvalidAction`. The table now lists the ten operations the plugin actually implements, five
+  of which — `ListMetrics`, `DescribeAlarmsForMetric`, `SetAlarmState`, `EnableAlarmActions` and
+  `DisableAlarmActions` — were implemented but undocumented.
 - **`sso` answered the wrong protocol, because substrate was reading it as the wrong service**
   (#758). The plugin emulates `sso-admin`: it dispatches on `X-Amz-Target` with the
   `SWBExternalService` prefix, and `sso-admin`'s model is `"protocol": "json"` with

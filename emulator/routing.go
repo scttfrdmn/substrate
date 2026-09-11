@@ -376,16 +376,18 @@ var pluginRouting = map[string]PluginRouting{
 	},
 	"monitoring": {
 		Display:      "CloudWatch",
-		Protocol:     "Query",
+		Protocol:     "CBOR / JSON / Query",
 		TargetPrefix: "GraniteServiceVersion20100801",
 		Hosts:        []string{"monitoring.us-east-1.amazonaws.com"},
 		SigningNames: []string{"monitoring"},
-		Why: "The model declares three protocols and botocore resolves json first, so the " +
-			"AWS CLI sends this target while aws-sdk-go-v2 takes the rpc-v2-cbor path " +
-			"substrate already routed — green tests over an endpoint no CLI could reach " +
-			"(#739). Routing it does not make the CLI's JSON body parseable by a plugin " +
-			"that reads Query form parameters; that is filed separately.",
-		Source: "botocore cloudwatch service-2.json (metadata.protocols, resolved by botocore's protocol priority)",
+		Why: "The service shape carries awsQuery, awsJson1_0, rpcv2Cbor and " +
+			"awsQueryCompatible at once, and its clients disagree: botocore resolves json " +
+			"first and sends this target, aws-sdk-go-v2 takes the rpc-v2-cbor path, and a " +
+			"hand-rolled client posts a query form. All three are served — the request is " +
+			"normalized into query parameters and the reply rendered from one document " +
+			"(#785) — so unlike #739, which routed the CLI to a plugin that could not read " +
+			"its body, routing now implies a usable response.",
+		Source: "botocore cloudwatch service-2.json (metadata.protocols) and the aws-sdk-go-v2 Smithy model's service traits",
 	},
 	"msk": {
 		Display:      "MSK",
