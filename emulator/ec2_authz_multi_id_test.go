@@ -162,11 +162,12 @@ func TestEC2_Authz_EachInstanceIsJudgedByItsOwnTags(t *testing.T) {
 // bundled AWS policy conditions a delete on the tags of the resource it names (#730), and a
 // delete of several is the same batch.
 //
-// GroupId's placement-group row is the overload worth naming: DescribePlacementGroups reads
-// pg- IDs through the same parameter, and nothing mis-resolves because ec2TaggableResource
-// keys on the ID's prefix.
+// Each row's operation is one AWS documents as supporting that resource type, which is what
+// #762 made the precondition for resolving an ID at all. The overload GroupId used to carry
+// here — DescribePlacementGroups reading pg- IDs through the same parameter — is now decided
+// against "*", and lives in
+// TestEC2_Authz_OperationDecidesWhetherAResourceIsResolved.
 func TestEC2_Authz_AllFourIDParametersExpand(t *testing.T) {
-	const pgName, pgID = "cluster-a", "pg-0aab11112222bbbb3"
 	tests := []struct {
 		name      string
 		operation string
@@ -218,21 +219,6 @@ func TestEC2_Authz_AllFourIDParametersExpand(t *testing.T) {
 			seed: func(f *ec2AuthzFixture, t *testing.T) {
 				f.putInternetGateway(t, ec2AuthzIGW, nil)
 				f.putInternetGateway(t, ec2MultiIGWB, nil)
-			},
-		},
-		{
-			// The placement group ARN is by *name*, so this also proves the expansion
-			// carries each resource's own translation rather than echoing the request.
-			name:      "GroupId naming placement groups",
-			operation: "DescribePlacementGroups",
-			param:     "GroupId",
-			first:     pgID, second: ec2MultiSGB,
-			firstARN:  ec2MultiARN("placement-group", pgName),
-			secondARN: ec2MultiARN("security-group", ec2MultiSGB),
-			seed: func(f *ec2AuthzFixture, t *testing.T) {
-				f.put(t, "placement_group:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+pgName,
-					emulator.EC2PlacementGroup{GroupName: pgName, GroupID: pgID})
-				f.putSecurityGroup(t, ec2MultiSGB, nil)
 			},
 		},
 	}
@@ -333,11 +319,15 @@ func TestEC2_Authz_BatchDenialIsReplayStable(t *testing.T) {
 	}
 	// Nothing is allowed, so every resource in the batch would deny — which is what makes
 	// this an ordering assertion rather than a matching one.
-	f.setPolicy(t, ec2MultiStatement("ec2:DescribeInstances", "arn:aws:ec2:*:*:instance/none"))
+	//
+	// TerminateInstances rather than a describe: since #762 only an operation AWS documents
+	// as supporting `instance` resolves its IDs at all, and a describe is decided against
+	// "*", which would make the assertion vacuous.
+	f.setPolicy(t, ec2MultiStatement("ec2:TerminateInstances", "arn:aws:ec2:*:*:instance/none"))
 
 	want := ec2MultiARN("instance", ec2MultiInstanceA)
 	for i := 0; i < 25; i++ {
-		err := f.call(t, "DescribeInstances", params)
+		err := f.call(t, "TerminateInstances", params)
 		require.True(t, ec2AuthzDenied(t, err))
 		require.Equal(t, want, deniedResource(t, err), "run %d named a different resource", i)
 	}

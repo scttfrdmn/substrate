@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An EC2 request is decided against the resource AWS would use, not against whatever
+  identifiers it happens to carry** (#762). Whether a request *has* a resource is a property
+  of the operation, not of its parameters. AWS documents `ec2:DescribeInstances` as supporting
+  no resource-level permissions, so a policy scoping it to an instance ARN grants nothing
+  there — and granted precisely those instances here, because `ec2AuthzNamedResources`
+  resolved `InstanceId`, `GroupId`, `RouteTableId` and `InternetGatewayId` for any operation
+  carrying one and never looked at `req.Operation`.
+
+  That is the direction that matters: it *grants*. A consumer's test scoping a describe to one
+  instance passed against substrate and the deployment behind it failed on AWS, which is the
+  precise failure substrate exists to prevent. `docs/services.md` recorded the divergence as
+  deliberately left, on the reading that gating the resolver was a question about the
+  resolution rather than about the batch #744 was fixing; this closes it.
+
+  An ID is now resolved only when AWS documents the operation as supporting that resource
+  type, read from the vendored Service Reference Information table rather than from a
+  hand-written operation list — so it cannot fall behind an operation substrate adds later.
+  An operation **absent** from that table is also decided against `*`, the same answer AWS
+  gives an action with no published resource types and the safe direction of the two: a
+  resource narrower than the one AWS would use is a grant substrate would be inventing.
+
+  The three EC2 resolvers that were already operation-gated are untouched — `CreateTags` and
+  `DeleteTags` (#674) and `RunInstances` (#662) — and AWS scopes all three to resource types,
+  so the gate confirms them rather than narrowing them. Two consequences are worth naming.
+  `DescribePlacementGroups`, which reads `pg-` IDs through the overloaded `GroupId`, is now
+  decided against `*`; the name-form placement-group ARN translation is still exercised by
+  `CreateTags`, which AWS does scope to `placement-group`. And an `ec2:ResourceTag/<key>`
+  condition on a describe can no longer match, because with the request resource `*` there is
+  no resource whose tags to read — AWS's behavior too, and why the bundled policies put those
+  conditions on the mutating operations.
+
 ### Added
 - **AWS's own per-operation authorization data is vendored, generated and drift-checked**
   (towards #762 and #770). No behaviour change: this adds the table both of those fixes are
