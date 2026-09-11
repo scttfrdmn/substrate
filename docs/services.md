@@ -1699,7 +1699,7 @@ survive that.
 | `AssumeRole` | **Absent.** The session name is not a user name |
 | A registered credential with no IAM entity behind it | **Absent.** That ARN's last segment is the access key ID |
 | A CloudFormation stack's own resource calls | The stack's creator, carried in the stack record so a rollback's deletes are authorized as the create was |
-| `SimulateCustomPolicy` / `SimulatePrincipalPolicy` | Derived from `CallerArn` when it names a user — the one place substrate reads a name out of an ARN, because there the ARN is the caller's own assertion of who to simulate as |
+| `SimulateCustomPolicy` / `SimulatePrincipalPolicy` | Derived from `CallerArn` when it names a user, because there the ARN is the caller's own assertion of who to simulate as. It takes the **last** segment, which is the friendly name — the reading every other reader of an entity ARN adopted in [#801](https://github.com/scttfrdmn/substrate/issues/801) |
 
 Substitution reads only the single-valued context, per AWS's "You can use any single-valued
 condition key as a variable. You can't use a multivalued condition key as a variable" — so
@@ -1767,11 +1767,36 @@ call it at all: `AddRoleToInstanceProfile` — the classic privilege-escalation 
 privileged role to a profile an instance already carries — had no plugin-side gate. All six are
 gated now.
 
-One limit on the principal side, which resource resolution does not reach: **a caller whose own
-user or role lives at a non-default path is not enforced**, because the principal ARN is parsed
-back to a name by reading everything after `user/`, so the lookup misses and the request is
-treated as one no policy governs. Tracked as
-[#801](https://github.com/scttfrdmn/substrate/issues/801).
+**The same rule applies to the caller, whose ARN also embeds their path**
+([#801](https://github.com/scttfrdmn/substrate/issues/801)). AWS writes an entity ARN as
+`arn:aws:iam::<account>:user/<UserNameWithPath>` — one component in which the friendly name is
+the **last** segment — so `…:user/division/engineering/alice` names the user `alice` at
+`/division/engineering/`. Substrate read the whole component as the name, and two things
+followed from that:
+
+- **A caller at a non-default path was not enforced at all.** Their ARN resolved to an entity
+  called `division/engineering/alice`, which exists nowhere, and a principal that resolves to
+  nothing is unenforced, because enforcement is opt-in by *existence*. Reachable two ways
+  without any misconfiguration: a CloudFormation stack whose `RoleARN` is a service role at
+  `/service-role/` — where AWS's console creates one — had *every* resource call allowed, and
+  `sts:AssumeRole` on a role at any path answered `NoSuchEntityException` for a valid ARN.
+- **A signed IAM-user call reported an ARN that named no entity.** The principal's ARN was
+  built from the access key's record without the path, so `aws:PrincipalArn` conditions and
+  `GetCallerIdentity` published `…:user/alice` for a user who is not there. That defect masked
+  the first one for long-term keys, which is why both moved together.
+
+The caller's ARN now carries the path, and every reader takes the friendly name from its last
+segment. One interaction is worth stating because it reads like a regression and is not: **a
+pathful caller's own resource ARN carries the path too**, so a statement scoped to
+`arn:aws:iam::*:user/${aws:username}` does not match them. That is AWS's behavior, and it is why
+AWS's own `IAMUserChangePassword` names a second resource, `arn:aws:iam::*:user/*/${aws:username}`
+— which does match, so the bundled policy grants a pathful user their own password exactly as it
+grants a default-path one.
+
+**An assumed-role ARN is the one exception**, and it is deliberate:
+`arn:aws:sts::<account>:assumed-role/<RoleName>/<RoleSessionName>` has exactly two segments and
+**excludes** the role's path, so its role name is the *first* — which is how a session of a role
+at `/service-role/` still resolves to that role's policies.
 
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 

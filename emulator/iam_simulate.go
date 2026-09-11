@@ -315,7 +315,10 @@ func simulationContextEntries(params map[string]string) (single map[string]strin
 func (p *IAMPlugin) simulationPolicySet(goCtx context.Context, params *iamSimulateRequest) (
 	docs, boundaryDocs []SourcedPolicyDocument, errResp *AWSResponse, err error,
 ) {
-	entityType, entityName := parsePrincipalARN(params.PolicySourceArn)
+	entityType, nameWithPath := parsePrincipalARN(params.PolicySourceArn)
+	// The record is keyed by friendly name, whatever path the source ARN carries — the
+	// same reading [simulationUserName] has always used for CallerArn (#801).
+	entityName := iamFriendlyName(nameWithPath)
 	// The simulated entity belongs to the account its own ARN names, which is what
 	// lets a caller simulate a principal in another account (#737).
 	entityAccount := arnAccountID(params.PolicySourceArn)
@@ -670,15 +673,15 @@ func simulationConditionContext(params *iamSimulateRequest, callerArn string, no
 // user `arn:aws:iam::123456789012:user/division/engineering/alice` has the path
 // `/division/engineering/` and the name `alice`, and it is the name that appears in
 // `${aws:username}`.
+//
+// That reading was local to the simulator until #801 found every other reader of an entity
+// ARN taking the whole component; [iamFriendlyName] is now the one place it lives.
 func simulationUserName(callerArn string) string {
-	entityType, name := parsePrincipalARN(callerArn)
+	entityType, nameWithPath := parsePrincipalARN(callerArn)
 	if entityType != "user" {
 		return ""
 	}
-	if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
-		return name[slash+1:]
-	}
-	return name
+	return iamFriendlyName(nameWithPath)
 }
 
 // paginateSimulationResults applies the Marker cursor and MaxItems to the flattened

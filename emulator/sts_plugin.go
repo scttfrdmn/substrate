@@ -70,14 +70,15 @@ func (p *STSPlugin) getCallerIdentity(ctx *RequestContext, _ *AWSRequest) (*AWSR
 
 	if ctx.Principal != nil {
 		arn = ctx.Principal.ARN
-		entityType, entityName := parsePrincipalARN(ctx.Principal.ARN)
-		switch entityType {
-		case "user":
-			userID = entityName
-		case "assumed-role":
-			userID = entityName
-		default:
-			userID = entityName
+		entityType, nameWithPath := parsePrincipalARN(ctx.Principal.ARN)
+		userID = nameWithPath
+		if entityType == "user" {
+			// The friendly name, so a caller whose entity lives at a path reports what
+			// they reported before their principal ARN started carrying that path
+			// (#801). An assumed-role ARN carries no path, so its <role>/<session> is
+			// left whole. Reporting a name here at all is a divergence — AWS reports the
+			// unique ID — tracked as #805.
+			userID = iamFriendlyName(nameWithPath)
 		}
 	}
 
@@ -156,10 +157,15 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		}
 	}
 
-	// Look up the role in IAM state.
-	_, roleName := parsePrincipalARN(roleARN)
+	// Look up the role in IAM state, by the name the record is keyed under: the friendly
+	// name, with any path dropped. A role ARN carries its path —
+	// arn:aws:iam::123:role/service-role/CfnRole is what AWS's console creates — and
+	// reading the whole component as the name made every such role unassumable, a hard
+	// NoSuchEntity for a perfectly valid ARN (#801).
+	_, nameWithPath := parsePrincipalARN(roleARN)
+	roleName := iamFriendlyName(nameWithPath)
 	if roleName == "" {
-		// Try parsing last segment after "/".
+		// Not an ARN this parse understands at all; fall back to its last segment.
 		if idx := strings.LastIndexByte(roleARN, '/'); idx >= 0 {
 			roleName = roleARN[idx+1:]
 		}

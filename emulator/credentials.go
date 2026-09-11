@@ -148,9 +148,11 @@ func buildCallerARN(accountID, accessKeyID string) string {
 // own, because a registry entry answers "which account" and only IAM's records
 // answer "which principal". Reading state costs two Gets on a request that
 // carries an Authorization header and refuses nothing: one for the credential,
-// and one for the entity behind it, whose tags substrate publishes as
-// `aws:PrincipalTag/<key>` and which change after the credential is minted (see
-// [iamPrincipalTags] and #771). It was one Get until the tags were needed.
+// and one for the entity behind it, whose path the principal's ARN carries and
+// whose tags substrate publishes as `aws:PrincipalTag/<key>` — both of which can
+// change after the credential is minted (see [iamEntityPathAndTags], #771 and
+// #801). It was one Get until the tags were needed, and stayed at two when the
+// path joined them: both come out of the same record.
 //
 // A nil principal means "no IAM identity", which [AuthController.CheckAccess]
 // treats as unenforced rather than denied — enforcement is opt-in by creating
@@ -179,7 +181,16 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 			if account == "" {
 				account, adopt = accountID, ""
 			}
-			arn := fmt.Sprintf("arn:aws:iam::%s:user/%s", account, key.UserName)
+			// The user's real ARN, path and all. An IAM ARN's resource part is
+			// `user/<name-with-path>`, so a user at /division/engineering/ is
+			// arn:aws:iam::123456789012:user/division/engineering/alice — and reporting
+			// the path-less form here published an ARN that named no entity, which
+			// `aws:PrincipalArn` conditions and GetCallerIdentity both read (#801). An
+			// absent record leaves the path empty, which normalisePath renders as the
+			// same single slash this line always used, so a key whose user has since
+			// been deleted resolves exactly as before.
+			path, tags := iamEntityPathAndTags(ctx, state, account, "user", key.UserName)
+			arn := iamUserARN(account, path, key.UserName)
 			return &Principal{
 				ARN:  arn,
 				Type: "IAMUser",
@@ -189,7 +200,7 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				// The AIDA… AWS publishes as aws:userid, recorded beside the key when
 				// it was created. Empty for a key written before #771.
 				UserID: key.UserID,
-				Tags:   iamPrincipalTags(ctx, state, arn),
+				Tags:   tags,
 			}, adopt
 		}
 	}
@@ -244,23 +255,41 @@ func iamPrincipalTags(ctx context.Context, state StateManager, principalARN stri
 	if !ok {
 		return nil
 	}
-	raw, err := state.Get(ctx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
+	_, tags := iamEntityPathAndTags(ctx, state, entity.Account, entity.Kind, entity.Name)
+	return tags
+}
+
+// iamEntityPathAndTags returns the IAM path and the tags recorded on an entity, keyed by
+// tag key, or "" and nil when there is no such record and when the read fails.
+//
+// Both come back together because both callers want the record and neither wants the rest
+// of it: [resolvePrincipal] builds the principal's ARN from the path, and
+// [iamPrincipalTags] publishes the tags as `aws:PrincipalTag/<key>`. Reading them in one
+// Get is what holds a signed request to the two-Get cost [resolvePrincipal] documents,
+// rather than three once the ARN had to carry the path (#801).
+//
+// IAMUser and IAMRole record both members under the same names, so one shape reads either
+// record and neither has to be unmarshalled in full.
+func iamEntityPathAndTags(ctx context.Context, state StateManager, account, kind, name string) (string, map[string]string) {
+	raw, err := state.Get(ctx, iamNamespace, iamEntityKey(account, kind, name))
 	if err != nil || raw == nil {
-		return nil
+		return "", nil
 	}
-	// IAMUser and IAMRole publish their tags under the same member, so one shape reads
-	// either record and neither has to be unmarshalled in full.
-	var tagged struct {
+	var record struct {
+		Path string   `json:"Path"`
 		Tags []IAMTag `json:"Tags"`
 	}
-	if unmarshalErr := json.Unmarshal(raw, &tagged); unmarshalErr != nil || len(tagged.Tags) == 0 {
-		return nil
+	if unmarshalErr := json.Unmarshal(raw, &record); unmarshalErr != nil {
+		return "", nil
 	}
-	tags := make(map[string]string, len(tagged.Tags))
-	for _, tag := range tagged.Tags {
+	if len(record.Tags) == 0 {
+		return record.Path, nil
+	}
+	tags := make(map[string]string, len(record.Tags))
+	for _, tag := range record.Tags {
 		tags[tag.Key] = tag.Value
 	}
-	return tags
+	return record.Path, tags
 }
 
 // VerifySigV4 validates the SigV4 signature on r using secret keys from reg.

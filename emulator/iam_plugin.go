@@ -289,9 +289,7 @@ func (p *IAMPlugin) getUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	userName := params.UserName
 	if userName == "" {
 		// Caller identity.
-		if ctx.Principal != nil {
-			_, userName = parsePrincipalARN(ctx.Principal.ARN)
-		}
+		userName = iamCallerUserName(ctx)
 	}
 	if userName == "" {
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
@@ -1371,9 +1369,7 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 	userName := params.UserName
 	if userName == "" {
-		if ctx.Principal != nil {
-			_, userName = parsePrincipalARN(ctx.Principal.ARN)
-		}
+		userName = iamCallerUserName(ctx)
 	}
 	if userName == "" {
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
@@ -1498,9 +1494,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 	userName := params.UserName
 	if userName == "" {
-		if ctx.Principal != nil {
-			_, userName = parsePrincipalARN(ctx.Principal.ARN)
-		}
+		userName = iamCallerUserName(ctx)
 	}
 	if userName == "" {
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
@@ -2714,10 +2708,21 @@ func paginateIAMKeys(keys []string, marker string, maxItems int) (page []string,
 	return
 }
 
-// parsePrincipalARN extracts the entity type ("user", "role") and name from
-// an IAM ARN such as "arn:aws:iam::123456789012:user/alice".
-func parsePrincipalARN(arn string) (entityType, name string) {
-	// arn:aws:iam::<account>:<type>/<name>
+// parsePrincipalARN extracts the entity type ("user", "role") and everything after the
+// type from an IAM ARN such as "arn:aws:iam::123456789012:user/alice".
+//
+// The second return is a name *with its path*, not a name. AWS's IAM ARN formats put the
+// two in one component — arn:${Partition}:iam::${Account}:user/${UserNameWithPath} — so
+// the user at path /division/engineering/ named alice yields
+// "division/engineering/alice" here, and a caller wanting the name must go through
+// [iamFriendlyName]. Reading this return as a name is what left a caller stored at a
+// non-default path resolving to no entity, and therefore unenforced (#801); it is named
+// nameWithPath so the next caller has to notice.
+//
+// An assumed-role ARN is the one place the whole component is not a name-with-path: see
+// [iamEntityForPrincipalARN].
+func parsePrincipalARN(arn string) (entityType, nameWithPath string) {
+	// arn:aws:iam::<account>:<type>/<name-with-path>
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) < 6 {
 		return "", ""
@@ -2728,6 +2733,55 @@ func parsePrincipalARN(arn string) (entityType, name string) {
 		return resource, ""
 	}
 	return resource[:slash], resource[slash+1:]
+}
+
+// iamFriendlyName returns the friendly name inside an IAM ARN's name-with-path component:
+// the segment after the final slash.
+//
+// AWS's IAM identifiers reference gives every entity ARN as one component holding both —
+// arn:${Partition}:iam::${Account}:user/${UserNameWithPath}, and the same shape for role,
+// group, policy and instance-profile — so the friendly name is the *last* segment and the
+// path is everything before it. The user at /division/engineering/ named alice has the ARN
+// arn:aws:iam::123456789012:user/division/engineering/alice, whose name is alice.
+//
+// The exception is deliberate and does not come through here: an assumed-role ARN is
+// arn:aws:sts::${Account}:assumed-role/${RoleName}/${RoleSessionName}, exactly two
+// segments in which the role's path does not appear at all, so its role name is the
+// *first* segment. [iamEntityForPrincipalARN] unwraps that one.
+func iamFriendlyName(nameWithPath string) string {
+	if slash := strings.LastIndexByte(nameWithPath, '/'); slash >= 0 {
+		return nameWithPath[slash+1:]
+	}
+	return nameWithPath
+}
+
+// iamCallerUserName returns the user an operation acts on when its UserName parameter is
+// absent, or "" when the caller is not an IAM user.
+//
+// GetUser, CreateAccessKey and ListAccessKeys each document UserName as optional, with
+// AWS deriving it "implicitly based on the AWS access key ID used to sign the request".
+//
+// The name recorded on the principal is preferred, on #745's record-don't-derive rule:
+// [resolvePrincipal] copies it from the access key's own record, so it is the name IAM
+// stored rather than a re-reading of an ARN. The ARN is the fallback for a principal
+// substrate did not mint the credential for, and it goes through [iamFriendlyName] because
+// the ARN carries the user's path (#801).
+//
+// A caller who is not a user — an assumed role, a service principal — has no implicit user
+// name, and returning "" here is what makes the handler answer AWS's ValidationError
+// rather than looking up a user named after a role session.
+func iamCallerUserName(ctx *RequestContext) string {
+	if ctx == nil || ctx.Principal == nil {
+		return ""
+	}
+	if ctx.Principal.UserName != "" {
+		return ctx.Principal.UserName
+	}
+	entityType, nameWithPath := parsePrincipalARN(ctx.Principal.ARN)
+	if entityType != "user" {
+		return ""
+	}
+	return iamFriendlyName(nameWithPath)
 }
 
 // arnPolicyName extracts the policy name from a policy ARN.

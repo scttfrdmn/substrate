@@ -72,13 +72,21 @@ const cfnRoleBucketTemplate = `{
 // what is under test is the deployment, not IAM's own request handling.
 func cfnSeedRole(t *testing.T, state emulator.StateManager, roleName string, actions []string) {
 	t.Helper()
+	cfnSeedRoleAtPath(t, state, "/", roleName, actions)
+}
+
+// cfnSeedRoleAtPath is [cfnSeedRole] for a role stored at a non-default path, which is
+// where AWS's own console puts a CloudFormation service role (`/service-role/`) and the
+// case #801 left every resource call of unenforced.
+func cfnSeedRoleAtPath(t *testing.T, state emulator.StateManager, path, roleName string, actions []string) {
+	t.Helper()
 	ctx := context.Background()
 
 	roleRaw, err := json.Marshal(emulator.IAMRole{
 		RoleName: roleName,
 		RoleID:   "AROATEST" + roleName,
-		ARN:      "arn:aws:iam::123456789012:role/" + roleName,
-		Path:     "/",
+		ARN:      emulator.IAMRoleARNForTest(authzTestAccount, path, roleName),
+		Path:     path,
 	})
 	require.NoError(t, err)
 	require.NoError(t, state.Put(ctx, "iam", emulator.IAMRoleKeyForTest(authzTestAccount, roleName), roleRaw))
