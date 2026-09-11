@@ -55,6 +55,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resource, `user/*/${aws:username}`, which does match, so the bundled policy grants a pathful
   user their own password exactly as it grants a default-path one.
 
+- **`StartTestServer` no longer depends on timing, on name resolution, or on a connection pool
+  shared with every other test** (#798). A test server flaked once with `read tcp
+  [::1]:59530->[::1]:59492: read: connection reset by peer`, in a subtest that took 5.19s where
+  its siblings took milliseconds; the *sibling* case in the same file then failed identically
+  while verifying #801, which places the defect in the shared harness rather than in either test.
+  Substrate's premise is that a red test is a real signal rather than timing noise, so three
+  structural causes are fixed together.
+
+  **The probe's result was discarded.** It broke out of a 5-second loop on success and simply
+  fell out of it on failure, returning a `*TestServer` either way — so a server that never came
+  up produced no message, and the first API call reported a transport error from somewhere else.
+  It now fails the test, naming the last error and the address.
+
+  **The probe was untimed**, on `http.DefaultClient`, whose `Timeout` is zero. Because the
+  listener is opened before the serving goroutine starts, an attempt lands in the kernel's accept
+  backlog and blocks rather than failing, so one attempt could consume the whole deadline instead
+  of retrying every 10ms — which is how a subtest reached 5.19s. Each attempt is now bounded.
+
+  **The probe pooled a keep-alive connection into `http.DefaultClient`**, keyed by host and port
+  and shared by 149 call sites across 54 test files, while ports are recycled inside one `go test`
+  process and every test server is shut down at the end of its test. A pooled connection to a dead
+  server fails on *read*, after the request was written — which is precisely `connection reset by
+  peer`, surfacing in whichever later test drew the recycled port rather than in the test that
+  leaked it. Substrate configures no `IdleTimeout`, so `net/http` falls back to `ReadTimeout` and
+  an idle server-side connection outlived any one test by up to 30 seconds — measured, not
+  inferred: the new assertion that the server hangs up takes 30.00s against the old harness. A
+  test server now disables keep-alives, which removes the hazard for every caller at once instead
+  of per client, and the probe uses a dedicated client that pools nothing.
+
+  A test server also binds and is dialled on the literal `127.0.0.1` rather than the name
+  `localhost`, which has two answers on a dual-stack host: `net.Listen` picks one family for the
+  bind while a client resolves the name independently, and the reported failure showed `[::1]` on
+  both ends. `docs/testing-guide.md` already documented `TestServer.URL` as
+  `http://127.0.0.1:54321`; the code now agrees with it.
+
+  No production behaviour changes. A downstream test using `emulator.StartTestServer` will see
+  `ts.URL` on `127.0.0.1` rather than `localhost`, and its server will close each connection after
+  one response. `ServerOptions.DisableKeepAlives` is new and defaults to off, so a real emulator
+  run keeps connections alive exactly as before.
+
 ## [v0.111.0] - 2026-09-10
 
 ### Fixed
