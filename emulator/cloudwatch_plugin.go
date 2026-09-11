@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,10 +11,18 @@ import (
 	"time"
 )
 
-// CloudWatchPlugin emulates the Amazon CloudWatch query-protocol Alarms API.
-// It handles PutMetricAlarm, DeleteAlarms, DescribeAlarms,
-// DescribeAlarmsForMetric, SetAlarmState, EnableAlarmActions, and
-// DisableAlarmActions.
+// CloudWatchPlugin emulates the Amazon CloudWatch Alarms and Metrics API. It
+// handles PutMetricAlarm, DeleteAlarms, DescribeAlarms, DescribeAlarmsForMetric,
+// SetAlarmState, EnableAlarmActions, DisableAlarmActions, PutMetricData,
+// ListMetrics and GetMetricData.
+//
+// All three wire protocols CloudWatch's service shape declares are served —
+// aws.protocols#awsQuery, aws.protocols#awsJson1_0 and
+// smithy.protocols#rpcv2Cbor — so a hand-rolled query client, the AWS CLI and
+// aws-sdk-go-v2 each get a response they can deserialize (#785). The handlers
+// themselves are protocol-agnostic: cloudwatch_input.go normalizes the request
+// into req.Params before dispatch, and cloudwatch_render.go renders the reply
+// from one neutral document.
 type CloudWatchPlugin struct {
 	state  StateManager
 	logger Logger
@@ -40,9 +47,14 @@ func (p *CloudWatchPlugin) Initialize(_ context.Context, cfg PluginConfig) error
 // Shutdown is a no-op for CloudWatchPlugin.
 func (p *CloudWatchPlugin) Shutdown(_ context.Context) error { return nil }
 
-// HandleRequest dispatches a CloudWatch query-protocol request to the
-// appropriate handler.
+// HandleRequest dispatches a CloudWatch request to the appropriate handler.
+//
+// A JSON or CBOR body is flattened into req.Params first, so that a handler reads one
+// input representation whichever protocol the caller used.
 func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	if err := cwNormalizeInput(req); err != nil {
+		return nil, err
+	}
 	switch req.Operation {
 	case "PutMetricAlarm":
 		return p.putMetricAlarm(ctx, req)
@@ -122,19 +134,7 @@ func (p *CloudWatchPlugin) putMetricAlarm(ctx *RequestContext, req *AWSRequest) 
 	idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
 	updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
 
-	type response struct {
-		XMLName  xml.Name `xml:"PutMetricAlarmResponse"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	return cwXMLResponse(http.StatusOK, response{
-		XMLNS: cloudwatchXMLNS,
-		Metadata: struct {
-			RequestID string `xml:"RequestId"`
-		}{RequestID: ctx.RequestID},
-	})
+	return cwUnitResponse(req, "PutMetricAlarm", ctx.RequestID)
 }
 
 func (p *CloudWatchPlugin) deleteAlarms(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -147,19 +147,7 @@ func (p *CloudWatchPlugin) deleteAlarms(ctx *RequestContext, req *AWSRequest) (*
 		removeFromStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
 	}
 
-	type response struct {
-		XMLName  xml.Name `xml:"DeleteAlarmsResponse"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	return cwXMLResponse(http.StatusOK, response{
-		XMLNS: cloudwatchXMLNS,
-		Metadata: struct {
-			RequestID string `xml:"RequestId"`
-		}{RequestID: ctx.RequestID},
-	})
+	return cwUnitResponse(req, "DeleteAlarms", ctx.RequestID)
 }
 
 func (p *CloudWatchPlugin) describeAlarms(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -231,7 +219,8 @@ func (p *CloudWatchPlugin) describeAlarms(ctx *RequestContext, req *AWSRequest) 
 		alarms = append(alarms, alarm)
 	}
 
-	return cwXMLResponse(http.StatusOK, buildDescribeAlarmsResponse(alarms, outNextToken, ctx.RequestID))
+	result := cwDoc{}.with("MetricAlarms", cwAlarmList(alarms)).withNonEmpty("NextToken", outNextToken)
+	return cwRespond(req, "DescribeAlarms", ctx.RequestID, result)
 }
 
 func (p *CloudWatchPlugin) describeAlarmsForMetric(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -264,7 +253,12 @@ func (p *CloudWatchPlugin) describeAlarmsForMetric(ctx *RequestContext, req *AWS
 		alarms = append(alarms, alarm)
 	}
 
-	return cwXMLResponse(http.StatusOK, buildDescribeAlarmsResponse(alarms, "", ctx.RequestID))
+	// DescribeAlarmsForMetricOutput has one member, MetricAlarms — no NextToken, since
+	// the operation does not paginate. Substrate previously answered a
+	// DescribeAlarmsResponse/DescribeAlarmsResult wrapper here, borrowed from
+	// DescribeAlarms; the query protocol names both elements after the operation.
+	result := cwDoc{}.with("MetricAlarms", cwAlarmList(alarms))
+	return cwRespond(req, "DescribeAlarmsForMetric", ctx.RequestID, result)
 }
 
 func (p *CloudWatchPlugin) setAlarmState(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -307,19 +301,7 @@ func (p *CloudWatchPlugin) setAlarmState(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("cloudwatch setAlarmState state.Put: %w", err)
 	}
 
-	type response struct {
-		XMLName  xml.Name `xml:"SetAlarmStateResponse"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	return cwXMLResponse(http.StatusOK, response{
-		XMLNS: cloudwatchXMLNS,
-		Metadata: struct {
-			RequestID string `xml:"RequestId"`
-		}{RequestID: ctx.RequestID},
-	})
+	return cwUnitResponse(req, "SetAlarmState", ctx.RequestID)
 }
 
 func (p *CloudWatchPlugin) enableAlarmActions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -349,98 +331,58 @@ func (p *CloudWatchPlugin) setActionsEnabled(ctx *RequestContext, req *AWSReques
 		_ = p.state.Put(goCtx, monitoringNamespace, stateKey, updated)
 	}
 
-	opName := "EnableAlarmActionsResponse"
+	operation := "EnableAlarmActions"
 	if !enabled {
-		opName = "DisableAlarmActionsResponse"
+		operation = "DisableAlarmActions"
 	}
-	type response struct {
-		XMLName  xml.Name `xml:"placeholder"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	resp := response{
-		XMLNS: cloudwatchXMLNS,
-		Metadata: struct {
-			RequestID string `xml:"RequestId"`
-		}{RequestID: ctx.RequestID},
-	}
-	body, err := xml.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("cloudwatch setActionsEnabled xml.Marshal: %w", err)
-	}
-	// Replace placeholder element name.
-	bodyStr := strings.ReplaceAll(string(body), "<placeholder>", "<"+opName+">")
-	bodyStr = strings.ReplaceAll(bodyStr, "</placeholder>", "</"+opName+">")
-	return &AWSResponse{
-		StatusCode: http.StatusOK,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), []byte(bodyStr)...),
-	}, nil
+	return cwUnitResponse(req, operation, ctx.RequestID)
 }
 
-// --- XML response builders --------------------------------------------------
+// --- Response documents -----------------------------------------------------
 
-// cwAlarmXML is an XML-serialisable representation of a CloudWatch alarm.
-type cwAlarmXML struct {
-	AlarmName               string   `xml:"AlarmName"`
-	AlarmArn                string   `xml:"AlarmArn"`
-	AlarmDescription        string   `xml:"AlarmDescription,omitempty"`
-	MetricName              string   `xml:"MetricName"`
-	Namespace               string   `xml:"Namespace"`
-	Statistic               string   `xml:"Statistic,omitempty"`
-	ComparisonOperator      string   `xml:"ComparisonOperator"`
-	Threshold               float64  `xml:"Threshold"`
-	EvaluationPeriods       int      `xml:"EvaluationPeriods"`
-	Period                  int      `xml:"Period"`
-	StateValue              string   `xml:"StateValue"`
-	StateReason             string   `xml:"StateReason,omitempty"`
-	ActionsEnabled          bool     `xml:"ActionsEnabled"`
-	AlarmActions            []string `xml:"AlarmActions>member,omitempty"`
-	OKActions               []string `xml:"OKActions>member,omitempty"`
-	InsufficientDataActions []string `xml:"InsufficientDataActions>member,omitempty"`
-}
-
-// describeAlarmsXML is the XML response for DescribeAlarms and
-// DescribeAlarmsForMetric.
-type describeAlarmsXML struct {
-	XMLName xml.Name `xml:"DescribeAlarmsResponse"`
-	XMLNS   string   `xml:"xmlns,attr"`
-	Result  struct {
-		MetricAlarms []cwAlarmXML `xml:"MetricAlarms>member,omitempty"`
-		NextToken    string       `xml:"NextToken,omitempty"`
-	} `xml:"DescribeAlarmsResult"`
-	Metadata struct {
-		RequestID string `xml:"RequestId"`
-	} `xml:"ResponseMetadata"`
-}
-
-func buildDescribeAlarmsResponse(alarms []CWAlarm, nextToken, requestID string) describeAlarmsXML {
-	resp := describeAlarmsXML{XMLNS: cloudwatchXMLNS}
-	resp.Metadata.RequestID = requestID
-	resp.Result.NextToken = nextToken
+// cwAlarmList renders alarms as a MetricAlarms list.
+//
+// The list is always returned, even when empty, so that a DescribeAlarms with no
+// matches answers a present-but-empty MetricAlarms — which is what CloudWatch does and
+// what a typed client expects — rather than omitting the member.
+func cwAlarmList(alarms []CWAlarm) cwList {
+	list := make(cwList, 0, len(alarms))
 	for _, a := range alarms {
-		resp.Result.MetricAlarms = append(resp.Result.MetricAlarms, cwAlarmXML{
-			AlarmName:               a.AlarmName,
-			AlarmArn:                a.AlarmARN,
-			AlarmDescription:        a.AlarmDescription,
-			MetricName:              a.MetricName,
-			Namespace:               a.Namespace,
-			Statistic:               a.Statistic,
-			ComparisonOperator:      a.ComparisonOperator,
-			Threshold:               a.Threshold,
-			EvaluationPeriods:       a.EvaluationPeriods,
-			Period:                  a.Period,
-			StateValue:              a.StateValue,
-			StateReason:             a.StateReason,
-			ActionsEnabled:          a.ActionsEnabled,
-			AlarmActions:            a.AlarmActions,
-			OKActions:               a.OKActions,
-			InsufficientDataActions: a.InsufficientDataActions,
-		})
+		list = append(list, cwAlarmDoc(a))
 	}
-	return resp
+	return list
+}
+
+// cwAlarmDoc renders one alarm as a MetricAlarm structure.
+//
+// Member order is the order substrate's XML struct used, not the model's, so that the
+// Query responses substrate already served are byte-for-byte unchanged; see the note in
+// cloudwatch_render.go on why order is free to be either.
+//
+// The members present are the ones [CWAlarm] stores. Modeled members substrate does not
+// track — the three timestamps, Dimensions, Unit, ExtendedStatistic, DatapointsToAlarm,
+// TreatMissingData and the rest — are absent rather than zero, which is the honest
+// answer: a typed client reads them as nil and can tell they were never set.
+func cwAlarmDoc(a CWAlarm) cwDoc {
+	doc := cwDoc{}.
+		with("AlarmName", a.AlarmName).
+		with("AlarmArn", a.AlarmARN).
+		withNonEmpty("AlarmDescription", a.AlarmDescription).
+		with("MetricName", a.MetricName).
+		with("Namespace", a.Namespace).
+		withNonEmpty("Statistic", a.Statistic).
+		with("ComparisonOperator", a.ComparisonOperator).
+		with("Threshold", a.Threshold).
+		with("EvaluationPeriods", a.EvaluationPeriods).
+		with("Period", a.Period).
+		with("StateValue", a.StateValue).
+		withNonEmpty("StateReason", a.StateReason).
+		withNonEmpty("StateReasonData", a.StateReasonData).
+		with("ActionsEnabled", a.ActionsEnabled)
+	return doc.
+		withStrings("AlarmActions", a.AlarmActions).
+		withStrings("OKActions", a.OKActions).
+		withStrings("InsufficientDataActions", a.InsufficientDataActions)
 }
 
 // --- State key helpers -------------------------------------------------------
@@ -468,71 +410,27 @@ func parseMemberList(params map[string]string, prefix string) []string {
 	return result
 }
 
-// --- Response helper ---------------------------------------------------------
-
-func cwXMLResponse(status int, v interface{}) (*AWSResponse, error) {
-	body, err := xml.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("cloudwatch xml.Marshal: %w", err)
-	}
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
-}
-
 // --- GetMetricData -----------------------------------------------------------
 
-// getMetricData handles the GetMetricData operation.  Substrate does not
-// store real metric time-series data, so it returns an empty
-// MetricDataResults list.  Callers that degrade gracefully on zero values
-// (e.g. display "0 bytes") work correctly with this response.
+// getMetricData handles the GetMetricData operation.
 //
-// The AWS SDK Go v2 (cloudwatch v1.55+) sends GetMetricData via the Smithy
-// RPC v2 CBOR protocol (Content-Type: application/cbor).  In that case, an
-// empty CBOR map is returned; otherwise the response is the standard XML.
+// Substrate records a metric's name and namespace but not its time series — running the
+// workload that produces data points is outside what an API observation can be — so the
+// answer is a present-but-empty MetricDataResults list and an empty Messages list. A
+// caller that degrades gracefully on zero values (displaying "0 bytes", say) works
+// against this; one that needs data points needs a seeded time series, which is not
+// modeled.
+//
+// Before #785 this was where substrate's only CBOR lived: a hardcoded one-byte 0xa0 for
+// any caller whose Content-Type mentioned CBOR, with the request body never parsed. The
+// empty map is *tolerated* by the protocol's NoOutputClientAllowsEmptyCbor test but says
+// nothing about the members, so a client could not distinguish "no data" from "not
+// implemented"; the two empty lists do.
 func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Smithy RPC v2 CBOR path: SDK sends Content-Type: application/cbor.
-	// Return an empty CBOR map {} (0xa0) — the SDK treats absent fields as
-	// zero values, so MetricDataResults defaults to nil (empty slice).
-	if strings.Contains(req.Headers["Content-Type"], "application/cbor") ||
-		strings.Contains(req.Headers["Smithy-Protocol"], "rpc-v2-cbor") {
-		return &AWSResponse{
-			StatusCode: http.StatusOK,
-			Headers: map[string]string{
-				"Content-Type":    "application/cbor",
-				"Smithy-Protocol": "rpc-v2-cbor",
-			},
-			// 0xa0 = CBOR map(0) — empty map.
-			Body: []byte{0xa0},
-		}, nil
-	}
-
-	type metricDataResult struct {
-		ID         string   `xml:"Id"`
-		Label      string   `xml:"Label"`
-		StatusCode string   `xml:"StatusCode"`
-		Timestamps []string `xml:"Timestamps>member"`
-		Values     []string `xml:"Values>member"`
-	}
-	type response struct {
-		XMLName xml.Name `xml:"GetMetricDataResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  struct {
-			MetricDataResults []metricDataResult `xml:"MetricDataResults>member"`
-			NextToken         string             `xml:"NextToken,omitempty"`
-		} `xml:"GetMetricDataResult"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	return cwXMLResponse(http.StatusOK, response{
-		XMLNS: cloudwatchXMLNS,
-		Metadata: struct {
-			RequestID string `xml:"RequestId"`
-		}{RequestID: ctx.RequestID},
-	})
+	result := cwDoc{}.
+		with("MetricDataResults", cwList{}).
+		with("Messages", cwList{})
+	return cwRespond(req, "GetMetricData", ctx.RequestID, result)
 }
 
 // --- PutMetricData -----------------------------------------------------------
@@ -560,19 +458,7 @@ func (p *CloudWatchPlugin) putMetricData(ctx *RequestContext, req *AWSRequest) (
 		updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
 	}
 
-	type putMetricDataResponse struct {
-		XMLName  xml.Name `xml:"PutMetricDataResponse"`
-		XMLNS    string   `xml:"xmlns,attr"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	return cwXMLResponse(http.StatusOK, putMetricDataResponse{
-		XMLNS: cloudwatchXMLNS,
-		Metadata: struct {
-			RequestID string `xml:"RequestId"`
-		}{RequestID: ctx.RequestID},
-	})
+	return cwUnitResponse(req, "PutMetricData", ctx.RequestID)
 }
 
 // --- ListMetrics -------------------------------------------------------------
@@ -585,12 +471,7 @@ func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*A
 	namespace := req.Params["Namespace"]
 	filterName := req.Params["MetricName"]
 
-	type cwMetricEntry struct {
-		MetricName string   `xml:"MetricName"`
-		Namespace  string   `xml:"Namespace"`
-		Dimensions struct{} `xml:"Dimensions"`
-	}
-	var metrics []cwMetricEntry
+	metrics := cwList{}
 
 	var namespaces []string
 	if namespace != "" {
@@ -618,23 +499,16 @@ func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*A
 			if filterName != "" && name != filterName {
 				continue
 			}
-			metrics = append(metrics, cwMetricEntry{MetricName: name, Namespace: ns})
+			// Dimensions is present and empty rather than absent: substrate records a
+			// metric by name and namespace only, and an empty dimension list is what
+			// CloudWatch reports for a metric published without any.
+			metrics = append(metrics, cwDoc{}.
+				with("MetricName", name).
+				with("Namespace", ns).
+				with("Dimensions", cwList{}))
 		}
 	}
 
-	type listMetricsResponse struct {
-		XMLName xml.Name `xml:"ListMetricsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  struct {
-			Metrics   []cwMetricEntry `xml:"Metrics>member"`
-			NextToken string          `xml:"NextToken,omitempty"`
-		} `xml:"ListMetricsResult"`
-		Metadata struct {
-			RequestID string `xml:"RequestId"`
-		} `xml:"ResponseMetadata"`
-	}
-	resp := listMetricsResponse{XMLNS: cloudwatchXMLNS}
-	resp.Result.Metrics = metrics
-	resp.Metadata.RequestID = ctx.RequestID
-	return cwXMLResponse(http.StatusOK, resp)
+	result := cwDoc{}.with("Metrics", metrics)
+	return cwRespond(req, "ListMetrics", ctx.RequestID, result)
 }

@@ -996,3 +996,52 @@ func CBOREncodeForTest(v any) ([]byte, error) { return cborEncode(v) }
 
 // CBORDecodeForTest wraps cborDecode for external tests.
 func CBORDecodeForTest(data []byte) (any, error) { return cborDecode(data) }
+
+// CWNormalizeInputForTest wraps cwNormalizeInput, returning the flattened parameter map.
+//
+// The flattening is where a JSON or CBOR request becomes something a handler can read, so
+// a test asserts the query-form keys it produces rather than the handler's behavior over
+// them (#785).
+func CWNormalizeInputForTest(protocol WireProtocol, body []byte) (map[string]string, error) {
+	req := &AWSRequest{Protocol: protocol, Body: body}
+	if err := cwNormalizeInput(req); err != nil {
+		return nil, err
+	}
+	return req.Params, nil
+}
+
+// CWRespondForTest renders a DescribeAlarms-shaped response over alarms in the given
+// protocol, returning the response's status, body and headers.
+//
+// Going through [CWAlarm] rather than exposing the neutral document keeps cwDoc internal
+// while still exercising every part of it: nested structures, lists of structures, lists
+// of strings, a double, two integers, a boolean, and members that are absent rather than
+// empty.
+func CWRespondForTest(protocol WireProtocol, operation, requestID string, alarms []CWAlarm) (int, []byte, map[string]string, error) {
+	req := &AWSRequest{Protocol: protocol}
+	resp, err := cwRespond(req, operation, requestID, cwDoc{}.with("MetricAlarms", cwAlarmList(alarms)))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return resp.StatusCode, resp.Body, resp.Headers, nil
+}
+
+// CWUnitResponseForTest wraps cwUnitResponse, the answer for the six CloudWatch
+// operations whose modeled output is smithy.api#Unit.
+func CWUnitResponseForTest(protocol WireProtocol, operation, requestID string) (int, []byte, map[string]string, error) {
+	req := &AWSRequest{Protocol: protocol}
+	resp, err := cwUnitResponse(req, operation, requestID)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return resp.StatusCode, resp.Body, resp.Headers, nil
+}
+
+// CWXMLTextForTest wraps cwXMLText, which renders a scalar as query-protocol character
+// data. Exported separately because timestamps and blobs appear in CloudWatch's model but
+// not in any response substrate currently builds.
+func CWXMLTextForTest(v any) (string, error) { return cwXMLText(v) }
+
+// CWParamTextForTest wraps cwParamText, the same scalars in the query form's request
+// spelling.
+func CWParamTextForTest(v any) (string, error) { return cwParamText(v) }

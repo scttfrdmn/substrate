@@ -50,7 +50,7 @@ CloudFormation, and cost detail follows below the matrix.
 | 37 | KMS | `kms` | JSON |
 | 38 | Lambda | `lambda` | REST/JSON |
 | 39 | CloudWatch Logs | `logs` | JSON |
-| 40 | CloudWatch | `monitoring` | Query |
+| 40 | CloudWatch | `monitoring` | CBOR / JSON / Query |
 | 41 | MSK | `msk` | REST/JSON |
 | 42 | HealthOmics | `omics` | REST/JSON |
 | 43 | OpenSearch | `opensearch` | REST/JSON |
@@ -158,15 +158,22 @@ botocore models only three carry a dotted prefix — `cloudtrail`, `codeconnecti
 `codestar-connections`, the latter two not substrate plugins — and their last segments
 do not collide.
 
-**CloudWatch's remaining gap is the success body, not the error.** `monitoring` receives
-every client's request, and since #757 its *refusals* are shaped by the protocol the
-caller used rather than by the service name: a CBOR caller gets a CBOR error naming the
-modeled shape in `__type`, a JSON-RPC caller gets a JSON one, a Query caller still gets
-`<ErrorResponse>`, and a caller that sent `X-Amzn-Query-Mode: true` also gets the Query
-code back in an `x-amzn-query-error` header. `CloudWatchPlugin` itself still reads
-query-form parameters and answers XML on every protocol, so a *successful* call returns
-HTTP 200 with a body a CBOR or JSON client cannot parse. Do not yet read "CloudWatch is
-routed" as "the AWS CLI can drive CloudWatch"; the response half is tracked as #785.
+**CloudWatch is now drivable three ways, and that closes the gap this section used to
+carve out.** Its service shape declares `awsQuery`, `awsJson1_0`, `rpcv2Cbor` **and**
+`awsQueryCompatible` at once, and its clients disagree about which to use: `aws-sdk-go-v2`
+posts Smithy RPC v2 CBOR, the AWS CLI and boto3 post `awsJson1_0` under an `X-Amz-Target`,
+and a hand-rolled client posts a query form. Substrate serves all three (#785) — a request
+is normalized into query parameters before dispatch and the reply rendered from one ordered
+document — so the ten operations answer bytes each client can deserialize, and since #757
+a *refusal* is shaped the same way: a CBOR caller gets a CBOR error naming the modeled
+shape in `__type`, a JSON-RPC caller gets a JSON one, a Query caller gets `<ErrorResponse>`,
+and a caller that sent `X-Amzn-Query-Mode: true` also gets the Query code back in an
+`x-amzn-query-error` header. The plugin previously answered XML on every protocol, so
+`aws-sdk-go-v2` reported `deserialization failed, expected map for struct, got major type 1`
+— `0x3C`, the leading `<`, read as a CBOR major type — and the AWS CLI printed nothing at
+all. Substrate's own suite was green over it, because every CloudWatch test posted a form
+body and read the XML back as a string; see [Protocols](#protocols) under CloudWatch for
+what each client now gets.
 
 ### Plugins that are deliberately not addressable three ways
 
@@ -6874,18 +6881,89 @@ EventBridge custom events: $1.00 per million events.
 ## CloudWatch
 
 **Endpoint:** `monitoring.{region}.amazonaws.com`
-**Protocol:** AWS Query (form-encoded, `Action=` parameter)
+**Protocol:** Smithy RPC v2 CBOR, `awsJson1_0` and AWS Query — see below
+
+### Protocols
+
+CloudWatch is the one service whose model declares three wire protocols at once. Its
+service shape, `com.amazonaws.cloudwatch#GraniteServiceVersion20100801`, carries
+`aws.protocols#awsQuery`, `aws.protocols#awsJson1_0`, `smithy.protocols#rpcv2Cbor` **and**
+`aws.protocols#awsQueryCompatible`, and its clients pick differently: `aws-sdk-go-v2` sends
+CBOR, the AWS CLI and boto3 send `awsJson1_0`, and a hand-rolled client sends a query form.
+All three are served, so which one you use is your choice and not a constraint (#785).
+
+| Client | Request | Response |
+|--------|---------|----------|
+| `aws-sdk-go-v2` | `POST /service/GraniteServiceVersion20100801/operation/{Op}`, `Content-Type: application/cbor`, `Smithy-Protocol: rpc-v2-cbor` | CBOR, `Smithy-Protocol: rpc-v2-cbor` |
+| AWS CLI, boto3 | `POST /`, `X-Amz-Target: GraniteServiceVersion20100801.{Op}`, `Content-Type: application/x-amz-json-1.0` | JSON, `application/x-amz-json-1.0` |
+| query client | `POST /` with `Action={Op}` in a form body | `<{Op}Response><{Op}Result>…`, `text/xml` |
+
+The Query path is byte-for-byte what earlier releases served, with two deliberate
+exceptions. `DescribeAlarmsForMetric` now answers `<DescribeAlarmsForMetricResponse>` /
+`<DescribeAlarmsForMetricResult>`; it previously borrowed `DescribeAlarms`' element names,
+which the query protocol does not permit. `EnableAlarmActions` and `DisableAlarmActions`
+previously emitted a document whose opening tag was literally `<placeholder>` and whose
+closing tag was the operation's — not well-formed XML at all. `MetricAlarms` and
+`GetMetricData`'s `Messages` are also now always present, where an empty one used to be
+omitted.
+
+**An operation with a `smithy.api#Unit` output answers with no body and no
+`Content-Type`.** Six of the ten do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
+`EnableAlarmActions`, `DisableAlarmActions` and `PutMetricData`. On the CBOR path they
+return HTTP 200 carrying only `Smithy-Protocol: rpc-v2-cbor` — the rule comes from the
+`no_output` protocol test in `smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy`,
+which lists `Content-Type` in its `forbidHeaders`, rather than from the protocol spec page.
+An empty CBOR map is merely *tolerated* by the companion `NoOutputClientAllowsEmptyCbor`
+test, and `GetMetricData` used to send exactly that one byte for any caller whose
+`Content-Type` mentioned CBOR — a response no client could tell from "not implemented". On
+the JSON path the same operations answer `{}`, because `awsJson1_0` has no equivalent rule
+and botocore reads a zero-length JSON body as a parse failure. On the Query path they answer
+a response wrapper with no result element.
+
+**Absent and present-but-empty are different answers.** A member substrate does not model
+is omitted, so a typed client reads it as nil and can tell it was never set: a `MetricAlarm`
+carries no timestamps, `Unit`, `ExtendedStatistic`, `DatapointsToAlarm` or
+`TreatMissingData`, and an alarm created without OK actions omits `OKActions` rather than
+returning an empty list. A member substrate models as empty is present: `DescribeAlarms`
+always returns `MetricAlarms`, a metric published without dimensions returns an empty
+`Dimensions`, and `GetMetricData` returns empty `MetricDataResults` and `Messages` because
+substrate records a metric's identity but not its time series (running the workload behind
+the API is outside what substrate models).
+
+**Errors name the modeled shape, not the query code.** A CBOR or JSON refusal sets `__type`
+to the absolute shape ID — `com.amazonaws.cloudwatch#InvalidParameterValueException`, not
+`InvalidParameterValue` — with the HTTP status from the shape's `@httpError`, and per the
+protocol the `Code` body member must not be what a client keys on. A caller that sent
+`X-Amzn-Query-Mode: true` (both reference clients do) additionally gets
+`x-amzn-query-error: <QueryCode>;Sender|Receiver`, which is how a query-compatible client
+recovers the code its older error handling branches on. A body substrate cannot decode is
+refused with `SerializationException` and HTTP 400; that choice is substrate's, since
+neither the protocol nor the CloudWatch model names a shape for it.
+
+**Substrate's CBOR writer is definite-length and minimal; its reader is not.** The protocol
+spec never mentions indefinite-length encoding, yet the normative test vectors use it almost
+everywhere and the reference implementation emits it, so a reader must accept
+indefinite-length maps, arrays and strings, non-minimal length arguments, a `double` arriving
+as a float16, float32, float64 **or** an integer, tag 1 as either an integer or a float, and
+`0xf7` as null — substrate's does, and skips an unrecognized member's value recursively. Its
+*writer* chooses definite lengths with minimal arguments so that the same response always
+produces the same bytes, which is what makes a recorded event replayable byte-for-byte. That
+is a documented divergence from the reference writer's output and conformant either way.
 
 ### Supported operations
 
 | Operation | Notes |
 |-----------|-------|
-| PutMetricData | |
-| GetMetricData | |
-| GetMetricStatistics | |
-| PutMetricAlarm | |
-| DescribeAlarms | |
+| PutMetricData | Records each datum's name and namespace for ListMetrics; values are discarded |
+| ListMetrics | Filters on `Namespace` and `MetricName`; `Dimensions` is always empty |
+| GetMetricData | Always empty `MetricDataResults` — no time series is modeled |
+| PutMetricAlarm | Preserves an existing alarm's state on re-put |
+| DescribeAlarms | Filters on `AlarmNames` and `StateValue`; paginates on `MaxRecords`/`NextToken` |
+| DescribeAlarmsForMetric | Filters on `MetricName` and `Namespace`; does not paginate |
 | DeleteAlarms | |
+| SetAlarmState | `ResourceNotFoundException` for an unknown alarm |
+| EnableAlarmActions | |
+| DisableAlarmActions | |
 
 ### CloudFormation resource types
 
