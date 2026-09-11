@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **AWS's own per-operation authorization data is vendored, generated and drift-checked**
+  (towards #762 and #770). No behaviour change: this adds the table both of those fixes are
+  decided against, so that "which resource is this request authorized against" is answered
+  from something AWS publishes rather than from a hand-written list.
+
+  The question both issues turn on is per action: which resource *types* does the action
+  support, and what shape is a resource ARN of that type? AWS answers it in the Service
+  Authorization Reference — whose HTML renders its tables in JavaScript, which is why
+  `docs/services.md` records that dead end for both ELB pages and why some ELB parameters are
+  still authorized against `*`. AWS publishes the same data as JSON at
+  `https://servicereference.us-east-1.amazonaws.com/v1/{service}/{service}.json`, where an
+  action's `Resources` list names the types it supports and **an action with no `Resources`
+  list supports none** — that last fact is the whole of #762.
+
+  Pruned snapshots of `ec2` (v1.4, 824 actions, 114 resource types) and `iam` (v1.4, 190
+  actions, 15 types) are committed under `emulator/authzref`, and
+  `cmd/gen-authz-reference` turns them into `emulator/authz_reference_gen.go`. The data is
+  vendored rather than fetched at generate time so that generation, the drift check and the
+  whole test suite stay offline: no CI job and no test may depend on network access.
+  Refreshing is a deliberate human step (`make authz-reference-fetch`) and the diff it
+  produces is the review. `make authz-reference-check` regenerates in memory and diffs,
+  offline, and runs on the existing `docs-reference` CI job — mirroring
+  `cmd/gen-service-reference`, since a refreshed snapshot committed without regenerating
+  would leave the table disagreeing with its own source.
+
+  Two details worth stating. The reader (`emulator/authz_reference.go`) returns *both* the
+  resource types and whether AWS publishes the action at all, because those are different
+  facts: an action AWS scopes to `*` and an action substrate names but AWS does not publish
+  must be distinguishable, even though both answers point at `*` — a resource narrower than
+  the one AWS would use is a grant substrate would be inventing, and inventing a grant is
+  worse than inventing a refusal. And the generated file is 1887 lines rather than pruned
+  below the ~1500 the plan allowed for: the alternative was dropping the ARN-format rows,
+  which are precisely what makes the table #770's citation, and the only two rows that are
+  genuinely unreadable on one line (`ec2:CreateTags` and `ec2:DeleteTags`, over a hundred
+  types each) are already written one type per line.
+
+  A test sweeps every resource-ID prefix `ec2TaggableResource` recognizes and asserts AWS
+  publishes the resource type substrate names for it. The forthcoming #762 gate compares
+  those names by string, so a type substrate spells differently from AWS — `natgateway` is
+  unhyphenated where every sibling is hyphenated — would silently never match and quietly
+  widen every operation naming it to `*`.
+
 ## [v0.110.0] - 2026-09-10
 
 ### Added

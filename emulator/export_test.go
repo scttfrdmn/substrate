@@ -1045,3 +1045,35 @@ func CWXMLTextForTest(v any) (string, error) { return cwXMLText(v) }
 // CWParamTextForTest wraps cwParamText, the same scalars in the query form's request
 // spelling.
 func CWParamTextForTest(v any) (string, error) { return cwParamText(v) }
+
+// AuthzActionResourceTypesForTest wraps authzActionResourceTypes, the reader for the
+// generated Service Reference Information table (authz_reference_gen.go).
+func AuthzActionResourceTypesForTest(service, operation string) ([]string, bool) {
+	return authzActionResourceTypes(service, operation)
+}
+
+// AuthzActionSupportsResourceTypeForTest wraps authzActionSupportsResourceType, the gate
+// that decides whether an operation may be authorized against a resource at all.
+func AuthzActionSupportsResourceTypeForTest(service, operation, resourceType string) bool {
+	return authzActionSupportsResourceType(service, operation, resourceType)
+}
+
+// AuthzResourceARNFormatsForTest wraps authzResourceARNFormats, AWS's documented ARN
+// shapes for a resource type.
+func AuthzResourceARNFormatsForTest(service, resourceType string) ([]string, bool) {
+	return authzResourceARNFormats(service, resourceType)
+}
+
+// EC2TaggableARNTypeForTest resolves an EC2 resource ID to the ARN type
+// [ec2TaggableResource] gives it, or "" for a prefix it does not recognize.
+//
+// The type is what the authorization reference is consulted with, so a test can sweep
+// every prefix substrate resolves and assert AWS publishes the type it names.
+func EC2TaggableARNTypeForTest(id string) string {
+	target, ok := ec2TaggableResource(NewMemoryStateManager(),
+		&RequestContext{AccountID: "123456789012", Region: "us-east-1"}, id)
+	if !ok {
+		return ""
+	}
+	return target.arnType
+}

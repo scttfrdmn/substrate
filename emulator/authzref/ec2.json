@@ -1,0 +1,5631 @@
+{
+  "Name": "ec2",
+  "Version": "v1.4",
+  "Actions": [
+    {
+      "Name": "AcceptAddressTransfer",
+      "Resources": [
+        "elastic-ip"
+      ]
+    },
+    {
+      "Name": "AcceptCapacityReservationBillingOwnership",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "AcceptReservedInstancesExchangeQuote",
+      "Resources": [
+        "reserved-instances"
+      ]
+    },
+    {
+      "Name": "AcceptTransitGatewayClientVpnAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "AcceptTransitGatewayMulticastDomainAssociations",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "AcceptTransitGatewayPeeringAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "AcceptTransitGatewayVpcAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "AcceptVpcEndpointConnections",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "AcceptVpcPeeringConnection",
+      "Resources": [
+        "vpc",
+        "vpc-peering-connection"
+      ]
+    },
+    {
+      "Name": "AdvertiseByoipCidr",
+      "Resources": []
+    },
+    {
+      "Name": "AllocateAddress",
+      "Resources": [
+        "elastic-ip",
+        "ipam-pool",
+        "ipv4pool-ec2"
+      ]
+    },
+    {
+      "Name": "AllocateHosts",
+      "Resources": [
+        "dedicated-host"
+      ]
+    },
+    {
+      "Name": "AllocateIpamPoolCidr",
+      "Resources": [
+        "ipam-pool",
+        "ipam-pool-allocation"
+      ]
+    },
+    {
+      "Name": "ApplySecurityGroupsToClientVpnTargetNetwork",
+      "Resources": [
+        "client-vpn-endpoint",
+        "security-group",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AssignIpv6Addresses",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "AssignPrivateIpAddresses",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "AssignPrivateNatGatewayAddress",
+      "Resources": [
+        "natgateway"
+      ]
+    },
+    {
+      "Name": "AssociateAddress",
+      "Resources": [
+        "elastic-ip",
+        "instance",
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "AssociateApplicationStatusCheck",
+      "Resources": [
+        "application-status-check",
+        "instance"
+      ]
+    },
+    {
+      "Name": "AssociateCapacityReservationBillingOwner",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "AssociateClientVpnTargetNetwork",
+      "Resources": [
+        "client-vpn-endpoint",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "AssociateDhcpOptions",
+      "Resources": [
+        "dhcp-options",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AssociateEnclaveCertificateIamRole",
+      "Resources": [
+        "certificate",
+        "role"
+      ]
+    },
+    {
+      "Name": "AssociateIamInstanceProfile",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "AssociateInstanceEventWindow",
+      "Resources": [
+        "instance-event-window"
+      ]
+    },
+    {
+      "Name": "AssociateIpamByoasn",
+      "Resources": []
+    },
+    {
+      "Name": "AssociateIpamResourceDiscovery",
+      "Resources": [
+        "ipam",
+        "ipam-resource-discovery",
+        "ipam-resource-discovery-association"
+      ]
+    },
+    {
+      "Name": "AssociateNatGatewayAddress",
+      "Resources": [
+        "elastic-ip",
+        "natgateway"
+      ]
+    },
+    {
+      "Name": "AssociateRouteServer",
+      "Resources": [
+        "route-server",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AssociateRouteTable",
+      "Resources": [
+        "internet-gateway",
+        "ipv4pool-ec2",
+        "route-table",
+        "subnet",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "AssociateSecurityGroupVpc",
+      "Resources": [
+        "security-group",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AssociateSubnetCidrBlock",
+      "Resources": [
+        "ipam-pool",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "AssociateTransitGatewayMulticastDomain",
+      "Resources": [
+        "subnet",
+        "transit-gateway-attachment",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "AssociateTransitGatewayPolicyTable",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "AssociateTransitGatewayRouteTable",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "AssociateTrunkInterface",
+      "Resources": []
+    },
+    {
+      "Name": "AssociateVerifiedAccessInstanceWebAcl",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "AssociateVpcCidrBlock",
+      "Resources": [
+        "ipam-pool",
+        "ipv6pool-ec2",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AttachApplianceToNatGateway",
+      "Resources": [
+        "natgateway"
+      ]
+    },
+    {
+      "Name": "AttachClassicLinkVpc",
+      "Resources": [
+        "instance",
+        "security-group",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AttachImageWatermark",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "AttachInternetGateway",
+      "Resources": [
+        "internet-gateway",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "AttachNetworkInterface",
+      "Resources": [
+        "instance",
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "AttachResourcesToPlacementGroup",
+      "Resources": [
+        "placement-group"
+      ]
+    },
+    {
+      "Name": "AttachVerifiedAccessTrustProvider",
+      "Resources": [
+        "verified-access-instance",
+        "verified-access-trust-provider"
+      ]
+    },
+    {
+      "Name": "AttachVolume",
+      "Resources": [
+        "instance",
+        "volume"
+      ]
+    },
+    {
+      "Name": "AttachVpnGateway",
+      "Resources": [
+        "vpc",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "AuthorizeClientVpnIngress",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "AuthorizeSecurityGroupEgress",
+      "Resources": [
+        "security-group",
+        "security-group-rule"
+      ]
+    },
+    {
+      "Name": "AuthorizeSecurityGroupIngress",
+      "Resources": [
+        "security-group",
+        "security-group-rule"
+      ]
+    },
+    {
+      "Name": "BatchModifyIpamRoutingPolicyRegistrations",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "BundleInstance",
+      "Resources": []
+    },
+    {
+      "Name": "CancelBundleTask",
+      "Resources": []
+    },
+    {
+      "Name": "CancelCapacityReservation",
+      "Resources": [
+        "capacity-reservation",
+        "capacity-reservation-cancellation-quote"
+      ]
+    },
+    {
+      "Name": "CancelCapacityReservationFleets",
+      "Resources": [
+        "capacity-reservation-fleet"
+      ]
+    },
+    {
+      "Name": "CancelConversionTask",
+      "Resources": []
+    },
+    {
+      "Name": "CancelDeclarativePoliciesReport",
+      "Resources": [
+        "declarative-policies-report"
+      ]
+    },
+    {
+      "Name": "CancelExportTask",
+      "Resources": [
+        "export-image-task",
+        "export-instance-task"
+      ]
+    },
+    {
+      "Name": "CancelImageLaunchPermission",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "CancelImportTask",
+      "Resources": [
+        "import-image-task",
+        "import-snapshot-task"
+      ]
+    },
+    {
+      "Name": "CancelReservedInstancesListing",
+      "Resources": []
+    },
+    {
+      "Name": "CancelSpotFleetRequests",
+      "Resources": [
+        "spot-fleet-request"
+      ]
+    },
+    {
+      "Name": "CancelSpotInstanceRequests",
+      "Resources": [
+        "spot-instances-request"
+      ]
+    },
+    {
+      "Name": "ConfirmProductInstance",
+      "Resources": []
+    },
+    {
+      "Name": "CopyFpgaImage",
+      "Resources": [
+        "fpga-image"
+      ]
+    },
+    {
+      "Name": "CopyImage",
+      "Resources": [
+        "image",
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "CopySnapshot",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "CopyVolumes",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "CreateApplicationStatusCheck",
+      "Resources": [
+        "application-status-check",
+        "security-group",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "CreateCapacityManagerDataExport",
+      "Resources": [
+        "capacity-manager-data-export"
+      ]
+    },
+    {
+      "Name": "CreateCapacityReservation",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "CreateCapacityReservationBySplitting",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "CreateCapacityReservationCancellationQuote",
+      "Resources": [
+        "capacity-reservation",
+        "capacity-reservation-cancellation-quote"
+      ]
+    },
+    {
+      "Name": "CreateCapacityReservationFleet",
+      "Resources": [
+        "capacity-reservation-fleet"
+      ]
+    },
+    {
+      "Name": "CreateCarrierGateway",
+      "Resources": [
+        "carrier-gateway",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateClientVpnEndpoint",
+      "Resources": [
+        "client-vpn-endpoint",
+        "security-group",
+        "transit-gateway",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateClientVpnRoute",
+      "Resources": [
+        "client-vpn-endpoint",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "CreateCoipCidr",
+      "Resources": [
+        "coip-pool"
+      ]
+    },
+    {
+      "Name": "CreateCoipPool",
+      "Resources": [
+        "coip-pool",
+        "local-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateCoipPoolPermission",
+      "Resources": [
+        "coip-pool"
+      ]
+    },
+    {
+      "Name": "CreateCustomerGateway",
+      "Resources": [
+        "customer-gateway"
+      ]
+    },
+    {
+      "Name": "CreateDefaultSubnet",
+      "Resources": []
+    },
+    {
+      "Name": "CreateDefaultVpc",
+      "Resources": []
+    },
+    {
+      "Name": "CreateDelegateMacVolumeOwnershipTask",
+      "Resources": [
+        "instance",
+        "mac-modification-task"
+      ]
+    },
+    {
+      "Name": "CreateDhcpOptions",
+      "Resources": [
+        "dhcp-options"
+      ]
+    },
+    {
+      "Name": "CreateEgressOnlyInternetGateway",
+      "Resources": [
+        "egress-only-internet-gateway",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateFleet",
+      "Resources": [
+        "fleet",
+        "image",
+        "instance",
+        "launch-template",
+        "placement-group",
+        "subnet",
+        "volume"
+      ]
+    },
+    {
+      "Name": "CreateFlowLogs",
+      "Resources": [
+        "natgateway",
+        "network-interface",
+        "subnet",
+        "transit-gateway",
+        "transit-gateway-attachment",
+        "vpc",
+        "vpc-flow-log"
+      ]
+    },
+    {
+      "Name": "CreateFpgaImage",
+      "Resources": [
+        "fpga-image"
+      ]
+    },
+    {
+      "Name": "CreateImage",
+      "Resources": [
+        "image",
+        "instance",
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "CreateImageUsageReport",
+      "Resources": [
+        "image",
+        "image-usage-report"
+      ]
+    },
+    {
+      "Name": "CreateInstanceConnectEndpoint",
+      "Resources": [
+        "instance-connect-endpoint",
+        "security-group",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "CreateInstanceEventWindow",
+      "Resources": [
+        "instance-event-window"
+      ]
+    },
+    {
+      "Name": "CreateInstanceExportTask",
+      "Resources": [
+        "export-instance-task",
+        "instance"
+      ]
+    },
+    {
+      "Name": "CreateInternetGateway",
+      "Resources": [
+        "internet-gateway"
+      ]
+    },
+    {
+      "Name": "CreateInterruptibleCapacityReservationAllocation",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "CreateIpam",
+      "Resources": [
+        "ipam"
+      ]
+    },
+    {
+      "Name": "CreateIpamExternalResourceVerificationToken",
+      "Resources": [
+        "ipam",
+        "ipam-external-resource-verification-token"
+      ]
+    },
+    {
+      "Name": "CreateIpamInternetRegistryAssociation",
+      "Resources": [
+        "ipam",
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "CreateIpamPolicy",
+      "Resources": [
+        "ipam",
+        "ipam-policy"
+      ]
+    },
+    {
+      "Name": "CreateIpamPool",
+      "Resources": [
+        "ipam-pool",
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "CreateIpamPrefixListResolver",
+      "Resources": [
+        "ipam",
+        "ipam-prefix-list-resolver",
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "CreateIpamPrefixListResolverTarget",
+      "Resources": [
+        "ipam-prefix-list-resolver",
+        "ipam-prefix-list-resolver-target"
+      ]
+    },
+    {
+      "Name": "CreateIpamResourceDiscovery",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "CreateIpamRoutingPolicyRegistration",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "CreateIpamScope",
+      "Resources": [
+        "ipam",
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "CreateKeyPair",
+      "Resources": [
+        "key-pair"
+      ]
+    },
+    {
+      "Name": "CreateLaunchTemplate",
+      "Resources": [
+        "launch-template"
+      ]
+    },
+    {
+      "Name": "CreateLaunchTemplateVersion",
+      "Resources": [
+        "launch-template"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayRoute",
+      "Resources": [
+        "local-gateway-route-table",
+        "local-gateway-virtual-interface-group",
+        "network-interface",
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayRouteTable",
+      "Resources": [
+        "local-gateway",
+        "local-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayRouteTablePermission",
+      "Resources": [
+        "local-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
+      "Resources": [
+        "local-gateway-route-table",
+        "local-gateway-route-table-virtual-interface-group-association",
+        "local-gateway-virtual-interface-group"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayRouteTableVpcAssociation",
+      "Resources": [
+        "local-gateway-route-table",
+        "local-gateway-route-table-vpc-association",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayVirtualInterface",
+      "Resources": [
+        "local-gateway-virtual-interface",
+        "local-gateway-virtual-interface-group",
+        "outpost-lag"
+      ]
+    },
+    {
+      "Name": "CreateLocalGatewayVirtualInterfaceGroup",
+      "Resources": [
+        "local-gateway",
+        "local-gateway-virtual-interface-group"
+      ]
+    },
+    {
+      "Name": "CreateMacSystemIntegrityProtectionModificationTask",
+      "Resources": [
+        "instance",
+        "mac-modification-task"
+      ]
+    },
+    {
+      "Name": "CreateManagedPrefixList",
+      "Resources": [
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "CreateNatGateway",
+      "Resources": [
+        "elastic-ip",
+        "natgateway",
+        "subnet",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateNetworkAcl",
+      "Resources": [
+        "network-acl",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateNetworkAclEntry",
+      "Resources": [
+        "network-acl"
+      ]
+    },
+    {
+      "Name": "CreateNetworkInsightsAccessScope",
+      "Resources": [
+        "network-insights-access-scope"
+      ]
+    },
+    {
+      "Name": "CreateNetworkInsightsPath",
+      "Resources": [
+        "instance",
+        "internet-gateway",
+        "network-insights-path",
+        "network-interface",
+        "transit-gateway",
+        "vpc-endpoint",
+        "vpc-endpoint-service",
+        "vpc-peering-connection",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "CreateNetworkInterface",
+      "Resources": [
+        "network-interface",
+        "security-group",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "CreateNetworkInterfacePermission",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "CreateOdbNetworkPeering",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreatePlacementGroup",
+      "Resources": [
+        "placement-group"
+      ]
+    },
+    {
+      "Name": "CreatePublicIpv4Pool",
+      "Resources": [
+        "ipv4pool-ec2"
+      ]
+    },
+    {
+      "Name": "CreateReplaceRootVolumeTask",
+      "Resources": [
+        "image",
+        "instance",
+        "replace-root-volume-task",
+        "snapshot",
+        "volume"
+      ]
+    },
+    {
+      "Name": "CreateReservedInstancesListing",
+      "Resources": []
+    },
+    {
+      "Name": "CreateRestoreImageTask",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "CreateRoute",
+      "Resources": [
+        "route-table"
+      ]
+    },
+    {
+      "Name": "CreateRouteServer",
+      "Resources": [
+        "route-server"
+      ]
+    },
+    {
+      "Name": "CreateRouteServerEndpoint",
+      "Resources": [
+        "route-server",
+        "route-server-endpoint",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "CreateRouteServerPeer",
+      "Resources": [
+        "route-server-endpoint",
+        "route-server-peer"
+      ]
+    },
+    {
+      "Name": "CreateRouteTable",
+      "Resources": [
+        "route-table",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateSecondaryNetwork",
+      "Resources": [
+        "secondary-network"
+      ]
+    },
+    {
+      "Name": "CreateSecondarySubnet",
+      "Resources": [
+        "secondary-network",
+        "secondary-subnet"
+      ]
+    },
+    {
+      "Name": "CreateSecurityGroup",
+      "Resources": [
+        "security-group",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateSnapshot",
+      "Resources": [
+        "snapshot",
+        "volume"
+      ]
+    },
+    {
+      "Name": "CreateSnapshots",
+      "Resources": [
+        "instance",
+        "snapshot",
+        "volume"
+      ]
+    },
+    {
+      "Name": "CreateSpotDatafeedSubscription",
+      "Resources": []
+    },
+    {
+      "Name": "CreateStoreImageTask",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "CreateSubnet",
+      "Resources": [
+        "ipam-pool",
+        "subnet",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateSubnetCidrReservation",
+      "Resources": [
+        "subnet"
+      ]
+    },
+    {
+      "Name": "CreateTags",
+      "Resources": [
+        "application-status-check",
+        "capacity-block",
+        "capacity-manager-data-export",
+        "capacity-reservation",
+        "capacity-reservation-cancellation-quote",
+        "capacity-reservation-fleet",
+        "carrier-gateway",
+        "client-vpn-endpoint",
+        "coip-pool",
+        "customer-gateway",
+        "declarative-policies-report",
+        "dedicated-host",
+        "dhcp-options",
+        "egress-only-internet-gateway",
+        "elastic-gpu",
+        "elastic-ip",
+        "export-image-task",
+        "export-instance-task",
+        "fleet",
+        "fpga-image",
+        "host-reservation",
+        "image",
+        "image-usage-report",
+        "import-image-task",
+        "import-snapshot-task",
+        "instance",
+        "instance-connect-endpoint",
+        "instance-event-window",
+        "internet-gateway",
+        "ipam",
+        "ipam-external-resource-verification-token",
+        "ipam-internet-registry-association",
+        "ipam-policy",
+        "ipam-pool",
+        "ipam-pool-allocation",
+        "ipam-prefix-list-resolver",
+        "ipam-prefix-list-resolver-target",
+        "ipam-resource-discovery",
+        "ipam-resource-discovery-association",
+        "ipam-scope",
+        "ipv4pool-ec2",
+        "ipv6pool-ec2",
+        "key-pair",
+        "launch-template",
+        "local-gateway",
+        "local-gateway-route-table",
+        "local-gateway-route-table-virtual-interface-group-association",
+        "local-gateway-route-table-vpc-association",
+        "local-gateway-virtual-interface",
+        "local-gateway-virtual-interface-group",
+        "natgateway",
+        "network-acl",
+        "network-insights-access-scope",
+        "network-insights-access-scope-analysis",
+        "network-insights-analysis",
+        "network-insights-path",
+        "network-interface",
+        "placement-group",
+        "prefix-list",
+        "replace-root-volume-task",
+        "reserved-instances",
+        "route-server",
+        "route-server-endpoint",
+        "route-server-peer",
+        "route-table",
+        "secondary-interface",
+        "secondary-network",
+        "secondary-subnet",
+        "security-group",
+        "security-group-rule",
+        "snapshot",
+        "spot-fleet-request",
+        "spot-instances-request",
+        "subnet",
+        "subnet-cidr-reservation",
+        "traffic-mirror-filter",
+        "traffic-mirror-filter-rule",
+        "traffic-mirror-session",
+        "traffic-mirror-target",
+        "transit-gateway",
+        "transit-gateway-attachment",
+        "transit-gateway-connect-peer",
+        "transit-gateway-metering-policy",
+        "transit-gateway-multicast-domain",
+        "transit-gateway-policy-table",
+        "transit-gateway-route-table",
+        "transit-gateway-route-table-announcement",
+        "verified-access-endpoint",
+        "verified-access-endpoint-target",
+        "verified-access-group",
+        "verified-access-instance",
+        "verified-access-policy",
+        "verified-access-trust-provider",
+        "volume",
+        "vpc",
+        "vpc-block-public-access-exclusion",
+        "vpc-encryption-control",
+        "vpc-endpoint",
+        "vpc-endpoint-connection",
+        "vpc-endpoint-service",
+        "vpc-endpoint-service-permission",
+        "vpc-flow-log",
+        "vpc-peering-connection",
+        "vpn-concentrator",
+        "vpn-connection",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "CreateTrafficMirrorFilter",
+      "Resources": [
+        "traffic-mirror-filter"
+      ]
+    },
+    {
+      "Name": "CreateTrafficMirrorFilterRule",
+      "Resources": [
+        "traffic-mirror-filter",
+        "traffic-mirror-filter-rule"
+      ]
+    },
+    {
+      "Name": "CreateTrafficMirrorSession",
+      "Resources": [
+        "network-interface",
+        "traffic-mirror-filter",
+        "traffic-mirror-session",
+        "traffic-mirror-target"
+      ]
+    },
+    {
+      "Name": "CreateTrafficMirrorTarget",
+      "Resources": [
+        "network-interface",
+        "traffic-mirror-target",
+        "vpc-endpoint"
+      ]
+    },
+    {
+      "Name": "CreateTransitGateway",
+      "Resources": [
+        "transit-gateway"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayConnect",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayConnectPeer",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-connect-peer"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayMeteringPolicy",
+      "Resources": [
+        "transit-gateway",
+        "transit-gateway-attachment",
+        "transit-gateway-metering-policy"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayMeteringPolicyEntry",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-metering-policy"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayMulticastDomain",
+      "Resources": [
+        "transit-gateway",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayPeeringAttachment",
+      "Resources": [
+        "transit-gateway",
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayPolicyTable",
+      "Resources": [
+        "transit-gateway",
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayPolicyTableEntry",
+      "Resources": [
+        "transit-gateway-policy-table",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayPrefixListReference",
+      "Resources": [
+        "prefix-list",
+        "transit-gateway-attachment",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayRoute",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayRouteTable",
+      "Resources": [
+        "transit-gateway",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayRouteTableAnnouncement",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table",
+        "transit-gateway-route-table-announcement"
+      ]
+    },
+    {
+      "Name": "CreateTransitGatewayVpcAttachment",
+      "Resources": [
+        "subnet",
+        "transit-gateway",
+        "transit-gateway-attachment",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateVerifiedAccessEndpoint",
+      "Resources": [
+        "network-interface",
+        "security-group",
+        "subnet",
+        "verified-access-endpoint",
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "CreateVerifiedAccessGroup",
+      "Resources": [
+        "verified-access-group",
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "CreateVerifiedAccessInstance",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "CreateVerifiedAccessTrustProvider",
+      "Resources": [
+        "verified-access-trust-provider"
+      ]
+    },
+    {
+      "Name": "CreateVolume",
+      "Resources": [
+        "snapshot",
+        "volume"
+      ]
+    },
+    {
+      "Name": "CreateVpc",
+      "Resources": [
+        "ipam-pool",
+        "ipv6pool-ec2",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "CreateVpcBlockPublicAccessExclusion",
+      "Resources": [
+        "subnet",
+        "vpc",
+        "vpc-block-public-access-exclusion"
+      ]
+    },
+    {
+      "Name": "CreateVpcEncryptionControl",
+      "Resources": [
+        "vpc",
+        "vpc-encryption-control"
+      ]
+    },
+    {
+      "Name": "CreateVpcEndpoint",
+      "Resources": [
+        "route-table",
+        "security-group",
+        "subnet",
+        "vpc",
+        "vpc-endpoint"
+      ]
+    },
+    {
+      "Name": "CreateVpcEndpointConnectionNotification",
+      "Resources": [
+        "vpc-endpoint",
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "CreateVpcEndpointServiceConfiguration",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "CreateVpcPeeringConnection",
+      "Resources": [
+        "vpc",
+        "vpc-peering-connection"
+      ]
+    },
+    {
+      "Name": "CreateVpnConcentrator",
+      "Resources": [
+        "transit-gateway",
+        "vpn-concentrator"
+      ]
+    },
+    {
+      "Name": "CreateVpnConnection",
+      "Resources": [
+        "customer-gateway",
+        "transit-gateway",
+        "transit-gateway-attachment",
+        "vpn-concentrator",
+        "vpn-connection",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "CreateVpnConnectionRoute",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "CreateVpnGateway",
+      "Resources": [
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteApplicationStatusCheck",
+      "Resources": [
+        "application-status-check"
+      ]
+    },
+    {
+      "Name": "DeleteCapacityManagerDataExport",
+      "Resources": [
+        "capacity-manager-data-export"
+      ]
+    },
+    {
+      "Name": "DeleteCarrierGateway",
+      "Resources": [
+        "carrier-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteClientVpnEndpoint",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "DeleteClientVpnRoute",
+      "Resources": [
+        "client-vpn-endpoint",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "DeleteCoipCidr",
+      "Resources": [
+        "coip-pool"
+      ]
+    },
+    {
+      "Name": "DeleteCoipPool",
+      "Resources": [
+        "coip-pool"
+      ]
+    },
+    {
+      "Name": "DeleteCoipPoolPermission",
+      "Resources": [
+        "coip-pool"
+      ]
+    },
+    {
+      "Name": "DeleteCustomerGateway",
+      "Resources": [
+        "customer-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteDhcpOptions",
+      "Resources": [
+        "dhcp-options"
+      ]
+    },
+    {
+      "Name": "DeleteEgressOnlyInternetGateway",
+      "Resources": [
+        "egress-only-internet-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteFleets",
+      "Resources": [
+        "fleet"
+      ]
+    },
+    {
+      "Name": "DeleteFlowLogs",
+      "Resources": [
+        "vpc-flow-log"
+      ]
+    },
+    {
+      "Name": "DeleteFpgaImage",
+      "Resources": [
+        "fpga-image"
+      ]
+    },
+    {
+      "Name": "DeleteImageUsageReport",
+      "Resources": [
+        "image-usage-report"
+      ]
+    },
+    {
+      "Name": "DeleteInstanceConnectEndpoint",
+      "Resources": [
+        "instance-connect-endpoint"
+      ]
+    },
+    {
+      "Name": "DeleteInstanceEventWindow",
+      "Resources": [
+        "instance-event-window"
+      ]
+    },
+    {
+      "Name": "DeleteInternetGateway",
+      "Resources": [
+        "internet-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteIpam",
+      "Resources": [
+        "ipam"
+      ]
+    },
+    {
+      "Name": "DeleteIpamExternalResourceVerificationToken",
+      "Resources": [
+        "ipam-external-resource-verification-token"
+      ]
+    },
+    {
+      "Name": "DeleteIpamInternetRegistryAssociation",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "DeleteIpamPolicy",
+      "Resources": [
+        "ipam-policy"
+      ]
+    },
+    {
+      "Name": "DeleteIpamPool",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "DeleteIpamPrefixListResolver",
+      "Resources": [
+        "ipam-prefix-list-resolver"
+      ]
+    },
+    {
+      "Name": "DeleteIpamPrefixListResolverTarget",
+      "Resources": [
+        "ipam-prefix-list-resolver-target"
+      ]
+    },
+    {
+      "Name": "DeleteIpamResourceDiscovery",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "DeleteIpamRoutingPolicyRegistration",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "DeleteIpamScope",
+      "Resources": [
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "DeleteKeyPair",
+      "Resources": [
+        "key-pair"
+      ]
+    },
+    {
+      "Name": "DeleteLaunchTemplate",
+      "Resources": [
+        "launch-template"
+      ]
+    },
+    {
+      "Name": "DeleteLaunchTemplateVersions",
+      "Resources": [
+        "launch-template"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayRoute",
+      "Resources": [
+        "local-gateway-route-table",
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayRouteTable",
+      "Resources": [
+        "local-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayRouteTablePermission",
+      "Resources": [
+        "local-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
+      "Resources": [
+        "local-gateway-route-table-virtual-interface-group-association"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayRouteTableVpcAssociation",
+      "Resources": [
+        "local-gateway-route-table-vpc-association"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayVirtualInterface",
+      "Resources": [
+        "local-gateway-virtual-interface"
+      ]
+    },
+    {
+      "Name": "DeleteLocalGatewayVirtualInterfaceGroup",
+      "Resources": [
+        "local-gateway-virtual-interface-group"
+      ]
+    },
+    {
+      "Name": "DeleteManagedPrefixList",
+      "Resources": [
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "DeleteNatGateway",
+      "Resources": [
+        "natgateway"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkAcl",
+      "Resources": [
+        "network-acl"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkAclEntry",
+      "Resources": [
+        "network-acl"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkInsightsAccessScope",
+      "Resources": [
+        "network-insights-access-scope"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkInsightsAccessScopeAnalysis",
+      "Resources": [
+        "network-insights-access-scope-analysis"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkInsightsAnalysis",
+      "Resources": [
+        "network-insights-analysis"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkInsightsPath",
+      "Resources": [
+        "network-insights-path"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkInterface",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "DeleteNetworkInterfacePermission",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "DeleteOdbNetworkPeering",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DeletePlacementGroup",
+      "Resources": [
+        "placement-group"
+      ]
+    },
+    {
+      "Name": "DeletePublicIpv4Pool",
+      "Resources": [
+        "ipv4pool-ec2"
+      ]
+    },
+    {
+      "Name": "DeleteQueuedReservedInstances",
+      "Resources": [
+        "reserved-instances"
+      ]
+    },
+    {
+      "Name": "DeleteResourcePolicy",
+      "Resources": [
+        "ipam-pool",
+        "placement-group",
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "DeleteRoute",
+      "Resources": [
+        "route-table"
+      ]
+    },
+    {
+      "Name": "DeleteRouteServer",
+      "Resources": [
+        "route-server"
+      ]
+    },
+    {
+      "Name": "DeleteRouteServerEndpoint",
+      "Resources": [
+        "route-server-endpoint"
+      ]
+    },
+    {
+      "Name": "DeleteRouteServerPeer",
+      "Resources": [
+        "route-server-peer"
+      ]
+    },
+    {
+      "Name": "DeleteRouteTable",
+      "Resources": [
+        "route-table"
+      ]
+    },
+    {
+      "Name": "DeleteSecondaryNetwork",
+      "Resources": [
+        "secondary-network"
+      ]
+    },
+    {
+      "Name": "DeleteSecondarySubnet",
+      "Resources": [
+        "secondary-subnet"
+      ]
+    },
+    {
+      "Name": "DeleteSecurityGroup",
+      "Resources": [
+        "security-group"
+      ]
+    },
+    {
+      "Name": "DeleteSnapshot",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "DeleteSpotDatafeedSubscription",
+      "Resources": []
+    },
+    {
+      "Name": "DeleteSubnet",
+      "Resources": [
+        "subnet"
+      ]
+    },
+    {
+      "Name": "DeleteSubnetCidrReservation",
+      "Resources": []
+    },
+    {
+      "Name": "DeleteTags",
+      "Resources": [
+        "application-status-check",
+        "capacity-block",
+        "capacity-manager-data-export",
+        "capacity-reservation",
+        "capacity-reservation-cancellation-quote",
+        "capacity-reservation-fleet",
+        "carrier-gateway",
+        "client-vpn-endpoint",
+        "coip-pool",
+        "customer-gateway",
+        "declarative-policies-report",
+        "dedicated-host",
+        "dhcp-options",
+        "egress-only-internet-gateway",
+        "elastic-gpu",
+        "elastic-ip",
+        "export-image-task",
+        "export-instance-task",
+        "fleet",
+        "fpga-image",
+        "host-reservation",
+        "image",
+        "image-usage-report",
+        "import-image-task",
+        "import-snapshot-task",
+        "instance",
+        "instance-connect-endpoint",
+        "instance-event-window",
+        "internet-gateway",
+        "ipam",
+        "ipam-external-resource-verification-token",
+        "ipam-internet-registry-association",
+        "ipam-policy",
+        "ipam-pool",
+        "ipam-pool-allocation",
+        "ipam-prefix-list-resolver",
+        "ipam-prefix-list-resolver-target",
+        "ipam-resource-discovery",
+        "ipam-resource-discovery-association",
+        "ipam-scope",
+        "ipv4pool-ec2",
+        "ipv6pool-ec2",
+        "key-pair",
+        "launch-template",
+        "local-gateway",
+        "local-gateway-route-table",
+        "local-gateway-route-table-virtual-interface-group-association",
+        "local-gateway-route-table-vpc-association",
+        "local-gateway-virtual-interface",
+        "local-gateway-virtual-interface-group",
+        "natgateway",
+        "network-acl",
+        "network-insights-access-scope",
+        "network-insights-access-scope-analysis",
+        "network-insights-analysis",
+        "network-insights-path",
+        "network-interface",
+        "placement-group",
+        "prefix-list",
+        "replace-root-volume-task",
+        "reserved-instances",
+        "route-server",
+        "route-server-endpoint",
+        "route-server-peer",
+        "route-table",
+        "secondary-interface",
+        "secondary-network",
+        "secondary-subnet",
+        "security-group",
+        "security-group-rule",
+        "snapshot",
+        "spot-fleet-request",
+        "spot-instances-request",
+        "subnet",
+        "subnet-cidr-reservation",
+        "traffic-mirror-filter",
+        "traffic-mirror-filter-rule",
+        "traffic-mirror-session",
+        "traffic-mirror-target",
+        "transit-gateway",
+        "transit-gateway-attachment",
+        "transit-gateway-connect-peer",
+        "transit-gateway-metering-policy",
+        "transit-gateway-multicast-domain",
+        "transit-gateway-policy-table",
+        "transit-gateway-route-table",
+        "transit-gateway-route-table-announcement",
+        "verified-access-endpoint",
+        "verified-access-endpoint-target",
+        "verified-access-group",
+        "verified-access-instance",
+        "verified-access-policy",
+        "verified-access-trust-provider",
+        "volume",
+        "vpc",
+        "vpc-block-public-access-exclusion",
+        "vpc-encryption-control",
+        "vpc-endpoint",
+        "vpc-endpoint-connection",
+        "vpc-endpoint-service",
+        "vpc-endpoint-service-permission",
+        "vpc-flow-log",
+        "vpc-peering-connection",
+        "vpn-concentrator",
+        "vpn-connection",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteTrafficMirrorFilter",
+      "Resources": [
+        "traffic-mirror-filter"
+      ]
+    },
+    {
+      "Name": "DeleteTrafficMirrorFilterRule",
+      "Resources": [
+        "traffic-mirror-filter",
+        "traffic-mirror-filter-rule"
+      ]
+    },
+    {
+      "Name": "DeleteTrafficMirrorSession",
+      "Resources": [
+        "traffic-mirror-session"
+      ]
+    },
+    {
+      "Name": "DeleteTrafficMirrorTarget",
+      "Resources": [
+        "traffic-mirror-target"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGateway",
+      "Resources": [
+        "transit-gateway"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayClientVpnAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayConnect",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayConnectPeer",
+      "Resources": [
+        "transit-gateway-connect-peer"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayMeteringPolicy",
+      "Resources": [
+        "transit-gateway-metering-policy"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayMeteringPolicyEntry",
+      "Resources": [
+        "transit-gateway-metering-policy"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayMulticastDomain",
+      "Resources": [
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayPeeringAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayPolicyTable",
+      "Resources": [
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayPolicyTableEntry",
+      "Resources": [
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayPrefixListReference",
+      "Resources": [
+        "prefix-list",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayRoute",
+      "Resources": [
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayRouteTable",
+      "Resources": [
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayRouteTableAnnouncement",
+      "Resources": [
+        "transit-gateway-route-table-announcement"
+      ]
+    },
+    {
+      "Name": "DeleteTransitGatewayVpcAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "DeleteVerifiedAccessEndpoint",
+      "Resources": [
+        "verified-access-endpoint"
+      ]
+    },
+    {
+      "Name": "DeleteVerifiedAccessGroup",
+      "Resources": [
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "DeleteVerifiedAccessInstance",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "DeleteVerifiedAccessTrustProvider",
+      "Resources": [
+        "verified-access-trust-provider"
+      ]
+    },
+    {
+      "Name": "DeleteVolume",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "DeleteVpc",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DeleteVpcBlockPublicAccessExclusion",
+      "Resources": [
+        "vpc-block-public-access-exclusion"
+      ]
+    },
+    {
+      "Name": "DeleteVpcEncryptionControl",
+      "Resources": [
+        "vpc-encryption-control"
+      ]
+    },
+    {
+      "Name": "DeleteVpcEndpointConnectionNotifications",
+      "Resources": [
+        "vpc-endpoint",
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "DeleteVpcEndpointServiceConfigurations",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "DeleteVpcEndpoints",
+      "Resources": [
+        "vpc-endpoint"
+      ]
+    },
+    {
+      "Name": "DeleteVpcPeeringConnection",
+      "Resources": [
+        "vpc-peering-connection"
+      ]
+    },
+    {
+      "Name": "DeleteVpnConcentrator",
+      "Resources": [
+        "vpn-concentrator"
+      ]
+    },
+    {
+      "Name": "DeleteVpnConnection",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "DeleteVpnConnectionRoute",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "DeleteVpnGateway",
+      "Resources": [
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "DeprovisionByoipCidr",
+      "Resources": []
+    },
+    {
+      "Name": "DeprovisionIpamByoasn",
+      "Resources": [
+        "ipam"
+      ]
+    },
+    {
+      "Name": "DeprovisionIpamPoolCidr",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "DeprovisionPublicIpv4PoolCidr",
+      "Resources": [
+        "ipv4pool-ec2"
+      ]
+    },
+    {
+      "Name": "DeregisterImage",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DeregisterInstanceEventNotificationAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "DeregisterTransitGatewayMulticastGroupMembers",
+      "Resources": [
+        "network-interface",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "DeregisterTransitGatewayMulticastGroupSources",
+      "Resources": [
+        "network-interface",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "DescribeAccountAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAccountVpcEncryptionControl",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAddressTransfers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAddresses",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAddressesAttribute",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAggregateIdFormat",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeApplicationStatus",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeApplicationStatusCheckAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeApplicationStatusChecks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAvailabilityZones",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAwsNetworkPerformanceMetricSubscriptions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeBundleTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeByoipCidrs",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityBlockExtensionHistory",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityBlockExtensionOfferings",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "DescribeCapacityBlockOfferings",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityBlockStatus",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityBlocks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityManagerDataExports",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityReservationBillingRequests",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityReservationCancellationQuotes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityReservationFleets",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityReservationTopology",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityReservations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCarrierGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeClassicLinkInstances",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeClientVpnAuthorizationRules",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "DescribeClientVpnConnections",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "DescribeClientVpnEndpoints",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeClientVpnRoutes",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "DescribeClientVpnTargetNetworks",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "DescribeCoipPools",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeConversionTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCustomerGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeDeclarativePoliciesReports",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeDhcpOptions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeEgressOnlyInternetGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeElasticGpus",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeExportImageTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeExportTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeFastLaunchImages",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeFastSnapshotRestores",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeFleetHistory",
+      "Resources": [
+        "fleet"
+      ]
+    },
+    {
+      "Name": "DescribeFleetInstances",
+      "Resources": [
+        "fleet"
+      ]
+    },
+    {
+      "Name": "DescribeFleets",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeFlowLogs",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeFpgaImageAttribute",
+      "Resources": [
+        "fpga-image"
+      ]
+    },
+    {
+      "Name": "DescribeFpgaImages",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeHostReservationOfferings",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeHostReservations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeHosts",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIamInstanceProfileAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIdFormat",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIdentityIdFormat",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeImageAttribute",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DescribeImageReferences",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeImageUsageReportEntries",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeImageUsageReports",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeImages",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeImportImageTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeImportSnapshotTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceAttribute",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "DescribeInstanceConnectEndpoints",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceCreditSpecifications",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceEventNotificationAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceEventWindows",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceImageMetadata",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceSqlHaHistoryStates",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceSqlHaStates",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceStatus",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceTopology",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceTypeOfferings",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstances",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInternetGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamByoasn",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamExternalResourceVerificationTokens",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamInternetRegistryAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamPolicies",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamPoolAllocations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamPools",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamPrefixListResolverTargets",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamPrefixListResolvers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamResourceDiscoveries",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamResourceDiscoveryAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpamScopes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpams",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeIpv6Pools",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeKeyPairs",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLaunchTemplateVersions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLaunchTemplates",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGatewayRouteTablePermissions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGatewayRouteTableVirtualInterfaceGroupAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGatewayRouteTableVpcAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGatewayRouteTables",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGatewayVirtualInterfaceGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGatewayVirtualInterfaces",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLocalGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLockedSnapshots",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeMacHosts",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeMacModificationTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeManagedPrefixLists",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeMovingAddresses",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNatGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkAcls",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInsightsAccessScopeAnalyses",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInsightsAccessScopes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInsightsAnalyses",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInsightsPaths",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInterfaceAttribute",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInterfacePermissions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNetworkInterfaces",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeOutpostLags",
+      "Resources": []
+    },
+    {
+      "Name": "DescribePlacementGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribePrefixLists",
+      "Resources": []
+    },
+    {
+      "Name": "DescribePrincipalIdFormat",
+      "Resources": []
+    },
+    {
+      "Name": "DescribePublicIpv4Pools",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeRegions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeReplaceRootVolumeTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeReservedInstances",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeReservedInstancesListings",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeReservedInstancesModifications",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeReservedInstancesOfferings",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeRouteServerEndpoints",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeRouteServerPeers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeRouteServers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeRouteTables",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeScheduledInstanceAvailability",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeScheduledInstances",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSecondaryInterfaces",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSecondaryNetworks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSecondarySubnets",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSecurityGroupReferences",
+      "Resources": [
+        "security-group"
+      ]
+    },
+    {
+      "Name": "DescribeSecurityGroupRules",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSecurityGroupVpcAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSecurityGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeServiceLinkVirtualInterfaces",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSnapshotAttribute",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "DescribeSnapshotTierStatus",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSnapshots",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSpotDatafeedSubscription",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSpotFleetInstances",
+      "Resources": [
+        "spot-fleet-request"
+      ]
+    },
+    {
+      "Name": "DescribeSpotFleetRequestHistory",
+      "Resources": [
+        "spot-fleet-request"
+      ]
+    },
+    {
+      "Name": "DescribeSpotFleetRequests",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSpotInstanceRequests",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSpotPriceHistory",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeStaleSecurityGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeStoreImageTasks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSubnets",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTags",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrafficMirrorFilterRules",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrafficMirrorFilters",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrafficMirrorSessions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrafficMirrorTargets",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayAttachments",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayConnectPeers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayConnects",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayMeteringPolicies",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayMulticastDomains",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayPeeringAttachments",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayPolicyTables",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayRouteTableAnnouncements",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayRouteTables",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGatewayVpcAttachments",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTransitGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrunkInterfaceAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVerifiedAccessEndpoints",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVerifiedAccessGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVerifiedAccessInstanceLoggingConfigurations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVerifiedAccessInstanceWebAclAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVerifiedAccessInstances",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVerifiedAccessTrustProviders",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVolumeAttribute",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "DescribeVolumeStatus",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVolumes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVolumesModifications",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcAttribute",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DescribeVpcBlockPublicAccessExclusions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcBlockPublicAccessOptions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcClassicLink",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcClassicLinkDnsSupport",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEncryptionControls",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEndpointAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEndpointConnectionNotifications",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEndpointConnections",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEndpointServiceConfigurations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEndpointServicePermissions",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "DescribeVpcEndpointServices",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcEndpoints",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcPeeringConnections",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpcs",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpnConcentrators",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpnConnections",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeVpnGateways",
+      "Resources": []
+    },
+    {
+      "Name": "DetachApplianceFromNatGateway",
+      "Resources": [
+        "natgateway"
+      ]
+    },
+    {
+      "Name": "DetachClassicLinkVpc",
+      "Resources": [
+        "instance",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DetachImageWatermark",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DetachInternetGateway",
+      "Resources": [
+        "internet-gateway",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DetachNetworkInterface",
+      "Resources": [
+        "instance",
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "DetachResourcesFromPlacementGroup",
+      "Resources": [
+        "placement-group"
+      ]
+    },
+    {
+      "Name": "DetachVerifiedAccessTrustProvider",
+      "Resources": [
+        "verified-access-instance",
+        "verified-access-trust-provider"
+      ]
+    },
+    {
+      "Name": "DetachVolume",
+      "Resources": [
+        "instance",
+        "volume"
+      ]
+    },
+    {
+      "Name": "DetachVpnGateway",
+      "Resources": [
+        "vpc",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "DisableAddressTransfer",
+      "Resources": [
+        "elastic-ip"
+      ]
+    },
+    {
+      "Name": "DisableAllowedImagesSettings",
+      "Resources": []
+    },
+    {
+      "Name": "DisableApplicationStatusCheckSuppression",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "DisableAwsNetworkPerformanceMetricSubscription",
+      "Resources": []
+    },
+    {
+      "Name": "DisableCapacityManager",
+      "Resources": []
+    },
+    {
+      "Name": "DisableEbsEncryptionByDefault",
+      "Resources": []
+    },
+    {
+      "Name": "DisableFastLaunch",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DisableFastSnapshotRestores",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "DisableImage",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DisableImageBlockPublicAccess",
+      "Resources": []
+    },
+    {
+      "Name": "DisableImageDeprecation",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DisableImageDeregistrationProtection",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "DisableInstanceSqlHaStandbyDetections",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "DisableIpamOrganizationAdminAccount",
+      "Resources": []
+    },
+    {
+      "Name": "DisableIpamPolicy",
+      "Resources": [
+        "ipam-policy"
+      ]
+    },
+    {
+      "Name": "DisableRouteServerPropagation",
+      "Resources": [
+        "route-server",
+        "route-table"
+      ]
+    },
+    {
+      "Name": "DisableSerialConsoleAccess",
+      "Resources": []
+    },
+    {
+      "Name": "DisableSnapshotBlockPublicAccess",
+      "Resources": []
+    },
+    {
+      "Name": "DisableTransitGatewayRouteTablePropagation",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table",
+        "transit-gateway-route-table-announcement"
+      ]
+    },
+    {
+      "Name": "DisableVgwRoutePropagation",
+      "Resources": [
+        "route-table",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "DisableVpcClassicLink",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DisableVpcClassicLinkDnsSupport",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DisassociateAddress",
+      "Resources": [
+        "elastic-ip",
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "DisassociateApplicationStatusCheck",
+      "Resources": [
+        "application-status-check",
+        "instance"
+      ]
+    },
+    {
+      "Name": "DisassociateCapacityReservationBillingOwner",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "DisassociateClientVpnTargetNetwork",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "DisassociateEnclaveCertificateIamRole",
+      "Resources": [
+        "certificate",
+        "role"
+      ]
+    },
+    {
+      "Name": "DisassociateIamInstanceProfile",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "DisassociateInstanceEventWindow",
+      "Resources": [
+        "instance-event-window"
+      ]
+    },
+    {
+      "Name": "DisassociateIpamByoasn",
+      "Resources": []
+    },
+    {
+      "Name": "DisassociateIpamResourceDiscovery",
+      "Resources": [
+        "ipam-resource-discovery-association"
+      ]
+    },
+    {
+      "Name": "DisassociateNatGatewayAddress",
+      "Resources": [
+        "elastic-ip",
+        "natgateway",
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "DisassociateRouteServer",
+      "Resources": [
+        "route-server",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DisassociateRouteTable",
+      "Resources": [
+        "internet-gateway",
+        "ipv4pool-ec2",
+        "ipv6pool-ec2",
+        "route-table",
+        "subnet",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "DisassociateSecurityGroupVpc",
+      "Resources": [
+        "security-group",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "DisassociateSubnetCidrBlock",
+      "Resources": [
+        "subnet"
+      ]
+    },
+    {
+      "Name": "DisassociateTransitGatewayMulticastDomain",
+      "Resources": [
+        "subnet",
+        "transit-gateway-attachment",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "DisassociateTransitGatewayPolicyTable",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "DisassociateTransitGatewayRouteTable",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "DisassociateTrunkInterface",
+      "Resources": []
+    },
+    {
+      "Name": "DisassociateVerifiedAccessInstanceWebAcl",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "DisassociateVpcCidrBlock",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "EnableAddressTransfer",
+      "Resources": [
+        "elastic-ip"
+      ]
+    },
+    {
+      "Name": "EnableAllowedImagesSettings",
+      "Resources": []
+    },
+    {
+      "Name": "EnableApplicationStatusCheckSuppression",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "EnableAwsNetworkPerformanceMetricSubscription",
+      "Resources": []
+    },
+    {
+      "Name": "EnableCapacityManager",
+      "Resources": []
+    },
+    {
+      "Name": "EnableEbsEncryptionByDefault",
+      "Resources": []
+    },
+    {
+      "Name": "EnableFastLaunch",
+      "Resources": [
+        "image",
+        "launch-template"
+      ]
+    },
+    {
+      "Name": "EnableFastSnapshotRestores",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "EnableImage",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "EnableImageBlockPublicAccess",
+      "Resources": []
+    },
+    {
+      "Name": "EnableImageDeprecation",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "EnableImageDeregistrationProtection",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "EnableInstanceSqlHaStandbyDetections",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "EnableIpamInternetRegistryAssociation",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "EnableIpamOrganizationAdminAccount",
+      "Resources": []
+    },
+    {
+      "Name": "EnableIpamPolicy",
+      "Resources": [
+        "ipam-policy"
+      ]
+    },
+    {
+      "Name": "EnableReachabilityAnalyzerOrganizationSharing",
+      "Resources": []
+    },
+    {
+      "Name": "EnableRouteServerPropagation",
+      "Resources": [
+        "route-server",
+        "route-table"
+      ]
+    },
+    {
+      "Name": "EnableSerialConsoleAccess",
+      "Resources": []
+    },
+    {
+      "Name": "EnableSnapshotBlockPublicAccess",
+      "Resources": []
+    },
+    {
+      "Name": "EnableTransitGatewayRouteTablePropagation",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table",
+        "transit-gateway-route-table-announcement"
+      ]
+    },
+    {
+      "Name": "EnableVgwRoutePropagation",
+      "Resources": [
+        "route-table",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "EnableVolumeIO",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "EnableVpcClassicLink",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "EnableVpcClassicLinkDnsSupport",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "ExportClientVpnClientCertificateRevocationList",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "ExportClientVpnClientConfiguration",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "ExportImage",
+      "Resources": [
+        "export-image-task",
+        "image"
+      ]
+    },
+    {
+      "Name": "ExportTransitGatewayRoutes",
+      "Resources": []
+    },
+    {
+      "Name": "ExportVerifiedAccessInstanceClientConfiguration",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "GetActiveVpnTunnelStatus",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "GetAllowedImagesSettings",
+      "Resources": []
+    },
+    {
+      "Name": "GetAssociatedEnclaveCertificateIamRoles",
+      "Resources": [
+        "certificate"
+      ]
+    },
+    {
+      "Name": "GetAssociatedIpv6PoolCidrs",
+      "Resources": [
+        "ipv6pool-ec2"
+      ]
+    },
+    {
+      "Name": "GetAwsNetworkPerformanceData",
+      "Resources": []
+    },
+    {
+      "Name": "GetCapacityManagerAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "GetCapacityManagerMetricData",
+      "Resources": []
+    },
+    {
+      "Name": "GetCapacityManagerMetricDimensions",
+      "Resources": []
+    },
+    {
+      "Name": "GetCapacityManagerMonitoredTagKeys",
+      "Resources": []
+    },
+    {
+      "Name": "GetCapacityReservationUsage",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "GetCoipPoolUsage",
+      "Resources": [
+        "coip-pool"
+      ]
+    },
+    {
+      "Name": "GetConsoleOutput",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "GetConsoleScreenshot",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "GetDeclarativePoliciesReportSummary",
+      "Resources": [
+        "declarative-policies-report"
+      ]
+    },
+    {
+      "Name": "GetDefaultCreditSpecification",
+      "Resources": []
+    },
+    {
+      "Name": "GetEbsDefaultKmsKeyId",
+      "Resources": []
+    },
+    {
+      "Name": "GetEbsEncryptionByDefault",
+      "Resources": []
+    },
+    {
+      "Name": "GetEnabledIpamPolicy",
+      "Resources": []
+    },
+    {
+      "Name": "GetFlowLogsIntegrationTemplate",
+      "Resources": [
+        "vpc-flow-log"
+      ]
+    },
+    {
+      "Name": "GetGroupsForCapacityReservation",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "GetHostReservationPurchasePreview",
+      "Resources": []
+    },
+    {
+      "Name": "GetImageAncestry",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "GetImageBlockPublicAccessState",
+      "Resources": []
+    },
+    {
+      "Name": "GetInstanceMetadataDefaults",
+      "Resources": []
+    },
+    {
+      "Name": "GetInstanceTpmEkPub",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "GetInstanceTypesFromInstanceRequirements",
+      "Resources": []
+    },
+    {
+      "Name": "GetInstanceUefiData",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "GetIpamAddressHistory",
+      "Resources": [
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "GetIpamDiscoveredAccounts",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "GetIpamDiscoveredPublicAddresses",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "GetIpamDiscoveredResourceCidrs",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "GetIpamDiscoveredRoutes",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "GetIpamInternetRegistryAssociationAsns",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "GetIpamInternetRegistryAssociationCidrs",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "GetIpamPolicyAllocationRules",
+      "Resources": [
+        "ipam-policy"
+      ]
+    },
+    {
+      "Name": "GetIpamPolicyOrganizationTargets",
+      "Resources": [
+        "ipam-policy"
+      ]
+    },
+    {
+      "Name": "GetIpamPoolAllocations",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "GetIpamPoolCidrs",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "GetIpamPrefixListResolverRules",
+      "Resources": [
+        "ipam-prefix-list-resolver"
+      ]
+    },
+    {
+      "Name": "GetIpamPrefixListResolverVersionEntries",
+      "Resources": [
+        "ipam-prefix-list-resolver"
+      ]
+    },
+    {
+      "Name": "GetIpamPrefixListResolverVersions",
+      "Resources": [
+        "ipam-prefix-list-resolver"
+      ]
+    },
+    {
+      "Name": "GetIpamResourceCidrs",
+      "Resources": [
+        "ipam-pool",
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "GetIpamRouteOriginAuthorizations",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "GetIpamRouteProtectionFindings",
+      "Resources": [
+        "ipam"
+      ]
+    },
+    {
+      "Name": "GetIpamRoutingPolicyRegistrationDeltas",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "GetIpamRoutingPolicyRegistrations",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "GetLaunchTemplateData",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "GetManagedPrefixListAssociations",
+      "Resources": [
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "GetManagedPrefixListEntries",
+      "Resources": [
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "GetManagedResourceVisibility",
+      "Resources": []
+    },
+    {
+      "Name": "GetNetworkInsightsAccessScopeAnalysisFindings",
+      "Resources": [
+        "network-insights-access-scope-analysis"
+      ]
+    },
+    {
+      "Name": "GetNetworkInsightsAccessScopeContent",
+      "Resources": [
+        "network-insights-access-scope"
+      ]
+    },
+    {
+      "Name": "GetPasswordData",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "GetReservedInstancesExchangeQuote",
+      "Resources": [
+        "reserved-instances"
+      ]
+    },
+    {
+      "Name": "GetResourcePolicy",
+      "Resources": [
+        "ipam-pool",
+        "placement-group",
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "GetRouteServerAssociations",
+      "Resources": [
+        "route-server"
+      ]
+    },
+    {
+      "Name": "GetRouteServerPropagations",
+      "Resources": [
+        "route-server",
+        "route-table"
+      ]
+    },
+    {
+      "Name": "GetRouteServerRoutingDatabase",
+      "Resources": [
+        "route-server"
+      ]
+    },
+    {
+      "Name": "GetSecurityGroupsForVpc",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "GetSerialConsoleAccessStatus",
+      "Resources": []
+    },
+    {
+      "Name": "GetSnapshotBlockPublicAccessState",
+      "Resources": []
+    },
+    {
+      "Name": "GetSpotPlacementScores",
+      "Resources": []
+    },
+    {
+      "Name": "GetSubnetCidrReservations",
+      "Resources": []
+    },
+    {
+      "Name": "GetTransitGatewayAttachmentPropagations",
+      "Resources": []
+    },
+    {
+      "Name": "GetTransitGatewayMeteringPolicyEntries",
+      "Resources": [
+        "transit-gateway-metering-policy"
+      ]
+    },
+    {
+      "Name": "GetTransitGatewayMulticastDomainAssociations",
+      "Resources": [
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "GetTransitGatewayPolicyTableAssociations",
+      "Resources": [
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "GetTransitGatewayPolicyTableEntries",
+      "Resources": [
+        "transit-gateway-policy-table"
+      ]
+    },
+    {
+      "Name": "GetTransitGatewayPrefixListReferences",
+      "Resources": []
+    },
+    {
+      "Name": "GetTransitGatewayRouteTableAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "GetTransitGatewayRouteTablePropagations",
+      "Resources": []
+    },
+    {
+      "Name": "GetVerifiedAccessEndpointPolicy",
+      "Resources": [
+        "verified-access-endpoint"
+      ]
+    },
+    {
+      "Name": "GetVerifiedAccessEndpointTargets",
+      "Resources": [
+        "verified-access-endpoint"
+      ]
+    },
+    {
+      "Name": "GetVerifiedAccessGroupPolicy",
+      "Resources": [
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "GetVerifiedAccessInstanceWebAcl",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "GetVpcResourcesBlockingEncryptionEnforcement",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "GetVpnConnectionDeviceSampleConfiguration",
+      "Resources": [
+        "vpn-connection",
+        "vpn-connection-device-type"
+      ]
+    },
+    {
+      "Name": "GetVpnConnectionDeviceTypes",
+      "Resources": []
+    },
+    {
+      "Name": "GetVpnTunnelReplacementStatus",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "ImportByoipCidrToIpam",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "ImportClientVpnClientCertificateRevocationList",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "ImportImage",
+      "Resources": [
+        "image",
+        "import-image-task",
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "ImportInstance",
+      "Resources": [
+        "instance",
+        "security-group",
+        "subnet",
+        "volume"
+      ]
+    },
+    {
+      "Name": "ImportKeyPair",
+      "Resources": [
+        "key-pair"
+      ]
+    },
+    {
+      "Name": "ImportSnapshot",
+      "Resources": [
+        "import-snapshot-task",
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "ImportVolume",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "InjectApiError",
+      "Resources": []
+    },
+    {
+      "Name": "InjectVolumeIOLatency",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "ListImagesInRecycleBin",
+      "Resources": []
+    },
+    {
+      "Name": "ListSnapshotsInRecycleBin",
+      "Resources": []
+    },
+    {
+      "Name": "ListVolumesInRecycleBin",
+      "Resources": []
+    },
+    {
+      "Name": "LockSnapshot",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "ModifyAccountVpcEncryptionControl",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyAddressAttribute",
+      "Resources": [
+        "elastic-ip"
+      ]
+    },
+    {
+      "Name": "ModifyApplicationStatusCheck",
+      "Resources": [
+        "application-status-check",
+        "security-group",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ModifyAvailabilityZoneGroup",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyCapacityReservation",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "ModifyCapacityReservationFleet",
+      "Resources": [
+        "capacity-reservation-fleet"
+      ]
+    },
+    {
+      "Name": "ModifyClientVpnEndpoint",
+      "Resources": [
+        "client-vpn-endpoint",
+        "security-group",
+        "transit-gateway",
+        "vpc"
+      ]
+    },
+    {
+      "Name": "ModifyDefaultCreditSpecification",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyEbsDefaultKmsKeyId",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyFleet",
+      "Resources": [
+        "fleet",
+        "image",
+        "launch-template",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ModifyFpgaImageAttribute",
+      "Resources": [
+        "fpga-image"
+      ]
+    },
+    {
+      "Name": "ModifyHosts",
+      "Resources": [
+        "dedicated-host"
+      ]
+    },
+    {
+      "Name": "ModifyIdFormat",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyIdentityIdFormat",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyImageAttribute",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceAttribute",
+      "Resources": [
+        "instance",
+        "security-group",
+        "volume"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceCapacityReservationAttributes",
+      "Resources": [
+        "capacity-reservation",
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceConnectEndpoint",
+      "Resources": [
+        "instance-connect-endpoint",
+        "security-group"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceCpuOptions",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceCreditSpecification",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceEventStartTime",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceEventWindow",
+      "Resources": [
+        "instance-event-window"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceMaintenanceOptions",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceMetadataDefaults",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyInstanceMetadataOptions",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstanceNetworkPerformanceOptions",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyInstancePlacement",
+      "Resources": [
+        "dedicated-host",
+        "instance",
+        "placement-group"
+      ]
+    },
+    {
+      "Name": "ModifyIpam",
+      "Resources": [
+        "ipam"
+      ]
+    },
+    {
+      "Name": "ModifyIpamPolicyAllocationRules",
+      "Resources": [
+        "ipam-policy",
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "ModifyIpamPool",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "ModifyIpamPoolAllocation",
+      "Resources": [
+        "ipam-pool-allocation"
+      ]
+    },
+    {
+      "Name": "ModifyIpamPrefixListResolver",
+      "Resources": [
+        "ipam-prefix-list-resolver",
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "ModifyIpamPrefixListResolverTarget",
+      "Resources": [
+        "ipam-prefix-list-resolver-target"
+      ]
+    },
+    {
+      "Name": "ModifyIpamResourceCidr",
+      "Resources": [
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "ModifyIpamResourceDiscovery",
+      "Resources": [
+        "ipam-resource-discovery"
+      ]
+    },
+    {
+      "Name": "ModifyIpamRoutingPolicyRegistration",
+      "Resources": [
+        "ipam-internet-registry-association"
+      ]
+    },
+    {
+      "Name": "ModifyIpamScope",
+      "Resources": [
+        "ipam-scope"
+      ]
+    },
+    {
+      "Name": "ModifyLaunchTemplate",
+      "Resources": [
+        "launch-template"
+      ]
+    },
+    {
+      "Name": "ModifyLocalGatewayRoute",
+      "Resources": [
+        "local-gateway-route-table",
+        "local-gateway-virtual-interface-group",
+        "network-interface",
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "ModifyManagedPrefixList",
+      "Resources": [
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "ModifyManagedResourceVisibility",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyNetworkInterfaceAttribute",
+      "Resources": [
+        "instance",
+        "network-interface",
+        "security-group",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ModifyOdbNetworkPeering",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "ModifyPrivateDnsNameOptions",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ModifyPublicIpDnsNameOptions",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "ModifyReservedInstances",
+      "Resources": [
+        "reserved-instances"
+      ]
+    },
+    {
+      "Name": "ModifyRouteServer",
+      "Resources": [
+        "route-server"
+      ]
+    },
+    {
+      "Name": "ModifySecurityGroupRules",
+      "Resources": [
+        "prefix-list",
+        "security-group",
+        "security-group-rule"
+      ]
+    },
+    {
+      "Name": "ModifySnapshotAttribute",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "ModifySnapshotTier",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "ModifySpotFleetRequest",
+      "Resources": [
+        "launch-template",
+        "spot-fleet-request",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ModifySubnetAttribute",
+      "Resources": [
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ModifyTrafficMirrorFilterNetworkServices",
+      "Resources": [
+        "traffic-mirror-filter"
+      ]
+    },
+    {
+      "Name": "ModifyTrafficMirrorFilterRule",
+      "Resources": [
+        "traffic-mirror-filter",
+        "traffic-mirror-filter-rule"
+      ]
+    },
+    {
+      "Name": "ModifyTrafficMirrorSession",
+      "Resources": [
+        "traffic-mirror-filter",
+        "traffic-mirror-session",
+        "traffic-mirror-target"
+      ]
+    },
+    {
+      "Name": "ModifyTransitGateway",
+      "Resources": [
+        "transit-gateway",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "ModifyTransitGatewayMeteringPolicy",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-metering-policy"
+      ]
+    },
+    {
+      "Name": "ModifyTransitGatewayPolicyTableEntry",
+      "Resources": [
+        "transit-gateway-policy-table",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "ModifyTransitGatewayPrefixListReference",
+      "Resources": [
+        "prefix-list",
+        "transit-gateway-attachment",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "ModifyTransitGatewayVpcAttachment",
+      "Resources": [
+        "subnet",
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessEndpoint",
+      "Resources": [
+        "subnet",
+        "verified-access-endpoint",
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessEndpointPolicy",
+      "Resources": [
+        "verified-access-endpoint"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessGroup",
+      "Resources": [
+        "verified-access-group",
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessGroupPolicy",
+      "Resources": [
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessInstance",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessInstanceLoggingConfiguration",
+      "Resources": [
+        "verified-access-instance"
+      ]
+    },
+    {
+      "Name": "ModifyVerifiedAccessTrustProvider",
+      "Resources": [
+        "verified-access-trust-provider"
+      ]
+    },
+    {
+      "Name": "ModifyVolume",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "ModifyVolumeAttribute",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "ModifyVpcAttribute",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "ModifyVpcBlockPublicAccessExclusion",
+      "Resources": [
+        "vpc-block-public-access-exclusion"
+      ]
+    },
+    {
+      "Name": "ModifyVpcBlockPublicAccessOptions",
+      "Resources": []
+    },
+    {
+      "Name": "ModifyVpcEncryptionControl",
+      "Resources": [
+        "vpc-encryption-control"
+      ]
+    },
+    {
+      "Name": "ModifyVpcEndpoint",
+      "Resources": [
+        "route-table",
+        "security-group",
+        "subnet",
+        "vpc-endpoint"
+      ]
+    },
+    {
+      "Name": "ModifyVpcEndpointConnectionNotification",
+      "Resources": [
+        "vpc-endpoint",
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "ModifyVpcEndpointPayerResponsibility",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "ModifyVpcEndpointServiceConfiguration",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "ModifyVpcEndpointServicePayerResponsibility",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "ModifyVpcEndpointServicePermissions",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "ModifyVpcPeeringConnectionOptions",
+      "Resources": [
+        "vpc-peering-connection"
+      ]
+    },
+    {
+      "Name": "ModifyVpcTenancy",
+      "Resources": [
+        "vpc"
+      ]
+    },
+    {
+      "Name": "ModifyVpnConnection",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "ModifyVpnConnectionOptions",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "ModifyVpnTunnelCertificate",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "ModifyVpnTunnelOptions",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "MonitorInstances",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "MoveAddressToVpc",
+      "Resources": []
+    },
+    {
+      "Name": "MoveByoipCidrToIpam",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "MoveCapacityReservationInstances",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "PauseVolumeIO",
+      "Resources": [
+        "instance",
+        "volume"
+      ]
+    },
+    {
+      "Name": "ProvisionByoipCidr",
+      "Resources": []
+    },
+    {
+      "Name": "ProvisionIpamByoasn",
+      "Resources": [
+        "ipam"
+      ]
+    },
+    {
+      "Name": "ProvisionIpamPoolCidr",
+      "Resources": [
+        "ipam-external-resource-verification-token",
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "ProvisionPublicIpv4PoolCidr",
+      "Resources": [
+        "ipam-pool",
+        "ipv4pool-ec2"
+      ]
+    },
+    {
+      "Name": "PurchaseCapacityBlock",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "PurchaseCapacityBlockExtension",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "PurchaseHostReservation",
+      "Resources": [
+        "dedicated-host"
+      ]
+    },
+    {
+      "Name": "PurchaseReservedInstancesOffering",
+      "Resources": []
+    },
+    {
+      "Name": "PurchaseScheduledInstances",
+      "Resources": []
+    },
+    {
+      "Name": "PutResourcePolicy",
+      "Resources": [
+        "ipam-pool",
+        "placement-group",
+        "verified-access-group"
+      ]
+    },
+    {
+      "Name": "RebootInstances",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "RegisterImage",
+      "Resources": [
+        "image",
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "RegisterInstanceEventNotificationAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "RegisterTransitGatewayMulticastGroupMembers",
+      "Resources": [
+        "network-interface",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "RegisterTransitGatewayMulticastGroupSources",
+      "Resources": [
+        "network-interface",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "RejectCapacityReservationBillingOwnership",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "RejectTransitGatewayClientVpnAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "RejectTransitGatewayMulticastDomainAssociations",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "RejectTransitGatewayPeeringAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "RejectTransitGatewayVpcAttachment",
+      "Resources": [
+        "transit-gateway-attachment"
+      ]
+    },
+    {
+      "Name": "RejectVpcEndpointConnections",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "RejectVpcPeeringConnection",
+      "Resources": [
+        "vpc-peering-connection"
+      ]
+    },
+    {
+      "Name": "ReleaseAddress",
+      "Resources": [
+        "elastic-ip"
+      ]
+    },
+    {
+      "Name": "ReleaseHosts",
+      "Resources": [
+        "dedicated-host"
+      ]
+    },
+    {
+      "Name": "ReleaseIpamPoolAllocation",
+      "Resources": [
+        "ipam-pool"
+      ]
+    },
+    {
+      "Name": "ReplaceIamInstanceProfileAssociation",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ReplaceImageCriteriaInAllowedImagesSettings",
+      "Resources": []
+    },
+    {
+      "Name": "ReplaceNetworkAclAssociation",
+      "Resources": [
+        "network-acl",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ReplaceNetworkAclEntry",
+      "Resources": [
+        "network-acl"
+      ]
+    },
+    {
+      "Name": "ReplaceRoute",
+      "Resources": [
+        "route-table"
+      ]
+    },
+    {
+      "Name": "ReplaceRouteTableAssociation",
+      "Resources": [
+        "internet-gateway",
+        "ipv4pool-ec2",
+        "ipv6pool-ec2",
+        "route-table",
+        "subnet",
+        "vpn-gateway"
+      ]
+    },
+    {
+      "Name": "ReplaceTransitGatewayRoute",
+      "Resources": [
+        "transit-gateway-attachment",
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "ReplaceVpnTunnel",
+      "Resources": [
+        "vpn-connection"
+      ]
+    },
+    {
+      "Name": "ReportInstanceStatus",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "RequestSpotFleet",
+      "Resources": [
+        "image",
+        "key-pair",
+        "launch-template",
+        "placement-group",
+        "security-group",
+        "snapshot",
+        "spot-fleet-request",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "RequestSpotInstances",
+      "Resources": [
+        "image",
+        "key-pair",
+        "network-interface",
+        "placement-group",
+        "security-group",
+        "snapshot",
+        "spot-instances-request",
+        "subnet"
+      ]
+    },
+    {
+      "Name": "ResetAddressAttribute",
+      "Resources": [
+        "elastic-ip"
+      ]
+    },
+    {
+      "Name": "ResetEbsDefaultKmsKeyId",
+      "Resources": []
+    },
+    {
+      "Name": "ResetFpgaImageAttribute",
+      "Resources": [
+        "fpga-image"
+      ]
+    },
+    {
+      "Name": "ResetImageAttribute",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "ResetInstanceAttribute",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "ResetNetworkInterfaceAttribute",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "ResetSnapshotAttribute",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "RestoreAddressToClassic",
+      "Resources": []
+    },
+    {
+      "Name": "RestoreImageFromRecycleBin",
+      "Resources": [
+        "image"
+      ]
+    },
+    {
+      "Name": "RestoreManagedPrefixListVersion",
+      "Resources": [
+        "prefix-list"
+      ]
+    },
+    {
+      "Name": "RestoreSnapshotFromRecycleBin",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "RestoreSnapshotTier",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "RestoreVolumeFromRecycleBin",
+      "Resources": [
+        "volume"
+      ]
+    },
+    {
+      "Name": "RevokeClientVpnIngress",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "RevokeSecurityGroupEgress",
+      "Resources": [
+        "security-group"
+      ]
+    },
+    {
+      "Name": "RevokeSecurityGroupIngress",
+      "Resources": [
+        "security-group"
+      ]
+    },
+    {
+      "Name": "RunInstances",
+      "Resources": [
+        "capacity-reservation",
+        "elastic-gpu",
+        "elastic-inference",
+        "group",
+        "image",
+        "instance",
+        "key-pair",
+        "launch-template",
+        "license-configuration",
+        "network-interface",
+        "placement-group",
+        "secondary-interface",
+        "secondary-subnet",
+        "security-group",
+        "snapshot",
+        "spot-instances-request",
+        "subnet",
+        "volume"
+      ]
+    },
+    {
+      "Name": "RunScheduledInstances",
+      "Resources": []
+    },
+    {
+      "Name": "SearchLocalGatewayRoutes",
+      "Resources": [
+        "local-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "SearchTransitGatewayMulticastGroups",
+      "Resources": [
+        "transit-gateway-multicast-domain"
+      ]
+    },
+    {
+      "Name": "SearchTransitGatewayRoutes",
+      "Resources": [
+        "transit-gateway-route-table"
+      ]
+    },
+    {
+      "Name": "SendDiagnosticInterrupt",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "SendSpotInstanceInterruptions",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "StartDeclarativePoliciesReport",
+      "Resources": []
+    },
+    {
+      "Name": "StartInstances",
+      "Resources": [
+        "group",
+        "instance",
+        "license-configuration"
+      ]
+    },
+    {
+      "Name": "StartNetworkInsightsAccessScopeAnalysis",
+      "Resources": [
+        "network-insights-access-scope",
+        "network-insights-access-scope-analysis"
+      ]
+    },
+    {
+      "Name": "StartNetworkInsightsAnalysis",
+      "Resources": [
+        "network-insights-analysis",
+        "network-insights-path"
+      ]
+    },
+    {
+      "Name": "StartVpcEndpointServicePrivateDnsVerification",
+      "Resources": [
+        "vpc-endpoint-service"
+      ]
+    },
+    {
+      "Name": "StopInstances",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "TerminateClientVpnConnections",
+      "Resources": [
+        "client-vpn-endpoint"
+      ]
+    },
+    {
+      "Name": "TerminateInstances",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "UnassignIpv6Addresses",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "UnassignPrivateIpAddresses",
+      "Resources": [
+        "network-interface"
+      ]
+    },
+    {
+      "Name": "UnassignPrivateNatGatewayAddress",
+      "Resources": [
+        "natgateway"
+      ]
+    },
+    {
+      "Name": "UnlockSnapshot",
+      "Resources": [
+        "snapshot"
+      ]
+    },
+    {
+      "Name": "UnmonitorInstances",
+      "Resources": [
+        "instance"
+      ]
+    },
+    {
+      "Name": "UpdateCapacityManagerMonitoredTagKeys",
+      "Resources": []
+    },
+    {
+      "Name": "UpdateCapacityManagerOrganizationsAccess",
+      "Resources": []
+    },
+    {
+      "Name": "UpdateInterruptibleCapacityReservationAllocation",
+      "Resources": [
+        "capacity-reservation"
+      ]
+    },
+    {
+      "Name": "UpdateSecurityGroupRuleDescriptionsEgress",
+      "Resources": [
+        "security-group"
+      ]
+    },
+    {
+      "Name": "UpdateSecurityGroupRuleDescriptionsIngress",
+      "Resources": [
+        "security-group"
+      ]
+    },
+    {
+      "Name": "WithdrawByoipCidr",
+      "Resources": []
+    }
+  ],
+  "Resources": [
+    {
+      "Name": "application-status-check",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:application-status-check/${ApplicationStatusCheckId}"
+      ]
+    },
+    {
+      "Name": "capacity-block",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:capacity-block/${CapacityBlockId}"
+      ]
+    },
+    {
+      "Name": "capacity-manager-data-export",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:capacity-manager-data-export/${CapacityManagerDataExportId}"
+      ]
+    },
+    {
+      "Name": "capacity-reservation",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:capacity-reservation/${CapacityReservationId}"
+      ]
+    },
+    {
+      "Name": "capacity-reservation-cancellation-quote",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:capacity-reservation-cancellation-quote/${CapacityReservationCancellationQuoteId}"
+      ]
+    },
+    {
+      "Name": "capacity-reservation-fleet",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:capacity-reservation-fleet/${CapacityReservationFleetId}"
+      ]
+    },
+    {
+      "Name": "carrier-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:carrier-gateway/${CarrierGatewayId}"
+      ]
+    },
+    {
+      "Name": "certificate",
+      "ARNFormats": [
+        "arn:${Partition}:acm:${Region}:${Account}:certificate/${CertificateId}"
+      ]
+    },
+    {
+      "Name": "client-vpn-endpoint",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:client-vpn-endpoint/${ClientVpnEndpointId}"
+      ]
+    },
+    {
+      "Name": "coip-pool",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:coip-pool/${Ipv4PoolCoipId}"
+      ]
+    },
+    {
+      "Name": "customer-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:customer-gateway/${CustomerGatewayId}"
+      ]
+    },
+    {
+      "Name": "declarative-policies-report",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:declarative-policies-report/${DeclarativePoliciesReportId}"
+      ]
+    },
+    {
+      "Name": "dedicated-host",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:dedicated-host/${DedicatedHostId}"
+      ]
+    },
+    {
+      "Name": "dhcp-options",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:dhcp-options/${DhcpOptionsId}"
+      ]
+    },
+    {
+      "Name": "egress-only-internet-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:egress-only-internet-gateway/${EgressOnlyInternetGatewayId}"
+      ]
+    },
+    {
+      "Name": "elastic-gpu",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:elastic-gpu/${ElasticGpuId}"
+      ]
+    },
+    {
+      "Name": "elastic-inference",
+      "ARNFormats": [
+        "arn:${Partition}:elastic-inference:${Region}:${Account}:elastic-inference-accelerator/${AcceleratorId}"
+      ]
+    },
+    {
+      "Name": "elastic-ip",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}"
+      ]
+    },
+    {
+      "Name": "export-image-task",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:export-image-task/${ExportImageTaskId}"
+      ]
+    },
+    {
+      "Name": "export-instance-task",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:export-instance-task/${ExportTaskId}"
+      ]
+    },
+    {
+      "Name": "fleet",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:fleet/${FleetId}"
+      ]
+    },
+    {
+      "Name": "fpga-image",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:fpga-image/${FpgaImageId}"
+      ]
+    },
+    {
+      "Name": "group",
+      "ARNFormats": [
+        "arn:${Partition}:resource-groups:${Region}:${Account}:group/${GroupName}"
+      ]
+    },
+    {
+      "Name": "host-reservation",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:host-reservation/${HostReservationId}"
+      ]
+    },
+    {
+      "Name": "image",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}::image/${ImageId}"
+      ]
+    },
+    {
+      "Name": "image-usage-report",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:image-usage-report/${ImageUsageReportId}"
+      ]
+    },
+    {
+      "Name": "import-image-task",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:import-image-task/${ImportImageTaskId}"
+      ]
+    },
+    {
+      "Name": "import-snapshot-task",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:import-snapshot-task/${ImportSnapshotTaskId}"
+      ]
+    },
+    {
+      "Name": "instance",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}"
+      ]
+    },
+    {
+      "Name": "instance-connect-endpoint",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:instance-connect-endpoint/${InstanceConnectEndpointId}"
+      ]
+    },
+    {
+      "Name": "instance-event-window",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:instance-event-window/${InstanceEventWindowId}"
+      ]
+    },
+    {
+      "Name": "internet-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:internet-gateway/${InternetGatewayId}"
+      ]
+    },
+    {
+      "Name": "ipam",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam/${IpamId}"
+      ]
+    },
+    {
+      "Name": "ipam-external-resource-verification-token",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-external-resource-verification-token/${IpamExternalResourceVerificationTokenId}"
+      ]
+    },
+    {
+      "Name": "ipam-internet-registry-association",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-internet-registry-association/${IpamInternetRegistryAssociationId}"
+      ]
+    },
+    {
+      "Name": "ipam-policy",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-policy/${IpamPolicyId}"
+      ]
+    },
+    {
+      "Name": "ipam-pool",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-pool/${IpamPoolId}"
+      ]
+    },
+    {
+      "Name": "ipam-pool-allocation",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:ipam-pool-allocation/${IpamPoolAllocationId}"
+      ]
+    },
+    {
+      "Name": "ipam-prefix-list-resolver",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-prefix-list-resolver/${IpamPrefixListResolverId}"
+      ]
+    },
+    {
+      "Name": "ipam-prefix-list-resolver-target",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-prefix-list-resolver-target/${IpamPrefixListResolverTargetId}"
+      ]
+    },
+    {
+      "Name": "ipam-resource-discovery",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-resource-discovery/${IpamResourceDiscoveryId}"
+      ]
+    },
+    {
+      "Name": "ipam-resource-discovery-association",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-resource-discovery-association/${IpamResourceDiscoveryAssociationId}"
+      ]
+    },
+    {
+      "Name": "ipam-scope",
+      "ARNFormats": [
+        "arn:${Partition}:ec2::${Account}:ipam-scope/${IpamScopeId}"
+      ]
+    },
+    {
+      "Name": "ipv4pool-ec2",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:ipv4pool-ec2/${Ipv4PoolEc2Id}"
+      ]
+    },
+    {
+      "Name": "ipv6pool-ec2",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:ipv6pool-ec2/${Ipv6PoolEc2Id}"
+      ]
+    },
+    {
+      "Name": "key-pair",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:key-pair/${KeyPairName}"
+      ]
+    },
+    {
+      "Name": "launch-template",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:launch-template/${LaunchTemplateId}"
+      ]
+    },
+    {
+      "Name": "license-configuration",
+      "ARNFormats": [
+        "arn:${Partition}:license-manager:${Region}:${Account}:license-configuration:${LicenseConfigurationId}"
+      ]
+    },
+    {
+      "Name": "local-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:local-gateway/${LocalGatewayId}"
+      ]
+    },
+    {
+      "Name": "local-gateway-route-table",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:local-gateway-route-table/${LocalGatewayRoutetableId}"
+      ]
+    },
+    {
+      "Name": "local-gateway-route-table-virtual-interface-group-association",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:local-gateway-route-table-virtual-interface-group-association/${LocalGatewayRouteTableVirtualInterfaceGroupAssociationId}"
+      ]
+    },
+    {
+      "Name": "local-gateway-route-table-vpc-association",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:local-gateway-route-table-vpc-association/${LocalGatewayRouteTableVpcAssociationId}"
+      ]
+    },
+    {
+      "Name": "local-gateway-virtual-interface",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:local-gateway-virtual-interface/${LocalGatewayVirtualInterfaceId}"
+      ]
+    },
+    {
+      "Name": "local-gateway-virtual-interface-group",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:local-gateway-virtual-interface-group/${LocalGatewayVirtualInterfaceGroupId}"
+      ]
+    },
+    {
+      "Name": "mac-modification-task",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:mac-modification-task/${MacModificationTaskId}"
+      ]
+    },
+    {
+      "Name": "natgateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:natgateway/${NatGatewayId}"
+      ]
+    },
+    {
+      "Name": "network-acl",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:network-acl/${NaclId}"
+      ]
+    },
+    {
+      "Name": "network-insights-access-scope",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:network-insights-access-scope/${NetworkInsightsAccessScopeId}"
+      ]
+    },
+    {
+      "Name": "network-insights-access-scope-analysis",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:network-insights-access-scope-analysis/${NetworkInsightsAccessScopeAnalysisId}"
+      ]
+    },
+    {
+      "Name": "network-insights-analysis",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:network-insights-analysis/${NetworkInsightsAnalysisId}"
+      ]
+    },
+    {
+      "Name": "network-insights-path",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:network-insights-path/${NetworkInsightsPathId}"
+      ]
+    },
+    {
+      "Name": "network-interface",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:network-interface/${NetworkInterfaceId}"
+      ]
+    },
+    {
+      "Name": "outpost-lag",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:outpost-lag/${OutpostLagId}"
+      ]
+    },
+    {
+      "Name": "placement-group",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:placement-group/${PlacementGroupName}"
+      ]
+    },
+    {
+      "Name": "prefix-list",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:prefix-list/${PrefixListId}"
+      ]
+    },
+    {
+      "Name": "replace-root-volume-task",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:replace-root-volume-task/${ReplaceRootVolumeTaskId}"
+      ]
+    },
+    {
+      "Name": "reserved-instances",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:reserved-instances/${ReservationId}"
+      ]
+    },
+    {
+      "Name": "role",
+      "ARNFormats": [
+        "arn:${Partition}:iam::${Account}:role/${RoleNameWithPath}"
+      ]
+    },
+    {
+      "Name": "route-server",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:route-server/${RouteServerId}"
+      ]
+    },
+    {
+      "Name": "route-server-endpoint",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:route-server-endpoint/${RouteServerEndpointId}"
+      ]
+    },
+    {
+      "Name": "route-server-peer",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:route-server-peer/${RouteServerPeerId}"
+      ]
+    },
+    {
+      "Name": "route-table",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:route-table/${RouteTableId}"
+      ]
+    },
+    {
+      "Name": "secondary-interface",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:secondary-interface/${SecondaryInterfaceId}"
+      ]
+    },
+    {
+      "Name": "secondary-network",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:secondary-network/${SecondaryNetworkId}"
+      ]
+    },
+    {
+      "Name": "secondary-subnet",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:secondary-subnet/${SecondarySubnetId}"
+      ]
+    },
+    {
+      "Name": "security-group",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"
+      ]
+    },
+    {
+      "Name": "security-group-rule",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:security-group-rule/${SecurityGroupRuleId}"
+      ]
+    },
+    {
+      "Name": "snapshot",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}::snapshot/${SnapshotId}"
+      ]
+    },
+    {
+      "Name": "spot-fleet-request",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:spot-fleet-request/${SpotFleetRequestId}"
+      ]
+    },
+    {
+      "Name": "spot-instances-request",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:spot-instances-request/${SpotInstanceRequestId}"
+      ]
+    },
+    {
+      "Name": "subnet",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:subnet/${SubnetId}"
+      ]
+    },
+    {
+      "Name": "subnet-cidr-reservation",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:subnet-cidr-reservation/${SubnetCidrReservationId}"
+      ]
+    },
+    {
+      "Name": "traffic-mirror-filter",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:traffic-mirror-filter/${TrafficMirrorFilterId}"
+      ]
+    },
+    {
+      "Name": "traffic-mirror-filter-rule",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:traffic-mirror-filter-rule/${TrafficMirrorFilterRuleId}"
+      ]
+    },
+    {
+      "Name": "traffic-mirror-session",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:traffic-mirror-session/${TrafficMirrorSessionId}"
+      ]
+    },
+    {
+      "Name": "traffic-mirror-target",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:traffic-mirror-target/${TrafficMirrorTargetId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway/${TransitGatewayId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-attachment",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-attachment/${TransitGatewayAttachmentId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-connect-peer",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-connect-peer/${TransitGatewayConnectPeerId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-metering-policy",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-metering-policy/${TransitGatewayMeteringPolicyId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-multicast-domain",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-multicast-domain/${TransitGatewayMulticastDomainId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-policy-table",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-policy-table/${TransitGatewayPolicyTableId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-route-table",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-route-table/${TransitGatewayRouteTableId}"
+      ]
+    },
+    {
+      "Name": "transit-gateway-route-table-announcement",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:transit-gateway-route-table-announcement/${TransitGatewayRouteTableAnnouncementId}"
+      ]
+    },
+    {
+      "Name": "verified-access-endpoint",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:verified-access-endpoint/${VerifiedAccessEndpointId}"
+      ]
+    },
+    {
+      "Name": "verified-access-endpoint-target",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:verified-access-endpoint-target/${VerifiedAccessEndpointTargetId}"
+      ]
+    },
+    {
+      "Name": "verified-access-group",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:verified-access-group/${VerifiedAccessGroupId}"
+      ]
+    },
+    {
+      "Name": "verified-access-instance",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:verified-access-instance/${VerifiedAccessInstanceId}"
+      ]
+    },
+    {
+      "Name": "verified-access-policy",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:verified-access-policy/${VerifiedAccessPolicyId}"
+      ]
+    },
+    {
+      "Name": "verified-access-trust-provider",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:verified-access-trust-provider/${VerifiedAccessTrustProviderId}"
+      ]
+    },
+    {
+      "Name": "volume",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:volume/${VolumeId}"
+      ]
+    },
+    {
+      "Name": "vpc",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"
+      ]
+    },
+    {
+      "Name": "vpc-block-public-access-exclusion",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-block-public-access-exclusion/${VpcBlockPublicAccessExclusionId}"
+      ]
+    },
+    {
+      "Name": "vpc-encryption-control",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-encryption-control/${VpcEncryptionControlId}"
+      ]
+    },
+    {
+      "Name": "vpc-endpoint",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-endpoint/${VpcEndpointId}"
+      ]
+    },
+    {
+      "Name": "vpc-endpoint-connection",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-endpoint-connection/${VpcEndpointConnectionId}"
+      ]
+    },
+    {
+      "Name": "vpc-endpoint-service",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-endpoint-service/${VpcEndpointServiceId}"
+      ]
+    },
+    {
+      "Name": "vpc-endpoint-service-permission",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-endpoint-service-permission/${VpcEndpointServicePermissionId}"
+      ]
+    },
+    {
+      "Name": "vpc-flow-log",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-flow-log/${VpcFlowLogId}"
+      ]
+    },
+    {
+      "Name": "vpc-peering-connection",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpc-peering-connection/${VpcPeeringConnectionId}"
+      ]
+    },
+    {
+      "Name": "vpn-concentrator",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpn-concentrator/${VpnConcentratorId}"
+      ]
+    },
+    {
+      "Name": "vpn-connection",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpn-connection/${VpnConnectionId}"
+      ]
+    },
+    {
+      "Name": "vpn-connection-device-type",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpn-connection-device-type/${VpnConnectionDeviceTypeId}"
+      ]
+    },
+    {
+      "Name": "vpn-gateway",
+      "ARNFormats": [
+        "arn:${Partition}:ec2:${Region}:${Account}:vpn-gateway/${VpnGatewayId}"
+      ]
+    }
+  ]
+}
