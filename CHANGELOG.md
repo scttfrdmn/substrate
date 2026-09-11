@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The caller substrate could not describe: `aws:userid` and `aws:PrincipalTag/<key>` are
+  published** (#771). The condition context named the caller with `aws:PrincipalArn` and
+  `aws:username` and nothing else, so a policy conditioning on either of these was evaluated
+  against a context that did not hold the key. For a positive operator that is a false deny —
+  a fleet-wide "grant only to the resource's own team" statement granted to nobody. For a
+  negated one it is a false *allow*, since AWS answers true for a negated operator over an
+  absent key, which is the same shape as the `aws:PrincipalArn` exemption #745 fixed.
+
+  Both keys arrive the way #745 established, and neither is derived from the principal ARN.
+  `aws:userid` is **recorded when the credential is minted**, in AWS's per-kind form: an IAM
+  user's `AIDA…` is copied onto the access key by `CreateAccessKey`; an assumed role's is the
+  `<role-id>:<session-name>` pairing `AssumeRole` already returns as `AssumedRoleId`; a
+  `GetSessionToken` session keeps the calling user's, its principal being that same user.
+  Recording is what makes the assumed-role form possible at all — a session's ARN carries the
+  role's *name*, so the role ID cannot be recovered afterwards, and the role may since have
+  been recreated with a new one.
+
+  `aws:PrincipalTag/<key>` is **read from the entity's record when the credential is
+  resolved**, not copied onto the credential, because `TagUser` and `UntagUser` change tags
+  after an access key exists: a snapshot taken at `CreateAccessKey` time would authorize a
+  long-lived key against tags its principal no longer has, so an `UntagUser` revoking an
+  exemption would have no effect until the key was rotated. That costs one extra state read
+  per signed request that resolves to an IAM entity, and `resolvePrincipal`'s doc comment,
+  which claimed one, now says two.
+
+  An empty value **publishes no key**, which is the #737/#745 fallback shape: a credential
+  resolving to no IAM entity has no unique ID, nor does a record written by an earlier
+  substrate, and a policy can test an absent key with `Null` where a guess would silently
+  match or silently refuse. Two limits are stated rather than implied. The account root is
+  the one kind AWS documents a value for that substrate has none for, because it models no
+  root principal — an unauthenticated caller resolves to a nil principal, which the gate
+  leaves unenforced. And **session tags are not modelled**: substrate's `AssumeRole` reads no
+  `Tags` parameter, so an assumed role's tags are the role's own, a narrowing in the direction
+  where what substrate publishes is a subset of AWS's rather than a superset.
+
+  Both keys reach both authorization doors, which call the same publisher, and
+  `${aws:PrincipalTag/team}` resolves as a policy variable with no change to substitution —
+  reading any single-valued key from the context is what #745 already built.
+
 - **An EC2 request is decided against the resource AWS would use, not against whatever
   identifiers it happens to carry** (#762). Whether a request *has* a resource is a property
   of the operation, not of its parameters. AWS documents `ec2:DescribeInstances` as supporting

@@ -1398,6 +1398,9 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		// The account is on the record because it cannot be in the key — an access key
 		// ID is resolved before any account is known (#737).
 		AccountID: ctx.AccountID,
+		// And the user's AIDA… for the same reason: aws:userid has to be answerable
+		// from the credential alone (#771).
+		UserID: user.UserID,
 	}
 
 	raw, err := json.Marshal(accessKey)

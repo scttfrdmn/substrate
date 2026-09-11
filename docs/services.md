@@ -1417,6 +1417,8 @@ nothing else:
 | `sts:ExternalId` | An `AssumeRole` that supplied one |
 | `aws:PrincipalArn` | The caller, at every gate — identity policy, permission boundary, [tag-on-create](#a-tagged-create-is-authorized-twice), the IAM control plane and a role's trust policy |
 | `aws:username` | The caller's IAM user name, at the same gates — **absent** for every principal that has none; see [policy variables](#policy-variables-resolve-from-the-request-context) |
+| `aws:userid` | The caller's unique ID, in AWS's per-kind form — an IAM user's `AIDA…`, and `<role-id>:<session-name>` for an assumed role; see [the caller's unique ID and tags](#the-caller-s-unique-id-and-tags) |
+| `aws:PrincipalTag/<key>` | One key per tag on the IAM user or role behind the request, read from its record at the same gates |
 | `aws:ResourceAccount` | A **simulation** only, from `ResourceOwner` |
 | Anything at all | A simulation's `ContextEntries` |
 
@@ -1435,27 +1437,25 @@ everyone.
 
 What has **no** producer, and therefore never matches on the enforcement path:
 
-- `aws:SecureTransport`, `aws:userid`, `aws:MultiFactorAuthPresent`,
+- `aws:SecureTransport`, `aws:MultiFactorAuthPresent`,
   `aws:MultiFactorAuthAge`, `aws:SourceIp`, `aws:SourceVpc`, `aws:PrincipalOrgID` and
   every other key not in the table above. The IP family is therefore correct but
   satisfiable only through a simulation's `ContextEntries`. (S3's
   [public-access analysis](#block-public-access) reads an `aws:SourceIp` condition out of a
   *bucket policy* to judge how broad it is, which is a different question from evaluating
   one against a request.)
-- `aws:PrincipalAccount` and `aws:userid`, even though `aws:PrincipalArn` and `aws:username`
-  are populated beside them. Each needs a derivation substrate cannot make honestly for
-  every principal kind — it mints no unique ID, and a cross-account credential makes the
-  account ambiguous — and a key guessed wrong is worse than one a policy can test for with
-  `Null`. `aws:username` was in this list until
-  [#745](https://github.com/scttfrdmn/substrate/issues/745), and the reason it left is worth
-  keeping: the derivation that made it honest was to *record* the name at the credential
-  lookup, not to parse it back out of an ARN. The same shape of prerequisite is what the
-  other two still need, and what
-  [#771](https://github.com/scttfrdmn/substrate/issues/771) tracks: `aws:userid` needs a
-  unique ID minted at create time, since substrate stores none and deriving one from a name
-  would make it stable per-name rather than per-entity; `aws:PrincipalTag/` needs the
-  principal's tags read where the credential is resolved, which is the cheaper of the two
-  because `TagUser`/`TagRole` already record them.
+- `aws:PrincipalAccount`, even though `aws:PrincipalArn`, `aws:username`, `aws:userid` and
+  `aws:PrincipalTag/` are all populated beside it. It is the last of the four caller keys
+  that needs a derivation substrate cannot make honestly, because a cross-account credential
+  makes "the principal's account" ambiguous between the one in the ARN and the one the
+  request resolved to — and a key guessed wrong is worse than one a policy can test for with
+  `Null`. `aws:username` left this list in
+  [#745](https://github.com/scttfrdmn/substrate/issues/745) and the other two in
+  [#771](https://github.com/scttfrdmn/substrate/issues/771), all three by the same route,
+  which is the reason worth keeping: what made each honest was *recording* the value where
+  the credential is minted or *reading* it where the credential is resolved, never parsing it
+  back out of an ARN. See [the caller's unique ID and
+  tags](#the-caller-s-unique-id-and-tags).
 - Four of the seven keys the bundled AWS managed policies condition on, each for its own
   reason rather than as one omission:
 
@@ -1488,6 +1488,56 @@ What has **no** producer, and therefore never matches on the enforcement path:
   Each remaining absence is a false deny in the safe direction: all 32 condition blocks in
   the bundled catalog sit on an `Allow`, so such a statement grants nothing rather than a
   `Deny` going inert.
+
+### The caller's unique ID and tags
+
+`aws:userid` and `aws:PrincipalTag/<key>` are populated
+([#771](https://github.com/scttfrdmn/substrate/issues/771)). Both are caller keys, and both
+arrive by the route [#745](https://github.com/scttfrdmn/substrate/issues/745) established for
+`aws:username`: substrate records or reads the value where it is known, and never parses it
+back out of the principal ARN.
+
+`aws:userid` is **recorded when the credential is minted**, in AWS's own per-kind form:
+
+| Caller | `aws:userid` |
+|---|---|
+| IAM user | the user's `AIDA…`, copied onto the access key by `CreateAccessKey` |
+| Assumed role | `<role-id>:<session-name>`, the string `AssumeRole` already returns as `AssumedRoleId` |
+| `GetSessionToken` session | the calling user's `AIDA…`, unchanged — the principal is the same user |
+| Anything else | **absent** |
+
+Recording rather than deriving is what makes the assumed-role form possible at all: a
+session's ARN carries the role's *name*, so `<role-id>` cannot be recovered from the
+credential afterwards — and the role it named may since have been deleted and recreated with
+a new ID. The account root is the one kind AWS's table documents that substrate has no value
+for, because it models no root principal: an unauthenticated caller resolves to a nil
+principal, which the gate leaves unenforced and `GetCallerIdentity` reports as `…:root`.
+
+**Absent is not empty.** A credential that resolves to no IAM entity — the documented
+`AKIAIOSFODNN7EXAMPLE`, or a record written before this release — publishes no `aws:userid`
+key at all, so a policy testing it with `Null` still answers, and nothing matches a guess.
+
+`aws:PrincipalTag/<key>` is **read from the entity's record when the credential is
+resolved**, one key per tag on the IAM user or role behind the request. Reading it per
+request is the point: `TagUser` and `UntagUser` change tags after an access key exists, and a
+snapshot taken at `CreateAccessKey` time would authorize a long-lived key against tags its
+principal no longer has — so an `UntagUser` meant to revoke an exemption would have no effect
+until the key was rotated. The cost is one extra state read per signed request that resolves
+to an IAM entity.
+
+**Session tags are not modelled.** Substrate's `AssumeRole` reads no `Tags` parameter, so an
+assumed role's `aws:PrincipalTag/` is the *role's* own tags, where AWS would also publish
+whatever the session passed. A deliberate narrowing: what is published is a subset of AWS's,
+never a superset, so a statement that matches here matches there.
+
+Both keys reach both authorization doors, because both call the same publisher — the
+one-answer-per-request requirement of
+[#411](https://github.com/scttfrdmn/substrate/issues/411). And `${aws:PrincipalTag/team}`
+resolves as a [policy variable](#policy-variables-resolve-from-the-request-context) with no
+further work, since substitution reads any single-valued key from the same context.
+
+Upgrading inverts one thing, and it inverts the same way on AWS: a policy asserting the
+*absence* of either key with `Null` stops matching for a caller that now has one.
 
 ### Service-linked roles and `iam:AWSServiceName`
 

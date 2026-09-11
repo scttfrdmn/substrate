@@ -146,8 +146,11 @@ func buildCallerARN(accountID, accessKeyID string) string {
 // documents (AKIAIOSFODNN7EXAMPLE, test/test). That coupling is gone — see
 // [ServerOptions.VerifySignatures] and #630 — but the separation stands on its
 // own, because a registry entry answers "which account" and only IAM's records
-// answer "which principal". Reading state costs one Get on a request that
-// carries an Authorization header and refuses nothing.
+// answer "which principal". Reading state costs two Gets on a request that
+// carries an Authorization header and refuses nothing: one for the credential,
+// and one for the entity behind it, whose tags substrate publishes as
+// `aws:PrincipalTag/<key>` and which change after the credential is minted (see
+// [iamPrincipalTags] and #771). It was one Get until the tags were needed.
 //
 // A nil principal means "no IAM identity", which [AuthController.CheckAccess]
 // treats as unenforced rather than denied — enforcement is opt-in by creating
@@ -176,12 +179,17 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 			if account == "" {
 				account, adopt = accountID, ""
 			}
+			arn := fmt.Sprintf("arn:aws:iam::%s:user/%s", account, key.UserName)
 			return &Principal{
-				ARN:  fmt.Sprintf("arn:aws:iam::%s:user/%s", account, key.UserName),
+				ARN:  arn,
 				Type: "IAMUser",
 				// The name AWS publishes as aws:username, taken from the record rather
 				// than re-derived from the ARN above (#745). See [Principal.UserName].
 				UserName: key.UserName,
+				// The AIDA… AWS publishes as aws:userid, recorded beside the key when
+				// it was created. Empty for a key written before #771.
+				UserID: key.UserID,
+				Tags:   iamPrincipalTags(ctx, state, arn),
 			}, adopt
 		}
 	}
@@ -202,11 +210,57 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				ARN:      sess.PrincipalARN,
 				Type:     "AssumedRole",
 				UserName: sess.UserName,
+				// `<role-id>:<session-name>` for an assumed role and the calling user's
+				// AIDA… for a GetSessionToken session, recorded when the session was
+				// minted because neither is recoverable from PrincipalARN (#771).
+				UserID: sess.PrincipalID,
+				// The role's own tags for an assumed role, the user's for a session
+				// token. Session tags are not modeled; see [Principal.Tags].
+				Tags: iamPrincipalTags(ctx, state, sess.PrincipalARN),
 			}, sess.AccountID
 		}
 	}
 
 	return nil, ""
+}
+
+// iamPrincipalTags returns the IAM tags on the entity a principal ARN names, keyed by
+// tag key, or nil when the ARN names no tag-holding entity and when it has no record.
+//
+// The tags are read here, per request, rather than copied onto the credential when it is
+// minted, because they are mutable: `TagUser` and `UntagUser` change them at any time and
+// a long-lived access key would otherwise authorize against whatever tags its user had on
+// the day it was created. That is the cost stated in [resolvePrincipal]'s comment — one
+// extra Get per signed request that resolves to an IAM entity.
+//
+// A read that *fails* yields no tags, and therefore denies a statement conditioned on
+// one. That is the opposite direction from [resolveIAMEntity], which fails open on a
+// broken backend so that a caller who never touched IAM is not refused — and it is the
+// right direction here for the same reason it is the wrong one there: a tag substrate
+// could not read is a grant it cannot justify, and publishing the key as absent is what
+// AWS's own rule for a key with no value already describes.
+func iamPrincipalTags(ctx context.Context, state StateManager, principalARN string) map[string]string {
+	entity, ok := iamEntityForPrincipalARN(principalARN)
+	if !ok {
+		return nil
+	}
+	raw, err := state.Get(ctx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
+	if err != nil || raw == nil {
+		return nil
+	}
+	// IAMUser and IAMRole publish their tags under the same member, so one shape reads
+	// either record and neither has to be unmarshalled in full.
+	var tagged struct {
+		Tags []IAMTag `json:"Tags"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &tagged); unmarshalErr != nil || len(tagged.Tags) == 0 {
+		return nil
+	}
+	tags := make(map[string]string, len(tagged.Tags))
+	for _, tag := range tagged.Tags {
+		tags[tag.Key] = tag.Value
+	}
+	return tags
 }
 
 // VerifySigV4 validates the SigV4 signature on r using secret keys from reg.

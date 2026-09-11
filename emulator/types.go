@@ -135,6 +135,43 @@ type Principal struct {
 	// `aws:username` — the account root, an assumed role, and a federated or
 	// service-linked caller (#745).
 	UserName string
+
+	// UserID is the caller's unique identifier — the `aws:userid` value, already in
+	// the form AWS documents for this caller's own principal kind — or empty when
+	// substrate has none to report.
+	//
+	// AWS publishes a different shape per kind: an IAM user's `AIDA…`, and
+	// `<role-id>:<session-name>` for an assumed role, an EC2 instance role and a
+	// federated session. So the value is *recorded* when the credential is minted
+	// rather than assembled here — the pairing an assumed role publishes is known
+	// only to the `AssumeRole` call that made it, since the session's ARN carries the
+	// role's name and not its ID.
+	//
+	// [authzPrincipalContext] publishes no `aws:userid` at all when this is empty,
+	// which is the #737/#745 fallback shape: a credential resolved from a registry
+	// entry with no IAM entity behind it has no unique ID, nor does a record written
+	// before #771, and a policy can test an absent key with `Null` where a guessed
+	// one would silently match or silently refuse.
+	//
+	// The account root is the one kind AWS documents that substrate cannot carry
+	// here, because it models no root principal: an unauthenticated caller resolves
+	// to a nil *Principal, which [AuthController.CheckAccess] leaves unenforced and
+	// `sts:GetCallerIdentity` reports as `…:root`.
+	UserID string
+
+	// Tags are the IAM tags on the entity behind the request, keyed by tag key, and
+	// empty when it carries none or is not an entity that holds tags.
+	//
+	// [authzPrincipalContext] publishes one `aws:PrincipalTag/<key>` per entry. They
+	// are read from the entity's own record when the credential is resolved rather
+	// than recorded beside the credential, because `TagUser` and `UntagUser` change
+	// them after a key is minted: a snapshot taken at `CreateAccessKey` time would
+	// authorize a long-lived key against tags its principal no longer has.
+	//
+	// Session tags are not modeled. Substrate's `AssumeRole` reads no `Tags`
+	// parameter, so an assumed role's tags here are the *role's* own, where AWS would
+	// also publish whatever the session passed (#771).
+	Tags map[string]string
 }
 
 // StateManager defines the interface for reading and writing emulator state.
