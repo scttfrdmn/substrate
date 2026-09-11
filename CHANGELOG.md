@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.111.0] - 2026-09-10
+
 ### Fixed
 - **An IAM request is authorized against the entity it names, at both doors** (#770). Every
   IAM request was decided against `arn:aws:iam::<account>:*` — a literal `*` in the resource
@@ -10081,7 +10083,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.110.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.111.0...HEAD
+[v0.111.0]: https://github.com/scttfrdmn/substrate/compare/v0.110.0...v0.111.0
 [v0.110.0]: https://github.com/scttfrdmn/substrate/compare/v0.109.0...v0.110.0
 [v0.109.0]: https://github.com/scttfrdmn/substrate/compare/v0.108.0...v0.109.0
 [v0.108.0]: https://github.com/scttfrdmn/substrate/compare/v0.107.0...v0.108.0
