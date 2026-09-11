@@ -104,11 +104,17 @@ func (a *AuthController) authzTimeContext(ctx map[string]string, now time.Time, 
 // specifies, since [condKeyPresent] reads an empty value as absent anyway; writing "" and
 // omitting the key are the same observation, and omitting it is the honest one.
 //
-// aws:PrincipalAccount and aws:userid are deliberately still absent: each needs a
-// derivation this function cannot do honestly for every principal kind — a unique ID
-// substrate does not mint, an account that a cross-account credential makes ambiguous —
-// and a key guessed wrong is worse than one a policy can test for with Null. Tracked as
-// its own issue rather than left as an unstated gap.
+// aws:userid and aws:PrincipalTag/<key> arrive the same way and for the same reason
+// (#771): the unique ID is recorded when the credential is minted and the tags are read
+// from the entity's record when it is resolved, so neither is derived here. Both are
+// absent rather than empty when substrate has no value — see [Principal.UserID] for the
+// principal kinds that have none.
+//
+// aws:PrincipalAccount is deliberately still absent. It is the one of the three that
+// needs a derivation this function cannot make honestly, because a cross-account
+// credential makes "the principal's account" ambiguous between the ARN's and the one the
+// request resolved to, and a key guessed wrong is worse than one a policy can test for
+// with Null. Tracked as its own issue rather than left as an unstated gap.
 func authzPrincipalContext(ctx map[string]string, principal *Principal) {
 	if principal == nil || principal.ARN == "" {
 		return
@@ -116,6 +122,16 @@ func authzPrincipalContext(ctx map[string]string, principal *Principal) {
 	ctx["aws:PrincipalArn"] = principal.ARN
 	if principal.UserName != "" {
 		ctx["aws:username"] = principal.UserName
+	}
+	if principal.UserID != "" {
+		ctx["aws:userid"] = principal.UserID
+	}
+	for key, value := range principal.Tags {
+		// One key per tag, which is the shape AWS documents: "aws:PrincipalTag/tag-key".
+		// A tag whose value is empty publishes an empty value, and [condKeyPresent] reads
+		// that as absent — the same reading it takes of every other key, and the one that
+		// makes a Null condition answer for a tag that exists with no value.
+		ctx["aws:PrincipalTag/"+key] = value
 	}
 }
 
@@ -503,9 +519,29 @@ type iamEntity struct {
 // thousands of calls made with a credential that never touched IAM are
 // unaffected. A read that genuinely *fails* is neither: see the error return.
 func resolveIAMEntity(ctx context.Context, state StateManager, principalARN string) (entity iamEntity, exists bool, err error) {
+	entity, ok := iamEntityForPrincipalARN(principalARN)
+	if !ok {
+		return iamEntity{}, false, nil
+	}
+
+	raw, err := state.Get(ctx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
+	if err != nil {
+		return entity, false, fmt.Errorf("load %s %q: %w", entity.Kind, entity.Name, err)
+	}
+	return entity, raw != nil, nil
+}
+
+// iamEntityForPrincipalARN names the IAM entity a principal ARN belongs to, without
+// reading state, and reports false for an ARN that names none.
+//
+// It is separate from [resolveIAMEntity] because two callers need the same mapping and
+// only one of them wants that function's existence check: [iamPrincipalTags] reads the
+// record itself, for its tags, and would otherwise repeat the assumed-role unwrapping
+// below — the one piece of this that is easy to get wrong.
+func iamEntityForPrincipalARN(principalARN string) (iamEntity, bool) {
 	entityType, entityName := parsePrincipalARN(principalARN)
 	if entityName == "" {
-		return iamEntity{}, false, nil
+		return iamEntity{}, false
 	}
 	// The account is in the ARN and was previously discarded, which is what made one
 	// account's policies apply to another account's principal of the same name (#737).
@@ -513,7 +549,7 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 
 	switch entityType {
 	case "user", "role":
-		entity = iamEntity{Account: account, Kind: entityType, Name: entityName}
+		return iamEntity{Account: account, Kind: entityType, Name: entityName}, true
 	case "assumed-role":
 		// arn:aws:sts::<acct>:assumed-role/<RoleName>/<SessionName>. Only the role
 		// carries policies, and parsePrincipalARN splits on the first slash — so
@@ -526,22 +562,16 @@ func resolveIAMEntity(ctx context.Context, state StateManager, principalARN stri
 			roleName = roleName[:slash]
 		}
 		if roleName == "" {
-			return iamEntity{}, false, nil
+			return iamEntity{}, false
 		}
-		entity = iamEntity{Account: account, Kind: "role", Name: roleName}
+		return iamEntity{Account: account, Kind: "role", Name: roleName}, true
 	default:
 		// A principal substrate does not model as a policy-holding entity — a
 		// service principal, a federated user, the account root. Not enforced,
 		// rather than denied: refusing a caller whose policies cannot be looked up
 		// would deny requests that pass today for a reason no test could fix.
-		return iamEntity{}, false, nil
+		return iamEntity{}, false
 	}
-
-	raw, err := state.Get(ctx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
-	if err != nil {
-		return entity, false, fmt.Errorf("load %s %q: %w", entity.Kind, entity.Name, err)
-	}
-	return entity, raw != nil, nil
 }
 
 // authzAdministratorAccessARN is the managed policy whose presence short-circuits

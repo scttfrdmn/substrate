@@ -84,6 +84,16 @@ type IAMAccessKey struct {
 	// never rendered. A record written before #737 has it empty, and the reader falls
 	// back to the account the request resolved to.
 	AccountID string `json:"AccountId,omitempty"`
+
+	// UserID is the `AIDA…` unique ID of the user this key belongs to.
+	//
+	// AWS publishes it as `aws:userid` for an IAM user, so [resolvePrincipal] needs it
+	// on every signed request; copying it here when the key is created is what keeps
+	// that lookup at the one Get the record itself costs. Like AccountID it is absent
+	// from the wire in both directions — neither CreateAccessKey nor ListAccessKeys
+	// publishes a user ID — so it is stored and never rendered. A record written
+	// before #771 has it empty, and no `aws:userid` is published for that caller.
+	UserID string `json:"UserId,omitempty"`
 }
 
 // IAMTag represents an AWS resource tag key-value pair.

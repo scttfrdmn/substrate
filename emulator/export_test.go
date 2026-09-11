@@ -1097,3 +1097,21 @@ func EC2AuthzNamedResourceARNsForTest(state StateManager, operation string, para
 	}
 	return arns
 }
+
+// AuthzPrincipalContextForTest returns the condition keys [authzPrincipalContext] publishes
+// for a principal, in a fresh map.
+//
+// It is how a test distinguishes an *absent* key from an empty one, which is the whole of
+// the fallback contract for `aws:userid`: a policy testing it with `Null` inverts on the
+// difference, and a decision test that only asserted allow/deny would pass either way (#771).
+func AuthzPrincipalContextForTest(principal *Principal) map[string]string {
+	ctx := make(map[string]string)
+	authzPrincipalContext(ctx, principal)
+	return ctx
+}
+
+// IAMPrincipalTagsForTest wraps iamPrincipalTags, the per-request read of the tags on the
+// entity a principal ARN names.
+func IAMPrincipalTagsForTest(state StateManager, principalARN string) map[string]string {
+	return iamPrincipalTags(context.Background(), state, principalARN)
+}

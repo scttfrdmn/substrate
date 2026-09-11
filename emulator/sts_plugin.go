@@ -193,6 +193,13 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	now := p.now()
 	expiry := now.Add(time.Duration(duration) * time.Second)
 
+	// AWS's aws:userid for an assumed role: "{role-id}:{caller-specified-role-name}
+	// where role-id is the unique id of the role and the caller-specified-role-name is
+	// specified by the RoleSessionName parameter". The response publishes it as
+	// AssumedRoleId below; the session record carries it so that a request signed with
+	// these credentials can be authorized against it (#771).
+	assumedRoleID := role.RoleID + ":" + sessionName
+
 	creds := STSSessionCredentials{
 		AccessKeyID:     generateIAMID("ASIA"),
 		SecretAccessKey: stsGenerateSecret(),
@@ -200,6 +207,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		Expiration:      expiry,
 		PrincipalARN:    fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName),
 		AccountID:       ctx.AccountID,
+		PrincipalID:     assumedRoleID,
 	}
 
 	credRaw, err := json.Marshal(creds)
@@ -210,7 +218,6 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("store session credentials: %w", err)
 	}
 
-	assumedRoleID := role.RoleID + ":" + sessionName
 	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName)
 
 	type xmlCreds struct {
@@ -372,6 +379,11 @@ func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSR
 		// carries that user's name forward and `aws:username` keeps its value across the
 		// call. assumeRole deliberately sets no UserName (#745).
 		creds.UserName = ctx.Principal.UserName
+		// Same reasoning for the unique ID: the principal does not change, so
+		// aws:userid stays the calling user's AIDA… rather than becoming a session
+		// pairing. Empty when the caller has none, in which case the session publishes
+		// no aws:userid either (#771).
+		creds.PrincipalID = ctx.Principal.UserID
 	}
 
 	goCtx := context.Background()
@@ -437,6 +449,17 @@ type STSSessionCredentials struct {
 	// the user's own ARN and whose AssumeRole form is an assumed-role ARN, so it is
 	// recorded when the session is minted (#745).
 	UserName string `json:"UserName,omitempty"`
+
+	// PrincipalID is the session's `aws:userid` value: `<role-id>:<session-name>` for
+	// AssumeRole, and the calling user's `AIDA…` for GetSessionToken, whose principal
+	// is that user unchanged.
+	//
+	// AssumeRole already computes the pairing for the AssumedRoleId member of its
+	// response; it is recorded here because it cannot be recovered from the session
+	// afterwards — PrincipalARN carries the role's *name*, and the role record it
+	// would have to be read back from may since have been deleted or replaced with a
+	// new ID (#771).
+	PrincipalID string `json:"PrincipalId,omitempty"`
 }
 
 // responseMetadata is the XML response metadata included in all STS responses.
