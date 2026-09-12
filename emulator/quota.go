@@ -148,7 +148,7 @@ func (q *QuotaController) resolveKey(service, operation string) string {
 }
 
 // defaultQuotaRules returns the built-in rate limits that mirror AWS service
-// quotas. S3 prefix-level limits are deferred to TODO(#22).
+// quotas. S3 prefix-level limits are deferred to TODO(#818).
 func defaultQuotaRules() map[string]RateRule {
 	return map[string]RateRule{
 		"iam":            {Rate: 100, Burst: 100},

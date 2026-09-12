@@ -5624,7 +5624,7 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 // Filter.N is applied through [ec2InstanceTypeFilterSpec] and
 // [ec2InstanceTypeMatchesFilters]: five of the fifty-seven documented names are evaluated,
 // the other fifty-two are accepted and inert, and an undocumented one is refused. That is
-// what #695 settled and what retires TODO(#495)'s filter half — the concern it recorded was
+// what #695 settled, retiring the filter half of the concern #495 recorded — which was
 // that applying the modellable handful and *silently dropping* the rest would repeat the
 // narrowing defect #485 found on the offerings operation, and the evaluated/accepted split is
 // the answer to it: an inert name constrains nothing and is listed as inert in

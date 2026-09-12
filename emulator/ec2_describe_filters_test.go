@@ -808,7 +808,7 @@ func TestEC2_RegionFilters_AllThreeEvaluated(t *testing.T) {
 // --- DescribeInstanceTypes ---
 
 // TestEC2_InstanceTypeFilters_FiveOfFiftySeven pins the filters the catalog can answer, which
-// retires the filter half of TODO(#495).
+// retired the filter half of the concern #495 recorded.
 func TestEC2_InstanceTypeFilters_FiveOfFiftySeven(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)

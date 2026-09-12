@@ -392,11 +392,11 @@ func ec2InstanceTypeMatchesFilters(info ec2InstanceTypeInfo, filters map[string]
 // ec2InstanceTypeMatchesFilter evaluates a single DescribeInstanceTypes filter against a
 // catalog entry.
 //
-// Five of fifty-seven, which retires the filter half of TODO(#495). The two numeric filters
-// compare the decimal rendering of the stored integer: AWS documents no comparison operators
-// for filters — "greater than or less than comparison is not supported", as the spot-price
-// filter says outright — so `memory-info.size-in-mib=1024` is a string match against 1024 and
-// a wildcard is the only way to ask a range-ish question.
+// Five of fifty-seven, which answered the filter half of the concern #495 recorded. The two
+// numeric filters compare the decimal rendering of the stored integer: AWS documents no
+// comparison operators for filters — "greater than or less than comparison is not supported",
+// as the spot-price filter says outright — so `memory-info.size-in-mib=1024` is a string match
+// against 1024 and a wildcard is the only way to ask a range-ish question.
 //
 // The two list-valued filters match if any element matches, which is the same any-of rule
 // [ec2InternetGatewayMatchesFilter] applies to the attachment set.
