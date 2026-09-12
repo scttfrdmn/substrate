@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`IsAttachable` on both IAM policy shapes, and `Description` on `GetPolicy`** (#807). Both
+  have been stored since `CreatePolicy` and neither was ever rendered, so a consumer setting a
+  description could not read it back at all, and no caller could tell an attachable policy from
+  an unattachable one. AWS's `Policy` data type documents `IsAttachable` with no operation
+  restriction and `ListPolicies`' own sample response renders it on every member, so it reaches
+  both shapes; `Description` is single-entity-only, and there AWS says so about the member
+  itself — *"This element is included in the response to the GetPolicy operation. It is not
+  included in the response to the ListPolicies operation."*
+
+  `IsAttachable` is written unconditionally rather than omitted when false: the member is
+  `Required: No`, but an omitted boolean decodes to the same `false` in every SDK, so omitting it
+  would leave a consumer unable to distinguish "not attachable" from "not reported".
+- **`PasswordLastUsed` on the user shapes** (#807), from the field `IAMUser` has always carried.
+  AWS documents it as *"returned only in the GetUser and ListUsers operations"*, and its
+  `ListUsers` sample renders it, so it reaches both. Nothing in substrate assigns it — no
+  password operation is modelled, since `ChangePassword`, `CreateLoginProfile` and
+  `UpdateLoginProfile` all answer `InvalidAction` — so the member is omitted in every ordinary
+  run, which is exactly what AWS reports for a user who never signed in with a password. It is
+  rendered from the record so a consumer seeding one directly observes it.
+
 ### Changed
+- **`ListUsers` and `ListRoles` no longer report `PermissionsBoundary`** (#807). AWS's note on
+  both operations excludes the member by name, in the same sentence that excludes `Tags`:
+  *"This operation does not return the following attributes, even though they are an attribute
+  of the returned object: PermissionsBoundary, RoleLastUsed, Tags. To view all of the information
+  for a role, see GetRole."* Substrate reported one on every shape, which is a divergence in the
+  direction where the emulator is *more* generous than the service — a consumer could write an
+  assertion against a list response that AWS never satisfies, and only discover it against real
+  IAM. `GetUser` and `GetRole` report it as before; the users nested in a `GetGroup` response and
+  the roles nested in an instance-profile shape are list shapes too, and carry no boundary for
+  the same reason.
+
+  The exclusion follows the shape split #796 built for tags, so it is one helper called from the
+  single-entity wrappers rather than a condition threaded through the field builders. The new
+  assertions are against **raw XML**, because a decoded map cannot tell an absent member from an
+  empty one — both are the zero value, which is what an SDK reports either way.
+
+  **Two members stay unmodelled, each with the reason recorded**: `PermissionsBoundaryUsageCount`
+  needs either a scan of every user and role per policy read, making `ListPolicies`
+  O(policies × entities), or a counter maintained across the four boundary operations plus the
+  entity deletes that drop a boundary implicitly — which then has to agree with a count rebuilt
+  by replay (#815). `RoleLastUsed` advances when a role is *assumed*, so it needs `AssumeRole` to
+  write an IAM record — substrate's first write on a path whose purpose is not to mutate — or a
+  projection over recorded `AssumeRole` events, plus a nested response type and the request's
+  region rather than the emulator's (#816).
 - **`TestServer.ResetState` takes `testing.TB`** (#605). It was the last harness entry point still
   requiring `*testing.T`, so a benchmark could start a server (`StartTestServer` widened in
   #798) but not reset it between iterations. `testing.TB` has an unexported method, so no cast

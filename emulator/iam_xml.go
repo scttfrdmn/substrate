@@ -74,6 +74,19 @@ func xmlEsc(s string) string {
 // --- Per-resource XML builders -----------------------------------------------
 
 // iamUserXMLFields returns XML element content for an IAMUser (no wrapper tag).
+//
+// PasswordLastUsed is rendered here, so it reaches both user shapes: AWS's `User`
+// type says the member "is returned only in the GetUser and ListUsers operations",
+// and `ListUsers`' sample response carries it (#807). It is omitted when nil, which
+// AWS documents as meaning the user never signed in with a password — and that is
+// always the case here, because substrate models no password operation
+// (`ChangePassword`, `CreateLoginProfile` and `UpdateLoginProfile` all answer
+// `InvalidAction`), so nothing assigns the field. Rendering it anyway costs nothing
+// and is what a consumer seeding an [IAMUser] into state directly observes.
+//
+// The member therefore also cannot appear on `CreateUser`, which shares this
+// builder and is the one operation returning `User` that AWS's sentence excludes: a
+// user created a moment ago has never used a password, so AWS omits it there too.
 func iamUserXMLFields(u *IAMUser) string {
 	var b strings.Builder
 	b.WriteString("<UserId>")
@@ -87,14 +100,49 @@ func iamUserXMLFields(u *IAMUser) string {
 	b.WriteString("</Path><CreateDate>")
 	b.WriteString(u.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
 	b.WriteString("</CreateDate>")
-	if u.PermissionsBoundary != nil {
-		b.WriteString("<PermissionsBoundary><PolicyArn>")
-		b.WriteString(xmlEsc(u.PermissionsBoundary.PolicyARN))
-		b.WriteString("</PolicyArn><PolicyName>")
-		b.WriteString(xmlEsc(u.PermissionsBoundary.PolicyName))
-		b.WriteString("</PolicyName></PermissionsBoundary>")
+	if u.PasswordLastUsed != nil {
+		b.WriteString("<PasswordLastUsed>")
+		b.WriteString(u.PasswordLastUsed.UTC().Format("2006-01-02T15:04:05Z"))
+		b.WriteString("</PasswordLastUsed>")
 	}
 	return b.String()
+}
+
+// iamPermissionsBoundaryXML renders an entity's permissions boundary for a
+// single-entity shape, and nothing at all when it has none.
+//
+// Omitted when absent because `PermissionsBoundary` is `Required: No` on both `User`
+// and `Role`, and rendering an empty element would report a boundary policy with an
+// empty ARN where AWS reports no boundary at all.
+//
+// Called from the single-entity wrappers only, never from a listing builder, for the
+// same reason [iamEntityTagsXML] is: AWS's listing operations exclude it by name.
+// `ListRoles` and `ListUsers` both carry this note verbatim (#807):
+//
+//	IAM resource-listing operations return a subset of the available attributes for the
+//	resource. This operation does not return the following attributes, even though they are
+//	an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags. To view
+//	all of the information for a role, see GetRole.
+//
+// So a consumer that sets a boundary and reads it back through GetRole or GetUser sees
+// it, and one that finds the entity through ListRoles or ListUsers does not, and must
+// read the entity — which is what the note tells them to do. Substrate reported one on
+// both shapes until this release, which is a divergence in the direction where an
+// emulator is *more* generous than the service: a consumer could write an assertion
+// against a list response that AWS never satisfies.
+//
+// The users [iamUserListXML] renders inside `GetGroup`, and the roles
+// [iamRoleMembersXML] renders inside an instance profile, are the list shape too. AWS
+// documents no boundary on either — `GetGroup`'s and `GetInstanceProfile`'s samples both
+// carry a reduced entity — and neither operation is a way to read one entity, so the
+// note's "see GetRole" instruction applies unchanged.
+func iamPermissionsBoundaryXML(boundary *IAMAttachedPolicy) string {
+	if boundary == nil {
+		return ""
+	}
+	return "<PermissionsBoundary><PolicyArn>" + xmlEsc(boundary.PolicyARN) +
+		"</PolicyArn><PolicyName>" + xmlEsc(boundary.PolicyName) +
+		"</PolicyName></PermissionsBoundary>"
 }
 
 // iamEntityTagsXML renders an entity's tags for a single-entity shape, and nothing at all
@@ -131,7 +179,8 @@ func iamEntityTagsXML(tags []IAMTag) string {
 
 // iamSingleUserXML wraps user fields in a <User> element.
 func iamSingleUserXML(u *IAMUser) string {
-	return "<User>" + iamUserXMLFields(u) + iamEntityTagsXML(u.Tags) + "</User>"
+	return "<User>" + iamUserXMLFields(u) + iamPermissionsBoundaryXML(u.PermissionsBoundary) +
+		iamEntityTagsXML(u.Tags) + "</User>"
 }
 
 // iamUserListXML builds <Users> containing <member> elements.
@@ -148,6 +197,15 @@ func iamUserListXML(users []*IAMUser) string {
 }
 
 // iamRoleXMLFields returns XML element content for an IAMRole (no wrapper tag).
+//
+// `RoleLastUsed` is documented on AWS's `Role` type and is **not modeled** (#816).
+// Substrate stores nothing to render: the member advances when the role is *assumed*, so
+// populating it means `AssumeRole` writing an IAM record — substrate's first write on a
+// path whose purpose is not to mutate — or a projection over the recorded `AssumeRole`
+// events, plus a nested response type and the request's region rather than the emulator's.
+// That is a design decision with a replay consequence, so it is its own issue rather than
+// a field set here. The member is omitted entirely, which is what AWS reports for a role
+// that has never been assumed.
 func iamRoleXMLFields(r *IAMRole) string {
 	var b strings.Builder
 	b.WriteString("<RoleId>")
@@ -197,19 +255,13 @@ func iamRoleXMLFields(r *IAMRole) string {
 			b.WriteString("</AssumeRolePolicyDocument>")
 		}
 	}
-	if r.PermissionsBoundary != nil {
-		b.WriteString("<PermissionsBoundary><PolicyArn>")
-		b.WriteString(xmlEsc(r.PermissionsBoundary.PolicyARN))
-		b.WriteString("</PolicyArn><PolicyName>")
-		b.WriteString(xmlEsc(r.PermissionsBoundary.PolicyName))
-		b.WriteString("</PolicyName></PermissionsBoundary>")
-	}
 	return b.String()
 }
 
 // iamSingleRoleXML wraps role fields in a <Role> element.
 func iamSingleRoleXML(r *IAMRole) string {
-	return "<Role>" + iamRoleXMLFields(r) + iamEntityTagsXML(r.Tags) + "</Role>"
+	return "<Role>" + iamRoleXMLFields(r) + iamPermissionsBoundaryXML(r.PermissionsBoundary) +
+		iamEntityTagsXML(r.Tags) + "</Role>"
 }
 
 // iamRoleListXML builds <Roles> containing <member> elements.
@@ -265,6 +317,29 @@ func iamGroupListXML(groups []*IAMGroup) string {
 }
 
 // iamPolicyXMLFields returns XML element content for an IAMPolicy.
+//
+// `IsAttachable` is rendered here, so it reaches both policy shapes: AWS's `Policy` type
+// documents it with no operation restriction, and `ListPolicies`' sample response renders
+// it on every member (#807). Substrate has stored it since `CreatePolicy` and simply never
+// reported it, so a consumer could not tell an attachable policy from an unattachable one.
+//
+// It is written unconditionally, not omitted when false. The member is `Required: No` on
+// the type, but the value is a state a policy always has, and `false` is meaningful rather
+// than absent — while an omitted boolean decodes to the same `false` in every SDK, so a
+// consumer cannot distinguish "not attachable" from "not reported".
+//
+// `PermissionsBoundaryUsageCount` is documented on the same type, appears in the same
+// sample, and is **not modeled** (#815). Substrate stores a boundary as an ARN on the
+// entity rather than a back-reference on the policy, so the count is derivable but not
+// stored: reporting it means either a scan of every user and role per policy read, which
+// makes `ListPolicies` O(policies x entities), or a counter maintained across the four
+// `Put*/Delete*PermissionsBoundary` operations plus the entity deletes that drop a boundary
+// implicitly — and a counter accumulated live has to agree with one rebuilt by replay. That
+// is a performance and determinism decision, so it is its own issue rather than a field set
+// here.
+//
+// `Description` is *not* rendered here; it is single-entity-only, via
+// [iamPolicyDescriptionXML].
 func iamPolicyXMLFields(p *IAMPolicy) string {
 	var b strings.Builder
 	b.WriteString("<PolicyId>")
@@ -282,7 +357,9 @@ func iamPolicyXMLFields(p *IAMPolicy) string {
 		b.WriteString("</DefaultVersionId>")
 	}
 	fmt.Fprintf(&b, "<AttachmentCount>%d</AttachmentCount>", p.AttachmentCount)
-	b.WriteString("<CreateDate>")
+	b.WriteString("<IsAttachable>")
+	b.WriteString(iamBoolXML(p.IsAttachable))
+	b.WriteString("</IsAttachable><CreateDate>")
 	b.WriteString(p.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
 	b.WriteString("</CreateDate>")
 	if !p.UpdateDate.IsZero() {
@@ -293,9 +370,33 @@ func iamPolicyXMLFields(p *IAMPolicy) string {
 	return b.String()
 }
 
+// iamPolicyDescriptionXML renders a policy's description for a single-entity shape, and
+// nothing at all when it has none.
+//
+// Single-entity-only, and here AWS says so about this member specifically rather than
+// leaving it to the listing note — from the `Policy` data type (#807):
+//
+//	Description — A friendly description of the policy. This element is included in the
+//	response to the GetPolicy operation. It is not included in the response to the
+//	ListPolicies operation.
+//
+// which `ListPolicies`' sample confirms by rendering no `Description` on any member.
+// Substrate has stored the value since `CreatePolicy` and never reported it, so a consumer
+// setting a description could not read it back at all.
+//
+// Omitted when empty, since `Required: No` and an empty element would report a policy
+// described as "" where AWS reports no description.
+func iamPolicyDescriptionXML(description string) string {
+	if description == "" {
+		return ""
+	}
+	return "<Description>" + xmlEsc(description) + "</Description>"
+}
+
 // iamSinglePolicyXML wraps policy fields in a <Policy> element.
 func iamSinglePolicyXML(p *IAMPolicy) string {
-	return "<Policy>" + iamPolicyXMLFields(p) + iamEntityTagsXML(p.Tags) + "</Policy>"
+	return "<Policy>" + iamPolicyXMLFields(p) + iamPolicyDescriptionXML(p.Description) +
+		iamEntityTagsXML(p.Tags) + "</Policy>"
 }
 
 // iamPolicyListXML builds <Policies> containing <member> elements.
