@@ -38,25 +38,43 @@ const (
 	cfnStampLogicalIDTag = "aws:cloudformation:logical-id"
 )
 
-// cfnStampFixture is a deployer and an EC2 plugin over one state, which is what makes the
-// stamp observable the way a caller observes it: the deployer writes it and DescribeTags
-// reads it back.
+// cfnStampFixture is a deployer and the plugins owning the resources it creates over one
+// state, which is what makes the stamp observable the way a caller observes it: the deployer
+// writes it and each service's own tag-reading call reads it back.
 type cfnStampFixture struct {
 	deployer *emulator.StackDeployer
 	ec2      *emulator.EC2Plugin
+	s3       *emulator.S3Plugin
+	lambda   *emulator.LambdaPlugin
+	sqs      *emulator.SQSPlugin
+	dynamodb *emulator.DynamoDBPlugin
+	elb      *emulator.ELBPlugin
 	state    emulator.StateManager
 }
 
 // newCFNStampFixture builds the fixture over the given state, so a test that also needs an
 // AuthController can share one store with it. A nil state gets a fresh one.
+//
+// Six plugins rather than the two #746 needed: #765 widened the stamp past EC2, and its
+// criterion is that each tag is readable through the owning service's own call — which means
+// the plugin that owns the record has to be here to answer it.
 func newCFNStampFixture(t *testing.T, state emulator.StateManager) *cfnStampFixture {
+	t.Helper()
+	return newCFNStampFixtureWithLogger(t, state,
+		emulator.NewDefaultLogger(slog.LevelError, false))
+}
+
+// newCFNStampFixtureWithLogger is [newCFNStampFixture] with the deployer's logger supplied, so
+// a test can assert on what the stamp did *not* log — the only way a silent skip is observable.
+func newCFNStampFixtureWithLogger(
+	t *testing.T, state emulator.StateManager, logger emulator.Logger,
+) *cfnStampFixture {
 	t.Helper()
 	if state == nil {
 		state = emulator.NewMemoryStateManager()
 	}
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
 	costs := emulator.NewCostController(emulator.CostConfig{Enabled: true})
@@ -69,8 +87,6 @@ func newCFNStampFixture(t *testing.T, state emulator.StateManager) *cfnStampFixt
 	}))
 	registry.Register(ec2Plugin)
 
-	// S3 too, so "a physical ID that is not an EC2 ID is skipped" is asserted against a real
-	// bucket rather than a fabricated one.
 	s3Plugin := &emulator.S3Plugin{}
 	require.NoError(t, s3Plugin.Initialize(context.Background(), emulator.PluginConfig{
 		State:   state,
@@ -79,9 +95,56 @@ func newCFNStampFixture(t *testing.T, state emulator.StateManager) *cfnStampFixt
 	}))
 	registry.Register(s3Plugin)
 
+	lambdaPlugin := &emulator.LambdaPlugin{}
+	require.NoError(t, lambdaPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(lambdaPlugin)
+
+	sqsPlugin := &emulator.SQSPlugin{}
+	require.NoError(t, sqsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(sqsPlugin)
+
+	dynamodbPlugin := &emulator.DynamoDBPlugin{}
+	require.NoError(t, dynamodbPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(dynamodbPlugin)
+
+	elbPlugin := &emulator.ELBPlugin{}
+	require.NoError(t, elbPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(elbPlugin)
+
+	// CloudWatch Logs models no tag state at all, so it is here as the negative case: a
+	// resource neither resolver claims has to deploy clean and be skipped in silence.
+	cwLogsPlugin := &emulator.CloudWatchLogsPlugin{}
+	require.NoError(t, cwLogsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(cwLogsPlugin)
+
 	return &cfnStampFixture{
 		deployer: emulator.NewStackDeployer(registry, store, state, tc, logger, costs),
 		ec2:      ec2Plugin,
+		s3:       s3Plugin,
+		lambda:   lambdaPlugin,
+		sqs:      sqsPlugin,
+		dynamodb: dynamodbPlugin,
+		elb:      elbPlugin,
 		state:    state,
 	}
 }
@@ -241,23 +304,34 @@ func TestCFN_StampIsIdempotent(t *testing.T) {
 	assert.Len(t, f.tagsFor(t, igw), 3, "the stamp upserts rather than appends")
 }
 
-// TestCFN_ANonEC2ResourceIsNotStamped pins the silent skip.
+// TestCFN_ANonEC2ResourceIsStampedByItsOwnService is the inversion of what #746 pinned.
 //
-// A bucket name resolves to no EC2 state key, so nothing is written and nothing is logged —
-// the deployer creates far more non-EC2 resources than EC2 ones, and a warning per resource
-// would drown a real one. The stamp beyond EC2 is #765.
-func TestCFN_ANonEC2ResourceIsNotStamped(t *testing.T) {
+// #746 asserted that a bucket carried no tags, because the resolver behind the stamp was
+// EC2's alone. #765 gave the stamp a second resolver, so the bucket now carries the three
+// keys — and the assertion has to be read back through S3's own `GetBucketTagging` rather
+// than through EC2's `DescribeTags`, which would report an empty set either way and so pass
+// whether or not anything was written.
+//
+// The two halves matter together: the EC2 resource beside it must still be stamped by the EC2
+// resolver, which is tried first.
+func TestCFN_ANonEC2ResourceIsStampedByItsOwnService(t *testing.T) {
 	f := newCFNStampFixture(t, nil)
-	tmpl := `{"Resources": {
-		"Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "stamp-test-bucket"}},
-		"Vpc":    {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.9.0.0/16"}}
-	}}`
+	tmpl := `{
+		"Resources": {
+			"Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "stamp-test-bucket"}},
+			"Vpc":    {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.9.0.0/16"}}
+		},
+		"Outputs": {"StackId": {"Value": {"Ref": "AWS::StackId"}}}
+	}`
 
 	result, err := f.deployer.Deploy(context.Background(), tmpl, "mixed-stack", nil)
 	require.NoError(t, err)
 	ids := physicalIDs(t, result)
 
-	assert.Empty(t, f.tagsFor(t, ids["Bucket"]), "a bucket carries no EC2 tags")
+	assert.Empty(t, f.tagsFor(t, ids["Bucket"]),
+		"a bucket is not an EC2 resource, so EC2's own tag store still knows nothing of it")
+	assert.Equal(t, cfnExpectedStamp("mixed-stack", result.Outputs["StackId"], "Bucket"),
+		f.bucketTagsFor(t, ids["Bucket"]), "and S3 reports the stamp on it")
 	assert.Len(t, f.tagsFor(t, ids["Vpc"]), 3, "and the EC2 resource beside it is still stamped")
 }
 

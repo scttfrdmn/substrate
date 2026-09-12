@@ -959,10 +959,29 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 // mergeTags loads the resource at ns/key, applies addTags (merge) and removes
 // removeKeys, then persists the updated resource.
 //
+// A thin wrapper over [mergeResourceTags], which holds the behavior so the tagging plugin
+// and the CloudFormation deployer cannot drift into two merge semantics.
+func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags map[string]string, removeKeys []string) error {
+	return mergeResourceTags(goCtx, p.state, ns, key, addTags, removeKeys)
+}
+
+// mergeResourceTags loads the resource at ns/key, applies addTags (merge) and removes
+// removeKeys, then persists the updated resource.
+//
 // For S3 / Lambda / SQS / DynamoDB, tags are map[string]string.
 // For IAM and EC2, tags are []IAMTag / []EC2Tag.
-func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags map[string]string, removeKeys []string) error {
-	raw, err := p.state.Get(goCtx, ns, key)
+//
+// A free function taking the state rather than a method, for the reason given on
+// [ec2ApplyTagsToResource]: the CloudFormation deployer writes the `aws:cloudformation:*`
+// stamp through here ([#765](https://github.com/scttfrdmn/substrate/issues/765)) and holds no
+// [TaggingPlugin]. Sharing the writer is the point — a tag the Resource Groups Tagging API
+// would write and one the deployer writes land in the same place, in the same shape, so a
+// consumer reading either back through the owning service's own call sees one behavior.
+func mergeResourceTags(
+	goCtx context.Context, state StateManager, ns, key string,
+	addTags map[string]string, removeKeys []string,
+) error {
+	raw, err := state.Get(goCtx, ns, key)
 	if err != nil {
 		return fmt.Errorf("get resource: %w", err)
 	}
@@ -978,7 +997,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		b.Tags = mergeStringMap(b.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(b)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case lambdaNamespace:
 		var fn LambdaFunction
@@ -987,7 +1006,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		fn.Tags = mergeStringMap(fn.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(fn)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case sqsNamespace:
 		var q SQSQueue
@@ -996,7 +1015,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		q.Tags = mergeStringMap(q.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(q)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case dynamodbNamespace:
 		var t DynamoDBTable
@@ -1005,7 +1024,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		t.Tags = mergeStringMap(t.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(t)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case ec2Namespace:
 		var inst EC2Instance
@@ -1014,7 +1033,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		inst.Tags = mergeEC2Tags(inst.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(inst)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case iamNamespace:
 		if strings.HasPrefix(key, "user:") {
@@ -1024,7 +1043,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			u.Tags = mergeIAMTags(u.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(u)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "role:") {
 			var r IAMRole
@@ -1033,7 +1052,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			r.Tags = mergeIAMTags(r.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(r)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported IAM resource key: %s", key)
 
@@ -1044,7 +1063,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(api)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case statesNamespace:
 		var sm StateMachineState
@@ -1053,7 +1072,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		sm.Tags = mergeStringMap(sm.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(sm)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case ecrNamespace:
 		var repo ECRRepository
@@ -1062,7 +1081,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		repo.Tags = mergeStringMap(repo.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(repo)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case ecsNamespace:
 		var cluster ECSCluster
@@ -1071,7 +1090,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		cluster.Tags = mergeECSTags(cluster.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(cluster)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case cognitoIDPNamespace:
 		var pool CognitoUserPool
@@ -1080,7 +1099,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		pool.Tags = mergeStringMap(pool.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(pool)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case kinesisNamespace:
 		var stream KinesisStream
@@ -1089,7 +1108,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		stream.Tags = mergeStringMap(stream.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(stream)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case rdsNamespace:
 		var inst RDSDBInstance
@@ -1098,7 +1117,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		inst.Tags = mergeStringMap(inst.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(inst)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case elasticacheNamespace:
 		var cluster ElastiCacheCacheCluster
@@ -1107,7 +1126,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 		}
 		cluster.Tags = mergeStringMap(cluster.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(cluster)
-		return p.state.Put(goCtx, ns, key, updated)
+		return state.Put(goCtx, ns, key, updated)
 
 	case efsNamespace:
 		if strings.HasPrefix(key, "filesystem:") {
@@ -1117,7 +1136,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			fs.Tags = mergeEFSTags(fs.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(fs)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "accesspoint:") {
 			var ap EFSAccessPoint
@@ -1126,7 +1145,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			ap.Tags = mergeEFSTags(ap.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(ap)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported EFS resource key: %s", key)
 
@@ -1138,7 +1157,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			db.Tags = mergeStringMap(db.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(db)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "job:") {
 			var job GlueJob
@@ -1147,7 +1166,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			job.Tags = mergeStringMap(job.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(job)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "crawler:") {
 			var crawler GlueCrawler
@@ -1156,7 +1175,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			crawler.Tags = mergeStringMap(crawler.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(crawler)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "connection:") {
 			var conn GlueConnection
@@ -1165,7 +1184,7 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 			}
 			conn.Tags = mergeStringMap(conn.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(conn)
-			return p.state.Put(goCtx, ns, key, updated)
+			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported Glue resource key: %s", key)
 

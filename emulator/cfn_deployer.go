@@ -2477,14 +2477,21 @@ const (
 // cfnStackResourceTags is the stamp CloudFormation applies to the resources a stack
 // creates, for the one resource named by logicalID.
 //
-// Provenance: of the three, only `aws:cloudformation:stack-name` appears on a reachable AWS
-// page. Every CloudFormation user-guide page documenting the set returned an empty body, and
-// `API_CreateStack.html` documents *stack tag propagation*, which is the other mechanism —
-// caller-supplied `Tags.member.N` flowing down, which substrate does not model at all
-// ([#764](https://github.com/scttfrdmn/substrate/issues/764) tracks it). So the triple is
-// observed AWS behavior rather than published API model, and is labeled as such in
-// `docs/services.md`. The values are AWS's: the stack's name, the stack's ARN — which is what
-// `AWS::StackId` resolves to and what `CreateStack` reports — and the resource's logical ID.
+// Provenance: **all three keys are documented**, on the Template Reference's resource-tag
+// page — "In addition to any tags you define, CloudFormation automatically creates the
+// following stack-level tags with the `aws:` prefix: `aws:cloudformation:{{logical-id}}`,
+// `aws:cloudformation:{{stack-id}}`, `aws:cloudformation:{{stack-name}}`". This corrects the
+// note that stood here through #746, which said only `stack-name` appeared on a reachable page
+// and labeled the triple as observed behavior: every user-guide page checked at the time
+// returned an empty body, and the Template Reference page was not among them. The values are
+// AWS's: the stack's name, the stack's ARN — which is what `AWS::StackId` resolves to and what
+// `CreateStack` reports — and the resource's logical ID.
+//
+// The same page is the authority for how far the stamp reaches, and it declines to enumerate:
+// "The propagation of stack-level tags to resources, including tags with the `aws:` prefix,
+// varies by resource type." So substrate states its own rule instead — stamped where substrate
+// models tags for the service, skipped silently otherwise — rather than claiming a coverage
+// AWS does not publish.
 //
 // Ordering is fixed and alphabetical by key so a test can assert the rendered tag list
 // without depending on map iteration. AWS publishes no order, and a real caller sorts.
@@ -2512,17 +2519,24 @@ func cfnStackResourceTags(stackName, stackID, logicalID string) []EC2Tag {
 // namespace. CloudFormation on AWS is likewise not observed issuing a tagging call — the
 // tags are simply on the resource — so the state write is also the closer model.
 //
-// Scoped to EC2, because [ec2TaggableResource] resolves a physical ID to a state key by
-// prefix and therefore covers all nine EC2 resource types the deployer creates at once, plus
-// any tenth that arrives. S3, DynamoDB, Lambda and SQS each keep tags in a store with a
-// different key shape and ELBv2 keeps none at all, so each needs its own resolver
-// ([#765](https://github.com/scttfrdmn/substrate/issues/765)). EC2 is what the bundled
-// cleanup policy conditions on, which is the statement this makes satisfiable.
+// **Two resolvers, tried in order** (#765). [ec2TaggableResource] goes first: it maps a
+// physical ID to a state key by prefix, so it covers all nine EC2 types the deployer creates at
+// once plus any tenth that arrives, and EC2 is what the bundled cleanup policy conditions on.
+// [cfnStampResourceTags] then covers the services whose tags live in a differently shaped
+// store — S3, DynamoDB, Lambda, SQS and ELBv2's four kinds — keyed on the CFN resource type
+// rather than the ID, because outside EC2 a physical ID is a bare name with nothing to switch
+// on.
 //
-// A physical ID that is not an EC2 ID resolves to nothing and is skipped silently — a bucket
-// name is the common case, and it must not log. A physical ID that merely *looks* like one
-// (a bucket named "i-something") resolves to a state key holding no record, which
-// [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource as.
+// EC2 is tried first because its resolver keys on the ID and the type-keyed one cannot reach an
+// EC2 type, so the order cannot matter for a resource either could claim. It is stated because
+// the reverse order would matter if a future arm overlapped.
+//
+// A resource neither resolver claims is **skipped silently** — a stack creates far more
+// resources than the ~22 services substrate models tags for, so a warning per resource would
+// bury a real one, and `docs/services.md` names what is skipped instead. A physical ID that
+// merely *looks* like an EC2 ID (a bucket named "i-something") resolves to a state key holding
+// no record, which [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource
+// as.
 //
 // A failed resource is not stamped: there may be nothing to stamp, and a tag on a resource
 // CloudFormation reports as CREATE_FAILED would claim a resource exists.
@@ -2531,20 +2545,33 @@ func (d *StackDeployer) stampCFNResourceTags(dr DeployedResource, cctx *cfnConte
 		return
 	}
 	reqCtx := &RequestContext{AccountID: cctx.accountID, Region: cctx.region}
-	if target, ok := ec2TaggableResource(d.state, reqCtx, dr.PhysicalID); !ok || !target.resolved() {
-		return
-	}
 	tags := cfnStackResourceTags(
 		cctx.stackName,
 		cfnStackARN(cctx.region, cctx.accountID, cctx.stackName),
 		dr.LogicalID,
 	)
-	if err := ec2ApplyTagsToResource(d.state, reqCtx, dr.PhysicalID, tags, false); err != nil {
-		// Recorded, not returned: the resource itself deployed, and a stack does not fail
-		// because CloudFormation could not stamp its own bookkeeping tag.
-		d.logger.Warn("cfn: could not stamp aws:cloudformation tags",
-			"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
+
+	if target, ok := ec2TaggableResource(d.state, reqCtx, dr.PhysicalID); ok && target.resolved() {
+		if err := ec2ApplyTagsToResource(d.state, reqCtx, dr.PhysicalID, tags, false); err != nil {
+			d.warnStampFailed(dr, err)
+		}
+		return
 	}
+
+	if _, err := cfnStampResourceTags(d.state, reqCtx, dr, tags); err != nil {
+		d.warnStampFailed(dr, err)
+	}
+}
+
+// warnStampFailed records a stamp that could not be written.
+//
+// Recorded, not returned: the resource itself deployed, and a stack does not fail because
+// CloudFormation could not write its own bookkeeping tag. Logged only when a resolver *found*
+// somewhere to write and the write failed — a resource no resolver claims is not a failure and
+// says nothing.
+func (d *StackDeployer) warnStampFailed(dr DeployedResource, err error) {
+	d.logger.Warn("cfn: could not stamp aws:cloudformation tags",
+		"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
 }
 
 // dispatchResource routes a CFN resource type to its deploy helper.

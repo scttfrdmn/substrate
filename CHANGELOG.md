@@ -122,6 +122,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other half of #764; until then only the three `aws:cloudformation:*` keys land on one.
   `CreateChangeSet` still drops `Tags.member.N`, tracked as #824.
 
+- **The `aws:cloudformation:*` stamp reaches beyond EC2** (#765). #746 gave the deployer a stamp
+  and it covered EC2 alone, because the resolver behind it switched on an EC2 id prefix. So most
+  of a stack was unstamped: an S3 bucket, a Lambda function, an SQS queue, a DynamoDB table and
+  every ELBv2 resource carried none of `aws:cloudformation:stack-name`, `…:stack-id` or
+  `…:logical-id`, and a policy or a cost-allocation assertion keyed on the stack name saw nothing
+  on them. Nine types across six services are stamped now, and each tag is readable through the
+  owning service's **own** tag call — `GetBucketTagging`, `ListTags`, `ListQueueTags`,
+  `ListTagsOfResource` and ELBv2's `DescribeTags` — rather than only out of state. A policy
+  conditioned on `aws:ResourceTag/aws:cloudformation:stack-name` now matches a bucket a stack
+  created, which is the whole point of the tag existing.
+
+  The second resolver keys on the **CloudFormation resource type** rather than on the physical
+  ID's shape, because outside EC2 a physical ID is a bare name: a bucket named `orders` and a
+  queue named `orders` are the same string, so there is nothing in the ID to switch on.
+  `DeployedResource` already carries the type beside the physical ID, so this added no
+  bookkeeping. EC2's resolver is still tried first, which is why an S3 bucket a template names
+  `i-something` still resolves as an instance — recorded in `docs/services.md` rather than
+  guarded against, since no AWS naming rule prevents it either.
+
+  Each state key was verified against the plugin that owns the record, not copied from the
+  Resource Groups Tagging API's resolver, which computes a key for the same four services and
+  gets SQS wrong — it addresses `queue:<name>` where the SQS plugin writes
+  `queue:<account>/<name>`, so a tag set through `TagResources` is invisible to `ListQueueTags`.
+  That defect is filed as #826 and deliberately not reproduced here; the criterion for the stamp
+  is that the tag is readable through the service's own call, which settles the tie whenever two
+  writers disagree about a key. Substrate's one merge implementation is now shared rather than
+  duplicated: `TaggingPlugin.mergeTags` was extracted into a free function taking a
+  `StateManager`, following `ec2ApplyTagsToResource`'s precedent, so the tagging API and the
+  deployer cannot drift into two merge behaviours.
+
+  **A resource whose service models no tags is still skipped in silence**, and AWS's own page is
+  the authority for stating a rule rather than a list: "The propagation of stack-level tags to
+  resources, including tags with the `aws:` prefix, varies by resource type." Roughly twenty
+  services the deployer can create resources in keep no tag state at all, and API Gateway and
+  Cognito carry tag state with no tagging operation to read it back through; `docs/services.md`
+  names them, and #819 tracks the list. IAM is excluded on purpose — no page says an IAM entity
+  receives the stamp, and substrate's own `TagRole` refuses an `aws:`-prefixed key, so a stamped
+  IAM tag would be one no caller could ever set or remove.
+
+  **Provenance, corrected.** An earlier note here and in `docs/services.md` said that only
+  `aws:cloudformation:stack-name` appeared on a reachable AWS page and that the three-key set was
+  observed behaviour. The Template Reference's *Resource tag* page documents all three by name;
+  the pages consulted when the stamp was first implemented had returned empty bodies. The same
+  page supplies the "varies by resource type" sentence and the EBS carve-out.
+
+  Found in passing and filed rather than folded in: `Ref` on an `AWS::ElasticLoadBalancingV2::`
+  `LoadBalancer` or `TargetGroup` answers with the resource's *name* where AWS answers with its
+  ARN, so AWS's own listener template does not deploy here (#827).
+
 ### Changed
 - **`ListUsers` and `ListRoles` no longer report `PermissionsBoundary`** (#807). AWS's note on
   both operations excludes the member by name, in the same sentence that excludes `Tags`:
