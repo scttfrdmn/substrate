@@ -365,7 +365,7 @@ func TestCFN_AFailedUpdateRollsBackToThePreviousTemplate(t *testing.T) {
 		`"Kept":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"rollback-kept"}},`+
 		`"Trailing":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"rollback-trailing"}},`+
 		`"Added":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"no"}}}}`,
-		"updated", nil)
+		"updated", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err, "a rolled-back update is a status, not a failed call")
 
 	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", result.Status)
@@ -395,7 +395,7 @@ func TestCFN_AnUnchangedUpdateStillReportsUpdateComplete(t *testing.T) {
 	_, err := d.Deploy(ctx, cfnRollbackCleanTemplate, "noop", nil)
 	require.NoError(t, err)
 
-	result, err := d.UpdateStack(ctx, cfnRollbackCleanTemplate, "noop", nil)
+	result, err := d.UpdateStack(ctx, cfnRollbackCleanTemplate, "noop", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "UPDATE_COMPLETE", result.Status,
 		"an update that changes nothing succeeds")

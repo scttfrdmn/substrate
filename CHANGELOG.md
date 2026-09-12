@@ -74,6 +74,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-modify-write is synchronous against a state manager that serializes its own access, and a
   state failure is returned as a Go error rather than as an IAM-shaped body.
 
+- **A CloudFormation stack records its own tags, and `DescribeStacks` reports them** (#764).
+  `CreateStack`'s and `UpdateStack`'s `Tags.member.N` was decoded by nothing at all: a caller
+  sending `--tags Key=team,Value=platform` got a 200 and a stack that reported no tags, so a
+  cost-allocation or policy assertion keyed on a stack tag had nothing to read, and there was no
+  way to tell a tagged stack from an untagged one. `CFNStackState` gains a `Tags` field and
+  `cfnStackItem` a `Tags` member; tags are reported sorted by key, as parameters and outputs
+  already are, so a response is byte-identical across runs.
+
+  **The update semantics are AWS's, and they are why a stack's tags are modelled as a map that
+  can be absent rather than as a list**: *"If you don't specify this parameter, CloudFormation
+  doesn't modify the stack's tags. If you specify an empty value, CloudFormation removes all
+  associated tags."* Those are three different requests, not two — omitting the parameter
+  preserves, sending an empty list clears, and sending members replaces the set wholesale rather
+  than merging into it. The distinction is observable because the query protocol serialises an
+  empty list as a bare `Tags=`, so `--tags '[]'` arrives with the parameter present and no
+  members. `UpdateStack` had no options struct at all and now takes one, which is the one
+  non-obvious cost in the change; a rollback of a failed update restores the tags the stack had,
+  since a rollback converges on the stack as it was.
+
+  A tag set is validated against the `Tag` data type's own constraints — at most 50 ("A maximum
+  number of 50 tags can be specified"), a key of 1 to 128 characters, a value of 1 to 256 —
+  counted in characters rather than bytes. Two divergences are asserted rather than smoothed
+  over, because both are AWS's own. **A stack tag's value may not be empty**: the model's minimum
+  is 1, where IAM's and ELBv2's tag values document a minimum of 0, so `Key=team` with no value
+  is refused by CloudFormation and accepted by those two. And the reserved `aws:` prefix is
+  matched **case-insensitively** here — the only service in substrate that does, because the only
+  one whose documentation says so: *"The `aws:` prefix is reserved for AWS use. This prefix is
+  case-insensitive."* So `AWS:owner` is refused as a stack tag and remains an ordinary caller tag
+  in EC2, ELBv2 and IAM. The prefix is refused in a key only; a *value* beginning `aws:` is
+  stored, since all AWS says of one is that "you can't update or delete the tag".
+
+  No character set is enforced, deliberately: the `Tag` model publishes no `Pattern` for either
+  member, unlike IAM's and AWS Config's, and inventing one would refuse requests AWS accepts. The
+  console page's 127 and 255 lose to the model's 128 and 256, and `docs/services.md` records the
+  disagreement so a consumer reading that page is not surprised by the extra character.
+
+  **Provenance: the `ValidationError`/400 on a bad stack tag is substrate's choice, not AWS's.**
+  Neither operation's Errors list names a code for one, and substrate's two precedents disagree —
+  EC2 invents `InvalidParameterValue`, ELBv2 accepts silently. `ValidationError` is what the
+  plugin already answers every other parameter refusal with. The refusal is of the whole request:
+  a create with one bad tag leaves no stack behind, and a refused update changes nothing.
+  Validation lives on the deployer's options rather than at the wire layer, so an in-process
+  `Client` deploy is held to the same limits as an HTTP request.
+
+  What a stack tag does **not** yet do is reach the resources the stack creates, which is the
+  other half of #764; until then only the three `aws:cloudformation:*` keys land on one.
+  `CreateChangeSet` still drops `Tags.member.N`, tracked as #824.
+
 ### Changed
 - **`ListUsers` and `ListRoles` no longer report `PermissionsBoundary`** (#807). AWS's note on
   both operations excludes the member by name, in the same sentence that excludes `Tags`:

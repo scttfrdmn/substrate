@@ -236,6 +236,21 @@ type CFNStackState struct {
 	// Parameters holds the resolved parameter values used during deployment.
 	Parameters map[string]string `json:"Parameters"`
 
+	// Tags holds the stack-level tags the create or update supplied, empty for a
+	// stack created without any.
+	//
+	// A map rather than an ordered list because CloudFormation's own model is
+	// key-value with unique keys, and because the distinction an update turns on is
+	// *absence*: "if you don't specify this parameter, CloudFormation doesn't modify
+	// the stack's tags. If you specify an empty value, CloudFormation removes all
+	// associated tags." A nil map is the omitted parameter and an empty non-nil one
+	// is the empty list, which no slice-of-pairs encoding expresses as cheaply.
+	//
+	// Sorted at the point it is rendered rather than stored ordered, following
+	// [cfnParametersXML], so a DescribeStacks response is byte-identical across
+	// runs.
+	Tags map[string]string `json:"Tags,omitempty"`
+
 	// Resources lists the deployed resources.
 	Resources []DeployedResource `json:"Resources"`
 
@@ -553,6 +568,20 @@ var (
 	// The caller's request is malformed rather than substrate failing, so this maps
 	// to a ValidationError at 400.
 	ErrCFNInvalidOnFailure = errors.New("invalid stack failure option")
+
+	// ErrCFNInvalidTag is returned when a stack tag breaks one of the limits the
+	// `Tag` data type documents — more than 50 entries, a key outside 1-128
+	// characters, a value outside 1-256 — or uses the reserved `aws:` prefix.
+	//
+	// This maps to a ValidationError at 400, and **that code is substrate's choice
+	// rather than AWS's**: `CreateStack`'s and `UpdateStack`'s Errors lists name only
+	// AlreadyExists, InsufficientCapabilities, LimitExceeded, TokenAlreadyExists and
+	// (for update) InvalidChangeSetStatus, none of which describes a malformed tag,
+	// and the two precedents already in substrate disagree with each other — EC2
+	// invents `InvalidParameterValue` for a reserved prefix while ELBv2 accepts one
+	// silently. ValidationError is the code this plugin already answers for every
+	// other malformed parameter, so a caller sees one code for one class of mistake.
+	ErrCFNInvalidTag = errors.New("invalid stack tag")
 )
 
 // Stack statuses substrate reports, for the ones written from more than one place.
@@ -1175,6 +1204,7 @@ func (d *StackDeployer) DeployWithOptions(
 			stackName:    stackName,
 			templateBody: cfn,
 			params:       cctx.params,
+			tags:         opts.Tags,
 			resources:    resources,
 			failures:     failures,
 			streamID:     streamID,
@@ -1202,6 +1232,7 @@ func (d *StackDeployer) DeployWithOptions(
 			StackName:    stackName,
 			TemplateBody: cfn,
 			Parameters:   cctx.params,
+			Tags:         opts.Tags,
 			Resources:    resources,
 			Outputs:      outputs,
 			ExportNames:  exportNames,
@@ -1228,16 +1259,36 @@ func (d *StackDeployer) DeployWithOptions(
 // [StackDeployer.rollbackFailedUpdate] for what the difference costs. An update whose
 // rollback is not wanted has no option to disable it: DisableRollback and OnFailure are
 // CreateStack parameters, and UpdateStack models neither.
-func (d *StackDeployer) UpdateStack(ctx context.Context, cfn, stackName string, params map[string]string) (*DeployResult, error) {
+//
+// Only opts.Tags is read, for that same reason: the options type is shared with
+// [StackDeployer.DeployWithOptions] so a caller has one struct to build rather than two
+// near-identical ones, and an OnFailure set here is **ignored** — UpdateStack forces
+// DO_NOTHING below because an update's failure path is a rollback onto a template, not a
+// sweep of the resources.
+func (d *StackDeployer) UpdateStack(
+	ctx context.Context, cfn, stackName string, params map[string]string, opts CFNDeployOptions,
+) (*DeployResult, error) {
 	// Read before the update, because the update overwrites it: this is the only
-	// description of the pre-update state a rollback has to converge on.
+	// description of the pre-update state a rollback has to converge on, and the only
+	// record of the tags an update that omits Tags has to preserve.
 	prev, prevErr := d.loadStack(ctx, stackName)
+
+	// "If you don't specify this parameter, CloudFormation doesn't modify the stack's
+	// tags. If you specify an empty value, CloudFormation removes all associated tags."
+	// A nil map is the omitted parameter, so it resolves to what the stack already
+	// carries; an empty non-nil one is the empty list and clears them. An unreadable
+	// previous record leaves the update's own tags in force rather than failing — the
+	// update is about to overwrite that record anyway.
+	tags := opts.Tags
+	if tags == nil && prevErr == nil && prev != nil {
+		tags = prev.Tags
+	}
 
 	// DO_NOTHING, so a failed update does not take the create-rollback path and
 	// delete the resources: an update failure rolls *back to a template*, and
 	// deleting what the previous template declares is the opposite of that.
 	result, err := d.DeployWithOptions(ctx, cfn, stackName, params,
-		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing})
+		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing, Tags: tags})
 	if err != nil {
 		return nil, fmt.Errorf("update stack %s: %w", stackName, err)
 	}
@@ -1747,7 +1798,11 @@ func (d *StackDeployer) ExecuteChangeSet(ctx context.Context, stackName, changeS
 	if err != nil {
 		return nil, err
 	}
-	result, err := d.UpdateStack(ctx, cs.TemplateBody, stackName, cs.Parameters)
+	// No tags: a change set records none today, and a nil Tags leaves the stack's own
+	// tags as they are — which is what executing a change set that says nothing about
+	// tags should do. CreateChangeSet's Tags parameter is a separate question (#824).
+	result, err := d.UpdateStack(ctx, cs.TemplateBody, stackName, cs.Parameters,
+		CFNDeployOptions{})
 	if err != nil {
 		return nil, err
 	}

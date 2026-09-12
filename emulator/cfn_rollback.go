@@ -97,6 +97,16 @@ type CFNDeployOptions struct {
 	// a caller to set them inconsistently and force every reader to decide which
 	// wins.
 	OnFailure string
+
+	// Tags are the stack-level tags the operation supplies, nil when it supplies
+	// none.
+	//
+	// Nil and empty mean different things on an update and the difference is the
+	// API's: an omitted Tags leaves the stack's tags alone, an empty one removes
+	// them all. A create sees no difference between the two — there is nothing to
+	// preserve — so the zero value is still CloudFormation's own behavior, which is
+	// what the type's contract above promises.
+	Tags map[string]string
 }
 
 // resolve returns the OnFailure value in force, applying the API's default.
@@ -113,7 +123,11 @@ func (o CFNDeployOptions) validate() error {
 		return cfnErrf(ErrCFNInvalidOnFailure,
 			"OnFailure must be one of DO_NOTHING, ROLLBACK or DELETE, got %q", o.OnFailure)
 	}
-	return nil
+	// Validated here rather than at the wire layer so an in-process [Client] deploy is
+	// held to the same limits as a request that arrived over HTTP: both funnel through
+	// [StackDeployer.DeployWithOptions], and a rule enforced on one path only is one a
+	// consumer discovers by switching harnesses.
+	return cfnValidateStackTags(o.Tags)
 }
 
 // cfnFailedResources names the resources that failed to deploy, in the order they
@@ -294,6 +308,7 @@ type cfnFailedCreate struct {
 	stackName    string
 	templateBody string
 	params       map[string]string
+	tags         map[string]string
 	resources    []DeployedResource
 	failures     []string
 	streamID     string
@@ -329,6 +344,7 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 		StackName:    fc.stackName,
 		TemplateBody: fc.templateBody,
 		Parameters:   fc.params,
+		Tags:         fc.tags,
 		Resources:    fc.resources,
 		Outputs:      map[string]string{},
 		AccountID:    d.identity.accountID,
@@ -446,8 +462,11 @@ func (d *StackDeployer) rollbackFailedUpdate(
 	// DO_NOTHING so the re-deploy reports its own failures instead of rolling back:
 	// a create rollback here would delete the resources the previous template
 	// declares, which is the opposite of converging on it.
+	// The previous template's tags go back with it. A rollback converges on the stack
+	// as it was, and the tags are part of that: leaving the failed update's tags in
+	// place would report a stack tagged by an operation that did not survive.
 	result, err := d.DeployWithOptions(ctx, prev.TemplateBody, streamID, prev.Parameters,
-		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing})
+		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing, Tags: prev.Tags})
 	if err != nil {
 		return nil, fmt.Errorf("roll back update of stack %s: %w", prev.StackName, err)
 	}

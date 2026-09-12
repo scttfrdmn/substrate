@@ -162,7 +162,7 @@ func TestCFNGeneratedName_UpdateDoesNotMoveAPhysicalID(t *testing.T) {
 
 	before, err := d.Deploy(ctx, repeatableTemplate, "stable", nil)
 	require.NoError(t, err)
-	after, err := d.UpdateStack(ctx, repeatableTemplate, "stable", nil)
+	after, err := d.UpdateStack(ctx, repeatableTemplate, "stable", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
 
 	for _, id := range []string{"MyRole", "MyQueue", "MyTopic"} {

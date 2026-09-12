@@ -240,7 +240,7 @@ func TestCFN_ChangingAnImportedExportIsRefused(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := d.UpdateStack(ctx, tc.template, "net", nil)
+			_, err := d.UpdateStack(ctx, tc.template, "net", nil, emulator.CFNDeployOptions{})
 			require.Error(t, err)
 			assert.ErrorIs(t, err, emulator.ErrCFNExportInUse)
 			assert.Contains(t, err.Error(),
@@ -250,7 +250,7 @@ func TestCFN_ChangingAnImportedExportIsRefused(t *testing.T) {
 
 	// Redeploying the same value is not a change, so it is allowed — otherwise an
 	// idempotent redeploy of an exporting stack would be impossible.
-	_, err = d.UpdateStack(ctx, cfnExportingTemplate, "net", nil)
+	_, err = d.UpdateStack(ctx, cfnExportingTemplate, "net", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
 }
 
