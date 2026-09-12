@@ -5334,9 +5334,10 @@ AWS ignores, which is a divergence in the granting direction.
 
 The bundled statement that motivated the prefix conditions on
 `ec2:ResourceTag/aws:cloudformation:stack-name`, and that tag is not one a caller can set —
-`CreateTags` refuses a key beginning with `aws:`, as AWS does. <a id="cloudformation-stamps-its-own-tags-on-the-ec2-resources-it-creates"></a>**CloudFormation
-stamps its own tags on the EC2 resources it creates**
-([#746](https://github.com/scttfrdmn/substrate/issues/746)), which is what makes
+`CreateTags` refuses a key beginning with `aws:`, as AWS does. <a id="cloudformation-stamps-its-own-tags-on-the-resources-it-creates"></a>**CloudFormation
+stamps its own tags on the resources it creates**
+([#746](https://github.com/scttfrdmn/substrate/issues/746) for EC2,
+[#765](https://github.com/scttfrdmn/substrate/issues/765) for everything else), which is what makes
 `ManagedCloudformationResourcesCleanupPolicy`'s statement satisfiable rather than inert: a
 resource a stack creates carries `aws:cloudformation:stack-name`,
 `aws:cloudformation:stack-id` and `aws:cloudformation:logical-id`, so the bundled statement's
@@ -5352,29 +5353,68 @@ derivation of it — and the write is an upsert, so re-deploying a stack rewrite
 rather than accumulating them. `aws:` keys are already excluded from the 50-tag limit, so the
 stamp cannot push a caller's own tags over it.
 
-Four limits on the stamp, each named because a policy or an assertion written against it will
+#### What the stamp reaches
+
+Nine CFN resource types are stamped, across six services, and each tag is readable through
+that service's **own** tag call rather than only out of state:
+
+| Service | CFN types stamped | Read back with |
+|---|---|---|
+| EC2 | VPC, Subnet, SecurityGroup, InternetGateway, RouteTable, EIP, NatGateway, LaunchTemplate, Instance | `DescribeTags` |
+| S3 | `AWS::S3::Bucket` | `GetBucketTagging` |
+| Lambda | `AWS::Lambda::Function` | `ListTags` |
+| SQS | `AWS::SQS::Queue` | `ListQueueTags` |
+| DynamoDB | `AWS::DynamoDB::Table` | `ListTagsOfResource` |
+| ELBv2 | LoadBalancer, TargetGroup, Listener, ListenerRule | `DescribeTags` |
+
+Two resolvers sit behind the one writer. EC2's keys on the physical ID's prefix, because an EC2
+ID carries its type; every other service's keys on the **CloudFormation resource type**, because
+outside EC2 a physical ID is a bare name — a bucket named `orders` and a queue named `orders` are
+the same string, so there is nothing in the ID to switch on. EC2's resolver is tried first, and a
+type neither claims is skipped.
+
+**A resource whose service models no tags is skipped silently, and that is deliberate rather
+than an omission.** AWS declines to publish an exhaustive propagation list of its own: "The
+propagation of stack-level tags to resources, including tags with the `aws:` prefix, varies by
+resource type. For example, tags aren't propagated to Amazon EBS volumes that are created from
+block device mappings." So substrate states its rule instead — a resource is stamped when
+substrate models tags for its service — and names what that leaves out. Roughly twenty services
+the deployer can create resources in keep no tag state at all, among them CloudWatch Logs,
+EventBridge, Route 53, Athena, CodeBuild, CodePipeline, CodeDeploy, CloudTrail, OpenSearch,
+WAFv2, Backup, Budgets, Firehose, MSK, Transfer, SES v2 and AppSync; API Gateway (v1 and v2) and
+Cognito carry tag *state* but expose no tagging operation, so there is nothing to read a stamp
+back through. Each needs a tag store **and** an API before it could be stamped observably, which
+is a per-service piece of work rather than a line here —
+[#819](https://github.com/scttfrdmn/substrate/issues/819) names the list. There is no log line
+per skipped resource: a stack creates far more of those than of the kinds that can be stamped,
+so a warning each would bury a real one.
+
+**IAM is deliberately excluded even though it models tags.** No AWS page states that an IAM
+entity receives the stamp, and substrate's `TagRole` refuses an `aws:`-prefixed key — so a
+stamped IAM tag would be one no caller could ever set or remove through the API. The question is
+filed rather than guessed at.
+
+Three further limits, each named because a policy or an assertion written against the stamp will
 otherwise assume more:
 
-- **EC2 only.** The resolver maps an ID prefix to a state key, and only EC2 keeps tags in a
-  store shaped that way; S3, DynamoDB, Lambda and SQS each keep them differently and ELBv2
-  keeps none. A non-EC2 physical ID is skipped silently — a stack creates far more non-EC2
-  resources than EC2 ones, so a warning per resource would bury a real one. Extending the
-  stamp is [#765](https://github.com/scttfrdmn/substrate/issues/765).
 - **A resource that failed to deploy is not stamped**, and neither is one with no physical ID.
   Tagging it would put a stack's bookkeeping on something the stack does not own.
 - **Caller-supplied stack tags do not reach the resources.** `CreateStack`'s `Tags.member.N` is
   recorded on the stack and reported by `DescribeStacks` (see [A stack's own
   tags](#a-stacks-own-tags)), but nothing propagates a stack tag to a created resource. That is
   the other half of the mechanism and is [#764](https://github.com/scttfrdmn/substrate/issues/764).
-- **A physical ID that merely looks like an EC2 ID is stamped.** The resolver keys on the
-  prefix alone, so an S3 bucket a template names `i-something` would resolve as an instance.
-  No AWS naming rule prevents it and substrate does not check for it.
+- **A physical ID that merely looks like an EC2 ID is stamped as one.** EC2's resolver is tried
+  first and keys on the prefix alone, so an S3 bucket a template names `i-something` resolves as
+  an instance. No AWS naming rule prevents it and substrate does not check for it.
 
-Provenance: of the three keys, only `aws:cloudformation:stack-name` appears on any AWS
-CloudFormation page that was reachable when this was implemented — every user-guide page
-documenting the set returned an empty body, and `API_CreateStack.html` documents caller-supplied
-stack-tag propagation, which is the different mechanism above. So the triple is observed
-behavior rather than the API model, and is recorded here as such.
+Provenance: **all three keys are documented**, on the Template Reference's *Resource tag* page —
+"CloudFormation automatically creates the following stack-level tags with the `aws:` prefix:
+`aws:cloudformation:{{logical-id}}`, `aws:cloudformation:{{stack-id}}`,
+`aws:cloudformation:{{stack-name}}`". This corrects an earlier note here which said that only
+`aws:cloudformation:stack-name` was reachable and that the triple was observed behaviour: the
+pages documenting the set returned empty bodies when the stamp was first implemented, and the
+Template Reference page settles it. The same page supplies the "varies by resource type"
+sentence and the EBS carve-out quoted above.
 
 What still resolves to `*`, each named because a policy written against it will not behave
 as AWS would:
