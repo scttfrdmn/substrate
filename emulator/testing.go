@@ -325,15 +325,18 @@ func (ts *TestServer) CredentialsFor(accountID string) (CredentialEntry, bool) {
 
 // ResetState wipes all server state. Call this between test cases that share
 // a single [TestServer] instance to avoid state leaking across cases.
-func (ts *TestServer) ResetState(t *testing.T) {
-	t.Helper()
+//
+// The parameter is [testing.TB], not *testing.T, so a benchmark can reset
+// between iterations — the last of the harness entry points to widen (#605).
+func (ts *TestServer) ResetState(tb testing.TB) {
+	tb.Helper()
 	resp, err := http.Post(ts.URL+"/v1/state/reset", "application/json", nil) //nolint:noctx
 	if err != nil {
-		t.Fatalf("ResetState: post: %v", err)
+		tb.Fatalf("ResetState: post: %v", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ResetState: unexpected status %d", resp.StatusCode)
+		tb.Fatalf("ResetState: unexpected status %d", resp.StatusCode)
 	}
 }
 

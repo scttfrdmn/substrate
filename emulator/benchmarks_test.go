@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/scttfrdmn/substrate/emulator"
-	"github.com/spf13/afero"
 )
 
 // BenchmarkEventStore_RecordThroughput measures how many events per second
@@ -152,61 +151,53 @@ func BenchmarkEventStore_FilterByService(b *testing.B) {
 }
 
 // BenchmarkS3PutObject_Latency measures the per-request latency for S3 PutObject
-// through the full server pipeline with a real S3Plugin backed by MemMapFs.
+// against a server started by the test harness, over loopback HTTP.
+//
+// It drives [emulator.StartTestServer] rather than a hand-rolled server and an
+// httptest recorder, which is the shape a downstream consumer benchmarks in: the
+// measured path includes the transport, so an uncached read costs an HTTP round
+// trip here as it does in production instead of a map lookup (#605). Every harness
+// entry point takes testing.TB, so a *testing.B reaches all of it — this benchmark
+// is the standing proof of that.
 func BenchmarkS3PutObject_Latency(b *testing.B) {
-	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
-	state := emulator.NewMemoryStateManager()
-	tc := emulator.NewTimeController(time.Now())
-	logger := emulator.NewDefaultLogger(slog.LevelError, false)
-	ctx := context.Background()
+	ts := emulator.StartTestServer(b)
+	defer ts.ResetState(b)
 
-	s3p := &emulator.S3Plugin{}
-	if err := s3p.Initialize(ctx, emulator.PluginConfig{
-		State:  state,
-		Logger: logger,
-		Options: map[string]any{
-			"time_controller": tc,
-			"filesystem":      afero.NewMemMapFs(),
-		},
-	}); err != nil {
-		b.Fatalf("S3Plugin.Initialize: %v", err)
+	client := &http.Client{}
+	defer client.CloseIdleConnections()
+
+	// put issues one path-style S3 request. The Host header is what routes a
+	// request to the S3 plugin, and the credential is any key at all: a test
+	// server accepts unverified signatures.
+	put := func(path, body string) {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPut,
+			ts.URL+path, strings.NewReader(body))
+		if err != nil {
+			b.Fatalf("new request: %v", err)
+		}
+		req.Host = "s3.amazonaws.com"
+		req.Header.Set("Authorization",
+			"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/s3/aws4_request")
+		req.ContentLength = int64(len(body))
+		resp, err := client.Do(req)
+		if err != nil {
+			b.Fatalf("PUT %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b.Fatalf("PUT %s: unexpected status %d", path, resp.StatusCode)
+		}
 	}
 
-	registry := emulator.NewPluginRegistry()
-	registry.Register(s3p)
-
-	cfg := *emulator.DefaultConfig()
-	srv := emulator.NewServer(cfg, registry, store, state, tc, logger)
-
-	// Pre-create the bucket so PUT requests succeed.
-	r := httptest.NewRequest(http.MethodPut, "/bench-bucket", nil)
-	r.Host = "s3.amazonaws.com"
-	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/s3/aws4_request")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, r)
+	// Pre-create the bucket so the measured PUTs succeed.
+	put("/bench-bucket", "")
 
 	body := strings.Repeat("x", 128)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	var totalNs int64
 	for i := range b.N {
-		start := time.Now()
-		req := httptest.NewRequest(http.MethodPut,
-			fmt.Sprintf("/bench-bucket/key-%d", i),
-			strings.NewReader(body))
-		req.Host = "s3.amazonaws.com"
-		req.Header.Set("Authorization",
-			"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/s3/aws4_request")
-		req.ContentLength = int64(len(body))
-		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
-		totalNs += time.Since(start).Nanoseconds()
-	}
-
-	if b.N > 0 {
-		avgNs := totalNs / int64(b.N)
-		b.ReportMetric(float64(avgNs), "ns/op")
+		put(fmt.Sprintf("/bench-bucket/key-%d", i), body)
 	}
 }
