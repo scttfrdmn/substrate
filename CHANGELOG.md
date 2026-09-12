@@ -118,6 +118,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ts.URL` on `127.0.0.1` rather than `localhost`, and its server will close each connection after
   one response. `ServerOptions.DisableKeepAlives` is new and defaults to off, so a real emulator
   run keeps connections alive exactly as before.
+- **An IAM entity read reports its tags** (#796). Tags were stored and never reported: `TagRole`
+  wrote them, `ListRoleTags` read them back, and `GetRole` reported none — so a consumer
+  comparing desired state against the entity read saw permanent drift, and a CDK or Terraform
+  plan proposed the same tag change every time. Nine responses now carry a `Tags` member when
+  the entity has tags: `CreateUser`, `GetUser`, `CreateRole`, `GetRole`,
+  `CreateServiceLinkedRole`, `CreatePolicy`, `GetPolicy`, `CreateInstanceProfile` and
+  `GetInstanceProfile`.
+
+  **AWS draws the line by shape, not by entity, and the list shapes deliberately report
+  nothing.** `ListUsers`, `ListRoles`, `ListPolicies` and `ListInstanceProfiles` each carry the
+  same note verbatim — *"IAM resource-listing operations return a subset of the available
+  attributes for the resource. This operation does not return the following attributes, even
+  though they are an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags.
+  To view all of the information for a role, see GetRole."* So the rendering is guarded at the
+  four single-entity wrappers rather than added to the field builders each of those wrappers
+  shares with a listing, and the roles nested inside an instance-profile shape are covered by
+  the same note: a tagged role reports its tags through `GetRole`, not through the profile that
+  holds it.
+
+  **An untagged entity omits the member rather than reporting an empty list.** `Tags` is
+  `Required: No` on `User`, `Role`, `Policy` and `InstanceProfile`, and every untagged sample
+  response leaves the element out; `CreateInstanceProfile`'s sample settles it by rendering its
+  *required* empty list as `<Roles/>` while carrying no `<Tags>` at all. `ListUserTags` and
+  `ListRoleTags` are unchanged — there `Tags` is required, so it is rendered whether empty or
+  not. No test asserted the absence before this release, since every assertion read a decoded
+  map, which cannot tell an absent element from an empty one; the new ones read the XML.
+
+  `CreatePolicy` and `CreateInstanceProfile` now accept `Tags.member.N`, which AWS documents on
+  both and which each dropped silently for want of anywhere to store it — `IAMPolicy` and
+  `IAMInstanceProfile` gain a `Tags` field, additively, and a record written by an earlier
+  version reads back untagged. **Groups gain nothing**: the `Group` data type documents no
+  `Tags`, the Actions index has no `TagGroup`, the vendored authorization snapshot publishes no
+  `iam:*Group` tagging action, and the User Guide says *"You can tag most IAM resources, but not
+  groups, assumed roles, access reports, or hardware-based MFA devices."*
 
 ## [v0.111.0] - 2026-09-10
 

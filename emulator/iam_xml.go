@@ -97,9 +97,41 @@ func iamUserXMLFields(u *IAMUser) string {
 	return b.String()
 }
 
+// iamEntityTagsXML renders an entity's tags for a single-entity shape, and nothing at all
+// when there are none.
+//
+// Two rules meet here, and both come from AWS.
+//
+// The member is *omitted* rather than rendered empty when an entity has no tags. `Tags` is
+// documented `Required: No` on `User`, `Role`, `Policy` and `InstanceProfile`, and every
+// reference sample for an untagged entity carries no `<Tags>` element —
+// `CreateInstanceProfile`'s sample proves the contrast, rendering its *required* empty list
+// as `<Roles/>` while carrying no `<Tags>` at all. So [iamTagListXML], which writes the
+// wrapper unconditionally, is right for `ListUserTags`/`ListRoleTags`, where `Tags` is
+// required, and is guarded here (#796).
+//
+// And it is called from the single-entity wrappers only, never from a listing builder,
+// because AWS's list operations document the opposite of its single reads. `ListRoles`,
+// `ListUsers`, `ListPolicies` and `ListInstanceProfiles` all carry the same note verbatim:
+//
+//	IAM resource-listing operations return a subset of the available attributes for the
+//	resource. This operation does not return the following attributes, even though they are
+//	an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags. To view
+//	all of the information for a role, see GetRole.
+//
+// A consumer that tags a role and reads it back through GetRole sees the tags; one that
+// finds it through ListRoles does not, and must read the entity to see them — which is
+// what the note tells them to do.
+func iamEntityTagsXML(tags []IAMTag) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	return iamTagListXML(tags)
+}
+
 // iamSingleUserXML wraps user fields in a <User> element.
 func iamSingleUserXML(u *IAMUser) string {
-	return "<User>" + iamUserXMLFields(u) + "</User>"
+	return "<User>" + iamUserXMLFields(u) + iamEntityTagsXML(u.Tags) + "</User>"
 }
 
 // iamUserListXML builds <Users> containing <member> elements.
@@ -177,7 +209,7 @@ func iamRoleXMLFields(r *IAMRole) string {
 
 // iamSingleRoleXML wraps role fields in a <Role> element.
 func iamSingleRoleXML(r *IAMRole) string {
-	return "<Role>" + iamRoleXMLFields(r) + "</Role>"
+	return "<Role>" + iamRoleXMLFields(r) + iamEntityTagsXML(r.Tags) + "</Role>"
 }
 
 // iamRoleListXML builds <Roles> containing <member> elements.
@@ -263,7 +295,7 @@ func iamPolicyXMLFields(p *IAMPolicy) string {
 
 // iamSinglePolicyXML wraps policy fields in a <Policy> element.
 func iamSinglePolicyXML(p *IAMPolicy) string {
-	return "<Policy>" + iamPolicyXMLFields(p) + "</Policy>"
+	return "<Policy>" + iamPolicyXMLFields(p) + iamEntityTagsXML(p.Tags) + "</Policy>"
 }
 
 // iamPolicyListXML builds <Policies> containing <member> elements.
@@ -396,7 +428,8 @@ func iamInstanceProfileXMLFields(p *IAMInstanceProfile) string {
 
 // iamSingleInstanceProfileXML wraps instance profile fields in <InstanceProfile>.
 func iamSingleInstanceProfileXML(p *IAMInstanceProfile) string {
-	return "<InstanceProfile>" + iamInstanceProfileXMLFields(p) + "</InstanceProfile>"
+	return "<InstanceProfile>" + iamInstanceProfileXMLFields(p) +
+		iamEntityTagsXML(p.Tags) + "</InstanceProfile>"
 }
 
 // iamInstanceProfileListXML builds <InstanceProfiles> containing <member> elements.
