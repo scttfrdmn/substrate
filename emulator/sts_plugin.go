@@ -64,22 +64,16 @@ func (p *STSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // --- Operations ------------------------------------------------------------
 
 func (p *STSPlugin) getCallerIdentity(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	userID := ctx.AccountID
 	account := ctx.AccountID
+	// The account root's unique ID *is* the account ID, per AWS's identifiers reference —
+	// so an unsigned request and one signed with a credential that resolves to no
+	// principal both report the documented value here without any lookup.
+	userID := ctx.AccountID
 	arn := fmt.Sprintf("arn:aws:iam::%s:root", ctx.AccountID)
 
 	if ctx.Principal != nil {
 		arn = ctx.Principal.ARN
-		entityType, nameWithPath := parsePrincipalARN(ctx.Principal.ARN)
-		userID = nameWithPath
-		if entityType == "user" {
-			// The friendly name, so a caller whose entity lives at a path reports what
-			// they reported before their principal ARN started carrying that path
-			// (#801). An assumed-role ARN carries no path, so its <role>/<session> is
-			// left whole. Reporting a name here at all is a divergence — AWS reports the
-			// unique ID — tracked as #805.
-			userID = iamFriendlyName(nameWithPath)
-		}
+		userID = p.callerUniqueID(context.Background(), ctx.Principal)
 	}
 
 	type result struct {
@@ -105,6 +99,87 @@ func (p *STSPlugin) getCallerIdentity(ctx *RequestContext, _ *AWSRequest) (*AWSR
 	}
 
 	return stsXMLResponse(http.StatusOK, resp)
+}
+
+// callerUniqueID returns the unique ID GetCallerIdentity reports for a principal.
+//
+// AWS's identifiers reference gives the three forms and names GetCallerIdentity as the way
+// to obtain one: an IAM user's `AIDA…`, an assumed role's `AROA…:<role-session-name>`, and
+// the account ID for the account root. Substrate reported the caller's *friendly name*
+// instead, which is a shape AWS never produces, and disagreed with its own
+// `aws:userid` — published from the same field since #771 (#805).
+//
+// The recorded value is preferred, on #745's record-don't-derive rule: [resolvePrincipal]
+// copies it from the access key's or the session's own record, so no lookup is needed on the
+// common path. The read below is the fallback for a credential minted before #771, whose
+// record has the field empty; GetCallerIdentity is not a hot path, and a stale answer here
+// would be worse than a Get.
+func (p *STSPlugin) callerUniqueID(ctx context.Context, principal *Principal) string {
+	if principal.UserID != "" {
+		return principal.UserID
+	}
+
+	entity, ok := iamEntityForPrincipalARN(principal.ARN)
+	if !ok {
+		return stsCallerNameFallback(principal.ARN)
+	}
+	recorded := p.entityUniqueID(ctx, entity)
+	if recorded == "" {
+		return stsCallerNameFallback(principal.ARN)
+	}
+
+	// An assumed role's unique ID is the role's, joined to the session name the caller
+	// chose — "{role-id}:{caller-specified-role-name}" — and the session name is the only
+	// part of it the ARN carries. assumeRole composes the same string when it mints a
+	// session; this rebuilds it for a session minted before it did.
+	if entityType, nameWithPath := parsePrincipalARN(principal.ARN); entityType == "assumed-role" {
+		if slash := strings.IndexByte(nameWithPath, '/'); slash >= 0 {
+			return recorded + ":" + nameWithPath[slash+1:]
+		}
+	}
+	return recorded
+}
+
+// entityUniqueID returns the `AIDA…` or `AROA…` recorded on an IAM entity, or "" when there
+// is no such record and when the read fails.
+//
+// One key serves both because the two fields cannot both be set: a record is a user or a
+// role, and [iamEntityKey] already keys them apart by kind.
+func (p *STSPlugin) entityUniqueID(ctx context.Context, entity iamEntity) string {
+	raw, err := p.state.Get(ctx, iamNamespace, iamEntityKey(entity.Account, entity.Kind, entity.Name))
+	if err != nil || raw == nil {
+		return ""
+	}
+	var record struct {
+		UserID string `json:"UserId"`
+		RoleID string `json:"RoleId"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &record); unmarshalErr != nil {
+		return ""
+	}
+	if record.UserID != "" {
+		return record.UserID
+	}
+	return record.RoleID
+}
+
+// stsCallerNameFallback returns the caller's friendly name, which is what GetCallerIdentity
+// reports when there is no unique ID to be had.
+//
+// That is substrate's choice, not AWS's: on AWS every caller has a unique ID, so the case
+// cannot arise there. It arises here for a principal that resolves to no IAM entity — a
+// CloudFormation service-role principal built from a stack's `RoleARN` whose role was
+// deleted, say. Reporting the name keeps the value substrate published before #805 rather
+// than regressing to an empty member, which a consumer asserting on `UserId` could not
+// distinguish from a bug.
+func stsCallerNameFallback(principalARN string) string {
+	entityType, nameWithPath := parsePrincipalARN(principalARN)
+	if entityType == "user" {
+		// The friendly name: an entity ARN's name component carries the path (#801).
+		return iamFriendlyName(nameWithPath)
+	}
+	// An assumed-role ARN carries no path, so <role>/<session> is left whole.
+	return nameWithPath
 }
 
 func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

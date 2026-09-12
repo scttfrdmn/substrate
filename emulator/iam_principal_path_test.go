@@ -474,9 +474,10 @@ func TestGetCallerIdentity_ReportsTheEntitysRealARN(t *testing.T) {
 	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &identity))
 	assert.Equal(t, "arn:aws:iam::123456789012:user/division/engineering/alice", identity.ARN)
 	assert.Equal(t, "123456789012", identity.Account)
-	// UserId is asserted only as "not the name-with-path": reporting a name here at all
-	// is a divergence from AWS, which documents the unique ID, and is tracked as #805.
-	assert.NotContains(t, identity.UserID, "/")
+	// And the unique ID AWS documents, rather than the friendly name substrate used to
+	// report here — #805, which this assertion was left loose for.
+	assert.True(t, strings.HasPrefix(identity.UserID, "AIDA"),
+		"an IAM user's unique ID is an AIDA…: %q", identity.UserID)
 }
 
 func TestIAMEntityForPrincipalARN_WhatEachARNFormResolvesTo(t *testing.T) {

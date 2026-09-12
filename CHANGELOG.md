@@ -54,6 +54,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. Both are AWS's behavior — and it is why AWS's own `IAMUserChangePassword` names a second
   resource, `user/*/${aws:username}`, which does match, so the bundled policy grants a pathful
   user their own password exactly as it grants a default-path one.
+- **`GetCallerIdentity` reports the caller's unique ID, not their friendly name** (#805). AWS's
+  identifiers reference documents three forms for `UserId` and names `GetCallerIdentity` as the
+  way to obtain one: `AIDA…` for an IAM user, `AROA…:<role-session-name>` for an assumed role,
+  and the account ID for the account root. Substrate answered `alice` for the user and
+  `worker/sess1` for the session — the latter is the ARN's last two segments, which is not a
+  shape AWS produces anywhere. A consumer asserting on `UserId`, or feeding it to code that
+  splits an assumed-role ID on `:` to recover the session name, read a value it could not have
+  got from AWS.
+
+  It also disagreed with substrate's own `aws:userid`, which has published the right value from
+  `Principal.UserID` since #771. The two now come from that one recorded field, so a policy
+  conditioned on `aws:userid` and a test asserting on `UserId` cannot disagree about who the
+  caller is. Per #745's record-don't-derive rule the recorded value is preferred and no lookup
+  happens on the common path; a credential minted before #771 has the field empty, and for that
+  case the entity's own `UserId`/`RoleId` is read — one state read on an operation that is not
+  hot, and for an assumed role the documented `{role-id}:{session-name}` pairing is rebuilt from
+  the role's record and the session name the ARN carries.
+
+  Where there is no IAM entity to have an ID — an unsigned request, substrate's documented
+  example credentials, a CloudFormation service-role principal whose role has been deleted — the
+  answer is unchanged from before: the account root reports the account ID, which is AWS's
+  documented form, and a principal that resolves to no entity reports its friendly name. That
+  last case is substrate's own choice rather than AWS's, since on AWS every caller has a unique
+  ID; a name identifies the caller, where an empty member would be indistinguishable from a bug.
 
 - **`StartTestServer` no longer depends on timing, on name resolution, or on a connection pool
   shared with every other test** (#798). A test server flaked once with `read tcp
