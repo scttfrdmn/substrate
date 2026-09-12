@@ -16,7 +16,8 @@ import (
 // Create one with [StartTestServer]; it is automatically shut down when the
 // test ends via t.Cleanup.
 type TestServer struct {
-	// URL is the base URL of the server, e.g. "http://localhost:54321".
+	// URL is the base URL of the server, e.g. "http://127.0.0.1:54321". The host is
+	// the literal address rather than the name "localhost"; see [testServerHost].
 	URL string
 	// Port is the TCP port the server is listening on.
 	Port     int
@@ -116,6 +117,66 @@ func StartTestServerWithAccounts(t testing.TB, accounts ...string) *TestServer {
 	return StartTestServer(t, WithAccounts(accounts...), WithSignatureVerification())
 }
 
+// testServerHost is the literal address a test server binds and is dialed on.
+//
+// The literal, not the name "localhost", because a name has two answers on a
+// dual-stack host: net.Listen picks *one* family for the wildcard-free bind while
+// the client resolves the name independently, so a probe and the test that follows
+// it could disagree about which server they were talking to. The flake in #798
+// reported [::1] on both ends, which is only visible at all because the address is
+// in the error. It also removes a resolver call from a code path CLAUDE.md forbids
+// from depending on the network.
+const testServerHost = "127.0.0.1"
+
+// testServerProbeTimeout bounds one health-check attempt.
+//
+// The probe was untimed, on http.DefaultClient, whose Timeout is 0. Because the
+// listener is opened before the serving goroutine starts, an attempt lands in the
+// kernel's accept backlog and blocks rather than failing — so a single attempt
+// could consume the entire deadline instead of retrying, which is how #798's
+// subtest reached 5.19s (#798).
+const testServerProbeTimeout = 250 * time.Millisecond
+
+// testServerProbeDeadline bounds the whole startup wait.
+const testServerProbeDeadline = 5 * time.Second
+
+// awaitTestServer blocks until the server behind baseURL answers /health, and reports
+// why it gave up if it never does.
+//
+// Reporting the failure at all is the point. The loop this replaces discarded its
+// probe's result: it broke out on success and simply fell out of the deadline
+// otherwise, returning a *TestServer either way — so a server that never came up
+// produced no message, and the first API call reported a confusing transport error from
+// somewhere else entirely (#798). Returning the error rather than failing the test here
+// keeps testing.TB out of the probe, which is what lets the give-up path be tested.
+//
+// The client is dedicated and pools nothing. On http.DefaultClient the probe left a
+// keep-alive connection in a pool shared by 149 call sites across 54 test files,
+// keyed by host and port — and ports are recycled within one `go test` process while
+// every test server is shut down at the end of its test.
+//
+// deadline bounds the whole wait; [testServerProbeDeadline] is what a test server uses.
+func awaitTestServer(baseURL string, deadline time.Duration) error {
+	client := &http.Client{
+		Timeout:   testServerProbeTimeout,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	defer client.CloseIdleConnections()
+
+	giveUpAt := time.Now().Add(deadline)
+	var lastErr error
+	for time.Now().Before(giveUpAt) {
+		resp, pingErr := client.Get(baseURL + "/health") //nolint:noctx
+		if pingErr == nil {
+			_ = resp.Body.Close()
+			return nil
+		}
+		lastErr = pingErr
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("%s did not answer /health within %s: %w", baseURL, deadline, lastErr)
+}
+
 // startTestServer is the shared body of [StartTestServer] and
 // [StartTestServerWithAccounts]. A [CredentialRegistry] is always wired, so
 // [TestServer.RegisterAccount] works on every test server; whether signatures
@@ -124,7 +185,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	t.Helper()
 
 	cfg := DefaultConfig()
-	cfg.Server.Address = "localhost:0"
+	cfg.Server.Address = testServerHost + ":0"
 	// Enable the in-memory event store so cost summaries and recording/replay
 	// work against the server out of the box (see TestServer.Store).
 	cfg.EventStore.Enabled = true
@@ -158,7 +219,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 
 	// Bind to a random port and keep the listener open to avoid the TOCTOU race
 	// between port reservation and server bind.
-	ln, err := net.Listen("tcp", "localhost:0")
+	ln, err := net.Listen("tcp", testServerHost+":0")
 	if err != nil {
 		t.Fatalf("StartTestServer: listen: %v", err)
 	}
@@ -185,6 +246,9 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 		Fault: fault, Costs: costs, Auth: auth,
 		Credentials:      creds,
 		VerifySignatures: tsCfg.verifySignatures,
+		// No connection to this server is ever pooled, so none can be reused after
+		// the test that created it tears it down and the port is recycled (#798).
+		DisableKeepAlives: true,
 	})
 
 	srvCtx, cancel := context.WithCancel(context.Background())
@@ -194,16 +258,12 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 		_ = srv.Serve(srvCtx, ln)
 	}()
 
-	// Wait until the health endpoint responds.
-	baseURL := fmt.Sprintf("http://localhost:%d", port)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, pingErr := http.Get(baseURL + "/health") //nolint:noctx
-		if pingErr == nil {
-			_ = resp.Body.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	baseURL := fmt.Sprintf("http://%s:%d", testServerHost, port)
+	if err := awaitTestServer(baseURL, testServerProbeDeadline); err != nil {
+		// Defensive: the server is in-process and its listener is already bound, so
+		// reaching here means it never began serving. Fail now rather than hand back a
+		// *TestServer whose every call fails for a reason that names the transport.
+		t.Fatalf("StartTestServer: %v", err)
 	}
 
 	t.Cleanup(func() {

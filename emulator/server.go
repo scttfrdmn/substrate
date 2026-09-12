@@ -76,6 +76,20 @@ type ServerOptions struct {
 	// When non-nil and FaultConfig.Enabled is true, faults are evaluated after
 	// the consistency check (Step 4) and before plugin dispatch (Step 5).
 	Fault *FaultController
+
+	// DisableKeepAlives closes every connection after one response, so no client
+	// can pool a connection to this server and reuse it later.
+	//
+	// Off by default: a real emulator run wants keep-alives, and an AWS SDK opens
+	// one connection per client and reuses it for every call. It exists for
+	// [StartTestServer], where the hazard is the other way round (#798): a test
+	// server is torn down at the end of its test, ports are recycled inside one
+	// `go test` process, and a connection pooled against a dead server fails on
+	// *read* — after the request was written — which surfaces as a bare
+	// "connection reset by peer" in whichever later test drew the recycled port,
+	// not in the test that leaked it. Closing server-side is what makes that
+	// impossible for all 149 call sites at once rather than per client.
+	DisableKeepAlives bool
 }
 
 // Server is the Substrate HTTP server. It receives AWS SDK requests, parses
@@ -157,6 +171,9 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
 	}
+	if s.opts.DisableKeepAlives {
+		s.httpSrv.SetKeepAlivesEnabled(false)
+	}
 
 	s.logger.Info("substrate server starting", "address", s.config.Server.Address)
 
@@ -190,6 +207,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		Handler:      s.router,
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
+	}
+	if s.opts.DisableKeepAlives {
+		s.httpSrv.SetKeepAlivesEnabled(false)
 	}
 
 	s.logger.Info("substrate server starting", "address", ln.Addr().String())
