@@ -2,7 +2,10 @@ package emulator_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -445,6 +448,209 @@ func TestIAMTagging_AMissingIdentifierIsAValidationError(t *testing.T) {
 			assert.Equal(t, "ValidationError",
 				iamFormErrorCode(t, srv, operation, nil, http.StatusBadRequest))
 		})
+	}
+}
+
+func TestIAMTagging_AMalformedBodyIsAValidationError(t *testing.T) {
+	// A body that is JSON but not an object — the shape a hand-rolled client or a mangled proxy
+	// sends. All six refuse it as `ValidationError` / 400 before reading any record, which is
+	// what the rest of the plugin answers for an unparseable body.
+	t.Parallel()
+	srv := newIAMTestServer(t)
+
+	for _, operation := range []string{
+		"TagPolicy", "UntagPolicy", "ListPolicyTags",
+		"TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
+	} {
+		t.Run(operation, func(t *testing.T) {
+			resp := iamRequest(t, srv, operation, "not-an-object")
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			var result map[string]any
+			decodeIAMXML(t, resp, &result)
+			assert.Equal(t, "ValidationError", result["__type"])
+		})
+	}
+}
+
+func TestIAMTagging_AStateFailureIsNotReportedAsNoSuchEntity(t *testing.T) {
+	// A store failure and an absent record are opposite signals: `NoSuchEntity` tells a consumer
+	// the resource is gone and to stop retrying, while a store failure is transient. Collapsing
+	// the first into the second would send a consumer down a permanent-failure path over a blip,
+	// which is why the loaders distinguish "no record" from "could not read" — the former is the
+	// caller's 404, the latter is propagated and answered as a 500.
+	t.Parallel()
+
+	for _, tc := range iamTagStoreCases() {
+		t.Run(tc.name+" via "+tc.operation, func(t *testing.T) {
+			t.Parallel()
+			state := &errAfterGetsStateManager{
+				inner:  emulator.NewMemoryStateManager(),
+				getErr: errors.New("state store unavailable"),
+				allow:  math.MaxInt, // permissive until the record exists
+			}
+			srv := newIAMTestServerWithState(t, state)
+			tc.seed(t, srv)
+
+			// Every Get from here on fails, so the record cannot be read even though it was
+			// written — the one case where an absent record and a broken store differ.
+			state.allow = state.gets
+
+			resp := iamRequest(t, srv, tc.operation, tc.body)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+				"a store failure is not the caller's NoSuchEntity")
+		})
+	}
+}
+
+// iamCorruptGetsStateManager is a StateManager that serves the first allow Get calls normally
+// and then answers every one with a body that is not valid JSON. It reaches the one branch a
+// failing store cannot: a record that reads back but does not decode.
+type iamCorruptGetsStateManager struct {
+	inner emulator.StateManager
+	allow int
+	gets  int
+}
+
+func (m *iamCorruptGetsStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	m.gets++
+	if m.gets > m.allow {
+		return []byte("{not json"), nil
+	}
+	return m.inner.Get(ctx, namespace, key)
+}
+
+func (m *iamCorruptGetsStateManager) Put(ctx context.Context, namespace, key string, value []byte) error {
+	return m.inner.Put(ctx, namespace, key, value)
+}
+
+func (m *iamCorruptGetsStateManager) Delete(ctx context.Context, namespace, key string) error {
+	return m.inner.Delete(ctx, namespace, key)
+}
+
+func (m *iamCorruptGetsStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	return m.inner.List(ctx, namespace, prefix)
+}
+
+// iamFailingPutStateManager is a StateManager whose writes start failing once armed, so a
+// tagging operation's read-modify-*write* can be made to fail after the read succeeded.
+type iamFailingPutStateManager struct {
+	inner  emulator.StateManager
+	fail   bool
+	putErr error
+}
+
+func (m *iamFailingPutStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	return m.inner.Get(ctx, namespace, key)
+}
+
+func (m *iamFailingPutStateManager) Put(ctx context.Context, namespace, key string, value []byte) error {
+	if m.fail {
+		return m.putErr
+	}
+	return m.inner.Put(ctx, namespace, key, value)
+}
+
+func (m *iamFailingPutStateManager) Delete(ctx context.Context, namespace, key string) error {
+	return m.inner.Delete(ctx, namespace, key)
+}
+
+func (m *iamFailingPutStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	return m.inner.List(ctx, namespace, prefix)
+}
+
+func TestIAMTagging_AnUndecodableRecordIsNotReportedAsNoSuchEntity(t *testing.T) {
+	// The other half of the distinction above. A record that reads back but does not decode is
+	// a corrupt store, not a missing resource, so it is propagated rather than answered 404 —
+	// telling a consumer their policy is gone when the bytes are merely unreadable would send
+	// them to delete-and-recreate over a store problem.
+	t.Parallel()
+
+	for _, tc := range iamTagStoreCases() {
+		t.Run(tc.name+" via "+tc.operation, func(t *testing.T) {
+			t.Parallel()
+			state := &iamCorruptGetsStateManager{
+				inner: emulator.NewMemoryStateManager(),
+				allow: math.MaxInt,
+			}
+			srv := newIAMTestServerWithState(t, state)
+			tc.seed(t, srv)
+			state.allow = state.gets
+
+			resp := iamRequest(t, srv, tc.operation, tc.body)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+func TestIAMTagging_AFailedWriteIsReportedRatherThanSwallowed(t *testing.T) {
+	// The write half: a tag operation whose read succeeded and whose store failed must not
+	// answer 200. A consumer that got a success and no tags would have no way to tell the
+	// difference from AWS accepting the call, which is the failure mode #639 was — TagUser
+	// answered 200 and stored nothing.
+	t.Parallel()
+
+	for _, tc := range iamTagStoreCases() {
+		if strings.HasPrefix(tc.operation, "List") {
+			continue // a listing performs no write.
+		}
+		t.Run(tc.name+" via "+tc.operation, func(t *testing.T) {
+			t.Parallel()
+			state := &iamFailingPutStateManager{
+				inner:  emulator.NewMemoryStateManager(),
+				putErr: errors.New("state store unavailable"),
+			}
+			srv := newIAMTestServerWithState(t, state)
+			tc.seed(t, srv)
+			state.fail = true
+
+			resp := iamRequest(t, srv, tc.operation, tc.body)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// iamTagStoreCase is a seeded resource and one tagging call against it, for the three
+// store-failure sweeps above.
+type iamTagStoreCase struct {
+	name      string
+	seed      func(t *testing.T, srv *emulator.Server)
+	operation string
+	body      any
+}
+
+// iamTagStoreCases covers every one of the six operations against a record that exists, so a
+// store failure is asserted on each rather than only on the pair that happens to be listed.
+func iamTagStoreCases() []iamTagStoreCase {
+	const policyARN = "arn:aws:iam::123456789012:policy/reader"
+	seedPolicy := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, iamRequest(t, srv, "CreatePolicy", map[string]any{
+			"PolicyName":     "reader",
+			"PolicyDocument": `{"Version":"2012-10-17","Statement":[]}`,
+		}).StatusCode)
+	}
+	seedProfile := func(t *testing.T, srv *emulator.Server) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, iamRequest(t, srv, "CreateInstanceProfile",
+			map[string]any{"InstanceProfileName": "web"}).StatusCode)
+	}
+	tags := []map[string]string{{"Key": "env", "Value": "prod"}}
+
+	return []iamTagStoreCase{
+		{"a policy", seedPolicy, "ListPolicyTags", map[string]any{"PolicyArn": policyARN}},
+		{"a policy", seedPolicy, "TagPolicy",
+			map[string]any{"PolicyArn": policyARN, "Tags": tags}},
+		{"a policy", seedPolicy, "UntagPolicy",
+			map[string]any{"PolicyArn": policyARN, "TagKeys": []string{"env"}}},
+		{"an instance profile", seedProfile, "ListInstanceProfileTags",
+			map[string]any{"InstanceProfileName": "web"}},
+		{"an instance profile", seedProfile, "TagInstanceProfile",
+			map[string]any{"InstanceProfileName": "web", "Tags": tags}},
+		{"an instance profile", seedProfile, "UntagInstanceProfile",
+			map[string]any{"InstanceProfileName": "web", "TagKeys": []string{"env"}}},
 	}
 }
 
