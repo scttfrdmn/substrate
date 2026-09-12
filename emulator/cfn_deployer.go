@@ -420,6 +420,32 @@ func (s CFNStackState) exports() map[string]string {
 	return out
 }
 
+// stackTags returns the tags the stack carried, nil-safe so a first deployment — which has no
+// previous record at all — reads as the empty set rather than needing a check at every caller.
+func (s *CFNStackState) stackTags() map[string]string {
+	if s == nil {
+		return nil
+	}
+	return s.Tags
+}
+
+// deployedResource returns what the stack recorded for one logical ID, nil-safe for the same
+// reason as [CFNStackState.stackTags].
+//
+// Only a successfully deployed slot is answered: a previously failed resource describes nothing
+// this deployment can act on.
+func (s *CFNStackState) deployedResource(logicalID string) (DeployedResource, bool) {
+	if s == nil {
+		return DeployedResource{}, false
+	}
+	for _, r := range s.Resources {
+		if r.LogicalID == logicalID && r.Error == "" {
+			return r, true
+		}
+	}
+	return DeployedResource{}, false
+}
+
 // cfnContext holds per-deployment resolution context for intrinsic functions.
 type cfnContext struct {
 	params     map[string]string           // caller-supplied + defaults
@@ -1160,9 +1186,21 @@ func (d *StackDeployer) DeployWithOptions(
 	// before the stack's fate is decided, or every redeploy of an unchanged template
 	// would look like a failed create and roll back the resources it was asked to
 	// keep.
-	if prev, prevErr := d.previousStack(ctx, stackName); prevErr == nil {
+	prev, prevErr := d.previousStack(ctx, stackName)
+	if prevErr == nil {
 		d.clearUnchangedRedeploys(prev, tmpl.Resources, resources)
 	}
+
+	// The stack's own tags reach the resources here, once the refusals above are settled and
+	// before the stack's fate is decided. Before, because a resource that deployed carries the
+	// stack's tags whatever becomes of the stack — which is what the three-key stamp already
+	// does, and a rollback is about to delete the records either way. The previous tag set is
+	// what tells a tag the stack propagated from one the caller set directly; on a first create
+	// there is none, and every key is new.
+	if prevErr != nil {
+		prev = nil
+	}
+	d.reconcileStackTags(resources, prev, opts.Tags)
 
 	// Resolve outputs, and with them the export names this stack publishes.
 	outputs := make(map[string]string)
@@ -2560,6 +2598,57 @@ func (d *StackDeployer) stampCFNResourceTags(dr DeployedResource, cctx *cfnConte
 
 	if _, err := cfnStampResourceTags(d.state, reqCtx, dr, tags); err != nil {
 		d.warnStampFailed(dr, err)
+	}
+}
+
+// reconcileStackTags propagates the stack's own tags to the resources it created, and removes
+// the ones the caller has taken off the stack (#764).
+//
+// AWS states the propagation on `CreateStack`'s `Tags` member — "CloudFormation also propagates
+// these tags to the resources created in the stack" — and it is the half of a stack tag that a
+// policy or a cost report actually reads: a stack whose tags only its own `DescribeStacks`
+// reports cannot be the subject of an `aws:ResourceTag` condition on anything it built.
+//
+// **Run over the whole result rather than per resource**, unlike the three-key stamp, and for a
+// reason the update path forces: [StackDeployer.clearUnchangedRedeploys] clears the
+// already-exists refusal from a resource this stack redeployed *after* every resource has been
+// dispatched, so at stamp time an unchanged resource still carries an error and is skipped.
+// A tag added to an existing stack has to reach exactly those resources, so the reconciliation
+// waits until the errors are settled.
+//
+// A resource that was refused also may carry no physical ID — "a refused create returns no
+// physical ID at all", as clearUnchangedRedeploys records — so the previous record supplies it.
+// That is sound precisely where it is used: the refusal was cleared only because the previous
+// record shows this stack deployed that logical ID from an identical declaration, so it is the
+// same resource.
+//
+// Failures are logged, not returned, for [StackDeployer.warnStampFailed]'s reason: the resource
+// deployed, and a stack does not fail because a tag could not be written onto it.
+func (d *StackDeployer) reconcileStackTags(
+	resources []DeployedResource, prev *CFNStackState, next map[string]string,
+) {
+	if d.state == nil || (len(prev.stackTags()) == 0 && len(next) == 0) {
+		return
+	}
+	reqCtx := &RequestContext{AccountID: d.identity.accountID, Region: d.identity.region}
+	previous := prev.stackTags()
+
+	for _, dr := range resources {
+		if dr.Error != "" || dr.LogicalID == "" {
+			continue
+		}
+		if dr.PhysicalID == "" && dr.ARN == "" {
+			if earlier, ok := prev.deployedResource(dr.LogicalID); ok {
+				dr = earlier
+			}
+		}
+		if dr.PhysicalID == "" && dr.ARN == "" {
+			continue
+		}
+		if _, err := cfnPropagateStackTags(d.state, reqCtx, dr, previous, next); err != nil {
+			d.logger.Warn("cfn: could not propagate the stack's tags",
+				"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
+		}
 	}
 }
 
