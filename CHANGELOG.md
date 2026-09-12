@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`TestServer.ResetState` takes `testing.TB`** (#605). It was the last harness entry point still
+  requiring `*testing.T`, so a benchmark could start a server (`StartTestServer` widened in
+  #798) but not reset it between iterations. `testing.TB` has an unexported method, so no cast
+  bridges `*testing.B` to `*testing.T` — a downstream consumer whose test helper wraps this
+  harness had to fall back to an in-memory fake for benchmarks, which measures a map lookup
+  where production measures an HTTP round trip. Source-compatible: `*testing.T` satisfies
+  `testing.TB`, so all 262 existing call sites are unchanged.
+
+  `BenchmarkS3PutObject_Latency` now drives the harness over loopback HTTP instead of a
+  hand-rolled server behind an `httptest` recorder, as the standing proof that a `*testing.B`
+  reaches all of it. Its numbers include the transport and so are not comparable with the
+  recorder-based ones it replaces.
+
 ## [v0.112.0] - 2026-09-11
 
 ### Added

@@ -69,7 +69,7 @@ type TestServer struct {
 }
 
 // State and time helpers
-func (ts *TestServer) ResetState(t *testing.T)          // wipes all server state
+func (ts *TestServer) ResetState(tb testing.TB)         // wipes all server state
 func (ts *TestServer) AdvanceTime(d time.Duration)      // move the simulated clock forward
 func (ts *TestServer) SetTime(t time.Time)              // set the simulated clock
 func (ts *TestServer) SetScale(scale float64)           // set the time-acceleration factor
@@ -86,6 +86,26 @@ func (ts *TestServer) Registry() *PluginRegistry
 `StartTestServer` returns when the `/health` endpoint responds — the server is
 ready for requests immediately. The event store is enabled, so cost summaries
 and recording/replay work against `ts.Store()` out of the box.
+
+### Benchmarks
+
+Every harness entry point takes `testing.TB`, so a `*testing.B` can drive a real
+server over HTTP rather than falling back to an in-memory fake:
+
+```go
+func BenchmarkUpload(b *testing.B) {
+    ts := substrate.StartTestServer(b)
+    defer ts.ResetState(b)
+
+    for range b.N {
+        // ... requests against ts.URL
+    }
+}
+```
+
+Do the setup before `b.ResetTimer()`, and keep `ResetState` out of the measured
+loop unless the reset itself is what you are measuring — it is a round trip to
+the server.
 
 ## State Isolation
 
