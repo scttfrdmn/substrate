@@ -17,12 +17,10 @@ import (
 // of the entity CRUD, and call the helpers here, so there is one implementation of the
 // merge-by-key, the removal and the listing rather than four or six of them.
 //
-// What the operations do not do is validate. AWS documents `InvalidInput`/400,
-// `LimitExceeded`/409 (the 50-tag cap) and `ConcurrentModification`/409 on the tag-writing
-// operations, and none of the three is emitted here; a key is also compared
-// case-sensitively where AWS treats user and role tag keys case-insensitively. That is filed
-// as #806 rather than folded in, because each rejection is a behavior change for a consumer
-// on today's permissive path and earns its own compatibility note.
+// What the operations validate, and with what, lives in `iam_tag_validation.go` (#806): the
+// character set and length limits from the `Tag` data type's two patterns, the reserved `aws:`
+// prefix on a key *or* a value, the fifty-tag cap counted post-merge, and the per-entity-type
+// case rule that [iamTagCase] carries into the two helpers below.
 //
 // There is no group equivalent, and there will not be: the `Group` data type documents no
 // `Tags` member, the Actions index publishes no `TagGroup`/`UntagGroup`/`ListGroupTags`, the
@@ -32,43 +30,75 @@ import (
 // answering with the unknown-action error, which is the honest report that substrate models no
 // such operation.
 
-// iamMergeTagSet returns existing with incoming merged over it by key, sorted by key.
+// iamMergeTagSet returns existing with incoming merged over it by key, sorted by key, comparing
+// keys under the entity type's caseRule.
 //
 // A repeated key takes the incoming value, because AWS says so of every tag-writing
 // operation: "If a tag with the same key name already exists, then that tag is overwritten
 // with the new value." Sorting is not cosmetic — the listing operations document that the
 // returned list is sorted by tag key, and their marker pagination is a position in that order.
-func iamMergeTagSet(existing, incoming []IAMTag) []IAMTag {
-	byKey := make(map[string]string, len(existing)+len(incoming))
+//
+// **Under [iamTagKeysCaseInsensitive] the stored key's spelling is preserved and only its value
+// changes**, which is the whole of the User Guide's sentence rather than half of it: "Tag key
+// values for IAM users and roles are not case sensitive, but case is preserved. […] If you have
+// tagged a user with the Department=finance tag and you add the department=hr tag, it replaces
+// the first tag. A second tag is not added." So the user ends up with `Department=hr` — one tag,
+// the original capitalization, the new value. A merge that took the incoming spelling would
+// silently rename a key a policy might be matching on.
+//
+// Two keys already stored that collide under caseRule can only come from state written before
+// #806 made them unreachable; the first in slice order wins, and the entity converges on one
+// key the next time it is tagged.
+func iamMergeTagSet(existing, incoming []IAMTag, caseRule iamTagCase) []IAMTag {
+	type entry struct {
+		key   string
+		value string
+	}
+	byKey := make(map[string]entry, len(existing)+len(incoming))
+	upsert := func(t IAMTag) {
+		canonical := caseRule.canonical(t.Key)
+		if prev, ok := byKey[canonical]; ok {
+			byKey[canonical] = entry{key: prev.key, value: t.Value}
+			return
+		}
+		byKey[canonical] = entry{key: t.Key, value: t.Value}
+	}
 	for _, t := range existing {
-		byKey[t.Key] = t.Value
+		upsert(t)
 	}
 	for _, t := range incoming {
-		byKey[t.Key] = t.Value
+		upsert(t)
 	}
 	merged := make([]IAMTag, 0, len(byKey))
-	for k, v := range byKey {
-		merged = append(merged, IAMTag{Key: k, Value: v})
+	for _, e := range byKey {
+		merged = append(merged, IAMTag{Key: e.key, Value: e.value})
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
 	return merged
 }
 
-// iamRemoveTagKeys returns tags without the named keys, keeping the order of the rest.
+// iamRemoveTagKeys returns tags without the named keys, keeping the order of the rest and
+// comparing keys under the entity type's caseRule.
 //
 // A key that is not present is not an error: AWS's untag operations declare no error for it,
 // and a consumer removing a tag it is unsure of should not have to read first.
-func iamRemoveTagKeys(tags []IAMTag, keys []string) []IAMTag {
+//
+// caseRule has to reach here and not only [iamMergeTagSet], because AWS's split is a property of
+// the entity type rather than of the operation: if `Department` and `department` cannot both
+// exist on a user, then untagging `DEPARTMENT` must remove the user's `Department` — otherwise a
+// caller can be left holding a tag it has no spelling that will delete. On a policy or an
+// instance profile the same request correctly removes nothing.
+func iamRemoveTagKeys(tags []IAMTag, keys []string, caseRule iamTagCase) []IAMTag {
 	if len(keys) == 0 {
 		return tags
 	}
 	remove := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
-		remove[k] = struct{}{}
+		remove[caseRule.canonical(k)] = struct{}{}
 	}
 	kept := make([]IAMTag, 0, len(tags))
 	for _, t := range tags {
-		if _, drop := remove[t.Key]; !drop {
+		if _, drop := remove[caseRule.canonical(t.Key)]; !drop {
 			kept = append(kept, t)
 		}
 	}
@@ -232,6 +262,13 @@ func (p *IAMPlugin) tagPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	// Validated after authorization and before the load, so an unauthorized caller learns
+	// nothing about its payload and a refusal does not depend on whether the policy exists
+	// (#806).
+	if resp := iamValidateTagSet(params.Tags); resp != nil {
+		return resp, nil
+	}
+
 	record, err := p.loadTaggedPolicy(goCtx, params.PolicyArn)
 	if err != nil {
 		return nil, err
@@ -239,7 +276,11 @@ func (p *IAMPlugin) tagPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if record == nil {
 		return iamPolicyNotFound(params.PolicyArn), nil
 	}
-	if err := record.store(goCtx, iamMergeTagSet(record.tags, params.Tags)); err != nil {
+	merged := iamMergeTagSet(record.tags, params.Tags, iamTagKeysCaseSensitive)
+	if resp := iamCheckTagLimit(merged); resp != nil {
+		return resp, nil
+	}
+	if err := record.store(goCtx, merged); err != nil {
 		return nil, fmt.Errorf("tagPolicy: %w", err)
 	}
 	return iamXMLEmptyResponse("TagPolicy"), nil
@@ -267,6 +308,10 @@ func (p *IAMPlugin) untagPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	if resp := iamValidateTagKeys(params.TagKeys); resp != nil {
+		return resp, nil
+	}
+
 	record, err := p.loadTaggedPolicy(goCtx, params.PolicyArn)
 	if err != nil {
 		return nil, err
@@ -274,7 +319,7 @@ func (p *IAMPlugin) untagPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if record == nil {
 		return iamPolicyNotFound(params.PolicyArn), nil
 	}
-	if err := record.store(goCtx, iamRemoveTagKeys(record.tags, params.TagKeys)); err != nil {
+	if err := record.store(goCtx, iamRemoveTagKeys(record.tags, params.TagKeys, iamTagKeysCaseSensitive)); err != nil {
 		return nil, fmt.Errorf("untagPolicy: %w", err)
 	}
 	return iamXMLEmptyResponse("UntagPolicy"), nil
@@ -332,6 +377,10 @@ func (p *IAMPlugin) tagInstanceProfile(ctx *RequestContext, req *AWSRequest) (*A
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	if resp := iamValidateTagSet(params.Tags); resp != nil {
+		return resp, nil
+	}
+
 	record, err := p.loadTaggedInstanceProfile(goCtx, ctx.AccountID, params.InstanceProfileName)
 	if err != nil {
 		return nil, err
@@ -339,7 +388,11 @@ func (p *IAMPlugin) tagInstanceProfile(ctx *RequestContext, req *AWSRequest) (*A
 	if record == nil {
 		return iamInstanceProfileNotFound(params.InstanceProfileName), nil
 	}
-	if err := record.store(goCtx, iamMergeTagSet(record.tags, params.Tags)); err != nil {
+	merged := iamMergeTagSet(record.tags, params.Tags, iamTagKeysCaseSensitive)
+	if resp := iamCheckTagLimit(merged); resp != nil {
+		return resp, nil
+	}
+	if err := record.store(goCtx, merged); err != nil {
 		return nil, fmt.Errorf("tagInstanceProfile: %w", err)
 	}
 	return iamXMLEmptyResponse("TagInstanceProfile"), nil
@@ -366,6 +419,10 @@ func (p *IAMPlugin) untagInstanceProfile(ctx *RequestContext, req *AWSRequest) (
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	if resp := iamValidateTagKeys(params.TagKeys); resp != nil {
+		return resp, nil
+	}
+
 	record, err := p.loadTaggedInstanceProfile(goCtx, ctx.AccountID, params.InstanceProfileName)
 	if err != nil {
 		return nil, err
@@ -373,7 +430,7 @@ func (p *IAMPlugin) untagInstanceProfile(ctx *RequestContext, req *AWSRequest) (
 	if record == nil {
 		return iamInstanceProfileNotFound(params.InstanceProfileName), nil
 	}
-	if err := record.store(goCtx, iamRemoveTagKeys(record.tags, params.TagKeys)); err != nil {
+	if err := record.store(goCtx, iamRemoveTagKeys(record.tags, params.TagKeys, iamTagKeysCaseSensitive)); err != nil {
 		return nil, fmt.Errorf("untagInstanceProfile: %w", err)
 	}
 	return iamXMLEmptyResponse("UntagInstanceProfile"), nil

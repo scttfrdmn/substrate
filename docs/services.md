@@ -1676,12 +1676,98 @@ managed policy", and a managed policy belongs to the `aws` account; substrate's 
 is read-only for the same reason, so tagging one answers `NoSuchEntity`/404 even though
 `GetPolicy` resolves the same ARN.
 
-**What the tag operations do not yet do is validate.** AWS documents `InvalidInput`/400 (an
-empty key, an `aws:` prefix), `LimitExceeded`/409 (the 50-tag cap) and
-`ConcurrentModification`/409, and substrate emits none of the three; a key is also compared
-case-sensitively where AWS treats user and role tag keys case-insensitively. Each rejection is a
-behaviour change for a consumer on today's permissive path, so it is tracked separately as
-[#806](https://github.com/scttfrdmn/substrate/issues/806) rather than folded in here.
+### What an IAM tag request is refused for
+
+All twelve paths that accept a tag — the four `Tag*`, the four `Untag*` and the four `Create*` —
+validate against one rule set ([#806](https://github.com/scttfrdmn/substrate/issues/806)). Before
+this release every one of them accepted anything at all: fifty-one tags, an empty key, a key
+beginning with the reserved `aws:` prefix, a character outside the set AWS publishes.
+
+| Rule | Source | Answer |
+|---|---|---|
+| Key 1–128 characters | `Tag` — *"Minimum length of 1. Maximum length of 128"* | `ValidationError`/400 |
+| Value 0–256 characters | `Tag` — *"Minimum length of 0. Maximum length of 256"* | `ValidationError`/400 |
+| Key matches `[\p{L}\p{Z}\p{N}_.:/=+\-@]+` | `Tag` — Pattern | `ValidationError`/400 |
+| Value matches `[\p{L}\p{Z}\p{N}_.:/=+\-@]*` | `Tag` — Pattern | `ValidationError`/400 |
+| At most 50 members in one request | `Tags.member.N` / `TagKeys.member.N` — *"Array Members: Maximum number of 50 items"* | `ValidationError`/400 |
+| Neither key nor value begins with `aws:` | *Tagging IAM resources* — *"You cannot create a tag key or value that begins with the text `aws:`"* | `InvalidInput`/400 |
+| At most 50 tags on a resource, counted after the merge | the same array cap, applied to the resulting set | `LimitExceeded`/409 |
+
+**The character set is Unicode, not ASCII.** The two rules above are AWS's own patterns compiled
+verbatim, so `Abteilung=Zürich`, `部門=エンジニアリング` and a value of Arabic-Indic digits are all
+accepted — where the ASCII whitelist the User Guide's prose rendering suggests ("letters, numbers,
+spaces, and `_ . : / = + - @`") would refuse them. The lengths are counted in **characters** rather
+than bytes for the same reason: a 128-rune key of non-Latin letters is legal. The anchors on the
+patterns are substrate's — AWS publishes them unanchored, and an unanchored match would accept any
+string containing one legal character.
+
+**Which code answers which rule is substrate's mapping**, and it is worth stating plainly because
+AWS publishes no per-rule code. A constraint stated **on the shape** answers `ValidationError`/400,
+the code the IAM plugin already returns for every other shape violation and the only 400 the four
+`Untag*` operations declare at all. A rule stated only **in prose** and inexpressible in the shape —
+the reserved prefix — answers `InvalidInput`/400, which every tag-writing and create operation
+documents. The over-limit total answers `LimitExceeded`/409, whose documented sentence is *"The
+request was rejected because it attempted to create resources beyond the current AWS account
+limits."* The *messages* are substrate's own wording throughout; no page publishes message text, and
+an SDK dispatches on the code.
+
+**The 50-tag cap is counted over the post-merge set**, the way EC2's is: rewriting the value of a
+key an entity already carries adds no key, so it succeeds on an entity already holding fifty tags,
+while adding a fifty-first is refused. Unlike EC2, reserved keys are **not** exempt from the count —
+EC2's restrictions list states that exemption and no IAM page does, and a caller cannot create such
+a key here in any case.
+
+**`aws:` is matched case-sensitively**, so `AWS:billing` is an ordinary caller tag. The prohibition
+names "the text `aws:`", the reserved keys the same page lists are all lowercase
+(`aws:cloudformation:stack-name`), and folding the comparison would refuse a key real IAM accepts.
+
+**An `Untag*` validates its keys too**, including against the reserved prefix. `TagKeys.member.N`
+carries the same length, pattern and array constraints as a tag key, so the same checks apply; the
+reserved-prefix check there is a choice rather than a rule, because the prohibition is on *creating*
+such a tag — but no IAM entity in substrate can hold one, so a caller naming it is asking to remove
+a tag that cannot exist.
+
+**A bad tag on a create leaves no entity behind.** `CreateUser`'s `Tags.member.N` is explicit —
+*"If any one of the tags is invalid or if you exceed the allowed maximum number of tags, then the
+entire request fails and the resource is not created"* — so validation runs before the write on all
+four creates. A create also collapses a duplicate key under its entity type's case rule (below), so
+an entity cannot be born holding two keys no later `Tag*` could produce.
+
+**Authorization is decided first.** A caller without the tagging permission on the named resource is
+told `AccessDenied` whether its payload is legal or not, rather than being told which of its tags
+was malformed on a resource it cannot touch.
+
+**Tag keys are case-sensitive for some entity types and not others**, which is AWS's split rather
+than substrate's: *"Tag key values for IAM users and roles are not case sensitive, but case is
+preserved. This means that you cannot have separate `Department` and `department` tag keys. […] For
+other IAM resource types, tag key values are case sensitive."*
+
+| Entity | Key comparison | `Department=finance` then `department=hr` yields |
+|---|---|---|
+| User | not case sensitive | `Department=hr` — one tag, stored spelling, new value |
+| Role | not case sensitive | `Department=hr` |
+| Customer managed policy | case sensitive | both keys |
+| Instance profile | case sensitive | both keys |
+
+Case being **preserved** matters on the insensitive side: the surviving key keeps the spelling
+already stored, because taking the incoming spelling would silently rename a key an
+`aws:ResourceTag` condition might be matching on. The same rule reaches the removal — untagging
+`DEPARTMENT` removes a user's `Department` and removes nothing from a policy — because otherwise a
+user could hold a tag no spelling a caller can send would delete.
+
+**Two rules are deliberately not enforced.** The `Tag` type marks both `Key` and `Value`
+`Required: Yes`, but an omitted `Tags.member.N.Value` arrives on the query wire as the empty string,
+which is indistinguishable from an explicitly empty one — and the empty value is documented as legal
+(*"You can create a tag with an empty value such as `phoneNumber = `"*), so it is accepted rather
+than guessed at. An empty *key* is refused, by the minimum length of 1 and the pattern's `+` alike.
+
+**`ConcurrentModification`/409 and `ServiceFailure`/500 are unreachable by construction.** Both are
+declared on all twelve operations and substrate emits neither. A tagging handler's
+read-modify-write runs synchronously inside one request against a state manager that serializes its
+own access, so no second request can interleave to produce the simultaneous-change condition
+`ConcurrentModification` reports. A state failure is returned as a Go error from the plugin and
+answered as an internal error, not as an IAM-shaped `ServiceFailure` body, so no code path
+constructs one. A consumer testing a retry loop around either code cannot drive it from here.
 
 ### Service-linked roles and `iam:AWSServiceName`
 
