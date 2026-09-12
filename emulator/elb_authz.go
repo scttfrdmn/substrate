@@ -131,8 +131,8 @@ func elbTagsToMap(tags []ELBTag) map[string]string {
 //
 // These are the four operations the bundled ELBTaggingPolicy names in its
 // elasticloadbalancing:CreateAction condition, which is also every ELBv2 operation
-// accepting Tags.member.N. The listener and rule types are AWS's own spellings rather
-// than the ones substrate's ARNs carry; see [elbKindListener] and #774.
+// accepting Tags.member.N. The listener and rule types are AWS's own spellings, which since #774
+// are also the ones substrate's ARNs carry; see [elbKindListener].
 var elbCreateResourceKinds = map[string]string{
 	"CreateLoadBalancer": elbKindLoadBalancer,
 	"CreateTargetGroup":  elbKindTargetGroup,

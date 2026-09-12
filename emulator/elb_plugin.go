@@ -589,7 +589,18 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	suffix := generateELBSuffix()
-	arn := elbListenerARN(lbARN, suffix)
+	arn, ok := elbListenerARN(lbARN, suffix)
+	if !ok {
+		// The listener's ARN carries the load balancer's name and id, so an unparseable
+		// LoadBalancerArn cannot produce one. Refusing is better than minting a malformed ARN no
+		// policy can match; AWS answers ValidationError for a malformed ARN too, and
+		// LoadBalancerNotFound only for a well-formed one naming nothing.
+		return nil, &AWSError{
+			Code:       "ValidationError",
+			Message:    fmt.Sprintf("'%s' is not a valid load balancer ARN", lbARN),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	listener := ELBListener{
 		ARN:             arn,
 		LoadBalancerARN: lbARN,
@@ -781,7 +792,16 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 
 	suffix := generateELBSuffix()
-	arn := elbRuleARN(listenerARN, suffix)
+	arn, ok := elbRuleARN(listenerARN, suffix)
+	if !ok {
+		// As in createListener: a rule's ARN is built from its listener's, so an unparseable
+		// ListenerArn — including one of the pre-#774 nested shape — cannot produce one.
+		return nil, &AWSError{
+			Code:       "ValidationError",
+			Message:    fmt.Sprintf("'%s' is not a valid listener ARN", listenerARN),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	rule := ELBRule{
 		ARN:         arn,
 		ListenerARN: listenerARN,

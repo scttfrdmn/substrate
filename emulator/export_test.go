@@ -1080,6 +1080,16 @@ func AuthzResourceARNFormatsForTest(service, resourceType string) ([]string, boo
 	return authzResourceARNFormats(service, resourceType)
 }
 
+// ELBResourceKindFromARNForTest wraps elbResourceKindFromARN, which classifies an ELBv2 ARN as
+// one of the four taggable kinds.
+//
+// It is exported so a test can assert that the pre-#774 nested listener and rule ARNs an earlier
+// version recorded are still recognized alongside the flat ones AWS publishes — a property no
+// request-level assertion can reach, because nothing mints the old shape any more.
+func ELBResourceKindFromARNForTest(arn string) string {
+	return elbResourceKindFromARN(arn)
+}
+
 // EC2TaggableARNTypeForTest resolves an EC2 resource ID to the ARN type
 // [ec2TaggableResource] gives it, or "" for a prefix it does not recognize.
 //

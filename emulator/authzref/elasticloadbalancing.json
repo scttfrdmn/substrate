@@ -1,0 +1,542 @@
+{
+  "Name": "elasticloadbalancing",
+  "Version": "v1.4",
+  "Actions": [
+    {
+      "Name": "AddListenerCertificates",
+      "Resources": [
+        "listener/app",
+        "listener/net"
+      ]
+    },
+    {
+      "Name": "AddTags",
+      "Resources": [
+        "listener-rule/app",
+        "listener-rule/net",
+        "listener/app",
+        "listener/gwy",
+        "listener/net",
+        "loadbalancer",
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/",
+        "targetgroup",
+        "truststore"
+      ]
+    },
+    {
+      "Name": "AddTrustStoreRevocations",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "AllowVendedLogDeliveryForResource",
+      "Resources": []
+    },
+    {
+      "Name": "ApplySecurityGroupsToLoadBalancer",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "AttachLoadBalancerToSubnets",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "ConfigureHealthCheck",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "CreateAppCookieStickinessPolicy",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "CreateLBCookieStickinessPolicy",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "CreateListener",
+      "Resources": [
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "CreateLoadBalancer",
+      "Resources": [
+        "loadbalancer",
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "CreateLoadBalancerListeners",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "CreateLoadBalancerPolicy",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "CreateRule",
+      "Resources": [
+        "listener/app",
+        "listener/net"
+      ]
+    },
+    {
+      "Name": "CreateTargetGroup",
+      "Resources": [
+        "targetgroup"
+      ]
+    },
+    {
+      "Name": "CreateTrustStore",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "CreateWebACLAssociation",
+      "Resources": [
+        "loadbalancer/app/"
+      ]
+    },
+    {
+      "Name": "DeleteListener",
+      "Resources": [
+        "listener/app",
+        "listener/gwy",
+        "listener/net"
+      ]
+    },
+    {
+      "Name": "DeleteLoadBalancer",
+      "Resources": [
+        "loadbalancer",
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "DeleteLoadBalancerListeners",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "DeleteLoadBalancerPolicy",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "DeleteRule",
+      "Resources": [
+        "listener-rule/app",
+        "listener-rule/net"
+      ]
+    },
+    {
+      "Name": "DeleteSharedTrustStoreAssociation",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "DeleteTargetGroup",
+      "Resources": [
+        "targetgroup"
+      ]
+    },
+    {
+      "Name": "DeleteTrustStore",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "DeleteWebACLAssociation",
+      "Resources": [
+        "loadbalancer/app/"
+      ]
+    },
+    {
+      "Name": "DeregisterInstancesFromLoadBalancer",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "DeregisterTargets",
+      "Resources": [
+        "targetgroup"
+      ]
+    },
+    {
+      "Name": "DescribeAccountLimits",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeCapacityReservation",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceHealth",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeListenerAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeListenerCertificates",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeListeners",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLoadBalancerAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLoadBalancerPolicies",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLoadBalancerPolicyTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLoadBalancers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeRules",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeSSLPolicies",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTags",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTargetGroupAttributes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTargetGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTargetHealth",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrustStoreAssociations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrustStoreRevocations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrustStores",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeWebACLAssociation",
+      "Resources": []
+    },
+    {
+      "Name": "DetachLoadBalancerFromSubnets",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "DisableAvailabilityZonesForLoadBalancer",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "EnableAvailabilityZonesForLoadBalancer",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "GetLoadBalancerWebACL",
+      "Resources": [
+        "loadbalancer/app/"
+      ]
+    },
+    {
+      "Name": "GetResourcePolicy",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "GetTrustStoreCaCertificatesBundle",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "GetTrustStoreRevocationContent",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "ModifyCapacityReservation",
+      "Resources": [
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "ModifyIpPools",
+      "Resources": [
+        "loadbalancer/app/"
+      ]
+    },
+    {
+      "Name": "ModifyListener",
+      "Resources": [
+        "listener/app",
+        "listener/gwy",
+        "listener/net"
+      ]
+    },
+    {
+      "Name": "ModifyListenerAttributes",
+      "Resources": [
+        "listener/app",
+        "listener/gwy",
+        "listener/net"
+      ]
+    },
+    {
+      "Name": "ModifyLoadBalancerAttributes",
+      "Resources": [
+        "loadbalancer",
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "ModifyRule",
+      "Resources": [
+        "listener-rule/app",
+        "listener-rule/net"
+      ]
+    },
+    {
+      "Name": "ModifyTargetGroup",
+      "Resources": [
+        "targetgroup"
+      ]
+    },
+    {
+      "Name": "ModifyTargetGroupAttributes",
+      "Resources": [
+        "targetgroup"
+      ]
+    },
+    {
+      "Name": "ModifyTrustStore",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "RegisterInstancesWithLoadBalancer",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "RegisterTargets",
+      "Resources": [
+        "targetgroup"
+      ]
+    },
+    {
+      "Name": "RemoveListenerCertificates",
+      "Resources": [
+        "listener/app",
+        "listener/net"
+      ]
+    },
+    {
+      "Name": "RemoveTags",
+      "Resources": [
+        "listener-rule/app",
+        "listener-rule/net",
+        "listener/app",
+        "listener/gwy",
+        "listener/net",
+        "loadbalancer",
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/",
+        "targetgroup",
+        "truststore"
+      ]
+    },
+    {
+      "Name": "RemoveTrustStoreRevocations",
+      "Resources": [
+        "truststore"
+      ]
+    },
+    {
+      "Name": "SetIpAddressType",
+      "Resources": [
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "SetLoadBalancerListenerSSLCertificate",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "SetLoadBalancerPoliciesForBackendServer",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "SetLoadBalancerPoliciesOfListener",
+      "Resources": [
+        "loadbalancer"
+      ]
+    },
+    {
+      "Name": "SetRulePriorities",
+      "Resources": [
+        "listener-rule/app",
+        "listener-rule/net"
+      ]
+    },
+    {
+      "Name": "SetSecurityGroups",
+      "Resources": [
+        "loadbalancer/app/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "SetSubnets",
+      "Resources": [
+        "loadbalancer/app/",
+        "loadbalancer/gwy/",
+        "loadbalancer/net/"
+      ]
+    },
+    {
+      "Name": "SetWebAcl",
+      "Resources": []
+    }
+  ],
+  "Resources": [
+    {
+      "Name": "listener-rule/app",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:listener-rule/app/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}/${ListenerRuleId}"
+      ]
+    },
+    {
+      "Name": "listener-rule/net",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:listener-rule/net/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}/${ListenerRuleId}"
+      ]
+    },
+    {
+      "Name": "listener/app",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:listener/app/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}"
+      ]
+    },
+    {
+      "Name": "listener/gwy",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:listener/gwy/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}"
+      ]
+    },
+    {
+      "Name": "listener/net",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:listener/net/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}"
+      ]
+    },
+    {
+      "Name": "loadbalancer",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:loadbalancer/${LoadBalancerName}"
+      ]
+    },
+    {
+      "Name": "loadbalancer/app/",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}"
+      ]
+    },
+    {
+      "Name": "loadbalancer/gwy/",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:loadbalancer/gwy/${LoadBalancerName}/${LoadBalancerId}"
+      ]
+    },
+    {
+      "Name": "loadbalancer/net/",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:loadbalancer/net/${LoadBalancerName}/${LoadBalancerId}"
+      ]
+    },
+    {
+      "Name": "targetgroup",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:targetgroup/${TargetGroupName}/${TargetGroupId}"
+      ]
+    },
+    {
+      "Name": "truststore",
+      "ARNFormats": [
+        "arn:${Partition}:elasticloadbalancing:${Region}:${Account}:truststore/${TrustStoreName}/${TrustStoreId}"
+      ]
+    }
+  ]
+}

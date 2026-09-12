@@ -194,8 +194,12 @@ func TestLoad_RefusesASnapshotItCannotTrust(t *testing.T) {
 }
 
 // TestLoad_ReadsTheCommittedSnapshots is the check the -check flag performs, exercised
-// against the data actually in the repository: both services load, both carry the actions
-// the authorization gates read, and both are at the version the generated header claims.
+// against the data actually in the repository: every vendored service loads, each carries the
+// actions the authorization gates read, and each is at the version the generated header claims.
+//
+// The count comes from `services` rather than a literal, so adding a snapshot — as #774 added
+// elasticloadbalancing beside ec2 and iam — does not need this test edited to keep meaning what
+// it says.
 func TestLoad_ReadsTheCommittedSnapshots(t *testing.T) {
 	svcs, err := load(filepath.Join("..", "..", "emulator", "authzref"))
 	if err != nil {

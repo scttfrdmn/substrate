@@ -7010,19 +7010,49 @@ operation name — AWS's examples write `"elasticloadbalancing:CreateAction": "C
 `ELBTaggingPolicy` statement names four values: `CreateTargetGroup`, `CreateRule`,
 `CreateListener` and `CreateLoadBalancer`.
 
-Two deliberate gaps:
+One deliberate gap: **`Names.member.N` on `DescribeLoadBalancers` and `DescribeTargetGroups`
+is not resolved to an ARN**, so those two requests are still decided against `*`. Whether
+ELB's describes support resource-level permissions could not be verified — the pages that
+would say are the unreachable ones above — and leaving them at `*` is the direction that
+cannot invent a grant.
 
-- **`Names.member.N` on `DescribeLoadBalancers` and `DescribeTargetGroups` is not resolved
-  to an ARN**, so those two requests are still decided against `*`. Whether ELB's describes
-  support resource-level permissions could not be verified — the pages that would say are
-  the unreachable ones above — and leaving them at `*` is the direction that cannot invent a
-  grant.
-- Substrate's listener and rule ARNs nest under the load balancer's
-  (`…:loadbalancer/app/<name>/<id>/listener/<suffix>`) where AWS mints flat
-  `…:listener/app/<name>/<id>/<suffix>` and `…:listener-rule/…` forms. The tagging code
-  accepts **both** shapes, and the tag-on-create pass authorizes against AWS's spelling, so a
-  policy written the way AWS writes one behaves correctly regardless. The ARN shape itself is
-  [#774](https://github.com/scttfrdmn/substrate/issues/774).
+### The ARNs substrate mints
+
+A listener and a listener rule are **siblings** of their load balancer's ARN, not children of
+it. AWS's four ELBv2 formats, taken from its Service Reference Information document for
+`elasticloadbalancing` (Version `v1.4`, vendored at `emulator/authzref/elasticloadbalancing.json`):
+
+| Resource type | Format |
+|---------------|--------|
+| `loadbalancer/app/` | `arn:${Partition}:elasticloadbalancing:${Region}:${Account}:loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}` |
+| `targetgroup` | `arn:…:targetgroup/${TargetGroupName}/${TargetGroupId}` |
+| `listener/app` | `arn:…:listener/app/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}` |
+| `listener-rule/app` | `arn:…:listener-rule/app/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}/${ListenerRuleId}` |
+
+So a child repeats its load balancer's name and id inside its *own* resource type rather than
+being appended to the parent's ARN, and the resource type carries the load balancer's subtype
+(`app`, `net`, `gwy` — the abbreviations, not `LoadBalancerTypeEnum`'s
+`application | network | gateway`). Substrate asserts a minted ARN against those published
+format strings rather than against a template copied into a test, so a drift in either fails.
+
+Both were wrong until [#774](https://github.com/scttfrdmn/substrate/issues/774):
+substrate nested the child (`…:loadbalancer/app/<name>/<id>/listener/<suffix>`) and spelled the
+subtype `application`. Neither is cosmetic. Every AWS policy example scopes a listener statement
+with `…:listener/*`, and that wildcard matched nothing at all against the nested shape — so a
+`Deny` written the documented way silently failed to deny, while an `Allow` on `…:loadbalancer/*`
+was a prefix of every listener and rule ARN and reached them. The subtype had to be fixed in the
+same change: a listener ARN repeats it, so leaving `application` in place would have minted
+`listener/application/…` and left `listener/app/*` matching nothing.
+
+A `CreateListener` or `CreateRule` naming a parent ARN it cannot build a child from — a
+malformed ARN, or the classic-ELB `…:loadbalancer/<name>` form, which carries too few segments —
+answers `ValidationError`/400 rather than minting a child of the wrong arity that no policy
+could match.
+
+The **old** nested spelling is still *resolved* by the tagging code, deliberately: an event log
+or an exported fixture recorded before #774 carries those ARNs, and a replay whose tagging
+calls suddenly named no resource would defeat the property the event store exists to provide.
+Nothing mints that shape any more.
 
 ### CloudFormation resource types
 
