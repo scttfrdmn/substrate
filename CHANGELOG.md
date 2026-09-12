@@ -266,6 +266,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depended on the nesting — both compare the child's *stored* parent ARN — and are now pinned by
   a test so a later "optimization" to prefix matching cannot reintroduce the coupling.
 
+- **Every `TODO(#N)` in the tree now cites an open issue.** All six references named closed ones,
+  which is worse than citing none: the convention exists so a reader can find out whether the
+  deferral still stands, and a closed number answers "yes, and it was resolved" when the opposite
+  is true. Two are live deferrals and were refiled — deep-comparing a replayed response body is
+  now `TODO(#817)` (was #6) and S3 prefix-level rate limits are `TODO(#818)` (was #22). The four
+  `#495` mentions are historical prose about a TODO #695 *retired*, so they are reworded to say
+  what the concern was rather than to read as open work; #495 is still cited, as the issue that
+  recorded the concern and the reason the instance-type catalog is deliberately small. No
+  behaviour changes.
+
 ## [v0.112.0] - 2026-09-11
 
 ### Added

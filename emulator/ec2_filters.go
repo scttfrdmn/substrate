@@ -611,10 +611,10 @@ func ec2RegionFilterSpec() ec2FilterSpec {
 //
 // Fifty-seven names, the widest set in EC2 after DescribeInstances', of which the seeded
 // catalog answers five. That ratio is the whole reason this operation went unfiltered
-// through v0.106.0: TODO(#495) recorded that applying the modellable handful and dropping
-// the rest would repeat #485's silent narrowing. It is no longer a silent drop — the five are
-// applied, and the fifty-two are accepted and listed, which is the distinction
-// [ec2FilterSpec] exists to draw.
+// through v0.106.0: the concern #495 recorded, and #695 settled, was that applying the
+// modellable handful and dropping the rest would repeat #485's silent narrowing. It is no
+// longer a silent drop — the five are applied, and the fifty-two are accepted and listed,
+// which is the distinction [ec2FilterSpec] exists to draw.
 //
 // Every inert name describes an instance-type property [ec2InstanceTypeInfo] does not carry:
 // EBS optimization, NVMe support, ENA and EFA, hypervisor, boot mode, disk layout. The

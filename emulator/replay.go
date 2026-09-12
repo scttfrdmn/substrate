@@ -327,7 +327,7 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 			Significance: "major",
 		})
 	}
-	// TODO(#6): deep-compare response bodies.
+	// TODO(#817): deep-compare response bodies.
 
 	if r.config.ValidateState && event.StateHashAfter != "" {
 		if actual := r.computeStateHash(ctx); actual != event.StateHashAfter {
