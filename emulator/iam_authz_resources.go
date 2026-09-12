@@ -146,6 +146,9 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"DeletePolicy":       {Type: "policy", NameParams: []string{"PolicyArn"}},
 	"GetPolicyVersion":   {Type: "policy", NameParams: []string{"PolicyArn"}},
 	"ListPolicyVersions": {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"TagPolicy":          {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"UntagPolicy":        {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"ListPolicyTags":     {Type: "policy", NameParams: []string{"PolicyArn"}},
 
 	// Instance profiles. AddRoleToInstanceProfile carries a RoleName too, and AWS still
 	// publishes only `instance-profile` for it — the profile is the resource a policy
@@ -156,6 +159,9 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"DeleteInstanceProfile":         {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
 	"AddRoleToInstanceProfile":      {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
 	"RemoveRoleFromInstanceProfile": {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
+	"TagInstanceProfile":            {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
+	"UntagInstanceProfile":          {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
+	"ListInstanceProfileTags":       {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
 
 	// PolicySourceArn is a finished ARN of whichever of the three entity types the caller
 	// asked about, so there is nothing to mint and no one Type to name.

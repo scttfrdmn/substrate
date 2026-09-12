@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The six IAM tagging operations for policies and instance profiles** (#796). `TagPolicy`,
+  `UntagPolicy`, `ListPolicyTags`, `TagInstanceProfile`, `UntagInstanceProfile` and
+  `ListInstanceProfileTags` reached the dispatcher's default arm and answered
+  `InvalidAction`/400. That is the other half of the same drift as the entity read below: a
+  consumer's tag aspect tags every entity it creates, and only two of the four taggable IAM
+  types could accept one — so a CDK or Terraform run tagging a customer-managed policy failed
+  outright rather than drifting.
+
+  All six behave as the user and role families do, which is now literal rather than a claim:
+  the merge-by-key, the removal, and the listing are one implementation the twelve operations
+  share, so the four families cannot answer differently. A repeated key is overwritten, per
+  AWS's *"If a tag with the same key name already exists, then that tag is overwritten with the
+  new value"*; removing a key that is not present is not an error, since AWS declares none for
+  it; an absent resource answers `NoSuchEntity`/404 and a missing identifier `ValidationError`/400.
+
+  **An AWS managed policy cannot be tagged.** AWS documents the policy family for an "IAM
+  customer managed policy", and a managed policy belongs to the `aws` account — substrate's
+  bundled catalog is read-only for the same reason — so the tagging operations do not resolve
+  it and answer `NoSuchEntity` even though `GetPolicy` reports the same ARN.
+
+  **There is no group family, and there will not be**, on the four citations under the entity
+  read below. `TagGroup`, `UntagGroup` and `ListGroupTags` keep answering `InvalidAction`,
+  which is the honest report that substrate models no such operation — a `NoSuchEntity` would
+  tell a consumer the group was the problem.
+
+  All six are authorized at both doors against the resource they name, from six new rows the
+  existing both-directions test validates against the vendored Service Reference Information
+  snapshot. Tagging is privilege-relevant rather than bookkeeping: an
+  `aws:ResourceTag`-conditioned statement is decided on the resource's tags, so a caller who
+  can retag an instance profile can move it in or out of the reach of every such statement.
+
+  **What they do not do is validate.** AWS documents `InvalidInput`/400 (an empty key, an
+  `aws:` prefix), `LimitExceeded`/409 (the 50-tag cap) and `ConcurrentModification`/409, and
+  none of the three is emitted; a key is also compared case-sensitively where AWS treats user
+  and role tag keys case-insensitively. Each rejection is a behaviour change for a consumer on
+  today's permissive path and earns its own compatibility note, so it is tracked as #806 rather
+  than folded in here.
+
 ### Fixed
+- **A tags listing is sorted by tag key** (#796). AWS states it on all six listing operations,
+  and it is not cosmetic: the response `Marker` names a key rather than an offset, so an
+  unsorted underlying order makes a second page arbitrary. `ListUserTags` and `ListRoleTags`
+  reported tags in whatever order they were stored — the order a `Tags.member.N` arrived in, or
+  a Go map's — so a consumer that tagged out of order and paged got an arbitrary page. Routing
+  all six through one implementation fixes both of the two that predate this release.
 - **A caller whose IAM entity lives at a path is enforced, and their principal ARN carries that
   path** (#801). AWS writes an entity ARN as `arn:aws:iam::<account>:user/<UserNameWithPath>` —
   one component in which the friendly name is the **last** segment — so
