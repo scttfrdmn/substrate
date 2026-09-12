@@ -48,7 +48,7 @@ import (
 // services are the services whose request resource substrate derives per operation, and
 // so the only ones whose reference data it needs. Adding a service here is what makes its
 // actions available to a per-operation resource table; nothing else consults the file.
-var services = []string{"ec2", "iam"}
+var services = []string{"ec2", "elasticloadbalancing", "iam"}
 
 // referenceEndpoint is AWS's Service Reference Information endpoint. The index at the
 // root lists every service; the per-service document is the one this tool prunes.

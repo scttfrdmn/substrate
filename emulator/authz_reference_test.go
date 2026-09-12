@@ -106,6 +106,29 @@ func TestAuthzReference_PublishesTheARNFormatSubstrateBuilds(t *testing.T) {
 			"iam", "assumed-role",
 			"arn:${Partition}:iam::${Account}:assumed-role/${RoleName}/${RoleSessionName}",
 		},
+		// The ELBv2 formats #774 reshaped substrate's ARNs to match. Note the resource type
+		// carries the subtype and that `loadbalancer/app/` keeps a trailing slash — quirks of
+		// AWS's own data that the generator must not normalize away.
+		{
+			"elasticloadbalancing", "loadbalancer/app/",
+			"arn:${Partition}:elasticloadbalancing:${Region}:${Account}:" +
+				"loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}",
+		},
+		{
+			"elasticloadbalancing", "listener/app",
+			"arn:${Partition}:elasticloadbalancing:${Region}:${Account}:" +
+				"listener/app/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}",
+		},
+		{
+			"elasticloadbalancing", "listener-rule/app",
+			"arn:${Partition}:elasticloadbalancing:${Region}:${Account}:" +
+				"listener-rule/app/${LoadBalancerName}/${LoadBalancerId}/${ListenerId}/${ListenerRuleId}",
+		},
+		{
+			"elasticloadbalancing", "targetgroup",
+			"arn:${Partition}:elasticloadbalancing:${Region}:${Account}:" +
+				"targetgroup/${TargetGroupName}/${TargetGroupId}",
+		},
 	}
 
 	for _, tt := range tests {

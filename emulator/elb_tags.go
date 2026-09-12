@@ -17,11 +17,11 @@ import (
 //
 // The listener and rule types are the ones AWS's ARNs carry —
 // `listener/app/<lb>/<lb-id>/<listener-id>` and
-// `listener-rule/app/<lb>/<lb-id>/<listener-id>/<rule-id>` — which is *not* the shape
-// [elbListenerARN] and [elbRuleARN] mint (they nest the suffix under the load
-// balancer's own ARN). Authorization uses the AWS spelling because that is what a
-// policy is written against; resolution reads substrate's, because that is what state
-// holds. The malformed ARN shape is #774, filed rather than fixed here.
+// `listener-rule/app/<lb>/<lb-id>/<listener-id>/<rule-id>` — and since #774 that is also the
+// shape [elbListenerARN] and [elbRuleARN] mint, so authorization and resolution read one spelling
+// rather than two. Substrate nested the child under the load balancer's own ARN before that;
+// [elbResourceKindFromARN] still recognizes the nested form, because recorded state and exported
+// fixtures written by an earlier version carry it.
 const (
 	elbKindLoadBalancer = "loadbalancer"
 	elbKindTargetGroup  = "targetgroup"
@@ -170,12 +170,16 @@ func elbNotFoundError(kind, arn string) *AWSError {
 // elbResourceKindFromARN reports which of the four taggable kinds an ARN names, or ""
 // when it names none.
 //
-// The listener and rule tests come first and match on substrate's own nesting —
-// `…:loadbalancer/app/<name>/<id>/listener/<suffix>` and that plus `/rule/<suffix>` —
-// so they must be tried before the load-balancer test, which their prefix also
-// satisfies. AWS's flat `…:listener/…` and `…:listener-rule/…` are recognized too, so a
-// caller passing an ARN of the real shape is not told it names nothing; that is the
-// forward-compatible half of #774.
+// Both shapes are recognized, and the order is what makes that safe. The nested tests —
+// `…:loadbalancer/app/<name>/<id>/listener/<suffix>` and that plus `/rule/<suffix>`, the shape
+// substrate minted before #774 — come first, because the load-balancer test their prefix also
+// satisfies would otherwise claim them. The flat `…:listener/…` and `…:listener-rule/…` that
+// #774 mints are AWS's own and are matched on the resource type.
+//
+// Keeping the nested form resolvable is deliberate: an event log recorded by an earlier version,
+// or a fixture exported from one, holds listener and rule ARNs of that shape, and a replay whose
+// tagging calls suddenly named nothing would be a regression in the one property the event store
+// exists to provide. New ARNs are never minted in it — see [elbRuleARN].
 func elbResourceKindFromARN(arn string) string {
 	switch {
 	case strings.Contains(arn, "/rule/") || strings.Contains(arn, ":listener-rule/"):

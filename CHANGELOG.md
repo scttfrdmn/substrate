@@ -132,6 +132,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaches all of it. Its numbers include the transport and so are not comparable with the
   recorder-based ones it replaces.
 
+- **An ELBv2 listener and listener-rule ARN is the shape AWS publishes** (#774). A listener and a
+  rule are **siblings** of their load balancer's ARN — `…:listener/app/<name>/<lbid>/<id>` — each
+  repeating the load balancer's name and id inside its own resource type. Substrate nested them
+  under the parent instead (`…:loadbalancer/app/<name>/<lbid>/listener/<id>`, plus `/rule/<id>`),
+  and the consequence was not cosmetic: every AWS policy example scopes a listener statement with
+  `…:listener/*`, and that wildcard matched *nothing at all* against the nested shape. So a `Deny`
+  written the documented way silently failed to deny, while an `Allow` on `…:loadbalancer/*` was a
+  prefix of every listener and rule ARN and reached them both.
+
+  **A load balancer's ARN now carries AWS's subtype abbreviation** — `app`, `net`, `gwy`, not
+  `LoadBalancerTypeEnum`'s `application | network | gateway`. This is part of the same defect
+  rather than a separate tidy-up: a listener ARN repeats its load balancer's subtype, so leaving
+  the long form in place would have minted `listener/application/…` and left `listener/app/*`
+  matching nothing — the very failure being fixed.
+
+  The provenance is machine-readable, which is why this release can cite the fix rather than
+  assert it. AWS's Service Reference Information document for `elasticloadbalancing` (Version
+  `v1.4`) publishes all eleven ELB resource types with their ARN format strings; it is vendored
+  at `emulator/authzref/elasticloadbalancing.json` beside the EC2 and IAM snapshots, and the tests
+  substitute the placeholders in **AWS's own templates** and compare against the minted ARN. A
+  drift in either side fails, where a hand-copied template in a test could only ever agree with
+  the implementation it was written from.
+
+  `CreateListener` and `CreateRule` now answer `ValidationError`/400 when the parent ARN they are
+  given cannot yield a child — a malformed ARN, or the classic-ELB `…:loadbalancer/<name>` form,
+  which carries too few segments. Minting a child of the wrong arity would reproduce the same
+  defect from the other direction: an ARN no policy could match.
+
+  The **old** nested spelling is still recognised on the tagging path, deliberately. An event log
+  or an exported fixture recorded by an earlier version carries those ARNs, and a replay whose
+  tagging calls suddenly named no resource would defeat the property the event store exists to
+  provide. Nothing mints that shape any more.
+
+  `DescribeListeners`' `LoadBalancerArn` filter and `DescribeRules`' `ListenerArn` filter never
+  depended on the nesting — both compare the child's *stored* parent ARN — and are now pinned by
+  a test so a later "optimization" to prefix matching cannot reintroduce the coupling.
+
 ## [v0.112.0] - 2026-09-11
 
 ### Added

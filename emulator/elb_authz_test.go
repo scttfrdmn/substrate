@@ -30,17 +30,19 @@ const (
 	elbAuthzRegion  = "us-east-1"
 )
 
-// The ARNs the fixture's resources carry, in substrate's own shapes. The listener and rule
-// ARNs nest under the load balancer's (#774); the tagging code accepts AWS's flat spelling
-// too, which elb_tags_test.go pins.
+// The ARNs the fixture's resources carry, in the shapes substrate mints since #774 — a listener
+// and a rule are siblings of their load balancer, repeating its name and id rather than nesting
+// under its ARN. The nested pre-#774 spelling still resolves for tagging, which
+// elb_tags_test.go pins.
 var (
 	elbAuthzLBARN       = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":loadbalancer/app/web/0abc111"
 	elbAuthzTGARN       = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":targetgroup/web-tg/0def222"
-	elbAuthzListenerARN = elbAuthzLBARN + "/listener/0aaa333"
-	elbAuthzRuleARN     = elbAuthzListenerARN + "/rule/0bbb444"
+	elbAuthzListenerARN = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":listener/app/web/0abc111/0aaa333"
+	elbAuthzRuleARN     = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":listener-rule/app/web/0abc111/0aaa333/0bbb444"
 
-	// The type wildcards a tagged create's second pass is authorized against, which are
-	// AWS's ARN resource types rather than substrate's nesting.
+	// The type wildcards a tagged create's second pass is authorized against. Since #774 these
+	// are the same resource types the minted ARNs carry, so the wildcard a policy writes and the
+	// ARN a request names agree — which is what #774 was about.
 	elbAuthzLBWildcard       = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":loadbalancer/*"
 	elbAuthzTGWildcard       = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":targetgroup/*"
 	elbAuthzListenerWildcard = "arn:aws:elasticloadbalancing:" + elbAuthzRegion + ":" + elbAuthzAccount + ":listener/*"
