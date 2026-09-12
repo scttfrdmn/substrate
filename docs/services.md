@@ -1984,6 +1984,28 @@ IAM operations are free.
 | AssumeRole | Evaluates the role's trust policy, then returns temporary credentials |
 | GetSessionToken | Returns stub temporary credentials |
 
+### What `GetCallerIdentity` reports as `UserId`
+
+AWS's [identifiers reference](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html)
+documents three forms, and names `GetCallerIdentity` as the way to read one:
+
+| Caller | `UserId` |
+|--------|----------|
+| An IAM user | the user's unique ID, `AIDA…` |
+| An assumed role | `AROA…:<role-session-name>` — the role's unique ID, then the session name the caller chose |
+| The account root | the account ID |
+
+Substrate reported the caller's *friendly name* until
+[#805](https://github.com/scttfrdmn/substrate/issues/805) — `alice`, and `worker/sess1`
+for a session, which is the ARN's last two segments rather than any documented shape.
+It is the same value `aws:userid` publishes, so a policy conditioned on that key and an
+assertion on `UserId` describe one caller.
+
+A caller who resolves to no IAM entity keeps the third row's answer or, if a credential
+names a user who has since been deleted, that user's name. Every caller on AWS has a
+unique ID, so this case is substrate's own: a name identifies the caller, where an empty
+member could not be told from a bug.
+
 ### A role's trust policy is enforced, and `sts:ExternalId` with it
 
 `AssumeRole` evaluates the role's `AssumeRolePolicyDocument` before minting a
