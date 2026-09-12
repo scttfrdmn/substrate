@@ -252,6 +252,17 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	// The tags are judged before anything is read or written, per CreateUser's Tags.member.N:
+	// "If any one of the tags is invalid or if you exceed the allowed maximum number of tags,
+	// then the entire request fails and the resource is not created." A bad tag therefore beats
+	// EntityAlreadyExists, which is the same order the four Tag* paths use — validated after
+	// authorization, before the entity is looked up (#806).
+	tags, tagResp := iamCreateTagSet(params.Tags, iamTagKeysCaseInsensitive)
+	if tagResp != nil {
+		return tagResp, nil
+	}
+	params.Tags = tags
+
 	key := iamUserKey(ctx.AccountID, params.UserName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
 	if err != nil {
@@ -458,6 +469,13 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if err := p.authorize(goCtx, ctx, "iam:CreateRole", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
+
+	// Validated before anything is read or written; see createUser (#806).
+	tags, tagResp := iamCreateTagSet(params.Tags, iamTagKeysCaseInsensitive)
+	if tagResp != nil {
+		return tagResp, nil
+	}
+	params.Tags = tags
 
 	key := iamRoleKey(ctx.AccountID, params.RoleName)
 	existing, err := p.state.Get(goCtx, iamNamespace, key)
@@ -1241,6 +1259,13 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	if err := p.authorize(goCtx, ctx, "iam:CreatePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
+	// Validated before anything is read or written; see createUser (#806). A policy's tag keys
+	// are case-*sensitive*, unlike a user's or a role's.
+	tags, tagResp := iamCreateTagSet(tags, iamTagKeysCaseSensitive)
+	if tagResp != nil {
+		return tagResp, nil
 	}
 
 	if params.Path == "" {
@@ -2251,6 +2276,12 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	// Validated after authorization and before the load; see tagPolicy in iam_tagging.go for
+	// why that is the order (#806).
+	if resp := iamValidateTagSet(params.Tags); resp != nil {
+		return resp, nil
+	}
+
 	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
@@ -2261,7 +2292,11 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	user.Tags = iamMergeTagSet(user.Tags, params.Tags)
+	merged := iamMergeTagSet(user.Tags, params.Tags, iamTagKeysCaseInsensitive)
+	if resp := iamCheckTagLimit(merged); resp != nil {
+		return resp, nil
+	}
+	user.Tags = merged
 
 	raw, err := json.Marshal(user)
 	if err != nil {
@@ -2296,6 +2331,10 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	if resp := iamValidateTagKeys(params.TagKeys); resp != nil {
+		return resp, nil
+	}
+
 	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
@@ -2306,7 +2345,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			http.StatusNotFound), nil
 	}
 
-	user.Tags = iamRemoveTagKeys(user.Tags, params.TagKeys)
+	user.Tags = iamRemoveTagKeys(user.Tags, params.TagKeys, iamTagKeysCaseInsensitive)
 
 	raw, err := json.Marshal(user)
 	if err != nil {
@@ -2373,6 +2412,10 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	if resp := iamValidateTagSet(params.Tags); resp != nil {
+		return resp, nil
+	}
+
 	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
@@ -2383,7 +2426,11 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	role.Tags = iamMergeTagSet(role.Tags, params.Tags)
+	merged := iamMergeTagSet(role.Tags, params.Tags, iamTagKeysCaseInsensitive)
+	if resp := iamCheckTagLimit(merged); resp != nil {
+		return resp, nil
+	}
+	role.Tags = merged
 
 	raw, err := json.Marshal(role)
 	if err != nil {
@@ -2418,6 +2465,10 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	if resp := iamValidateTagKeys(params.TagKeys); resp != nil {
+		return resp, nil
+	}
+
 	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
@@ -2428,7 +2479,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			http.StatusNotFound), nil
 	}
 
-	role.Tags = iamRemoveTagKeys(role.Tags, params.TagKeys)
+	role.Tags = iamRemoveTagKeys(role.Tags, params.TagKeys, iamTagKeysCaseInsensitive)
 
 	raw, err := json.Marshal(role)
 	if err != nil {
@@ -2761,6 +2812,13 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	// five operations that follow it are decided against one string built one way (#770).
 	if err := p.authorize(goCtx, ctx, "iam:CreateInstanceProfile", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
+	// Validated before anything is read or written; see createUser (#806). An instance profile's
+	// tag keys are case-sensitive, as a policy's are.
+	tags, tagResp := iamCreateTagSet(tags, iamTagKeysCaseSensitive)
+	if tagResp != nil {
+		return tagResp, nil
 	}
 
 	key := iamInstanceProfileKey(ctx.AccountID, params.InstanceProfileName)

@@ -256,23 +256,26 @@ func TestIAMMemberTags(t *testing.T) {
 			want:   []emulator.IAMTag{{Key: "env", Value: ""}},
 		},
 		{
-			// A wholly empty member would otherwise merge into the tag set under the
-			// key "", which no client asked for.
-			name: "a wholly empty member is dropped",
+			// A wholly empty member is *kept*, reversing what this decoder did before
+			// #806. Dropping it silently accepted a request AWS refuses outright — "You
+			// cannot create an empty tag key" — so the member has to survive the decode
+			// to reach the validator, which answers ValidationError for it.
+			name: "a wholly empty member is kept for the validator to refuse",
 			params: map[string]string{
 				"Tags.member.1.Key":   "",
 				"Tags.member.1.Value": "",
 				"Tags.member.2.Key":   "team",
 				"Tags.member.2.Value": "infra",
 			},
-			want: []emulator.IAMTag{{Key: "team", Value: "infra"}},
+			want: []emulator.IAMTag{{Key: "", Value: ""}, {Key: "team", Value: "infra"}},
 		},
 		{
-			// Every member empty means nothing to apply, and nil is what lets the
-			// handler fall through to its JSON body rather than clearing the field.
-			name:   "all members empty answers nil",
+			// Same reversal: a lone empty member is a request to be refused, not an
+			// absent Tags list. Only a genuinely absent list answers nil, which is what
+			// lets a handler fall through to its JSON body.
+			name:   "a lone empty member is kept, not turned into nil",
 			params: map[string]string{"Tags.member.1.Key": "", "Tags.member.1.Value": ""},
-			want:   nil,
+			want:   []emulator.IAMTag{{Key: "", Value: ""}},
 		},
 	}
 

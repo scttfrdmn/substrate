@@ -321,10 +321,16 @@ func iamMemberStructs(params map[string]string, prefix string) []map[string]stri
 // tagging handlers store. It returns nil when no Tags list was sent, which is what
 // lets a caller fall back to a JSON body.
 //
-// A member with neither Key nor Value is dropped: an empty tag would otherwise
-// merge into an entity's tag set under the key "", which no client asked for. An
-// empty *Value* under a real Key is kept, because AWS accepts a tag with an empty
-// value.
+// This is a **pure decoder**: every member that arrived is returned, including one with an empty
+// key, and nothing here judges it. It dropped an empty member before #806 — an empty tag would
+// otherwise have merged into an entity's tag set under the key "" — but silently discarding it
+// is exactly the wrong answer now that a validator exists, because AWS refuses the request
+// ("You cannot create an empty tag key") rather than ignoring the tag. Dropping it here would
+// hide it from [iamValidateTagSet] and leave substrate accepting a request real IAM rejects.
+//
+// An empty *Value* under a real Key is legal and is kept, because AWS accepts a tag with an
+// empty value; the query wire cannot distinguish that from an omitted `Value`, and the `Tag`
+// type's minimum value length of 0 makes both acceptable.
 func iamMemberTags(params map[string]string) []IAMTag {
 	members := iamMemberStructs(params, "Tags")
 	if members == nil {
@@ -332,14 +338,7 @@ func iamMemberTags(params map[string]string) []IAMTag {
 	}
 	out := make([]IAMTag, 0, len(members))
 	for _, m := range members {
-		key, value := m["Key"], m["Value"]
-		if key == "" && value == "" {
-			continue
-		}
-		out = append(out, IAMTag{Key: key, Value: value})
-	}
-	if len(out) == 0 {
-		return nil
+		out = append(out, IAMTag{Key: m["Key"], Value: m["Value"]})
 	}
 	return out
 }

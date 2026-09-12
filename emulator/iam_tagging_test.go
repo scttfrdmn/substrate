@@ -231,6 +231,24 @@ type iamTaggedEntity struct {
 	seed func(t *testing.T, srv *emulator.Server, extra map[string]string) map[string]string
 	tag  string
 	list string
+
+	// The remaining fields let a case drive the type's create and untag paths directly rather
+	// than only through seed, which requires a 200 — a create that must be *refused* cannot use
+	// it, and neither can an untag whose keys are the thing under test (#806).
+	untag string
+	// create and createParams are the operation and the minimum parameters that create the
+	// entity, without any tags.
+	create       string
+	createParams map[string]string
+	// identify names the entity for its tagging operations and for get, and is what seed
+	// returns. It is spelled out here so a case that never seeds still has it.
+	identify map[string]string
+	// get is the single-entity read, for asserting an entity was not created.
+	get string
+	// keysAreCaseSensitive is AWS's split, from *Tagging IAM resources*: "Tag key values for IAM
+	// users and roles are not case sensitive, but case is preserved. […] For other IAM resource
+	// types, tag key values are case sensitive."
+	keysAreCaseSensitive bool
 }
 
 // iamTaggedEntities covers all four taggable types, so the shared listing helper is asserted
@@ -238,7 +256,10 @@ type iamTaggedEntity struct {
 var iamTaggedEntities = []iamTaggedEntity{
 	{
 		name: "a user",
-		tag:  "TagUser", list: "ListUserTags",
+		tag:  "TagUser", list: "ListUserTags", untag: "UntagUser", get: "GetUser",
+		create:       "CreateUser",
+		createParams: map[string]string{"UserName": "jill"},
+		identify:     map[string]string{"UserName": "jill"},
 		seed: func(t *testing.T, srv *emulator.Server, extra map[string]string) map[string]string {
 			t.Helper()
 			id := map[string]string{"UserName": "jill"}
@@ -248,7 +269,13 @@ var iamTaggedEntities = []iamTaggedEntity{
 	},
 	{
 		name: "a role",
-		tag:  "TagRole", list: "ListRoleTags",
+		tag:  "TagRole", list: "ListRoleTags", untag: "UntagRole", get: "GetRole",
+		create: "CreateRole",
+		createParams: map[string]string{
+			"RoleName":                 "worker",
+			"AssumeRolePolicyDocument": `{"Version":"2012-10-17","Statement":[]}`,
+		},
+		identify: map[string]string{"RoleName": "worker"},
 		seed: func(t *testing.T, srv *emulator.Server, extra map[string]string) map[string]string {
 			t.Helper()
 			id := map[string]string{"RoleName": "worker"}
@@ -261,7 +288,14 @@ var iamTaggedEntities = []iamTaggedEntity{
 	},
 	{
 		name: "a customer-managed policy",
-		tag:  "TagPolicy", list: "ListPolicyTags",
+		tag:  "TagPolicy", list: "ListPolicyTags", untag: "UntagPolicy", get: "GetPolicy",
+		create: "CreatePolicy",
+		createParams: map[string]string{
+			"PolicyName":     "reader",
+			"PolicyDocument": `{"Version":"2012-10-17","Statement":[]}`,
+		},
+		identify:             map[string]string{"PolicyArn": "arn:aws:iam::123456789012:policy/reader"},
+		keysAreCaseSensitive: true,
 		seed: func(t *testing.T, srv *emulator.Server, extra map[string]string) map[string]string {
 			t.Helper()
 			iamFormOK(t, srv, "CreatePolicy", iamMergeParams(map[string]string{
@@ -274,6 +308,11 @@ var iamTaggedEntities = []iamTaggedEntity{
 	{
 		name: "an instance profile",
 		tag:  "TagInstanceProfile", list: "ListInstanceProfileTags",
+		untag: "UntagInstanceProfile", get: "GetInstanceProfile",
+		create:               "CreateInstanceProfile",
+		createParams:         map[string]string{"InstanceProfileName": "web"},
+		identify:             map[string]string{"InstanceProfileName": "web"},
+		keysAreCaseSensitive: true,
 		seed: func(t *testing.T, srv *emulator.Server, extra map[string]string) map[string]string {
 			t.Helper()
 			id := map[string]string{"InstanceProfileName": "web"}

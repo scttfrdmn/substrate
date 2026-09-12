@@ -28,6 +28,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run, which is exactly what AWS reports for a user who never signed in with a password. It is
   rendered from the record so a consumer seeding one directly observes it.
 
+- **IAM tag validation, on all twelve paths that accept a tag** (#806). The four `Tag*`, the four
+  `Untag*` and the four `Create*` operations accepted anything at all: fifty-one tags, an empty
+  key, a key or value beginning with the reserved `aws:` prefix, a character outside the set AWS
+  publishes. A consumer testing the error branch its tagging code has for each of those got a
+  200 and a stored tag, so the branch was never reached — and a run that would fail on AWS
+  passed here.
+
+  Every rule is quoted rather than inferred. The lengths and the character sets are the `Tag`
+  data type's own constraints, and the two patterns are AWS's regexes **compiled verbatim**:
+  `[\p{L}\p{Z}\p{N}_.:/=+\-@]+` for a key, the `*` form for a value. That is not a tidiness
+  point — the classes are Unicode, so `Abteilung=Zürich` and `部門=エンジニアリング` are accepted,
+  where the ASCII whitelist the User Guide's prose rendering suggests would refuse them. Lengths
+  are counted in characters rather than bytes for the same reason. The 50-item cap is the
+  `Tags.member.N` / `TagKeys.member.N` array constraint, and the reserved prefix comes from
+  *Tagging IAM resources*, which states it for the **value** as well as the key — where EC2's
+  equivalent restriction names keys only.
+
+  **Which code answers which rule is substrate's mapping**, because AWS publishes no per-rule
+  code. A constraint stated on the shape answers `ValidationError`/400 — the code the IAM plugin
+  already returns for every other shape violation, and the only 400 the four `Untag*` operations
+  declare at all. The reserved prefix, stated only in prose and inexpressible in the shape,
+  answers `InvalidInput`/400. The over-limit total answers `LimitExceeded`/409. So no operation
+  emits a code its own Errors list does not carry. The messages are substrate's wording; no page
+  publishes message text, and an SDK dispatches on the code.
+
+  The cap is counted over the **post-merge** set, as EC2's is: rewriting a key's value on an
+  entity already holding fifty tags succeeds, adding a fifty-first is refused. Reserved keys are
+  not exempt from the count — EC2's restrictions list states that exemption and no IAM page
+  does, and a caller cannot create such a key here anyway. `aws:` is matched case-sensitively,
+  so `AWS:billing` stays an ordinary caller tag.
+
+  A bad tag on a `Create*` leaves **no entity behind**, per `CreateUser`'s *"If any one of the
+  tags is invalid or if you exceed the allowed maximum number of tags, then the entire request
+  fails and the resource is not created"* — so validation runs before the write. Authorization is
+  still decided first: a caller without the permission is told `AccessDenied` whether its
+  payload is legal or not, rather than learning which of its tags was malformed on a resource it
+  cannot touch.
+
+  Two rules are deliberately not enforced, and `docs/services.md` says so: `Tag.Value` is
+  `Required: Yes`, but an omitted value arrives on the query wire as the empty string,
+  indistinguishable from an explicitly empty one — and an empty value is documented as legal. An
+  empty *key* is refused. `ConcurrentModification`/409 and `ServiceFailure`/500 are declared on
+  all twelve operations and remain **unreachable by construction**: a tagging handler's
+  read-modify-write is synchronous against a state manager that serializes its own access, and a
+  state failure is returned as a Go error rather than as an IAM-shaped body.
+
 ### Changed
 - **`ListUsers` and `ListRoles` no longer report `PermissionsBoundary`** (#807). AWS's note on
   both operations excludes the member by name, in the same sentence that excludes `Tags`:
@@ -53,6 +99,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write an IAM record — substrate's first write on a path whose purpose is not to mutate — or a
   projection over recorded `AssumeRole` events, plus a nested response type and the request's
   region rather than the emulator's (#816).
+- **IAM tag keys are compared case-sensitively for some entity types and not others** (#806),
+  which is AWS's split rather than substrate's: *"Tag key values for IAM users and roles are not
+  case sensitive, but case is preserved. […] For other IAM resource types, tag key values are
+  case sensitive."* Every key was compared case-sensitively before this. So `Department` and
+  `department` are now **one tag on a user or a role** and stay two on a customer managed policy
+  or an instance profile, and an untag of `DEPARTMENT` removes the former's `Department` while
+  removing nothing from the latter's.
+
+  Case being *preserved* is the load-bearing half: the surviving key keeps the spelling already
+  stored and takes the new value, because adopting the incoming spelling would silently rename a
+  key an `aws:ResourceTag` condition may be matching on. The rule reaches the removal for a
+  reason beyond symmetry — if the two spellings cannot both exist on a user, then an untag that
+  missed on case would leave a caller holding a tag no spelling it can send would delete. A
+  `Create*` applies the same rule, so an entity cannot be born holding two keys no later `Tag*`
+  could produce.
+
+  A consumer on the permissive path sees requests start failing: more than 50 tags, an `aws:`
+  prefix on a key or a value, an empty key, a character outside AWS's set, and a second
+  differently-cased key on a user or role now collapsing into the first.
+
 - **`TestServer.ResetState` takes `testing.TB`** (#605). It was the last harness entry point still
   requiring `*testing.T`, so a benchmark could start a server (`StartTestServer` widened in
   #798) but not reset it between iterations. `testing.TB` has an unexported method, so no cast
