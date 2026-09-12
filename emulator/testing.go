@@ -140,44 +140,41 @@ const testServerProbeTimeout = 250 * time.Millisecond
 // testServerProbeDeadline bounds the whole startup wait.
 const testServerProbeDeadline = 5 * time.Second
 
-// awaitTestServer blocks until the server behind baseURL answers /health, and fails
-// the test if it never does.
+// awaitTestServer blocks until the server behind baseURL answers /health, and reports
+// why it gave up if it never does.
 //
-// Reporting the failure is the point. The loop this replaces discarded its probe's
-// result: it broke out on success and simply fell out of the deadline otherwise,
-// returning a *TestServer either way — so a server that never came up produced no
-// message, and the first API call reported a confusing transport error from
-// somewhere else entirely (#798).
+// Reporting the failure at all is the point. The loop this replaces discarded its
+// probe's result: it broke out on success and simply fell out of the deadline
+// otherwise, returning a *TestServer either way — so a server that never came up
+// produced no message, and the first API call reported a confusing transport error from
+// somewhere else entirely (#798). Returning the error rather than failing the test here
+// keeps testing.TB out of the probe, which is what lets the give-up path be tested.
 //
 // The client is dedicated and pools nothing. On http.DefaultClient the probe left a
 // keep-alive connection in a pool shared by 149 call sites across 54 test files,
 // keyed by host and port — and ports are recycled within one `go test` process while
 // every test server is shut down at the end of its test.
-func awaitTestServer(t testing.TB, baseURL string) {
-	t.Helper()
-
+//
+// deadline bounds the whole wait; [testServerProbeDeadline] is what a test server uses.
+func awaitTestServer(baseURL string, deadline time.Duration) error {
 	client := &http.Client{
 		Timeout:   testServerProbeTimeout,
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 	defer client.CloseIdleConnections()
 
-	deadline := time.Now().Add(testServerProbeDeadline)
+	giveUpAt := time.Now().Add(deadline)
 	var lastErr error
-	for time.Now().Before(deadline) {
+	for time.Now().Before(giveUpAt) {
 		resp, pingErr := client.Get(baseURL + "/health") //nolint:noctx
 		if pingErr == nil {
 			_ = resp.Body.Close()
-			return
+			return nil
 		}
 		lastErr = pingErr
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Defensive: the server is in-process and bound before this runs, so reaching
-	// here means it never began serving. Fail here rather than hand back a
-	// *TestServer whose every call will fail for a reason that names the transport.
-	t.Fatalf("StartTestServer: %s did not answer /health within %s: %v",
-		baseURL, testServerProbeDeadline, lastErr)
+	return fmt.Errorf("%s did not answer /health within %s: %w", baseURL, deadline, lastErr)
 }
 
 // startTestServer is the shared body of [StartTestServer] and
@@ -262,7 +259,12 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	}()
 
 	baseURL := fmt.Sprintf("http://%s:%d", testServerHost, port)
-	awaitTestServer(t, baseURL)
+	if err := awaitTestServer(baseURL, testServerProbeDeadline); err != nil {
+		// Defensive: the server is in-process and its listener is already bound, so
+		// reaching here means it never began serving. Fail now rather than hand back a
+		// *TestServer whose every call fails for a reason that names the transport.
+		t.Fatalf("StartTestServer: %v", err)
+	}
 
 	t.Cleanup(func() {
 		cancel()

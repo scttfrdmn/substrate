@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,6 +104,33 @@ func TestStartTestServer_AnswersHealthBeforeItReturns(t *testing.T) {
 	require.NoError(t, err, "the first call after StartTestServer must not race the server")
 	require.NoError(t, resp.Body.Close())
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestAwaitTestServer_ReportsWhyItGaveUp(t *testing.T) {
+	// The defect itself, at the level it lives: the probe's answer must be an answer. The
+	// loop this replaces broke out on success and fell out of its deadline on failure with
+	// nothing to show for it, so a server that never came up was indistinguishable from one
+	// that did until some later call failed naming the transport.
+	//
+	// StartTestServer cannot reach this — its server is in-process and its listener is
+	// already bound — so the probe is called directly, against a port nothing is listening
+	// on. The deadline is a parameter so this costs milliseconds rather than the 5s a test
+	// server waits: a refused connection on loopback fails immediately, so the loop spins
+	// and gives up at the deadline whatever the machine's speed.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closedURL := "http://" + ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	err = emulator.AwaitTestServerForTest(closedURL, 30*time.Millisecond)
+	require.Error(t, err, "a server that never answers must be reported, not shrugged off")
+	assert.Contains(t, err.Error(), closedURL, "the message names which server")
+	assert.Contains(t, err.Error(), "30ms", "and how long it waited")
+	assert.Contains(t, err.Error(), "/health", "and what it asked for")
+
+	// The negative control, so the case above is not passing for want of a working probe.
+	ts := emulator.StartTestServer(t)
+	assert.NoError(t, emulator.AwaitTestServerForTest(ts.URL, 5*time.Second))
 }
 
 func TestStartTestServer_ManyServersInOneProcessDoNotInterfere(t *testing.T) {

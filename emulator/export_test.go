@@ -14,6 +14,16 @@ import (
 // This file exports internal symbols for use in external test packages.
 // It is compiled only when running tests.
 
+// AwaitTestServerForTest wraps awaitTestServer, the health probe [StartTestServer] waits on.
+//
+// Exported so the give-up path can be tested at all: it is unreachable through
+// StartTestServer, whose server is in-process and bound before the probe runs, and the
+// point of #798 is that this probe reports why it gave up rather than discarding the
+// answer.
+func AwaitTestServerForTest(baseURL string, deadline time.Duration) error {
+	return awaitTestServer(baseURL, deadline)
+}
+
 // GenerateIAMIDForTest wraps generateIAMID for external tests.
 func GenerateIAMIDForTest(prefix string) string { return generateIAMID(prefix) }
 
