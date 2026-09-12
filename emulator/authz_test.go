@@ -399,8 +399,15 @@ func TestABAC_RequestTag_Deny(t *testing.T) {
 }
 
 func TestABAC_IAMRole_ResourceTag(t *testing.T) {
-	// Policy: allow iam:PassRole only when aws:ResourceTag/Team == "infra".
-	policyDoc := newABACPolicy("Allow", "iam:PassRole", "*", "aws:ResourceTag/Team", "infra")
+	// Policy: allow iam:GetRole only when aws:ResourceTag/Team == "infra".
+	//
+	// The action is one that names a role, and the caller is a *different*, untagged entity,
+	// so an allow here can only have come from the tags on the role the request names. Until
+	// #804 this test asked iam:PassRole — an operation whose resource substrate resolves to
+	// the account wildcard — with the tagged role as the caller, and passed because
+	// resourceTagsFor published the caller's own tags as the resource's. That is the false
+	// allow #804 reports, so the fixture that depended on it is the fixture that had to move.
+	policyDoc := newABACPolicy("Allow", "iam:GetRole", "*", "aws:ResourceTag/Team", "infra")
 	policyARN := "arn:aws:iam::123456789012:policy/InfraTeam"
 
 	state := emulator.NewMemoryStateManager()
@@ -443,23 +450,31 @@ func TestABAC_IAMRole_ResourceTag(t *testing.T) {
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)
 
-	// The principal is a user whose principal ARN maps to a user entity.
-	// For the resource-tag lookup the auth controller uses the principal's entity.
-	// We test that the role's tags flow into condCtx; to exercise addResourceTags
-	// for IAM roles we need the principal to be a role.
-	reqCtx := &emulator.RequestContext{
-		RequestID: "req-role",
-		AccountID: "123456789012",
-		Region:    "us-east-1",
-		Principal: &emulator.Principal{ARN: "arn:aws:iam::123456789012:role/my-role", Type: "IAMRole"},
-		Metadata:  make(map[string]interface{}),
-	}
-	// Attach the policy list to the role too.
-	require.NoError(t, state.Put(ctx, "iam", emulator.IAMAttachedPoliciesKeyForTest(authzTestAccount, "role", "my-role"), arnsRaw))
+	// The caller is frank, who carries no tags of his own, and the policy is attached to him.
+	reqCtx := newAuthTestReqCtx("arn:aws:iam::123456789012:user/frank")
 
-	req := &emulator.AWSRequest{Service: "iam", Operation: "PassRole", Path: "/"}
-	err := auth.CheckAccess(reqCtx, req)
-	assert.NoError(t, err)
+	req := &emulator.AWSRequest{
+		Service:   "iam",
+		Operation: "GetRole",
+		Path:      "/",
+		Params:    map[string]string{"RoleName": "my-role"},
+	}
+	assert.NoError(t, auth.CheckAccess(reqCtx, req))
+
+	// And the same policy grants nothing on a role that is not tagged Team=infra: the tags
+	// are the named role's, not something the request carries with it.
+	other := emulator.IAMRole{
+		RoleName: "other-role",
+		RoleID:   "AROAOTHER",
+		ARN:      "arn:aws:iam::123456789012:role/other-role",
+		Path:     "/",
+	}
+	otherRaw, marshalErr := json.Marshal(other)
+	require.NoError(t, marshalErr)
+	require.NoError(t, state.Put(ctx, "iam", emulator.IAMRoleKeyForTest(authzTestAccount, "other-role"), otherRaw))
+
+	req.Params = map[string]string{"RoleName": "other-role"}
+	assert.Error(t, auth.CheckAccess(reqCtx, req))
 }
 
 func TestABAC_EC2_ResourceTag(t *testing.T) {
