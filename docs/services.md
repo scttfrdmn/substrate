@@ -1124,12 +1124,55 @@ Two tags naming the same key collapse, last one winning. AWS publishes no error 
 duplicate key, and the tag set is a mapping from key to value, so there is nothing a second
 entry could mean other than an overwrite.
 
-What a stack tag does **not** yet do is reach the resources the stack creates, which is the
-other half of [#764](https://github.com/scttfrdmn/substrate/issues/764) — AWS propagates them
-("CloudFormation also propagates these tags to the resources created in the stack"), and until
-that ships only the three `aws:cloudformation:*` keys land on a created resource. An
-in-process `Client` deploy is held to the same limits as an HTTP request, because both funnel
+An in-process `Client` deploy is held to the same limits as an HTTP request, because both funnel
 through the deployer's options, where the validation lives.
+
+#### A stack tag reaches the resources the stack creates
+
+AWS says so on the `Tags` member itself — "CloudFormation also propagates these tags to the
+resources created in the stack" — and it is the half a policy or a cost report reads: a stack tag
+only `DescribeStacks` reports cannot be the subject of an `aws:ResourceTag` condition on anything
+the stack built. A stack tag therefore lands on the same resources the three
+`aws:cloudformation:*` keys do, through the same per-service tag stores, and is readable through
+each service's own tag call — see [what the stamp
+reaches](#cloudformation-stamps-its-own-tags-on-the-resources-it-creates) for the table of
+services and the named list of what is skipped. A resource whose service models no tags is
+skipped silently here too, with no log line.
+
+**Whose tag a key is** is the question propagation actually has to answer, because two of AWS's
+rules pull against each other: a tag the caller set directly on a resource must survive
+propagation, and a stack tag whose value the caller *changes on the stack* must reach the
+resource. Neither is decidable from the new tag set alone. What decides it is the stack's
+**previous** tag set, which substrate already stores:
+
+| The resource's stored value for the key | What propagation does |
+|---|---|
+| the key is absent | write it |
+| equal to what the stack carried before | overwrite it — the stack's own copy |
+| anything else | leave it alone — the caller's |
+| the key left the stack, value still matches | remove it |
+| the key left the stack, value differs | leave it alone |
+
+That needs no per-resource bookkeeping and can never delete a key the stack did not propagate.
+The one case it cannot distinguish is a caller who sets a resource tag to the **same value** the
+stack propagates: removing the stack tag then removes theirs too. Substrate records that rather
+than papering over it — the alternative is tracking, per resource, which keys the deployer wrote,
+which is real state in the event stream for an ambiguity AWS does not resolve either, since a
+propagated tag on a real resource carries no provenance a caller can read.
+
+Three further consequences worth knowing before writing an assertion:
+
+- **Propagation runs after the whole stack is deployed**, not per resource like the
+  `aws:cloudformation:*` stamp. It has to: an update re-creates every resource in the template,
+  and a resource that already exists is refused and *then* recognised as an unchanged redeploy —
+  so at stamp time it still looks failed. A tag added to an existing stack must reach exactly
+  those resources.
+- **A resource whose redeploy was refused may report no physical ID**, and the previous stack
+  record supplies it. That is sound only where it is used: the refusal was dismissed because the
+  record shows this stack deployed that logical ID from an identical declaration.
+- **An update re-creates an unnamed resource rather than retagging it.** A VPC the template does
+  not name is minted afresh on every update and carries the new tags; the old one keeps the old
+  ones until it is swept. That is the deployer's redeploy model rather than anything about tags.
 
 ### Change sets describe, they do not stage
 
@@ -5399,10 +5442,12 @@ otherwise assume more:
 
 - **A resource that failed to deploy is not stamped**, and neither is one with no physical ID.
   Tagging it would put a stack's bookkeeping on something the stack does not own.
-- **Caller-supplied stack tags do not reach the resources.** `CreateStack`'s `Tags.member.N` is
-  recorded on the stack and reported by `DescribeStacks` (see [A stack's own
-  tags](#a-stacks-own-tags)), but nothing propagates a stack tag to a created resource. That is
-  the other half of the mechanism and is [#764](https://github.com/scttfrdmn/substrate/issues/764).
+- **Caller-supplied stack tags reach the same resources, by a different rule.** `CreateStack`'s
+  `Tags.member.N` is propagated as well ([#764](https://github.com/scttfrdmn/substrate/issues/764)),
+  to exactly the services in the table above — but the three keys here are substrate's own and are
+  upserted unconditionally, where a stack tag yields to a value the caller set directly. See [A
+  stack tag reaches the resources the stack
+  creates](#a-stack-tag-reaches-the-resources-the-stack-creates).
 - **A physical ID that merely looks like an EC2 ID is stamped as one.** EC2's resolver is tried
   first and keys on the prefix alone, so an S3 bucket a template names `i-something` resolves as
   an instance. No AWS naming rule prevents it and substrate does not check for it.
@@ -7177,9 +7222,11 @@ Nothing mints that shape any more.
 | AWS::ElasticLoadBalancingV2::Listener | ListenerArn | |
 | AWS::ElasticLoadBalancingV2::ListenerRule | RuleArn | |
 
-The deployer does not send `Tags` for any of the four, so a template's resource tags are
-still dropped — as is the `aws:cloudformation:*` stamp, whose first cut covers EC2 only, and
-any stack-level tag, which is recorded on the stack without reaching its resources.
+The deployer does not send `Tags` for any of the four, so a **template's** resource-level tags are
+still dropped. The stack-level tags do arrive: all four carry the three `aws:cloudformation:*`
+keys ([#765](https://github.com/scttfrdmn/substrate/issues/765)) and any tag on the stack itself
+([#764](https://github.com/scttfrdmn/substrate/issues/764)), written straight to the ELB record
+and readable through `DescribeTags`.
 
 ### Cost
 

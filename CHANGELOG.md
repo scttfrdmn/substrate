@@ -118,8 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validation lives on the deployer's options rather than at the wire layer, so an in-process
   `Client` deploy is held to the same limits as an HTTP request.
 
-  What a stack tag does **not** yet do is reach the resources the stack creates, which is the
-  other half of #764; until then only the three `aws:cloudformation:*` keys land on one.
+  What a stack tag does next is reach the resources the stack creates, below.
   `CreateChangeSet` still drops `Tags.member.N`, tracked as #824.
 
 - **The `aws:cloudformation:*` stamp reaches beyond EC2** (#765). #746 gave the deployer a stamp
@@ -170,6 +169,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Found in passing and filed rather than folded in: `Ref` on an `AWS::ElasticLoadBalancingV2::`
   `LoadBalancer` or `TargetGroup` answers with the resource's *name* where AWS answers with its
   ARN, so AWS's own listener template does not deploy here (#827).
+
+- **A stack's own tags reach the resources it creates, and leaving the stack removes them**
+  (#764). Recording a stack's tags is half of what AWS says they do; the other half is on
+  `CreateStack`'s own `Tags` member — *"CloudFormation also propagates these tags to the resources
+  created in the stack"* — and until now none of them did. A caller who tagged a stack
+  `team=platform` for a cost report, or wrote a policy conditioned on
+  `aws:ResourceTag/team`, saw the tag on `DescribeStacks` and on nothing the stack built. Every
+  resource the `aws:cloudformation:*` stamp reaches now carries the stack's tags too, readable
+  through the owning service's own tag call — `GetBucketTagging`, `ListTags`, `ListQueueTags`,
+  `ListTagsOfResource`, `DescribeTags` for EC2 and for ELBv2 — and a resource whose service models
+  no tags is skipped in the same silence, for the same reason: *"The propagation of stack-level
+  tags to resources, including tags with the `aws:` prefix, varies by resource type."*
+
+  **The hard part was not the write, it was deciding whose tag a key is.** A propagated tag must
+  not clobber one the caller set directly on the resource, and a stack tag whose value the caller
+  *changes* must still reach the resource — two requirements pulling opposite ways, and neither
+  decidable from the new tag set alone. What decides it is the stack's **previous** tag set, which
+  the first half of #764 already stores: a resource holding, for some key, exactly the value the
+  stack previously carried is holding the stack's own propagated copy, so the stack may overwrite
+  or remove it; a resource holding anything else is holding the caller's, and it is left alone.
+  That needed no new bookkeeping and can never delete a key the stack never propagated. The one
+  case it cannot tell apart — a caller who set a resource tag to the *same* value the stack
+  propagates loses it when the stack tag goes away — is recorded in `docs/services.md` rather than
+  papered over, because the alternative is per-resource tag provenance in the event stream for an
+  ambiguity AWS does not resolve either: it publishes no provenance for a propagated tag.
+
+  Propagation runs **once over the finished deployment** rather than per resource beside the stamp,
+  and the reason is a redeploy. A resource whose declaration did not change is refused with an
+  already-exists error that is only cleared after every resource has dispatched, so at stamp time
+  an unchanged resource still looks failed — and it is exactly the resources an update does not
+  touch that a newly added stack tag has to reach. A refused create also returns no physical ID at
+  all, so the identifier comes from the previous stack record, which is sound precisely because
+  the refusal was cleared only for a declaration that was identical. One consequence is worth
+  knowing: an update *re-creates* a resource the template does not name, so an unnamed VPC gets
+  fresh tags rather than retagged ones, while a named bucket or queue is retagged in place.
 
 ### Changed
 - **`ListUsers` and `ListRoles` no longer report `PermissionsBoundary`** (#807). AWS's note on

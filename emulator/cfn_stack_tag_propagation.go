@@ -1,0 +1,260 @@
+package emulator
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
+// Propagating a stack's own tags to the resources it creates (#764).
+//
+// `CreateStack`'s `Tags.member.N` is recorded on the stack and reported by `DescribeStacks`,
+// and AWS says what else it does: "CloudFormation also propagates these tags to the resources
+// created in the stack." So the tags reach the same resources the three `aws:cloudformation:*`
+// keys do, through the same per-service tag stores [cfnStampResourceTags] writes to.
+//
+// **The hard part is not the write, it is deciding whose tag a key is.** A propagated tag must
+// not clobber one the caller set directly on the resource, and a stack tag whose value the
+// caller *changes* on the stack must still reach the resource — those two pull in opposite
+// directions, and neither is decidable from the new tag set alone. What decides it is the
+// stack's *previous* tag set, which substrate already stores on [CFNStackState]: a resource
+// whose value for a key equals the value the stack previously carried for that key is holding
+// the stack's own propagated tag, and one holding anything else is holding the caller's. That
+// needs no new bookkeeping and cannot delete a key the stack never propagated.
+//
+// The one case it cannot distinguish is a caller who set a resource tag to the *same* value the
+// stack propagates: removing the stack tag then removes theirs too. `docs/services.md` records
+// that rather than papering over it, because the alternative — recording which keys the stamp
+// wrote, per resource — is real bookkeeping in the event stream for an ambiguity AWS itself
+// does not resolve (it publishes no per-resource provenance for a propagated tag either).
+
+// cfnStackTagChanges decides what a stack's tags mean for one resource, given the tags the
+// resource already carries and the stack's previous and next tag sets.
+//
+// Returns the keys to write and the keys to remove; the removals are sorted so a write is the
+// same on every run. Both are empty for the common case of an unchanged tag set, which is what
+// makes a redeploy of an untouched stack write nothing at all.
+//
+// The rules, in the order they are decided:
+//
+//   - A key the resource does not carry is written. Nothing can be clobbered.
+//   - A key whose stored value equals the value the stack carried *before* this operation is
+//     the stack's own, and is overwritten with the new value.
+//   - Any other stored value is the caller's, and is left alone — including a value equal to
+//     the one being propagated, where writing would be a no-op anyway.
+//   - A key the stack carried before and does not carry now is removed, but only if the stored
+//     value still matches what the stack propagated.
+func cfnStackTagChanges(existing, prev, next map[string]string) (map[string]string, []string) {
+	write := make(map[string]string)
+	for key, value := range next {
+		stored, held := existing[key]
+		if !held {
+			write[key] = value
+			continue
+		}
+		if before, was := prev[key]; was && stored == before {
+			if stored != value {
+				write[key] = value
+			}
+		}
+	}
+
+	var remove []string
+	for key, before := range prev {
+		if _, still := next[key]; still {
+			continue
+		}
+		if stored, held := existing[key]; held && stored == before {
+			remove = append(remove, key)
+		}
+	}
+	sort.Strings(remove)
+
+	return write, remove
+}
+
+// cfnPropagateStackTags reconciles one resource's tags with the stack's, reporting whether the
+// resource's tags could be reached at all.
+//
+// The three families are the three tag stores, exactly as in [cfnStampResourceTags]: ELBv2's
+// ordered `[]ELBTag` found by ARN, the four services keyed by [cfnResolveStampTarget], and
+// EC2's own prefix-keyed resolver for everything else. The CFN resource type decides which,
+// rather than the physical ID: a type the type-keyed resolver claims is never also an EC2 one,
+// and asking the ID first would let a bucket named `i-orders` be reconciled as an instance —
+// which the stamp does do, and which is recorded in `docs/services.md` as a limit rather than
+// reproduced here for symmetry's sake.
+//
+// A resource nothing can reach reports false and is skipped in silence, as the stamp is: the
+// services that model no tags at all are the majority of what a stack creates.
+func cfnPropagateStackTags(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+) (bool, error) {
+	if cfnELBStampableTypes[dr.Type] {
+		return cfnPropagateELBStackTags(state, reqCtx, dr, prev, next)
+	}
+	if target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID); ok {
+		return cfnPropagateRecordStackTags(state, target, dr, prev, next)
+	}
+	return cfnPropagateEC2StackTags(state, reqCtx, dr, prev, next)
+}
+
+// cfnPropagateRecordStackTags reconciles the tags on a record whose tags are a
+// `map[string]string`, which is the shape S3, Lambda, SQS and DynamoDB all keep them in.
+//
+// The existing set is read through [cfnRecordTags] rather than by unmarshaling the concrete
+// type, so this arm needs no per-service case of its own: the merge back is
+// [mergeResourceTags], which already has one for each of the four and is the writer the
+// Resource Groups Tagging API uses, so a propagated tag and a `TagResources` call cannot end up
+// merging differently.
+func cfnPropagateRecordStackTags(
+	state StateManager, target cfnStampTarget, dr DeployedResource, prev, next map[string]string,
+) (bool, error) {
+	existing, found, err := cfnRecordTags(state, target)
+	if err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
+	}
+	if !found {
+		return false, nil
+	}
+
+	write, remove := cfnStackTagChanges(existing, prev, next)
+	if len(write) == 0 && len(remove) == 0 {
+		return true, nil
+	}
+	if err := mergeResourceTags(
+		context.Background(), state, target.namespace, target.stateKey, write, remove,
+	); err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
+	}
+	return true, nil
+}
+
+// cfnRecordTags reads the tags off a stored record, reporting false when no record is there.
+//
+// The two spellings are both real: `S3Bucket` stores its tags as `"tags"` and Lambda's, SQS's
+// and DynamoDB's records as `"Tags"`. Decoding both members rather than switching on the
+// namespace keeps this from acquiring a second copy of [cfnResolveStampTarget]'s type switch,
+// which is the copy that could drift; a record carrying neither reads as untagged, which is
+// what an absent tag set is.
+func cfnRecordTags(state StateManager, target cfnStampTarget) (map[string]string, bool, error) {
+	raw, err := state.Get(context.Background(), target.namespace, target.stateKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("get %s/%s: %w", target.namespace, target.stateKey, err)
+	}
+	if raw == nil {
+		return nil, false, nil
+	}
+
+	var record struct {
+		Lower map[string]string `json:"tags"`
+		Upper map[string]string `json:"Tags"`
+	}
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, false, fmt.Errorf("unmarshal %s/%s: %w", target.namespace, target.stateKey, err)
+	}
+	if record.Lower != nil {
+		return record.Lower, true, nil
+	}
+	return record.Upper, true, nil
+}
+
+// cfnPropagateEC2StackTags reconciles the tags on an EC2 resource.
+//
+// [ec2ResourceTags] and [ec2ApplyTagsToResource] are the same pair the stamp uses, so the
+// prefix switch over EC2's fifteen id shapes lives in one place. Two writes rather than one
+// when a key is both written and removed, because the EC2 writer takes a direction rather than
+// a pair of sets; the alternative is a third mode on a function every `CreateTags` goes
+// through, for a case that only arises when a stack tag is replaced by a differently named one.
+func cfnPropagateEC2StackTags(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+) (bool, error) {
+	current, found, err := ec2ResourceTags(state, reqCtx, dr.PhysicalID)
+	if err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
+	}
+	if !found {
+		return false, nil
+	}
+
+	existing := make(map[string]string, len(current))
+	for _, tag := range current {
+		existing[tag.Key] = tag.Value
+	}
+	write, remove := cfnStackTagChanges(existing, prev, next)
+
+	if len(write) > 0 {
+		if err := ec2ApplyTagsToResource(
+			state, reqCtx, dr.PhysicalID, cfnSortedEC2Tags(write), false,
+		); err != nil {
+			return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
+		}
+	}
+	if len(remove) > 0 {
+		gone := make([]EC2Tag, 0, len(remove))
+		for _, key := range remove {
+			gone = append(gone, EC2Tag{Key: key})
+		}
+		if err := ec2ApplyTagsToResource(state, reqCtx, dr.PhysicalID, gone, true); err != nil {
+			return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
+		}
+	}
+	return true, nil
+}
+
+// cfnPropagateELBStackTags reconciles the tags on one ELBv2 resource, found by its ARN.
+//
+// The ARN for the reason [cfnStampELBResource] gives: it is what ELBv2's resolver takes, and a
+// load balancer's and a target group's physical ID is a name rather than an ARN.
+func cfnPropagateELBStackTags(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+) (bool, error) {
+	if dr.ARN == "" {
+		return false, nil
+	}
+	res, _, err := elbResolveTaggedResource(state, reqCtx.AccountID+"/"+reqCtx.Region, dr.ARN)
+	if err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.ARN, err)
+	}
+	if res == nil {
+		return false, nil
+	}
+
+	existing := make(map[string]string, len(res.tags))
+	for _, tag := range res.tags {
+		existing[tag.Key] = tag.Value
+	}
+	write, remove := cfnStackTagChanges(existing, prev, next)
+	if len(write) == 0 && len(remove) == 0 {
+		return true, nil
+	}
+
+	incoming := make([]ELBTag, 0, len(write))
+	for _, tag := range cfnSortedEC2Tags(write) {
+		incoming = append(incoming, ELBTag(tag))
+	}
+	updated, err := res.withTags(elbRemoveTagKeys(elbMergeTags(res.tags, incoming), remove))
+	if err != nil {
+		return true, fmt.Errorf("stack tags %s %s: marshal: %w", dr.Type, dr.ARN, err)
+	}
+	if err := state.Put(context.Background(), elbNamespace, res.stateKey, updated); err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.ARN, err)
+	}
+	return true, nil
+}
+
+// cfnSortedEC2Tags renders a tag map as the ordered pair list the EC2 and ELBv2 writers take,
+// sorted by key so a resource's stored tag order is the same on every run — the property
+// [cfnStackResourceTags] fixes its own order for.
+func cfnSortedEC2Tags(tags map[string]string) []EC2Tag {
+	keys := make([]string, 0, len(tags))
+	for key := range tags {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]EC2Tag, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, EC2Tag{Key: key, Value: tags[key]})
+	}
+	return out
+}
