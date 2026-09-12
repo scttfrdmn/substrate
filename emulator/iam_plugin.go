@@ -1218,6 +1218,10 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if params.PolicyName == "" {
 		return iamErrorResponse("ValidationError", "PolicyName is required", http.StatusBadRequest), nil
 	}
+	// Tags is a query-protocol list, decoded the same way CreateUser and CreateRole decode
+	// theirs; AWS's CreatePolicy documents `Tags.member.N` and a policy created with tags
+	// kept none of them (#796).
+	tags := iamMemberTags(req.Params)
 
 	goCtx := context.Background()
 
@@ -1263,6 +1267,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		CreateDate:       now,
 		UpdateDate:       now,
 		Document:         doc,
+		Tags:             tags,
 	}
 
 	raw, err := json.Marshal(policy)
@@ -2817,6 +2822,9 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 	if params.Path == "" {
 		params.Path = "/"
 	}
+	// AWS's CreateInstanceProfile documents `Tags.member.N`, and a profile created with tags
+	// kept none of them (#796).
+	tags := iamMemberTags(req.Params)
 
 	goCtx := context.Background()
 
@@ -2847,6 +2855,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 		Path:                params.Path,
 		Roles:               []IAMRole{},
 		CreateDate:          p.now().UTC(),
+		Tags:                tags,
 	}
 
 	raw, err := json.Marshal(profile)

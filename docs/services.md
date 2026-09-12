@@ -1539,6 +1539,49 @@ further work, since substitution reads any single-valued key from the same conte
 Upgrading inverts one thing, and it inverts the same way on AWS: a policy asserting the
 *absence* of either key with `Null` stops matching for a caller that now has one.
 
+### What an entity read reports about its tags
+
+An entity's tags were stored and never reported
+([#796](https://github.com/scttfrdmn/substrate/issues/796)): `TagRole` wrote them, `ListRoleTags`
+read them back, and `GetRole` reported none — so a consumer comparing desired state against the
+entity read saw the same tag change on every plan, for ever.
+
+AWS draws the line by **shape**, not by entity, and substrate now draws it the same way. Nine
+responses carry a `Tags` member when the entity has tags:
+
+| Shape | Operations |
+|---|---|
+| `User` | `CreateUser`, `GetUser` |
+| `Role` | `CreateRole`, `GetRole`, `CreateServiceLinkedRole` |
+| `Policy` | `CreatePolicy`, `GetPolicy` |
+| `InstanceProfile` | `CreateInstanceProfile`, `GetInstanceProfile` |
+
+**The list shapes deliberately report no tags.** `ListUsers`, `ListRoles`, `ListPolicies` and
+`ListInstanceProfiles` each carry the same note in the API reference, verbatim: *"IAM
+resource-listing operations return a subset of the available attributes for the resource. This
+operation does not return the following attributes, even though they are an attribute of the
+returned object: PermissionsBoundary, RoleLastUsed, Tags. To view all of the information for a
+role, see GetRole."* The roles nested inside an instance-profile shape are a list too, and carry
+none for the same reason — a tagged role reports its tags through `GetRole` and not through the
+profile that holds it.
+
+**An untagged entity omits the member rather than reporting an empty list.** `Tags` is
+`Required: No` on all four data types, and every untagged sample response leaves the element
+out; `CreateInstanceProfile`'s sample settles the contrast by rendering its *required* empty
+list as `<Roles/>` while carrying no `<Tags>` at all. `ListUserTags` and `ListRoleTags` are the
+other case — there `Tags` is required, so it is always rendered, empty or not.
+
+**Groups cannot be tagged.** There is no `Tags` member on the `Group` data type, no
+`TagGroup`/`UntagGroup`/`ListGroupTags` in the Actions index, no `iam:*Group` tagging action in
+the vendored service-authorization snapshot, and the User Guide says it directly: *"You can tag
+most IAM resources, but not groups, assumed roles, access reports, or hardware-based MFA
+devices."* A `Tags.member.N` sent to `CreateGroup` anyway is ignored rather than stored.
+
+`Tags.member.N` at create time is accepted by all four — `CreatePolicy` and
+`CreateInstanceProfile` had nowhere to put one before this release, so a `--tags` on either was
+dropped silently. A record written by an earlier version reads back with no tags, which is the
+same thing an untagged entity is.
+
 ### Service-linked roles and `iam:AWSServiceName`
 
 The three service-linked-role operations exist principally as the producer for

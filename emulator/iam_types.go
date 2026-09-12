@@ -64,6 +64,11 @@ type IAMPolicy struct {
 	CreateDate       time.Time      `json:"CreateDate"`
 	UpdateDate       time.Time      `json:"UpdateDate"`
 	Document         PolicyDocument `json:"Document,omitempty"`
+
+	// Tags are the policy's resource tags, which AWS's `Policy` data type documents as
+	// `Tags.member.N`, max 50, `Required: No`. A record written before #796 has none, which
+	// reads back as an untagged policy — the same thing an untagged policy is.
+	Tags []IAMTag `json:"Tags,omitempty"`
 }
 
 // IAMAccessKey represents an AWS IAM access key credential.
@@ -358,4 +363,9 @@ type IAMInstanceProfile struct {
 
 	// CreateDate is when the instance profile was created.
 	CreateDate time.Time `json:"CreateDate"`
+
+	// Tags are the profile's resource tags, which AWS's `InstanceProfile` data type
+	// documents as `Tags.member.N`, max 50, `Required: No`. A record written before #796 has
+	// none, which reads back as an untagged profile — the same thing an untagged profile is.
+	Tags []IAMTag `json:"Tags,omitempty"`
 }
