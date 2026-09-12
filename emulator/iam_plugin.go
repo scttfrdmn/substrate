@@ -1559,7 +1559,8 @@ const iamAccessDeniedCode = "AccessDenied"
 
 // authorize checks whether the caller (reqCtx.Principal) is allowed to perform
 // action on resource. A nil Principal always passes (bootstrap/test mode).
-func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, action, resource string) error {
+func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext,
+	action string, resource authzResource) error {
 	return p.authorizeWith(goCtx, reqCtx, action, resource, nil)
 }
 
@@ -1576,8 +1577,13 @@ func (p *IAMPlugin) authorize(goCtx context.Context, reqCtx *RequestContext, act
 // name is in hand and the entity's record is not — it is loaded after authorization, if at
 // all — so minting from the local would produce the `/`-path ARN for every entity, and a
 // statement scoped to a real path would match nothing. The resolver reads the path; see
-// [iamAuthzMintResourceARN] for the one extra Get that costs.
-func (p *IAMPlugin) authzResource(reqCtx *RequestContext, req *AWSRequest) string {
+// [iamAuthzMintResource] for the one extra Get that costs.
+//
+// It answers an [authzResource] rather than an ARN so that this door publishes the resource's
+// tags too. Passing the ARN alone would have left `aws:ResourceTag/<key>` out of the context
+// here while [AuthController.CheckAccess] published it, which is the one-request-two-answers
+// failure this helper exists to prevent, arrived at through the condition context (#804).
+func (p *IAMPlugin) authzResource(reqCtx *RequestContext, req *AWSRequest) authzResource {
 	return iamAuthzRequestResource(p.state, reqCtx, req)
 }
 
@@ -1601,9 +1607,10 @@ func (p *IAMPlugin) authzResource(reqCtx *RequestContext, req *AWSRequest) strin
 // used to be a literal `"*"` at 48 of them, so a statement naming a user, a role or a path
 // matched nothing here even when the generic gate's answer would have been the same. Passing
 // the request to one resolver rather than a string per call site is what keeps the two doors
-// from drifting again.
+// from drifting again — and it carries the resource's tags, so the same is true of a
+// condition on `aws:ResourceTag/<key>` (#804).
 func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
-	action, resource string, extra map[string]string) error {
+	action string, resource authzResource, extra map[string]string) error {
 	if reqCtx.Principal == nil {
 		return nil
 	}
@@ -1697,24 +1704,42 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 		}
 	}
 
-	// The context carries the caller and nothing else, and MultiContext is left nil: this
-	// path authorizes an IAM control-plane call, and nothing here reads the request for
-	// tags. A policy conditioned on aws:RequestTag or aws:TagKeys therefore cannot be
-	// satisfied through this door even though [CheckAccess] populates both — which is
-	// worth knowing before writing a condition against an iam: action (#690).
+	// MultiContext is left nil, and nothing here reads the request body for tags: a policy
+	// conditioned on aws:RequestTag or aws:TagKeys cannot be satisfied through this door even
+	// though [CheckAccess] populates both, which is worth knowing before writing a condition
+	// against an iam: action (#690).
 	//
-	// The caller's own keys are the exception, for [authzPrincipalContext]'s reason: they
-	// are not read from the request at all, they name who signed it, and this door knows
-	// that as surely as the other three. Leaving aws:PrincipalArn out let a negated
-	// operator over it hold vacuously here while failing at the main gate (#714), and
-	// leaving aws:username out is what made `${aws:username}` in an iam: statement — the
-	// shape of "let a user manage their own credentials" — match nothing at this door
-	// while resolving at the other (#745).
+	// What the context does carry is the caller and the resource. The caller's own keys are
+	// [authzPrincipalContext]'s: they are not read from the request at all, they name who
+	// signed it, and this door knows that as surely as the other three. Leaving
+	// aws:PrincipalArn out let a negated operator over it hold vacuously here while failing
+	// at the main gate (#714), and leaving aws:username out is what made `${aws:username}` in
+	// an iam: statement — the shape of "let a user manage their own credentials" — match
+	// nothing at this door while resolving at the other (#745).
+	//
+	// The resource's tags are published under every prefix the service reports them under,
+	// exactly as [CheckAccess] does it, because the alternative is the same divergence a
+	// third time: an Allow conditioned on aws:ResourceTag/<key> would be granted at the gate
+	// and refused here, so the caller would see a 403 on a request their policy plainly
+	// allows (#804). The tags travel on the resource rather than beside it, so the values are
+	// the named entity's own and no other's.
 	//
 	// A request-specific key reaches here through extra, which is how the two doors are
 	// kept in step for the keys the gate does publish (#747).
-	condCtx := make(map[string]string, 2+len(extra))
+	// The service is a literal for [iamAccessDeniedCode]'s reason: this plugin's is always
+	// "iam". IAM publishes no service-specific duplicate of aws:ResourceTag/ — the User Guide
+	// names aws:ResourceTag, aws:RequestTag, aws:PrincipalTag and aws:TagKeys and no
+	// iam:-prefixed tag key — so the list is one prefix long today and is read from
+	// [authzResourceTagPrefixes] anyway, so that the two doors cannot come to publish
+	// different prefixes for the same tag.
+	tagPrefixes := authzResourceTagPrefixes("iam")
+	condCtx := make(map[string]string, 2+len(extra)+len(resource.Tags)*len(tagPrefixes))
 	authzPrincipalContext(condCtx, reqCtx.Principal)
+	for k, v := range resource.Tags {
+		for _, prefix := range tagPrefixes {
+			condCtx[prefix+k] = v
+		}
+	}
 	for k, v := range extra {
 		condCtx[k] = v
 	}
@@ -1722,7 +1747,7 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 	result := Evaluate(docs, EvaluationRequest{
 		Principal: reqCtx.Principal.ARN,
 		Action:    action,
-		Resource:  resource,
+		Resource:  resource.ARN,
 		Context:   condCtx,
 	})
 
@@ -1749,7 +1774,7 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 				boundaryResult := Evaluate(boundaryDocs, EvaluationRequest{
 					Principal: reqCtx.Principal.ARN,
 					Action:    action,
-					Resource:  resource,
+					Resource:  resource.ARN,
 					Context:   condCtx,
 				})
 				if boundaryResult.Decision != DecisionAllow {

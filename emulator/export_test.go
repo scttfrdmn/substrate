@@ -90,15 +90,20 @@ func VerifySigV4ForTest(r *http.Request, body []byte, reg *CredentialRegistry) e
 
 // IAMAuthorizeForTest exercises the unexported IAMPlugin.authorize method so
 // coverage tools can reach the inline-policy and boundary loading helpers.
+//
+// It takes the resource as an ARN, which is what a caller wanting to pin one string wants.
+// The door itself takes an authzResource, so that it can publish the resource's tags as
+// aws:ResourceTag/<key> (#804); a test about those drives a real request through the server,
+// where the resolver supplies the tags.
 func IAMAuthorizeForTest(p *IAMPlugin, ctx *RequestContext, action, resource string) error {
-	return p.authorize(context.Background(), ctx, action, resource)
+	return p.authorize(context.Background(), ctx, action, authzResource{ARN: resource})
 }
 
 // IAMAuthorizeWithForTest exercises IAMPlugin.authorizeWith, the door that publishes a
 // request-specific condition key alongside the caller's own (#747).
 func IAMAuthorizeWithForTest(p *IAMPlugin, ctx *RequestContext, action, resource string,
 	extra map[string]string) error {
-	return p.authorizeWith(context.Background(), ctx, action, resource, extra)
+	return p.authorizeWith(context.Background(), ctx, action, authzResource{ARN: resource}, extra)
 }
 
 // IAMSLRRoleNameForTest wraps iamSLRRoleName for external tests.
@@ -1181,9 +1186,31 @@ func AuthzResourceARNsForTest(a *AuthController, reqCtx *RequestContext, req *AW
 }
 
 // IAMAuthzResourceForTest wraps [IAMPlugin.authzResource], the resource every gate inside the
-// IAM plugin passes — the plugin door's half of the same invariant.
+// IAM plugin passes — the plugin door's half of the same invariant. It answers the ARN, which
+// is what that invariant is about; [IAMAuthzResourceTagsForTest] answers the tags beside it.
 func IAMAuthzResourceForTest(p *IAMPlugin, reqCtx *RequestContext, req *AWSRequest) string {
-	return p.authzResource(reqCtx, req)
+	return p.authzResource(reqCtx, req).ARN
+}
+
+// IAMAuthzResourceTagsForTest answers the tags the plugin door publishes for a request, and
+// [AuthzResourceTagsForTest] the ones the generic gate does.
+//
+// They are the same invariant as the ARN, one condition key over: a tag read at one door and
+// not the other means one policy gets two answers depending on which door the caller arrived
+// at, which is what #804 was on the resource side of (#770).
+func IAMAuthzResourceTagsForTest(p *IAMPlugin, reqCtx *RequestContext, req *AWSRequest) map[string]string {
+	return p.authzResource(reqCtx, req).Tags
+}
+
+// AuthzResourceTagsForTest returns the tags the generic gate pairs with each resource a
+// request names, in the same order as [AuthzResourceARNsForTest].
+func AuthzResourceTagsForTest(a *AuthController, reqCtx *RequestContext, req *AWSRequest) []map[string]string {
+	resources := a.buildResourceARNs(reqCtx, req)
+	tags := make([]map[string]string, 0, len(resources))
+	for _, res := range resources {
+		tags = append(tags, res.Tags)
+	}
+	return tags
 }
 
 // IAMAuthzAccountResourceARNForTest wraps iamAuthzAccountResourceARN, the resource an IAM

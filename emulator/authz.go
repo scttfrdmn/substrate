@@ -1239,40 +1239,23 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		}
 		tags = q.Tags
 
-	case "iam":
-		entityType, nameWithPath := parsePrincipalARN(reqCtx.Principal.ARN)
-		// The friendly name, not the name-with-path: the record is keyed by name
-		// whatever path the ARN carries (#801). Reading the caller here at all is a
-		// separate defect, tracked as #804.
-		entityName := iamFriendlyName(nameWithPath)
-		// The entity's own account, which is the one its ARN names rather than the one
-		// the request resolved to — the two agree for every call substrate routes today,
-		// and the ARN is the authority when they do not (#737).
-		entityAccount := arnAccountID(reqCtx.Principal.ARN)
-		switch entityType {
-		case "user":
-			raw, err := a.state.Get(goCtx, iamNamespace, iamUserKey(entityAccount, entityName))
-			if err != nil || raw == nil {
-				return nil
-			}
-			var u IAMUser
-			if err := json.Unmarshal(raw, &u); err != nil {
-				return nil
-			}
-			tags = iamTagsToMap(u.Tags)
-		case "role":
-			raw, err := a.state.Get(goCtx, iamNamespace, iamRoleKey(entityAccount, entityName))
-			if err != nil || raw == nil {
-				return nil
-			}
-			var r IAMRole
-			if err := json.Unmarshal(raw, &r); err != nil {
-				return nil
-			}
-			tags = iamTagsToMap(r.Tags)
-		default:
-			return nil
-		}
+	// IAM has no arm here either, and for the first of EC2's two reasons. Every IAM request
+	// naming a resource substrate can resolve is answered by [iamAuthzResources], which reads
+	// that entity's own tags beside its ARN out of the record it already reads for the path —
+	// so the tags belong to the ARN the decision is made about (#804).
+	//
+	// What is left reaching here is an IAM request that resolves no resource, which
+	// [AuthController.buildResourceARN] answers with [iamAuthzAccountResourceARN]: every IAM
+	// resource in the account, which names no one entity whose tags could describe it. So
+	// those six operations — ListUsers, ListRoles, ListGroups, ListPolicies,
+	// ListInstanceProfiles and SimulateCustomPolicy — publish no aws:ResourceTag/<key> at
+	// all, and a condition on one cannot be satisfied for them.
+	//
+	// The arm that was here read [Principal.ARN] and published the *caller's* tags as the
+	// resource's, so a caller tagged team=platform satisfied a condition written about an
+	// untagged entity — a false allow. It dates from v0.18.0, before either key had a
+	// producer for IAM; the caller's tags are aws:PrincipalTag/<key>, which [iamPrincipalTags]
+	// has published since #771.
 
 	// EC2 has no arm here, and its absence is deliberate rather than a gap. Every EC2
 	// request naming a resource substrate can resolve is answered by one of

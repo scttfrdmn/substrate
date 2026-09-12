@@ -168,7 +168,8 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"SimulatePrincipalPolicy": {NameParams: []string{"PolicySourceArn"}},
 }
 
-// iamAuthzRequestResource returns the resource ARN an IAM request is decided against.
+// iamAuthzRequestResource returns the resource an IAM request is decided against: the ARN,
+// and the tags on the entity that ARN names.
 //
 // Both authorization doors call this, on the same [AWSRequest], which is what makes them
 // agree by construction rather than by two sets of call sites happening to pass the same
@@ -177,14 +178,21 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 // scoped to the account wildcard was therefore honored at one door and not the other even
 // before #770's per-operation resource existed.
 //
+// It answers an [authzResource] rather than a string so that the tags cannot be separated
+// from the ARN they belong to — the invariant that type exists for, and the one #804 is
+// about: a condition on `aws:ResourceTag/<key>` must be answered from the entity the
+// request names and from no other record.
+//
 // The fallback is [iamAuthzAccountResourceARN] rather than a bare `"*"`, because a bare `*`
 // in the *resource* position is what [resourceMatches] treats as matching every statement:
-// harmless for an Allow and wrong for a Deny.
-func iamAuthzRequestResource(state StateManager, reqCtx *RequestContext, req *AWSRequest) string {
+// harmless for an Allow and wrong for a Deny. It carries no tags, and that is the honest
+// answer rather than a gap: the account wildcard names every IAM resource in the account
+// rather than one, so there is no record whose tags could describe it.
+func iamAuthzRequestResource(state StateManager, reqCtx *RequestContext, req *AWSRequest) authzResource {
 	if resources := iamAuthzResources(state, reqCtx, req); len(resources) == 1 {
-		return resources[0].ARN
+		return resources[0]
 	}
-	return iamAuthzAccountResourceARN(reqCtx.AccountID)
+	return authzResource{ARN: iamAuthzAccountResourceARN(reqCtx.AccountID)}
 }
 
 // iamAuthzAccountResourceARN is the resource an IAM request whose own resource substrate
@@ -198,16 +206,16 @@ func iamAuthzAccountResourceARN(accountID string) string {
 	return "arn:aws:iam::" + accountID + ":*"
 }
 
-// iamAuthzOperationResourceARN returns the ARN of the resource [iamAuthzOperationResource]
-// says the operation names, or "" when the table does not cover it or the request does not
-// name enough to resolve one.
+// iamAuthzTableResource returns the resource [iamAuthzOperationResource] says the operation
+// names, or the zero value when the table does not cover it or the request does not name
+// enough to resolve one.
 //
-// Returning "" rather than a guess is [iamAuthzSLRResourceARN]'s rule: leave the request on
-// the general path rather than mint an ARN that only looks specific.
-func iamAuthzOperationResourceARN(state StateManager, reqCtx *RequestContext, req *AWSRequest) string {
+// Answering a zero [authzResource] rather than a guess is [iamAuthzSLRResourceARN]'s rule:
+// leave the request on the general path rather than mint an ARN that only looks specific.
+func iamAuthzTableResource(state StateManager, reqCtx *RequestContext, req *AWSRequest) authzResource {
 	ref, ok := iamAuthzOperationResource[req.Operation]
 	if !ok {
-		return ""
+		return authzResource{}
 	}
 
 	name := ""
@@ -219,28 +227,68 @@ func iamAuthzOperationResourceARN(state StateManager, reqCtx *RequestContext, re
 	}
 	if name == "" {
 		if !ref.CallerIsResource || reqCtx.Principal == nil {
-			return ""
+			return authzResource{}
 		}
 		name = reqCtx.Principal.UserName
 		if name == "" {
-			return ""
+			return authzResource{}
 		}
 	}
 
 	if strings.HasPrefix(name, "arn:") {
-		// PolicyArn and PolicySourceArn arrive finished. Nothing to mint, no record to read
-		// and no path to recover, so these rows cost nothing beyond the map lookup.
-		return name
+		// PolicyArn and PolicySourceArn arrive finished. Nothing to mint and no path to
+		// recover, so these rows cost the map lookup plus the one read the ARN's own tags
+		// need — a policy record is keyed by its ARN, so that read is the only way to reach
+		// the tags of the resource the decision is about (#804).
+		return authzResource{ARN: name, Tags: iamAuthzTagsForARN(state, name)}
 	}
 	if ref.Type == "" {
 		// A row with no Type expects an ARN and got a name. Nothing honest to build.
-		return ""
+		return authzResource{}
 	}
-	return iamAuthzMintResourceARN(state, reqCtx, req, ref.Type, name)
+	return iamAuthzMintResource(state, reqCtx, req, ref.Type, name)
 }
 
-// iamAuthzMintResourceARN builds the ARN for a named IAM entity, supplying the path the ARN
-// needs but the request usually does not carry.
+// iamAuthzTagsForARN returns the tags on the IAM resource arn names, or nil when there is
+// no such record, when the ARN names something substrate does not store, or when the
+// resource type is not one AWS lets a caller tag.
+//
+// It reads by ARN, which is what the two paths with no name in hand need: a policy record
+// is keyed by its ARN rather than by a name, and the service-linked-role arms derive their
+// ARN from a service principal or a deletion-task ID and never hold the role's record. Every
+// other operation's tags come out of the read [iamAuthzMintResource] already performs, so
+// this is not on the common path.
+//
+// A group returns nil, and that is AWS: the `Group` data type documents no `Tags` member and
+// the User Guide says so outright — "You can tag most IAM resources, but not groups, assumed
+// roles, access reports, or hardware-based MFA devices." So a condition on
+// `aws:ResourceTag/<key>` cannot be satisfied for a group operation, here or on AWS.
+//
+// The account comes from the ARN rather than from the request, on [resourceTagsFor]'s
+// reasoning for the same choice: the ARN is the authority on which account its resource
+// belongs to, and the two agree for every call substrate routes today (#737).
+func iamAuthzTagsForARN(state StateManager, arn string) map[string]string {
+	if state == nil {
+		return nil
+	}
+	resourceType, nameWithPath := parsePrincipalARN(arn)
+	var key string
+	switch resourceType {
+	case "policy":
+		key = iamPolicyKey(arn)
+	case "user", "role", "instance-profile":
+		// The friendly name, not the name-with-path: an IAM ARN carries both in one
+		// component and the record is keyed by the name alone (#801).
+		key = iamEntityKey(arnAccountID(arn),
+			iamAuthzResourceStateKind(resourceType), iamFriendlyName(nameWithPath))
+	default:
+		return nil
+	}
+	return iamTagsToMap(iamAuthzReadEntity(state, key).Tags)
+}
+
+// iamAuthzMintResource builds the ARN for a named IAM entity, supplying the path the ARN
+// needs but the request usually does not carry, and pairs it with the entity's own tags.
 //
 // An IAM ARN embeds the entity's path — AWS writes the placeholder as
 // `${UserNameWithPath}` — and only the `Create*` operations put Path on the wire. So the
@@ -249,64 +297,109 @@ func iamAuthzOperationResourceARN(state StateManager, reqCtx *RequestContext, re
 // always done for DeleteServiceLinkedRole, generalized; the alternative is an ARN with a
 // `/` path that silently fails to match any statement written about a real path.
 //
+// The tags come out of that same read rather than a second one, which is the whole cost of
+// #804: the record the path is recovered from is the record whose tags describe the ARN
+// being built, so decoding one more member pays for the `aws:ResourceTag/<key>` context.
+//
 // When there is no record the request's own Path is used, which is right for a `Create*`
 // and harmless otherwise: a name that names nothing has no path to be wrong about, and
 // [normalisePath] turns the empty case into `/`. Falling back to the account wildcard
 // instead would be the permissive direction for a Deny scoped to `user/*`, which is the
-// one direction a privilege boundary must not drift in.
-func iamAuthzMintResourceARN(state StateManager, reqCtx *RequestContext, req *AWSRequest,
-	resourceType, name string) string {
-	path := iamAuthzEntityPath(state, reqCtx.AccountID, resourceType, name)
+// one direction a privilege boundary must not drift in. Such a request carries no tags for
+// the same reason — there is no record to read them from.
+func iamAuthzMintResource(state StateManager, reqCtx *RequestContext, req *AWSRequest,
+	resourceType, name string) authzResource {
+	record := iamAuthzNamedEntity(state, reqCtx.AccountID, resourceType, name)
+	path := record.Path
 	if path == "" {
 		path = iamAuthzParam(req, "Path")
 	}
+	arn := ""
 	switch resourceType {
 	case "user":
-		return iamUserARN(reqCtx.AccountID, path, name)
+		arn = iamUserARN(reqCtx.AccountID, path, name)
 	case "role":
-		return iamRoleARN(reqCtx.AccountID, path, name)
+		arn = iamRoleARN(reqCtx.AccountID, path, name)
 	case "group":
-		return iamGroupARN(reqCtx.AccountID, path, name)
+		arn = iamGroupARN(reqCtx.AccountID, path, name)
 	case "policy":
-		return iamPolicyARN(reqCtx.AccountID, path, name)
+		arn = iamPolicyARN(reqCtx.AccountID, path, name)
 	case "instance-profile":
-		return iamInstanceProfileARN(reqCtx.AccountID, path, name)
+		arn = iamInstanceProfileARN(reqCtx.AccountID, path, name)
 	default:
-		return ""
+		return authzResource{}
 	}
+	return authzResource{ARN: arn, Tags: iamTagsToMap(record.Tags)}
+}
+
+// iamAuthzEntityRecord is what an authorization decision reads out of a stored IAM record:
+// the path its ARN embeds, and the tags a condition on `aws:ResourceTag/<key>` is answered
+// from.
+//
+// The two travel together because they come out of one [StateManager.Get] — see
+// [iamAuthzMintResource], which needs both for the same resource and would otherwise read
+// the same record twice.
+type iamAuthzEntityRecord struct {
+	// Path is the entity's stored path, or "" when there is no record to read one from.
+	Path string `json:"Path"`
+
+	// Tags are the entity's stored tags, or nil when it has none. [IAMUser], [IAMRole],
+	// [IAMPolicy] and [IAMInstanceProfile] all store them under this member, so one shape
+	// decodes any of them; [IAMGroup] has no such member, because a group is not a taggable
+	// IAM resource, and decodes to none.
+	Tags []IAMTag `json:"Tags"`
 }
 
 // iamAuthzEntityPath returns the stored path of a named IAM entity, or "" when there is no
 // such record and for a resource type whose records carry no path to read.
 //
+// It is the path-only view of [iamAuthzNamedEntity], kept for [iamAuthzRolePath], whose
+// caller wants the path and nothing else.
+func iamAuthzEntityPath(state StateManager, accountID, resourceType, name string) string {
+	return iamAuthzNamedEntity(state, accountID, resourceType, name).Path
+}
+
+// iamAuthzNamedEntity returns the stored record of a named IAM entity, or the zero value
+// when there is none and for a resource type whose records cannot be looked up by name.
+//
 // A customer-managed policy is the second case: its record is keyed by the ARN the path is
 // already part of, so there is nothing to look up by name — CreatePolicy's Path parameter
-// is the only source, and it is on the wire.
-//
-// Like [iamAuthzRolePath], which now delegates here, it reads through the raw
-// [StateManager] rather than through IAMPlugin: [AuthController] holds no plugin, and a
-// decision must not depend on one being registered.
-func iamAuthzEntityPath(state StateManager, accountID, resourceType, name string) string {
-	if state == nil {
-		return ""
-	}
+// is the only source of a path, and it is on the wire, while a policy that already exists
+// is reached by ARN through [iamAuthzTagsForARN].
+func iamAuthzNamedEntity(state StateManager, accountID, resourceType, name string) iamAuthzEntityRecord {
 	kind := iamAuthzResourceStateKind(resourceType)
 	if kind == "" {
-		return ""
+		return iamAuthzEntityRecord{}
 	}
-	raw, err := state.Get(context.Background(), iamNamespace, iamEntityKey(accountID, kind, name))
+	return iamAuthzReadEntity(state, iamEntityKey(accountID, kind, name))
+}
+
+// iamAuthzReadEntity reads the record at key, answering the zero value for every failure.
+//
+// Like [iamAuthzRolePath], which delegates here, it reads through the raw [StateManager]
+// rather than through IAMPlugin: [AuthController] holds no plugin, and a decision must not
+// depend on one being registered.
+//
+// A read failure and a corrupt record are both answered as "nothing known about this
+// resource" rather than propagated. That is the safe direction: an unread tag leaves a
+// condition on `aws:ResourceTag/<key>` unsatisfied, so an Allow conditioned on it grants
+// nothing and a Deny conditioned on it does not bite — the same trade [elbAuthzTagsFor]
+// documents, and the one a decision that cannot read its own state has to make.
+func iamAuthzReadEntity(state StateManager, key string) iamAuthzEntityRecord {
+	if state == nil {
+		return iamAuthzEntityRecord{}
+	}
+	raw, err := state.Get(context.Background(), iamNamespace, key)
 	if err != nil || raw == nil {
-		return ""
+		return iamAuthzEntityRecord{}
 	}
-	// Users, roles, groups and instance profiles all publish their path under the same
-	// member, so one shape reads any of the four and none has to be unmarshalled in full.
-	var stored struct {
-		Path string `json:"Path"`
-	}
+	// One shape reads any IAM record and none has to be unmarshalled in full; see
+	// [iamAuthzEntityRecord] for which members that relies on.
+	var stored iamAuthzEntityRecord
 	if err := json.Unmarshal(raw, &stored); err != nil {
-		return ""
+		return iamAuthzEntityRecord{}
 	}
-	return stored.Path
+	return stored
 }
 
 // iamAuthzResourceStateKind maps AWS's resource-type name onto the prefix substrate stores

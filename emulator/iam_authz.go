@@ -99,19 +99,27 @@ func iamAuthzParam(req *AWSRequest, name string) string {
 // The service-linked-role operations are resolved first and separately, by
 // [iamAuthzSLRResourceARN], because their resource is derived from a service principal or a
 // deletion-task ID rather than from a name the request carries. Every other IAM operation
-// goes through [iamAuthzOperationResourceARN] and the table AWS's own data checks (#770).
+// goes through [iamAuthzTableResource] and the table AWS's own data checks (#770).
 // Nothing resolves for an operation in neither, and the request stays on the
 // single-resource path below, where [AuthController.buildResourceARN]'s iam arm answers
 // [iamAuthzAccountResourceARN].
+//
+// Each resource carries the tags of the entity its ARN names, which is what a condition on
+// `aws:ResourceTag/<key>` is answered from. Returning the ARN alone left that key out of the
+// context of every entity-naming IAM request, so a Deny conditioned on it silently stopped
+// biting (#804).
 func iamAuthzResources(state StateManager, reqCtx *RequestContext, req *AWSRequest) []authzResource {
-	arn := iamAuthzSLRResourceARN(state, reqCtx, req)
-	if arn == "" {
-		arn = iamAuthzOperationResourceARN(state, reqCtx, req)
+	if arn := iamAuthzSLRResourceARN(state, reqCtx, req); arn != "" {
+		// A service-linked role is a role, and can be tagged like one, but neither the
+		// create nor the deletion-status arm holds its record — the ARN is derived from a
+		// service principal or a deletion-task ID — so the tags are read by ARN rather than
+		// threaded out of a read that did not happen.
+		return []authzResource{{ARN: arn, Tags: iamAuthzTagsForARN(state, arn)}}
 	}
-	if arn == "" {
-		return nil
+	if resource := iamAuthzTableResource(state, reqCtx, req); resource.ARN != "" {
+		return []authzResource{resource}
 	}
-	return []authzResource{{ARN: arn}}
+	return nil
 }
 
 // iamAuthzSLRResourceARN returns the service-linked-role ARN an SLR operation is about,

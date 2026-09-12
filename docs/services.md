@@ -1888,6 +1888,46 @@ grants a default-path one.
 **excludes** the role's path, so its role name is the *first* — which is how a session of a role
 at `/service-role/` still resolves to that role's policies.
 
+### `aws:ResourceTag/<key>` on an IAM request
+
+**The tags published for an IAM request are the named entity's**
+([#804](https://github.com/scttfrdmn/substrate/issues/804)). They ride out of the same read that
+recovers the path above, so `aws:ResourceTag/<key>` costs nothing beyond it, and they are attached
+to the ARN they belong to rather than merged across the request — a condition about one resource
+cannot be satisfied by a tag on another.
+
+The IAM User Guide names four tag condition keys for IAM — `aws:ResourceTag/<key>`,
+`aws:RequestTag/<key>`, `aws:PrincipalTag/<key>` and `aws:TagKeys` — and no `iam:`-prefixed
+resource-tag key, so unlike EC2 there is no service-specific duplicate to publish under.
+
+| Request | What `aws:ResourceTag/<key>` reports |
+|---|---|
+| Names a user, role, policy or instance profile | That entity's tags, from its own record |
+| Names a service-linked role | The role's tags — an SLR is a role and is tagged like one |
+| Names a group | **Nothing.** AWS does not let a caller tag a group |
+| Names an entity that does not exist | **Nothing** — there is no record to read tags from |
+| Names no resource (the six `List*` and `SimulateCustomPolicy`) | **Nothing.** Their resource is `arn:aws:iam::<account>:*` — every IAM resource in the account, which names no one entity whose tags could describe it |
+
+Two directions were wrong before that release, and the serious one is the second:
+
+- **An `Allow … if aws:ResourceTag/team=platform` granted nothing**, because the key was absent
+  from every entity-naming IAM request from the moment
+  [#770](https://github.com/scttfrdmn/substrate/issues/770) made that the path they all take.
+- **A `Deny … if aws:ResourceTag/env=prod` silently stopped biting.** A guardrail written to fence
+  off production entities was inert, and the `Allow` beneath it decided the request — enforced on
+  AWS, unenforced here, which is the one direction an emulated privilege boundary must not drift
+  in.
+- **On the six operations that name no resource, the *caller's* tags were published as the
+  resource's**, so a caller tagged `team=platform` satisfied a condition written about a resource
+  tagged `team=platform` whatever the resource carried. That arm dated from before either key had
+  a producer for IAM; the caller's tags are `aws:PrincipalTag/<key>`, which has had
+  [one of its own](#the-caller-s-unique-id-and-tags) since
+  [#771](https://github.com/scttfrdmn/substrate/issues/771).
+
+Both doors publish the same tags for the same request, for the same reason they derive the same
+ARN: publishing the key at the generic gate alone would have refused, inside the handler, a
+request the gate had just allowed.
+
 ### Multivalued condition keys: `ForAllValues` and `ForAnyValue`
 
 A condition key is either **single-valued** — at most one value in the request context —

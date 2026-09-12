@@ -197,6 +197,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags`, the Actions index has no `TagGroup`, the vendored authorization snapshot publishes no
   `iam:*Group` tagging action, and the User Guide says *"You can tag most IAM resources, but not
   groups, assumed roles, access reports, or hardware-based MFA devices."*
+- **`aws:ResourceTag/<key>` on an IAM request describes the resource, and is populated at all**
+  (#804). The resource resolver #770 introduced returned the ARN alone, so from that release
+  every entity-naming IAM request published no `aws:ResourceTag/<key>` whatsoever. An
+  `Allow … if aws:ResourceTag/team=platform` therefore granted nothing — and, the direction that
+  matters, a `Deny … if aws:ResourceTag/env=prod` **silently stopped biting**, leaving the
+  `Allow` beneath it to decide the request. A tag-scoped guardrail is enforced on AWS and was
+  inert here, which is the one direction an emulated privilege boundary must not drift in.
+
+  The tags come out of the read the resolver already performs to recover the entity's path, so
+  the key costs nothing beyond it, and they travel attached to the ARN they belong to — a
+  condition about one resource cannot be satisfied by a tag on another. All five resolvable
+  types are covered now that policies and instance profiles carry tags (#796), including a
+  service-linked role, whose ARN is derived from a service principal or a deletion-task ID
+  rather than read and whose tags are therefore fetched by ARN. A **group** publishes none, on
+  the same four citations as the entity read above.
+
+  **The caller's tags were being published as the resource's.** For the six operations that name
+  no resource — `ListUsers`, `ListRoles`, `ListGroups`, `ListPolicies`, `ListInstanceProfiles`
+  and `SimulateCustomPolicy` — an arm of `resourceTagsFor` read the *principal's* ARN and
+  reported that entity's tags under `aws:ResourceTag/<key>`, so a caller tagged `team=platform`
+  satisfied a condition written about a resource tagged `team=platform` whatever the resource
+  carried, and satisfied it where there is no resource to carry anything. It dated from v0.18.0,
+  before either key had a producer for IAM; the caller's tags are `aws:PrincipalTag/<key>`, which
+  has had one of its own since #771. Those six operations are decided against
+  `arn:aws:iam::<account>:*` — every IAM resource in the account, which names no one entity whose
+  tags could describe it — so they now publish no `aws:ResourceTag/<key>` and a condition on one
+  cannot be satisfied for them.
+
+  **Both doors publish the same tags**, for the same reason they derive the same ARN since #770:
+  publishing the key at the generic gate alone would have refused inside the IAM handler a
+  request the gate had just allowed — the one-request-two-answers failure behind #411, #714 and
+  #745. IAM has no service-specific duplicate of the global key to publish under; the User Guide
+  names `aws:ResourceTag`, `aws:RequestTag`, `aws:PrincipalTag` and `aws:TagKeys` for IAM and no
+  `iam:`-prefixed tag key, unlike EC2's `ec2:ResourceTag`.
+
+  Compatibility, in both directions: a `Deny` conditioned on a resource tag bites where it was
+  inert, and an `Allow` that was satisfied by the caller's own tags stops being satisfied.
 
 ## [v0.111.0] - 2026-09-10
 
