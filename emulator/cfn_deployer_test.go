@@ -310,7 +310,7 @@ func TestCFN_UpdateStack(t *testing.T) {
 			"B2": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "update-bucket-2"}}
 		}
 	}`
-	result, err := d.UpdateStack(context.Background(), tmpl2, "update-stack", nil)
+	result, err := d.UpdateStack(context.Background(), tmpl2, "update-stack", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
 	assert.Len(t, result.Resources, 2)
 }

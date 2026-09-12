@@ -245,6 +245,11 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 		return nil, roleErr
 	}
 	att := cfnAttribution{roleARN: req.Params["RoleARN"], creator: reqCtx.Principal}
+	// "Key-value pairs to associate with this stack. CloudFormation also propagates
+	// these tags to the resources created in the stack." The limits are checked by the
+	// deployer, so an in-process deploy is held to the same ones (see
+	// [CFNDeployOptions.validate]).
+	opts.Tags = cfnStackTags(req.Params)
 	if _, err := p.deployerFor(reqCtx, att).DeployWithOptions(context.Background(), body, name,
 		cfnRequestParameters(req.Params, nil), opts); err != nil {
 		return nil, cfnMapDeployerError(err)
@@ -304,8 +309,12 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 		}
 		att.roleARN = roleARN
 	}
+	// An omitted Tags preserves the stack's own tags and an empty one clears them, which
+	// is why the decoder distinguishes the two rather than returning an empty map for
+	// both — [StackDeployer.UpdateStack] resolves it against the stored record.
 	if _, err := p.deployerFor(reqCtx, att).UpdateStack(context.Background(), body, name,
-		cfnRequestParameters(req.Params, stack.Parameters)); err != nil {
+		cfnRequestParameters(req.Params, stack.Parameters),
+		CFNDeployOptions{Tags: cfnStackTags(req.Params)}); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -413,6 +422,10 @@ type cfnStackItem struct {
 	Parameters      []cfnParameterXML `xml:"Parameters>member,omitempty"`
 	Outputs         []cfnOutputXML    `xml:"Outputs>member,omitempty"`
 
+	// Tags are the stack's own tags, omitted for a stack with none — see
+	// [cfnStackTagsXML] for why an empty element is not reported instead.
+	Tags []cfnTagXML `xml:"Tags>member,omitempty"`
+
 	// RoleARN is "the ARN of an IAM role that's associated with the stack", omitted
 	// for a stack with none. Omitted rather than empty because the member is not
 	// required and a stack without a service role has no role to report: an empty
@@ -487,6 +500,7 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 			DisableRollback:   cfnStackDisablesRollback(s.OnFailure),
 			Parameters:        cfnParametersXML(s.Parameters),
 			Outputs:           cfnOutputsXML(s.Outputs, s.ExportNames),
+			Tags:              cfnStackTagsXML(s.Tags),
 			RoleARN:           s.RoleARN,
 		})
 	}
@@ -1400,7 +1414,10 @@ func cfnMapDeployerError(err error) *AWSError {
 		// An OnFailure outside the three values, a non-boolean DisableRollback, or
 		// both parameters at once, are all the request being malformed. The API
 		// documents no code of its own for them.
-		errors.Is(err, ErrCFNInvalidOnFailure):
+		errors.Is(err, ErrCFNInvalidOnFailure),
+		// A tag outside the Tag type's limits, or one using the reserved aws: prefix.
+		// The code is substrate's choice — see [ErrCFNInvalidTag] for why this one.
+		errors.Is(err, ErrCFNInvalidTag):
 		return &AWSError{Code: "ValidationError", Message: msg, HTTPStatus: http.StatusBadRequest}
 	case errors.Is(err, ErrCFNTemplateInvalid):
 		return &AWSError{
