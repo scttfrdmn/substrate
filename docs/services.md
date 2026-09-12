@@ -1588,6 +1588,60 @@ devices."* A `Tags.member.N` sent to `CreateGroup` anyway is ignored rather than
 dropped silently. A record written by an earlier version reads back with no tags, which is the
 same thing an untagged entity is.
 
+### Which members each entity shape reports
+
+Tags are one member of several that AWS reports per *shape* rather than per entity
+([#807](https://github.com/scttfrdmn/substrate/issues/807)). The full picture, with what
+substrate renders:
+
+| Member | Single-entity shape | List shape | Notes |
+|---|---|---|---|
+| `UserId`, `UserName`, `Arn`, `Path`, `CreateDate` | yes | yes | required on `User` |
+| `RoleId`, `RoleName`, `Arn`, `Path`, `CreateDate` | yes | yes | required on `Role` |
+| `Description` (role) | yes | yes | `Required: No`, omitted when unset |
+| `MaxSessionDuration` | yes | yes | omitted when unset |
+| `AssumeRolePolicyDocument` | yes | yes | omitted when the role has no trust policy |
+| `PasswordLastUsed` | yes | yes | omitted when unset, which is always — see below |
+| `PermissionsBoundary` | yes | **no** | excluded from the list shapes by AWS's own note |
+| `Tags` | yes | **no** | same note; omitted when the entity has none |
+| `PolicyId`, `PolicyName`, `Arn`, `Path`, `AttachmentCount`, `CreateDate` | yes | yes | |
+| `DefaultVersionId`, `UpdateDate` | yes | yes | omitted when unset |
+| `IsAttachable` | yes | yes | always rendered, `false` included |
+| `Description` (policy) | yes | **no** | `Required: No`, omitted when unset |
+| `PermissionsBoundaryUsageCount` | **not modelled** | **not modelled** | [#815](https://github.com/scttfrdmn/substrate/issues/815) |
+| `RoleLastUsed` | **not modelled** | n/a | [#816](https://github.com/scttfrdmn/substrate/issues/816) |
+
+**`PermissionsBoundary` left the list shapes**, which is a behaviour change: `ListUsers` and
+`ListRoles` reported one until this release. AWS's note on both operations excludes it by name,
+in the same sentence that excludes `Tags` — so substrate was more generous than the service, and
+a consumer could write an assertion against a list response that AWS never satisfies. Read the
+entity to see its boundary, which is what the note instructs. The users nested in a `GetGroup`
+response and the roles nested in an instance-profile shape are list shapes too, and carry no
+boundary for the same reason.
+
+**`Description` on a policy is single-entity-only**, and here AWS says so about the member
+directly rather than through the listing note: *"This element is included in the response to the
+GetPolicy operation. It is not included in the response to the ListPolicies operation."* Both it
+and `IsAttachable` were stored from `CreatePolicy` and never rendered before this release, so a
+consumer setting a description could not read it back at all.
+
+**`PasswordLastUsed` is rendered but never populated.** AWS documents it as *"returned only in
+the GetUser and ListUsers operations"*, and a null value means the user never signed in with a
+password. Substrate models no password operation at all — `ChangePassword`,
+`CreateLoginProfile` and `UpdateLoginProfile` answer `InvalidAction` — so nothing assigns the
+field and the member is always omitted in an ordinary run. It is rendered from the record so a
+consumer that seeds one directly observes it.
+
+**Two members are deliberately unmodelled**, each because reporting it is a design decision
+rather than a field to render. `PermissionsBoundaryUsageCount` would need either a scan of every
+user and role per policy read — making `ListPolicies` O(policies × entities) — or a counter
+maintained across the four boundary operations plus the entity deletes that drop a boundary
+implicitly, which must then agree with a count rebuilt by replay
+([#815](https://github.com/scttfrdmn/substrate/issues/815)). `RoleLastUsed` advances when a role
+is *assumed*, so it needs `AssumeRole` to write an IAM record — substrate's first write on a path
+whose purpose is not to mutate — or a projection over recorded `AssumeRole` events, plus a nested
+response type and the request's region ([#816](https://github.com/scttfrdmn/substrate/issues/816)).
+
 ### The tagging operations, and what a listing reports
 
 Twelve tagging operations answer, in four families of three. The user and role families have
