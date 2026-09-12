@@ -184,6 +184,20 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.untagRole(ctx, req)
 	case "ListRoleTags":
 		return p.listRoleTags(ctx, req)
+	// The policy and instance-profile pairs live in iam_tagging.go, which also documents why
+	// there is no TagGroup: a group is not a taggable IAM resource (#796).
+	case "TagPolicy":
+		return p.tagPolicy(ctx, req)
+	case "UntagPolicy":
+		return p.untagPolicy(ctx, req)
+	case "ListPolicyTags":
+		return p.listPolicyTags(ctx, req)
+	case "TagInstanceProfile":
+		return p.tagInstanceProfile(ctx, req)
+	case "UntagInstanceProfile":
+		return p.untagInstanceProfile(ctx, req)
+	case "ListInstanceProfileTags":
+		return p.listInstanceProfileTags(ctx, req)
 
 	case "CreateInstanceProfile":
 		return p.createInstanceProfile(ctx, req)
@@ -2222,20 +2236,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	// Merge tags by key.
-	tagMap := make(map[string]string, len(user.Tags))
-	for _, t := range user.Tags {
-		tagMap[t.Key] = t.Value
-	}
-	for _, t := range params.Tags {
-		tagMap[t.Key] = t.Value
-	}
-	merged := make([]IAMTag, 0, len(tagMap))
-	for k, v := range tagMap {
-		merged = append(merged, IAMTag{Key: k, Value: v})
-	}
-	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
-	user.Tags = merged
+	user.Tags = iamMergeTagSet(user.Tags, params.Tags)
 
 	raw, err := json.Marshal(user)
 	if err != nil {
@@ -2280,17 +2281,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			http.StatusNotFound), nil
 	}
 
-	removeKeys := make(map[string]struct{}, len(params.TagKeys))
-	for _, k := range params.TagKeys {
-		removeKeys[k] = struct{}{}
-	}
-	filtered := user.Tags[:0]
-	for _, t := range user.Tags {
-		if _, remove := removeKeys[t.Key]; !remove {
-			filtered = append(filtered, t)
-		}
-	}
-	user.Tags = filtered
+	user.Tags = iamRemoveTagKeys(user.Tags, params.TagKeys)
 
 	raw, err := json.Marshal(user)
 	if err != nil {
@@ -2332,41 +2323,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusNotFound), nil
 	}
 
-	tags := user.Tags
-	if tags == nil {
-		tags = []IAMTag{}
-	}
-
-	maxItems := params.MaxItems.Int()
-	if maxItems <= 0 {
-		maxItems = 100
-	}
-
-	// Simple pagination over sorted tags.
-	startIdx := 0
-	if params.Marker != "" {
-		for i, t := range tags {
-			if t.Key == params.Marker {
-				startIdx = i
-				break
-			}
-		}
-	}
-	end := startIdx + maxItems
-	isTruncated := false
-	var nextMarker string
-	if end < len(tags) {
-		isTruncated = true
-		nextMarker = tags[end].Key
-	} else {
-		end = len(tags)
-	}
-
-	xmlStr := iamTagListXML(tags[startIdx:end]) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
-	if nextMarker != "" {
-		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
-	}
-	return iamXMLResponse(http.StatusOK, "ListUserTags", xmlStr)
+	return iamTagListingResponse("ListUserTags", user.Tags, params.Marker, params.MaxItems)
 }
 
 func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2401,20 +2358,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	// Merge tags by key.
-	tagMap := make(map[string]string, len(role.Tags))
-	for _, t := range role.Tags {
-		tagMap[t.Key] = t.Value
-	}
-	for _, t := range params.Tags {
-		tagMap[t.Key] = t.Value
-	}
-	merged := make([]IAMTag, 0, len(tagMap))
-	for k, v := range tagMap {
-		merged = append(merged, IAMTag{Key: k, Value: v})
-	}
-	sort.Slice(merged, func(i, j int) bool { return merged[i].Key < merged[j].Key })
-	role.Tags = merged
+	role.Tags = iamMergeTagSet(role.Tags, params.Tags)
 
 	raw, err := json.Marshal(role)
 	if err != nil {
@@ -2459,17 +2403,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			http.StatusNotFound), nil
 	}
 
-	removeKeys := make(map[string]struct{}, len(params.TagKeys))
-	for _, k := range params.TagKeys {
-		removeKeys[k] = struct{}{}
-	}
-	filtered := role.Tags[:0]
-	for _, t := range role.Tags {
-		if _, remove := removeKeys[t.Key]; !remove {
-			filtered = append(filtered, t)
-		}
-	}
-	role.Tags = filtered
+	role.Tags = iamRemoveTagKeys(role.Tags, params.TagKeys)
 
 	raw, err := json.Marshal(role)
 	if err != nil {
@@ -2511,40 +2445,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusNotFound), nil
 	}
 
-	tags := role.Tags
-	if tags == nil {
-		tags = []IAMTag{}
-	}
-
-	maxItems := params.MaxItems.Int()
-	if maxItems <= 0 {
-		maxItems = 100
-	}
-
-	startIdx := 0
-	if params.Marker != "" {
-		for i, t := range tags {
-			if t.Key == params.Marker {
-				startIdx = i
-				break
-			}
-		}
-	}
-	end := startIdx + maxItems
-	isTruncated := false
-	var nextMarker string
-	if end < len(tags) {
-		isTruncated = true
-		nextMarker = tags[end].Key
-	} else {
-		end = len(tags)
-	}
-
-	xmlStr := iamTagListXML(tags[startIdx:end]) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
-	if nextMarker != "" {
-		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
-	}
-	return iamXMLResponse(http.StatusOK, "ListRoleTags", xmlStr)
+	return iamTagListingResponse("ListRoleTags", role.Tags, params.Marker, params.MaxItems)
 }
 
 // --- State helpers ---------------------------------------------------------

@@ -1198,12 +1198,18 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | TagRole | |
 | UntagRole | |
 | ListRoleTags | |
+| TagPolicy | Customer-managed policies only |
+| UntagPolicy | Customer-managed policies only |
+| ListPolicyTags | Customer-managed policies only |
 | CreateInstanceProfile | |
 | GetInstanceProfile | |
 | DeleteInstanceProfile | |
 | AddRoleToInstanceProfile | |
 | RemoveRoleFromInstanceProfile | |
 | ListInstanceProfiles | |
+| TagInstanceProfile | |
+| UntagInstanceProfile | |
+| ListInstanceProfileTags | |
 
 ### What the policy simulator evaluates
 
@@ -1581,6 +1587,47 @@ devices."* A `Tags.member.N` sent to `CreateGroup` anyway is ignored rather than
 `CreateInstanceProfile` had nowhere to put one before this release, so a `--tags` on either was
 dropped silently. A record written by an earlier version reads back with no tags, which is the
 same thing an untagged entity is.
+
+### The tagging operations, and what a listing reports
+
+Twelve tagging operations answer, in four families of three. The user and role families have
+existed for some time; the policy and instance-profile families answered `InvalidAction`/400
+before this release ([#796](https://github.com/scttfrdmn/substrate/issues/796)), which is the
+other half of the same drift — a consumer's tag aspect tags every entity it creates, and only
+two of the four could accept one.
+
+| Family | Operations | Identifier |
+|---|---|---|
+| User | `TagUser`, `UntagUser`, `ListUserTags` | `UserName` |
+| Role | `TagRole`, `UntagRole`, `ListRoleTags` | `RoleName` |
+| Policy | `TagPolicy`, `UntagPolicy`, `ListPolicyTags` | `PolicyArn` |
+| Instance profile | `TagInstanceProfile`, `UntagInstanceProfile`, `ListInstanceProfileTags` | `InstanceProfileName` |
+
+**A listing is sorted by tag key**, on all six — AWS states it on each, and it is not cosmetic:
+the response `Marker` names a key rather than an offset, so an unsorted underlying order would
+make a second page arbitrary. All six render through one code path, so `ListUserTags` and
+`ListRoleTags` now sort too, where they previously reported tags in whatever order they were
+stored. `MaxItems` defaults to 100 (1–1000), and `Marker` appears in the response **only** when
+`IsTruncated` is `true`. `Tags` is a *required* response member here, so an untagged resource
+reports an empty list rather than omitting it — the opposite of the entity shapes above.
+
+**Tagging is a privilege-relevant operation**, not bookkeeping: an `aws:ResourceTag`-conditioned
+statement is decided on the resource's tags, so a caller who can retag an instance profile can
+move it in or out of the reach of every such statement. All six are authorized at both doors
+against the resource they name, which is what the six new
+[`iamAuthzOperationResource`](#what-resource-an-iam-request-is-decided-against) rows are for.
+
+**An AWS managed policy cannot be tagged.** AWS documents these operations for an "IAM customer
+managed policy", and a managed policy belongs to the `aws` account; substrate's bundled catalog
+is read-only for the same reason, so tagging one answers `NoSuchEntity`/404 even though
+`GetPolicy` resolves the same ARN.
+
+**What the tag operations do not yet do is validate.** AWS documents `InvalidInput`/400 (an
+empty key, an `aws:` prefix), `LimitExceeded`/409 (the 50-tag cap) and
+`ConcurrentModification`/409, and substrate emits none of the three; a key is also compared
+case-sensitively where AWS treats user and role tag keys case-insensitively. Each rejection is a
+behaviour change for a consumer on today's permissive path, so it is tracked separately as
+[#806](https://github.com/scttfrdmn/substrate/issues/806) rather than folded in here.
 
 ### Service-linked roles and `iam:AWSServiceName`
 
