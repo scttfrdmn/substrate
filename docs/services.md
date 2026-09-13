@@ -1867,7 +1867,7 @@ substrate renders:
 | `IsAttachable` | yes | yes | always rendered, `false` included |
 | `Description` (policy) | yes | **no** | `Required: No`, omitted when unset |
 | `PermissionsBoundaryUsageCount` | yes | yes | computed per read, never stored — see below |
-| `RoleLastUsed` | **not modelled** | n/a | [#816](https://github.com/scttfrdmn/substrate/issues/816) |
+| `RoleLastUsed` | yes | **no** | same note; omitted until the role is assumed — see below |
 
 **`PermissionsBoundary` left the list shapes**, which is a behaviour change: `ListUsers` and
 `ListRoles` reported one until this release. AWS's note on both operations excludes it by name,
@@ -1902,11 +1902,60 @@ replay rebuilds rather than a counter accumulated alongside it. A bundled AWS ma
 counted the same way, which matters because a fresh emulator's only available boundary ARNs are
 bundled ones ([#815](https://github.com/scttfrdmn/substrate/issues/815)).
 
-**One member is deliberately unmodelled**, because reporting it is a design decision rather than
-a field to render. `RoleLastUsed` advances when a role is *assumed*, so it needs `AssumeRole` to
-write an IAM record — substrate's first write on a path whose purpose is not to mutate — or a
-projection over recorded `AssumeRole` events, plus a nested response type and the request's
-region ([#816](https://github.com/scttfrdmn/substrate/issues/816)).
+**No member of these shapes is left unmodelled now.** `PermissionsBoundaryUsageCount` and
+`RoleLastUsed` were the last two, each recorded as a design decision rather than a field to
+render, and both are answered as of #815 and #816.
+
+### What a role read reports about its last use
+
+`GetRole` reports `RoleLastUsed` — AWS's structure carrying `LastUsedDate` and `Region` — once
+the role has been assumed ([#816](https://github.com/scttfrdmn/substrate/issues/816)). It was
+neither stored nor rendered before, so a consumer could not tell an assumed role from an
+untouched one.
+
+**`AssumeRole` is what writes it**, which makes that operation a writer of IAM state. AWS's
+`RoleLastUsed` advances when the role is *used*, and an assume is the only use an emulator that
+models no workload can observe, so the stamp is written by the STS operation onto the IAM
+record. `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not implemented, so there is
+exactly one write site. The role record was already read to evaluate its trust policy, so the
+stamp costs one `Put` and no extra read, and it is written after the session credentials are
+stored — a caller the trust policy refuses records no use.
+
+**A projection over the recorded `AssumeRole` events was considered and rejected.** The direct
+write replays identically for the reason a projection would: the replay engine re-executes each
+recorded request with the simulated clock set to that event's timestamp and the request's region
+taken from the event, so the re-executed `AssumeRole` derives the same date and the same region
+and writes the same value. What a projection adds is a dependency no plugin has — the IAM plugin
+would have to hold the event store and scan it on every `GetRole`, making the answer to a read
+depend on the event log rather than on state.
+
+**The date comes from the simulated clock and the region from the request.** AWS documents
+`Region` as *"the name of the AWS Region in which the role was last used"*, so it is the
+assuming request's region and not the emulator's configured one: assuming the same role from
+`eu-west-2` and then `ap-southeast-1` reports each in turn.
+
+**Only `GetRole` reports it.** The `RoleLastUsed` type says so directly: *"This data type is
+returned as a response element in the GetRole and GetAccountAuthorizationDetails operations."*
+Substrate does not answer `GetAccountAuthorizationDetails` at all, so `GetRole` is the whole of
+the member's reach; if that operation is added later it renders a role through the same wrapper
+and gains the member with it. `ListRoles` excludes it by name, in the same sentence that
+excludes `PermissionsBoundary` and `Tags`, and the roles nested inside an instance-profile
+shape are a list too. `CreateRole` and `CreateServiceLinkedRole` share the single-role wrapper
+and report none, because a role created a moment ago has not been assumed.
+
+**Omitting the member for a never-assumed role is substrate's choice, not AWS's.** AWS's page
+settles neither half of the question. `LastUsedDate` is documented only as *"This field is null
+if the role has not been used within the IAM tracking period"* — a statement about a role
+falling out of the trailing 400 days of tracked activity, not about a role never assumed at all
+— and it says nothing about `Region` in that case, nor about whether the structure itself is
+present or absent. Both members are `Required: No`, so omitting the wrapper is admissible;
+substrate omits it because that is the only way a consumer can distinguish "not yet assumed"
+from "assumed", where a rendered wrapper holding a zero date and an empty region would report
+values AWS never publishes. So do not assert on `RoleLastUsed` being present-but-null: assert on
+its absence.
+
+A role record written by an earlier version reads back with no last use, which is the same
+thing a never-assumed role is.
 
 ### The tagging operations, and what a listing reports
 

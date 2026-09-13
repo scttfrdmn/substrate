@@ -36,6 +36,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without mutating the shared catalog entry, which matters because a fresh emulator's only
   available boundary ARNs are bundled ones.
 
+- **`GetRole` reports `RoleLastUsed`** (#816). AWS's `Role` type carries a `RoleLastUsed`
+  structure holding `LastUsedDate` and `Region`; substrate neither stored nor rendered it, so a
+  consumer could not tell an assumed role from an untouched one. #807 recorded the gap with its
+  cost; this is that cost paid.
+
+  **`AssumeRole` is what writes it, which makes that operation a writer of IAM state.** AWS's
+  member advances when the role is *used*, and an assume is the only use an emulator that models
+  no workload can observe — so an STS operation now stamps an IAM record, which no other
+  substrate write does: every other one follows from an operation whose purpose is to mutate.
+  `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not implemented, so there is exactly
+  one write site. The role record was already read to evaluate its trust policy, so the stamp
+  costs one `Put` and no extra read, and it lands after the session credentials are stored — a
+  caller the trust policy refuses records no use.
+
+  **A projection over the recorded `AssumeRole` events was considered and rejected**, even though
+  #816 guessed it the better answer. The direct write replays identically for the reason a
+  projection would: the replay engine re-executes each recorded request with the simulated clock
+  set to that event's timestamp and the request's region taken from the event, so the re-executed
+  `AssumeRole` derives the same `LastUsedDate` from the same simulated clock and the same `Region`
+  from the same recorded request, writes the same value, and the state hash after the event
+  agrees. What a projection adds is a dependency no plugin has — the IAM plugin would have to hold
+  the event store and scan it on every `GetRole`, making the answer to a read depend on the event
+  log rather than on state.
+
+  The date comes from the simulated clock and the region from the *request* — AWS documents
+  `Region` as "the name of the AWS Region in which the role was last used" — so assuming one role
+  from `eu-west-2` and then `ap-southeast-1` reports each in turn, and neither reports the
+  emulator's configured region.
+
+  **Only `GetRole` reports it.** The `RoleLastUsed` type says so: "This data type is returned as
+  a response element in the GetRole and GetAccountAuthorizationDetails operations." Substrate does
+  not answer `GetAccountAuthorizationDetails` at all, so `GetRole` is the whole of the member's
+  reach; the operation would render a role through the same wrapper and gain the member with it if
+  it is added. `ListRoles` excludes it by name, in the same sentence that already excludes
+  `PermissionsBoundary` and `Tags`, and so do the roles nested in an instance-profile shape.
+  `CreateRole` and `CreateServiceLinkedRole` share the single-role wrapper and report none,
+  because a role created a moment ago has not been assumed.
+
+  **Omitting the member for a never-assumed role is substrate's choice, not AWS's.** AWS documents
+  `LastUsedDate` as "null if the role has not been used within the IAM tracking period" — a
+  statement about a role falling out of the trailing 400 days, not about a role never assumed at
+  all — and says nothing about `Region` in that case nor about whether the structure itself is
+  present. Both members are `Required: No`, so the whole element is omitted until the first
+  assume, which is the only way a consumer can distinguish "not yet assumed" from "assumed".
+  Assert on its absence, not on a present-but-null date.
+
+  **Compatibility.** `AssumeRole` now writes IAM state, so the state hash recorded *after* an
+  `AssumeRole` event differs from the one an earlier version recorded for the same request: a
+  replay of a pre-#816 event log with `ValidateState` enabled reports a `state_hash_after`
+  difference on every `AssumeRole`, and a fixture exported from such a log should be re-recorded.
+  A role record written by an earlier version reads back with no last use — the same thing a
+  never-assumed role is — and gains the field the first time it is assumed. Nothing that a
+  consumer reads changes for a role that is never assumed.
+
 ### Fixed
 - **`Ref` resolves to the value AWS documents for that resource type** (#827). CloudFormation's
   `Ref` does not return one kind of value: each type's Template Reference "Return values" section
