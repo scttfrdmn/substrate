@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -25,21 +26,45 @@ var roleLastUsedClock = time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 // simulated clock, and an event store capturing bodies so its stream can be replayed.
 type roleLastUsedFixture struct {
 	server   *emulator.Server
-	state    *emulator.MemoryStateManager
+	state    emulator.StateManager
 	store    *emulator.EventStore
 	tc       *emulator.TimeController
 	registry *emulator.PluginRegistry
 	logger   emulator.Logger
 }
 
-// newRoleLastUsedFixture builds a [roleLastUsedFixture].
+// roleLastUsedPutFault is a state store whose Put fails for keys containing a substring, so
+// the write AssumeRole makes to the *IAM* record can be broken while the session write it
+// makes to the STS namespace still succeeds.
+type roleLastUsedPutFault struct {
+	emulator.StateManager
+
+	// failKeySubstr, when non-empty, makes Put fail for any key containing it.
+	failKeySubstr string
+}
+
+func (s *roleLastUsedPutFault) Put(ctx context.Context, namespace, key string, value []byte) error {
+	if s.failKeySubstr != "" && strings.Contains(key, s.failKeySubstr) {
+		return errors.New("state store unavailable")
+	}
+	return s.StateManager.Put(ctx, namespace, key, value)
+}
+
+// newRoleLastUsedFixture builds a [roleLastUsedFixture] over a fresh in-memory store.
+func newRoleLastUsedFixture(t *testing.T) *roleLastUsedFixture {
+	t.Helper()
+	return newRoleLastUsedFixtureWith(t, emulator.NewMemoryStateManager())
+}
+
+// newRoleLastUsedFixtureWith is [newRoleLastUsedFixture] over a caller-supplied store, for
+// the test that needs a write to fail.
 //
 // The clock is frozen — scale 0, so Now() is the baseline and nothing else — rather than
 // merely started at a fixed instant. A [emulator.TimeController] at the default scale of
 // 1.0 advances with wall time, and RoleLastUsed is rendered to the second, so an assertion
 // on the literal value would be a wall-clock dependence: it would pass except when the
 // test happened to straddle a second boundary.
-func newRoleLastUsedFixture(t *testing.T) *roleLastUsedFixture {
+func newRoleLastUsedFixtureWith(t *testing.T, state emulator.StateManager) *roleLastUsedFixture {
 	t.Helper()
 
 	cfg := emulator.DefaultConfig()
@@ -47,7 +72,6 @@ func newRoleLastUsedFixture(t *testing.T) *roleLastUsedFixture {
 	// when told to.
 	cfg.EventStore.IncludeBodies = true
 
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelInfo, false)
 
 	tc := emulator.NewTimeController(roleLastUsedClock)
@@ -258,6 +282,34 @@ func TestIAMRoleLastUsed_SurvivesReplay(t *testing.T) {
 
 	assert.Equal(t, live, roleLastUsedElement(t, f.getRoleXML(t, "replayed-role")),
 		"a replayed run must report the same RoleLastUsed as the live one")
+}
+
+// TestIAMRoleLastUsed_StoreFailureFailsTheAssume asserts that a state store that refuses the
+// IAM write fails the whole AssumeRole rather than answering a session and silently losing the
+// stamp.
+//
+// The fault is keyed on the IAM record's key alone: the session write AssumeRole makes lands
+// under `session:` in the STS namespace and still succeeds, so this reaches the new write and
+// nothing before it.
+func TestIAMRoleLastUsed_StoreFailureFailsTheAssume(t *testing.T) {
+	fault := &roleLastUsedPutFault{StateManager: emulator.NewMemoryStateManager()}
+	f := newRoleLastUsedFixtureWith(t, fault)
+	// Armed only after the role exists, so CreateRole's own Put is not the one that fails.
+	f.createRole(t, "unwritable-role")
+	fault.failKeySubstr = "role:"
+
+	r := httptest.NewRequest(http.MethodPost,
+		"/?Action=AssumeRole&RoleArn=arn:aws:iam::123456789012:role/unwritable-role"+
+			"&RoleSessionName=doomed", nil)
+	r.Host = "sts.us-east-1.amazonaws.com"
+
+	w := httptest.NewRecorder()
+	f.server.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code,
+		"a refused IAM write must fail the assume, not be swallowed")
+	assert.Contains(t, w.Body.String(), "store role last used",
+		"the error must name the write that failed")
 }
 
 // TestIAMRoleLastUsed_SeededRecord renders the member from a record seeded into state, which
