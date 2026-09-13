@@ -789,8 +789,12 @@ func (p *CloudFormationPlugin) createChangeSet(reqCtx *RequestContext, req *AWSR
 	if body == "" {
 		body = stack.TemplateBody
 	}
+	// "Key-value pairs to associate with this stack. CloudFormation also propagates these
+	// tags to resources in the stack." The same decoder createStack and updateStack use, so
+	// an omitted Tags, an empty list and a populated one mean here what they mean there; the
+	// deployer validates them, which is why nothing is checked at this layer (#824).
 	if _, err := p.deployer.CreateChangeSet(context.Background(), stackName, changeSetName, body,
-		cfnRequestParameters(req.Params, stack.Parameters)); err != nil {
+		cfnRequestParameters(req.Params, stack.Parameters), cfnStackTags(req.Params)); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -854,7 +858,18 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 		ExecutionStatus string            `xml:"ExecutionStatus"`
 		CreationTime    string            `xml:"CreationTime"`
 		Parameters      []cfnParameterXML `xml:"Parameters>member,omitempty"`
-		Changes         []change          `xml:"Changes>member"`
+
+		// Tags are "if you execute the change set, the tags that will be associated with
+		// the stack", rendered exactly as [cfnStackItem] renders the stack's own: a change
+		// set with none reports an empty `<Tags></Tags>`, because `encoding/xml` writes the
+		// parent element of a nested path whether or not the slice has members — see
+		// [cfnStackTagsXML] for why matching the neighbors beats suppressing it (#824).
+		//
+		// AWS's page lists response elements alphabetically, so it does not settle wire
+		// order. Placed where DescribeStacks places its own Tags — after the parameter
+		// list — so a consumer reading both responses meets the member in the same spot.
+		Tags    []cfnTagXML `xml:"Tags>member,omitempty"`
+		Changes []change    `xml:"Changes>member"`
 	}
 	type response struct {
 		XMLName  xml.Name            `xml:"DescribeChangeSetResponse"`
@@ -875,6 +890,7 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 			ExecutionStatus: "AVAILABLE",
 			CreationTime:    cfnTime(cs.CreatedAt),
 			Parameters:      cfnParametersXML(cs.Parameters),
+			Tags:            cfnStackTagsXML(cs.Tags),
 		},
 		Metadata: cfnMetadata(reqCtx),
 	}

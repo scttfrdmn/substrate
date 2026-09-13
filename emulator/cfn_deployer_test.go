@@ -2297,7 +2297,7 @@ func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
 			}
 		}
 	}`
-	cs, err := d.CreateChangeSet(context.Background(), "cs-stack", "my-changes", tmpl2, nil)
+	cs, err := d.CreateChangeSet(context.Background(), "cs-stack", "my-changes", tmpl2, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "CREATE_COMPLETE", cs.Status)
 	assert.Equal(t, "cs-stack", cs.StackName)
@@ -2346,9 +2346,9 @@ func TestCFN_ChangeSet_ListAndDelete(t *testing.T) {
 	tmpl2 := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "list-bucket-v2"}}}}`
 
 	// Create two change sets.
-	_, err = d.CreateChangeSet(context.Background(), "list-stack", "cs-a", tmpl2, nil)
+	_, err = d.CreateChangeSet(context.Background(), "list-stack", "cs-a", tmpl2, nil, nil)
 	require.NoError(t, err)
-	_, err = d.CreateChangeSet(context.Background(), "list-stack", "cs-b", tmpl2, nil)
+	_, err = d.CreateChangeSet(context.Background(), "list-stack", "cs-b", tmpl2, nil, nil)
 	require.NoError(t, err)
 
 	sets, err := d.ListChangeSets(context.Background(), "list-stack")
@@ -2372,7 +2372,7 @@ func TestCFN_ChangeSet_ModifyProperties(t *testing.T) {
 
 	// Change bucket name property.
 	tmpl2 := `{"Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "mod-bucket-v2"}}}}`
-	cs, err := d.CreateChangeSet(context.Background(), "mod-stack", "mod-cs", tmpl2, nil)
+	cs, err := d.CreateChangeSet(context.Background(), "mod-stack", "mod-cs", tmpl2, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, cs.Changes, 1)
 	assert.Equal(t, "Modify", cs.Changes[0].Action)

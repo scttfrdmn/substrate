@@ -91,6 +91,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer reads changes for a role that is never assumed.
 
 ### Fixed
+- **A change set records its tags, reports them, and applies them when it executes** (#824).
+  `CreateChangeSet` publishes a `Tags` parameter carrying the same description `CreateStack`
+  does — "key-value pairs to associate with this stack. CloudFormation also propagates these
+  tags to resources in the stack" — and substrate decoded none of it. The parameter reached a
+  handler that never read it, so a caller got a 200, a change set that reported no tags, and an
+  execution that behaved as though no tags had been asked for. That was the one hole left when
+  `CreateStack` and `UpdateStack` gained theirs in #764.
+
+  `CFNChangeSet` gains a `Tags` field, `DescribeChangeSet` gains a `Tags` member after
+  `Parameters` — where `DescribeStacks` puts its own, since AWS's page lists response elements
+  alphabetically and so does not settle wire order — and `ExecuteChangeSet` passes the recorded
+  set to the update it already performs, which propagates it to the stack's resources for free.
+
+  **The three-way meaning is the family's**, and it is `UpdateStack`'s wording because that is
+  the operation an execution routes through: "If you don't specify this parameter, CloudFormation
+  doesn't modify the stack's tags. If you specify an empty value, CloudFormation removes all
+  associated tags." So a change set created without `Tags` leaves the stack's tags exactly as
+  they were — which is how every change set behaved before this, and the reason nothing recorded
+  by an earlier version changes when it executes — an empty `Tags` clears them, and a populated
+  one replaces them wholesale.
+
+  Because that distinction is read back out of state at execution time rather than resolved at
+  the wire, the recorded field is deliberately **not** `omitempty`, unlike the stack's own: an
+  empty map dropped from the JSON would read back as an omitted parameter and preserve where the
+  caller asked to clear. A record written before this release carries no member at all and
+  decodes to nil, which is the omitted case.
+
+  **The documented warrant for applying tags on execution is `DescribeChangeSet`'s, not
+  `ExecuteChangeSet`'s.** `API_ExecuteChangeSet` mentions tags nowhere — no request parameter,
+  no response element, an empty result body — so the only statement AWS makes about what
+  executing a change set does with tags is the description of the member `DescribeChangeSet`
+  reports: "if you execute the change set, the tags that will be associated with the stack".
+
+  Tags are validated at **creation**, against the same limits `CreateStack` is held to (50 tags,
+  a key of 1–128 characters, a value of 1–256, no case-insensitive `aws:` key prefix), because
+  `CreateChangeSet` publishes the same constraints. A change set that could never execute is
+  refused rather than recorded, and the refusal leaves nothing behind. The check lives in the
+  deployer rather than the wire layer, so an in-process caller is held to the same limits.
+
+  **Compatibility.** `DescribeChangeSet` gains a `Tags` element, empty for a change set with
+  none, exactly as the `Parameters` and `Changes` elements beside it already render.
+  `StackDeployer.CreateChangeSet` takes an additional `tags map[string]string` argument — a
+  breaking change for a caller driving the deployer directly in Go, fixed by passing `nil`, which
+  is the behaviour that shipped. Executing a change set created with tags now changes the stack's
+  tags and its resources' tags.
+
 - **`Ref` resolves to the value AWS documents for that resource type** (#827). CloudFormation's
   `Ref` does not return one kind of value: each type's Template Reference "Return values" section
   documents its own, and it is an ARN for some types, a name for others, a service-assigned ID for
