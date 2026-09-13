@@ -78,7 +78,7 @@ func cfnStackTagChanges(existing, prev, next map[string]string) (map[string]stri
 // resource's tags could be reached at all.
 //
 // The three families are the three tag stores, exactly as in [cfnStampResourceTags]: ELBv2's
-// ordered `[]ELBTag` found by ARN, the four services keyed by [cfnResolveStampTarget], and
+// ordered `[]ELBTag` found by ARN, the services keyed by [cfnResolveStampTarget], and
 // EC2's own prefix-keyed resolver for everything else. The CFN resource type decides which,
 // rather than the physical ID: a type the type-keyed resolver claims is never also an EC2 one,
 // and asking the ID first would let a bucket named `i-orders` be reconciled as an instance —
@@ -93,14 +93,14 @@ func cfnPropagateStackTags(
 	if cfnELBStampableTypes[dr.Type] {
 		return cfnPropagateELBStackTags(state, reqCtx, dr, prev, next)
 	}
-	if target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID); ok {
+	if target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID, reqCtx.Region); ok {
 		return cfnPropagateRecordStackTags(state, target, dr, prev, next)
 	}
 	return cfnPropagateEC2StackTags(state, reqCtx, dr, prev, next)
 }
 
-// cfnPropagateRecordStackTags reconciles the tags on a record whose tags are a
-// `map[string]string`, which is the shape S3, Lambda, SQS and DynamoDB all keep them in.
+// cfnPropagateRecordStackTags reconciles the tags on a record [cfnResolveStampTarget] resolves,
+// whatever shape that record keeps its tags in.
 //
 // The existing set is read through [cfnRecordTags] rather than by unmarshaling the concrete
 // type, so this arm needs no per-service case of its own: the merge back is
@@ -132,11 +132,13 @@ func cfnPropagateRecordStackTags(
 
 // cfnRecordTags reads the tags off a stored record, reporting false when no record is there.
 //
-// The two spellings are both real: `S3Bucket` stores its tags as `"tags"` and Lambda's, SQS's
-// and DynamoDB's records as `"Tags"`. Decoding both members rather than switching on the
-// namespace keeps this from acquiring a second copy of [cfnResolveStampTarget]'s type switch,
-// which is the copy that could drift; a record carrying neither reads as untagged, which is
-// what an absent tag set is.
+// Both spellings of the member and both shapes of its contents are real, and decoding all four
+// combinations rather than switching on the namespace keeps this from acquiring a second copy of
+// [cfnResolveStampTarget]'s table, which is the copy that could drift. `S3Bucket` spells the
+// member `"tags"` and Lambda's, SQS's and DynamoDB's records spell it `"Tags"`; ECS keeps a
+// `[]ECSTag` and EFS a `[]EFSTag` where the rest keep a `map[string]string` (#819). A record
+// carrying neither member — or one whose tags are in a shape neither decode reaches — reads as
+// untagged, which is what an absent tag set is, rather than failing the whole reconciliation.
 func cfnRecordTags(state StateManager, target cfnStampTarget) (map[string]string, bool, error) {
 	raw, err := state.Get(context.Background(), target.namespace, target.stateKey)
 	if err != nil {
@@ -147,16 +149,59 @@ func cfnRecordTags(state StateManager, target cfnStampTarget) (map[string]string
 	}
 
 	var record struct {
-		Lower map[string]string `json:"tags"`
-		Upper map[string]string `json:"Tags"`
+		Lower json.RawMessage `json:"tags"`
+		Upper json.RawMessage `json:"Tags"`
 	}
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, false, fmt.Errorf("unmarshal %s/%s: %w", target.namespace, target.stateKey, err)
 	}
-	if record.Lower != nil {
-		return record.Lower, true, nil
+	member := record.Lower
+	if len(member) == 0 {
+		member = record.Upper
 	}
-	return record.Upper, true, nil
+	return cfnDecodeRecordTags(member), true, nil
+}
+
+// cfnDecodeRecordTags reads a record's tag member as a key/value map, in either of the two
+// shapes substrate's records keep tags in.
+//
+// A shape neither decode reaches reads as untagged rather than as an error, for the reason
+// [cfnRecordTags] gives: this feeds a reconciliation that must not fail a stack, and a record
+// whose tags cannot be read has none this can reconcile against either way.
+func cfnDecodeRecordTags(member json.RawMessage) map[string]string {
+	if len(member) == 0 {
+		return nil
+	}
+	var asMap map[string]string
+	if err := json.Unmarshal(member, &asMap); err == nil {
+		return asMap
+	}
+
+	// Both casings, because ECS marshals `key`/`value` and EFS `Key`/`Value`. One struct with
+	// four members rather than two decode attempts: the pair that is absent decodes as empty.
+	var asList []struct {
+		LowerKey   string `json:"key"`
+		LowerValue string `json:"value"`
+		UpperKey   string `json:"Key"`
+		UpperValue string `json:"Value"`
+	}
+	if err := json.Unmarshal(member, &asList); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(asList))
+	for _, tag := range asList {
+		key, value := tag.UpperKey, tag.UpperValue
+		if key == "" {
+			key, value = tag.LowerKey, tag.LowerValue
+		}
+		if key != "" {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // cfnPropagateEC2StackTags reconciles the tags on an EC2 resource.

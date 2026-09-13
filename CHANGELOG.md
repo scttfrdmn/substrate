@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CloudFormation stamps `aws:cloudformation:*` on nine more resource types** (#819). The stamp
+  reached six services; it now reaches fourteen, adding a Step Functions state machine, an ECR
+  repository, an ECS cluster, an EFS file system and access point, an ElastiCache cache cluster,
+  an RDS DB instance, a Kinesis stream and a Glue database. A stack tag propagated under #764
+  reaches the same nine, since both go through one resolver. What a consumer gets is what the
+  stamp exists for: an `aws:ResourceTag/aws:cloudformation:stack-name` condition, or a
+  cost-allocation assertion keyed on the stack, now matches these resources instead of silently
+  seeing an untagged one.
+
+  **Every one is verified through that service's own tag call**, not through the state store —
+  Step Functions', ECR's, ECS's, EFS's, ElastiCache's and RDS's `ListTagsForResource`, Kinesis'
+  `ListTagsForStream` and Glue's `GetTags`. That is the whole test, and #826 is why: a tag written
+  to a key the owning service does not read satisfies a state assertion and satisfies no caller.
+  So each type had two things checked against its plugin rather than inferred — that substrate's
+  shared tag writer already has a merge arm for the record, and that the physical ID
+  CloudFormation records is already exactly the identifier the plugin keys that record by. Sharing
+  the writer with the Resource Groups Tagging API is deliberate: a stamp and a `TagResources` call
+  cannot merge differently.
+
+  **Three services are now decided out of scope rather than pending** — IAM users and roles, API
+  Gateway v1/v2 APIs, and Cognito user pools. Each carries a tag field in its record that no
+  operation reads or writes, so a stamp would be an observation no API call could make, which is
+  outside substrate's emulation boundary. IAM has a second reason of its own: `TagRole` refuses an
+  `aws:`-prefixed key (#806), so the stamp would be a tag no caller could set or remove either.
+  Roughly twenty services that model no tag state at all stay deferred, on AWS's own licence —
+  propagation "varies by resource type", so there is no published list a partial cut falls short
+  of. Eleven further types that keep tag state but have no arm in the shared writer are #835; the
+  same gap keeps the Resource Groups Tagging API off them, so it is one defect with two symptoms
+  rather than a CloudFormation limitation. `docs/services.md` states all three decisions.
+
+  One thing widening the resolver required: the stack-tag reconciler reads a resource's current
+  tags before it decides which keys are the stack's, and ECS and EFS keep a tag *list* where every
+  service it previously reached keeps a map. It reads both shapes now, and an unreadable one reads
+  as untagged rather than failing — a stack does not fail because a tag could not be reconciled.
 - **IAM reports `PermissionsBoundaryUsageCount` on the policy shapes** (#815). AWS documents the
   member on the `Policy` data type — *"The number of entities (users and roles) for which the
   policy is used to set the permissions boundary"* — and the type's scope note says it "is used

@@ -208,6 +208,247 @@ func (f *cfnStampFixture) elbTagsFor(t *testing.T, arn string) []string {
 	return cfnSortedTagStrings(pairs)
 }
 
+// The nine readers below are #819's group 3a, each going through that service's own
+// tag-reading call for the reason the file header gives: a stamp written to a state key the
+// service does not read satisfies a state assertion and no caller.
+//
+// They are nine functions rather than one table because the calls genuinely differ — Step
+// Functions, ECR, ECS and Glue take a JSON body, Kinesis takes a stream *name* rather than an
+// ARN, RDS and ElastiCache take a query parameter named `ResourceName` and answer in XML, and
+// EFS puts the resource ID in the URL path — and flattening that into one helper would hide the
+// very differences a caller trips over.
+
+// stateMachineTagsFor reads one state machine's tags through Step Functions'
+// ListTagsForResource.
+func (f *cfnStampFixture) stateMachineTagsFor(t *testing.T, name string) []string {
+	t.Helper()
+	arn := "arn:aws:states:" + cfnStampRegion + ":" + cfnStampAccount + ":stateMachine:" + name
+	body, err := json.Marshal(map[string]string{"resourceArn": arn})
+	require.NoError(t, err)
+
+	resp, err := f.states.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "states",
+		Operation: "ListTagsForResource",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{"x-amz-target": "AWSStepFunctions.ListTagsForResource"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var doc struct {
+		Tags map[string]string `json:"tags"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
+	return cfnSortedTagStrings(doc.Tags)
+}
+
+// repositoryTagsFor reads one ECR repository's tags through ECR's ListTagsForResource.
+func (f *cfnStampFixture) repositoryTagsFor(t *testing.T, name string) []string {
+	t.Helper()
+	arn := "arn:aws:ecr:" + cfnStampRegion + ":" + cfnStampAccount + ":repository/" + name
+	body, err := json.Marshal(map[string]string{"resourceArn": arn})
+	require.NoError(t, err)
+
+	resp, err := f.ecr.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "ecr",
+		Operation: "ListTagsForResource",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var doc struct {
+		Tags map[string]string `json:"tags"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
+	return cfnSortedTagStrings(doc.Tags)
+}
+
+// clusterTagsFor reads one ECS cluster's tags through ECS's ListTagsForResource.
+//
+// ECS keeps a `[]ECSTag` rather than a map, spelled `key`/`value` in the record — the shape the
+// stamp's merge has to produce for this call to see it.
+func (f *cfnStampFixture) clusterTagsFor(t *testing.T, name string) []string {
+	t.Helper()
+	arn := "arn:aws:ecs:" + cfnStampRegion + ":" + cfnStampAccount + ":cluster/" + name
+	body, err := json.Marshal(map[string]string{"resourceArn": arn})
+	require.NoError(t, err)
+
+	resp, err := f.ecs.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "ecs",
+		Operation: "ListTagsForResource",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var doc struct {
+		Tags []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"tags"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
+
+	pairs := make(map[string]string, len(doc.Tags))
+	for _, tag := range doc.Tags {
+		pairs[tag.Key] = tag.Value
+	}
+	return cfnSortedTagStrings(pairs)
+}
+
+// efsTagsFor reads one EFS file system's or access point's tags through EFS's
+// ListTagsForResource, which is a GET on `/resource-tags/{id}`.
+//
+// One reader for both kinds, because EFS's own call takes the resource ID and decides from its
+// `fs-`/`fsap-` prefix which record to load — the two resolver arms have to agree with that
+// split, and a single reader is what proves they do.
+func (f *cfnStampFixture) efsTagsFor(t *testing.T, resourceID string) []string {
+	t.Helper()
+	require.NotEmpty(t, resourceID, "an EFS resource with no ID cannot be read back")
+	resp, err := f.efs.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "efs",
+		Operation: "GET",
+		Path:      "/2015-02-01/resource-tags/" + resourceID,
+		Params:    map[string]string{},
+		Headers:   map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var doc struct {
+		Tags []struct {
+			Key   string `json:"Key"`
+			Value string `json:"Value"`
+		} `json:"Tags"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
+
+	pairs := make(map[string]string, len(doc.Tags))
+	for _, tag := range doc.Tags {
+		pairs[tag.Key] = tag.Value
+	}
+	return cfnSortedTagStrings(pairs)
+}
+
+// cacheClusterTagsFor reads one ElastiCache cluster's tags through its ListTagsForResource,
+// which names the resource in a `ResourceName` query parameter rather than in a body.
+func (f *cfnStampFixture) cacheClusterTagsFor(t *testing.T, id string) []string {
+	t.Helper()
+	arn := "arn:aws:elasticache:" + cfnStampRegion + ":" + cfnStampAccount + ":cluster:" + id
+	resp, err := f.elasticache.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "elasticache",
+		Operation: "ListTagsForResource",
+		Params: map[string]string{
+			"Action":       "ListTagsForResource",
+			"ResourceName": arn,
+		},
+		Headers: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	return cfnTagListXMLStrings(t, resp.Body)
+}
+
+// dbInstanceTagsFor reads one RDS instance's tags through RDS's ListTagsForResource.
+func (f *cfnStampFixture) dbInstanceTagsFor(t *testing.T, id string) []string {
+	t.Helper()
+	arn := "arn:aws:rds:" + cfnStampRegion + ":" + cfnStampAccount + ":db:" + id
+	resp, err := f.rds.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "rds",
+		Operation: "ListTagsForResource",
+		Params: map[string]string{
+			"Action":       "ListTagsForResource",
+			"ResourceName": arn,
+		},
+		Headers: map[string]string{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	return cfnTagListXMLStrings(t, resp.Body)
+}
+
+// cfnTagListXMLStrings reads the `TagList` both RDS's and ElastiCache's ListTagsForResource
+// answer with, which is the one response shape two of the nine share.
+func cfnTagListXMLStrings(t *testing.T, body []byte) []string {
+	t.Helper()
+	var doc struct {
+		Tags []struct {
+			Key   string `xml:"Key"`
+			Value string `xml:"Value"`
+		} `xml:"ListTagsForResourceResult>TagList>Tag"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &doc), "ListTagsForResource body: %s", body)
+
+	pairs := make(map[string]string, len(doc.Tags))
+	for _, tag := range doc.Tags {
+		pairs[tag.Key] = tag.Value
+	}
+	return cfnSortedTagStrings(pairs)
+}
+
+// streamTagsFor reads one Kinesis stream's tags through ListTagsForStream, which takes the
+// stream's *name* — Kinesis has no ListTagsForResource.
+func (f *cfnStampFixture) streamTagsFor(t *testing.T, name string) []string {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"StreamName": name})
+	require.NoError(t, err)
+
+	resp, err := f.kinesis.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "kinesis",
+		Operation: "ListTagsForStream",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{"x-amz-target": "Kinesis_20131202.ListTagsForStream"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var doc struct {
+		Tags []struct {
+			Key   string `json:"Key"`
+			Value string `json:"Value"`
+		} `json:"Tags"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForStream body: %s", resp.Body)
+
+	pairs := make(map[string]string, len(doc.Tags))
+	for _, tag := range doc.Tags {
+		pairs[tag.Key] = tag.Value
+	}
+	return cfnSortedTagStrings(pairs)
+}
+
+// glueDatabaseTagsFor reads one Glue database's tags through Glue's GetTags, which is what Glue
+// calls its tag-reading operation.
+func (f *cfnStampFixture) glueDatabaseTagsFor(t *testing.T, name string) []string {
+	t.Helper()
+	arn := "arn:aws:glue:" + cfnStampRegion + ":" + cfnStampAccount + ":database/" + name
+	body, err := json.Marshal(map[string]string{"ResourceArn": arn})
+	require.NoError(t, err)
+
+	resp, err := f.glue.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "glue",
+		Operation: "GetTags",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{"x-amz-target": "AWSGlue.GetTags"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	var doc struct {
+		Tags map[string]string `json:"Tags"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body, &doc), "GetTags body: %s", resp.Body)
+	return cfnSortedTagStrings(doc.Tags)
+}
+
 // arnsByLogicalID maps each deployed resource's logical ID to its ARN, requiring every
 // resource to have deployed.
 func arnsByLogicalID(t *testing.T, result *emulator.DeployResult) map[string]string {
@@ -293,6 +534,129 @@ func TestCFN_StampReachesEveryServiceThatModelsTags(t *testing.T) {
 	t.Run("and the EC2 resource beside them still goes through EC2's resolver", func(t *testing.T) {
 		assert.Equal(t, want("Vpc"), f.tagsFor(t, ids["Vpc"]))
 	})
+}
+
+// cfnGroup3aTemplate is one resource of each of the nine types #819's group 3a added.
+//
+// A separate template from [cfnBeyondEC2Template] rather than nine more entries in it, because
+// that constant is shared with the stack-tag propagation tests and its resource count is
+// asserted on — and because these nine share one thing worth keeping in one place: each has a
+// tag record keyed `<kind>:<account>/<region>/<physical-id>`.
+//
+// The access point takes its file system through `Ref`, which is also the ordering constraint:
+// the deployer ranks `AWS::EFS::AccessPoint` behind `AWS::EFS::FileSystem`, so the ID the access
+// point needs exists by the time it is created.
+const cfnGroup3aTemplate = `{
+	"Resources": {
+		"Sm": {"Type": "AWS::StepFunctions::StateMachine", "Properties": {
+			"StateMachineName": "group3a-sm",
+			"RoleArn": "arn:aws:iam::123456789012:role/states-exec"}},
+		"Repo": {"Type": "AWS::ECR::Repository", "Properties": {
+			"RepositoryName": "group3a-repo"}},
+		"Cluster": {"Type": "AWS::ECS::Cluster", "Properties": {
+			"ClusterName": "group3a-cluster"}},
+		"Fs": {"Type": "AWS::EFS::FileSystem", "Properties": {
+			"CreationToken": "group3a-fs"}},
+		"Ap": {"Type": "AWS::EFS::AccessPoint", "Properties": {
+			"FileSystemId": {"Ref": "Fs"}}},
+		"Cache": {"Type": "AWS::ElastiCache::CacheCluster", "Properties": {
+			"ClusterId": "group3a-cache", "Engine": "redis",
+			"CacheNodeType": "cache.t3.micro", "NumCacheNodes": "1"}},
+		"Db": {"Type": "AWS::RDS::DBInstance", "Properties": {
+			"DBInstanceIdentifier": "group3a-db", "Engine": "mysql",
+			"DBInstanceClass": "db.t3.micro", "MasterUsername": "admin",
+			"AllocatedStorage": "20"}},
+		"Stream": {"Type": "AWS::Kinesis::Stream", "Properties": {"Name": "group3a-stream"}},
+		"GlueDb": {"Type": "AWS::Glue::Database", "Properties": {"DatabaseName": "group3a_db"}}
+	},
+	"Outputs": {"StackId": {"Value": {"Ref": "AWS::StackId"}}}
+}`
+
+// TestCFN_StampReachesGroup3A is #819's second acceptance criterion: the nine resource types
+// whose service has both a tagging surface and a [mergeResourceTags] arm, each read back
+// through that service's own tag-reading operation.
+//
+// One subtest per type rather than one for the stack, for the reason #746's and #765's
+// equivalents give: the stamp is written from a single table lookup, so a type the table does
+// not claim is skipped in silence and only a per-type assertion catches it. The EFS pair is two
+// subtests for a sharper reason — both go through one `ListTagsForResource`, which decides from
+// the ID's prefix which of the two records to load, so an arm that named the wrong prefix would
+// read back empty rather than fail loudly.
+func TestCFN_StampReachesGroup3A(t *testing.T) {
+	f := newCFNStampFixture(t, nil)
+	const stackName = "group3a-stack"
+
+	result, err := f.deployer.Deploy(context.Background(), cfnGroup3aTemplate, stackName, nil)
+	require.NoError(t, err)
+	ids := physicalIDs(t, result)
+	require.Len(t, ids, 9, "every resource in the template deployed")
+
+	stackID := result.Outputs["StackId"]
+	require.NotEmpty(t, stackID)
+	want := func(logicalID string) []string {
+		return cfnExpectedStamp(stackName, stackID, logicalID)
+	}
+
+	t.Run("Step Functions state machine", func(t *testing.T) {
+		assert.Equal(t, want("Sm"), f.stateMachineTagsFor(t, ids["Sm"]))
+	})
+	t.Run("ECR repository", func(t *testing.T) {
+		assert.Equal(t, want("Repo"), f.repositoryTagsFor(t, ids["Repo"]))
+	})
+	t.Run("ECS cluster", func(t *testing.T) {
+		assert.Equal(t, want("Cluster"), f.clusterTagsFor(t, ids["Cluster"]))
+	})
+	t.Run("EFS file system", func(t *testing.T) {
+		assert.Equal(t, want("Fs"), f.efsTagsFor(t, ids["Fs"]))
+	})
+	t.Run("EFS access point", func(t *testing.T) {
+		assert.Equal(t, want("Ap"), f.efsTagsFor(t, ids["Ap"]))
+	})
+	t.Run("ElastiCache cache cluster", func(t *testing.T) {
+		assert.Equal(t, want("Cache"), f.cacheClusterTagsFor(t, ids["Cache"]))
+	})
+	t.Run("RDS DB instance", func(t *testing.T) {
+		assert.Equal(t, want("Db"), f.dbInstanceTagsFor(t, ids["Db"]))
+	})
+	t.Run("Kinesis stream", func(t *testing.T) {
+		assert.Equal(t, want("Stream"), f.streamTagsFor(t, ids["Stream"]))
+	})
+	t.Run("Glue database", func(t *testing.T) {
+		assert.Equal(t, want("GlueDb"), f.glueDatabaseTagsFor(t, ids["GlueDb"]))
+	})
+}
+
+// TestCFN_AStackTagReachesGroup3A is the other half of what widening the resolver does: the same
+// table drives #764's stack-tag propagation, so a stack tag now reaches the nine as well.
+//
+// It is asserted for ECS and EFS in particular, not for symmetry. Those two keep their tags as a
+// `[]ECSTag`/`[]EFSTag` where every service the propagation path previously reached keeps a
+// `map[string]string`, so the reader behind it had to learn the list shape — and a reader that
+// had not would have reported the record unreadable and logged a warning per resource per
+// update, while the tag itself never arrived.
+func TestCFN_AStackTagReachesGroup3A(t *testing.T) {
+	logger := &cfnRecordingLogger{}
+	f := newCFNStampFixtureWithLogger(t, nil, logger)
+	const stackName = "group3a-tagged-stack"
+	stackTags := map[string]string{"team": "platform"}
+
+	result, err := f.deployer.DeployWithOptions(context.Background(), cfnGroup3aTemplate,
+		stackName, nil, emulator.CFNDeployOptions{Tags: stackTags})
+	require.NoError(t, err)
+	ids := physicalIDs(t, result)
+	stackID := result.Outputs["StackId"]
+	require.NotEmpty(t, stackID)
+
+	want := func(logicalID string) []string {
+		return append(cfnExpectedStamp(stackName, stackID, logicalID), "team=platform")
+	}
+
+	assert.Equal(t, want("Cluster"), f.clusterTagsFor(t, ids["Cluster"]))
+	assert.Equal(t, want("Fs"), f.efsTagsFor(t, ids["Fs"]))
+	assert.Equal(t, want("Ap"), f.efsTagsFor(t, ids["Ap"]))
+	assert.Equal(t, want("Db"), f.dbInstanceTagsFor(t, ids["Db"]))
+	assert.NotContains(t, logger.joined(), "could not propagate",
+		"a record whose tags are a list is reconciled, not reported unreadable")
 }
 
 // TestCFN_StampReachesAListenerAndARule covers the two ELBv2 kinds whose parent ARN a template
