@@ -492,7 +492,7 @@ func TestCFN_ELBListenerAndRule(t *testing.T) {
 			"MyListener": {
 				"Type": "AWS::ElasticLoadBalancingV2::Listener",
 				"Properties": {
-					"LoadBalancerArn": {"Fn::GetAtt": ["MyLB", "Arn"]},
+					"LoadBalancerArn": {"Fn::GetAtt": ["MyLB", "LoadBalancerArn"]},
 					"Protocol": "HTTP",
 					"Port": "80"
 				}
@@ -500,7 +500,7 @@ func TestCFN_ELBListenerAndRule(t *testing.T) {
 			"MyRule": {
 				"Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
 				"Properties": {
-					"ListenerArn": {"Fn::GetAtt": ["MyListener", "Arn"]},
+					"ListenerArn": {"Fn::GetAtt": ["MyListener", "ListenerArn"]},
 					"Priority": "10"
 				}
 			}
@@ -512,6 +512,13 @@ func TestCFN_ELBListenerAndRule(t *testing.T) {
 	assert.Len(t, result.Resources, 4)
 }
 
+// TestCFN_Route53RecordSetGroup deploys a record set and a record set group into a hosted zone.
+//
+// Both name the zone with `Ref`, which is what AWS documents as returning a hosted zone's ID —
+// AWS::Route53::HostedZone documents only `Id` and `NameServers` as Fn::GetAtt attributes, and no
+// `Arn` at all. This asked for `!GetAtt MyZone.Arn` until #827, which resolved to the zone *name*
+// because the resolver answered any unrecognized attribute with the physical ID; the deploy passed
+// regardless, since nothing here reads the HostedZoneId back.
 func TestCFN_Route53RecordSetGroup(t *testing.T) {
 	d := newV016FullDeployer(t)
 	tmpl := `{
@@ -526,7 +533,7 @@ func TestCFN_Route53RecordSetGroup(t *testing.T) {
 			"MyRecordSet": {
 				"Type": "AWS::Route53::RecordSet",
 				"Properties": {
-					"HostedZoneId": {"Fn::GetAtt": ["MyZone", "Arn"]},
+					"HostedZoneId": {"Ref": "MyZone"},
 					"Name": "api.testzone.com",
 					"Type": "A",
 					"TTL": "300",
@@ -536,7 +543,7 @@ func TestCFN_Route53RecordSetGroup(t *testing.T) {
 			"MyRecordSetGroup": {
 				"Type": "AWS::Route53::RecordSetGroup",
 				"Properties": {
-					"HostedZoneId": {"Fn::GetAtt": ["MyZone", "Arn"]},
+					"HostedZoneId": {"Ref": "MyZone"},
 					"RecordSets": [
 						{
 							"Name": "www.testzone.com",
@@ -760,7 +767,8 @@ func TestCFN_GetAttNewAttributes(t *testing.T) {
 			"KeyArn":    {"Value": {"Fn::GetAtt": ["MyKey", "Arn"]}},
 			"KeyArn2":   {"Value": {"Fn::GetAtt": ["MyKey", "KeyArn"]}},
 			"TopicArn":  {"Value": {"Fn::GetAtt": ["MyTopic", "TopicArn"]}},
-			"ParamVal":  {"Value": {"Fn::GetAtt": ["MyParam", "Value"]}}
+			"ParamVal":  {"Value": {"Fn::GetAtt": ["MyParam", "Value"]}},
+			"ParamType": {"Value": {"Fn::GetAtt": ["MyParam", "Type"]}}
 		}
 	}`
 
@@ -769,8 +777,12 @@ func TestCFN_GetAttNewAttributes(t *testing.T) {
 	assert.NotEmpty(t, result.Outputs["KeyArn"])
 	assert.NotEmpty(t, result.Outputs["KeyArn2"])
 	assert.NotEmpty(t, result.Outputs["TopicArn"])
-	// ParamVal GetAtt returns the parameter name (physical ID).
-	assert.Equal(t, "/getatt/test", result.Outputs["ParamVal"])
+	// "Value — Returns the value of the parameter." This asserted the parameter *name*
+	// until #827: the resolver answered every unrecognized attribute with the physical ID,
+	// and for an SSM parameter that is the name. The value and the name are both plausible
+	// strings, which is why the wrong one went unnoticed here.
+	assert.Equal(t, "param-value", result.Outputs["ParamVal"])
+	assert.Equal(t, "String", result.Outputs["ParamType"])
 }
 
 // TestCFN_ResolveValueTypes tests that resolveValue handles numeric, bool, and

@@ -101,6 +101,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns the subscription's logical name", a value the template already has, and substrate
   deliberately keeps returning the subscription ARN.
 
+- **`Fn::GetAtt` keys on the resource type as well as the attribute name** (#827). The resolver
+  switched on the **attribute name alone**, which is the mirror image of the `Ref` defect above: an
+  attribute name two services share resolved with the wrong service's rule, and every attribute the
+  switch did not recognise fell through to the resource's physical ID.
+
+  What that answered:
+
+  - `!GetAtt bucket.Arn` returned the bucket **name**. The `Arn` arm fell back to the physical ID
+    when no ARN had been recorded, and no ARN was recorded for an S3 bucket, an SSM parameter, a
+    CloudWatch alarm or a log group.
+  - `!GetAtt bucket.DomainName` returned the name too — `DomainName` was CloudFront's arm — and
+    `RegionalDomainName`, `DualStackDomainName` and `WebsiteURL` matched nothing at all.
+  - `!GetAtt param.Value` returned an SSM parameter's **name**, where AWS documents "returns the
+    value of the parameter". A test in the tree asserted that wrong value.
+  - `!GetAtt lb.DNSName` returned the load balancer's name; `!GetAtt zone.Arn` on a hosted zone,
+    which documents no `Arn` at all, returned the zone name.
+
+  **An attribute the resolver cannot answer now resolves to empty**, never to the physical ID —
+  generalizing the rule the `Config::ConfigRule` arm already stated to the whole resolver, for its
+  reason: a bare name where an ARN, a URL or a stored value belongs is a plausible-looking wrong
+  answer that a stack `Output` carries and a test asserts against happily, while an empty string is
+  distinguishable from a real value.
+
+  Resolution answers only from a fact, in three steps: a per-type rule; then the attribute's own
+  name in the metadata the deploy helper recorded; then the resource's own ARN **when the
+  attribute's name says it returns one**. That last step is a check on the attribute's spelling
+  rather than a table of 113 resource types, which is why `LoadBalancerArn`, `ListenerArn`,
+  `RuleArn`, `TopicArn`, `TaskDefinitionArn`, `ServiceArn` and FSx's `ResourceARN` all resolve
+  without a rule each. A plural `…Arns` is a list, not a string, and a **dotted** name is a
+  *member's* ARN rather than the resource's — an RDS instance's `MasterUserSecret.SecretArn` is the
+  secret's — so neither is matched.
+
+  The per-type rules and the attributes each one covers are tabulated in `docs/services.md`. New
+  values: an S3 bucket's `Arn` and its three domain names and `WebsiteURL`; a log group's `Arn`
+  **with the trailing `:*`** AWS's example carries, built by the same function the Logs API's own
+  `arn` member uses; an ELBv2 load balancer's `DNSName`, `LoadBalancerName` and
+  `LoadBalancerFullName` and a target group's `TargetGroupName` and `TargetGroupFullName`; a topic's
+  `TopicName`; a queue's `QueueName` and `QueueUrl`; a secret's `Id` (which for that type *is* the
+  ARN); a Glue database's `CatalogId`; an ECS service's and an API Gateway stage's `Name`; a Cognito
+  pool's `UserPoolId`; an HTTP API's `ApiId` and `ApiEndpoint`; an AppSync API's `ApiId`; an
+  ElastiCache cluster's `RedisEndpoint.*` under AWS's documented spelling rather than the
+  `RedisEndPoint` the ElastiCache API uses; and an SSM parameter's `Type` and `Value`.
+
+  Two attributes resolve to **empty deliberately**, because the generic ARN rule would otherwise
+  answer with the wrong resource's ARN wearing the right shape: a DynamoDB table's `StreamArn` is
+  the *stream's*, and an AppSync API's `GraphQLEndpointArn` is the *endpoint's*. An attribute AWS
+  documents that substrate models nothing for — an ELBv2 load balancer's `CanonicalHostedZoneID` —
+  is absent from the rules for the same reason and reads as empty.
+
+  An S3 bucket's domain names and an HTTP API's endpoint name **AWS's** hostnames rather than
+  substrate's, unlike a queue's `Ref`: they are values a template hands to another resource, not
+  endpoints the emulator serves, so there is no request for a substrate-local form to satisfy.
+
+  `DeployedResource.ARN` is now populated for an S3 bucket and an SSM parameter, built by the same
+  function the owning plugin builds it with, and its doc comment — which still described the field
+  as populated for IAM resources and empty for S3 — was rewritten to say what it actually holds and
+  what reads it. The S3 ARN builder replaces two hand-rolled `"arn:aws:s3:::" + name` sites.
+
 - **An SQS queue is addressed by one state key, by every reader** (#826). The SQS plugin stores a
   queue under `queue:{account}/{name}` — its key helper takes the last two components of a queue
   URL, and a queue URL's penultimate component is the account. Two readers dropped the account and

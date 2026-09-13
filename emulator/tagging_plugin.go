@@ -283,7 +283,7 @@ func (p *TaggingPlugin) scanS3Buckets(_ context.Context, _ *RequestContext) ([]r
 			continue
 		}
 		out = append(out, resourceTagMapping{
-			ResourceARN: "arn:aws:s3:::" + b.Name,
+			ResourceARN: s3BucketARN(b.Name),
 			Tags:        mapToTaggingTags(b.Tags),
 		})
 	}
