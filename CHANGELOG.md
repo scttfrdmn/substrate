@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **IAM reports `PermissionsBoundaryUsageCount` on the policy shapes** (#815). AWS documents the
+  member on the `Policy` data type — *"The number of entities (users and roles) for which the
+  policy is used to set the permissions boundary"* — and the type's scope note says it "is used
+  as a response element in the CreatePolicy, GetPolicy, and ListPolicies operations", with no
+  per-operation carve-out of the kind `Description` carries. `ListPolicies`' own sample response
+  renders a count on every member, two of them non-zero. #807 rendered every other documented
+  member of the shape and recorded this one as its stated cost; this is that cost paid. All three
+  operations report it now, always rendered rather than omitted at zero — a policy no entity uses
+  as a boundary has a count, and it is zero.
+
+  **The count is derived on every read rather than stored.** Substrate keeps a boundary as an ARN
+  on the entity (`IAMUser`, `IAMRole`) and not as a back-reference on the policy, so a read counts
+  it by scanning the account's users and roles. Deriving it makes three of the issue's criteria
+  hold by construction instead of by maintenance: the count reaches zero when the last boundary is
+  removed, `DeleteUser`/`DeleteRole` decrement it because they delete the whole entity record and
+  the boundary goes with it, and a replayed run reports the live run's count because the count is a
+  function of the state replay rebuilds rather than an accumulator that has to end up agreeing with
+  one accumulated live. A counter on the policy would instead have to be maintained across the four
+  `Put*`/`Delete*PermissionsBoundary` operations *and* both entity deletes, where missing any one
+  path reports a count that is then wrong forever.
+
+  The performance cost the issue names — `ListPolicies` at O(policies × entities) — is avoided by
+  hoisting the scan to **one per request**: each operation counts every ARN in a single pass and
+  hands the map to the renderer, so a read is O(policies + entities). Threading the count as an
+  argument rather than assigning it to a field also keeps a bundled AWS managed policy countable
+  without mutating the shared catalog entry, which matters because a fresh emulator's only
+  available boundary ARNs are bundled ones.
+
 ### Fixed
 - **`Ref` resolves to the value AWS documents for that resource type** (#827). CloudFormation's
   `Ref` does not return one kind of value: each type's Template Reference "Return values" section

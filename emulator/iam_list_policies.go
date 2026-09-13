@@ -101,6 +101,15 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, err
 	}
 
+	// PermissionsBoundaryUsageCount is hoisted for the same reason, and matters more here: the
+	// scan is over users and roles, so counting per policy would repeat it once per member and
+	// make the listing O(policies × entities) — the cost #815 names. One scan makes it
+	// O(policies + entities).
+	boundaryUsage, err := p.iamBoundaryUsageCounts(goCtx, ctx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
 	byARN := make(map[string]*IAMPolicy, len(candidates))
 	arns := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -134,7 +143,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		policies = append(policies, byARN[arn])
 	}
 
-	xmlStr := iamPolicyListXML(policies) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
+	xmlStr := iamPolicyListXML(policies, boundaryUsage) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
 		xmlStr += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
