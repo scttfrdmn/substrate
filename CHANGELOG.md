@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **An SQS queue is addressed by one state key, by every reader** (#826). The SQS plugin stores a
+  queue under `queue:{account}/{name}` — its key helper takes the last two components of a queue
+  URL, and a queue URL's penultimate component is the account. Two readers dropped the account and
+  addressed `queue:{name}`, a key no queue is ever stored at, and they had each derived it
+  separately:
+
+  - The Resource Groups Tagging API's ARN resolver, so `TagResources` on a real queue created a
+    phantom record and answered `200`. `ListQueueTags` then reported nothing, and `GetResources`
+    reported the real queue with no tags — while the tags sat in a record nothing reads.
+  - The authorizer, which took the last component of the request's `QueueUrl`, so it published no
+    `aws:ResourceTag/*` at all for an SQS request. A condition on one was unsatisfiable, which is
+    the dangerous direction: an explicit `Deny` scoped by resource tag silently allowed.
+
+  The authorizer now calls the SQS plugin's own key helper rather than re-deriving the key, which
+  is what stops the two drifting apart again. The tagging resolver takes the account from the
+  **ARN**, as the IAM and EC2 arms do, so an ARN naming another account resolves that account's
+  queue or none and lands in `FailedResourcesMap` — rather than silently tagging the caller's own
+  same-named queue, which would succeed against the wrong resource.
+
+  Every other service's arm was audited against its plugin's key in the same pass and they all
+  agree — S3, Lambda, DynamoDB, EC2, IAM users and roles, API Gateway, Step Functions, ECR, ECS,
+  Cognito, Kinesis, RDS, ElastiCache, EFS (both kinds) and Glue's four. SQS was the only
+  divergence.
+
+  Three test fixtures seeded the wrong key themselves, which is why both paths were covered and
+  both passed: the tagging suite's SQS helper — the only one of thirteen using a key its own
+  service does not — and the SQS ABAC test. The new tests go through `CreateQueue`, `TagQueue`,
+  `ListQueueTags`, `TagResources` and `GetResources` rather than through state, because state
+  agreeing with a test that no caller agrees with is the whole defect.
+
 ## [v0.113.0] - 2026-09-12
 
 ### Added

@@ -7279,6 +7279,35 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 Scanned resource types: S3 buckets, Lambda functions, SQS queues, DynamoDB
 tables, EC2 instances, IAM users, IAM roles.
 
+### An ARN resolves to the state key its own service uses
+
+`TagResources` and `UntagResources` take an ARN and have to reach the record the
+owning service reads. That is not automatic: the ARN and the state key are
+derived separately, and where they disagree a tag is written to a record nothing
+reads — the call answers `200`, the service reports no tag, and an
+`aws:ResourceTag` condition on the resource never matches.
+
+That is what happened for SQS until #826. A queue is stored under
+`queue:{account}/{name}`, because the SQS plugin keys on the last two components
+of a queue URL, but the ARN resolver dropped the account and addressed
+`queue:{name}`. The authorizer derived the same key a third way, from the last
+component of the request's `QueueUrl`, and so had the same blind spot: every
+`aws:ResourceTag/*` condition on an SQS request was unsatisfiable, which turns
+an explicit `Deny` into a silent allow. Both now address
+`queue:{account}/{name}`, and the authorizer calls the SQS plugin's own key
+helper rather than re-deriving it.
+
+Every other service's arm was audited against its plugin's key at the same time
+and they all agree: S3, Lambda, DynamoDB, EC2, IAM (users and roles), API
+Gateway, Step Functions, ECR, ECS, Cognito, Kinesis, RDS, ElastiCache, EFS (file
+systems and access points) and Glue's four types. SQS was the only divergence.
+
+The account in a key comes from the **ARN**, not from the calling request, for
+SQS as for IAM and EC2. An ARN naming another account therefore resolves that
+account's resource or none at all, and appears in `FailedResourcesMap` — rather
+than silently tagging the caller's own same-named resource, which would succeed
+against the wrong thing.
+
 ### Cost
 
 Resource Groups Tagging API operations are free.

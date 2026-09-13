@@ -1220,16 +1220,16 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		tags = fn.Tags
 
 	case "sqs":
-		qurl := strings.TrimRight(req.Params["QueueUrl"], "/")
-		if qurl == "" {
+		qurl := req.Params["QueueUrl"]
+		if strings.TrimRight(qurl, "/") == "" {
 			return nil
 		}
-		parts := strings.Split(qurl, "/")
-		name := parts[len(parts)-1]
-		if name == "" {
-			return nil
-		}
-		raw, err := a.state.Get(goCtx, sqsNamespace, "queue:"+name)
+		// [sqsURLKey] rather than a second derivation of the same thing: this arm used to take
+		// the last URL component alone, which is not the key the SQS plugin stores a queue at,
+		// so no request against a real queue ever published a tag and every aws:ResourceTag
+		// condition on one was unsatisfiable (#826). Calling the plugin's own helper is what
+		// stops the two drifting apart again.
+		raw, err := a.state.Get(goCtx, sqsNamespace, "queue:"+sqsURLKey(qurl))
 		if err != nil || raw == nil {
 			return nil
 		}
