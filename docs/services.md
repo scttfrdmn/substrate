@@ -938,6 +938,72 @@ does not exist in substrate to return:
   `AWS::Backup::BackupPlan` — conditionally or self-consistently correct as they
   stand.
 
+#### What `Fn::GetAtt` returns
+
+**`Fn::GetAtt` keys on the resource type *and* the attribute name.** It used to key on
+the attribute name alone, which is the mirror image of the `Ref` defect above: an
+attribute name two services share resolved with the wrong service's rule, and everything
+unrecognised fell through to the physical ID (#827). `!GetAtt bucket.Arn` answered the
+bucket **name**, because a bucket had no recorded ARN and the `Arn` arm fell back;
+`!GetAtt bucket.DomainName` answered the name too, because `DomainName` was
+CloudFront's arm; `!GetAtt param.Value` answered an SSM parameter's **name** where AWS
+documents "returns the value of the parameter"; and `!GetAtt lb.DNSName` had no arm at
+all.
+
+**An attribute the resolver cannot answer resolves to empty**, never to the physical ID.
+This generalises the rule the `AWS::Config::ConfigRule` arm already stated to the whole
+resolver, for its reason: a bare name where an ARN, a URL or a stored value belongs is a
+plausible-looking wrong answer, which a stack `Output` carries and a test asserts against
+happily, while an empty string is distinguishable from a real value. So an attribute AWS
+documents but substrate models nothing for — an ELBv2 load balancer's
+`CanonicalHostedZoneID`, a DynamoDB table's `StreamArn` when the table has no stream —
+reads as empty rather than as something plausible.
+
+Resolution answers only from a fact, in three steps:
+
+1. **A per-type rule**, for the attributes whose value is specific to the type.
+2. **The attribute's own name in the resource's recorded metadata**, which is the channel
+   every deploy helper already records a resolvable attribute through — `RepositoryUri`,
+   `Endpoint.Address`, `InvokeURL`, `ProviderName`, `AllocationId`, `ConfigRuleId`.
+3. **The resource's own ARN, when the attribute's name says it returns one** — a check on
+   the attribute's spelling rather than a table of 113 resource types, which is why
+   `LoadBalancerArn`, `ListenerArn`, `RuleArn`, `TopicArn`, `TaskDefinitionArn`,
+   `ServiceArn` and FSx's `ResourceARN` all resolve without a rule each. A plural
+   `…Arns` is a list, not a string, and is not matched; neither is a **dotted** name,
+   because a nested path names a *member's* ARN rather than the resource's — an RDS
+   instance's `MasterUserSecret.SecretArn` is the secret's.
+
+The per-type rules, each carrying the value the type's own "Return values" section
+documents:
+
+| Resource type | Attributes |
+|---|---|
+| `AWS::S3::Bucket` | `DomainName`, `RegionalDomainName`, `DualStackDomainName`, `WebsiteURL` — built from the bucket name and the region, in AWS's own forms |
+| `AWS::Logs::LogGroup` | `Arn` — with the trailing `:*` AWS's example carries, built by the same function the Logs API's own `arn` member uses |
+| `AWS::ElasticLoadBalancingV2::LoadBalancer` | `LoadBalancerName`, `LoadBalancerFullName` (`app/name/id`) |
+| `AWS::ElasticLoadBalancingV2::TargetGroup` | `TargetGroupName`, `TargetGroupFullName` (`targetgroup/name/id`) |
+| `AWS::SNS::Topic` | `TopicName` — off the end of the ARN, since a topic's physical ID *is* its ARN |
+| `AWS::SQS::Queue` | `QueueName`, `QueueUrl` — the same URL `Ref` resolves to, from the same builder |
+| `AWS::SecretsManager::Secret` | `Id` — which for this type is the ARN, not an opaque identifier |
+| `AWS::Glue::Database` | `CatalogId` — the deploying account |
+| `AWS::ECS::Service`, `AWS::ApiGateway::Stage` | `Name` |
+| `AWS::Cognito::UserPool` | `UserPoolId` |
+| `AWS::ApiGatewayV2::Api` | `ApiId`, `ApiEndpoint` (`https://{id}.execute-api.{region}.amazonaws.com`) |
+| `AWS::AppSync::GraphQLApi` | `ApiId`; `GraphQLEndpointArn` is empty — it is the *endpoint's* ARN, not the API's |
+| `AWS::ElastiCache::CacheCluster` | `RedisEndpoint.Address`, `RedisEndpoint.Port` — AWS's documented spelling, translated to the `RedisEndPoint` the ElastiCache API uses |
+| `AWS::DynamoDB::Table` | `StreamArn` — empty unless a stream was recorded, so the table's own ARN is not returned in its place |
+| `AWS::SSM::Parameter` | `Type` and `Value`, recorded at deploy time |
+
+An S3 bucket's four domain names and an HTTP API's endpoint name **AWS's** hostnames
+rather than substrate's, unlike a queue's `Ref`: they are values a template hands to
+another resource — a CloudFront origin, a redirect target — not endpoints the emulator
+serves, so there is no request for a substrate-local form to satisfy. Where a value is
+an endpoint the caller then *uses*, the emulator's own is returned instead.
+
+An attribute of a resource the template does not declare still resolves to
+`{LogicalID}.{Attribute}`, which names the mistake rather than hiding it as an empty
+string.
+
 #### `Mappings` and `Fn::FindInMap`
 
 A template's `Mappings` section is read and `Fn::FindInMap` resolves all three

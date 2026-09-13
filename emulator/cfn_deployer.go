@@ -2947,6 +2947,11 @@ func (d *StackDeployer) deployS3Bucket(
 		LogicalID:  logicalID,
 		Type:       "AWS::S3::Bucket",
 		PhysicalID: bucketName,
+		// CreateBucket returns no body to read an ARN out of, and an S3 bucket ARN carries
+		// no region or account, so it is a pure function of the name — built by the same
+		// s3BucketARN the tagging API reports and an event notification embeds, so
+		// `!GetAtt Bucket.Arn` cannot disagree with either (#827).
+		ARN: s3BucketARN(bucketName),
 	}
 	if routeErr != nil {
 		// Recorded on the resource, not returned — a returned error aborts the
@@ -3665,6 +3670,10 @@ func (d *StackDeployer) deployELBLoadBalancer(
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
 		dr.ARN = extractXMLField(resp.Body, "LoadBalancerArn")
+		// GetAtt DNSName. Read out of the response the plugin already renders it in rather
+		// than rebuilt here, so a template's DNS name is the one describe-load-balancers
+		// reports for the same balancer.
+		cfnSetMetadata(&dr, "DNSName", extractXMLField(resp.Body, "DNSName"))
 	}
 	return dr, cost, nil
 }
@@ -4098,6 +4107,22 @@ func (d *StackDeployer) deploySSMParameter(
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::SSM::Parameter", PhysicalID: name}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
+	} else {
+		// PutParameter's response carries no ARN, so it is built here by ssmParameterARN — the
+		// same function the SSM plugin stores on the parameter record, applied to the same
+		// leading-slash normalization PutParameter applies before storing it, so the ARN a
+		// template resolves is the one GetParameter answers with (#827).
+		slashed := name
+		if !strings.HasPrefix(slashed, "/") {
+			slashed = "/" + slashed
+		}
+		dr.ARN = ssmParameterARN(cctx.region, cctx.accountID, slashed)
+		// GetAtt Type and Value. "Value — Returns the value of the parameter": the resolver
+		// used to answer this attribute with the physical ID, which is the parameter's *name*
+		// (#827). Recorded from what was sent rather than read back, because PutParameter's
+		// response carries only a version.
+		cfnSetMetadata(&dr, "Type", fmt.Sprintf("%v", body["Type"]))
+		cfnSetMetadata(&dr, "Value", value)
 	}
 	return dr, cost, nil
 }
@@ -5650,97 +5675,15 @@ func resolveFnGetAtt(args interface{}, cctx *cfnContext) string {
 		return ""
 	}
 	if dr, ok := cctx.resources[logicalID]; ok {
-		switch attr {
-		case "Arn", "KeyArn":
-			if dr.ARN != "" {
-				return dr.ARN
-			}
-			return dr.PhysicalID
-		case "TopicArn":
-			// AWS::SNS::Topic GetAtt TopicArn returns the ARN.
-			if dr.ARN != "" {
-				return dr.ARN
-			}
-			return dr.PhysicalID
-		case "Value":
-			// AWS::SSM::Parameter GetAtt Value — physical ID is the parameter name.
-			return dr.PhysicalID
-		case "RootResourceId":
-			// AWS::ApiGateway::RestApi GetAtt RootResourceId — stored as extra in PhysicalID with prefix.
-			if strings.HasPrefix(dr.PhysicalID, "root:") {
-				return strings.TrimPrefix(dr.PhysicalID, "root:")
-			}
-			// Fallback: the metadata map stores it separately.
-			if v, ok := dr.Metadata["RootResourceId"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		case "InvokeURL":
-			// AWS::ApiGateway::Stage GetAtt InvokeURL.
-			if v, ok := dr.Metadata["InvokeURL"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		case "Name":
-			// AWS::StepFunctions::StateMachine GetAtt Name.
-			if v, ok := dr.Metadata["Name"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		case "RepositoryUri":
-			// AWS::ECR::Repository GetAtt RepositoryUri.
-			if v, ok := dr.Metadata["RepositoryUri"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.ARN
-		case "ProviderName":
-			// AWS::Cognito::UserPool GetAtt ProviderName.
-			if v, ok := dr.Metadata["ProviderName"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		case "ProviderURL":
-			// AWS::Cognito::UserPool GetAtt ProviderURL.
-			if v, ok := dr.Metadata["ProviderURL"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		case "DomainName":
-			// AWS::CloudFront::Distribution GetAtt DomainName.
-			if v, ok := dr.Metadata["DomainName"]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		case "StreamArn":
-			// AWS::Kinesis::Stream GetAtt StreamArn.
-			if dr.ARN != "" {
-				return dr.ARN
-			}
-			return dr.PhysicalID
-		case "ConfigRuleId", "Compliance.Type":
-			// AWS::Config::ConfigRule GetAtt ConfigRuleId and Compliance.Type, both
-			// read back from the service at deploy time. Falling through to the
-			// default here would return the rule *name* for either one, which is a
-			// plausible-looking wrong answer: a stack Output carrying it would be
-			// asserted against happily. An unset attribute resolves to empty instead,
-			// which a test can tell apart from an ID.
-			if v, ok := dr.Metadata[attr]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return ""
-		case "Endpoint.Address", "Endpoint.Port",
-			"ConfigurationEndpoint.Address", "ConfigurationEndpoint.Port",
-			"RedisEndPoint.Address", "RedisEndPoint.Port",
-			"PrimaryEndPoint.Address", "PrimaryEndPoint.Port":
-			// AWS::RDS::DBInstance and AWS::ElastiCache::* endpoint GetAtts.
-			if v, ok := dr.Metadata[attr]; ok {
-				return fmt.Sprintf("%v", v)
-			}
-			return dr.PhysicalID
-		default:
-			return dr.PhysicalID
-		}
+		// Per-type resolution lives in cfn_intrinsics.go next to Ref's, because the two
+		// answer the same question — what value does *this* type report — and had drifted
+		// into two unrelated shapes: a switch on the type for one, a switch on the
+		// attribute name for the other (#827).
+		return cfnGetAttValue(dr, attr, cctx)
 	}
+	// An attribute of a resource the template does not declare. Left as "<logicalID>.<attr>"
+	// rather than resolved to empty: it names the mistake in the template, and it is the
+	// form the short-form !GetAtt tests assert both spellings agree on.
 	return logicalID + "." + attr
 }
 

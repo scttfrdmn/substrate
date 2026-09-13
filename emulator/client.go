@@ -23,7 +23,17 @@ type DeployedResource struct {
 	// PhysicalID is the actual name used (bucket name, role name, etc.).
 	PhysicalID string
 
-	// ARN is populated for IAM resources; empty for S3.
+	// ARN is the resource's ARN, empty for a type whose ARN the deploy did not yield.
+	//
+	// Most helpers read it out of the creating operation's own response. A few build it
+	// with the same function the owning plugin builds it with, because the operation
+	// returns no body to read it from — an S3 bucket, an SSM parameter, a CloudWatch
+	// alarm, a log group. It stays empty for a type whose ARN is neither returned nor
+	// derivable, and for any resource that failed to create.
+	//
+	// It is read by Fn::GetAtt: an attribute documented as returning an ARN resolves to
+	// this field, and to empty rather than to PhysicalID when it is unset, because a bare
+	// name where an ARN belongs is a plausible-looking wrong answer (#827).
 	ARN string
 
 	// Error is non-empty if this resource failed to create.

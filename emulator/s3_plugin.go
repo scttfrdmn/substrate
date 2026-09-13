@@ -599,6 +599,20 @@ func (p *S3Plugin) headBucket(_ *RequestContext, _ *AWSRequest, bucket string) (
 	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{}}, nil
 }
 
+// s3BucketARN returns the ARN of a bucket.
+//
+// An S3 bucket ARN carries neither a region nor an account, because a bucket name is
+// globally unique — so unlike every other service's ARN this one is a pure function of
+// the name and needs no request context to build.
+//
+// It exists so the one string is built in one place: the CloudFormation deployer records
+// it as a bucket's ARN, the tagging API reports it, and an event notification embeds it.
+// buildS3ARN in authz.go deliberately does not call it — that one builds an ARN from a
+// request path, which may name an object as well as its bucket.
+func s3BucketARN(bucket string) string {
+	return "arn:aws:s3:::" + bucket
+}
+
 // s3BucketSubresourceKey returns the state key holding one of a bucket's
 // singleton sub-resource configurations, for each prefix in
 // [s3BucketSubresourcePrefixes].
@@ -3656,7 +3670,7 @@ func (p *S3Plugin) buildS3EventPayload(ctx *RequestContext, bucket, key, eventNa
 					"s3SchemaVersion": "1.0",
 					"bucket": map[string]interface{}{
 						"name": bucket,
-						"arn":  "arn:aws:s3:::" + bucket,
+						"arn":  s3BucketARN(bucket),
 					},
 					"object": map[string]interface{}{
 						"key":  key,
