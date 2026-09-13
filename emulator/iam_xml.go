@@ -198,14 +198,8 @@ func iamUserListXML(users []*IAMUser) string {
 
 // iamRoleXMLFields returns XML element content for an IAMRole (no wrapper tag).
 //
-// `RoleLastUsed` is documented on AWS's `Role` type and is **not modeled** (#816).
-// Substrate stores nothing to render: the member advances when the role is *assumed*, so
-// populating it means `AssumeRole` writing an IAM record — substrate's first write on a
-// path whose purpose is not to mutate — or a projection over the recorded `AssumeRole`
-// events, plus a nested response type and the request's region rather than the emulator's.
-// That is a design decision with a replay consequence, so it is its own issue rather than
-// a field set here. The member is omitted entirely, which is what AWS reports for a role
-// that has never been assumed.
+// `RoleLastUsed` is *not* rendered here; it is single-entity-only, via
+// [iamRoleLastUsedXML], for the reason that function documents.
 func iamRoleXMLFields(r *IAMRole) string {
 	var b strings.Builder
 	b.WriteString("<RoleId>")
@@ -258,9 +252,51 @@ func iamRoleXMLFields(r *IAMRole) string {
 	return b.String()
 }
 
+// iamRoleLastUsedXML renders a role's last use for a single-entity shape, and nothing at
+// all when it has never been assumed.
+//
+// Single-entity-only, and AWS scopes this member by naming its operations rather than by
+// leaving it to the listing note — from the `RoleLastUsed` data type (#816):
+//
+//	This data type is returned as a response element in the GetRole and
+//	GetAccountAuthorizationDetails operations.
+//
+// so it is called from [iamSingleRoleXML] and never from [iamRoleListXML] or
+// [iamRoleMembersXML]. `GetAccountAuthorizationDetails` is not among the operations
+// substrate answers, so `GetRole` is the whole of the member's reach here; if it is
+// implemented later it renders a role through this same wrapper and gains the member with
+// it. `ListRoles` excludes it by name, in the very sentence that already excludes
+// `PermissionsBoundary` and `Tags` — see [iamPermissionsBoundaryXML] for the note
+// verbatim. `CreateRole` and `CreateServiceLinkedRole` share this wrapper and render
+// nothing, because a role created a moment ago has not been assumed.
+//
+// Omitted entirely for a never-assumed role, and **that is substrate's choice rather than
+// AWS's**. AWS's page settles neither half of the question: `LastUsedDate` is documented
+// only as
+//
+//	This field is null if the role has not been used within the IAM tracking period.
+//
+// which is a statement about a *tracked* role falling out of the trailing 400 days, not
+// about a role never assumed at all; it says nothing about `Region` in that case, and
+// nothing about whether the structure itself is present. Both members are `Required: No`,
+// so omitting the wrapper is admissible, and it is the answer #816 asked for: a consumer
+// can then distinguish "not yet assumed" from "assumed", which a rendered wrapper holding
+// a zero date and an empty region could not express without inventing a value AWS never
+// publishes.
+func iamRoleLastUsedXML(lastUsed *IAMRoleLastUsed) string {
+	if lastUsed == nil {
+		return ""
+	}
+	return "<RoleLastUsed><LastUsedDate>" +
+		lastUsed.LastUsedDate.UTC().Format("2006-01-02T15:04:05Z") +
+		"</LastUsedDate><Region>" + xmlEsc(lastUsed.Region) +
+		"</Region></RoleLastUsed>"
+}
+
 // iamSingleRoleXML wraps role fields in a <Role> element.
 func iamSingleRoleXML(r *IAMRole) string {
-	return "<Role>" + iamRoleXMLFields(r) + iamPermissionsBoundaryXML(r.PermissionsBoundary) +
+	return "<Role>" + iamRoleXMLFields(r) + iamRoleLastUsedXML(r.RoleLastUsed) +
+		iamPermissionsBoundaryXML(r.PermissionsBoundary) +
 		iamEntityTagsXML(r.Tags) + "</Role>"
 }
 

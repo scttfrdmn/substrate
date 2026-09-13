@@ -40,6 +40,32 @@ type IAMRole struct {
 	AssumeRolePolicyDocument PolicyDocument     `json:"AssumeRolePolicyDocument"`
 	Tags                     []IAMTag           `json:"Tags,omitempty"`
 	PermissionsBoundary      *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
+
+	// RoleLastUsed records the last time the role was assumed, written by
+	// [STSPlugin.assumeRole] and reported by GetRole (#816).
+	//
+	// A pointer, and omitted when nil, because that is how a role that has never been
+	// assumed is represented: both members of AWS's `RoleLastUsed` are `Required: No`,
+	// so there is no value that means "never". A record written before #816 reads back
+	// with it nil, which is the same thing a never-assumed role is.
+	RoleLastUsed *IAMRoleLastUsed `json:"RoleLastUsed,omitempty"`
+}
+
+// IAMRoleLastUsed records when and where an IAM role was last assumed.
+//
+// It is AWS's `RoleLastUsed` structure, which that type's reference describes as
+// containing "information about the last time that an IAM role was used. This includes
+// the date and time and the Region in which the role was last used." Real IAM reports
+// only the trailing 400 days of activity; substrate keeps whatever the run recorded,
+// since a run is not 400 days long.
+type IAMRoleLastUsed struct {
+	// LastUsedDate is the simulated time at which the role was last assumed.
+	LastUsedDate time.Time `json:"LastUsedDate"`
+
+	// Region is the region of the AssumeRole request that last used the role — AWS
+	// documents it as "the name of the AWS Region in which the role was last used", so
+	// it is the request's region and not the emulator's configured one.
+	Region string `json:"Region"`
 }
 
 // IAMGroup represents an AWS IAM group entity.

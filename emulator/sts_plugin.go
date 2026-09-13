@@ -299,6 +299,10 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("store session credentials: %w", err)
 	}
 
+	if err := p.recordRoleLastUsed(goCtx, ctx, roleARN, roleName, &role, now); err != nil {
+		return nil, err
+	}
+
 	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName)
 
 	type xmlCreds struct {
@@ -340,6 +344,57 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 
 	return stsXMLResponse(http.StatusOK, resp)
+}
+
+// recordRoleLastUsed stamps the role's record with the time and region of this assume,
+// which is what `GetRole` reports as `RoleLastUsed` (#816).
+//
+// This is the one place substrate learns that a role was *used*: AWS's `RoleLastUsed`
+// advances on use, and an assume is the only use an emulator that models no workload can
+// observe. `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not implemented here,
+// so this is the single write site rather than one of three; adding either later must call
+// this too.
+//
+// It makes AssumeRole a writer of IAM state, which is worth naming: every other substrate
+// write follows from an operation whose purpose is to mutate, and this is an STS operation
+// mutating an IAM record. The role was already read at the top of [STSPlugin.assumeRole]
+// to evaluate its trust policy, so the stamp costs one Put and no extra Get, and it lands
+// after the session credentials are stored so that only an assume that actually succeeded
+// records a use — a refusal by the trust policy returns long before here.
+//
+// **A projection over the recorded `AssumeRole` events was considered and rejected.** The
+// direct write is replay-safe for the same reason a projection would be: [ReplayEngine]
+// re-executes each recorded request, setting the simulated clock to the event's timestamp
+// and the request context's region from the event, so a re-executed AssumeRole re-derives
+// `LastUsedDate` from that same simulated clock and `Region` from that same recorded
+// request, writes the identical value, and the state hash after the event agrees. What a
+// projection would add is a dependency no plugin has: [IAMPlugin] would need to hold an
+// *[EventStore] and scan it on every `GetRole`, which makes the answer to a read depend on
+// the event log rather than on state — the one thing state is for.
+//
+// The region is the *request's* (`RequestContext.Region`), per AWS's wording: `Region` is
+// "the name of the AWS Region in which the role was last used". The emulator's configured
+// region is not that; a caller signing for eu-west-1 used it there.
+func (p *STSPlugin) recordRoleLastUsed(
+	goCtx context.Context,
+	ctx *RequestContext,
+	roleARN, roleName string,
+	role *IAMRole,
+	now time.Time,
+) error {
+	role.RoleLastUsed = &IAMRoleLastUsed{
+		LastUsedDate: now.UTC(),
+		Region:       ctx.Region,
+	}
+
+	raw, err := json.Marshal(role)
+	if err != nil {
+		return fmt.Errorf("marshal role last used: %w", err)
+	}
+	if err := p.state.Put(goCtx, iamNamespace, iamRoleKey(arnAccountID(roleARN), roleName), raw); err != nil {
+		return fmt.Errorf("store role last used: %w", err)
+	}
+	return nil
 }
 
 // checkTrustPolicy evaluates a role's trust policy against the caller, returning
