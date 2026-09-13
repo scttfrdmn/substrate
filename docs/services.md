@@ -449,9 +449,9 @@ In tests, `StartTestServer` wires a registry with verification off, so
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
 | GetTemplate | Returns the stored `TemplateBody` byte-for-byte |
-| CreateChangeSet | `ChangeSetType=UPDATE` only; see below |
+| CreateChangeSet | `ChangeSetType=UPDATE` only; records `Tags`; see below |
 | DescribeChangeSet | Accepts a bare change-set name or its ARN |
-| ExecuteChangeSet | Applies the change and consumes the set |
+| ExecuteChangeSet | Applies the change and its tags, and consumes the set |
 | ListChangeSets | Pending change sets for a stack |
 | DeleteChangeSet | Discards a pending set; deleting an absent set succeeds |
 | DetectStackDrift | Returns a `StackDriftDetectionId` |
@@ -1326,6 +1326,42 @@ the stack family, which reports `ValidationError` at 400).
 `ChangeSetType=CREATE` is refused: it would have to produce a stack in
 `REVIEW_IN_PROGRESS`, a state the stack model has no representation for. Create
 the stack, then change-set the update.
+
+#### What a change set does with tags
+
+`CreateChangeSet` records its `Tags`, `DescribeChangeSet` reports them, and
+`ExecuteChangeSet` applies them to the stack and propagates them to the stack's
+resources ([#824](https://github.com/scttfrdmn/substrate/issues/824)). The
+parameter was decoded by nothing before, so a change set answered 200 and then
+executed as though the caller had asked for no tags — the one hole left when
+`CreateStack` and `UpdateStack` gained theirs.
+
+The three-way meaning is the family's, and it is `UpdateStack`'s wording because
+that is the operation an execution routes through: *"If you don't specify this
+parameter, CloudFormation doesn't modify the stack's tags. If you specify an empty
+value, CloudFormation removes all associated tags."* So a change set created
+without `Tags` leaves the stack's own tags exactly as they are — which is how every
+change set behaved before this — one created with an empty `Tags` clears them, and
+one created with tags replaces them wholesale.
+
+**The warrant for applying them on execution is `DescribeChangeSet`'s, not
+`ExecuteChangeSet`'s.** `API_ExecuteChangeSet` mentions tags nowhere at all: no
+request parameter, no response element, an empty result body. The only statement
+AWS makes about what executing a change set does with tags is the description of
+the member `DescribeChangeSet` reports — *"if you execute the change set, the tags
+that will be associated with the stack"* — and that is the sentence substrate
+implements.
+
+Tags are validated at **creation**, against the same limits `CreateStack` is held
+to (50 tags, a key of 1–128 characters, a value of 1–256, no case-insensitive
+`aws:` key prefix), because `CreateChangeSet` publishes the same constraints. A
+change set that could never execute is refused rather than recorded, and the
+refusal leaves no change set behind.
+
+`DescribeChangeSet`'s `Tags` member sits after `Parameters`, where `DescribeStacks`
+puts its own; AWS's page lists response elements alphabetically, so it does not
+settle wire order. A change set with no tags reports an empty `<Tags></Tags>`,
+matching the `Parameters` and `Changes` members beside it.
 
 ### Stack events are derived from the stack record
 

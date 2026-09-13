@@ -711,6 +711,25 @@ type CFNChangeSet struct {
 	// Changes lists the resource-level changes.
 	Changes []CFNResourceChange `json:"Changes"`
 
+	// Tags holds the stack-level tags the change set was created with, nil when it was
+	// created without the parameter (#824).
+	//
+	// `CreateChangeSet` documents the member exactly as `CreateStack` does — "key-value
+	// pairs to associate with this stack. CloudFormation also propagates these tags to
+	// resources in the stack" — and `DescribeChangeSet` says what executing it means:
+	// "if you execute the change set, the tags that will be associated with the stack".
+	// So the set is recorded here and applied by [StackDeployer.ExecuteChangeSet].
+	//
+	// **Not `omitempty`**, unlike [CFNStackState.Tags]. The three-way distinction the
+	// decoder draws — absent, empty, populated — has to survive the round trip through
+	// state, because it is read back at execution and handed to `UpdateStack`, where nil
+	// preserves the stack's tags and an empty non-nil map clears them. `omitempty` drops
+	// an empty map, so a change set created with `Tags=` would read back as one that
+	// never mentioned tags and preserve where the caller asked to clear. A record
+	// written before #824 carries no member at all and decodes to nil, which is the
+	// omitted case and the behavior that shipped.
+	Tags map[string]string `json:"Tags"`
+
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time `json:"CreatedAt"`
 }
@@ -1757,9 +1776,22 @@ func removeStr(list []string, drop string) []string {
 // CreateChangeSet compares a proposed template against the current stack state
 // and returns a change set describing the differences. The change set is persisted
 // in state and can be executed later via [StackDeployer.ExecuteChangeSet].
-func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSetName, templateBody string, params map[string]string) (*CFNChangeSet, error) {
+//
+// tags are the stack-level tags the change set records and executing it applies, with the
+// same three-way meaning the rest of the family gives them: nil is the omitted parameter,
+// an empty non-nil map is the empty list, and a populated one replaces the stack's tags
+// (#824). They are validated here rather than at the wire layer, for the reason
+// [CFNDeployOptions.validate] states — an in-process caller is held to the same limits as
+// a request that arrived over HTTP — and validated at *creation* rather than deferred to
+// execution, because that is where AWS refuses them: `CreateChangeSet` publishes the same
+// `Tags` constraints `CreateStack` does, so a change set that could never execute is not
+// worth recording.
+func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSetName, templateBody string, params, tags map[string]string) (*CFNChangeSet, error) {
 	if d.state == nil {
 		return nil, cfnErrf(ErrCFNStateRequired, "cfn CreateChangeSet: state manager required")
+	}
+	if err := cfnValidateStackTags(tags); err != nil {
+		return nil, err
 	}
 
 	// Load existing stack.
@@ -1792,6 +1824,7 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 		TemplateBody:  templateBody,
 		Parameters:    params,
 		Changes:       changes,
+		Tags:          tags,
 		CreatedAt:     d.tc.Now(),
 	}
 
@@ -1836,11 +1869,15 @@ func (d *StackDeployer) ExecuteChangeSet(ctx context.Context, stackName, changeS
 	if err != nil {
 		return nil, err
 	}
-	// No tags: a change set records none today, and a nil Tags leaves the stack's own
-	// tags as they are — which is what executing a change set that says nothing about
-	// tags should do. CreateChangeSet's Tags parameter is a separate question (#824).
+	// The change set's own tags, whatever CreateChangeSet recorded (#824). `ExecuteChangeSet`
+	// says nothing about tags — no request parameter, no response element, an empty result
+	// body — so the documented warrant for applying them here is `DescribeChangeSet`'s
+	// description of the member it reports: "if you execute the change set, the tags that
+	// will be associated with the stack". A change set created without the parameter carries
+	// a nil map, which leaves the stack's own tags exactly as they are, so a change set
+	// recorded before #824 executes as it always did.
 	result, err := d.UpdateStack(ctx, cs.TemplateBody, stackName, cs.Parameters,
-		CFNDeployOptions{})
+		CFNDeployOptions{Tags: cs.Tags})
 	if err != nil {
 		return nil, err
 	}

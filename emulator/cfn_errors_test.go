@@ -40,7 +40,7 @@ func TestCFN_DeployerErrorsCarryTheirClassification(t *testing.T) {
 		{
 			name: "CreateChangeSet on an absent stack",
 			call: func() error {
-				_, err := d.CreateChangeSet(ctx, "no-such-stack", "cs", tmpl, nil)
+				_, err := d.CreateChangeSet(ctx, "no-such-stack", "cs", tmpl, nil, nil)
 				return err
 			},
 			class:   emulator.ErrCFNStackNotFound,
@@ -93,7 +93,7 @@ func TestCFN_DeployerErrorsCarryTheirClassification(t *testing.T) {
 		{
 			name: "CreateChangeSet with an unparseable new template",
 			call: func() error {
-				_, err := d.CreateChangeSet(ctx, "cls-stack", "cs", "{ not a template", nil)
+				_, err := d.CreateChangeSet(ctx, "cls-stack", "cs", "{ not a template", nil, nil)
 				return err
 			},
 			class: emulator.ErrCFNTemplateInvalid,
