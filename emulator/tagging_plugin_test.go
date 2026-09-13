@@ -319,16 +319,23 @@ func TestTagging_TagResources_NotFound(t *testing.T) {
 }
 
 // putTestSQSQueue pre-populates state with an SQS queue.
+//
+// The key is account-qualified, which is what the SQS plugin itself stores a queue at — see
+// [sqsURLKey], which takes the last *two* components of a queue URL. This helper seeded
+// "queue:<name>" until #826, and was the only one of the thirteen here with a key its own
+// service does not use, which is how a TagResources that wrote to a phantom record went on
+// passing its test.
 func putTestSQSQueue(t *testing.T, state emulator.StateManager, name string, tags map[string]string) {
 	t.Helper()
 	q := emulator.SQSQueue{
 		QueueName: name,
-		QueueURL:  "http://sqs.us-east-1.amazonaws.com/123456789012/" + name,
-		QueueARN:  "arn:aws:sqs:us-east-1:123456789012:" + name,
+		QueueURL:  "http://sqs.us-east-1.amazonaws.com/" + taggingTestAccountID + "/" + name,
+		QueueARN:  "arn:aws:sqs:us-east-1:" + taggingTestAccountID + ":" + name,
 		Tags:      tags,
 	}
 	raw, _ := json.Marshal(q)
-	require.NoError(t, state.Put(context.Background(), "sqs", "queue:"+name, raw))
+	require.NoError(t, state.Put(context.Background(), "sqs",
+		"queue:"+taggingTestAccountID+"/"+name, raw))
 }
 
 // taggingTestAccountID is the account ID used in tagging tests. Since the test
@@ -476,7 +483,7 @@ func TestTagging_TagResources_SQS(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Empty(t, out["FailedResourcesMap"])
 
-	raw, err := state.Get(context.Background(), "sqs", "queue:my-queue")
+	raw, err := state.Get(context.Background(), "sqs", "queue:"+taggingTestAccountID+"/my-queue")
 	require.NoError(t, err)
 	var q emulator.SQSQueue
 	require.NoError(t, json.Unmarshal(raw, &q))

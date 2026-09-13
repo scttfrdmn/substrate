@@ -819,7 +819,15 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 
 	case "sqs":
 		// arn:aws:sqs:{region}:{acct}:{name}
-		return sqsNamespace, "queue:" + resource, nil
+		//
+		// The key is account-qualified because [sqsURLKey] builds it from the last *two*
+		// components of a queue URL, and a queue URL's penultimate component is the account.
+		// Dropping the account addressed a key no queue is ever stored at, so a TagResources
+		// against a real queue wrote a phantom record and answered 200 (#826).
+		//
+		// The account comes from the ARN rather than from reqCtx, as it does for the IAM and EC2
+		// arms: an ARN naming another account must resolve that account's queue or none.
+		return sqsNamespace, "queue:" + parts[4] + "/" + resource, nil
 
 	case "dynamodb":
 		// arn:aws:dynamodb:{region}:{acct}:table/{name}
