@@ -5633,8 +5633,8 @@ stamp cannot push a caller's own tags over it.
 
 #### What the stamp reaches
 
-Nine CFN resource types are stamped, across six services, and each tag is readable through
-that service's **own** tag call rather than only out of state:
+Twenty-six CFN resource types are stamped, across fourteen services, and each tag is readable
+through that service's **own** tag call rather than only out of state:
 
 | Service | CFN types stamped | Read back with |
 |---|---|---|
@@ -5644,6 +5644,23 @@ that service's **own** tag call rather than only out of state:
 | SQS | `AWS::SQS::Queue` | `ListQueueTags` |
 | DynamoDB | `AWS::DynamoDB::Table` | `ListTagsOfResource` |
 | ELBv2 | LoadBalancer, TargetGroup, Listener, ListenerRule | `DescribeTags` |
+| Step Functions | `AWS::StepFunctions::StateMachine` | `ListTagsForResource` |
+| ECR | `AWS::ECR::Repository` | `ListTagsForResource` |
+| ECS | `AWS::ECS::Cluster` | `ListTagsForResource` |
+| EFS | `AWS::EFS::FileSystem`, `AWS::EFS::AccessPoint` | `ListTagsForResource` |
+| ElastiCache | `AWS::ElastiCache::CacheCluster` | `ListTagsForResource` |
+| RDS | `AWS::RDS::DBInstance` | `ListTagsForResource` |
+| Kinesis | `AWS::Kinesis::Stream` | `ListTagsForStream` |
+| Glue | `AWS::Glue::Database` | `GetTags` |
+
+The last eight services are
+[#819](https://github.com/scttfrdmn/substrate/issues/819)'s nine types. Two conditions decided
+that cut, both checked against the owning plugin rather than assumed: the service's tag record has
+a merge arm behind substrate's one tag writer — the same writer the Resource Groups Tagging API
+uses, so a stamp and a `TagResources` call cannot merge differently — and the physical ID
+CloudFormation records is already exactly the identifier that plugin keys its record by. A service
+that fails the second condition would need the key re-derived, which is where a stamp lands
+somewhere nothing reads.
 
 Two resolvers sit behind the one writer. EC2's keys on the physical ID's prefix, because an EC2
 ID carries its type; every other service's keys on the **CloudFormation resource type**, because
@@ -5656,21 +5673,45 @@ than an omission.** AWS declines to publish an exhaustive propagation list of it
 propagation of stack-level tags to resources, including tags with the `aws:` prefix, varies by
 resource type. For example, tags aren't propagated to Amazon EBS volumes that are created from
 block device mappings." So substrate states its rule instead — a resource is stamped when
-substrate models tags for its service — and names what that leaves out. Roughly twenty services
-the deployer can create resources in keep no tag state at all, among them CloudWatch Logs,
-EventBridge, Route 53, Athena, CodeBuild, CodePipeline, CodeDeploy, CloudTrail, OpenSearch,
-WAFv2, Backup, Budgets, Firehose, MSK, Transfer, SES v2 and AppSync; API Gateway (v1 and v2) and
-Cognito carry tag *state* but expose no tagging operation, so there is nothing to read a stamp
-back through. Each needs a tag store **and** an API before it could be stamped observably, which
-is a per-service piece of work rather than a line here —
-[#819](https://github.com/scttfrdmn/substrate/issues/819) names the list. There is no log line
-per skipped resource: a stack creates far more of those than of the kinds that can be stamped,
-so a warning each would bury a real one.
+substrate models tags for its service *and* a caller can read the tag back through that
+service's own API — and names what that leaves out, in three groups. There is no log line per
+skipped resource: a stack creates far more of those than of the kinds that can be stamped, so a
+warning each would bury a real one.
 
-**IAM is deliberately excluded even though it models tags.** No AWS page states that an IAM
-entity receives the stamp, and substrate's `TagRole` refuses an `aws:`-prefixed key — so a
-stamped IAM tag would be one no caller could ever set or remove through the API. The question is
-filed rather than guessed at.
+**Tag state but no tagging operation: out of scope.** An IAM user or role, an API Gateway v1 or
+v2 API and a Cognito user pool each carry a tag field in substrate's records, but no operation
+reads or writes it. Stamping them would write a tag **no API call could observe**, and an
+observation a caller cannot make is outside substrate's emulation boundary — the boundary is
+what an AWS API call can see, not what a record happens to hold (see the *Scope* section of
+`CLAUDE.md`). IAM has a second, independent reason: no AWS page states that an IAM entity
+receives the stamp, and substrate's `TagRole` refuses an `aws:`-prefixed key, so a stamped IAM
+tag would be one no caller could ever set or remove. These three are therefore **decided out**
+rather than deferred. Should one of them gain a tagging surface, the stamp becomes observable
+and the decision is worth revisiting on that ground alone.
+
+**No tag state at all: deferred, on AWS's own licence.** Roughly twenty services the deployer
+can create resources in keep no tag state whatsoever, among them CloudWatch Logs, EventBridge,
+Route 53, Athena, CodeBuild, CodePipeline, CodeDeploy, CloudTrail, OpenSearch, WAFv2, Backup,
+Budgets, Firehose, MSK, Transfer, SES v2 and AppSync. Each needs a tag store **and** a tagging
+API before a stamp could be observed at all, which is a per-service piece of work rather than a
+line here. The omission is licensed by the sentence quoted above: propagation "varies by
+resource type", so a partial cut is what AWS itself describes rather than a shortfall against a
+published list. [#819](https://github.com/scttfrdmn/substrate/issues/819) keeps the list in one
+place; it is split per service when one is picked up.
+
+**A tagging surface but no merge arm: filed as
+[#835](https://github.com/scttfrdmn/substrate/issues/835).** Eleven more types — a KMS key, a
+Secrets Manager secret, an SNS topic, a Step Functions activity, an ECS service and task
+definition, an RDS DB cluster and DB subnet group, an ACM certificate, a CloudFront distribution
+and an SSM parameter — have both tag state and a tagging call, and are still unstamped. The
+missing piece for these is not a resolver arm but an arm in substrate's shared tag *writer*, so
+the same gap also means the Resource Groups Tagging API cannot tag them: one defect with two
+symptoms, tracked there rather than folded in here. For three of the eleven — an ECS task
+definition, an RDS DB cluster and an RDS DB subnet group — the service's own tagging operation
+cannot reach the resource either, because its ARN resolver has no arm for that kind; a
+`TagResource` on an ECS task definition answers `200` and writes nothing. Config is unstamped for
+a different reason again: it keeps a rule's tags in a side-car state record rather than on the
+rule, so reaching them needs a writer that knows that layout.
 
 Three further limits, each named because a policy or an assertion written against the stamp will
 otherwise assume more:

@@ -13,6 +13,9 @@ import (
 // queue and every ELBv2 resource carried none of the three `aws:cloudformation:*` keys, and a
 // policy or a cost-allocation assertion keyed on the stack name saw nothing on them.
 //
+// #819 then added the nine types in [cfnRegionalStampKinds], on the same test: a stamp counts
+// as landed only when it reads back through the *owning service's own* tag call.
+//
 // The resolvers here are keyed on [DeployedResource.Type] rather than on the physical ID's
 // shape, because outside EC2 a physical ID is a bare name with no prefix to switch on — a
 // bucket named `orders` and a queue named `orders` are the same string. The CFN resource type
@@ -47,7 +50,14 @@ type cfnStampTarget struct {
 //
 // ELBv2 is absent here and resolved separately, because its four kinds are keyed by a suffix
 // that is not derivable from the name — see [cfnStampELBResource].
-func cfnResolveStampTarget(dr DeployedResource, accountID string) (cfnStampTarget, bool) {
+func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnStampTarget, bool) {
+	if kind, ok := cfnRegionalStampKinds[dr.Type]; ok {
+		return cfnStampTarget{
+			namespace: kind.namespace,
+			stateKey:  kind.prefix + ":" + accountID + "/" + region + "/" + dr.PhysicalID,
+		}, true
+	}
+
 	switch dr.Type {
 	case "AWS::S3::Bucket":
 		// A bucket name is globally unique, so the key carries no account or region.
@@ -76,6 +86,59 @@ func cfnResolveStampTarget(dr DeployedResource, accountID string) (cfnStampTarge
 	}
 }
 
+// cfnRegionalStampKind names the state record one CFN resource type's tags live in, for a
+// service that keys its records by account and region.
+type cfnRegionalStampKind struct {
+	// namespace is the state namespace the owning service keeps its records in.
+	namespace string
+
+	// prefix is the key's leading segment, ahead of the account and region.
+	prefix string
+}
+
+// cfnRegionalStampKinds are the CFN resource types whose tag record is keyed
+// `<prefix>:<account>/<region>/<physical-id>` — #819's group 3a.
+//
+// They are one table rather than nine `switch` arms because they share one key shape: each
+// owning plugin builds its key from `reqCtx.AccountID + "/" + reqCtx.Region` and the same
+// identifier the deployer already records as the physical ID. The four services in
+// [cfnResolveStampTarget]'s switch cannot join them — a bucket key carries neither account nor
+// region, and a queue's and a table's carry the account but not the region.
+//
+// Both of #819's conditions were checked against the owning plugin for every entry, not
+// inferred. First, [mergeResourceTags] already has an arm for the namespace and key prefix, so
+// the stamp merges into the concrete record the service persists and the merge semantics are
+// the ones a `TagResources` call gets. Second, the deployer already sets
+// [DeployedResource.PhysicalID] to *exactly* the identifier the plugin keys on: a state
+// machine, an ECR repository, an ECS cluster, a Kinesis stream and a Glue database are named by
+// the template (falling back to the logical ID); an RDS instance and an ElastiCache cluster
+// carry their own identifier property; and an EFS file system and access point take the
+// `fs-`/`fsap-` ID out of the create response, which is what EFS's `ListTagsForResource` path
+// segment names them by.
+//
+// The first condition is what holds the rest of #819's group 3 out rather than a judgement about
+// which service matters: KMS, Secrets Manager, SNS, a Step Functions activity, an ECS service or
+// task definition, an RDS cluster or subnet group, ACM, CloudFront and SSM all keep tag state,
+// but none has a [mergeResourceTags] arm that reaches it — so a stamp would have nowhere to land,
+// and `TagResources` cannot reach them either. One defect with two symptoms, filed as
+// [#835](https://github.com/scttfrdmn/substrate/issues/835). Three of those eleven cannot be
+// tagged through their own service at all, because its ARN resolver has no arm for the kind, so
+// they need that fixing first; and where an arm's namespace *is* in [mergeResourceTags] it
+// unmarshals one sibling unconditionally — `statesNamespace` assumes a state machine even for an
+// `activity:` key, `ecsNamespace` a cluster, `rdsNamespace` a DB instance — which is why adding
+// them is that issue's work and not a line here.
+var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
+	"AWS::StepFunctions::StateMachine": {namespace: statesNamespace, prefix: "statemachine"},
+	"AWS::ECR::Repository":             {namespace: ecrNamespace, prefix: "ecrrepo"},
+	"AWS::ECS::Cluster":                {namespace: ecsNamespace, prefix: "cluster"},
+	"AWS::EFS::FileSystem":             {namespace: efsNamespace, prefix: "filesystem"},
+	"AWS::EFS::AccessPoint":            {namespace: efsNamespace, prefix: "accesspoint"},
+	"AWS::ElastiCache::CacheCluster":   {namespace: elasticacheNamespace, prefix: "cachecluster"},
+	"AWS::RDS::DBInstance":             {namespace: rdsNamespace, prefix: "dbinstance"},
+	"AWS::Kinesis::Stream":             {namespace: kinesisNamespace, prefix: "stream"},
+	"AWS::Glue::Database":              {namespace: glueNamespace, prefix: "database"},
+}
+
 // cfnELBStampableTypes are the ELBv2 CFN types whose records substrate keeps tags on.
 //
 // All four became stampable with #748, which gave ELBv2 a tag store; before that the service
@@ -91,8 +154,8 @@ var cfnELBStampableTypes = map[string]bool{
 // service substrate models tags for but EC2's resolver does not reach. It reports whether it
 // found somewhere to write.
 //
-// The two arms differ because the two tag stores differ, not by choice: the four services
-// [cfnResolveStampTarget] covers keep tags in a record [mergeResourceTags] already knows how
+// The two arms differ because the two tag stores differ, not by choice: every service
+// [cfnResolveStampTarget] covers keeps tags in a record [mergeResourceTags] already knows how
 // to merge, while ELBv2 keeps an ordered `[]ELBTag` on a record found by scanning for its ARN.
 // Both upsert, as EC2's writer does, so re-deploying a stack rewrites the three values rather
 // than accumulating them.
@@ -106,7 +169,7 @@ func cfnStampResourceTags(
 		return cfnStampELBResource(state, reqCtx, dr, tags)
 	}
 
-	target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID)
+	target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID, reqCtx.Region)
 	if !ok {
 		return false, nil
 	}

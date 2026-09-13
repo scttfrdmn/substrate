@@ -49,15 +49,28 @@ type cfnStampFixture struct {
 	sqs      *emulator.SQSPlugin
 	dynamodb *emulator.DynamoDBPlugin
 	elb      *emulator.ELBPlugin
-	state    emulator.StateManager
+
+	// The eight #819 added, owning nine CFN resource types between them — EFS answers for both
+	// a file system and an access point.
+	states      *emulator.StepFunctionsPlugin
+	ecr         *emulator.ECRPlugin
+	ecs         *emulator.ECSPlugin
+	efs         *emulator.EFSPlugin
+	elasticache *emulator.ElastiCachePlugin
+	rds         *emulator.RDSPlugin
+	kinesis     *emulator.KinesisPlugin
+	glue        *emulator.GluePlugin
+
+	state emulator.StateManager
 }
 
 // newCFNStampFixture builds the fixture over the given state, so a test that also needs an
 // AuthController can share one store with it. A nil state gets a fresh one.
 //
-// Six plugins rather than the two #746 needed: #765 widened the stamp past EC2, and its
-// criterion is that each tag is readable through the owning service's own call — which means
-// the plugin that owns the record has to be here to answer it.
+// Fourteen plugins rather than the two #746 needed: #765 widened the stamp past EC2 and #819
+// widened it again, and the criterion both work to is that each tag is readable through the
+// owning service's own call — which means the plugin that owns the record has to be here to
+// answer it.
 func newCFNStampFixture(t *testing.T, state emulator.StateManager) *cfnStampFixture {
 	t.Helper()
 	return newCFNStampFixtureWithLogger(t, state,
@@ -137,16 +150,52 @@ func newCFNStampFixtureWithLogger(
 	}))
 	registry.Register(cwLogsPlugin)
 
+	// #819's eight. Registered through [cfnStampRegister] rather than repeated: none of them
+	// needs an option beyond the shared clock, and eight more copies of the block above would
+	// hide the two that do (S3 needs a filesystem, Step Functions takes the registry).
+	statesPlugin := cfnStampRegister(t, registry, &emulator.StepFunctionsPlugin{}, state, logger, tc)
+	ecrPlugin := cfnStampRegister(t, registry, &emulator.ECRPlugin{}, state, logger, tc)
+	ecsPlugin := cfnStampRegister(t, registry, &emulator.ECSPlugin{}, state, logger, tc)
+	efsPlugin := cfnStampRegister(t, registry, &emulator.EFSPlugin{}, state, logger, tc)
+	elasticachePlugin := cfnStampRegister(t, registry, &emulator.ElastiCachePlugin{}, state, logger, tc)
+	rdsPlugin := cfnStampRegister(t, registry, &emulator.RDSPlugin{}, state, logger, tc)
+	kinesisPlugin := cfnStampRegister(t, registry, &emulator.KinesisPlugin{}, state, logger, tc)
+	gluePlugin := cfnStampRegister(t, registry, &emulator.GluePlugin{}, state, logger, tc)
+
 	return &cfnStampFixture{
-		deployer: emulator.NewStackDeployer(registry, store, state, tc, logger, costs),
-		ec2:      ec2Plugin,
-		s3:       s3Plugin,
-		lambda:   lambdaPlugin,
-		sqs:      sqsPlugin,
-		dynamodb: dynamodbPlugin,
-		elb:      elbPlugin,
-		state:    state,
+		deployer:    emulator.NewStackDeployer(registry, store, state, tc, logger, costs),
+		ec2:         ec2Plugin,
+		s3:          s3Plugin,
+		lambda:      lambdaPlugin,
+		sqs:         sqsPlugin,
+		dynamodb:    dynamodbPlugin,
+		elb:         elbPlugin,
+		states:      statesPlugin,
+		ecr:         ecrPlugin,
+		ecs:         ecsPlugin,
+		efs:         efsPlugin,
+		elasticache: elasticachePlugin,
+		rds:         rdsPlugin,
+		kinesis:     kinesisPlugin,
+		glue:        gluePlugin,
+		state:       state,
 	}
+}
+
+// cfnStampRegister initializes one plugin over the fixture's state and clock and registers it,
+// returning it at its concrete type so the fixture can call it directly.
+func cfnStampRegister[P emulator.Plugin](
+	t *testing.T, registry *emulator.PluginRegistry, plugin P,
+	state emulator.StateManager, logger emulator.Logger, tc *emulator.TimeController,
+) P {
+	t.Helper()
+	require.NoError(t, plugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(plugin)
+	return plugin
 }
 
 // tagsFor returns the tags DescribeTags reports for one resource, as "key=value" strings
