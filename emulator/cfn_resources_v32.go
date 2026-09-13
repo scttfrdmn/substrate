@@ -49,7 +49,16 @@ func (d *StackDeployer) deployOpenSearchDomain(
 }
 
 // deployWAFv2WebACL creates a WAFv2 WebACL stub.
-// The Ref value is the WebACL ID.
+//
+// Ref returns "name|id|scope", so the name and the scope are recorded in Metadata: the ARN
+// carries the name and the ID but not the scope, and the scope is not derivable from the ARN
+// once it is in the segment (#827).
+//
+// Scope is a required property whose allowed values are CLOUDFRONT and REGIONAL, and it
+// selects the ARN's scope segment — "cloudfront" or "regional". That segment used to be
+// hardcoded to "regional", so a CLOUDFRONT web ACL reported an ARN naming a scope it does not
+// have. It is corrected here rather than left wrong beside a Metadata entry recording the real
+// scope two lines away.
 func (d *StackDeployer) deployWAFv2WebACL(
 	ctx context.Context,
 	logicalID string,
@@ -58,13 +67,19 @@ func (d *StackDeployer) deployWAFv2WebACL(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "Name", logicalID, cctx)
-	arn := fmt.Sprintf("arn:aws:wafv2:%s:%s:regional/webacl/%s/%s", cctx.region, cctx.accountID, name, logicalID)
+	scope := resolveStringProp(props, "Scope", "REGIONAL", cctx)
+	arn := fmt.Sprintf("arn:aws:wafv2:%s:%s:%s/webacl/%s/%s",
+		cctx.region, cctx.accountID, strings.ToLower(scope), name, logicalID)
 	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::WAFv2::WebACL",
 		PhysicalID: logicalID,
 		ARN:        arn,
+		Metadata: map[string]interface{}{
+			"Name":  name,
+			"Scope": scope,
+		},
 	}, 0, nil
 }
 
@@ -151,7 +166,9 @@ func (d *StackDeployer) deployCodeDeployDeploymentGroup(
 }
 
 // deployCloudTrailTrail creates a CloudTrail trail stub.
-// The Ref value is the trail ARN.
+//
+// Ref returns the trail's resource name, not its ARN, so the name is recorded rather than cut
+// back out of the ARN at resolve time (#827).
 func (d *StackDeployer) deployCloudTrailTrail(
 	ctx context.Context,
 	logicalID string,
@@ -167,6 +184,7 @@ func (d *StackDeployer) deployCloudTrailTrail(
 		Type:       "AWS::CloudTrail::Trail",
 		PhysicalID: arn,
 		ARN:        arn,
+		Metadata:   map[string]interface{}{"TrailName": name},
 	}, 0, nil
 }
 

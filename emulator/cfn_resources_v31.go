@@ -67,7 +67,10 @@ func (d *StackDeployer) deployAppSyncGraphQLApi(
 }
 
 // deployAppSyncDataSource creates an AppSync data source for the given CFN resource.
-// The Ref value is the data source name.
+//
+// Ref returns the data source's ARN, so the ARN is read out of the AppSync plugin's own
+// response rather than rebuilt here from ApiId and Name (#827). The two derivations would
+// otherwise be free to drift, which is how #826 happened.
 func (d *StackDeployer) deployAppSyncDataSource(
 	ctx context.Context,
 	logicalID string,
@@ -100,7 +103,7 @@ func (d *StackDeployer) deployAppSyncDataSource(
 		Params:    map[string]string{},
 	}
 
-	_, cost, routeErr := d.dispatch(ctx, req, streamID)
+	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::AppSync::DataSource",
@@ -108,12 +111,23 @@ func (d *StackDeployer) deployAppSyncDataSource(
 	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
+	} else if resp != nil {
+		var result struct {
+			DataSource struct {
+				DataSourceARN string `json:"dataSourceArn"`
+			} `json:"dataSource"`
+		}
+		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
+			dr.ARN = result.DataSource.DataSourceARN
+		}
 	}
 	return dr, cost, nil
 }
 
 // deployAppSyncResolver creates an AppSync resolver for the given CFN resource.
-// The Ref value is the resolver ARN.
+//
+// Ref returns the resolver's ARN, read out of the AppSync plugin's own response for the
+// reason given on [StackDeployer.deployAppSyncDataSource].
 func (d *StackDeployer) deployAppSyncResolver(
 	ctx context.Context,
 	logicalID string,
@@ -147,7 +161,7 @@ func (d *StackDeployer) deployAppSyncResolver(
 		Params:    map[string]string{},
 	}
 
-	_, cost, routeErr := d.dispatch(ctx, req, streamID)
+	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::AppSync::Resolver",
@@ -155,12 +169,24 @@ func (d *StackDeployer) deployAppSyncResolver(
 	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
+	} else if resp != nil {
+		var result struct {
+			Resolver struct {
+				ResolverARN string `json:"resolverArn"`
+			} `json:"resolver"`
+		}
+		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
+			dr.ARN = result.Resolver.ResolverARN
+		}
 	}
 	return dr, cost, nil
 }
 
 // deployAppSyncFunction creates an AppSync pipeline function for the given CFN resource.
-// The Ref value is the function ID.
+//
+// Ref returns the function's ARN, read out of the AppSync plugin's own response for the
+// reason given on [StackDeployer.deployAppSyncDataSource]. The function ID stays the
+// physical ID, which is what the AppSync API addresses a function by.
 func (d *StackDeployer) deployAppSyncFunction(
 	ctx context.Context,
 	logicalID string,
@@ -204,11 +230,13 @@ func (d *StackDeployer) deployAppSyncFunction(
 	} else if resp != nil {
 		var result struct {
 			FunctionConfiguration struct {
-				FunctionID string `json:"functionId"`
+				FunctionID  string `json:"functionId"`
+				FunctionARN string `json:"functionArn"`
 			} `json:"functionConfiguration"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
 			dr.PhysicalID = result.FunctionConfiguration.FunctionID
+			dr.ARN = result.FunctionConfiguration.FunctionARN
 		}
 	}
 	return dr, cost, nil

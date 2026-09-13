@@ -862,6 +862,82 @@ stack created without any: substrate has no notification model, so there is neve
 an ARN to report, and `!Select ['0', !Ref 'AWS::NotificationARNs']` yields the
 empty string rather than the reference string.
 
+#### What `Ref` returns
+
+**`Ref` is resolved per resource type.** CloudFormation does not return one kind of
+value: each type's Template Reference "Return values" section documents its own,
+which is an ARN for some types, a name for others, a service-assigned ID for others
+and a URL for one. `Ref` used to answer the resource's physical ID for every type —
+correct for the majority, and the wrong *kind of thing* for the rest (#827). Nothing
+refuses a wrong-kind value, so a template writing `LoadBalancerArn: !Ref lb` passed a
+bare load balancer name to `CreateListener` and AWS's own listener shape did not
+deploy at all; where the receiving operation was more permissive the wrong value was
+simply stored.
+
+For most types the documented value **is** the physical ID — a bucket or role name, a
+VPC or instance ID, an SNS topic ARN — and those are unchanged. These are the types
+whose `Ref` is something else:
+
+| Resource type | `Ref` returns |
+|---|---|
+| `AWS::ElasticLoadBalancingV2::LoadBalancer` | the load balancer ARN |
+| `AWS::ElasticLoadBalancingV2::TargetGroup` | the target group ARN |
+| `AWS::ECS::Service` | the service ARN |
+| `AWS::StepFunctions::StateMachine` | the state machine ARN |
+| `AWS::StepFunctions::Activity` | the activity ARN |
+| `AWS::AppSync::GraphQLApi` | the API ARN |
+| `AWS::AppSync::DataSource` | the data source ARN |
+| `AWS::AppSync::Resolver` | the resolver ARN |
+| `AWS::AppSync::FunctionConfiguration` | the function ARN |
+| `AWS::Transfer::Server` | the server ARN |
+| `AWS::KMS::Key`, `AWS::KMS::ReplicaKey` | the key **ID**, not the key ARN |
+| `AWS::EC2::EIP` | the Elastic **IP address**, not the allocation ID |
+| `AWS::CloudTrail::Trail` | the trail **name**, not the trail ARN |
+| `AWS::SQS::Queue` | the queue **URL** |
+| `AWS::WAFv2::WebACL` | `name\|id\|scope`, as the page's own example spells it |
+| `AWS::ApiGateway::UsagePlanKey` | `keyId:usagePlanId` |
+
+A queue's `Ref` is the URL substrate's own SQS operations answer with and accept —
+`http://sqs.{region}.localhost/{account}/{name}` rather than AWS's
+`https://sqs.{region}.amazonaws.com/...` — because a URL the emulator would then
+reject is useless to the caller who resolved it. Both come from one function, so the
+value a template resolves and the value `CreateQueue` returns cannot drift.
+
+A listener's `DefaultActions` and a listener rule's `Actions` are now **forwarded** to
+`CreateListener` and `CreateRule`. They were dropped, so the resolved target group
+never reached the listener and `DescribeListeners` reported a listener with no default
+action; forwarding them is what makes a resolved `!Ref` on a target group observable
+through an API call rather than only through a stack `Output`.
+
+**When a type's documented value cannot be built, `Ref` resolves to empty** rather
+than falling back to the physical ID. An empty value means the deploy did not yield
+the source the value is derived from, which happens only for a resource that failed
+and is about to be reported `CREATE_FAILED`; a plausible-looking wrong answer is worse
+than an obviously missing one, since a stack `Output` carrying it would be asserted
+against happily.
+
+These divergences are **recorded rather than fixed**, because the value AWS documents
+does not exist in substrate to return:
+
+- `AWS::SNS::Subscription` — AWS documents "`Ref` returns the subscription's logical
+  name". Substrate returns the subscription ARN, deliberately: the logical name is a
+  value the template already has, and the ARN is the one an `Unsubscribe` takes.
+- `AWS::ApiGateway::Method` — the documented value is the method's ID, which substrate
+  does not mint; the physical ID is the HTTP verb. Every `GET` method in a stack
+  therefore shares one physical ID.
+- `AWS::CloudFront::CloudFrontOriginAccessIdentity` — the documented value is the OAI
+  ID, which is not minted; the physical ID is the configured `Comment`.
+- `AWS::ElasticLoadBalancing::LoadBalancer` (classic) — documented as the DNS name.
+  The classic load balancer has no deploy helper at all and falls through to the
+  generic stub, so there is no DNS name to return.
+- `AWS::EC2::SecurityGroupIngress` and `::SecurityGroupEgress` — no per-rule identity
+  exists, and `Ref` on the ingress type is not documented.
+- `AWS::EC2::SecurityGroup` — AWS returns the group **name** for a group created
+  without a `VpcId` and the group ID otherwise. Substrate always returns the ID.
+- `AWS::SecretsManager::RotationSchedule` and `::SecretTargetAttachment`, and
+  `AWS::Backup::BackupPlan` — conditionally or self-consistently correct as they
+  stand.
+
 #### `Mappings` and `Fn::FindInMap`
 
 A template's `Mappings` section is read and `Fn::FindInMap` resolves all three

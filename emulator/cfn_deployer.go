@@ -3669,6 +3669,43 @@ func (d *StackDeployer) deployELBLoadBalancer(
 	return dr, cost, nil
 }
 
+// cfnELBActionParams flattens a CloudFormation listener action list into the
+// `<member>.member.N.*` query parameters the ELBv2 API takes.
+//
+// The member name is a parameter because the two callers differ: CreateListener takes
+// DefaultActions and CreateRule takes Actions.
+//
+// Only Type and TargetGroupArn are forwarded, which are the two members the ELB plugin reads.
+// TargetGroupArn is why this exists: it is where a `!Ref` on a target group lands, and until #827
+// the actions were dropped entirely, so a listener deployed from a template routed to nothing and
+// DescribeListeners reported it with no default action at all.
+func cfnELBActionParams(prop interface{}, member string, cctx *cfnContext) map[string]string {
+	actions, isList := prop.([]interface{})
+	if !isList {
+		return nil
+	}
+	params := make(map[string]string, len(actions)*2)
+	for i, a := range actions {
+		action, isMap := a.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+		// The plugin stops at the first member with no Type, matching the wire format's
+		// 1-based contiguous indexing, so an action carrying no Type ends the list rather
+		// than leaving a gap the reader would silently stop at anyway.
+		actionType := resolveStringProp(action, "Type", "", cctx)
+		if actionType == "" {
+			break
+		}
+		prefix := fmt.Sprintf("%s.member.%d.", member, i+1)
+		params[prefix+"Type"] = actionType
+		if tg := resolveStringProp(action, "TargetGroupArn", "", cctx); tg != "" {
+			params[prefix+"TargetGroupArn"] = tg
+		}
+	}
+	return params
+}
+
 // deployELBListener creates an ELBv2 listener for the given CFN resource.
 func (d *StackDeployer) deployELBListener(
 	ctx context.Context,
@@ -3688,6 +3725,9 @@ func (d *StackDeployer) deployELBListener(
 			"Port":            resolveStringProp(props, "Port", "80", cctx),
 		},
 		Headers: map[string]string{},
+	}
+	for k, v := range cfnELBActionParams(props["DefaultActions"], "DefaultActions", cctx) {
+		req.Params[k] = v
 	}
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ElasticLoadBalancingV2::Listener"}
@@ -3719,6 +3759,9 @@ func (d *StackDeployer) deployELBListenerRule(
 			"Priority":    priority,
 		},
 		Headers: map[string]string{},
+	}
+	for k, v := range cfnELBActionParams(props["Actions"], "Actions", cctx) {
+		req.Params[k] = v
 	}
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ElasticLoadBalancingV2::ListenerRule"}
@@ -3818,9 +3861,13 @@ func (d *StackDeployer) deployRoute53RecordSetGroup(
 			totalCost += cost
 		}
 	}
+	// The physical ID is the group's logical name, which is also what Ref returns for this type
+	// (#827). It used to be left unset, so a !Ref on a record set group resolved to the empty
+	// string and DescribeStackResources reported a resource with no physical ID at all.
 	return DeployedResource{
-		LogicalID: logicalID,
-		Type:      "AWS::Route53::RecordSetGroup",
+		LogicalID:  logicalID,
+		Type:       "AWS::Route53::RecordSetGroup",
+		PhysicalID: logicalID,
 	}, totalCost, nil
 }
 
@@ -3865,6 +3912,10 @@ func (d *StackDeployer) deployKMSKey(
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
 			dr.PhysicalID = result.KeyMetadata.ARN
 			dr.ARN = result.KeyMetadata.ARN
+			// Ref returns the key ID, not the ARN, so the ID is recorded rather than
+			// re-derived from the ARN's last segment at resolve time (#827). It was already
+			// being decoded and discarded.
+			dr.Metadata = map[string]interface{}{"KeyId": result.KeyMetadata.KeyID}
 		}
 	}
 	return dr, cost, nil
@@ -3912,7 +3963,13 @@ func (d *StackDeployer) deployKMSReplicaKey(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	// Stub: treat as a standard symmetric key creation.
-	return d.deployKMSKey(ctx, logicalID, props, streamID, cctx)
+	dr, cost, err := d.deployKMSKey(ctx, logicalID, props, streamID, cctx)
+	// The delegation left dr.Type as "AWS::KMS::Key", so DescribeStackResources reported the
+	// wrong type for a replica key and anything switching on the type — Ref resolution now
+	// among them (#827) — could not tell the two apart. Both types Ref to the key ID, so this
+	// corrects the report rather than changing a resolved value.
+	dr.Type = "AWS::KMS::ReplicaKey"
+	return dr, cost, err
 }
 
 // deploySecret creates a Secrets Manager secret for the given CFN resource.
@@ -5073,8 +5130,14 @@ func resolveRef(ref string, cctx *cfnContext) string {
 	if v, ok := cctx.params[ref]; ok {
 		return v
 	}
-	// Deployed resource Ref (physical ID).
+	// Deployed resource Ref. The value AWS documents is per resource type — an ARN for some,
+	// a name for others, a service-assigned ID or a URL for others still — so cfnRefValue is
+	// consulted first and the physical ID is only the fallback for the majority of types whose
+	// documented Ref value it already is (#827).
 	if dr, ok := cctx.resources[ref]; ok {
+		if v, perType := cfnRefValue(dr, cctx); perType {
+			return v
+		}
 		return dr.PhysicalID
 	}
 	return ref

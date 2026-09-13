@@ -431,7 +431,14 @@ func (d *StackDeployer) deployAPIGatewayUsagePlanKey(
 	}
 
 	_, cost, routeErr := d.dispatch(ctx, req, streamID)
-	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ApiGateway::UsagePlanKey", PhysicalID: keyID}
+	// Ref returns "keyId:usagePlanId", so the plan ID is recorded: it is resolved here to build
+	// the request path and was then discarded, leaving the composite unbuildable (#827).
+	dr := DeployedResource{
+		LogicalID:  logicalID,
+		Type:       "AWS::ApiGateway::UsagePlanKey",
+		PhysicalID: keyID,
+		Metadata:   map[string]interface{}{"UsagePlanId": planID},
+	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
 	}

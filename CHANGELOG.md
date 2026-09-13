@@ -8,6 +8,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`Ref` resolves to the value AWS documents for that resource type** (#827). CloudFormation's
+  `Ref` does not return one kind of value: each type's Template Reference "Return values" section
+  documents its own, and it is an ARN for some types, a name for others, a service-assigned ID for
+  others and a URL for one. Substrate answered the resource's physical ID for every type — the
+  identifier it addresses a resource by, which is correct for the majority and the wrong *kind of
+  thing* for the rest.
+
+  Nothing refuses a wrong-kind value. A template writing `LoadBalancerArn: !Ref lb` handed
+  `CreateListener` a bare load balancer name, so **AWS's own listener shape did not deploy** — the
+  listener reported `CREATE_FAILED` with `ValidationError: '…' is not a valid load balancer ARN` and
+  the stack rolled back. Where the receiving operation was more permissive, the wrong value was
+  simply stored.
+
+  Resolution is now per type, in one seam both `Ref` and a `Ref` in list position pass through. The
+  divergent types: the two ELBv2 types, `ECS::Service`, both Step Functions types, all four AppSync
+  types and `Transfer::Server` return their **ARN**; `KMS::Key` and `KMS::ReplicaKey` return the key
+  **ID** rather than the key ARN; `EC2::EIP` returns the **IP address** rather than the allocation ID;
+  `CloudTrail::Trail` returns the trail **name** rather than its ARN; `SQS::Queue` returns the queue
+  **URL**; `WAFv2::WebACL` returns `name|id|scope` and `ApiGateway::UsagePlanKey` returns
+  `keyId:usagePlanId`, both as their pages' own examples spell them. Every one of the fifteen was
+  confirmed against its Template Reference page rather than inferred.
+
+  **`PhysicalResourceId` is unchanged.** The physical ID is what `DescribeStackResources` reports,
+  what every `aws:cloudformation:*` tag state key is built from, and what a redeploy recognizes an
+  existing resource by, so the `Ref` value is *derived* at resolve time instead — from the ARN the
+  deploy already recorded, from a value the deploy helper now records in metadata, or from the
+  stack's own region and account. Whether the reported physical ID should also become per-type is
+  #837.
+
+  Where a type's documented value cannot be built, `Ref` resolves to **empty** rather than falling
+  back to the physical ID. That only happens for a resource that failed and is about to be reported
+  `CREATE_FAILED`, and a plausible-looking wrong answer is worse than an obviously missing one — the
+  rule `Fn::GetAtt` already applied to an unresolvable attribute, generalized.
+
+  A queue's `Ref` is built by the same function the SQS plugin's `CreateQueue` answers with, so the
+  value a template resolves is byte-identical to the one the API hands out and neither can drift from
+  the other — the lesson of #826, applied structurally. For the same reason the AppSync helpers now
+  read each ARN out of the plugin's own response instead of rebuilding it from the API ID and the
+  name.
+
+  Four defects found in the code this passed through, each of which would have made the new per-type
+  table dishonest:
+
+  - A listener's `DefaultActions` and a listener rule's `Actions` were **dropped entirely**, so the
+    resolved target group never reached the listener and `DescribeListeners` reported a listener with
+    no default action. They are forwarded now, which is what makes a resolved `!Ref` on a target
+    group observable through an API call rather than only through a stack `Output`.
+  - `WAFv2::WebACL` hardcoded `regional` in its ARN's scope segment, so a `CLOUDFRONT` web ACL
+    reported an ARN naming a scope it does not have. The ARN follows the template's `Scope` now.
+  - `KMS::ReplicaKey` reported `AWS::KMS::Key` as its type, so nothing switching on the type could
+    tell the two apart. Both `Ref` to the key ID, so this corrects the report rather than a resolved
+    value.
+  - `Route53::RecordSetGroup` left its physical ID unset, so a `!Ref` on one resolved to the empty
+    string and `DescribeStackResources` reported a resource with no physical ID at all.
+
+  Divergences that are **recorded rather than fixed**, because the documented value does not exist in
+  substrate to return, are listed in `docs/services.md`: `ApiGateway::Method` (no method ID is
+  minted — the physical ID is the HTTP verb, so every `GET` in a stack shares one),
+  `CloudFront::CloudFrontOriginAccessIdentity`, the classic `ElasticLoadBalancing::LoadBalancer`
+  (which has no deploy helper at all), the two `EC2::SecurityGroup{Ingress,Egress}` rule types,
+  `EC2::SecurityGroup`'s no-`VpcId` case, and `SNS::Subscription` — where AWS documents "`Ref`
+  returns the subscription's logical name", a value the template already has, and substrate
+  deliberately keeps returning the subscription ARN.
+
 - **An SQS queue is addressed by one state key, by every reader** (#826). The SQS plugin stores a
   queue under `queue:{account}/{name}` — its key helper takes the last two components of a queue
   URL, and a queue URL's penultimate component is the account. Two readers dropped the account and

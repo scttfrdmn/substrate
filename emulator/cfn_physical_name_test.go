@@ -147,7 +147,11 @@ func TestCFNGeneratedName_RefAndGetAttResolveToIt(t *testing.T) {
 	assert.Equal(t, role.PhysicalID, result.Outputs["RoleRef"])
 	assert.Equal(t, role.ARN, result.Outputs["RoleArn"])
 	assert.Contains(t, result.Outputs["RoleArn"], role.PhysicalID)
-	assert.Equal(t, resourceByLogicalID(t, result, "MyQueue").PhysicalID,
+	// A queue's Ref is its URL, not its name (#827), so the generated name is asserted as the
+	// URL's last component. The claim this test makes is unchanged — the intrinsic follows the
+	// generated name rather than the logical ID — but the value it arrives in is the queue URL.
+	queueName := resourceByLogicalID(t, result, "MyQueue").PhysicalID
+	assert.Equal(t, "http://sqs.us-east-1.localhost/123456789012/"+queueName,
 		result.Outputs["QueueRef"])
 }
 
