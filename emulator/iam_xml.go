@@ -328,19 +328,18 @@ func iamGroupListXML(groups []*IAMGroup) string {
 // than absent — while an omitted boolean decodes to the same `false` in every SDK, so a
 // consumer cannot distinguish "not attachable" from "not reported".
 //
-// `PermissionsBoundaryUsageCount` is documented on the same type, appears in the same
-// sample, and is **not modeled** (#815). Substrate stores a boundary as an ARN on the
-// entity rather than a back-reference on the policy, so the count is derivable but not
-// stored: reporting it means either a scan of every user and role per policy read, which
-// makes `ListPolicies` O(policies x entities), or a counter maintained across the four
-// `Put*/Delete*PermissionsBoundary` operations plus the entity deletes that drop a boundary
-// implicitly — and a counter accumulated live has to agree with one rebuilt by replay. That
-// is a performance and determinism decision, so it is its own issue rather than a field set
-// here.
+// `PermissionsBoundaryUsageCount` is documented on the same type with no carve-out either,
+// and `ListPolicies`' sample renders it on every member, so it reaches both shapes from here
+// too (#815). It arrives as an argument rather than off `p`, because substrate stores a
+// boundary as an ARN on the entity and not as a back-reference on the policy: the count is
+// derived from a single scan of the users and roles, hoisted to one per request by the
+// caller — see [IAMPlugin.iamBoundaryUsageCounts] for why deriving it beats keeping a
+// counter, and for the cost. Rendered unconditionally for the reason `IsAttachable` is: a
+// policy no entity uses as a boundary has a count, and it is zero.
 //
 // `Description` is *not* rendered here; it is single-entity-only, via
 // [iamPolicyDescriptionXML].
-func iamPolicyXMLFields(p *IAMPolicy) string {
+func iamPolicyXMLFields(p *IAMPolicy, boundaryUsage int) string {
 	var b strings.Builder
 	b.WriteString("<PolicyId>")
 	b.WriteString(xmlEsc(p.PolicyID))
@@ -357,6 +356,7 @@ func iamPolicyXMLFields(p *IAMPolicy) string {
 		b.WriteString("</DefaultVersionId>")
 	}
 	fmt.Fprintf(&b, "<AttachmentCount>%d</AttachmentCount>", p.AttachmentCount)
+	fmt.Fprintf(&b, "<PermissionsBoundaryUsageCount>%d</PermissionsBoundaryUsageCount>", boundaryUsage)
 	b.WriteString("<IsAttachable>")
 	b.WriteString(iamBoolXML(p.IsAttachable))
 	b.WriteString("</IsAttachable><CreateDate>")
@@ -394,18 +394,24 @@ func iamPolicyDescriptionXML(description string) string {
 }
 
 // iamSinglePolicyXML wraps policy fields in a <Policy> element.
-func iamSinglePolicyXML(p *IAMPolicy) string {
-	return "<Policy>" + iamPolicyXMLFields(p) + iamPolicyDescriptionXML(p.Description) +
+//
+// boundaryUsage is this policy's `PermissionsBoundaryUsageCount`.
+func iamSinglePolicyXML(p *IAMPolicy, boundaryUsage int) string {
+	return "<Policy>" + iamPolicyXMLFields(p, boundaryUsage) + iamPolicyDescriptionXML(p.Description) +
 		iamEntityTagsXML(p.Tags) + "</Policy>"
 }
 
 // iamPolicyListXML builds <Policies> containing <member> elements.
-func iamPolicyListXML(policies []*IAMPolicy) string {
+//
+// boundaryUsage is `PermissionsBoundaryUsageCount` keyed by policy ARN, from one scan for the
+// whole listing rather than one per member; a policy no entity uses as a boundary is absent
+// from it and reports zero.
+func iamPolicyListXML(policies []*IAMPolicy, boundaryUsage map[string]int) string {
 	var b strings.Builder
 	b.WriteString("<Policies>")
 	for _, p := range policies {
 		b.WriteString("<member>")
-		b.WriteString(iamPolicyXMLFields(p))
+		b.WriteString(iamPolicyXMLFields(p, boundaryUsage[p.ARN]))
 		b.WriteString("</member>")
 	}
 	b.WriteString("</Policies>")

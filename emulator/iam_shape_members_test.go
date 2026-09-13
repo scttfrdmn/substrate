@@ -29,9 +29,11 @@ import (
 // whether a member is present at all and a map cannot tell absent from empty: both decode to
 // the zero value, which is exactly what an SDK reports for a member the service omitted.
 //
-// The two members this release leaves unmodeled have no test: `PermissionsBoundaryUsageCount`
-// (#815) and `RoleLastUsed` (#816). Their absence is asserted here only in the negative sense
-// that the shapes below list every member substrate renders.
+// One member #807 left unmodeled still has no test here: `RoleLastUsed` (#816). Its absence is
+// asserted only in the negative sense that the shapes below list every member substrate
+// renders. `PermissionsBoundaryUsageCount` was the other, and is modeled since #815 — its own
+// tests are in iam_boundary_usage_test.go, because what it needs pinning about is a derived
+// count's behavior over several operations rather than a member's presence in one shape.
 
 // iamRawBody returns a response's body as a string, for an assertion about an element being
 // present or absent rather than about its decoded value.

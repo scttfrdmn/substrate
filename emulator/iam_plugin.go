@@ -1317,7 +1317,19 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("put policy: %w", err)
 	}
 
-	return iamXMLResponse(http.StatusOK, "CreatePolicy", iamSinglePolicyXML(policy))
+	// The scan runs here too, rather than hardcoding the zero a freshly created policy must
+	// have. AWS's own CreatePolicy sample omits the member (as it omits `IsAttachable`, which
+	// #807 renders anyway), but the `Policy` type names CreatePolicy in its scope note, so the
+	// member belongs on the response — and reading it from the same helper every other policy
+	// read uses means there is no second, hardcoded answer to keep true. It also stays right in
+	// the one case where zero would be wrong: substrate does not require a boundary's policy to
+	// exist, so an ARN can already name this policy before CreatePolicy makes it.
+	boundaryUsage, err := p.iamBoundaryUsageCounts(goCtx, ctx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
+	return iamXMLResponse(http.StatusOK, "CreatePolicy", iamSinglePolicyXML(policy, boundaryUsage[arn]))
 }
 
 func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1337,9 +1349,17 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	// Counted before the catalog arm, so a bundled policy set as a boundary reports its usage
+	// too: a fresh substrate's boundaries are all bundled ARNs, since those are the only
+	// policies that exist before a caller creates one.
+	boundaryUsage, err := p.iamBoundaryUsageCounts(goCtx, ctx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check managed policies first.
 	if mp, ok := GetManagedPolicy(params.PolicyArn); ok {
-		return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(mp))
+		return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(mp, boundaryUsage[mp.ARN]))
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn))
@@ -1356,7 +1376,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("unmarshal policy: %w", err)
 	}
 
-	return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(&policy))
+	return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(&policy, boundaryUsage[policy.ARN]))
 }
 
 func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

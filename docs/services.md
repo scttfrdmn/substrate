@@ -1800,7 +1800,7 @@ substrate renders:
 | `DefaultVersionId`, `UpdateDate` | yes | yes | omitted when unset |
 | `IsAttachable` | yes | yes | always rendered, `false` included |
 | `Description` (policy) | yes | **no** | `Required: No`, omitted when unset |
-| `PermissionsBoundaryUsageCount` | **not modelled** | **not modelled** | [#815](https://github.com/scttfrdmn/substrate/issues/815) |
+| `PermissionsBoundaryUsageCount` | yes | yes | computed per read, never stored — see below |
 | `RoleLastUsed` | **not modelled** | n/a | [#816](https://github.com/scttfrdmn/substrate/issues/816) |
 
 **`PermissionsBoundary` left the list shapes**, which is a behaviour change: `ListUsers` and
@@ -1824,15 +1824,23 @@ password. Substrate models no password operation at all — `ChangePassword`,
 field and the member is always omitted in an ordinary run. It is rendered from the record so a
 consumer that seeds one directly observes it.
 
-**Two members are deliberately unmodelled**, each because reporting it is a design decision
-rather than a field to render. `PermissionsBoundaryUsageCount` would need either a scan of every
-user and role per policy read — making `ListPolicies` O(policies × entities) — or a counter
-maintained across the four boundary operations plus the entity deletes that drop a boundary
-implicitly, which must then agree with a count rebuilt by replay
-([#815](https://github.com/scttfrdmn/substrate/issues/815)). `RoleLastUsed` advances when a role
-is *assumed*, so it needs `AssumeRole` to write an IAM record — substrate's first write on a path
-whose purpose is not to mutate — or a projection over recorded `AssumeRole` events, plus a nested
-response type and the request's region ([#816](https://github.com/scttfrdmn/substrate/issues/816)).
+**`PermissionsBoundaryUsageCount` is computed on every policy read, not stored.** A boundary
+lives as an ARN on the entity — `IAMUser`/`IAMRole` — and not as a back-reference on the policy,
+so `CreatePolicy`, `GetPolicy` and `ListPolicies` each count it by scanning the account's users
+and roles once and reading the resulting map per member. That makes a policy read
+O(policies + entities) rather than the O(policies × entities) a per-policy scan would cost, and
+it is why three things need no code of their own: the count reaches zero when the last boundary
+is removed, `DeleteUser`/`DeleteRole` decrement it (the boundary goes with the deleted record),
+and a replayed run reports the live run's count, because the count is a function of the state
+replay rebuilds rather than a counter accumulated alongside it. A bundled AWS managed policy is
+counted the same way, which matters because a fresh emulator's only available boundary ARNs are
+bundled ones ([#815](https://github.com/scttfrdmn/substrate/issues/815)).
+
+**One member is deliberately unmodelled**, because reporting it is a design decision rather than
+a field to render. `RoleLastUsed` advances when a role is *assumed*, so it needs `AssumeRole` to
+write an IAM record — substrate's first write on a path whose purpose is not to mutate — or a
+projection over recorded `AssumeRole` events, plus a nested response type and the request's
+region ([#816](https://github.com/scttfrdmn/substrate/issues/816)).
 
 ### The tagging operations, and what a listing reports
 
