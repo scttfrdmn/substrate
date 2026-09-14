@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`StartTestServer` can record request bodies and state hashes** — `WithRecordedBodies()` and
+  `WithRecordedStateHashes()` (part of #833). Both are off by default, matching
+  `EventStoreConfig.IncludeBodies` and `IncludeStateHashes`, because a body is the largest thing an
+  event carries and a state hash is a full snapshot taken twice per request. The first is what any
+  test about replay needs: a recorded event with no request **cannot be re-executed**, so a test
+  that records against a default test server and then replays verifies nothing at all. That is not
+  hypothetical — it is exactly why the flagship end-to-end replay journey passed while executing
+  nothing, and there was previously no option to change it.
+
+- **`EventStore.RecordRequest` accepts `WithStateHashes(before, after)`**, and
+  `EventStore.RecordsStateHashes` reports whether the store will keep them (part of #833). The
+  caller supplies both because only the caller knows when "before" was — the store is invoked after
+  the request completed, so it can observe the after-state and nothing else. The store's config
+  stays the authority: a hash offered while `IncludeStateHashes` is off is discarded rather than
+  producing an event whose contents disagree with the configuration it was recorded under.
+
 ### Fixed
 - **The tagging API's ARN resolver checks the resource type it strips** (#845). Eight of sixteen
   arms in `resolveARN` stripped a resource-type prefix without first checking it was there, and
@@ -167,6 +184,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent from both operations' error lists but present on IAM's `CommonErrors` page ("The input
   doesn't meet the required format or constraints", 400) and is what every other IAM handler
   answers for one.
+
+- **A replay stops reporting success for work it never did** (part of #833). `replayEvent`
+  incremented `SkippedEvents` and returned a nil error for an event carrying no request, and the
+  driver read that nil error as a success — so a skipped event incremented **both** counters. Since
+  `IncludeBodies` defaults to false, *no* event on a default-configured stream carries a request, so
+  every event was skipped and a replay of such a stream reported `total=N success=N` while executing
+  none of them. `replayEvent` now reports whether it executed the event, separately from the error,
+  because a skip is neither a success nor a failure and both return nil; the three counters now
+  partition the stream, which is stated as an invariant on `ReplayResults`. The completion log
+  reports the skipped count and the difference count too — `total=N success=N` and `total=N
+  skipped=N` are the same stream with and without recorded bodies, and only one of them verified
+  anything. `SuccessEvents` is documented as meaning "re-executed without returning an error",
+  **not** "matched the recording": whether a replay reproduced a run is `Differences` together with
+  `StateValid`.
+
+- **A recorded refusal that replays as a success is reported as a critical difference** (part of
+  #833). Nothing caught this: the error comparison ran only when the *replay* errored, so a
+  successful replay never consulted the recorded error, and the status comparison could not stand in
+  for it because every pre-plugin refusal records with a nil response — so `event.Response` is nil
+  for exactly the events that were refused. A recorded 403 replaying as a 200 was reported as **no
+  difference at all**, and, before the counter fix above, as a success. It is classed critical to
+  match the reverse case already there: a replay that grants what the recording denied is the
+  divergence most likely to make a passing test meaningless, because it is the one that lets a
+  request through.
+
+- **`ValidateState` stops being inert** (part of #833). `IncludeStateHashes` was declared, plumbed
+  through config and defaulted, and **never read**; `Event.StateHashBefore` and `StateHashAfter`
+  were never written outside a hand-built test event, so both replay comparisons were guarded on a
+  field that was always empty. This is `AttachmentCount`'s defect in another subsystem — a value
+  read from a field no writer touches. The server and the CloudFormation stack deployer now record
+  both hashes when the store is configured to keep them, taken before the pipeline's first refusal
+  point so that a refused request records the same hash on both sides rather than leaving the field
+  empty and having the replay skip the check. The recorded hash and the replayed hash come from one
+  function, `stateSnapshotHash`, for the reason #826 established for ARNs: two implementations of
+  "hash the state" would be two answers, and the comparison would report a difference on every
+  event.
+
+  **Enabling this on a stream that contains a create now reports a mismatch**, and that is the
+  honest answer rather than a defect. Substrate mints most identifiers from `crypto/rand`, so the
+  minted value differs between a recording and its replay and lands in the state being hashed
+  (#856). Making the comparison run is what surfaces it; it was previously invisible because
+  nothing was being compared.
+
+  Two things are **recorded rather than fixed**, both narrower in the issue than in the tree.
+  `isReplaying` is consulted at **three** sites (quota, and consistency twice), all unreachable,
+  because a replay calls `RouteRequest` directly and never enters the pipeline that would set it —
+  so the dead contract is three times the size #833 describes. And a replay **never freezes the
+  clock**: `SetScale` is called nowhere on that path, and `TimeController.Now()` is
+  `baseline + (wall elapsed × scale)`, so #817's premise that simulated-clock timestamps in a body
+  compare equal across a recording and its replay is false. Both are why #833 and #817 stay open
+  with their execution halves outstanding, and both now need #856 first.
 
 ### Changed
 - `docs/services.md`'s Resource Groups Tagging section corrects two overstatements v0.114.0 left.
