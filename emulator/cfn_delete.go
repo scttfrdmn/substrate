@@ -301,16 +301,20 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 		func(api, id string) string { return "/restapis/" + api + "/stages/" + id }),
 	"AWS::ApiGateway::Authorizer": apiGatewayChildDeleter("RestApiId",
 		func(api, id string) string { return "/restapis/" + api + "/authorizers/" + id }),
-	"AWS::ApiGateway::Method": func(_ *StackDeployer, dr DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
+	"AWS::ApiGateway::Method": func(_ *StackDeployer, _ DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
 		// A method is the only child here needing two parents: the API and the
-		// resource it hangs off. Its physical ID is the HTTP verb.
+		// resource it hangs off. All three path segments come from props, the verb
+		// through the same helper the create used — the physical ID is a generated
+		// method ID (#843) and never was the verb's only home, since the two parents
+		// were already resolved this way.
 		api := resolveStringProp(props, "RestApiId", "", cctx)
 		res := resolveStringProp(props, "ResourceId", "", cctx)
 		if api == "" || res == "" {
 			return nil
 		}
 		return &AWSRequest{Service: "apigateway", Operation: "DELETE",
-			Path:    "/restapis/" + api + "/resources/" + res + "/methods/" + dr.PhysicalID,
+			Path: "/restapis/" + api + "/resources/" + res + "/methods/" +
+				cfnAPIGatewayMethodVerb(props, cctx),
 			Headers: map[string]string{}, Params: map[string]string{}}
 	},
 	"AWS::ApiGateway::ApiKey":    pathDeleter("apigateway", "/apikeys/"),

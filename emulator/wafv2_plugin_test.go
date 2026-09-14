@@ -388,15 +388,11 @@ func TestWAFv2Plugin_IPSet_AddressVersionRoundTrips(t *testing.T) {
 			},
 			want: "IPV4",
 		},
-		{
-			name: "an omitted version still defaults to IPV4",
-			request: map[string]any{
-				"Name":      "default-set",
-				"Scope":     "REGIONAL",
-				"Addresses": []string{"192.0.2.0/24"},
-			},
-			want: "IPV4",
-		},
+		// A third case asserting "an omitted version still defaults to IPV4" used to
+		// sit here. It pinned the defect: IPAddressVersion is documented Required:
+		// Yes, so the request it described is one AWS refuses, and defaulting it
+		// reported an address family the caller never chose. #755 removed the default,
+		// and the refusal is asserted in TestWAFv2CreateIPSet_AnOmittedRequiredMemberIsRefused.
 	}
 
 	for _, tt := range tests {

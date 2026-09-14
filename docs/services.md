@@ -903,11 +903,49 @@ A queue's `Ref` is the URL substrate's own SQS operations answer with and accept
 reject is useless to the caller who resolved it. Both come from one function, so the
 value a template resolves and the value `CreateQueue` returns cannot drift.
 
+Every `arn:aws:wafv2` ARN — a web ACL's or an IP set's, from the WAFv2 API or from
+CloudFormation — comes from one builder, for the same reason. The CloudFormation path
+derived the ARN's scope segment from the `Scope` property while the plugin hardcoded
+`regional`, so one logical web ACL reported two different ARNs depending on which path
+created it, and a `CLOUDFRONT` resource created through the API named a scope it did
+not have. An IP-set ARN is what an `IPSetReferenceStatement` takes and a web-ACL ARN is
+what `AssociateWebACL` takes, so that is an identifier another operation is expected to
+accept. The segment is the lowercase of `Scope`, which is **substrate's reading**: AWS
+publishes exactly one substituted web-ACL ARN anywhere, on the `AWS::WAFv2::WebACL`
+Template Reference page, and it is a `REGIONAL` ACL rendering `regional`. What one
+builder guarantees is that every path agrees; which answer they agree on is not cited
+(#858).
+
+`CreateIPSet` refuses an incomplete request rather than inventing one. All four of
+`Addresses`, `IPAddressVersion`, `Name` and `Scope` are documented `Required: Yes`, and
+substrate defaulted three of them — so a request AWS rejects created an IP set whose
+scope and address family the caller never chose, and then reported them back as though
+it had asked. An **omitted** required member answers `ValidationError`/400 (WAFv2's
+`CommonErrors`: "Check that all required parameters are included and that values are
+valid"); a **present-but-invalid value** answers `WAFInvalidParameterException`/400,
+which the operation's own Errors section lists. `"Addresses": []` still **succeeds**,
+because AWS lists it among the operation's valid specifications while marking
+`"Addresses": [""]` INVALID — so an empty list and an absent member stay distinct, and
+the `nil`-to-`[]` normalisation had to go rather than sit beside the refusal (#755).
+
 A listener's `DefaultActions` and a listener rule's `Actions` are now **forwarded** to
 `CreateListener` and `CreateRule`. They were dropped, so the resolved target group
 never reached the listener and `DescribeListeners` reported a listener with no default
 action; forwarding them is what makes a resolved `!Ref` on a target group observable
 through an API call rather than only through a stack `Output`.
+
+An `AWS::ApiGateway::Method`'s physical ID is a **generated method ID**,
+`{stack}-{logical}-{suffix}`, which is the shape AWS's own Template Reference example
+for the type has (`mysta-metho-01234b567890example`). It was the HTTP verb, so two
+methods with the same verb on different resources of one API were indistinguishable —
+and because a `PhysicalResourceId` lookup scans every stack in the account, so was
+every `GET` method everywhere. The type has no name property, so unlike every other
+generated name the bound comes from that published example rather than from a service
+limit; API Gateway's REST API publishes no method identifier at all, which is why the
+identifier exists only in the CloudFormation layer and the plugin is unchanged — a
+method is still addressed by its verb in API Gateway's own state, and the deleter
+resolves the verb from the template's properties, the same channel it already used for
+the method's two parents (#843).
 
 **When a type's documented value cannot be built, `Ref` resolves to empty** rather
 than falling back to the physical ID. An empty value means the deploy did not yield
@@ -922,11 +960,11 @@ does not exist in substrate to return:
 - `AWS::SNS::Subscription` — AWS documents "`Ref` returns the subscription's logical
   name". Substrate returns the subscription ARN, deliberately: the logical name is a
   value the template already has, and the ARN is the one an `Unsubscribe` takes.
-- `AWS::ApiGateway::Method` — the documented value is the method's ID, which substrate
-  does not mint; the physical ID is the HTTP verb. Every `GET` method in a stack
-  therefore shares one physical ID.
 - `AWS::CloudFront::CloudFrontOriginAccessIdentity` — the documented value is the OAI
-  ID, which is not minted; the physical ID is the configured `Comment`.
+  ID, which is not minted. The physical ID is the resource's **logical ID**: the
+  deploy helper asks for `CloudFrontOriginAccessIdentityConfig.Comment`, but that
+  lookup reads a dotted key from a flat map and the property is a nested object, so
+  the lookup never matches and the fallback always wins (#859).
 - `AWS::ElasticLoadBalancing::LoadBalancer` (classic) — documented as the DNS name.
   The classic load balancer has no deploy helper at all and falls through to the
   generic stub, so there is no DNS name to return.
@@ -8112,7 +8150,7 @@ result with no error (#529).
 |------|-----|-------|
 | AWS::ApiGateway::RestApi | RestApiId | |
 | AWS::ApiGateway::Resource | ResourceId | |
-| AWS::ApiGateway::Method | — | |
+| AWS::ApiGateway::Method | method ID | Generated `{stack}-{logical}-{suffix}`, matching AWS's documented example (#843) |
 | AWS::ApiGateway::Deployment | DeploymentId | |
 | AWS::ApiGateway::Stage | StageName | |
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -93,6 +94,31 @@ func wafv2AssocKey(acct, region, resourceArn string) string {
 	return "assoc:" + acct + "/" + region + "/" + resourceArn
 }
 
+// wafv2ARN builds the ARN of a WAFv2 resource. It is the single builder for the
+// whole service, for the reason #826 established: two builders are two answers,
+// and one logical web ACL reported two different ARNs depending on whether the
+// WAFv2 API or CloudFormation created it, because the plugin hardcoded the scope
+// segment "regional" while the CloudFormation helper derived it.
+//
+// The scope segment is the lowercase of the Scope value, which is a REGIONAL
+// reading extended to CLOUDFRONT rather than a documented fact, and the extension
+// is substrate's. AWS publishes exactly one substituted example of a web-ACL ARN
+// anywhere, on the AWS::WAFv2::WebACL Template Reference page —
+//
+//	arn:aws:wafv2:us-east-1:ExampleAccountNumber:regional/webacl/exampleWebACL/exampleWebACLExampleID
+//
+// — and it is a REGIONAL ACL rendering "regional". The Service Authorization
+// Reference page returns an empty body, the machine-readable Service Reference
+// gives only the unsubstituted "${Scope}", and API_AssociateWebACL lists the
+// protectable resources' ARN formats but no web-ACL ARN. So whether a CLOUDFRONT
+// ACL's segment reads "cloudfront" or something else is unverified. What this
+// function guarantees is that every path agrees on one answer; which answer it is
+// remains substrate's reading.
+func wafv2ARN(region, accountID, scope, resourceType, name, id string) string {
+	return fmt.Sprintf("arn:aws:wafv2:%s:%s:%s/%s/%s/%s",
+		region, accountID, strings.ToLower(scope), resourceType, name, id)
+}
+
 // generateWAFv2Token returns a new random UUID string for use as a LockToken or ID.
 func generateWAFv2Token() string {
 	b := make([]byte, 16)
@@ -129,7 +155,7 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 
 	id := generateWAFv2Token()
 	lockToken := generateWAFv2Token()
-	arn := fmt.Sprintf("arn:aws:wafv2:%s:%s:regional/webacl/%s/%s", reqCtx.Region, reqCtx.AccountID, input.Name, id)
+	arn := wafv2ARN(reqCtx.Region, reqCtx.AccountID, input.Scope, "webacl", input.Name, id)
 
 	acl := WAFv2WebACL{
 		ID:               id,
@@ -430,22 +456,13 @@ func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
-	if input.Name == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
-	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
-	}
-	if input.IPAddressVersion == "" {
-		input.IPAddressVersion = "IPV4"
-	}
-	if input.Addresses == nil {
-		input.Addresses = []string{}
+	if err := wafv2ValidateCreateIPSet(input.Name, input.Scope, input.IPAddressVersion, input.Addresses); err != nil {
+		return nil, err
 	}
 
 	id := generateWAFv2Token()
 	lockToken := generateWAFv2Token()
-	arn := fmt.Sprintf("arn:aws:wafv2:%s:%s:regional/ipset/%s/%s", reqCtx.Region, reqCtx.AccountID, input.Name, id)
+	arn := wafv2ARN(reqCtx.Region, reqCtx.AccountID, input.Scope, "ipset", input.Name, id)
 
 	ipset := WAFv2IPSet{
 		ID:               id,

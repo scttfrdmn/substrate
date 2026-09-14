@@ -59,6 +59,10 @@ func (d *StackDeployer) deployOpenSearchDomain(
 // hardcoded to "regional", so a CLOUDFRONT web ACL reported an ARN naming a scope it does not
 // have. It is corrected here rather than left wrong beside a Metadata entry recording the real
 // scope two lines away.
+//
+// The ARN comes from wafv2ARN, which the WAFv2 plugin also uses. Fixing the segment here alone
+// left the plugin still hardcoding "regional", so the same logical web ACL reported two
+// different ARNs depending on which path created it; one builder is what stops that recurring.
 func (d *StackDeployer) deployWAFv2WebACL(
 	ctx context.Context,
 	logicalID string,
@@ -68,8 +72,7 @@ func (d *StackDeployer) deployWAFv2WebACL(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 	scope := resolveStringProp(props, "Scope", "REGIONAL", cctx)
-	arn := fmt.Sprintf("arn:aws:wafv2:%s:%s:%s/webacl/%s/%s",
-		cctx.region, cctx.accountID, strings.ToLower(scope), name, logicalID)
+	arn := wafv2ARN(cctx.region, cctx.accountID, scope, "webacl", name, logicalID)
 	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
 	return DeployedResource{
 		LogicalID:  logicalID,

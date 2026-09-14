@@ -261,9 +261,6 @@ type ConfigRule struct {
 
 	// EvaluationModes are the modes the rule evaluates in.
 	EvaluationModes []ConfigEvaluationMode `json:"EvaluationModes,omitempty"`
-
-	// Tags are the tags set when the rule was created, not updated by a later Put.
-	Tags map[string]string `json:"-"`
 }
 
 // ConfigEvaluation is the Evaluation shape: one resource's verdict, as submitted

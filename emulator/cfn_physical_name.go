@@ -14,10 +14,14 @@ import (
 // CloudFormation documents for a generated name — "must begin with a letter;
 // contain only ASCII letters, digits, and hyphens; and not end with a hyphen or
 // contain two consecutive hyphens" — is a subset of what every one of those
-// services allows.
+// services allows, and of what CloudFormation itself accepts for an identifier
+// no service ever sees.
 type cfnNameConstraint struct {
 	// maxLen is the longest name the service accepts, from that service's own
-	// API reference rather than from CloudFormation's.
+	// API reference rather than from CloudFormation's — except for a type whose
+	// generated identifier is never sent to a service at all, where there is no
+	// such limit to read and the bound comes from CloudFormation's own published
+	// example instead (see the AWS::ApiGateway::Method entry).
 	maxLen int
 
 	// lower forces the whole name to lowercase, for a service whose names are
@@ -37,6 +41,13 @@ type cfnNameConstraint struct {
 // identifiers a template legitimately controls — generating those would change
 // the URLs and identifiers a consumer wrote the template to get. A type absent
 // from this table keeps the older behavior of using the logical ID verbatim.
+//
+// One entry is admitted on a different warrant: a type with no name property at
+// all, whose identifier exists only in the CloudFormation layer and whose
+// Template Reference publishes a generated one in this table's own shape. There
+// the alternative is not "a name the template controls" but "an identifier that
+// does not distinguish two resources in the same stack", which is what
+// AWS::ApiGateway::Method had.
 var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// IAM names: "[\w+=,.@-]+", 64 for a role, 128 for a policy or an instance
 	// profile (CreateRole, CreatePolicy, CreateInstanceProfile).
@@ -81,6 +92,21 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// may exist per account per Region, so a generated stack-scoped name would
 	// replace a name the service assigns and could not collide with anything anyway.
 	"AWS::Config::ConfigRule": {maxLen: 128},
+
+	// AWS::ApiGateway::Method is the one entry with no name property at all, and
+	// so the one whose bound does not come from a service limit. API Gateway's
+	// REST API has no method identifier — API_Method carries the eleven
+	// configuration fields and no id, and API_PutMethod returns none — so nothing
+	// is ever sent to a service for validation and there is no service-side
+	// maximum to fit. The identifier exists only in the CloudFormation layer, and
+	// the Template Reference publishes it: Ref "returns the method ID, such as
+	// mysta-metho-01234b567890example". That example is this table's shape, it is
+	// 31 characters, and it is lowercase — so 31 and lower are taken from the
+	// example, the only evidence AWS publishes, rather than from a limit. Without
+	// an entry here every method in a stack is identified by its HTTP verb, so two
+	// methods with the same verb on different resources are indistinguishable
+	// (#843).
+	"AWS::ApiGateway::Method": {maxLen: 31, lower: true},
 }
 
 // cfnGeneratedNameSuffixLen is the length of the derived suffix, matching the

@@ -209,6 +209,28 @@ func (d *StackDeployer) deployAPIGatewayResource(
 	return dr, cost, nil
 }
 
+// cfnAPIGatewayMethodVerb resolves the HTTP verb of an AWS::ApiGateway::Method
+// from its declared properties. Deploy and delete both go through it so the two
+// cannot drift: the verb is a path segment in the method's own URL, so a delete
+// that resolved it differently from the create would address a method that was
+// never made.
+//
+// It reads props rather than the DeployedResource because the physical ID is a
+// generated method ID (#843) and there is no other channel that would survive.
+// Metadata is the wrong one on purpose: cfnGetAttValue resolves any metadata key
+// by its own name, and AWS::ApiGateway::Method has no Fn::GetAtt section at all,
+// so recording the verb there would publish an attribute AWS does not have.
+// Props costs nothing in durability — the deleter already resolves RestApiId and
+// ResourceId the same way, from the stored template body, and a template that no
+// longer parses already leaves it unable to name the method's two parents.
+//
+// The "GET" fallback matches the create side rather than being correct: AWS marks
+// HttpMethod Required: Yes, so a template omitting it is invalid, and substrate
+// has no CloudFormation-side required-property validation to refuse it with.
+func cfnAPIGatewayMethodVerb(props map[string]interface{}, cctx *cfnContext) string {
+	return resolveStringProp(props, "HttpMethod", "GET", cctx)
+}
+
 // deployAPIGatewayMethod creates an API Gateway method for the given CFN resource.
 func (d *StackDeployer) deployAPIGatewayMethod(
 	ctx context.Context,
@@ -219,7 +241,7 @@ func (d *StackDeployer) deployAPIGatewayMethod(
 ) (DeployedResource, float64, error) {
 	restAPIID := resolveStringProp(props, "RestApiId", "", cctx)
 	resourceID := resolveStringProp(props, "ResourceId", "", cctx)
-	httpMethod := resolveStringProp(props, "HttpMethod", "GET", cctx)
+	httpMethod := cfnAPIGatewayMethodVerb(props, cctx)
 
 	body := map[string]interface{}{
 		"authorizationType": resolveStringProp(props, "AuthorizationType", "NONE", cctx),
@@ -236,7 +258,17 @@ func (d *StackDeployer) deployAPIGatewayMethod(
 	}
 
 	_, cost, routeErr := d.dispatch(ctx, req, streamID)
-	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ApiGateway::Method", PhysicalID: httpMethod}
+	// The physical ID is a generated method ID, not the verb: the verb identifies a
+	// method only within one API resource, so using it made every method in a stack
+	// — and, because a PhysicalResourceId lookup scans every stack, every method in
+	// the account — report the same identifier (#843). AWS publishes Ref for this
+	// type as a generated ID, "such as mysta-metho-01234b567890example", which is
+	// what cfnGeneratedName produces.
+	dr := DeployedResource{
+		LogicalID:  logicalID,
+		Type:       "AWS::ApiGateway::Method",
+		PhysicalID: cfnGeneratedName(cctx, "AWS::ApiGateway::Method", logicalID),
+	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
 	}

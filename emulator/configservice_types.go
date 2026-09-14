@@ -109,11 +109,6 @@ type ConfigRecorder struct {
 
 	// RecordingScope is INTERNAL or PAID.
 	RecordingScope string `json:"recordingScope,omitempty"`
-
-	// Tags are the tags set when the recorder was created. A later Put does not
-	// replace them: the API reference states tags "are added at creation and are not
-	// updated with configuration recorder updates".
-	Tags map[string]string `json:"-"`
 }
 
 // ConfigRecordingGroup is the RecordingGroup shape: which resource types a
@@ -213,6 +208,16 @@ func cfgsvcChannelKey(accountID, region string) string {
 // cfgsvcTagsKey holds the tags on a Config resource, keyed by its ARN. Tags are
 // keyed by ARN rather than by name so one map serves recorders, rules and packs,
 // which is also the shape TagResource's own input has.
+//
+// This side-car record is the *only* home for a Config resource's tags, and that
+// is deliberate: neither AWS's ConfigurationRecorder nor its ConfigRule shape has
+// a Tags member (API_ConfigurationRecorder, API_ConfigRule), and
+// describeConfigurationRecorders serializes the record straight to the wire, so a
+// Tags field on either struct would emit a member AWS never emits. Both structs
+// carried one for a while, unwritten and unread by anything; #836 removed them,
+// having first been filed on the premise that their presence meant tags were
+// broken. Creation-time tags come from the *request's* top-level Tags member,
+// where the API model puts it, and land here.
 func cfgsvcTagsKey(arn string) string { return "tags:" + arn }
 
 // --- ARNs ---
@@ -345,6 +350,13 @@ func (p *ConfigServicePlugin) cfgsvcDeleteKey(ctx context.Context, key string) e
 
 // cfgsvcSaveTags stores the tags on a resource ARN, deleting the key when the map
 // is empty rather than storing "{}".
+//
+// A recorder's and a rule's tags are written here only when the resource is
+// created; a later Put does not replace them, because the API reference states
+// tags "are added at creation and are not updated with configuration recorder
+// updates". PutConfigurationRecorder enforces that by writing tags only when no
+// record exists yet, which is what makes an updating Put carry the existing tags
+// forward rather than dropping them.
 func (p *ConfigServicePlugin) cfgsvcSaveTags(ctx context.Context, arn string, tags map[string]string) error {
 	if len(tags) == 0 {
 		return p.cfgsvcDeleteKey(ctx, cfgsvcTagsKey(arn))
