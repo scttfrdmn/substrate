@@ -104,6 +104,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build the state key themselves rather than from an ARN, so for those the arms are the only thing
   between a stamp aimed at an unhandled namespace and a silent success.
 
+- **A permissions boundary is reported under AWS's own member names, so an SDK can read it**
+  (#852). `GetRole` and `GetUser` rendered the boundary as `<PolicyArn>` and `<PolicyName>`, and
+  **neither name exists on AWS's shape**: the `PermissionsBoundary` member of `User`, `Role`,
+  `UserDetail` and `RoleDetail` is an `AttachedPermissionsBoundary`, whose Contents section lists
+  exactly `PermissionsBoundaryArn` and `PermissionsBoundaryType`. So an SDK decoded the element
+  into an empty struct — a consumer reading `role.PermissionsBoundary.PermissionsBoundaryArn` got
+  `""` for a boundary substrate had stored and was reporting. Nothing in the tree had ever emitted
+  either AWS name, and the one test covering the element asserted only that the tag was present,
+  which is the assertion a decoded struct can make and raw XML cannot be fooled by — so the fix is
+  asserted both ways: raw XML for presence, a typed decode for the names an SDK actually looks for.
+
+  `PermissionsBoundaryType` renders `PermissionsBoundaryPolicy`. AWS's page contradicts itself
+  about it — the prose says the type "can only have a value of `Policy`" while the same page's
+  enumeration says "Valid Values: `PermissionsBoundaryPolicy`", and the CLI v2 reference, generated
+  from the service model, lists only the latter — so under #671's binding rule, *only what the API
+  model states*, the wire value is the enum's, with the prose recorded rather than silently
+  resolved. `PolicyName` is still stored on the entity, because `ListAttachedRolePolicies` renders
+  one and AWS's `AttachedPolicy` shape has that member, but it no longer reaches the wire from a
+  boundary: the boundary's shape has nowhere to carry it, which is what makes #846's "source the
+  `PolicyName` from the resolved policy" moot rather than deferred.
+
+- **`GetPolicy` reports the attachment count it derives, not the field nothing writes** (#847).
+  Nothing assigns `IAMPolicy.AttachmentCount`: `CreatePolicy` never set it, the bundled catalog
+  carries no value for it, and an attach records only the ARN on the entity's own list. So
+  `GetPolicy` reported **0 for every policy in every state** while `ListPolicies`, which derives the
+  count, reported the truth — a policy attached to three entities read as 3 in a listing and 0 on
+  its own. `GetPolicy` now derives it from the same three `<kind>_policies:` prefixes, hoisted once
+  per request alongside the boundary-usage scan. The two scans are **not** collapsed: attachment
+  counts are read without loading a single entity record, while boundary usage has to walk the
+  `user:` and `role:` records, so one pass cannot serve both. The count is written onto a **copy**
+  of a bundled policy's record, because the catalog hands back shared pointers and writing through
+  one would leak a count into every later read of that policy — including a read from a different
+  emulator in the same process, which is asserted as a test rather than left to the comment.
+
+- **A permissions boundary's ARN is validated, and a service-linked role refuses one** (#846).
+  `putPermissionsBoundary` — one body serving both operations — tested the boundary for emptiness
+  only. A malformed ARN now answers `InvalidInput`/400 through the same `iamValidatePolicyARN` the
+  three attach operations use, so a bare policy name, a `role/` ARN where `policy/` belongs, and a
+  length outside `arnType`'s 20–2048 bounds are all refused with the code both operation pages
+  publish. `PutRolePermissionsBoundary` refuses a **service-linked role** with
+  `UnmodifiableEntity`/400: its own prose says "You cannot set the boundary for a service-linked
+  role", and both the sentence and the code are absent from `PutUserPermissionsBoundary`, so the
+  asymmetry is AWS's rather than an inference from "there is no service-linked user". The
+  recognition reuses the two helpers `deleteRole` already uses, so there is one definition of a
+  reserved path rather than two that can drift.
+
+  **The issue's first acceptance criterion is deliberately reversed.** Refusing a boundary ARN that
+  names no policy with `NoSuchEntity` contradicts #499's recorded rationale: substrate bundles 52 of
+  roughly 1,200 AWS managed policies, AWS says a boundary may be "an AWS managed policy or a
+  customer managed policy", and neither operation's page states what a nonexistent boundary policy
+  produces — so the refusal would be substrate's inference presented as AWS's behaviour, and it
+  would fail the ~1,150 calls that succeed against AWS. An unresolvable boundary warns instead, on
+  its own line rather than the attach path's, because the consequence is the reverse one: an
+  unresolvable *attached* policy grants nothing, while an unresolvable *boundary* **restricts**
+  nothing — the evaluator loads no document, and no document is indistinguishable from no boundary,
+  so the entity keeps every permission its attached policies grant where AWS would have clamped
+  them. Two further findings are recorded rather than implemented: `PolicyNotAttachable` is
+  published on both pages and is not modelled, because substrate does not record which managed
+  policies are AWS service-role policies and refusing on a guess would be a refusal AWS's own
+  description does not cover; and `ValidationError` is kept for a missing required member, which is
+  absent from both operations' error lists but present on IAM's `CommonErrors` page ("The input
+  doesn't meet the required format or constraints", 400) and is what every other IAM handler
+  answers for one.
+
 ### Changed
 - `docs/services.md`'s Resource Groups Tagging section corrects two overstatements v0.114.0 left.
   The claim that #826's audit found "every other service's arm … all agree" was narrower than it
@@ -112,6 +176,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the section now also states which types `TagResources` reaches that `GetResources` does not, so a
   tag readable through the owning service's own call but absent from a `GetResources` listing reads
   as the scanner half of #835 rather than as an inconsistency.
+
+- `docs/services.md`'s IAM section states what a boundary's two members are and why the type
+  renders the enum's spelling rather than the prose's, that `AttachmentCount` is derived on every
+  read like `PermissionsBoundaryUsageCount` is, and what the two `Put*PermissionsBoundary`
+  operations refuse — including the two things they deliberately do not.
 
 ## [v0.114.0] - 2026-09-12
 

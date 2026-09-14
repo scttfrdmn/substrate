@@ -86,8 +86,13 @@ func TestIAM_PermissionsBoundaryIsSingleEntityOnly(t *testing.T) {
 			assert.Contains(t, body, boundaryPresenceAnchor(tt.operation), "entity missing from response")
 			if tt.want {
 				assert.Contains(t, body, "<PermissionsBoundary>", "boundary should be reported")
-				assert.Contains(t, body, "<PolicyArn>"+boundaryARN+"</PolicyArn>")
-				assert.Contains(t, body, "<PolicyName>PowerUserAccess</PolicyName>")
+				// AWS's AttachedPermissionsBoundary members, asserted against raw XML
+				// (#852). The two names this used to assert, PolicyArn and PolicyName, are
+				// on no AWS shape, so an SDK decoded the element into an empty struct.
+				assert.Contains(t, body, "<PermissionsBoundaryArn>"+boundaryARN+"</PermissionsBoundaryArn>")
+				assert.Contains(t, body, "<PermissionsBoundaryType>PermissionsBoundaryPolicy</PermissionsBoundaryType>")
+				assert.NotContains(t, body, "<PolicyName>",
+					"the boundary shape has no PolicyName member")
 				return
 			}
 			assert.NotContains(t, body, "PermissionsBoundary",

@@ -1054,7 +1054,8 @@ func TestIAMPlugin_PermissionsBoundary_User(t *testing.T) {
 	decodeIAMXML(t, resp, &result)
 	user := result["User"].(map[string]any)
 	boundary := user["PermissionsBoundary"].(map[string]any)
-	assert.Equal(t, "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess", boundary["PolicyArn"])
+	assert.Equal(t, "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess", boundary["PermissionsBoundaryArn"])
+	assert.Equal(t, "PermissionsBoundaryPolicy", boundary["PermissionsBoundaryType"])
 
 	// Delete permissions boundary.
 	resp = iamRequest(t, srv, "DeleteUserPermissionsBoundary", map[string]any{

@@ -1357,9 +1357,30 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, err
 	}
 
+	// AttachmentCount is derived here for the same reason ListPolicies derives it
+	// (iam_list_policies.go:124-133): nothing writes IAMPolicy.AttachmentCount. CreatePolicy
+	// never sets it, the bundled catalog carries no value for it, and an attach writes only the
+	// entity's own ARN list — so reading the stored field made GetPolicy report 0 for every
+	// policy in every state while ListPolicies reported the truth (#847).
+	//
+	// The two scans cannot be collapsed into one: attachment counts come from the three
+	// "<kind>_policies:" prefixes, which iamPolicyAttachmentCounts reads without loading a
+	// single entity record, while boundary usage has to walk "user:" and "role:" records. Both
+	// are hoisted once per request, as they are for a listing.
+	attachments, err := p.iamPolicyAttachmentCounts(goCtx, ctx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Check managed policies first.
 	if mp, ok := GetManagedPolicy(params.PolicyArn); ok {
-		return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(mp, boundaryUsage[mp.ARN]))
+		// A local copy, because GetManagedPolicy hands back the catalog's shared pointer:
+		// writing the count through it would leak this request's number into every later read
+		// of the same bundled policy, including a listing that filters on OnlyAttached. The
+		// state arm below needs no copy — its policy is already a local value.
+		listed := *mp
+		listed.AttachmentCount = attachments[listed.ARN]
+		return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(&listed, boundaryUsage[listed.ARN]))
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn))
@@ -1375,6 +1396,7 @@ func (p *IAMPlugin) getPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return nil, fmt.Errorf("unmarshal policy: %w", err)
 	}
+	policy.AttachmentCount = attachments[policy.ARN]
 
 	return iamXMLResponse(http.StatusOK, "GetPolicy", iamSinglePolicyXML(&policy, boundaryUsage[policy.ARN]))
 }
@@ -2126,6 +2148,32 @@ func (p *IAMPlugin) deleteRolePermissionsBoundary(ctx *RequestContext, req *AWSR
 }
 
 // putPermissionsBoundary sets the permissions boundary on a user or role.
+//
+// One body serves PutUserPermissionsBoundary and PutRolePermissionsBoundary, so the validation
+// below cannot diverge between them. What differs is deliberate and is AWS's own asymmetry, not
+// a structural inference: UnmodifiableEntity is on the role operation's published error list and
+// its prose says "You cannot set the boundary for a service-linked role", while neither appears
+// on the user operation's page at all.
+//
+// The boundary ARN is checked for shape and not for existence, which is #499's recorded decision
+// (iam_policy_arn.go) applied here rather than re-argued: AWS says a boundary may be "an AWS
+// managed policy or a customer managed policy", substrate bundles 52 of roughly 1,200 managed
+// policies, and neither operation's page states what a nonexistent boundary policy produces — so
+// a NoSuchEntity refusal would be substrate's inference presented as AWS's behavior, and it
+// would break the ~1,148 unbundled ARNs that are the common case. #846's first acceptance
+// criterion asked for that refusal and is reversed for those reasons. An ARN naming nothing warns
+// instead, exactly as an attach does.
+//
+// A malformed boundary ARN answers InvalidInput, which is what both pages publish. The missing
+// member keeps ValidationError: that code is absent from both operations' error lists but present
+// on IAM's CommonErrors page — "The input doesn't meet the required format or constraints. Check
+// that all required parameters are included and that values are valid", HTTP 400 — which is where
+// a framework-level refusal belongs and what every other IAM handler answers for an absent
+// required member. So the two codes divide on the same line attachRolePolicy already draws.
+//
+// PolicyNotAttachable is published on both pages and is deliberately not taken: substrate does not
+// model which managed policies are AWS service-role policies, so it cannot tell the case apart,
+// and inventing the condition would be a refusal AWS's own description does not cover.
 func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest, entityType string) (*AWSResponse, error) {
 	var params struct {
 		UserName            string `json:"UserName"`
@@ -2146,12 +2194,19 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 		return iamErrorResponse("ValidationError",
 			"EntityName and PermissionsBoundary are required", http.StatusBadRequest), nil
 	}
+	// Shape, not existence — see iam_policy_arn.go (#499) and this function's own doc comment.
+	if message, ok := iamValidatePolicyARN(params.PermissionsBoundary); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:Put"+actionSuffix+"PermissionsBoundary", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}
 
+	// PolicyName is still stored, because ListAttachedRolePolicies renders one and AWS's
+	// AttachedPolicy shape has the member. It no longer reaches the wire from a boundary:
+	// AttachedPermissionsBoundary has no PolicyName at all (#852).
 	boundary := &IAMAttachedPolicy{
 		PolicyARN:  params.PermissionsBoundary,
 		PolicyName: arnPolicyName(params.PermissionsBoundary),
@@ -2187,6 +2242,22 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 				fmt.Sprintf("The role with name %s cannot be found.", entityName),
 				http.StatusNotFound), nil
 		}
+
+		// "You cannot set the boundary for a service-linked role" — PutRolePermissionsBoundary's
+		// own prose, with UnmodifiableEntity on its error list at HTTP 400. deleteRole recognizes
+		// a service-linked role the same way, through the same two helpers, so there is one
+		// definition of what a reserved path is rather than two that can drift (#747).
+		if iamIsSLRPath(role.Path) {
+			message := "Service linked roles are protected AWS resources. " +
+				"Only the service that depends on the service-linked role can modify or delete " +
+				"the role on your behalf."
+			if service := iamSLRServiceFromPath(role.Path); service != "" {
+				message = fmt.Sprintf("%s cannot be modified because it is a service-linked role "+
+					"for %s.", entityName, service)
+			}
+			return iamErrorResponse("UnmodifiableEntity", message, http.StatusBadRequest), nil
+		}
+
 		role.PermissionsBoundary = boundary
 		raw, err := json.Marshal(role)
 		if err != nil {
@@ -2196,6 +2267,10 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 			return nil, fmt.Errorf("put role: %w", err)
 		}
 	}
+
+	// After the write, as an attach does: the call succeeds either way, and warning before the
+	// store would announce a boundary that a NoSuchEntity refusal then never set.
+	p.iamWarnUnresolvedBoundaryARN(goCtx, "Put"+actionSuffix+"PermissionsBoundary", params.PermissionsBoundary)
 
 	return iamXMLEmptyResponse("Put" + actionSuffix + "PermissionsBoundary"), nil
 }
