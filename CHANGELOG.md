@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.115.0] - 2026-09-14
+
 ### Added
 - **`StartTestServer` can record request bodies and state hashes** — `WithRecordedBodies()` and
   `WithRecordedStateHashes()` (part of #833). Both are off by default, matching
@@ -11308,7 +11310,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.114.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.115.0...HEAD
+[v0.115.0]: https://github.com/scttfrdmn/substrate/compare/v0.114.0...v0.115.0
 [v0.114.0]: https://github.com/scttfrdmn/substrate/compare/v0.113.0...v0.114.0
 [v0.113.0]: https://github.com/scttfrdmn/substrate/compare/v0.112.0...v0.113.0
 [v0.112.0]: https://github.com/scttfrdmn/substrate/compare/v0.111.0...v0.112.0
