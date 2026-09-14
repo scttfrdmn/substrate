@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The tagging API's ARN resolver checks the resource type it strips** (#845). Eight of sixteen
+  arms in `resolveARN` stripped a resource-type prefix without first checking it was there, and
+  `strings.TrimPrefix` returns its input unchanged when the prefix does not match — so an ARN
+  naming a *different type* under the same service built a well-formed state key for **the wrong
+  kind of resource** rather than failing. A Step Functions `activity:` ARN resolved to a
+  state-machine key, so `TagResources` aimed at an activity tagged a same-named state machine if
+  one existed and wrote a phantom record if it did not; a Lambda **layer** ARN resolved to a
+  function key; a DynamoDB **stream** or **index** ARN, a Kinesis **consumer** ARN and an HTTP-API
+  ARN each did the same to their service's real resource. Every arm now checks what it strips, and
+  the seven that already did are unchanged.
+
+  Three of the checks are more than a prefix test, and each is that way because AWS's own ARN
+  format makes it so. A Lambda **version** ARN (`function:{name}:{version}`) and an **alias** ARN
+  (`function:{name}:{alias}`) are lexically identical — only whether the suffix is numeric tells
+  them apart, and AWS does not resolve the ambiguity — so any qualified function ARN is refused
+  rather than guessed at, which costs nothing because tags belong to the function. A DynamoDB
+  index (`table/{name}/index/{index}`) and stream (`table/{name}/stream/{label}`) nest **under**
+  the table prefix, so a remaining `/` is not a table. And Step Functions distinguishes its two
+  taggable types by the capital M in `stateMachine:` against `activity:` alone, so that check is
+  case-sensitive on purpose.
+
+- **A cross-account DynamoDB tag stops hitting the caller's own table** (#845, the recurrence
+  #826 missed). The DynamoDB arm built its key from the **calling request's** account rather than
+  the ARN's, so `TagResources` naming another account's table tagged the caller's own same-named
+  table and `UntagResources` stripped tags from it — the arm immediately below the SQS one #826
+  rewrote, carrying the reason verbatim in a comment it did not follow. `resolveARN` no longer
+  receives a `*RequestContext` **at all**, so the invariant is structural rather than advisory:
+  an arm that cannot reach the caller's account cannot regress this way again. AWS publishes no
+  cross-account behaviour here — `TagResources` says only that "you can only tag resources that
+  are located in the specified AWS Region for the AWS account", and an explicit refusal is
+  documented for a **partition** mismatch but not for an account mismatch — so refusing is
+  substrate's reading, applied uniformly rather than per arm.
+
+- **An unsupported resource type answers `InternalServiceException`, and no `ErrorMessage`
+  carries a state key** (#845). `FailureInfo` documents `InternalServiceException` as covering
+  "the resource type in the request is not supported by the Resource Groups Tagging API", with the
+  guidance "it's safe to retry the request and then call GetResources to verify the changes";
+  substrate answered `InvalidParameterException`/400, which is the **opposite** of what the issue
+  asserts substrate already did. `InvalidParameterException`/400 is now kept for an ARN that is
+  not an ARN — no `arn:` prefix, or fewer than six segments. The split is **substrate's reading,
+  not AWS's**: the same page's `InvalidParameterException` bullets also say "the target ID is
+  invalid, unsupported, or doesn't exist", so both codes can be read to cover an unsupported type,
+  and substrate splits them on whether the ARN parses because that is the only distinction a
+  caller can act on differently. Both handlers now map through one pair of functions, so
+  `TagResources` and `UntagResources` cannot drift. Separately, the message passed `err.Error()`
+  straight to the caller, publishing substrate's internal state-key layout in an API response;
+  the detail now goes to the log and the response carries AWS's documented sentence.
+
+  Substrate deliberately does **not** distinguish "AWS's tagging API does not support this type"
+  from "AWS supports it and substrate has no arm yet". AWS publishes no list that could support
+  the distinction: `supported-services.html`, which its own `TagResources` reference links to,
+  **does not exist**, and the list on the guide's welcome page is truncated alphabetically at IAM.
+
+- **ECS `TagResource` stops answering 200 for a tag it never wrote** (#845). `resourceStateKey`
+  returned `("", "")` for any ARN it could not key and `applyTagsToResource` then returned success,
+  so tagging a task definition answered the exact response AWS documents for a **successful** tag
+  — "an HTTP 200 response with an empty HTTP body" — having written nothing, and `UntagResource`
+  did the same. A resource that does not exist behaved identically. Meanwhile
+  `ListTagsForResource` refused the same ARN: the two sides of one tag disagreed and the write
+  side was the one that lied. Both write sides now refuse, with the codes ECS publishes —
+  `InvalidParameterException` for an ARN that keys nothing, which is the code `TagResource`'s own
+  `resourceArn` description names for the one bad-ARN case AWS spells out ("if you try to tag a
+  service with a short ARN, you receive an `InvalidParameterException` error"), and
+  `ResourceNotFoundException` for a well-formed ARN naming no stored resource.
+
+  That not-found refusal is **HTTP 400, not 404**: every ECS exception except `ServerException` is
+  documented at 400, and the 404 substrate answered is the shape of a REST service rather than a
+  JSON-protocol one. A consumer asserting 404 from ECS `ListTagsForResource` sees 400.
+
+  ECS's key builder had the same account-attribution defect as DynamoDB's — it keyed from
+  `ctx.AccountID`/`ctx.Region` rather than from the ARN — and the tagging API's ECS arm built the
+  cluster key a second time by hand. Both now go through one function, which is the "one builder,
+  so they cannot drift" structure #826 established, and it is also what lets the tagging API reach
+  an ECS **service, task and task definition** rather than a cluster only (part of #835). AWS lists
+  six taggable ECS types; substrate keys four, and a capacity provider and container instance are
+  refused rather than silently accepted, because substrate stores neither.
+
+- **The tagging writer stores a resource's tags in a deterministic order.** All four
+  slice-returning merge helpers — EC2, IAM, ECS and EFS — built their result by ranging over a Go
+  map, so two identical runs stored one resource's tags in **different orders**. That made
+  `ListTagsForResource`, `DescribeTags` and `GetResources` report a different order each run for
+  the same state, and it made a hash over the record differ when nothing about the record had
+  changed — which an event-sourced emulator cannot afford, because a replay has to be able to
+  compare state it did not change and find it equal. All four now sort by key, which is the answer
+  `DescribeStacks` already gives for a stack's own tags. Not previously filed.
+
+- **The shared tag writer stops truncating an ECS record.** `mergeResourceTags`' ECS arm decoded
+  every key into `ECSCluster`, which was harmless only while the resolver could reach nothing but
+  a cluster; a service or task definition would have been re-marshalled with every member
+  `ECSCluster` lacks silently dropped. It now edits the stored record's `tags` member as raw JSON,
+  preserving every other member, through the same function ECS's own `TagResource` writes with.
+  The `default` arm and the per-namespace key fallbacks in that writer are **kept** even though
+  the resolver can no longer reach them: two of its three callers are CloudFormation paths that
+  build the state key themselves rather than from an ARN, so for those the arms are the only thing
+  between a stamp aimed at an unhandled namespace and a silent success.
+
+### Changed
+- `docs/services.md`'s Resource Groups Tagging section corrects two overstatements v0.114.0 left.
+  The claim that #826's audit found "every other service's arm … all agree" was narrower than it
+  read — it held for the resource type each arm *claims* to name and missed the eight arms that
+  never checked. And the scanned-type list named seven types where `GetResources` scans **sixteen**;
+  the section now also states which types `TagResources` reaches that `GetResources` does not, so a
+  tag readable through the owning service's own call but absent from a `GetResources` listing reads
+  as the scanner half of #835 rather than as an inconsistency.
+
 ## [v0.114.0] - 2026-09-12
 
 ### Added

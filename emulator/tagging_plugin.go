@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -708,7 +710,11 @@ type tagResourcesOutput struct {
 	FailedResourcesMap map[string]failedResourcesInfo `json:"FailedResourcesMap,omitempty"`
 }
 
-func (p *TaggingPlugin) tagResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// tagResources implements TagResources. It takes no account or region from the request
+// context: every resource is addressed by the ARN the caller named, through
+// [TaggingPlugin.resolveARN], which is what keeps a cross-account ARN out of the caller's own
+// resources.
+func (p *TaggingPlugin) tagResources(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var in tagResourcesInput
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
@@ -718,21 +724,13 @@ func (p *TaggingPlugin) tagResources(reqCtx *RequestContext, req *AWSRequest) (*
 	goCtx := context.Background()
 
 	for _, arn := range in.ResourceARNList {
-		ns, key, err := p.resolveARN(arn, reqCtx)
+		ns, key, err := p.resolveARN(arn)
 		if err != nil {
-			failures[arn] = failedResourcesInfo{
-				ErrorCode:    "InvalidParameterException",
-				ErrorMessage: err.Error(),
-				StatusCode:   http.StatusBadRequest,
-			}
+			failures[arn] = p.tagResolveFailure(arn, err)
 			continue
 		}
 		if err := p.mergeTags(goCtx, ns, key, in.Tags, nil); err != nil {
-			failures[arn] = failedResourcesInfo{
-				ErrorCode:    "InternalServiceException",
-				ErrorMessage: err.Error(),
-				StatusCode:   http.StatusInternalServerError,
-			}
+			failures[arn] = p.tagMergeFailure(arn, err)
 		}
 	}
 
@@ -754,7 +752,10 @@ type untagResourcesOutput struct {
 	FailedResourcesMap map[string]failedResourcesInfo `json:"FailedResourcesMap,omitempty"`
 }
 
-func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// untagResources implements UntagResources, addressing resources exactly as
+// [TaggingPlugin.tagResources] does so that the two cannot diverge on which resource an ARN
+// names — a removal aimed at the wrong resource is the more damaging direction.
+func (p *TaggingPlugin) untagResources(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var in untagResourcesInput
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
@@ -764,21 +765,13 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 	goCtx := context.Background()
 
 	for _, arn := range in.ResourceARNList {
-		ns, key, err := p.resolveARN(arn, reqCtx)
+		ns, key, err := p.resolveARN(arn)
 		if err != nil {
-			failures[arn] = failedResourcesInfo{
-				ErrorCode:    "InvalidParameterException",
-				ErrorMessage: err.Error(),
-				StatusCode:   http.StatusBadRequest,
-			}
+			failures[arn] = p.tagResolveFailure(arn, err)
 			continue
 		}
 		if err := p.mergeTags(goCtx, ns, key, nil, in.TagKeys); err != nil {
-			failures[arn] = failedResourcesInfo{
-				ErrorCode:    "InternalServiceException",
-				ErrorMessage: err.Error(),
-				StatusCode:   http.StatusInternalServerError,
-			}
+			failures[arn] = p.tagMergeFailure(arn, err)
 		}
 	}
 
@@ -791,9 +784,92 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 
 // ----- ARN resolver --------------------------------------------------------
 
+// unsupportedTagResourceError reports an ARN that is well formed but names a resource type
+// the tagging API does not handle. It exists to keep that case distinguishable from a
+// malformed ARN, because the two answer different error codes.
+//
+// [FailureInfo] documents InternalServiceException as covering the case where "the resource
+// type in the request is not supported by the Resource Groups Tagging API", and tells the
+// caller "it's safe to retry the request and then call GetResources to verify the changes".
+// InvalidParameterException is documented for a different set of causes, of which the one
+// that fits here is "a provided string parameter is malformed".
+//
+// The split is substrate's reading, not AWS's: the same InvalidParameterException list also
+// says "the target ID is invalid, unsupported, or doesn't exist", so both codes can be read
+// to cover an unsupported type. Substrate splits them on whether the ARN parses at all,
+// which is the only distinction a caller can act on differently — a malformed ARN is a bug
+// in the request, an unsupported type is a gap in the emulator.
+type unsupportedTagResourceError struct {
+	// detail names the offending resource portion. It reaches the log, not the response.
+	detail string
+}
+
+// Error implements error.
+func (e *unsupportedTagResourceError) Error() string {
+	return "unsupported resource type for tagging: " + e.detail
+}
+
+// unsupportedTagResource builds an [unsupportedTagResourceError] for a well-formed ARN whose
+// resource type has no arm in [TaggingPlugin.resolveARN].
+func unsupportedTagResource(format string, args ...any) error {
+	return &unsupportedTagResourceError{detail: fmt.Sprintf(format, args...)}
+}
+
+// tagResolveFailure maps a [TaggingPlugin.resolveARN] error onto the FailureInfo a caller
+// sees, keeping both handlers on one mapping so TagResources and UntagResources cannot drift.
+//
+// The message is deliberately not err.Error() for the unsupported case and never the merge
+// error's text: those carry substrate's internal state-key layout, which is not something an
+// API response should publish. The detail goes to the log instead.
+func (p *TaggingPlugin) tagResolveFailure(arn string, err error) failedResourcesInfo {
+	var unsupported *unsupportedTagResourceError
+	if errors.As(err, &unsupported) {
+		p.logger.Warn("tagging API cannot resolve a resource type",
+			"arn", arn, "detail", unsupported.detail)
+		return failedResourcesInfo{
+			ErrorCode:    "InternalServiceException",
+			ErrorMessage: "the resource type in the request is not supported by the Resource Groups Tagging API",
+			StatusCode:   http.StatusInternalServerError,
+		}
+	}
+	return failedResourcesInfo{
+		ErrorCode:    "InvalidParameterException",
+		ErrorMessage: err.Error(),
+		StatusCode:   http.StatusBadRequest,
+	}
+}
+
+// tagMergeFailure maps a tag-merge error onto a FailureInfo. The error's own text names the
+// state key it failed at, so it is logged rather than returned.
+func (p *TaggingPlugin) tagMergeFailure(arn string, err error) failedResourcesInfo {
+	p.logger.Error("tagging API failed to merge tags", "arn", arn, "error", err)
+	return failedResourcesInfo{
+		ErrorCode:    "InternalServiceException",
+		ErrorMessage: "the request failed because of an internal error; retry the request and then call GetResources to verify the changes",
+		StatusCode:   http.StatusInternalServerError,
+	}
+}
+
 // resolveARN parses an ARN and returns the (namespace, stateKey) for the resource.
+//
+// Every arm checks the resource-type prefix it strips before stripping it. strings.TrimPrefix
+// returns its input unchanged when the prefix does not match, so an arm that strips without
+// checking builds a well-formed key for the *wrong kind of resource* rather than failing —
+// which is how a tag landed on a state machine when an activity ARN was passed, and how a
+// layer ARN resolved to a function key (#845, and the resolver half of #835).
+//
+// The account and region come from the ARN, and the resolver deliberately takes no
+// [RequestContext] so that no arm can reach for the caller's account instead. An ARN naming
+// another account must resolve that account's resource or none: resolving it against the
+// caller's account tags a same-named resource the caller never named, which is the defect
+// #826 fixed for SQS and this pass fixed for DynamoDB. AWS does not publish what a
+// foreign-account ARN does — TagResources says only that "you can only tag resources that are
+// located in the specified AWS Region for the AWS account", and an explicit refusal is
+// documented for a partition mismatch but not for an account mismatch — so refusing is
+// substrate's reading, applied uniformly rather than per arm.
+//
 // Returns an error if the ARN format is unrecognized.
-func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key string, err error) {
+func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 	// ARN format: arn:aws:{service}:{region}:{account}:{resource}
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) < 6 || parts[0] != "arn" {
@@ -804,17 +880,26 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 
 	switch svc {
 	case "s3":
-		// arn:aws:s3:::bucket-name
-		bucket := strings.TrimPrefix(resource, "")
-		if strings.Contains(bucket, "/") {
-			// object ARN — not supported for tagging via this API
-			return "", "", fmt.Errorf("S3 object ARNs are not supported; use bucket ARN")
+		// arn:aws:s3:::bucket-name — the resource portion is the bare bucket name, with no
+		// type prefix to strip. An object, access point or job ARN carries a "/" and is not
+		// a bucket, which is the only distinction this ARN shape offers.
+		if strings.Contains(resource, "/") {
+			return "", "", unsupportedTagResource("S3 %q is not a bucket ARN", resource)
 		}
-		return s3Namespace, "bucket:" + bucket, nil
+		return s3Namespace, "bucket:" + resource, nil
 
 	case "lambda":
 		// arn:aws:lambda:{region}:{acct}:function:{name}
-		name := strings.TrimPrefix(resource, "function:")
+		//
+		// A qualified ARN is refused rather than resolved to the unqualified function. AWS
+		// documents a version as function:{name}:{version} and an alias as
+		// function:{name}:{alias}, which are lexically identical — only whether the suffix is
+		// numeric tells them apart, and AWS does not resolve the ambiguity. Tags belong to
+		// the function, so there is nothing a qualified ARN could correctly address here.
+		name, ok := strings.CutPrefix(resource, "function:")
+		if !ok || strings.Contains(name, ":") {
+			return "", "", unsupportedTagResource("Lambda %q is not an unqualified function ARN", resource)
+		}
 		return lambdaNamespace, "function:" + name, nil
 
 	case "sqs":
@@ -825,14 +910,28 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 		// Dropping the account addressed a key no queue is ever stored at, so a TagResources
 		// against a real queue wrote a phantom record and answered 200 (#826).
 		//
-		// The account comes from the ARN rather than from reqCtx, as it does for the IAM and EC2
-		// arms: an ARN naming another account must resolve that account's queue or none.
+		// The account comes from the ARN rather than from the caller's request context, as it
+		// does for the IAM and EC2 arms: an ARN naming another account must resolve that
+		// account's queue or none.
 		return sqsNamespace, "queue:" + parts[4] + "/" + resource, nil
 
 	case "dynamodb":
 		// arn:aws:dynamodb:{region}:{acct}:table/{name}
-		name := strings.TrimPrefix(resource, "table/")
-		return dynamodbNamespace, "table:" + reqCtx.AccountID + "/" + name, nil
+		//
+		// A remaining "/" means the ARN names something nested under the table rather than the
+		// table: AWS documents an index as table/{name}/index/{index} and a stream as
+		// table/{name}/stream/{label}, both sharing this prefix.
+		//
+		// The account comes from the ARN. Taking it from the caller's request context meant an
+		// ARN naming another account's table tagged the caller's own same-named table, and
+		// UntagResources stripped tags from it — the defect #826 fixed for the SQS arm above,
+		// in the one arm that pass missed. The resolver no longer receives a request context at
+		// all, so no arm can reach for the caller's account again.
+		name, ok := strings.CutPrefix(resource, "table/")
+		if !ok || strings.Contains(name, "/") {
+			return "", "", unsupportedTagResource("DynamoDB %q is not a table ARN", resource)
+		}
+		return dynamodbNamespace, "table:" + parts[4] + "/" + name, nil
 
 	case "ec2":
 		// arn:aws:ec2:{region}:{acct}:instance/{id}
@@ -842,7 +941,7 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 			acct := parts[4]
 			return ec2Namespace, "instance:" + acct + "/" + region + "/" + id, nil
 		}
-		return "", "", fmt.Errorf("unsupported EC2 resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("EC2 %q is not a taggable resource type", resource)
 
 	case "iam":
 		// The account comes from the ARN, as it does for every other arm here: an IAM
@@ -856,49 +955,73 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 			name := strings.TrimPrefix(resource, "role/")
 			return iamNamespace, iamRoleKey(acct, name), nil
 		}
-		return "", "", fmt.Errorf("unsupported IAM resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("IAM %q is not a taggable resource type", resource)
 
 	case "apigateway":
-		// arn:aws:apigateway:{region}::/restapis/{apiId}
-		apiID := strings.TrimPrefix(resource, "/restapis/")
+		// arn:aws:apigateway:{region}::/restapis/{apiId} — a v1 REST API. An HTTP or WebSocket
+		// API is /apis/{id}, which is a different resource with its own state key.
+		apiID, ok := strings.CutPrefix(resource, "/restapis/")
+		if !ok || strings.Contains(apiID, "/") {
+			return "", "", unsupportedTagResource("API Gateway %q is not a REST API ARN", resource)
+		}
 		region := parts[3]
 		acct := parts[4]
 		return apigatewayNamespace, "api:" + acct + "/" + region + "/" + apiID, nil
 
 	case "states":
 		// arn:aws:states:{region}:{acct}:stateMachine:{name}
-		name := strings.TrimPrefix(resource, "stateMachine:")
+		//
+		// The prefix check is case-sensitive on purpose. AWS distinguishes the two taggable
+		// Step Functions resources by the literal segment alone — stateMachine:{name} with a
+		// capital M against activity:{name} — so an activity ARN otherwise resolved to a
+		// state-machine key and tagged a same-named state machine if one existed, or wrote a
+		// phantom record if it did not.
+		name, ok := strings.CutPrefix(resource, "stateMachine:")
+		if !ok || strings.Contains(name, ":") {
+			return "", "", unsupportedTagResource("Step Functions %q is not a state machine ARN", resource)
+		}
 		region := parts[3]
 		acct := parts[4]
 		return statesNamespace, "statemachine:" + acct + "/" + region + "/" + name, nil
 
 	case "ecr":
 		// arn:aws:ecr:{region}:{acct}:repository/{name}
-		name := strings.TrimPrefix(resource, "repository/")
+		name, ok := strings.CutPrefix(resource, "repository/")
+		if !ok {
+			return "", "", unsupportedTagResource("ECR %q is not a repository ARN", resource)
+		}
 		region := parts[3]
 		acct := parts[4]
 		return ecrNamespace, "ecrrepo:" + acct + "/" + region + "/" + name, nil
 
 	case "ecs":
-		// arn:aws:ecs:{region}:{acct}:cluster/{name}
-		if strings.HasPrefix(resource, "cluster/") {
-			name := strings.TrimPrefix(resource, "cluster/")
-			region := parts[3]
-			acct := parts[4]
-			return ecsNamespace, "cluster:" + acct + "/" + region + "/" + name, nil
+		// A cluster, service, task or task definition, keyed by [ecsTagStateKey] — the same
+		// function ECS's own TagResource keys through, so the tagging API and the owning service
+		// cannot disagree about where one resource's tags live. Building the key here by hand
+		// meant this arm reached a cluster only, which is why a service and a task definition
+		// appear in #835.
+		if ns, key, ok := ecsTagStateKey(arn); ok {
+			return ns, key, nil
 		}
-		return "", "", fmt.Errorf("unsupported ECS resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("ECS %q is not a taggable resource type", resource)
 
 	case "cognito-idp":
 		// arn:aws:cognito-idp:{region}:{acct}:userpool/{poolId}
-		poolID := strings.TrimPrefix(resource, "userpool/")
+		poolID, ok := strings.CutPrefix(resource, "userpool/")
+		if !ok || strings.Contains(poolID, "/") {
+			return "", "", unsupportedTagResource("Cognito %q is not a user pool ARN", resource)
+		}
 		region := parts[3]
 		acct := parts[4]
 		return cognitoIDPNamespace, "userpool:" + acct + "/" + region + "/" + poolID, nil
 
 	case "kinesis":
-		// arn:aws:kinesis:{region}:{acct}:stream/{name}
-		name := strings.TrimPrefix(resource, "stream/")
+		// arn:aws:kinesis:{region}:{acct}:stream/{name} — a consumer ARN nests under the same
+		// prefix as stream/{name}/consumer/{name}:{timestamp}, so a remaining "/" is not a stream.
+		name, ok := strings.CutPrefix(resource, "stream/")
+		if !ok || strings.Contains(name, "/") {
+			return "", "", unsupportedTagResource("Kinesis %q is not a stream ARN", resource)
+		}
 		region := parts[3]
 		acct := parts[4]
 		return kinesisNamespace, "stream:" + acct + "/" + region + "/" + name, nil
@@ -911,7 +1034,7 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 			acct := parts[4]
 			return rdsNamespace, "dbinstance:" + acct + "/" + region + "/" + id, nil
 		}
-		return "", "", fmt.Errorf("unsupported RDS resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("RDS %q is not a taggable resource type", resource)
 
 	case "elasticache":
 		// arn:aws:elasticache:{region}:{acct}:cluster:{id}
@@ -921,7 +1044,7 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 			acct := parts[4]
 			return elasticacheNamespace, "cachecluster:" + acct + "/" + region + "/" + id, nil
 		}
-		return "", "", fmt.Errorf("unsupported ElastiCache resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("ElastiCache %q is not a taggable resource type", resource)
 
 	case "elasticfilesystem":
 		// arn:aws:elasticfilesystem:{region}:{acct}:file-system/{id}
@@ -935,7 +1058,7 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 			id := strings.TrimPrefix(resource, "access-point/")
 			return efsNamespace, "accesspoint:" + acct + "/" + region + "/" + id, nil
 		}
-		return "", "", fmt.Errorf("unsupported EFS resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("EFS %q is not a taggable resource type", resource)
 
 	case "glue":
 		// arn:aws:glue:{region}:{acct}:{type}/{name}
@@ -957,10 +1080,10 @@ func (p *TaggingPlugin) resolveARN(arn string, reqCtx *RequestContext) (ns, key 
 			name := strings.TrimPrefix(resource, "connection/")
 			return glueNamespace, "connection:" + acct + "/" + region + "/" + name, nil
 		}
-		return "", "", fmt.Errorf("unsupported Glue resource type in ARN: %q", resource)
+		return "", "", unsupportedTagResource("Glue %q is not a taggable resource type", resource)
 
 	default:
-		return "", "", fmt.Errorf("unsupported service %q for tagging", svc)
+		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
 	}
 }
 
@@ -985,6 +1108,13 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 // [TaggingPlugin]. Sharing the writer is the point — a tag the Resource Groups Tagging API
 // would write and one the deployer writes land in the same place, in the same shape, so a
 // consumer reading either back through the owning service's own call sees one behavior.
+//
+// The default arm and the per-namespace key fallbacks below stay even though
+// [TaggingPlugin.resolveARN] can no longer reach them (#845). Two of the three callers are
+// CloudFormation paths that build ns/key themselves rather than from an ARN
+// ([cfnStampResourceTags], [cfnPropagateRecordStackTags]), so for those the arms are the only
+// thing between a stamp aimed at an unhandled namespace and a silent success — the defect
+// class #845 exists to remove, not to relocate.
 func mergeResourceTags(
 	goCtx context.Context, state StateManager, ns, key string,
 	addTags map[string]string, removeKeys []string,
@@ -1092,12 +1222,14 @@ func mergeResourceTags(
 		return state.Put(goCtx, ns, key, updated)
 
 	case ecsNamespace:
-		var cluster ECSCluster
-		if err := json.Unmarshal(raw, &cluster); err != nil {
-			return fmt.Errorf("unmarshal ECSCluster: %w", err)
+		// Through [ecsMergeRecordTags] rather than a concrete type, because this one namespace
+		// holds a cluster, a service, a task and a task definition, and this arm previously
+		// decoded [ECSCluster] whatever the key named — safe only while the resolver could reach
+		// nothing but a cluster (#845).
+		updated, err := ecsMergeRecordTags(raw, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge ECS tags %s: %w", key, err)
 		}
-		cluster.Tags = mergeECSTags(cluster.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(cluster)
 		return state.Put(goCtx, ns, key, updated)
 
 	case cognitoIDPNamespace:
@@ -1235,6 +1367,7 @@ func mergeEC2Tags(existing []EC2Tag, add map[string]string, removeKeys []string)
 	for k, v := range m {
 		out = append(out, EC2Tag{Key: k, Value: v})
 	}
+	sortTagsByKey(out, func(t EC2Tag) string { return t.Key })
 	return out
 }
 
@@ -1254,7 +1387,21 @@ func mergeIAMTags(existing []IAMTag, add map[string]string, removeKeys []string)
 	for k, v := range m {
 		out = append(out, IAMTag{Key: k, Value: v})
 	}
+	sortTagsByKey(out, func(t IAMTag) string { return t.Key })
 	return out
+}
+
+// sortTagsByKey orders a slice of tag structs by the key that keyOf reads off each one.
+//
+// The four merge helpers above persist their result, and each built its slice by ranging over a
+// Go map — so two identical runs stored one resource's tags in different orders. That made
+// ListTagsForResource, DescribeTags and GetResources report a different order each run for the
+// same state, and it made a hash over the record differ when nothing about the record had
+// changed, which is the one thing an event-sourced emulator cannot afford: a replay has to be
+// able to compare state it did not change and find it equal. Sorting by key is the same answer
+// DescribeStacks already gives for a stack's own tags, and for the same reason.
+func sortTagsByKey[T any](tags []T, keyOf func(T) string) {
+	slices.SortFunc(tags, func(a, b T) int { return strings.Compare(keyOf(a), keyOf(b)) })
 }
 
 // ----- Helpers -------------------------------------------------------------
@@ -1323,6 +1470,7 @@ func mergeECSTags(existing []ECSTag, add map[string]string, removeKeys []string)
 	for k, v := range m {
 		out = append(out, ECSTag{Key: k, Value: v})
 	}
+	sortTagsByKey(out, func(t ECSTag) string { return t.Key })
 	return out
 }
 
@@ -1353,6 +1501,7 @@ func mergeEFSTags(existing []EFSTag, add map[string]string, removeKeys []string)
 	for k, v := range m {
 		out = append(out, EFSTag{Key: k, Value: v})
 	}
+	sortTagsByKey(out, func(t EFSTag) string { return t.Key })
 	return out
 }
 

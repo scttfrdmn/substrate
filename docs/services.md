@@ -7552,8 +7552,18 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-Scanned resource types: S3 buckets, Lambda functions, SQS queues, DynamoDB
-tables, EC2 instances, IAM users, IAM roles.
+`GetResources` scans sixteen resource types: S3 buckets, Lambda functions, SQS
+queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
+APIs, Step Functions state machines, ECR repositories, ECS clusters, Cognito user
+pools, Kinesis streams, RDS DB instances, ElastiCache cache clusters, EFS file
+systems and Glue databases.
+
+`TagResources` and `UntagResources` reach a slightly different set, because they
+address one named ARN rather than enumerating a namespace: they additionally
+reach an ECS service, task and task definition, and EFS access points and Glue's
+other three types. So a tag written to an ECS service is readable through ECS's
+own `ListTagsForResource` but does not yet appear in a `GetResources` listing —
+the scanner half of #835, which stays open.
 
 ### An ARN resolves to the state key its own service uses
 
@@ -7574,15 +7584,73 @@ an explicit `Deny` into a silent allow. Both now address
 helper rather than re-deriving it.
 
 Every other service's arm was audited against its plugin's key at the same time
-and they all agree: S3, Lambda, DynamoDB, EC2, IAM (users and roles), API
-Gateway, Step Functions, ECR, ECS, Cognito, Kinesis, RDS, ElastiCache, EFS (file
-systems and access points) and Glue's four types. SQS was the only divergence.
+and they agreed *for the resource type each arm claims to name*: S3, Lambda,
+DynamoDB, EC2, IAM (users and roles), API Gateway, Step Functions, ECR, ECS,
+Cognito, Kinesis, RDS, ElastiCache, EFS (file systems and access points) and
+Glue's four types. SQS was the only key that disagreed.
+
+That audit was narrower than it read, and #845 found what it missed. Eight arms
+stripped a resource-type prefix without first checking it was there, and
+`strings.TrimPrefix` returns its input unchanged when the prefix does not match —
+so an ARN naming a *different type* under the same service built a well-formed
+key for the wrong kind of resource instead of failing. A Step Functions
+`activity:` ARN resolved to a state-machine key, so a tag meant for an activity
+landed on a same-named state machine; a Lambda layer ARN resolved to a function
+key. Every arm now checks what it strips. Three checks are more than a prefix
+test, because AWS's own ARN formats make them so: a Lambda version and alias ARN
+are lexically identical, so any qualified function ARN is refused rather than
+guessed at; a DynamoDB index and stream ARN nest under `table/`, so a remaining
+`/` is not a table; and Step Functions distinguishes its two types by the capital
+M in `stateMachine:` alone, so that check is case-sensitive on purpose.
 
 The account in a key comes from the **ARN**, not from the calling request, for
 SQS as for IAM and EC2. An ARN naming another account therefore resolves that
 account's resource or none at all, and appears in `FailedResourcesMap` — rather
 than silently tagging the caller's own same-named resource, which would succeed
 against the wrong thing.
+
+DynamoDB was the one arm that rule had missed: it built its key from the calling
+request's account, so an ARN naming another account's table tagged the caller's
+own same-named table and `UntagResources` stripped tags from it. The resolver no
+longer receives a request context at all, so no arm can reach for the caller's
+account again. ECS's own `TagResource` had the same defect and now shares one key
+builder with the ARN resolver, which is also what lets the tagging API reach an
+ECS service, task and task definition rather than a cluster only.
+
+AWS does not publish what a cross-account ARN does here: `TagResources` says only
+that "you can only tag resources that are located in the specified AWS Region for
+the AWS account", and an explicit refusal is documented for a **partition**
+mismatch but not for an account mismatch. Refusing is substrate's reading,
+applied uniformly.
+
+### Which failure gets which error code
+
+A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
+enumerates, split on whether the ARN parsed:
+
+| Case | Code | Status |
+|------|------|--------|
+| A well-formed ARN naming a resource type substrate cannot key | `InternalServiceException` | 500 |
+| Not an ARN: no `arn:` prefix, or fewer than six colon-separated segments | `InvalidParameterException` | 400 |
+
+`FailureInfo` documents `InternalServiceException` as covering "the resource type
+in the request is not supported by the Resource Groups Tagging API", and tells the
+caller "it's safe to retry the request and then call `GetResources` to verify the
+changes". The split is substrate's reading rather than AWS's: the same page's
+`InvalidParameterException` bullets also say "the target ID is invalid,
+unsupported, or doesn't exist", so both codes can be read to cover an unsupported
+type. Substrate splits them on whether the ARN parses, because that is the only
+distinction a caller can act on differently.
+
+Substrate does **not** distinguish "AWS's tagging API does not support this type"
+from "AWS supports it and substrate has no arm yet". AWS publishes no list that
+could support the distinction: the `supported-services` page its own
+`TagResources` reference links to does not exist, and the list on the guide's
+welcome page is truncated alphabetically at IAM.
+
+An `ErrorMessage` never carries a state key. The detail naming the offending
+resource portion goes to the log instead, because a state-key layout is
+substrate's internal business and not something an API response should publish.
 
 ### Cost
 
