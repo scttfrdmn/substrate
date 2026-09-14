@@ -41,12 +41,13 @@ type cfnStampTarget struct {
 // false for a type substrate models no tags for.
 //
 // Each key is the one the *owning plugin* writes, verified against it rather than copied from
-// [TaggingPlugin.resolveARN], which computes a key for the same four services and gets SQS
-// wrong (#826). That is the ordering rule when the two disagree: the record the service's own
-// tag-reading call loads is the record the stamp has to land in, because #765's criterion is
-// that the tag is readable through that call. Reusing the shape rather than the function is
-// forced by the input anyway — `resolveARN` parses an ARN, and the deployer holds a CFN type
-// and a physical ID, since [DeployedResource.ARN] is empty for most of the types it handles.
+// [TaggingPlugin.resolveARN], which computes a key for the same four services and got SQS wrong
+// until #826 and DynamoDB's account wrong until #845. That is the ordering rule when the two
+// disagree: the record the service's own tag-reading call loads is the record the stamp has to
+// land in, because #765's criterion is that the tag is readable through that call. Reusing the
+// shape rather than the function is forced by the input anyway — `resolveARN` parses an ARN, and
+// the deployer holds a CFN type and a physical ID, since [DeployedResource.ARN] is empty for
+// most of the types it handles.
 //
 // ELBv2 is absent here and resolved separately, because its four kinds are keyed by a suffix
 // that is not derivable from the name — see [cfnStampELBResource].
@@ -68,10 +69,8 @@ func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnSt
 		// `sqsURLKey` (`sqs_plugin.go:98`) keys a queue by the last two components of its URL,
 		// so the record the SQS plugin reads is `queue:<account>/<name>` — the form the
 		// deployer's own drift and deletion reads already use (`cfn_deployer.go:2110`, `:2352`).
-		// [TaggingPlugin.resolveARN] builds `queue:<name>` instead, which is a defect on its
-		// side rather than a format to copy: it writes a record the SQS plugin never reads. It
-		// is filed as #826 and left alone here, because the criterion for this stamp is that
-		// the tag is readable through the service's *own* tag call.
+		// [TaggingPlugin.resolveARN] built `queue:<name>` until #826 and so wrote a record the
+		// SQS plugin never reads; it now builds this same key, from the ARN's own account.
 		return cfnStampTarget{
 			namespace: sqsNamespace,
 			stateKey:  "queue:" + accountID + "/" + dr.PhysicalID,

@@ -979,7 +979,9 @@ func (p *ECSPlugin) listTasks(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 
 // --- Tagging -----------------------------------------------------------------
 
-func (p *ECSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// tagResource implements TagResource. The resource is addressed by the ARN the caller named,
+// so no account or region is taken from the request context — see [ECSPlugin.resourceStateKey].
+func (p *ECSPlugin) tagResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		ResourceArn string   `json:"resourceArn"`
 		Tags        []ECSTag `json:"tags"`
@@ -989,10 +991,16 @@ func (p *ECSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	goCtx := context.Background()
-	return ecsJSONResponse(http.StatusOK, p.applyTagsToResource(goCtx, ctx, body.ResourceArn, body.Tags, false))
+	out, err := p.applyTagsToResource(goCtx, body.ResourceArn, body.Tags, false)
+	if err != nil {
+		return nil, err
+	}
+	return ecsJSONResponse(http.StatusOK, out)
 }
 
-func (p *ECSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// untagResource implements UntagResource, addressing the resource exactly as
+// [ECSPlugin.tagResource] does so the two cannot disagree about which resource an ARN names.
+func (p *ECSPlugin) untagResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		ResourceArn string   `json:"resourceArn"`
 		TagKeys     []string `json:"tagKeys"`
@@ -1006,10 +1014,16 @@ func (p *ECSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		tags[i] = ECSTag{Key: k}
 	}
 	goCtx := context.Background()
-	return ecsJSONResponse(http.StatusOK, p.applyTagsToResource(goCtx, ctx, body.ResourceArn, tags, true))
+	out, err := p.applyTagsToResource(goCtx, body.ResourceArn, tags, true)
+	if err != nil {
+		return nil, err
+	}
+	return ecsJSONResponse(http.StatusOK, out)
 }
 
-func (p *ECSPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// listTagsForResource implements ListTagsForResource, addressing the resource exactly as the
+// two write operations do.
+func (p *ECSPlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		ResourceArn string `json:"resourceArn"`
 	}
@@ -1018,7 +1032,7 @@ func (p *ECSPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 	}
 
 	goCtx := context.Background()
-	tags, err := p.getTagsForResource(goCtx, ctx, body.ResourceArn)
+	tags, err := p.getTagsForResource(goCtx, body.ResourceArn)
 	if err != nil {
 		return nil, err
 	}
@@ -1031,67 +1045,95 @@ func (p *ECSPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 
 // applyTagsToResource merges or removes tags on the resource identified by ARN.
 // When remove is true, tag entries are treated as keys to delete.
-// Returns an empty struct (caller wraps in response).
-func (p *ECSPlugin) applyTagsToResource(goCtx context.Context, ctx *RequestContext, arn string, tags []ECSTag, remove bool) struct{} {
-	stateKey, ns := p.resourceStateKey(ctx, arn)
-	if stateKey == "" {
-		return struct{}{}
+//
+// Every way of not writing a tag is an error, because the alternative is the response AWS
+// documents for a *successful* tag — "an HTTP 200 response with an empty HTTP body" — over a
+// resource nothing was written to. That is what TagResource and UntagResource answered for an
+// ARN [ECSPlugin.resourceStateKey] could not key and for a resource that does not exist, while
+// ListTagsForResource refused the same ARN: the two sides of one tag disagreed, and the write
+// side was the one that lied (#845).
+func (p *ECSPlugin) applyTagsToResource(goCtx context.Context, arn string, tags []ECSTag, remove bool) (struct{}, error) {
+	stateKey, ns, err := p.resourceStateKey(arn)
+	if err != nil {
+		return struct{}{}, err
 	}
 
-	data, _ := p.state.Get(goCtx, ns, stateKey)
+	data, err := p.state.Get(goCtx, ns, stateKey)
+	if err != nil {
+		return struct{}{}, fmt.Errorf("ecs applyTagsToResource state.Get: %w", err)
+	}
 	if data == nil {
-		return struct{}{}
+		return struct{}{}, ecsResourceNotFound(arn)
 	}
 
-	// We work with a generic map to avoid type-switching on every resource type.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return struct{}{}
-	}
-
-	var existingTags []ECSTag
-	if t, ok := raw["tags"]; ok {
-		_ = json.Unmarshal(t, &existingTags)
-	}
-
+	var addTags map[string]string
+	var removeKeys []string
 	if remove {
-		removeKeys := make(map[string]bool)
-		for _, t := range tags {
-			removeKeys[t.Key] = true
+		removeKeys = make([]string, len(tags))
+		for i, t := range tags {
+			removeKeys[i] = t.Key
 		}
-		filtered := existingTags[:0]
-		for _, t := range existingTags {
-			if !removeKeys[t.Key] {
-				filtered = append(filtered, t)
-			}
-		}
-		existingTags = filtered
 	} else {
-		keyIdx := make(map[string]int)
-		for i, t := range existingTags {
-			keyIdx[t.Key] = i
-		}
+		addTags = make(map[string]string, len(tags))
 		for _, t := range tags {
-			if idx, ok := keyIdx[t.Key]; ok {
-				existingTags[idx].Value = t.Value
-			} else {
-				existingTags = append(existingTags, t)
-			}
+			addTags[t.Key] = t.Value
 		}
 	}
 
-	tagBytes, _ := json.Marshal(existingTags)
-	raw["tags"] = tagBytes
-	updated, _ := json.Marshal(raw)
-	_ = p.state.Put(goCtx, ns, stateKey, updated)
-	return struct{}{}
+	updated, err := ecsMergeRecordTags(data, addTags, removeKeys)
+	if err != nil {
+		return struct{}{}, fmt.Errorf("ecs applyTagsToResource %s: %w", stateKey, err)
+	}
+	if err := p.state.Put(goCtx, ns, stateKey, updated); err != nil {
+		return struct{}{}, fmt.Errorf("ecs applyTagsToResource state.Put: %w", err)
+	}
+	return struct{}{}, nil
+}
+
+// ecsMergeRecordTags applies addTags and removeKeys to the "tags" member of a stored ECS
+// record, returning the re-encoded record.
+//
+// It edits the record as raw JSON rather than decoding a concrete type, because the ECS
+// namespace holds four shapes — [ECSCluster], [ECSService], [ECSTask] and [ECSTaskDefinition] —
+// and a writer that guessed one of them would silently drop every member the others carry and
+// store the truncated record back. That is not hypothetical: [mergeResourceTags]'s ECS arm
+// decoded [ECSCluster] unconditionally, which was harmless only for as long as
+// [TaggingPlugin.resolveARN] could reach nothing but a cluster (#845).
+//
+// Shared with [mergeResourceTags] so that a tag written by ECS's own TagResource, by the
+// Resource Groups Tagging API and by the CloudFormation stamp land in one place in one shape —
+// the reason [mergeResourceTags] is a free function to begin with.
+func ecsMergeRecordTags(raw []byte, addTags map[string]string, removeKeys []string) ([]byte, error) {
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("unmarshal ECS record: %w", err)
+	}
+
+	var existing []ECSTag
+	if t, ok := record["tags"]; ok {
+		if err := json.Unmarshal(t, &existing); err != nil {
+			return nil, fmt.Errorf("unmarshal ECS record tags: %w", err)
+		}
+	}
+
+	merged, err := json.Marshal(mergeECSTags(existing, addTags, removeKeys))
+	if err != nil {
+		return nil, fmt.Errorf("marshal ECS record tags: %w", err)
+	}
+	record["tags"] = merged
+
+	updated, err := json.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("marshal ECS record: %w", err)
+	}
+	return updated, nil
 }
 
 // getTagsForResource retrieves tags from the resource identified by ARN.
-func (p *ECSPlugin) getTagsForResource(goCtx context.Context, ctx *RequestContext, arn string) ([]ECSTag, error) {
-	stateKey, ns := p.resourceStateKey(ctx, arn)
-	if stateKey == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "unsupported resource ARN: " + arn, HTTPStatus: http.StatusBadRequest}
+func (p *ECSPlugin) getTagsForResource(goCtx context.Context, arn string) ([]ECSTag, error) {
+	stateKey, ns, err := p.resourceStateKey(arn)
+	if err != nil {
+		return nil, err
 	}
 
 	data, err := p.state.Get(goCtx, ns, stateKey)
@@ -1099,7 +1141,7 @@ func (p *ECSPlugin) getTagsForResource(goCtx context.Context, ctx *RequestContex
 		return nil, fmt.Errorf("ecs getTagsForResource state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
+		return nil, ecsResourceNotFound(arn)
 	}
 
 	var raw struct {
@@ -1111,50 +1153,130 @@ func (p *ECSPlugin) getTagsForResource(goCtx context.Context, ctx *RequestContex
 	return raw.Tags, nil
 }
 
-// resourceStateKey returns the state key and namespace for an ECS resource ARN.
-// Supports cluster, service, and task ARNs.
-// Returns ("", "") for unknown resource types.
-func (p *ECSPlugin) resourceStateKey(ctx *RequestContext, arn string) (string, string) {
+// ecsUnsupportedTagARN reports an ARN the ECS tag operations cannot key onto a resource.
+//
+// InvalidParameterException, which is what TagResource's own `resourceArn` description names
+// for the one bad-ARN case AWS spells out: "If you try to tag a service with a short ARN, you
+// receive an InvalidParameterException error." Extending it to every other unkeyable ARN is
+// substrate's reading — the page lists no error per resource type — but it is the reading that
+// short service ARN forces, and answering one code for the whole class keeps the three tag
+// operations from disagreeing about what a bad ARN is.
+func ecsUnsupportedTagARN(arn string) error {
+	return &AWSError{
+		Code:       "InvalidParameterException",
+		Message:    "unsupported resource ARN: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ecsResourceNotFound reports a well-formed ECS ARN naming no stored resource.
+//
+// HTTP 400, which is what every ECS exception except ServerException carries: TagResource,
+// UntagResource and ListTagsForResource all document "ResourceNotFoundException … HTTP Status
+// Code: 400". The 404 substrate answered here is the shape of a REST service, not of a
+// JSON-protocol one, and no ECS page publishes it.
+func ecsResourceNotFound(arn string) error {
+	return &AWSError{
+		Code:       "ResourceNotFoundException",
+		Message:    "Resource not found: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// resourceStateKey returns the state key and namespace for an ECS resource ARN, or an error
+// naming why the ARN keys nothing. It is [ecsTagStateKey] plus ECS's own error code.
+func (p *ECSPlugin) resourceStateKey(arn string) (string, string, error) {
+	ns, key, ok := ecsTagStateKey(arn)
+	if !ok {
+		return "", "", ecsUnsupportedTagARN(arn)
+	}
+	return key, ns, nil
+}
+
+// ecsTagStateKey resolves a taggable ECS resource ARN to its (namespace, state key), reporting
+// false for an ARN that names no resource substrate stores tags for.
+//
+// A free function with two callers on purpose: ECS's own three tag operations reach it through
+// [ECSPlugin.resourceStateKey], and the Resource Groups Tagging API reaches it from
+// [TaggingPlugin.resolveARN]. Both previously built the cluster key by hand from their own
+// string concatenation, which is the arrangement #826 exists to warn about — two spellings of
+// one resource's address that agree until one of them is edited. Sharing the builder is what
+// makes them unable to drift, and it is what lets the tagging API reach an ECS service, task
+// and task definition at all (part of #835).
+//
+// The two callers keep their own error codes because AWS publishes different ones: ECS names
+// InvalidParameterException on TagResource's `resourceArn` description, while the tagging API's
+// FailureInfo names InternalServiceException for an unsupported resource type. Only the
+// *keying* is shared; what a refusal is called is each API's own business.
+//
+// The account and region come from the ARN, never from the caller's request context. Taking
+// them from the context meant an ARN naming another account's cluster resolved the caller's own
+// same-named cluster and tagged it — the defect #826 fixed for SQS. Neither caller passes a
+// [RequestContext], so no arm can regress that way again.
+//
+// AWS lists six taggable ECS resource types — "capacity providers, tasks, services, task
+// definitions, clusters, and container instances". Substrate keys four; a capacity provider and
+// a container instance are refused rather than silently accepted, because substrate stores
+// neither, so there is no record a tag could land on or be read back from.
+func ecsTagStateKey(arn string) (ns, key string, ok bool) {
 	// ARN patterns:
 	//   arn:aws:ecs:{region}:{acct}:cluster/{name}
 	//   arn:aws:ecs:{region}:{acct}:service/{cluster}/{name}
 	//   arn:aws:ecs:{region}:{acct}:task/{cluster}/{taskID}
+	//   arn:aws:ecs:{region}:{acct}:task-definition/{family}:{revision}
 	if !strings.HasPrefix(arn, "arn:aws:ecs:") {
-		return "", ""
+		return "", "", false
 	}
 	// Extract resource type and name: last two colon-separated parts give "{type}/{id...}".
 	// ARN format: arn:aws:ecs:{region}:{account}:{type}/{...}
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) < 6 {
-		return "", ""
+		return "", "", false
 	}
+	region, acct := parts[3], parts[4]
 	resource := parts[5] // e.g. "cluster/my-cluster" or "service/clusterName/serviceName"
-	slash := strings.IndexByte(resource, '/')
-	if slash < 0 {
-		return "", ""
+	rType, rRest, found := strings.Cut(resource, "/")
+	if !found {
+		return "", "", false
 	}
-	rType := resource[:slash]
-	rRest := resource[slash+1:]
 
 	switch rType {
 	case "cluster":
-		return ecsClusterKey(ctx.AccountID, ctx.Region, rRest), ecsNamespace
-	case "service":
-		// rRest = "clusterName/serviceName"
-		idx := strings.IndexByte(rRest, '/')
-		if idx < 0 {
-			return "", ""
+		if rRest == "" || strings.ContainsAny(rRest, "/:") {
+			return "", "", false
 		}
-		return ecsServiceKey(ctx.AccountID, ctx.Region, rRest[:idx], rRest[idx+1:]), ecsNamespace
+		return ecsNamespace, ecsClusterKey(acct, region, rRest), true
+	case "service":
+		// rRest = "clusterName/serviceName". A service ARN with no cluster segment is AWS's
+		// documented *short* ARN, whose refusal ECS's own page states outright: "If you try to
+		// tag a service with a short ARN, you receive an InvalidParameterException error."
+		cluster, name, found := strings.Cut(rRest, "/")
+		if !found || cluster == "" || name == "" || strings.Contains(name, "/") {
+			return "", "", false
+		}
+		return ecsNamespace, ecsServiceKey(acct, region, cluster, name), true
 	case "task":
 		// rRest = "clusterName/taskID"
-		idx := strings.IndexByte(rRest, '/')
-		if idx < 0 {
-			return "", ""
+		cluster, id, found := strings.Cut(rRest, "/")
+		if !found || cluster == "" || id == "" || strings.Contains(id, "/") {
+			return "", "", false
 		}
-		return ecsTaskKey(ctx.AccountID, ctx.Region, rRest[:idx], rRest[idx+1:]), ecsNamespace
+		return ecsNamespace, ecsTaskKey(acct, region, cluster, id), true
+	case "task-definition":
+		// rRest = "{family}:{revision}" — ECS is the one service here that mixes separators,
+		// and the revision is part of the identifier: a family alone names no single record,
+		// since every RegisterTaskDefinition mints another revision under it.
+		family, rev, found := strings.Cut(rRest, ":")
+		if !found || family == "" || strings.ContainsAny(family, "/:") {
+			return "", "", false
+		}
+		revision, err := strconv.Atoi(rev)
+		if err != nil || revision < 1 {
+			return "", "", false
+		}
+		return ecsNamespace, ecsTaskDefKey(acct, region, family, revision), true
 	default:
-		return "", ""
+		return "", "", false
 	}
 }
 
