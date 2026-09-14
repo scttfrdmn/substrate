@@ -356,6 +356,43 @@ func (e *EventStore) maybeFlush(n int) {
 	}
 }
 
+// RecordsStateHashes reports whether the store fills [Event.StateHashBefore] and
+// [Event.StateHashAfter], per [EventStoreConfig.IncludeStateHashes].
+//
+// A caller asks before hashing rather than hashing unconditionally because a hash
+// is a full snapshot of state, taken twice per request. The flag is off by
+// default, and the work must be too.
+func (e *EventStore) RecordsStateHashes() bool { return e.config.IncludeStateHashes }
+
+// EventRecordOption supplies a value to [EventStore.RecordRequest] that the store
+// cannot derive from the request/response cycle alone.
+type EventRecordOption func(*eventRecordOptions)
+
+// eventRecordOptions collects what an [EventRecordOption] sets.
+type eventRecordOptions struct {
+	stateHashBefore string
+	stateHashAfter  string
+}
+
+// WithStateHashes attaches state hashes taken before and after the request, for
+// [ReplayEngine] to compare a replay against.
+//
+// The caller supplies them because only the caller knows when "before" was: the
+// store is invoked after the request completed, so it can observe the after-state
+// and nothing else. Both are ignored unless [EventStoreConfig.IncludeStateHashes]
+// is set — the store's config is the authority on whether an event carries a hash,
+// so a caller that offers one while recording is off does not create an event
+// whose hash disagrees with the configuration it was recorded under (#833).
+//
+// Produce both with [stateSnapshotHash], which is also what the replay engine
+// compares with; two ways of hashing the same state would differ on every event.
+func WithStateHashes(before, after string) EventRecordOption {
+	return func(o *eventRecordOptions) {
+		o.stateHashBefore = before
+		o.stateHashAfter = after
+	}
+}
+
 // RecordRequest is a convenience wrapper that builds an [Event] from a
 // completed AWS request/response cycle and records it.
 func (e *EventStore) RecordRequest(
@@ -366,6 +403,7 @@ func (e *EventStore) RecordRequest(
 	duration time.Duration,
 	cost float64,
 	err error,
+	opts ...EventRecordOption,
 ) error {
 	event := &Event{
 		Timestamp: e.now(),
@@ -385,6 +423,15 @@ func (e *EventStore) RecordRequest(
 	if e.config.IncludeBodies {
 		event.Request = req
 		event.Response = resp
+	}
+
+	if e.config.IncludeStateHashes {
+		var o eventRecordOptions
+		for _, opt := range opts {
+			opt(&o)
+		}
+		event.StateHashBefore = o.stateHashBefore
+		event.StateHashAfter = o.stateHashAfter
 	}
 
 	if err != nil {

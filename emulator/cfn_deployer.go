@@ -4518,6 +4518,13 @@ func (d *StackDeployer) dispatch(
 	// yes to.
 	resolveOperationName(req)
 
+	// The "before" state hash, taken here for the same reason
+	// [Server.handleAWSRequest] takes it before its first refusal point: a refused
+	// call changed nothing, and recording the same hash on both sides says so
+	// rather than leaving the field empty and having the replay skip the check.
+	// Empty, and free, unless the store records hashes (#833).
+	stateBefore := d.recordedStateHash(ctx)
+
 	// Authorize here rather than in RouteRequest, which no caller's requests pass
 	// an authorization check through. Doing it at the deployer covers create,
 	// update, rollback and delete at once: every one of those sweeps reaches a
@@ -4533,7 +4540,8 @@ func (d *StackDeployer) dispatch(
 			// Record the refusal before returning it, so a denied call is in the
 			// event log beside the ones that succeeded and a replay shows where the
 			// deployment stopped and why.
-			_ = d.store.RecordRequest(ctx, reqCtx, req, nil, 0, 0, err)
+			_ = d.store.RecordRequest(ctx, reqCtx, req, nil, 0, 0, err,
+				WithStateHashes(stateBefore, d.recordedStateHash(ctx)))
 			return nil, 0, err
 		}
 	}
@@ -4543,9 +4551,24 @@ func (d *StackDeployer) dispatch(
 	duration := time.Since(start)
 	cost := d.costs.CostForRequest(req)
 
-	_ = d.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr)
+	_ = d.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr,
+		WithStateHashes(stateBefore, d.recordedStateHash(ctx)))
 
 	return resp, cost, cfnDispatchError(resp, routeErr)
+}
+
+// recordedStateHash returns the hash to record on a dispatched event, or "" when
+// the store is not recording state hashes.
+//
+// The deployer needs its own because it is one of the tree's four dispatch paths
+// and does not go through [Server.handleAWSRequest]; without it a stack's resource
+// calls would be the only recorded events with no hash, and a replay would
+// silently skip validating exactly the requests CloudFormation made.
+func (d *StackDeployer) recordedStateHash(ctx context.Context) string {
+	if d.store == nil || !d.store.RecordsStateHashes() {
+		return ""
+	}
+	return stateSnapshotHash(ctx, d.state)
 }
 
 // cfnDispatchError reports the failure a dispatched request represents, or nil if

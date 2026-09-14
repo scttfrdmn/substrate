@@ -81,17 +81,36 @@ type ActiveReplay struct {
 }
 
 // ReplayResults holds the outcome of a completed replay run.
+//
+// The three event counters partition the stream: every event a replay reaches is
+// counted in exactly one of SuccessEvents, FailedEvents and SkippedEvents, and a
+// run that reached the end of the stream satisfies
+// SuccessEvents + FailedEvents + SkippedEvents == TotalEvents. That was not true
+// before #833: a skipped event incremented SkippedEvents *and* SuccessEvents,
+// because the skip returned no error and the driver read a nil error as a
+// success. So a stream recorded without bodies — the default, see
+// [EventStoreConfig.IncludeBodies] — reported every one of its events as a
+// successful replay while executing none of them.
+//
+// SuccessEvents means "re-executed without returning an error", **not** "matched
+// the recording". A successful event may still have diverged; whether the replay
+// reproduced the run is [ReplayResults.Differences] together with StateValid.
 type ReplayResults struct {
 	// TotalEvents is the number of events in the stream.
 	TotalEvents int
 
-	// SuccessEvents is the number of events that replayed without error.
+	// SuccessEvents is the number of events that were re-executed and returned
+	// no error. It does not imply the replay matched the recording; see
+	// Differences and StateValid.
 	SuccessEvents int
 
 	// FailedEvents is the number of events that produced an error during replay.
 	FailedEvents int
 
-	// SkippedEvents is the number of events skipped (e.g., missing request body).
+	// SkippedEvents is the number of events that could not be re-executed
+	// because the recorded event carries no request. An event stream recorded
+	// without [EventStoreConfig.IncludeBodies] carries no request on any event,
+	// so every event is skipped and nothing is verified.
 	SkippedEvents int
 
 	// Duration is the wall-clock time taken for the replay run.
@@ -220,7 +239,11 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 
 		event := replay.Events[replay.Position]
 
-		if err := r.replayEvent(ctx, event, replay); err != nil {
+		// executed is what distinguishes a success from a skip. Both return a nil
+		// error, so a driver that reads only the error counts a skipped event as a
+		// successful replay — which is what #833 fixed here.
+		executed, err := r.replayEvent(ctx, event, replay)
+		if err != nil {
 			r.logger.Error("event replay failed",
 				"event_id", event.ID,
 				"position", replay.Position,
@@ -230,7 +253,7 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 			if r.config.StopOnError {
 				break
 			}
-		} else {
+		} else if executed {
 			replay.Results.SuccessEvents++
 		}
 
@@ -244,11 +267,16 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 
 	replay.Results.Duration = time.Since(start)
 
+	// skipped is reported because it is the number that tells a caller whether the
+	// replay verified anything: total=N success=N reads as a clean run, and
+	// total=N skipped=N is the same stream with no request bodies recorded.
 	r.logger.Info("replay complete",
 		"replay_id", replay.ID,
 		"total", replay.Results.TotalEvents,
 		"success", replay.Results.SuccessEvents,
 		"failed", replay.Results.FailedEvents,
+		"skipped", replay.Results.SkippedEvents,
+		"differences", len(replay.Results.Differences),
 		"duration", replay.Results.Duration,
 	)
 
@@ -257,10 +285,16 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 
 // replayEvent re-executes a single event through the plugin registry and
 // compares the result against the original.
-func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *ActiveReplay) error {
+//
+// The bool reports whether the event was actually re-executed. It is separate
+// from the error because a skip is neither a success nor a failure, and a caller
+// that reads only the error cannot tell the two apart: both return nil. That is
+// how a stream recorded without request bodies reported every event as a
+// successful replay while executing none of them (#833).
+func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *ActiveReplay) (bool, error) {
 	if event.Request == nil {
 		replay.Results.SkippedEvents++
-		return nil
+		return false, nil
 	}
 
 	if r.timeController != nil {
@@ -314,7 +348,29 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 				Significance: "major",
 			})
 		}
-		return err
+		return true, err
+	}
+
+	// A recorded refusal that replays as a success. Nothing caught this before
+	// #833: the error comparison above runs only when the *replay* errored, and
+	// the status comparison below cannot see it either, because a pre-plugin
+	// refusal records with a nil response (server.go:801, :813, :829, :849) and so
+	// event.Response is nil for exactly the events that were refused. A recorded
+	// 403 replaying as a 200 was reported as no difference at all — and, before
+	// the counter fix, as a success.
+	//
+	// Critical rather than major, and matching the reverse case above: a replay
+	// that grants what the recording denied is the divergence most likely to make
+	// a passing test meaningless, since it is the one that lets a request through.
+	if event.Error != "" {
+		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
+			EventID:      event.ID,
+			Sequence:     event.Sequence,
+			Field:        "error",
+			Expected:     event.Error,
+			Actual:       nil,
+			Significance: "critical",
+		})
 	}
 
 	if event.Response != nil && resp != nil && resp.StatusCode != event.Response.StatusCode {
@@ -343,11 +399,16 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 // StepForward re-executes the next event and advances the position.
 // Returns the event that was replayed.
+//
+// It records differences but does not maintain [ReplayResults]' success and
+// failure counters, which belong to a whole-stream [ReplayEngine.Replay]; the
+// counter partition documented on ReplayResults holds for that run, not for a
+// hand-stepped session.
 func (r *ReplayEngine) StepForward(ctx context.Context) (*Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -362,7 +423,7 @@ func (r *ReplayEngine) StepForward(ctx context.Context) (*Event, error) {
 
 	event := r.currentReplay.Events[r.currentReplay.Position]
 
-	if err := r.replayEvent(ctx, event, r.currentReplay); err != nil {
+	if _, err := r.replayEvent(ctx, event, r.currentReplay); err != nil {
 		return nil, err
 	}
 
@@ -437,7 +498,7 @@ func (r *ReplayEngine) JumpToEvent(ctx context.Context, sequence int64) error {
 
 	for r.currentReplay.Position < targetPos {
 		event := r.currentReplay.Events[r.currentReplay.Position]
-		if err := r.replayEvent(ctx, event, r.currentReplay); err != nil {
+		if _, err := r.replayEvent(ctx, event, r.currentReplay); err != nil {
 			return fmt.Errorf("replay failed at position %d: %w", r.currentReplay.Position, err)
 		}
 		r.currentReplay.Position++
@@ -612,10 +673,34 @@ func (r *ReplayEngine) restoreState(ctx context.Context, data []byte) error {
 // Returns an empty string when no state manager is set or it does not implement
 // [SnapshotableStateManager].
 func (r *ReplayEngine) computeStateHash(ctx context.Context) string {
-	if r.stateManager == nil {
+	return stateSnapshotHash(ctx, r.stateManager)
+}
+
+// stateSnapshotHash returns a SHA-256 hash of sm's entire contents, or an empty
+// string when sm is nil, does not implement [SnapshotableStateManager], or cannot
+// be snapshotted.
+//
+// It is one function because a recorded hash and a replayed hash have to be
+// produced the same way to be comparable at all: [Server] calls it to fill
+// [Event.StateHashBefore] and [Event.StateHashAfter], and [ReplayEngine] calls it
+// to compare against them. Two implementations of "hash the state" would be two
+// answers, and the comparison would report a difference for every event.
+//
+// The hash is deterministic for [MemoryStateManager]: Snapshot marshals a map,
+// and encoding/json sorts map keys. It is *not* invariant across a recording and
+// its replay for a stream containing a create, because substrate mints most
+// identifiers from crypto/rand and the minted value ends up in the state key or
+// the record — see #856. A reported mismatch there is a real divergence, not a
+// defect in this function.
+//
+// An empty string means "not available", and both call sites treat it as "do not
+// compare" rather than as a hash of empty state — a nil state manager and an
+// empty one must not look alike.
+func stateSnapshotHash(ctx context.Context, sm StateManager) string {
+	if sm == nil {
 		return ""
 	}
-	ss, ok := r.stateManager.(SnapshotableStateManager)
+	ss, ok := sm.(SnapshotableStateManager)
 	if !ok {
 		return ""
 	}

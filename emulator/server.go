@@ -618,6 +618,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //     1.5. Credential resolution — account from Credentials (when non-nil),
 //     principal from state (always; see [resolvePrincipal])
 //     1.6. SigV4 signature verification (when VerifySignatures is set)
+//     1.7. stateBefore := recordedStateHash() (only when the store records hashes)
 //  2. auth.CheckAccess()        → 403 AccessDenied / AccessDeniedException
 //     (per the service's wire protocol; see accessDeniedCodeFor)
 //  3. quota.CheckQuota()        → 429 ThrottlingException
@@ -625,7 +626,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //  5. registry.RouteRequest()   (plugin dispatch)
 //  6. cost := costs.CostForRequest(req)
 //  7. if success && mutating: consistency.RecordWrite(req)
-//  8. store.RecordRequest(…, cost, routeErr)
+//  8. store.RecordRequest(…, cost, routeErr, WithStateHashes(before, after))
 //  9. write response
 func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -794,11 +795,22 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 1.7: capture the state hash the recorded event will carry as its
+	// "before" value.
+	//
+	// It is taken here, before the first step that can refuse, so that every
+	// recorded event has a before-hash — a refusal changes nothing, so its before
+	// and after hashes are the same value, and that is asserted by taking both
+	// rather than by assuming it. Empty when the store is not recording hashes, in
+	// which case this is free (#833).
+	stateBefore := s.recordedStateHash(ctx)
+
 	// Step 2: cross-service IAM authorization.
 	if s.opts.Auth != nil {
 		if authErr := s.opts.Auth.CheckAccess(reqCtx, req); authErr != nil {
 			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, authErr); recordErr != nil {
+			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, authErr,
+				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
 				s.logger.Warn("failed to record auth event", "err", recordErr)
 			}
 			s.writeError(w, authErr, r, req.Service)
@@ -810,7 +822,8 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Quota != nil {
 		if quotaErr := s.opts.Quota.CheckQuota(reqCtx, req); quotaErr != nil {
 			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, quotaErr); recordErr != nil {
+			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, quotaErr,
+				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
 				s.logger.Warn("failed to record quota event", "err", recordErr)
 			}
 			if s.opts.Metrics != nil {
@@ -826,7 +839,8 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Consistency != nil {
 		if consErr := s.opts.Consistency.CheckRead(reqCtx, req); consErr != nil {
 			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, consErr); recordErr != nil {
+			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, consErr,
+				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
 				s.logger.Warn("failed to record consistency event", "err", recordErr)
 			}
 			if s.opts.Metrics != nil {
@@ -846,7 +860,8 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		if faultErr != nil {
 			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, faultErr); recordErr != nil {
+			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, faultErr,
+				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
 				s.logger.Warn("failed to record fault event", "err", recordErr)
 			}
 			s.writeError(w, faultErr, r, req.Service)
@@ -871,7 +886,8 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(start)
 
 	// Step 8: always record the event regardless of routing outcome.
-	if recordErr := s.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr); recordErr != nil {
+	if recordErr := s.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr,
+		WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
 		s.logger.Warn("failed to record event", "err", recordErr)
 	}
 
@@ -903,6 +919,24 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeResponse(w, resp)
+}
+
+// recordedStateHash returns the hash to record on an event, or "" when the store
+// is not recording state hashes.
+//
+// Gated on the store rather than on the server's own config so that the decision
+// is read from the same field the store honors; a hash the store would discard is
+// never computed, and a full state snapshot is not taken twice per request for
+// every consumer who left [EventStoreConfig.IncludeStateHashes] off (#833).
+//
+// It shares [stateSnapshotHash] with [ReplayEngine.computeStateHash] because the
+// recorded value and the replayed value have to be produced identically to be
+// comparable at all.
+func (s *Server) recordedStateHash(ctx context.Context) string {
+	if s.store == nil || !s.store.RecordsStateHashes() {
+		return ""
+	}
+	return stateSnapshotHash(ctx, s.state)
 }
 
 // writeResponse serializes resp into the HTTP response writer.
