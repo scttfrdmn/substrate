@@ -236,6 +236,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compare equal across a recording and its replay is false. Both are why #833 and #817 stay open
   with their execution halves outstanding, and both now need #856 first.
 
+- **An `AWS::ApiGateway::Method`'s physical ID is a generated method ID, not its HTTP verb**
+  (#843). Every method in a stack was identified by its verb, so two methods with the same verb on
+  different resources were indistinguishable in `DescribeStackResources` — and because a
+  `PhysicalResourceId`-only request scans every stack in the account,
+  `describe-stack-resources --physical-resource-id GET` returned every `GET` method in **every
+  stack**. `!Ref` on a method resolved to the verb too. The type joins
+  `cfnGeneratedNameTypes`, so the physical ID is now `{stack}-{logical}-{suffix}` — the shape
+  AWS's Template Reference publishes for this type's `Ref`, "the method ID, such as
+  `mysta-metho-01234b567890example`" — derived from account, Region, stack name and logical ID so
+  a redeploy reports the same value.
+
+  It is the one entry in that table whose bound comes from an example rather than from a service
+  limit, because API Gateway's REST API has **no method identifier at all**: `API_Method` carries
+  the eleven configuration fields and no `id`, and `API_PutMethod` returns none. That is also why
+  the two acceptance criteria asking the API Gateway plugin to mint and return one are **reversed
+  with that citation** rather than implemented — they would have invented a member AWS does not
+  publish. The plugin already keys methods correctly by (account, Region, API, resource, verb), so
+  there was never a service-state collision; the defect was purely in what CloudFormation
+  *reported*.
+
+  Stack deletion is fixed in the same change, because it was load-bearing on the old value: the
+  deleter built the method's DELETE path using the physical ID **as the verb**. Deploy and delete
+  now resolve the verb through one shared helper reading the declared properties, which is where
+  the deleter already got the method's two parent IDs. The verb is deliberately **not** recorded in
+  `Metadata`: that is a generic `Fn::GetAtt` channel — any metadata key resolves under its own
+  name — and `AWS::ApiGateway::Method` has no `Fn::GetAtt` section, so recording it there would
+  publish an attribute AWS does not have. That is the defect this release fixed in IAM's
+  permissions boundary, and repeating it to fix an identifier would have been a poor trade.
+
+- **`CreateIPSet` refuses a request that omits a required member or supplies an invalid value**
+  (#755). All four of `Addresses`, `IPAddressVersion`, `Name` and `Scope` are documented
+  `Required: Yes`, and substrate silently defaulted three of them — `Scope` to `REGIONAL`,
+  `IPAddressVersion` to `IPV4`, and an absent `Addresses` to an empty array — so a request AWS
+  rejects created an IP set whose scope and address family the caller never chose, and then
+  reported them back as if they had been asked for.
+
+  The issue's open question was which error code, and AWS's own pages answer it in two parts. An
+  **omitted** required member answers `ValidationError`/400, from WAFv2's Common Error Types:
+  "The input doesn't meet the required format or constraints. Check that all required parameters
+  are included and that values are valid." A **present but invalid** value answers
+  `WAFInvalidParameterException`/400, which `CreateIPSet`'s own Errors section lists and whose
+  first bullet is "You specified a parameter name or value that isn't valid". `IPAddressVersion`
+  must be `IPV4` or `IPV6`, `Scope` must be `CLOUDFRONT` or `REGIONAL`, `Name` must match
+  `^[\w\-]+$` within 128 characters, and each address must be a CIDR range other than `/0`.
+
+  **An absent `Addresses` and an empty one stay distinct**, which is why the nil-to-empty default
+  had to go rather than being kept alongside the check: AWS lists `"Addresses": []` among its valid
+  example specifications while marking `"Addresses": [""]` INVALID. Normalising nil to `[]` erased
+  the only difference between "the caller omitted a required member" and "the caller asked for an
+  IP set matching nothing" — the same three-way distinction #824's change-set tags needed.
+
+  Two things are **recorded rather than enforced**. AWS does not say an `IPV4` set refuses an IPv6
+  CIDR, so the version and the addresses are validated independently rather than against each
+  other. And `WAFInvalidParameterException`'s three modelled members — `Field`, `Parameter`,
+  `Reason` — are described in prose with no published enumeration of the values `Field` and
+  `Reason` take, so they are folded into the message rather than emitted with invented values;
+  `AWSError` carries only a code, a message and a status, so a modelled error's extra members have
+  no channel to the wire today either.
+
+  An existing test case asserting "an omitted version still defaults to IPV4" is **deleted**: it
+  pinned the defect, describing a request AWS refuses. The generated Go SDK independently
+  corroborates both halves of this — its own validator refuses an absent `Name`, `Scope`,
+  `IPAddressVersion` or `Addresses` client-side, and it keys the last of those on
+  `v.Addresses == nil`, so the empty-versus-absent line substrate had erased is one the SDK draws
+  too. That also means no Go consumer could reach the defaulting at all, which is why the wire-tier
+  test for the omission is a hand-built request rather than a client call.
+
+- **One builder produces every WAFv2 ARN** (#858). v0.114.0 fixed CloudFormation's web-ACL ARN to
+  derive its scope segment from the `Scope` property and left the WAFv2 plugin hardcoding
+  `regional` at both of its create paths — the only other `arn:aws:wafv2` literals in non-test
+  code. So the same logical web ACL reported **two different ARNs** depending on whether
+  CloudFormation or the API created it, and a `CLOUDFRONT` resource created through the API still
+  reported a scope it does not have. That is not cosmetic: an IP-set ARN is what a caller hands to
+  `IPSetReferenceStatement` and a web-ACL ARN is what `AssociateWebACL` takes. All three sites now
+  go through `wafv2ARN`, the "one builder, so they cannot drift" structure #826 established for
+  state keys — two implementations of an ARN are two answers, which is how this diverged.
+
+  **Which literal a `CLOUDFRONT` scope renders is unverified and is documented as substrate's
+  reading.** Four sources: the Service Authorization Reference page for WAFv2 returns an empty
+  body; the machine-readable Service Reference gives only the unsubstituted `${Scope}`;
+  `API_AssociateWebACL` lists the eight protectable-resource ARN formats but no web-ACL ARN; and
+  the only substituted example AWS publishes anywhere, on the `AWS::WAFv2::WebACL` Template
+  Reference page, is a REGIONAL ACL rendering `regional` — consistent with the lowercase of
+  `Scope`, and not proof for `CLOUDFRONT`. What the fix guarantees is that the three paths agree.
+
+- Two statements justifying why CloudFormation's stored `PhysicalID` is left alone were checkable
+  and neither held, and both are corrected in `cfn_intrinsics.go` and in v0.114.0's #827 entry
+  (part of #837, which stays open). A redeploy does **not** recognise a resource by its physical
+  ID: `deployedResource` matches on logical ID with no physical-ID fallback, and recognition is
+  `clearUnchangedRedeploys`, whose own doc comment gives the reason the physical ID *cannot* be the
+  key — a refused create returns none at all. And the stamp claim said **every**
+  `aws:cloudformation:*` state key is built from it, which the four ELBv2 types disprove:
+  `cfnStampELBResource` finds the record by ARN and bypasses `cfnResolveStampTarget` entirely. The
+  real reasons to leave it alone — `DescribeStackResources`, the deletion path, drift detection and
+  the stamp for the types that do use it — are stronger than the two that were written down.
+
+### Removed
+- **Two dead `Tags` fields on Config's shapes** (#836). `ConfigurationRecorder.Tags` and
+  `ConfigRule.Tags` were declared `json:"-"` and were never assigned or read anywhere in the tree,
+  tests included. #836 was filed on the premise that their presence meant a tag set at creation was
+  never persisted; it is not. Config keeps every resource's tags in a side-car record keyed by ARN,
+  `cfgsvcTagsKey`, and nine paths go through it — including `TagResource`, `UntagResource`,
+  `ListTagsForResource`, the `aws:ResourceTag` authorization hook, and creation-time tags for both
+  `PutConfigurationRecorder` and `PutConfigRule`, which read the **request's** top-level `Tags`
+  member where the API model puts it. Three existing tests already assert what the issue's criteria
+  asked for.
+
+  Giving either field a real JSON tag — the issue's first criterion — would have introduced a
+  defect rather than fixing one: AWS's `ConfigurationRecorder` and `ConfigRule` shapes have **no
+  `Tags` member**, and `describeConfigurationRecorders` serialises the record straight to the wire,
+  so it would emit a member AWS never emits *and* create a second spelling of one resource's tags
+  with only the side-car actually read — #826's failure shape, deliberately. Deleting the fields
+  removes the attractive nuisance that produced a wholly incorrect bug report, and their accurate
+  doc comments move to `cfgsvcSaveTags` and `cfgsvcTagsKey`, where the behaviour they describe
+  actually lives.
+
+  This is a **breaking change for a Go consumer** constructing either struct with a `Tags` field,
+  which nothing in substrate did.
+
 ### Changed
 - `docs/services.md`'s Resource Groups Tagging section corrects two overstatements v0.114.0 left.
   The claim that #826's audit found "every other service's arm … all agree" was narrower than it
@@ -249,6 +368,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renders the enum's spelling rather than the prose's, that `AttachmentCount` is derived on every
   read like `PermissionsBoundaryUsageCount` is, and what the two `Put*PermissionsBoundary`
   operations refuse — including the two things they deliberately do not.
+
+- `docs/services.md`'s CloudFormation section moves `AWS::ApiGateway::Method` out of the "recorded
+  rather than fixed" `Ref` list and states where the bound on its generated identifier comes from,
+  since it is the one generated name with no service limit behind it. It also **corrects the
+  `AWS::CloudFront::CloudFrontOriginAccessIdentity` entry**, which said the physical ID is the
+  configured `Comment`: the deploy helper asks for `CloudFrontOriginAccessIdentityConfig.Comment`,
+  but that resolver reads a dotted key from a flat map while the property is a nested object, so the
+  lookup never matches and the logical ID always wins (#859). Two new paragraphs record WAFv2's
+  single ARN builder and what `CreateIPSet` now refuses.
 
 ## [v0.114.0] - 2026-09-12
 
@@ -439,9 +567,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed against its Template Reference page rather than inferred.
 
   **`PhysicalResourceId` is unchanged.** The physical ID is what `DescribeStackResources` reports,
-  what every `aws:cloudformation:*` tag state key is built from, and what a redeploy recognizes an
-  existing resource by, so the `Ref` value is *derived* at resolve time instead — from the ARN the
-  deploy already recorded, from a value the deploy helper now records in metadata, or from the
+  what most `aws:cloudformation:*` tag state keys are built from, and the key the deletion path and
+  drift detection address a resource by, so the `Ref` value is *derived* at resolve time instead —
+  from the ARN the deploy already recorded, from a value the deploy helper now records in metadata,
+  or from the
   stack's own region and account. Whether the reported physical ID should also become per-type is
   #837.
 

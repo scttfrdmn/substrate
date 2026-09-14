@@ -33,9 +33,18 @@ import (
 // the same rule resolveFnGetAtt states on its ConfigRuleId arm.
 //
 // PhysicalID is deliberately not changed to carry these values. It is what
-// DescribeStackResources reports, what cfnResolveStampTarget builds every tag state key from,
-// and what a redeploy recognizes an existing resource by, so the Ref value is *derived* here
-// instead. Whether the reported PhysicalResourceId should also become per-type is #837.
+// DescribeStackResources reports, what most aws:cloudformation:* tag state keys are built from
+// (cfnResolveStampTarget), and the key the deletion path and drift detection address a resource
+// by, so the Ref value is *derived* here instead. Whether the reported PhysicalResourceId
+// should also become per-type is #837.
+//
+// Two earlier justifications for that are corrected here rather than left standing, because
+// both were checkable and neither held (#837). A redeploy does *not* recognize a resource by
+// its physical ID: deployedResource matches on logical ID with no physical-ID fallback, and
+// recognition is clearUnchangedRedeploys, whose own comment gives the reason the physical ID
+// cannot be the key — a refused create returns none at all. And the stamp claim was "every"
+// key, which the four ELBv2 types disprove: cfnStampELBResource finds the record by ARN and
+// bypasses cfnResolveStampTarget entirely.
 func cfnRefValue(dr DeployedResource, cctx *cfnContext) (string, bool) {
 	switch dr.Type {
 	// ----- Ref is the resource's ARN ---------------------------------------------------
