@@ -136,14 +136,48 @@ func iamUserXMLFields(u *IAMUser) string {
 // documents no boundary on either — `GetGroup`'s and `GetInstanceProfile`'s samples both
 // carry a reduced entity — and neither operation is a way to read one entity, so the
 // note's "see GetRole" instruction applies unchanged.
+//
+// The two member names are AWS's, which they were not until #852. The element used to carry
+// `PolicyArn` and `PolicyName`, and *neither name exists on AWS's shape*: the
+// `PermissionsBoundary` member of `User`, `Role`, `UserDetail` and `RoleDetail` is an
+// [AttachedPermissionsBoundary], whose Contents section lists exactly `PermissionsBoundaryArn`
+// and `PermissionsBoundaryType`. So an SDK decoded the element into an empty struct — a
+// consumer reading `role.PermissionsBoundary.PermissionsBoundaryArn` got `""` for a boundary
+// substrate had stored and was reporting. Nothing in the tree had ever emitted either AWS
+// name, and the one test covering the element asserted only that the tag was present, which is
+// the assertion a decoded struct can make and raw XML cannot be fooled by.
+//
+// [IAMAttachedPolicy.PolicyName] is still stored on the entity — it costs nothing and
+// `ListAttachedRolePolicies` renders it, where AWS's `AttachedPolicy` shape *does* have it —
+// but it no longer reaches the wire here, because the boundary's shape has no member to carry
+// it. That is what makes #846's "source the PolicyName from the resolved policy" moot rather
+// than deferred: there is nowhere for a better-sourced name to go.
+//
+// [AttachedPermissionsBoundary]: https://docs.aws.amazon.com/IAM/latest/APIReference/API_AttachedPermissionsBoundary.html
 func iamPermissionsBoundaryXML(boundary *IAMAttachedPolicy) string {
 	if boundary == nil {
 		return ""
 	}
-	return "<PermissionsBoundary><PolicyArn>" + xmlEsc(boundary.PolicyARN) +
-		"</PolicyArn><PolicyName>" + xmlEsc(boundary.PolicyName) +
-		"</PolicyName></PermissionsBoundary>"
+	return "<PermissionsBoundary><PermissionsBoundaryType>" + iamPermissionsBoundaryTypePolicy +
+		"</PermissionsBoundaryType><PermissionsBoundaryArn>" + xmlEsc(boundary.PolicyARN) +
+		"</PermissionsBoundaryArn></PermissionsBoundary>"
 }
+
+// iamPermissionsBoundaryTypePolicy is the only value AWS's model admits for
+// `PermissionsBoundaryType`.
+//
+// AWS's page contradicts itself about it. The prose says the type "can only have a value of
+// `Policy`" while the same page's enumeration says "Valid Values: `PermissionsBoundaryPolicy`",
+// and the CLI v2 reference — generated from the service model — lists `PermissionsBoundaryPolicy`
+// as the only possible value. Under #671's binding rule, *only what the API model states*, the
+// wire value is the enum's. The prose is recorded here rather than silently resolved, because a
+// consumer who read the prose and asserts `Policy` needs to know which of the two substrate
+// chose and why.
+//
+// A constant rather than a literal at the one call site, so that a future shape rendering a
+// boundary — `GetAccountAuthorizationDetails`' `UserDetail` and `RoleDetail` (#848) — cannot
+// pick the other spelling.
+const iamPermissionsBoundaryTypePolicy = "PermissionsBoundaryPolicy"
 
 // iamEntityTagsXML renders an entity's tags for a single-entity shape, and nothing at all
 // when there are none.

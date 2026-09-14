@@ -85,16 +85,7 @@ func iamPolicyARNIsAWSManaged(arn string) bool {
 // caller used it — a bool no attach reads is a value a test cannot observe, so a mutation
 // flipping it survived the whole suite. The log line is the entire observable effect.
 func (p *IAMPlugin) iamWarnUnresolvedPolicyARN(goCtx context.Context, operation, arn string) {
-	if p.logger == nil {
-		return
-	}
-	if _, ok := GetManagedPolicy(arn); ok {
-		return
-	}
-	// A state failure is treated as "does not resolve": the warning is advisory and the attach
-	// proceeds either way, so a read error must not turn an accepted call into an error.
-	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
-	if err == nil && raw != nil {
+	if p.logger == nil || p.iamPolicyARNResolves(goCtx, arn) {
 		return
 	}
 
@@ -109,4 +100,49 @@ func (p *IAMPlugin) iamWarnUnresolvedPolicyARN(goCtx context.Context, operation,
 		"nor state; the attach succeeds and the policy contributes no statements to an "+
 		"authorization decision",
 		"policyArn", arn)
+}
+
+// iamWarnUnresolvedBoundaryARN logs at WARN when the ARN a permissions boundary was just set to
+// resolves in neither the bundled catalog nor state.
+//
+// Separate from iamWarnUnresolvedPolicyARN because the consequence is the reverse one, and
+// stating it as "contributes no statements" would be misleading in the direction that matters. An
+// unresolvable *attached* policy grants nothing, so a decision that needed it is denied. An
+// unresolvable *boundary* caps nothing: AuthController.loadPermissionBoundary returns nil when the
+// ARN loads nowhere (authz.go), and a nil boundary is indistinguishable from no boundary at all —
+// so the principal keeps every permission its attached policies grant, where AWS would have
+// clamped them. The set succeeds regardless, for #499's reason (substrate bundles 52 of roughly
+// 1,200 managed policies, so refusing would break the common case), but a consumer testing that a
+// boundary *restricts* something needs to know its boundary is inert.
+func (p *IAMPlugin) iamWarnUnresolvedBoundaryARN(goCtx context.Context, operation, arn string) {
+	if p.logger == nil || p.iamPolicyARNResolves(goCtx, arn) {
+		return
+	}
+
+	if iamPolicyARNIsAWSManaged(arn) {
+		p.logger.Warn("iam "+operation+": the boundary is a well-formed AWS managed ARN substrate "+
+			"does not bundle; the boundary is stored and reported but enforces nothing, so the "+
+			"entity's effective permissions are not clamped",
+			"permissionsBoundary", arn)
+		return
+	}
+	p.logger.Warn("iam "+operation+": the boundary resolves in neither the bundled catalog nor "+
+		"state; the boundary is stored and reported but enforces nothing, so the entity's "+
+		"effective permissions are not clamped",
+		"permissionsBoundary", arn)
+}
+
+// iamPolicyARNResolves reports whether arn names a policy substrate can load, from the bundled
+// catalog or from state.
+//
+// A state read failure counts as "does not resolve". Both callers are advisory warnings whose
+// operation proceeds either way, so a read error must not turn an accepted call into an error —
+// and the bool is read by two warners rather than being the return value of one, which is what
+// made the earlier bool form untestable.
+func (p *IAMPlugin) iamPolicyARNResolves(goCtx context.Context, arn string) bool {
+	if _, ok := GetManagedPolicy(arn); ok {
+		return true
+	}
+	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
+	return err == nil && raw != nil
 }

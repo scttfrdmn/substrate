@@ -1482,9 +1482,9 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | GetRolePolicy | |
 | DeleteRolePolicy | |
 | ListRolePolicies | |
-| PutUserPermissionsBoundary | |
+| PutUserPermissionsBoundary | ARN shape checked, existence not — see below |
 | DeleteUserPermissionsBoundary | |
-| PutRolePermissionsBoundary | |
+| PutRolePermissionsBoundary | Refuses a service-linked role with `UnmodifiableEntity` |
 | DeleteRolePermissionsBoundary | |
 | TagUser | |
 | UntagUser | |
@@ -1941,6 +1941,35 @@ bundled ones ([#815](https://github.com/scttfrdmn/substrate/issues/815)).
 **No member of these shapes is left unmodelled now.** `PermissionsBoundaryUsageCount` and
 `RoleLastUsed` were the last two, each recorded as a design decision rather than a field to
 render, and both are answered as of #815 and #816.
+
+**A boundary is reported under AWS's own member names**, which two of them were not until
+[#852](https://github.com/scttfrdmn/substrate/issues/852). The `PermissionsBoundary` member of
+`User`, `Role`, `UserDetail` and `RoleDetail` is an `AttachedPermissionsBoundary`, and its Contents
+section lists exactly `PermissionsBoundaryArn` and `PermissionsBoundaryType`. Substrate rendered
+`PolicyArn` and `PolicyName` instead — names that appear on no AWS shape — so an SDK decoded the
+element into an empty struct and a consumer reading
+`role.PermissionsBoundary.PermissionsBoundaryArn` got `""` for a boundary substrate had stored and
+was reporting. `PolicyName` is still kept on the stored record, because
+`ListAttachedRolePolicies` renders one and AWS's `AttachedPolicy` shape *has* that member, but a
+boundary no longer carries it to the wire: there is no member on the shape to carry it.
+
+`PermissionsBoundaryType` renders **`PermissionsBoundaryPolicy`**. AWS's page contradicts itself
+here — the prose says the type "can only have a value of `Policy`" while the same page's
+enumeration says "Valid Values: `PermissionsBoundaryPolicy`", and the CLI v2 reference, generated
+from the service model, lists only the latter. Substrate follows the model rather than the prose,
+and the contradiction is recorded rather than silently resolved so a consumer who read the prose
+knows which of the two substrate chose.
+
+**`AttachmentCount` is derived per read, exactly as `PermissionsBoundaryUsageCount` is.** Nothing
+writes the field: `CreatePolicy` never set it, the bundled catalog carries no value for it, and an
+attach records only the ARN on the entity's own list. `ListPolicies` derived the count and
+`GetPolicy` did not, so a policy attached to three entities reported 3 in a listing and **0** when
+read on its own ([#847](https://github.com/scttfrdmn/substrate/issues/847)). Both now count the
+same way, from the three `<kind>_policies:` prefixes, which is also why an attach and a detach are
+immediately visible in both. The count is written onto a **copy** of a bundled policy's record
+rather than onto the catalog entry, because the catalog hands back shared pointers: writing through
+one would leak a count into every later read of that policy, including reads from a different
+emulator in the same process.
 
 ### What a role read reports about its last use
 
@@ -2531,8 +2560,9 @@ service-role policies substrate bundles, `AmazonSSMManagedInstanceCore` and
 `AmazonEC2ContainerRegistryReadOnly`, live at `/` because that is their real path — what a
 policy is *for* and where it lives are different things, and the path reported here is
 AWS's. `OnlyAttached` is computed from stored attachments, so a bundled policy that has
-been attached to a user, group or role does appear; the catalog's own `AttachmentCount` is
-always 0 and is not used.
+been attached to a user, group or role does appear; the catalog's own `AttachmentCount` field is
+always 0 and is read by nothing — every shape that reports a count derives it, `GetPolicy`
+included as of #847.
 
 `PolicyUsageFilter` is **validated and applies no narrowing.** The reference does not say
 which side of `PermissionsPolicy`/`PermissionsBoundary` an entirely-unused policy falls on,
@@ -2559,6 +2589,30 @@ The consequence to know: an attached-but-unresolvable policy contributes **no st
 to any authorization decision, so `CheckAccess` and the simulator both behave as though it
 were not attached. A consumer who needs the attach verified should follow it with
 `GetPolicy`, which is exact.
+
+**A permissions boundary is treated the same way, and the consequence is the reverse one.**
+`PutUserPermissionsBoundary` and `PutRolePermissionsBoundary` check the boundary ARN's shape and
+refuse a malformed one with `InvalidInput` (400) — the code both operations publish — while a
+well-formed ARN naming a policy substrate cannot resolve **succeeds** and logs at `WARN`, for
+#499's reason above: AWS says a boundary may be "an AWS managed policy or a customer managed
+policy", so the unbundled ~1,150 are the common case here too, and neither operation's page states
+what a nonexistent boundary policy produces. The warning is its own line rather than the attach
+path's, because an unresolvable *attached* policy grants nothing while an unresolvable *boundary*
+**restricts** nothing: the boundary is stored and reported, but the evaluator loads no document for
+it, and no document is indistinguishable from no boundary — so the entity keeps every permission
+its attached policies grant, where AWS would have clamped them
+([#846](https://github.com/scttfrdmn/substrate/issues/846)).
+
+Two further notes on that pair. `PutRolePermissionsBoundary` refuses a **service-linked role** with
+`UnmodifiableEntity` (400) — its own prose says "You cannot set the boundary for a service-linked
+role", and both the sentence and the code are absent from `PutUserPermissionsBoundary`, which is
+AWS confirming the asymmetry rather than substrate inferring it from "there is no service-linked
+user". And `PolicyNotAttachable`, which both pages publish for an AWS service-role policy attached
+to anything but its own service-linked role, is deliberately **not** modelled: substrate does not
+record which managed policies are service-role policies, so it cannot tell the case apart, and
+refusing on a guess would be a refusal AWS's own description does not cover. A missing required
+member is `ValidationError` (400), which is on IAM's `CommonErrors` page rather than either
+operation's list, and is what every other IAM operation answers for one.
 
 #### Policy documents and versions
 
