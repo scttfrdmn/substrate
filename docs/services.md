@@ -8690,7 +8690,18 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 | UpdateDistribution | |
 | DeleteDistribution | |
 | ListDistributions | |
-| TagResource | |
+| TagResource | Body is a `<Tags>` document; a body of another shape is refused rather than read as an empty tag set (#883) |
+| UntagResource | Body is a `<TagKeys><Items><Key>` document. Removing a key the distribution does not carry succeeds — AWS documents no error for it, so that reading is substrate's (#883) |
+| ListTagsForResource | |
+
+All three tagging operations share the `POST`/`GET /2020-05-31/tagging` path and are told apart
+by the query string: `Operation=Tag`, `Operation=Untag`, and a `GET` carrying only `Resource`. A
+POST whose `Operation` is neither is refused with `InvalidAction`, never treated as a tag write
+(#883).
+
+The Resource Groups Tagging API cannot reach a CloudFront distribution: `UntagResources` and
+`TagResources` answer an `InternalServiceException` `FailedResourcesMap` entry for a CloudFront
+ARN, so tags here are changed through CloudFront's own operations only (#835).
 
 All CloudFront resources are stored under `us-east-1` (global service).
 
