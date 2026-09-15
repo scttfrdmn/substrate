@@ -341,9 +341,13 @@ func (d *StackDeployer) deployGlueJob(
 	body := map[string]interface{}{
 		"Name": name,
 		"Role": resolveStringProp(props, "Role", "", cctx),
+		// Command is a nested object in the template, so both members are read through the
+		// nested walk. Indexed flat by "Command.Name" and "Command.ScriptLocation" they matched
+		// nothing and took their fallbacks unconditionally, so every CFN Glue job shipped an
+		// empty ScriptLocation and a pythonshell job was created as a Spark ETL one (#877).
 		"Command": map[string]interface{}{
-			"Name":           resolveStringProp(props, "Command.Name", "glueetl", cctx),
-			"ScriptLocation": resolveStringProp(props, "Command.ScriptLocation", "", cctx),
+			"Name":           resolveNestedStringProp(props, "Command", "Name", "glueetl", cctx),
+			"ScriptLocation": resolveNestedStringProp(props, "Command", "ScriptLocation", "", cctx),
 		},
 	}
 	bodyBytes, err := json.Marshal(body)

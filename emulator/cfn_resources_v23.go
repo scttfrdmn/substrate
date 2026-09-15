@@ -8,7 +8,9 @@ package emulator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"strings"
 )
 
 // ----- v0.23.0 — Kinesis ---------------------------------------------------
@@ -61,7 +63,12 @@ func (d *StackDeployer) deployCloudFrontDistribution(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	comment := resolveStringProp(props, "DistributionConfig.Comment", logicalID, cctx)
+	// DistributionConfig is a nested object; indexed flat this matched nothing and the stored
+	// comment was always the logical ID (#877). The PhysicalID is recovered from the response Id
+	// below, so this was the cosmetic one of the five — but a comment that reports a template's
+	// logical ID rather than what the template said is still a value from somewhere other than
+	// the request.
+	comment := resolveNestedStringProp(props, "DistributionConfig", "Comment", logicalID, cctx)
 
 	body := []byte(`<DistributionConfig><Comment>` + comment + `</Comment><Enabled>true</Enabled></DistributionConfig>`)
 
@@ -98,7 +105,65 @@ func (d *StackDeployer) deployCloudFrontDistribution(
 	return dr, cost, nil
 }
 
-// deployCloudFrontOAI creates a CloudFront Origin Access Identity stub.
+// cfnOAIIDChars are the characters an origin access identity's ID is built from.
+//
+// AWS publishes the format only by example, and the two examples agree: Ref returns "the origin
+// access identity, such as E15MNIMTCFKK4C", and Fn::GetAtt Id returns "E74FTE3AJFJ256A". Both are
+// E followed by thirteen uppercase alphanumerics, which is also the shape
+// generateCloudFrontID's own doc comment states for a distribution ID. So the alphabet is
+// substrate's reading of two agreeing samples rather than of a published grammar.
+const cfnOAIIDChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// cfnOAIIDLen is the number of characters after the leading "E".
+const cfnOAIIDLen = 13
+
+// cfnOriginAccessIdentityID derives an origin access identity's ID from the resource's scope.
+//
+// Deterministic for a given (account, Region, stack, logical ID), for the reason
+// cfnGeneratedName records for its own suffix: UpdateStack in substrate re-deploys the whole
+// template, so an ID minted from crypto/rand would change on every update and leak the identity
+// it replaced. It is derived rather than reused from generateCloudFrontID
+// (cloudfront_plugin.go), which produces exactly this shape but reads crypto/rand.
+//
+// The two obvious deterministic helpers do not fit. cfnGeneratedName returns a hyphenated
+// {stack}-{logical}-{suffix}, which is not this shape. cfnNameSuffix is pinned to twelve base-36
+// characters by cfnGeneratedNameSuffixLen — thirteen in total, one short — and cannot be widened:
+// its modulus loop is uint64 and 36**13 (about 1.71e20) overflows 2**64 (about 1.84e19), where
+// 36**12 (about 4.74e18) fits. So the derivation is SHA-256 over the joined scope, following
+// cfnDeterministicUUID, mapped onto the thirty-six-character alphabet.
+//
+// Each output character takes its own hash byte rather than reducing one big integer, which keeps
+// the mapping independent of any word size. The modulus makes the distribution very slightly
+// uneven (256 is not a multiple of 36); that is irrelevant here, because the property needed is
+// stability plus distinctness between resources, not uniformity.
+func cfnOriginAccessIdentityID(cctx *cfnContext, logicalID string) string {
+	stackName, region, accountID := "", "", ""
+	if cctx != nil {
+		stackName, region, accountID = cctx.stackName, cctx.region, cctx.accountID
+	}
+	sum := sha256.Sum256([]byte(strings.Join(
+		[]string{accountID, region, stackName, logicalID}, "/")))
+
+	out := make([]byte, 0, cfnOAIIDLen+1)
+	out = append(out, 'E')
+	for i := 0; i < cfnOAIIDLen; i++ {
+		out = append(out, cfnOAIIDChars[int(sum[i])%len(cfnOAIIDChars)])
+	}
+	return string(out)
+}
+
+// deployCloudFrontOAI records a CloudFront origin access identity.
+//
+// It dispatches nothing, and the type stays in cfnDeleteInertTypes: substrate keeps no
+// CloudFront-side OAI record, so there is nothing to create and nothing to delete. What #859
+// fixes is the identity, not the record — Ref returned the resource's own *logical ID*, which is
+// not an identifier AWS would ever hand back, and every template passing !Ref to an S3 bucket
+// policy or an origin-access configuration passed that along.
+//
+// The comment is read but no longer reported. Before #877 the flat index of
+// "CloudFrontOriginAccessIdentityConfig.Comment" matched nothing, so PhysicalID was the logical
+// ID by way of the fallback rather than by intent; now the comment reaches Metadata, where a
+// reader can see what the template said, and PhysicalID is the minted ID.
 func (d *StackDeployer) deployCloudFrontOAI(
 	_ context.Context,
 	logicalID string,
@@ -106,10 +171,17 @@ func (d *StackDeployer) deployCloudFrontOAI(
 	_ string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	comment := resolveStringProp(props, "CloudFrontOriginAccessIdentityConfig.Comment", logicalID, cctx)
-	return DeployedResource{
+	comment := resolveNestedStringProp(props,
+		"CloudFrontOriginAccessIdentityConfig", "Comment", "", cctx)
+
+	dr := DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::CloudFront::CloudFrontOriginAccessIdentity",
-		PhysicalID: comment,
-	}, 0, nil
+		PhysicalID: cfnOriginAccessIdentityID(cctx, logicalID),
+		Metadata:   make(map[string]interface{}),
+	}
+	if comment != "" {
+		dr.Metadata["Comment"] = comment
+	}
+	return dr, 0, nil
 }

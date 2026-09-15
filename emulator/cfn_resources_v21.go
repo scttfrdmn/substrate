@@ -148,9 +148,16 @@ func (d *StackDeployer) deployECSTaskDefinition(
 	family := resolveStringProp(props, "Family", logicalID, cctx)
 
 	body := map[string]interface{}{
-		"family":                  family,
-		"networkMode":             resolveStringProp(props, "NetworkMode", "bridge", cctx),
-		"requiresCompatibilities": []string{resolveStringProp(props, "RequiresCompatibilities.0", "EC2", cctx)},
+		"family":      family,
+		"networkMode": resolveStringProp(props, "NetworkMode", "bridge", cctx),
+		// RequiresCompatibilities is a *list* in the template, and "RequiresCompatibilities.0"
+		// indexed flat matched nothing — so every task definition deployed through
+		// CloudFormation registered as EC2 and a Fargate one was never Fargate (#877). A nested
+		// map walk would not reach a list element either, which is why this site reads its
+		// element by index.
+		"requiresCompatibilities": []string{
+			resolveIndexedStringProp(props, "RequiresCompatibilities", 0, "EC2", cctx),
+		},
 	}
 	if cdefs, ok := props["ContainerDefinitions"]; ok {
 		body["containerDefinitions"] = ecsContainerDefinitions(cdefs, cctx)
