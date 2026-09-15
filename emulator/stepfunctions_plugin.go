@@ -101,8 +101,10 @@ func (p *StepFunctionsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 
 // --- State key helpers ---
 
+// smKey is [sfnStateMachineKey]. The key form lives in stepfunctions_tags.go so the tagging
+// resolver builds it through the same function these operations do (#910).
 func (p *StepFunctionsPlugin) smKey(accountID, region, name string) string {
-	return "statemachine:" + accountID + "/" + region + "/" + name
+	return sfnStateMachineKey(accountID, region, name)
 }
 
 func (p *StepFunctionsPlugin) smNamesKey(accountID, region string) string {
@@ -117,8 +119,9 @@ func (p *StepFunctionsPlugin) execIDsKey(accountID, region, smName string) strin
 	return "execution_ids:" + accountID + "/" + region + "/" + smName
 }
 
+// activityKey is [sfnActivityKey]. See [StepFunctionsPlugin.smKey].
 func (p *StepFunctionsPlugin) activityKey(accountID, region, name string) string {
-	return "activity:" + accountID + "/" + region + "/" + name
+	return sfnActivityKey(accountID, region, name)
 }
 
 func (p *StepFunctionsPlugin) activityNamesKey(accountID, region string) string {
@@ -1012,153 +1015,8 @@ func (p *StepFunctionsPlugin) deleteActivity(ctx *RequestContext, req *AWSReques
 	return statesJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-func (p *StepFunctionsPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		ResourceArn string            `json:"resourceArn"`
-		Tags        map[string]string `json:"tags"`
-	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	goCtx := context.Background()
-	name := extractSMNameFromARN(input.ResourceArn)
-
-	if strings.Contains(input.ResourceArn, ":stateMachine:") {
-		sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, name)
-		if err != nil {
-			return nil, err
-		}
-		if sm == nil {
-			return nil, &AWSError{Code: "ResourceNotFound", Message: "Resource not found: " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
-		}
-		if sm.Tags == nil {
-			sm.Tags = make(map[string]string)
-		}
-		for k, v := range input.Tags {
-			sm.Tags[k] = v
-		}
-		if err := p.saveStateMachine(goCtx, sm); err != nil {
-			return nil, fmt.Errorf("stepfunctions tagResource saveStateMachine: %w", err)
-		}
-	} else if strings.Contains(input.ResourceArn, ":activity:") {
-		act, err := p.loadActivity(goCtx, ctx.AccountID, ctx.Region, name)
-		if err != nil {
-			return nil, err
-		}
-		if act == nil {
-			return nil, &AWSError{Code: "ResourceNotFound", Message: "Resource not found: " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
-		}
-		if act.Tags == nil {
-			act.Tags = make(map[string]string)
-		}
-		for k, v := range input.Tags {
-			act.Tags[k] = v
-		}
-		if err := p.saveActivity(goCtx, act); err != nil {
-			return nil, fmt.Errorf("stepfunctions tagResource saveActivity: %w", err)
-		}
-	} else {
-		return nil, &AWSError{Code: "InvalidArn", Message: "unsupported resource ARN: " + input.ResourceArn, HTTPStatus: http.StatusBadRequest}
-	}
-
-	return statesJSONResponse(http.StatusOK, map[string]interface{}{})
-}
-
-func (p *StepFunctionsPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		ResourceArn string   `json:"resourceArn"`
-		TagKeys     []string `json:"tagKeys"`
-	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	removeSet := make(map[string]bool, len(input.TagKeys))
-	for _, k := range input.TagKeys {
-		removeSet[k] = true
-	}
-
-	goCtx := context.Background()
-	name := extractSMNameFromARN(input.ResourceArn)
-
-	if strings.Contains(input.ResourceArn, ":stateMachine:") {
-		sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, name)
-		if err != nil {
-			return nil, err
-		}
-		if sm == nil {
-			return nil, &AWSError{Code: "ResourceNotFound", Message: "Resource not found: " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
-		}
-		for k := range removeSet {
-			delete(sm.Tags, k)
-		}
-		if err := p.saveStateMachine(goCtx, sm); err != nil {
-			return nil, fmt.Errorf("stepfunctions untagResource saveStateMachine: %w", err)
-		}
-	} else if strings.Contains(input.ResourceArn, ":activity:") {
-		act, err := p.loadActivity(goCtx, ctx.AccountID, ctx.Region, name)
-		if err != nil {
-			return nil, err
-		}
-		if act == nil {
-			return nil, &AWSError{Code: "ResourceNotFound", Message: "Resource not found: " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
-		}
-		for k := range removeSet {
-			delete(act.Tags, k)
-		}
-		if err := p.saveActivity(goCtx, act); err != nil {
-			return nil, fmt.Errorf("stepfunctions untagResource saveActivity: %w", err)
-		}
-	} else {
-		return nil, &AWSError{Code: "InvalidArn", Message: "unsupported resource ARN: " + input.ResourceArn, HTTPStatus: http.StatusBadRequest}
-	}
-
-	return statesJSONResponse(http.StatusOK, map[string]interface{}{})
-}
-
-func (p *StepFunctionsPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		ResourceArn string `json:"resourceArn"`
-	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	goCtx := context.Background()
-	name := extractSMNameFromARN(input.ResourceArn)
-	var tags map[string]string
-
-	if strings.Contains(input.ResourceArn, ":stateMachine:") {
-		sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, name)
-		if err != nil {
-			return nil, err
-		}
-		if sm == nil {
-			return nil, &AWSError{Code: "ResourceNotFound", Message: "Resource not found: " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
-		}
-		tags = sm.Tags
-	} else if strings.Contains(input.ResourceArn, ":activity:") {
-		act, err := p.loadActivity(goCtx, ctx.AccountID, ctx.Region, name)
-		if err != nil {
-			return nil, err
-		}
-		if act == nil {
-			return nil, &AWSError{Code: "ResourceNotFound", Message: "Resource not found: " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
-		}
-		tags = act.Tags
-	} else {
-		return nil, &AWSError{Code: "InvalidArn", Message: "unsupported resource ARN: " + input.ResourceArn, HTTPStatus: http.StatusBadRequest}
-	}
-
-	if tags == nil {
-		tags = make(map[string]string)
-	}
-	out := map[string]interface{}{
-		"tags": tags,
-	}
-	return statesJSONResponse(http.StatusOK, out)
-}
+// TagResource, UntagResource and ListTagsForResource live in stepfunctions_tags.go, beside the
+// ARN resolver they and the Resource Groups Tagging API share (#910).
 
 // --- Response helpers ---
 

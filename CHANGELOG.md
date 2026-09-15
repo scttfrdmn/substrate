@@ -160,6 +160,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **Step Functions' three tagging operations address the resource their ARN names, and an
+  activity is reachable from the Resource Groups Tagging API** (#910, part of #835). Four
+  defects in the same three functions, and the wire-shape one made two of them uncallable from
+  any AWS SDK.
+
+  `TagResource`, `UntagResource` and `ListTagsForResource` took the resource *name* from the
+  ARN's last colon-separated segment and the account and Region from the **calling request**, so
+  an ARN naming another account's state machine reached the caller's same-named one.
+  `UntagResource` is the damaging direction: stripping a tag can turn an `aws:ResourceTag`
+  `Deny` into an allow, and it answered `200` while doing it. A cross-Region ARN in the caller's
+  own account did the same. That is the rule #826 established for SQS and DynamoDB and #845
+  carried across the tagging API's resolver; these three operations were never audited against
+  it. All four readers — the three operations and the tagging API's `states` arm — now key
+  through one `sfnResolveARN` that takes no `*RequestContext` at all, so the account coming from
+  the ARN is structural rather than a thing each call site has to remember.
+
+  The type check was `strings.Contains(arn, ":stateMachine:")`, a substring test over the whole
+  ARN rather than a comparison against the resource segment, so an ARN whose *name* carried that
+  text took the state-machine branch —
+  `arn:aws:states:{region}:{account}:activity:x:stateMachine:y` resolved as a state machine. The
+  comparison is now against the resource segment alone, and stays case-sensitive because AWS
+  distinguishes its two taggable resources by the literal segment: `stateMachine` with a capital
+  M against `activity`.
+
+  **`ResourceNotFound` now answers HTTP 400, not 404.** All three operations publish it with
+  "HTTP Status Code: 400" — unusual enough to be worth calling out, since substrate answered a
+  status no Step Functions endpoint returns. An execution ARN still answers `InvalidArn`/400,
+  but now by a decision rather than by falling off the end of the `strings.Contains` chain: it
+  is well-formed and names a resource these operations do not accept, so the ARN is what does
+  not belong, not the resource that is missing.
+
+  **`tags` is an array of `{key, value}` objects on the wire, not an object.** AWS's `Tag` shape
+  is an array on `TagResource`'s request and `ListTagsForResource`'s response, and
+  `CreateStateMachine` and `CreateActivity` in the same plugin already decoded it that way — so
+  the plugin disagreed with itself about the shape of its own tags. A tag set at create time
+  could not be read back in a shape any SDK decodes, and `TagResource` could not be called by
+  one at all. `ListTagsForResource` sorts the array by key: AWS documents no order, and one that
+  followed Go's map iteration would differ between two identical calls in one run and could not
+  replay (#862).
+
+  For #835's two Step Functions rows, sharing the resolver was again only half of it. The
+  tagging API's `states` arm merged a tag by decoding the record into a `StateMachineState`
+  whatever the key named, so tagging an activity replaced its record with a state-machine-shaped
+  one and `DescribeActivity` stopped reporting the `activityArn` at all — nothing refused, and
+  the tag itself was written correctly, which is exactly why a test asserting on the tag cannot
+  see it. The arm now edits the tags member of the raw JSON through the shared
+  `mergeRecordStringMapTags` the RDS and ECS arms use, behind a kind guard, because the `states`
+  namespace also holds executions and three index keys that no ARN addresses and that store no
+  tags. The guard and the raw-JSON merge fix different failures and neither substitutes for the
+  other. `GetResources` gained an activities scanner, since a resolver arm alone makes a resource
+  taggable by name while leaving it invisible to a caller discovering resources — the two halves
+  of #835's criterion per row. Nineteen resource types are now scanned.
 - **An RDS DB cluster and DB subnet group can be tagged through the ARN RDS reports for them,
   and tagging one no longer truncates its record** (part of #835). Two defects, and the second
   is why this is `Fixed` rather than `Added`.

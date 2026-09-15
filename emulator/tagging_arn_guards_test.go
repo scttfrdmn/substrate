@@ -308,16 +308,20 @@ func TestTaggingResolveARN_TheRightTypeStillResolves(t *testing.T) {
 		if failures := tagResourcesFailures(t, ts, "TagResources", arn); len(failures) != 0 {
 			t.Fatalf("TagResources %s: %+v", arn, failures)
 		}
+		// Step Functions renders tags as AWS's array of Tag objects (#910).
 		var out struct {
-			Tags map[string]string `json:"tags"`
+			Tags []struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			} `json:"tags"`
 		}
 		resp := signedRequest(t, ts, statesTarget, taggingTestAccount, "ListTagsForResource",
 			map[string]any{"resourceArn": arn})
 		if status, errCode := decodeAWSResponse(t, resp, &out); errCode != "" || status != 200 {
 			t.Fatalf("ListTagsForResource: status %d, %s", status, errCode)
 		}
-		if out.Tags["env"] != "test" {
-			t.Errorf("ListTagsForResource tags = %v, want env=test", out.Tags)
+		if len(out.Tags) != 1 || out.Tags[0].Key != "env" || out.Tags[0].Value != "test" {
+			t.Errorf("ListTagsForResource tags = %+v, want [{env test}]", out.Tags)
 		}
 	})
 }

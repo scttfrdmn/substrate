@@ -246,6 +246,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "iam", scan: p.scanIAMEntities},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
 		{typePrefix: "states", scan: p.scanStepFunctionsStateMachines},
+		{typePrefix: "states", scan: p.scanStepFunctionsActivities},
 		{typePrefix: "ecr", scan: p.scanECRRepositories},
 		{typePrefix: "ecs", scan: p.scanECSClusters},
 		{typePrefix: "cognito-idp", scan: p.scanCognitoUserPools},
@@ -490,6 +491,35 @@ func (p *TaggingPlugin) scanStepFunctionsStateMachines(_ context.Context, reqCtx
 		out = append(out, resourceTagMapping{
 			ResourceARN: sm.StateMachineArn,
 			Tags:        mapToTaggingTags(sm.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanStepFunctionsActivities reports the activities GetResources can discover.
+//
+// Without it an activity was taggable by name once the resolver gained its arm, but invisible to
+// a caller discovering resources — the two halves of #835's criterion per resource type.
+func (p *TaggingPlugin) scanStepFunctionsActivities(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := sfnActivityKeyPrefix + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, statesNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list stepfunctions activities: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, statesNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var act ActivityState
+		if err := json.Unmarshal(raw, &act); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: act.ActivityArn,
+			Tags:        mapToTaggingTags(act.Tags),
 		})
 	}
 	return out, nil
@@ -1027,20 +1057,18 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		return apigatewayNamespace, "api:" + acct + "/" + region + "/" + apiID, nil
 
 	case "states":
-		// arn:aws:states:{region}:{acct}:stateMachine:{name}
+		// arn:aws:states:{region}:{acct}:stateMachine:{name} or :activity:{name}
 		//
-		// The prefix check is case-sensitive on purpose. AWS distinguishes the two taggable
-		// Step Functions resources by the literal segment alone — stateMachine:{name} with a
-		// capital M against activity:{name} — so an activity ARN otherwise resolved to a
-		// state-machine key and tagged a same-named state machine if one existed, or wrote a
-		// phantom record if it did not.
-		name, ok := strings.CutPrefix(resource, "stateMachine:")
-		if !ok || strings.Contains(name, ":") {
-			return "", "", unsupportedTagResource("Step Functions %q is not a state machine ARN", resource)
+		// Through [sfnResolveARN], which is what Step Functions' own three tagging operations
+		// key through, so the two sides cannot disagree about which record an ARN names. It also
+		// carries the activity arm this one lacked, which is what made an activity unreachable
+		// from here (part of #835), and the case-sensitivity of the "stateMachine" segment, which
+		// AWS distinguishes from "activity" by the literal segment alone.
+		ns, key, resolveErr := sfnResolveARN(arn)
+		if resolveErr != nil {
+			return "", "", unsupportedTagResource("Step Functions %q is not a taggable ARN: %v", resource, resolveErr)
 		}
-		region := parts[3]
-		acct := parts[4]
-		return statesNamespace, "statemachine:" + acct + "/" + region + "/" + name, nil
+		return ns, key, nil
 
 	case "ecr":
 		// arn:aws:ecr:{region}:{acct}:repository/{name}
@@ -1264,12 +1292,20 @@ func mergeResourceTags(
 		return state.Put(goCtx, ns, key, updated)
 
 	case statesNamespace:
-		var sm StateMachineState
-		if err := json.Unmarshal(raw, &sm); err != nil {
-			return fmt.Errorf("unmarshal StateMachineState: %w", err)
+		// Through [mergeRecordStringMapTags] rather than a concrete type, and behind a kind
+		// guard. This arm decoded [StateMachineState] whatever the key named, which was safe only
+		// while the resolver could reach nothing but a state machine: an activity round-tripped
+		// through that struct loses every member it does not carry under the same name, and the
+		// namespace also holds executions and three index keys that no ARN addresses and that
+		// store no tags. The two fix different failures and neither substitutes for the other
+		// (part of #835, #910).
+		if !sfnKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported Step Functions resource key: %s", key)
 		}
-		sm.Tags = mergeStringMap(sm.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(sm)
+		updated, err := mergeRecordStringMapTags(raw, sfnTagsJSONMember, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge Step Functions tags for %s: %w", key, err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case ecrNamespace:
