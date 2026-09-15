@@ -7,6 +7,7 @@ import (
 	"math/rand" // nosemgrep
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,7 +21,21 @@ type OmicsPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
-	rng    *rand.Rand
+
+	// rngMu guards rng, which is written by both a request and a reset: Int63n
+	// advances the source in place, and ResetForRun replaces it. A *rand.Rand is
+	// not safe for concurrent use, and two concurrent StartRun calls could
+	// previously race on it.
+	rngMu sync.Mutex
+
+	// rng is the source run IDs are drawn from.
+	rng *rand.Rand
+
+	// rngSeed is the seed rng was built from, kept so ResetForRun can rewind the
+	// source to the position it had at the start of the run rather than to an
+	// unrelated one. The seed itself is still per-process wall-clock; making it
+	// reproducible across processes is #856.
+	rngSeed int64
 }
 
 // Name returns the service name "omics".
@@ -35,12 +50,30 @@ func (p *OmicsPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
-	p.rng = rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	p.rngSeed = time.Now().UnixNano()
+	p.rng = rand.New(rand.NewSource(p.rngSeed)) //nolint:gosec
 	return nil
 }
 
 // Shutdown is a no-op for OmicsPlugin.
 func (p *OmicsPlugin) Shutdown(_ context.Context) error { return nil }
+
+// ResetForRun rewinds the random source run IDs are drawn from to the position it
+// held when the plugin was initialized, by rebuilding it from the same seed. It
+// implements [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay
+// needs it.
+//
+// Rewinding to the original seed rather than to a fresh one is what makes a replay
+// reproduce the run it is replaying: the recording drew from position 0 of this
+// seed, so a replay must too. The seed remains per-process, so two processes still
+// mint different run IDs from the same events — that is #856, and it is a separate
+// question from whether one process is self-consistent.
+func (p *OmicsPlugin) ResetForRun(_ context.Context) error {
+	p.rngMu.Lock()
+	defer p.rngMu.Unlock()
+	p.rng = rand.New(rand.NewSource(p.rngSeed)) //nolint:gosec
+	return nil
+}
 
 // HandleRequest dispatches a HealthOmics REST/JSON request to the appropriate handler.
 func (p *OmicsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -211,8 +244,14 @@ func (p *OmicsPlugin) listRuns(ctx *RequestContext, _ *AWSRequest) (*AWSResponse
 }
 
 // generateOmicsRunID generates a 10-digit numeric string matching real HealthOmics run IDs.
+//
+// The lock is held only for the draw: rng is shared mutable state that a reset can
+// replace under a concurrent request (#886), and a *rand.Rand cannot be used from
+// two goroutines at once.
 func (p *OmicsPlugin) generateOmicsRunID() string {
+	p.rngMu.Lock()
 	n := p.rng.Int63n(9000000000) + 1000000000 //nolint:gosec
+	p.rngMu.Unlock()
 	return fmt.Sprintf("%d", n)
 }
 

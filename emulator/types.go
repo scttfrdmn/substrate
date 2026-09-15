@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -330,6 +331,24 @@ type Plugin interface {
 	Shutdown(ctx context.Context) error
 }
 
+// ResettablePlugin is an optional capability a [Plugin] may implement when it
+// keeps mutable state of its own — a sequence counter, a cache, a random source —
+// outside the [StateManager].
+//
+// It exists because resetting the state manager is not the whole of resetting the
+// emulator. A plugin that mints an identifier from a counter on its own struct
+// carries that counter across a state reset, so a replay of one recorded stream
+// produced different identifiers each time it ran in the same process (#886).
+// Follow the [SnapshotableStateManager] pattern: the capability is discovered by
+// type assertion, so the plugins that keep everything in the state manager — most
+// of them — need no method at all.
+type ResettablePlugin interface {
+	// ResetForRun returns the plugin's own mutable state to the value it had at the
+	// start of a run. It must be safe to call on a plugin that has never handled a
+	// request, and safe to call concurrently with request handling.
+	ResetForRun(ctx context.Context) error
+}
+
 // PluginRegistry routes incoming AWS API requests to the appropriate [Plugin].
 type PluginRegistry struct {
 	mu      sync.RWMutex
@@ -364,6 +383,56 @@ func (r *PluginRegistry) RouteRequest(ctx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 	return p.HandleRequest(ctx, req)
+}
+
+// Plugin returns the plugin registered under name, and whether one is registered.
+// It is how a caller asks what a registered plugin can do — for instance whether it
+// implements [ResettablePlugin] — without routing a request to it.
+func (r *PluginRegistry) Plugin(name string) (Plugin, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.plugins[name]
+	return p, ok
+}
+
+// ResetPlugins returns every registered [ResettablePlugin] to its start-of-run
+// state. A plugin that does not implement [ResettablePlugin] is skipped, which is
+// almost all of them: a plugin whose only mutable state lives in the
+// [StateManager] is already reset by resetting the state manager.
+//
+// Every resettable plugin is visited even after one of them fails, and the errors
+// are joined. Stopping at the first failure would leave the remaining plugins
+// holding the previous run's counters — the exact condition this exists to
+// remove — while reporting that a reset had been attempted.
+//
+// Plugins are visited in sorted name order so that a multi-plugin failure reports
+// the same way on every run.
+func (r *PluginRegistry) ResetPlugins(ctx context.Context) error {
+	// The registry lock is released before any plugin is called: a plugin's reset may
+	// re-enter the registry (S3 notifications route through it), and holding the read
+	// lock across a callback risks deadlocking against a concurrent Register.
+	r.mu.RLock()
+	targets := make(map[string]ResettablePlugin, len(r.plugins))
+	for name, p := range r.plugins {
+		if rp, ok := p.(ResettablePlugin); ok {
+			targets[name] = rp
+		}
+	}
+	r.mu.RUnlock()
+
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var errs []error
+	for _, name := range names {
+		if err := targets[name].ResetForRun(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("reset plugin %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Names returns the sorted list of service names registered in the registry.

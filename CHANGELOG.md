@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ResettablePlugin`, an optional plugin capability for state a plugin keeps outside the
+  `StateManager`** (#886). A plugin implements `ResetForRun(ctx) error` when it holds mutable
+  state of its own — a sequence counter an identifier is minted from, a cache, a random source
+  — and `PluginRegistry.ResetPlugins` calls it for every plugin that does. Optional, and
+  discovered by type assertion exactly as `SnapshotableStateManager` already is: 64 of the 67
+  registered plugins need no reset of their own, so a mandatory method on `Plugin` would have
+  added 64 no-op implementations and broken every third-party plugin in order to reach three
+  counters.
+  `PluginRegistry.Plugin(name)` is also new: it returns a registered plugin so a caller can ask
+  what it implements without routing a request to it. See the plugin-author guidance in
+  `docs/contributing.md` and `emulator/doc_plugins.go`.
+
 - **`DescribeInstanceTypeOfferings` answers `LocationType=availability-zone-id`, and the
   refusal narrows to `outpost` alone** (#893). `Added` rather than `Fixed`: the value was
   refused deliberately and visibly with `InvalidParameterValue` and a message naming
@@ -180,6 +192,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ValidateState` could not be reached from the CLI; making it configurable would otherwise have
   shipped a summary printing `MISMATCH (0 error(s))` for a real divergence and listing none of
   them. Each entry now names the event, its sequence, which comparison failed, and both hashes.
+- **A reset reaches the mutable state plugins keep on themselves, so replaying one stream twice
+  in a process no longer mints different identifiers the second time** (#886).
+  `ReplayEngine.resetState` reset the `StateManager` and nothing else, and its doc comment said
+  as much — but three plugins mint identifiers from state on their own struct, which no reset
+  could reach: `S3Plugin.versionSeq` behind every `x-amz-version-id` and delete-marker ID,
+  `SESv2Plugin.msgSeq` behind every `MessageId`, and `OmicsPlugin.rng` behind every HealthOmics
+  run ID. So a second replay of a recorded stream continued the first replay's counter and
+  produced entirely different identifiers from byte-identical events — and, since the CLI now
+  runs a real registry (#855), from `substrate replay` and not only from a test. A replay whose
+  output depends on how many replays preceded it is the one property the event log exists to
+  rule out.
+
+  `POST /v1/state/reset` is fixed with it, because it is the same defect through a different
+  door: it is documented as wiping emulator state and is what `TestServer.ResetState` calls
+  between test cases, so a surviving counter made the identifiers one test case observes depend
+  on how many test cases ran before it. Both paths clear the state manager *first* and the
+  plugins second, because a plugin's `ResetForRun` may write its start-of-run state into the
+  state manager and clearing the store afterwards would erase it.
+
+  The HealthOmics source is rewound to the seed it was built from rather than re-seeded, so a
+  replay draws the same values the recording drew; the seed itself is still per-process
+  wall-clock, which is #856's question and deliberately not answered here. Its `*rand.Rand`
+  also picked up the mutex it always needed — a reset can now replace it under a concurrent
+  request, and two concurrent `StartRun` calls were already racing on it unguarded.
+
+  The audit #886 asked for turned up four further pieces of plugin-held mutable state, none of
+  which feeds a minted identifier, each filed rather than folded in: S3 object payloads in the
+  plugin filesystem survive a reset (#902); Lambda event-source-mapping poller goroutines and
+  the Lambda/RDS container pools survive one (#903); and `RedshiftDataPlugin.results` is left
+  deliberately — a seeded result set is installed through a control-plane call that streams do
+  not record, so wiping it at replay would make the replay diverge from the recording it is
+  reproducing. A test asserts the implementer set is exactly `{omics, s3, sesv2}`, so a plugin
+  gaining or losing the hook cannot pass unnoticed. Writing the test also exposed that 15 of the
+  67 default plugin registrations omit `time_controller` and therefore run on wall-clock time
+  (#904), which is why the SES v2 case has to wire the clock itself.
 
 - **S3 `ListBuckets` honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`,
   and reports `Owner` and a conditional `BucketRegion`** (#884). The handler took its request as
