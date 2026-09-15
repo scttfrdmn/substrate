@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A listing's member order came from Go's map hash seed, so two identical calls in one run could
+  differ** (#865). `MemoryStateManager.List` — the only non-test `StateManager` implementation —
+  ranged the namespace map and returned without sorting, and `StateManager.List`'s doc comment
+  stated no ordering contract at all, so no call site was wrong to assume nothing. It now sorts
+  lexicographically, and the interface documents that as a contract an implementation must meet.
+
+  This is a correctness defect and not an untidiness. An emulator whose claim is that a recorded
+  run replays byte-for-byte cannot have a response body that reorders itself between two reads of
+  unchanged state, and a cursor paged over an unstable order can **omit or repeat** a resource
+  between pages rather than merely reordering it — which is what RDS's `Marker` and the four ELBv2
+  describes' `Marker`/`PageSize` were doing. The state hash was already deterministic only *by
+  accident*, because `Snapshot` marshals a map and `encoding/json` sorts map keys on the way out.
+
+  Fixed at the source rather than at each call site, because the same defect had already been
+  fixed five separate times at five individual sites — CloudFormation stack tags (#764),
+  `aws:TagKeys`, `CreateSnapshots`' `snapshotSet`, `DeleteSnapshot`'s image-ID tie-break, and the
+  four tag merge helpers (#862) — each with its own written rationale, and each leaving every
+  other caller exposed.
+
+  Verified operation by operation rather than inferred from the call sites, the response-body
+  order changed for: S3 `ListBuckets`, `ListMultipartUploads` and `ListObjectVersions`; the four
+  ELBv2 describes that return a list; RDS's five describes; and fifteen EC2 describes. Every other
+  `List` caller is a single-key lookup or a mutation that stops at the first match, and its order
+  was never observable.
+
+- **`ListMultipartUploads` violated the order AWS publishes for it** (#865). `API_ListMultipartUploads`
+  has a "Sorting of multipart uploads in response" section — ascending object key, then ascending
+  initiation time among uploads sharing a key — and substrate returned neither, because state keys
+  are `multipart:<uploadID>` and upload ID is unrelated to both. This is the one ordering in the
+  set that is a citable violation rather than a determinism nicety. Where two uploads of one key
+  share an initiation instant, which a controlled clock allows and a real one effectively does
+  not, the upload ID breaks the tie; AWS does not document that case, but its
+  `key-marker`/`upload-id-marker` cursor implies exactly that order.
+
+- **`DescribeInstances` reported its reservations in map order** (#865). Sorting `List` made the
+  instances *within* a reservation deterministic, but the handler buckets them into a
+  `map[string]*reservationItem` and then ranges that map, so `reservationSet`'s own member order
+  was still Go's. It is now ordered by reservation ID — substrate's reading, since AWS documents
+  no order for `reservationSet`.
+
+- **`docs/services.md` contradicted itself about what the tagging API reaches, and described ECS
+  behaviour that #845 had already removed** (#867). One passage still said that all eleven types
+  of #835 mean "the Resource Groups Tagging API cannot tag them" and that "a `TagResource` on an
+  ECS task definition answers `200` and writes nothing", while another passage in the same file
+  correctly recorded that `TagResources` and `UntagResources` reach an ECS service, task and task
+  definition. The resolver keys through `ecsTagStateKey` and the writer merges an ECS record as
+  raw JSON, so both of those claims had been false since the previous release. The same stale
+  reasoning was also carried in `cfnStampResourceTags`' own doc comment, which is corrected with
+  it: ECS's service and task definition are held out of the CloudFormation stamp by a missing
+  entry in the deployer's type table, not by a missing merge arm.
+
+  The ordering guarantee above is recorded in the same pass, with its provenance separated into
+  what AWS documents, what an operation's own cursor requires, and what is substrate's reading —
+  because for `ListBuckets`, `DescribeRules` and EC2's `reservationSet`, AWS documents no order at
+  all and a consumer should not read the guarantee as AWS's behaviour.
+
 ## [v0.115.0] - 2026-09-14
 
 ### Added

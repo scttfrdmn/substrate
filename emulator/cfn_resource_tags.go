@@ -116,16 +116,24 @@ type cfnRegionalStampKind struct {
 // segment names them by.
 //
 // The first condition is what holds the rest of #819's group 3 out rather than a judgement about
-// which service matters: KMS, Secrets Manager, SNS, a Step Functions activity, an ECS service or
-// task definition, an RDS cluster or subnet group, ACM, CloudFront and SSM all keep tag state,
-// but none has a [mergeResourceTags] arm that reaches it — so a stamp would have nowhere to land,
-// and `TagResources` cannot reach them either. One defect with two symptoms, filed as
-// [#835](https://github.com/scttfrdmn/substrate/issues/835). Three of those eleven cannot be
-// tagged through their own service at all, because its ARN resolver has no arm for the kind, so
-// they need that fixing first; and where an arm's namespace *is* in [mergeResourceTags] it
-// unmarshals one sibling unconditionally — `statesNamespace` assumes a state machine even for an
-// `activity:` key, `ecsNamespace` a cluster, `rdsNamespace` a DB instance — which is why adding
+// which service matters: KMS, Secrets Manager, SNS, a Step Functions activity, an RDS cluster or
+// subnet group, ACM, CloudFront and SSM all keep tag state, but none has a [mergeResourceTags] arm
+// that reaches it — so a stamp would have nowhere to land, and `TagResources` cannot reach them
+// either. One defect with two symptoms, filed as
+// [#835](https://github.com/scttfrdmn/substrate/issues/835). Two of them cannot be tagged through
+// their own service at all — an RDS cluster and an RDS subnet group — because its ARN resolver has
+// no arm for either kind, so they need that fixing first; and where an arm's namespace *is* in
+// [mergeResourceTags] it may unmarshal one sibling unconditionally — `statesNamespace` assumes a
+// state machine even for an `activity:` key, `rdsNamespace` a DB instance — which is why adding
 // them is that issue's work and not a line here.
+//
+// **ECS's service and task definition are no longer in that group and are held out for a different
+// reason.** [mergeResourceTags]' `ecsNamespace` arm merges through [ecsMergeRecordTags], which
+// treats the record as raw JSON rather than as a cluster, so all four ECS kinds are reachable by
+// `TagResources` and by a stamp alike. What they lack is an entry in [cfnRegionalStampKinds] — a
+// table line, not a writer — because the deployer's physical ID for those two types has not been
+// checked against the identifier `ecsTagStateKey` keys on, which is the second of the two
+// conditions above and the one that cannot be inferred (#867).
 var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::StepFunctions::StateMachine": {namespace: statesNamespace, prefix: "statemachine"},
 	"AWS::ECR::Repository":             {namespace: ecrNamespace, prefix: "ecrrepo"},

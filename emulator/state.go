@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -75,8 +76,32 @@ func (m *MemoryStateManager) Delete(_ context.Context, namespace, key string) er
 	return nil
 }
 
-// List returns all keys in namespace whose names begin with prefix.
-// An empty prefix returns all keys in the namespace.
+// List returns all keys in namespace whose names begin with prefix, sorted
+// lexicographically. An empty prefix returns all keys in the namespace.
+//
+// The sort is the contract, not a convenience. State is held in a Go map, whose
+// iteration order is randomized per process, so an unsorted return made every
+// caller that renders these keys in order answer differently from one run to the
+// next. Verified operation by operation, that is S3 ListBuckets,
+// ListMultipartUploads and ListObjectVersions, the four ELBv2 describes that
+// return a list, RDS's five describes and fifteen EC2 describes; the rest of the
+// 119 call sites are single-key lookups or mutations that stop at the first match,
+// where the order was never observable. Worst of the set are the ones that page
+// over the keys with a cursor — RDS's Marker, ELBv2's Marker/PageSize — because a
+// cursor over an unstable order can omit or repeat a resource across pages rather
+// than merely reordering them.
+//
+// Sorting here rather than at each call site is deliberate. The same defect had
+// already been fixed five separate times at five individual sites — CFN stack
+// tags (#764), aws:TagKeys, CreateSnapshots' snapshotSet, DeleteSnapshot's
+// image-ID tie-break, and the four tag merge helpers (#862) — each with its own
+// written rationale, and each leaving every other caller exposed. The state
+// hash was already deterministic only by accident, because [MemoryStateManager.Snapshot]
+// marshals a map and encoding/json sorts map keys on the way out (#865).
+//
+// Where AWS documents an order other than lexicographic for a particular
+// operation, that operation sorts into it after this call; see
+// S3's listMultipartUploads and listObjectVersions.
 func (m *MemoryStateManager) List(_ context.Context, namespace, prefix string) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -92,6 +117,7 @@ func (m *MemoryStateManager) List(_ context.Context, namespace, prefix string) (
 			keys = append(keys, k)
 		}
 	}
+	sort.Strings(keys)
 
 	return keys, nil
 }

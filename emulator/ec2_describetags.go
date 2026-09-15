@@ -297,10 +297,14 @@ func ec2TagMatchesFilter(item ec2TagDescription, name string, values []string) b
 // ec2SortTagDescriptions orders the answer by resource ID, then type, then key.
 //
 // AWS says its own order "might vary" and that applications should not rely on it.
-// Substrate is stricter deliberately: [StateManager.List] documents no ordering either, so
-// an offset-based NextToken over an unordered list could skip or repeat a tag between
-// pages, and two replays of one recorded request could answer differently. A deterministic
-// emulator must not answer one request two ways.
+// Substrate is stricter deliberately: an offset-based NextToken over an unordered list could
+// skip or repeat a tag between pages, and two replays of one recorded request could answer
+// differently. A deterministic emulator must not answer one request two ways.
+//
+// This sort is still load-bearing now that [StateManager.List] guarantees lexicographic key
+// order (#865), because the order wanted here is not the order of the keys the tags were read
+// from: DescribeTags spans every resource type at once, and a tag's state key does not sort by
+// resource ID then type then key.
 //
 // The key breaks the tie within a resource, and the type breaks it between two resources of
 // different types sharing an ID — which substrate's generated IDs make impossible, but the

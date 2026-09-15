@@ -433,6 +433,71 @@ In tests, `StartTestServer` wires a registry with verification off, so
 
 ---
 
+## The order a listing returns its members in
+
+**A listing is sorted, and the order is part of what substrate promises rather than an
+incidental tidiness.** `StateManager.List` returns the keys of a namespace sorted
+lexicographically, and its doc comment states that as a contract an implementation must meet.
+Every listing built from it therefore answers the same way twice.
+
+That guarantee is stated here because for most of substrate's history it did not hold. State is
+held in Go maps, whose iteration order is randomised per process, and `List` returned that order
+directly — so a listing rendered straight into a response body reported its members in a
+different order on each run, and sometimes on two calls within one run. In an emulator whose
+whole claim is that a recorded run replays byte-for-byte, that is a correctness defect and not a
+cosmetic one: a response body that reorders itself between two reads of unchanged state cannot be
+compared against a recording, and a cursor paged over an unstable order can omit or repeat a
+resource between pages ([#865](https://github.com/scttfrdmn/substrate/issues/865)).
+
+The fix is in the one non-test `List` implementation rather than at each call site, because the
+same defect had already been fixed five separate times at five individual sites — CloudFormation
+stack tags, `aws:TagKeys`, `CreateSnapshots`' `snapshotSet`, `DeleteSnapshot`'s image-ID
+tie-break, and the four tag merge helpers — each with its own written rationale, and each leaving
+every other caller exposed.
+
+**Where the order comes from differs by operation, and the three cases are not equally strong.**
+
+- **AWS documents it.** `ListMultipartUploads` publishes a "Sorting of multipart uploads in
+  response" section: ascending object key, then ascending initiation time among uploads sharing a
+  key. Substrate's previous order was a citable violation, not merely a nondeterminism. Where two
+  uploads of one key share an initiation instant — which a controlled clock allows and a real one
+  effectively does not — the upload ID breaks the tie, which AWS does not document but its
+  `key-marker`/`upload-id-marker` cursor implies.
+- **The operation's own cursor requires it, though the prose states none.**
+  `ListObjectVersions` is the case in point: `NextKeyMarker` is "the first key not returned that
+  satisfies the search criteria" and a `CommonPrefixes` entry "is filtered out from results if it
+  is not lexicographically greater than the key-marker", both of which presuppose a key order.
+  RDS's `DescribeDBInstances` pages an offset `Marker` over its listing, and the four ELBv2
+  describes publish a `Marker` and `PageSize`. A cursor over an unstable order is the worst form
+  of this defect, because it loses and duplicates resources rather than merely reordering them.
+- **AWS documents no order at all, and lexicographic is substrate's reading.** `ListBuckets` says
+  nothing about the order buckets come back in; neither does `DescribeRules`, nor EC2's
+  `reservationSet`. The guarantee there rests on the replay promise and on the five precedents
+  above, not on a published statement, and a consumer should not read it as AWS's behaviour.
+
+**Operations whose response-body order this actually changed**, verified one by one rather than
+inferred from the call sites: S3 `ListBuckets`, `ListMultipartUploads` and `ListObjectVersions`;
+the four ELBv2 describes that return a list — `DescribeLoadBalancers`, `DescribeTargetGroups`,
+`DescribeListeners` and `DescribeRules`; RDS's five describes; and fifteen EC2 describes, among
+them `DescribeInstances`, `DescribeVolumes`, `DescribeSnapshots`, `DescribeImages`,
+`DescribeVpcs`, `DescribeSubnets` and `DescribeSecurityGroups`. The remaining `List` callers are
+single-key lookups or mutations that stop at the first match, and their order was never
+observable.
+
+**Two listings were never affected, and are recorded here so the claim is not overstated.** The
+Resource Groups Tagging API's `GetResources` sorts its scan results by ARN before paginating, so
+its `PaginationToken` was always a cursor over a stable order. EC2's `DescribeTags` sorts by
+resource ID, then type, then key. Both sorts remain load-bearing after the change, because
+neither wants the order of the state keys its records were read from: `DescribeTags` spans every
+resource type at once, and a tag's state key does not sort by resource ID.
+
+`DescribeInstances` needed a second fix beyond the shared one. It buckets instances into
+reservations through a map and then ranges that map, so sorting `List` made the instances within
+a reservation deterministic while leaving `reservationSet`'s own member order in Go's map order.
+It is now ordered by reservation ID.
+
+---
+
 ## CloudFormation
 
 **Endpoint:** `cloudformation.{region}.amazonaws.com`
@@ -5791,19 +5856,28 @@ resource type", so a partial cut is what AWS itself describes rather than a shor
 published list. [#819](https://github.com/scttfrdmn/substrate/issues/819) keeps the list in one
 place; it is split per service when one is picked up.
 
-**A tagging surface but no merge arm: filed as
+**A tagging surface but no stamp: filed as
 [#835](https://github.com/scttfrdmn/substrate/issues/835).** Eleven more types — a KMS key, a
 Secrets Manager secret, an SNS topic, a Step Functions activity, an ECS service and task
 definition, an RDS DB cluster and DB subnet group, an ACM certificate, a CloudFront distribution
-and an SSM parameter — have both tag state and a tagging call, and are still unstamped. The
-missing piece for these is not a resolver arm but an arm in substrate's shared tag *writer*, so
-the same gap also means the Resource Groups Tagging API cannot tag them: one defect with two
-symptoms, tracked there rather than folded in here. For three of the eleven — an ECS task
-definition, an RDS DB cluster and an RDS DB subnet group — the service's own tagging operation
-cannot reach the resource either, because its ARN resolver has no arm for that kind; a
-`TagResource` on an ECS task definition answers `200` and writes nothing. Config is unstamped for
-a different reason again: it keeps a rule's tags in a side-car state record rather than on the
-rule, so reaching them needs a writer that knows that layout.
+and an SSM parameter — have both tag state and a tagging call, and are still unstamped.
+
+For nine of the eleven the missing piece is not a resolver arm but an arm in substrate's shared
+tag *writer*, so the same gap also means the Resource Groups Tagging API cannot tag them: one
+defect with two symptoms, tracked there rather than folded in here. **ECS's service and task
+definition are the two exceptions, and they were the two symptoms fixed first.** The resolver now
+keys through the same `ecsTagStateKey` ECS's own `TagResource` uses, and the writer merges an ECS
+record as raw JSON rather than as a cluster, so `TagResources` and `UntagResources` reach an ECS
+service, task and task definition today — and a `TagResource` on a task definition writes the tag
+rather than answering `200` over a record nothing was written to. What remains for those two is
+narrower than for the other nine: the stamp needs an entry in the deployer's own type table, and
+`GetResources` still enumerates ECS clusters only, which is the scanner half of the same issue.
+
+Two of the nine cannot be tagged through their own service at all — an RDS DB cluster and an RDS
+DB subnet group — because its ARN resolver has no arm for either kind, so that has to be fixed
+before a stamp has anywhere to land. Config is unstamped for a different reason again: it keeps a
+rule's tags in a side-car state record rather than on the rule, so reaching them needs a writer
+that knows that layout.
 
 Three further limits, each named because a policy or an assertion written against the stamp will
 otherwise assume more:
