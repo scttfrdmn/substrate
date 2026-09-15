@@ -555,10 +555,14 @@ var cfnStubDeleteTypes = map[string]bool{
 // says which, because "no delete is modeled" and "AWS models no delete" are
 // different facts and only the first is substrate's to fix.
 var cfnDeleteInertTypes = map[string]string{
-	"AWS::CloudFront::CloudFrontOriginAccessIdentity": "the deploy records no state to remove",
-	"AWS::ECS::CapacityProvider":                      "the deploy records no state to remove",
-	"AWS::SSM::Association":                           "the deploy records no state to remove",
-	"AWS::SecretsManager::SecretTargetAttachment":     "the deploy records no state to remove",
+	// The identity now has an ID (#859), but the ID is derived from the resource's scope rather
+	// than registered with CloudFront, so there is still nothing on the service side to remove —
+	// which is why gaining an identity did not turn this into a delete to dispatch.
+	"AWS::CloudFront::CloudFrontOriginAccessIdentity": "the ID is derived rather than registered " +
+		"with CloudFront, so the deploy records no state to remove",
+	"AWS::ECS::CapacityProvider":                  "the deploy records no state to remove",
+	"AWS::SSM::Association":                       "the deploy records no state to remove",
+	"AWS::SecretsManager::SecretTargetAttachment": "the deploy records no state to remove",
 	"AWS::Route53::RecordSetGroup": "the group's record sets were created as " +
 		"AWS::Route53::RecordSet dispatches that the stack does not record, so they " +
 		"are not swept",

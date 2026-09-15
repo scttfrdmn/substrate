@@ -811,7 +811,7 @@ naming the reason:
 
 | Type | Why the sweep is a no-op |
 |---|---|
-| `AWS::CloudFront::CloudFrontOriginAccessIdentity` | the deploy records no state to remove |
+| `AWS::CloudFront::CloudFrontOriginAccessIdentity` | the ID is derived rather than registered with CloudFront, so the deploy records no state to remove |
 | `AWS::ECS::CapacityProvider` | the deploy records no state to remove |
 | `AWS::SSM::Association` | the deploy records no state to remove |
 | `AWS::SecretsManager::SecretTargetAttachment` | the deploy records no state to remove |
@@ -1012,6 +1012,37 @@ method is still addressed by its verb in API Gateway's own state, and the delete
 resolves the verb from the template's properties, the same channel it already used for
 the method's two parents (#843).
 
+An `AWS::CloudFront::CloudFrontOriginAccessIdentity`'s physical ID is a **derived OAI
+ID** — `E` followed by 13 uppercase alphanumerics — computed by SHA-256 over the
+account, the Region, the stack name and the logical ID. It was the resource's own
+**logical ID**, so `!Ref Oai` handed an S3 bucket policy or an origin-access
+configuration a value AWS would never mint. That was not a stub left in place: the
+deploy asked for `CloudFrontOriginAccessIdentityConfig.Comment`, a **dotted key read
+from a flat map**, so the lookup matched nothing and the fallback — the logical ID —
+won unconditionally (#877). The shape is **AWS's**, published twice by example
+(`E15MNIMTCFKK4C` for `Ref`, `E74FTE3AJFJ256A` for `Fn::GetAtt Id`); the
+**derivation is substrate's reading**, and it is derived rather than random because
+`UpdateStack` re-deploys the whole template, so a `crypto/rand` ID would change on
+every update and every policy naming the old one would silently stop matching. The
+type still dispatches nothing and still sweeps to a no-op on delete: the identity is
+derived, not registered with CloudFront (#859).
+
+**Four other property lookups read a dotted key from a flat map, and all four took
+their fallback unconditionally** (#877). A Glue job's `Command.Name` and
+`Command.ScriptLocation` are nested object members, so every job created through
+CloudFormation shipped an **empty `ScriptLocation`** — the property that says what the
+job runs — and a `pythonshell` job was created as a Spark ETL one. An ECS task
+definition's `RequiresCompatibilities.0` is a **list element**, so every task
+definition registered as `EC2` and a Fargate one was never Fargate. A distribution's
+`DistributionConfig.Comment` stored the logical ID; that one is cosmetic, because the
+physical ID is recovered from `CreateDistribution`'s response, but a comment reporting
+a logical ID is still a value from somewhere other than the template. Each site reads
+its own nested member or list element rather than the shared helper learning to split
+a dotted key, because a nested read and a list-indexed read are different operations
+and a shared walk would have turned all five constants into template-controlled values
+at once, as a side effect of a refactor rather than as a decision per site. An
+AST tripwire refuses a sixth.
+
 **When a type's documented value cannot be built, `Ref` resolves to empty** rather
 than falling back to the physical ID. An empty value means the deploy did not yield
 the source the value is derived from, which happens only for a resource that failed
@@ -1025,11 +1056,6 @@ does not exist in substrate to return:
 - `AWS::SNS::Subscription` — AWS documents "`Ref` returns the subscription's logical
   name". Substrate returns the subscription ARN, deliberately: the logical name is a
   value the template already has, and the ARN is the one an `Unsubscribe` takes.
-- `AWS::CloudFront::CloudFrontOriginAccessIdentity` — the documented value is the OAI
-  ID, which is not minted. The physical ID is the resource's **logical ID**: the
-  deploy helper asks for `CloudFrontOriginAccessIdentityConfig.Comment`, but that
-  lookup reads a dotted key from a flat map and the property is a nested object, so
-  the lookup never matches and the fallback always wins (#859).
 - `AWS::ElasticLoadBalancing::LoadBalancer` (classic) — documented as the DNS name.
   The classic load balancer has no deploy helper at all and falls through to the
   generic stub, so there is no DNS name to return.
@@ -1088,6 +1114,7 @@ documents:
 | `AWS::SNS::Topic` | `TopicName` — off the end of the ARN, since a topic's physical ID *is* its ARN |
 | `AWS::SQS::Queue` | `QueueName`, `QueueUrl` — the same URL `Ref` resolves to, from the same builder |
 | `AWS::SecretsManager::Secret` | `Id` — which for this type is the ARN, not an opaque identifier |
+| `AWS::CloudFront::CloudFrontOriginAccessIdentity` | `Id` — the derived OAI ID, which is also what `Ref` returns; `S3CanonicalUserId` is empty, since AWS publishes no format for it (#859) |
 | `AWS::Glue::Database` | `CatalogId` — the deploying account |
 | `AWS::ECS::Service`, `AWS::ApiGateway::Stage` | `Name` |
 | `AWS::Cognito::UserPool` | `UserPoolId` |

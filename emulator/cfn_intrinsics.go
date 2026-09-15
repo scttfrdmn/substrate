@@ -285,6 +285,26 @@ func cfnGetAttPerType(dr DeployedResource, attr string, cctx *cfnContext) (strin
 			return dr.ARN, true
 		}
 
+	case "AWS::CloudFront::CloudFrontOriginAccessIdentity":
+		// The type documents exactly two attributes, and they are opposite cases.
+		switch attr {
+		case "Id":
+			// The identity's own ID, which is also what Ref returns — AWS publishes
+			// "E74FTE3AJFJ256A" here and "E15MNIMTCFKK4C" for Ref, one identifier under two
+			// names. It is reachable only through this arm: the generic metadata step reads
+			// Metadata["Id"], which the deploy does not write, so before #859 a template using
+			// !GetAtt Oai.Id got an empty string where !Ref Oai got the logical ID — two
+			// intrinsics disagreeing about one resource.
+			return dr.PhysicalID, true
+		case "S3CanonicalUserId":
+			// Deliberately unresolved, and this arm is what records that rather than leaving it
+			// to look like an oversight. AWS publishes no format for it — only a single
+			// 96-character lowercase-hex sample — so a minted value would be a guess at a
+			// grammar, on far thinner evidence than the two agreeing samples the ID rests on.
+			// Empty is the honest answer for a value substrate does not model (#827).
+			return "", true
+		}
+
 	case "AWS::Glue::Database":
 		if attr == "CatalogId" {
 			// The only attribute the type documents, and it is the account the catalog belongs

@@ -5833,6 +5833,12 @@ func resolveFnIf(args interface{}, cctx *cfnContext) string {
 }
 
 // resolveStringProp resolves a property value from props using the cfnContext.
+//
+// key is a single top-level property name. It is looked up by one flat map index, so a key
+// spelled with a dot matches nothing and the fallback is returned unconditionally — which is
+// how five call sites came to be silently dead (#877). Use [resolveNestedStringProp] for a
+// property inside a nested object and [resolveIndexedStringProp] for one inside a list;
+// TestCFNProps_NoDottedResolveStringPropKey is the tripwire that keeps a sixth from appearing.
 func resolveStringProp(props map[string]interface{}, key, fallback string, cctx *cfnContext) string {
 	if props == nil {
 		return fallback
@@ -5842,6 +5848,62 @@ func resolveStringProp(props map[string]interface{}, key, fallback string, cctx 
 		return fallback
 	}
 	result := resolveValue(v, cctx)
+	if result == "" {
+		return fallback
+	}
+	return result
+}
+
+// resolveNestedStringProp resolves props[outer][inner] to a string, returning fallback when
+// either level is absent or the value resolves empty.
+//
+// This exists rather than teaching [resolveStringProp] to split a dotted key, and the reason is
+// the failure mode #877 is about rather than a preference. A shared dotted-path walk would turn
+// ECS's launch type and Glue's command name from effective constants into template-controlled
+// values at all five dotted call sites at once, silently, as a side effect of a helper change —
+// a behavior change to four unrelated resource types delivered as a refactor. A separate
+// function changes nothing until a call site is edited to use it.
+//
+// The value goes through resolveValue, so an intrinsic in the nested position still resolves:
+// a Command.ScriptLocation written as !Sub "s3://${Bucket}/etl.py" is the common template shape.
+func resolveNestedStringProp(props map[string]interface{}, outer, inner, fallback string, cctx *cfnContext) string {
+	if props == nil {
+		return fallback
+	}
+	// A YAML or JSON template decodes a nested object to map[string]interface{}; nothing else
+	// can carry a named member, so a non-map value here means the template put a scalar or a
+	// list where an object belongs and there is no inner property to read.
+	nested, ok := props[outer].(map[string]interface{})
+	if !ok {
+		return fallback
+	}
+	v, ok := nested[inner]
+	if !ok {
+		return fallback
+	}
+	result := resolveValue(v, cctx)
+	if result == "" {
+		return fallback
+	}
+	return result
+}
+
+// resolveIndexedStringProp resolves element index of the list at props[key] to a string,
+// returning fallback when the property is absent, is not a list, is shorter than index+1, or
+// resolves empty.
+//
+// Separate from [resolveNestedStringProp] because a map walk cannot reach a list element at all
+// — which is why RequiresCompatibilities.0 was the highest-impact of #877's five sites and the
+// one a dotted-path walk would have left broken while appearing to cover everything.
+func resolveIndexedStringProp(props map[string]interface{}, key string, index int, fallback string, cctx *cfnContext) string {
+	if props == nil || index < 0 {
+		return fallback
+	}
+	list, ok := props[key].([]interface{})
+	if !ok || index >= len(list) {
+		return fallback
+	}
+	result := resolveValue(list[index], cctx)
 	if result == "" {
 		return fallback
 	}

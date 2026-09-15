@@ -226,6 +226,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Part of #817, whose response-body comparison cannot run while a body field is guaranteed to
   differ.
 
+- **Five CloudFormation property lookups read a dotted key from a flat map, so all five took their
+  fallback unconditionally** (#877). `resolveStringProp` does a single flat map index — no split, no
+  walk — and five call sites passed it a key with a dot in it. The result was not a missing value but
+  a **wrong** one, because the fallback is a plausible default:
+
+  - a Glue job's `Command.ScriptLocation` was always `""`, so **every Glue job created through
+    CloudFormation shipped no script at all** and `GetJob` reported none — the one property that says
+    what the job runs;
+  - a Glue job's `Command.Name` was always `glueetl`, so a **`pythonshell` job was created as a Spark
+    ETL job**;
+  - an ECS task definition's `RequiresCompatibilities.0` was always `EC2`, so **every task definition
+    registered as `EC2` and a Fargate one was never Fargate** — a launch type a consumer asserts on
+    and a service refuses to run against the wrong one;
+  - a CloudFront distribution's `DistributionConfig.Comment` was always the resource's logical ID;
+  - an origin access identity's `CloudFrontOriginAccessIdentityConfig.Comment` was always the logical
+    ID too, and it fed the resource's `PhysicalID` — which is #859 below.
+
+  This is the release's theme at its most literal: the value substrate reported came from the
+  deployer's own fallback list rather than from the template in front of it. Nothing reported the
+  omission, because the stack completed, the service answered 200, and the deploy result looked
+  entirely correct — a `DeployedResource` assertion cannot see it, which is why **none of the five had
+  a test**.
+
+  **Each site reads its own nested member or list element; the shared helper was deliberately not
+  taught to split a dotted key.** A nested object read and a list-element read are different
+  operations — `RequiresCompatibilities.0` is a list index a map walk cannot reach at all — and a
+  shared walk would have turned all five constants into template-controlled values simultaneously, as
+  a side effect of a refactor rather than as a decision per site. `resolveStringProp` now carries the
+  warning in its own doc comment, and an **AST tripwire** parses every file in the package and refuses
+  a sixth dotted literal, because the defect compiles, deploys and passes review exactly as the
+  correct call does. A present-but-empty `Command: {}` and an empty `RequiresCompatibilities: []` keep
+  their documented defaults, so a template that omits the property produces what it produced before.
+
+- **A CloudFront origin access identity's `Ref` was its own logical ID** (#859). AWS documents the
+  return value as the identity's ID, and substrate returned the resource's logical name — a value AWS
+  would never mint, handed to every S3 bucket policy and origin-access configuration that names an OAI
+  by `!Ref`. It was not a stub left in place: the deploy asked for the comment through the dotted
+  lookup above, matched nothing, and the fallback happened to be the logical ID.
+
+  The `PhysicalID` is now a derived OAI ID — `E` followed by 13 uppercase alphanumerics, by SHA-256
+  over the account, the Region, the stack name and the logical ID. The **shape is AWS's**, published
+  twice by example (`E15MNIMTCFKK4C` for `Ref`, `E74FTE3AJFJ256A` for `Fn::GetAtt Id`) and already
+  documented in-tree by `generateCloudFrontID`; the **derivation is substrate's reading**. It is
+  derived rather than random for the reason `cfnGeneratedName` records for its own suffix:
+  `UpdateStack` re-deploys the whole template, so a `crypto/rand` ID would change on every update and
+  every bucket policy naming the previous one would silently stop matching. Neither existing
+  deterministic helper fits — `cfnGeneratedName` returns a hyphenated `{stack}-{logical}-{suffix}`,
+  and `cfnNameSuffix` is pinned to twelve base-36 characters and cannot be widened to thirteen because
+  its modulus loop is `uint64` and 36¹³ overflows it.
+
+  **`Fn::GetAtt Id` resolves to the same identifier**, which is what makes the two intrinsics agree:
+  they answered `Ref` → logical ID and `Id` → empty, two answers about one resource. **`Fn::GetAtt
+  S3CanonicalUserId` stays empty, by decision rather than by omission**, and now has an arm saying so:
+  AWS publishes no format for it — one 96-character hex sample — so minting one would be a second
+  invented value on far thinner evidence than the two agreeing samples the ID rests on. Empty is the
+  honest answer for a value the emulator does not model.
+
+  The comment the broken lookup was reaching for is now read and recorded in the resource's metadata,
+  where a reader can see what the template said. The type still dispatches nothing and still sweeps to
+  a no-op on delete, with the reason updated: the identity is *derived*, not registered with
+  CloudFront, so there remains nothing on the service side to remove. Giving an OAI a CloudFront-side
+  record is a separate decision.
+
 ## [v0.115.0] - 2026-09-14
 
 ### Added
