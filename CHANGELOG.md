@@ -56,6 +56,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes (`ec2_filters.go`), which the same `ec2SeededZones` pairing now makes
   implementable.
 
+- **`DescribeAccountLimits` answers, and the limits it reports are seedable** (#885). The
+  action was authorizable but not dispatched: `elasticloadbalancing:DescribeAccountLimits` was
+  already in the generated authorization reference with an empty resource list, while
+  `ELBPlugin.HandleRequest`'s switch had no arm for it — so a caller could be *granted* a
+  permission substrate then answered `InvalidAction` for. It was also the one shared action
+  name of nine that routed nowhere, correcting #844's claim that all nine reach v2.
+
+  The interesting part is not the arm, it is what number the operation should report.
+  Substrate enforces no ELB quota anywhere and is not going to, so a bare constant here would
+  be a number that does not come from where it appears to — the defect class the previous
+  release was spent removing. Rather than report a decorative constant or omit the operation,
+  the limits are **seedable** via `POST`/`DELETE /v1/elb/account-limits`, keyed by limit name
+  or the `*` wildcard with specific-then-wildcard resolution, following the `ec2FleetShortfall`
+  shape. AWS's published defaults become the default seed value, so the constant that would
+  have been decorative becomes the thing a caller polls this operation *for* — driving its own
+  "approaching my quota" branch — at essentially no extra cost. `docs/services.md` states
+  explicitly that nothing in substrate enforces the number reported, seeded or defaulted;
+  that sentence is what makes choosing this option honest rather than merely plausible.
+
+  **The provenance of the reported names splits, and is recorded rather than smoothed over.**
+  The *shape* is the API model's: `Limits.member.N` of `Max`/`Name` plus `NextMarker`, with
+  `Max` rendered as a **String** per `API_Limit` — the member a caller's code will reach for as
+  an integer, which is why the test asserts on the raw XML. The *names* are not. Classic's
+  2012-06-01 `API_Limit` enumerates exactly three (`classic-listeners`,
+  `classic-load-balancers`, `classic-registered-instances`); **v2's enumerates none** — it says
+  only "The name of the limit." and points at the three Load Balancer quota user guides. The
+  23 v2 names substrate reports are therefore taken verbatim from the example output on the
+  AWS CLI v2 reference page for the operation, the only AWS page found that renders the tokens
+  at all, and are labelled an illustrative example rather than presented as the published API
+  model. Their *values* come from the three quota user guides, which are AWS's normative
+  statement of a default and which the CLI example is not kept in step with: where the two
+  disagree the guide wins (`condition-wildcards-per-alb-rule` is 6, not the example's 5), and
+  the two entries no guide row names cleanly keep the example's value and say so on their own
+  line in the source.
+
+  `NextMarker` is **absent** when the walk is exhausted rather than empty, because the two
+  generations document it differently — v2 "Otherwise, this is null", classic "the string is
+  empty" — and this handler answers v2 shapes. The difference is recorded against #844 rather
+  than resolved silently, since it is published text and not a paraphrase. `Marker` is a
+  decimal offset into a fixed name-ordered set, so a paged walk returns each limit exactly
+  once.
+
+  `PageSize` is documented 1–400, and a value outside it **falls back to the default** rather
+  than being refused — a decision that needed making because substrate's paginators do not
+  agree with each other. The Query-protocol family this operation joins (RDS's and
+  ElastiCache's `MaxRecords`, CloudWatch's) substitutes its default for anything unusable and
+  enforces no maximum; EC2's `DescribeTags` refuses a `MaxResults` outside 5–1000 with
+  `InvalidParameterValue`. ELBv2 had no paginated operation at all before this one, so there
+  was no ELB precedent to match, and the decider is that `DescribeAccountLimits` publishes **no
+  operation-specific error** on either generation's page: refusing would mean inventing a code
+  AWS does not publish for it. Because the default is the documented maximum, a `PageSize`
+  above 400 is answered indistinguishably from a clamp.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
