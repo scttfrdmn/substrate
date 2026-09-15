@@ -91,6 +91,8 @@ func (p *ELBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.removeTags(ctx, req)
 	case "DescribeTags":
 		return p.describeTags(ctx, req)
+	case "DescribeAccountLimits":
+		return p.describeAccountLimits(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), action)
 	}

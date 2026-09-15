@@ -7665,6 +7665,7 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | AddTags | Up to 50 user tags per resource |
 | RemoveTags | |
 | DescribeTags | At most 20 resources per request |
+| DescribeAccountLimits | Reports 23 limits, seedable; `Marker`/`PageSize` paginated |
 
 Every operation whose output shape carries no members answers
 `<OperationResponse><OperationResult/></OperationResponse>`. The empty result element is not
@@ -7675,6 +7676,85 @@ success. `DeleteLoadBalancer`, `DeleteTargetGroup`, `DeleteListener`, `DeleteRul
 `RegisterTargets` and `DeregisterTargets` answered that way and were unusable from a real
 client while substrate's own tests passed, because those tests read the XML directly instead
 of through an SDK's parser.
+
+### Account limits
+
+`DescribeAccountLimits` reports 23 Elastic Load Balancing limits. **Nothing in substrate
+enforces the number it reports** — seeded or defaulted. No ELB operation counts a load
+balancer, target group, listener or rule against a quota, and none is planned to. The number
+exists to be *read*: it is what a consumer's "am I approaching my quota" branch looks at, and
+making it seedable is what lets that branch be exercised. A constant nothing enforces would
+be a number that does not come from where it appears to (#885).
+
+```bash
+# One limit is nearly exhausted.
+curl -X POST http://localhost:4566/v1/elb/account-limits \
+  -d '{"name":"application-load-balancers","max":"1"}'
+
+# Every limit at once, for "the whole account is at quota".
+curl -X POST http://localhost:4566/v1/elb/account-limits -d '{"name":"*","max":"0"}'
+
+# Clear one seed, or all of them.
+curl -X DELETE 'http://localhost:4566/v1/elb/account-limits?name=application-load-balancers'
+curl -X DELETE http://localhost:4566/v1/elb/account-limits
+```
+
+`name` matches a limit name or `*` (the default) for every limit, resolved specific-first.
+`max` is a **string** because the API member is one: `Limit`'s reference gives "Max … Type:
+String", which is the member a caller's code will try to treat as an integer.
+
+The provenance of the reported set splits three ways, and the split is the point:
+
+- The **shape** is the API model's — `elasticloadbalancingv2-2015-12-01`'s
+  `API_DescribeAccountLimits` and `API_Limit`: `Limits.member.N` of `Max`/`Name`, plus
+  `NextMarker`, with `PageSize` valid 1–400 and `Marker` the cursor. The Errors section is
+  Common Errors only; the operation publishes no error of its own.
+- The limit **names** are **not published on the v2 API reference**. That page enumerates
+  none of them — it says only "The name of the limit." and links the Application, Network and
+  Gateway Load Balancer quota user guides. The 23 names substrate reports are taken verbatim
+  from the example output on the AWS CLI v2 reference page for the operation, the only AWS
+  page found that renders the tokens at all. That is an illustrative example, not the model,
+  and is recorded as such rather than presented as the published API model. (Classic's
+  2012-06-01 `API_Limit` *does* enumerate exactly three — `classic-listeners`,
+  `classic-load-balancers`, `classic-registered-instances` — which is a published difference
+  between the generations. They are absent because this handler answers v2 shapes; classic
+  dispatch is #844.)
+- The **values** are the current defaults from those three quota user guides, since a guide
+  is AWS's normative statement of a default and the CLI example is an illustration AWS does
+  not keep in step with it. Where the two disagree the guide wins:
+  `condition-wildcards-per-alb-rule` is 6 per the guide against the example's 5. Two entries
+  no guide row names cleanly keep the example's value and say so in the source:
+  `target-id-registrations-per-application-load-balancer`, which no guide names at all, and
+  `target-groups-per-action-on-network-load-balancer`, whose nearest NLB guide row is "Target
+  groups per listener rule action" at 5 — whether that row is this token could not be
+  established, so the example's 1 stands.
+
+Two behaviors are substrate's decisions rather than AWS's published text:
+
+| | |
+|---|---|
+| `NextMarker` | **Absent** when the walk is exhausted, not empty. v2 documents "Otherwise, this is null"; classic documents "If there are no additional results, the string is empty" — a present-but-empty element. Following v2 is following the shapes this handler answers; the difference is recorded for #844 |
+| `PageSize` | A value outside the documented 1–400, or a non-numeric one, **falls back to the default** rather than being refused. The default is the documented maximum, so an unparameterized call returns the whole set in one page and a `PageSize` above 400 is indistinguishable from a clamp |
+
+The `PageSize` choice needs the citation because substrate's own paginators do not agree.
+The Query-protocol family this operation joins — RDS's and ElastiCache's `MaxRecords`,
+CloudWatch's — takes any positive integer and quietly substitutes its default for anything
+else, enforcing no maximum; EC2's `DescribeTags` goes the other way and refuses a
+`MaxResults` outside 5–1000 with `InvalidParameterValue`. ELBv2 had no paginated operation
+at all before this one, so there was no ELB precedent to match. The decider is that
+`DescribeAccountLimits` publishes no operation-specific error on either generation's page:
+refusing would mean inventing a code AWS does not publish for it, which is a thing EC2's
+`DescribeTags` did not have to do.
+
+`Marker` is a decimal offset into a fixed, name-ordered set, so a paged walk returns each
+limit exactly once. An unparseable `Marker` restarts the walk and an offset past the end
+answers an empty last page — neither being an error the operation publishes a code for.
+
+Authorization needed nothing: `elasticloadbalancing:DescribeAccountLimits` was **already** in
+substrate's generated authorization reference with an empty resource list, which is exactly
+why this was worth fixing — a caller could be *granted* a permission substrate then answered
+`InvalidAction` for. Every ELB request is decided centrally before dispatch, so the arm in
+the action switch was the whole of the wiring the operation needed.
 
 ### Tagging
 
