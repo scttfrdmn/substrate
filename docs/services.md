@@ -6507,12 +6507,19 @@ Filter values honour EC2's documented wildcards and are case-sensitive, per
 where that matcher started, which is why the examples there use instance types.
 
 `LocationType` is a top-level **parameter**, not a filter name (`location-type` is
-refused as a filter). `availability-zone` is the default and `region` returns one
-offering per type located at the region. `availability-zone-id` and `outpost` are
-valid AWS values that substrate does **not** model, and are refused with a message
-naming substrate — treating them as `availability-zone` would return zone *names*
-under a `locationType` claiming they are IDs or Outpost ARNs, which a caller
-matching the two would silently mis-read.
+refused as a filter). `availability-zone` is the default, `region` returns one
+offering per type located at the region, and `availability-zone-id` returns one per
+type per zone located at the zone's **AZ ID** — the same `zoneId`
+`DescribeAvailabilityZones` reports for that zone, since both read one derivation
+(#893). A `location` filter under this `locationType` therefore matches an AZ ID:
+`use1-az1` selects, `us-east-1a` selects nothing. Read the ID out of
+`DescribeAvailabilityZones` rather than hardcoding it — the name→ID pairing substrate
+reports is stable and a real account's is not, per the note below.
+
+`outpost` is the one valid AWS value substrate does **not** model, and it is refused
+with a message naming substrate — its location is an Outpost ARN, substrate seeds no
+Outpost, and answering with zone *names* under a `locationType` claiming they are
+Outpost ARNs is what a caller matching the two would silently mis-read.
 
 The three zones `DescribeAvailabilityZones` reports are the same three the
 offerings and spot-price operations use, so filtering an offerings query by a zone

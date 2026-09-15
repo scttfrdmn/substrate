@@ -532,9 +532,9 @@ func TestEC2_DescribeInstanceTypeOfferings_LocationValues(t *testing.T) {
 //
 // The reference lists it as a separate parameter with four valid values, and lists exactly
 // two filter names (instance-type, location) — so `location-type` is not a filter at all.
-// region and availability-zone are modeled; availability-zone-id and outpost are refused
-// rather than silently answered as zone names, since a caller matching the locationType
-// against the location would otherwise mis-read zone names as AZ IDs or Outpost ARNs.
+// region, availability-zone and, since #893, availability-zone-id are modeled; outpost is
+// refused rather than silently answered as zone names, since a caller matching the
+// locationType against the location would otherwise mis-read a zone name as an Outpost ARN.
 func TestEC2_DescribeInstanceTypeOfferings_LocationType(t *testing.T) {
 	ts := newEC2TestServer(t)
 
@@ -567,18 +567,70 @@ func TestEC2_DescribeInstanceTypeOfferings_LocationType(t *testing.T) {
 		assert.Equal(t, "us-east-1", offerings[0].Location)
 	})
 
-	for _, unmodelled := range []string{"availability-zone-id", "outpost"} {
-		t.Run(unmodelled+" is refused", func(t *testing.T) {
-			status, code, message := ec2ErrorDetail(t, ts, map[string]string{
-				"Action":       "DescribeInstanceTypeOfferings",
-				"LocationType": unmodelled,
-			})
-			assert.Equal(t, http.StatusBadRequest, status)
-			assert.Equal(t, "InvalidParameterValue", code)
-			assert.Contains(t, message, "not modeled by substrate",
-				"the message must name substrate, so the divergence is not read as AWS behavior")
+	t.Run("availability-zone-id reports the IDs paired with the zone names", func(t *testing.T) {
+		// Asserted against the zoneId DescribeAvailabilityZones reports, never against a
+		// literal such as "use1-az1". Substrate maps zone a to -az1 always, because a
+		// deterministic emulator cannot hold a per-account secret, whereas AWS
+		// "independently map[s] Availability Zones to codes for each AWS account" — so a
+		// test hardcoding the pairing passes here and asserts nothing about a real account.
+		// Reading the pairing out of the API is the assertion a consumer can also make.
+		idOfName := map[string]string{}
+		for _, z := range ec2DescribeAZs(t, ts, map[string]string{"Action": "DescribeAvailabilityZones"}) {
+			require.NotEmpty(t, z.ZoneID)
+			require.NotEqual(t, z.ZoneName, z.ZoneID, "an AZ ID is not a zone name")
+			idOfName[z.ZoneName] = z.ZoneID
+		}
+		require.NotEmpty(t, idOfName)
+
+		byName := ec2Offerings(t, ts, map[string]string{"LocationType": "availability-zone"})
+		byID := ec2Offerings(t, ts, map[string]string{"LocationType": "availability-zone-id"})
+		require.Len(t, byID, len(byName), "the same offerings, keyed the other way")
+		for i, o := range byID {
+			assert.Equal(t, "availability-zone-id", o.LocationType,
+				"the echoed locationType must say what the location is; #893 is the mismatch")
+			assert.Equal(t, byName[i].InstanceType, o.InstanceType)
+			assert.Equal(t, idOfName[byName[i].Location], o.Location,
+				"the location must be the AZ ID paired with the zone name at this position")
+		}
+	})
+
+	t.Run("a location filter selects by AZ ID, not by zone name", func(t *testing.T) {
+		zones := ec2DescribeAZs(t, ts, map[string]string{"Action": "DescribeAvailabilityZones"})
+		require.NotEmpty(t, zones)
+		last := zones[len(zones)-1]
+
+		offerings := ec2Offerings(t, ts, map[string]string{
+			"LocationType":     "availability-zone-id",
+			"Filter.1.Name":    "location",
+			"Filter.1.Value.1": last.ZoneID,
+			"Filter.2.Name":    "instance-type",
+			"Filter.2.Value.1": "t3.micro",
 		})
-	}
+		require.Len(t, offerings, 1)
+		assert.Equal(t, last.ZoneID, offerings[0].Location)
+		assert.Equal(t, "availability-zone-id", offerings[0].LocationType)
+
+		// The complement is what makes the arm's keying observable rather than assumed: a
+		// zone *name* is not a location under this locationType and must select nothing.
+		assert.Empty(t, ec2Offerings(t, ts, map[string]string{
+			"LocationType":     "availability-zone-id",
+			"Filter.1.Name":    "location",
+			"Filter.1.Value.1": last.ZoneName,
+		}))
+	})
+
+	t.Run("outpost is refused", func(t *testing.T) {
+		status, code, message := ec2ErrorDetail(t, ts, map[string]string{
+			"Action":       "DescribeInstanceTypeOfferings",
+			"LocationType": "outpost",
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Contains(t, message, "not modeled by substrate",
+			"the message must name substrate, so the divergence is not read as AWS behavior")
+		assert.Contains(t, message, "availability-zone-id",
+			"the remedies the message offers must include the one #893 made answerable")
+	})
 
 	t.Run("a value outside the documented set is refused", func(t *testing.T) {
 		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{

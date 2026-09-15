@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`DescribeInstanceTypeOfferings` answers `LocationType=availability-zone-id`, and the
+  refusal narrows to `outpost` alone** (#893). `Added` rather than `Fixed`: the value was
+  refused deliberately and visibly with `InvalidParameterValue` and a message naming
+  substrate, so no caller was ever handed a wrong answer — what changes is that a request AWS
+  accepts now has an answer.
+
+  This reverses a recorded decision, and the reversal is honest because it makes the
+  decision's own premise false rather than relaxing it. `ec2UnmodelledLocationTypeError` gave
+  the reason as: substrate "reports AZ IDs from DescribeAvailabilityZones but does not key
+  offerings by them", and treating the value as `availability-zone` "would return zone *names*
+  under a locationType saying they are IDs or ARNs, which a caller matching the two would
+  silently mis-read". That argument holds exactly as written — which is why the fix keys
+  offerings by AZ ID instead of aliasing the value. The doc comment moved with the behaviour,
+  in the same commit, rather than being left to describe a refusal that no longer happens.
+
+  The location comes from `ec2SeededZones`, the single producer of a zone's name and ID and
+  what `DescribeAvailabilityZones` renders from, so `us-east-1a` ↔ `use1-az1` cannot drift
+  between the two operations. The `availability-zone` arm was switched onto the same producer
+  at the same time: enumerating `ec2SeededAZSuffixes` directly was equivalent only while
+  nothing else about a zone could vary, and one producer means a zone the seed later reports
+  differently cannot leave the two arms disagreeing about which locations exist. The existing
+  `location` filter needed no change — it compares against whatever the location list holds,
+  so `use1-az1` selects and `us-east-1a` selects nothing, which is the assertion the tests
+  make in both directions.
+
+  AWS's reference is what the arm is built to: `LocationType`'s valid values are
+  `region | availability-zone | availability-zone-id | outpost`, `availability-zone-id` is
+  documented as "The AZ ID. When you specify a location filter, it must be an AZ ID for the
+  current Region", and `InstanceTypeOffering.location` is "The identifier for the location.
+  This depends on the location type" — so the per-item `locationType` echoing
+  `availability-zone-id` while `location` carries the ID is the shape AWS publishes, and the
+  mismatch this issue was about.
+
+  One caveat for a consumer, and the tests are written to it: substrate maps zone `a` to
+  `-az1` in every account, because a deterministic emulator cannot hold a per-account secret,
+  whereas AWS "independently map[s] Availability Zones to codes for each AWS account". Read
+  the ID out of `DescribeAvailabilityZones` rather than hardcoding `use1-az1` — a test
+  asserting the literal pairing passes here and asserts nothing about a real account.
+  `outpost` stays refused for the untouched half of the original reasoning: its location is an
+  Outpost ARN and substrate seeds no Outpost, so there is no ARN it could report.
+
+  Two adjacent gaps on the same operation are left alone and recorded rather than fixed:
+  `MaxResults`/`NextToken` are unimplemented although the handler's own doc comment lists
+  them, so a paginating caller gets the whole set every call with no `nextToken`; and
+  `availability-zone-id` remains accepted-but-inert as a *filter name* on five other EC2
+  describes (`ec2_filters.go`), which the same `ec2SeededZones` pairing now makes
+  implementable.
+
+### Changed
+- **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
+  1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
+  1.11.0→1.12.1. `test/e2e`: `aws-sdk-go-v2/config`, `credentials` and twelve service clients
+  (`account`, `cloudformation`, `configservice`, `dynamodb`, `ec2`, `iam`, `organizations`, `s3`,
+  `servicequotas`, `sts`, `wafv2`, plus eight internal modules). Taken as one change rather than
+  as the two Dependabot PRs that proposed them (#889, #890), because `test/e2e` requires the root
+  module through a `replace` directive and the E2E job asserts `test/e2e/go.mod` is tidy — so a
+  root-only `modernc.org/sqlite` bump leaves the e2e module stale and cannot pass CI on its own,
+  which is exactly how #889 failed as authored. Same reasoning as #786.
+
 ### Fixed
 - **The three IAM detach operations validate `PolicyArn`'s shape, so a malformed ARN is refused
   with the code the attach already answers** (#875). `DetachUserPolicy`, `DetachRolePolicy` and
@@ -37,17 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The malformed-ARN table is now **one** table shared by the attach and the detach tests, and a test
   asserts both directions reach the same verdict on every case. Two tables would let a case be added
   to one side only, which is how the pair came to disagree in the first place.
-
-### Changed
-- **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
-  1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
-  1.11.0→1.12.1. `test/e2e`: `aws-sdk-go-v2/config`, `credentials` and twelve service clients
-  (`account`, `cloudformation`, `configservice`, `dynamodb`, `ec2`, `iam`, `organizations`, `s3`,
-  `servicequotas`, `sts`, `wafv2`, plus eight internal modules). Taken as one change rather than
-  as the two Dependabot PRs that proposed them (#889, #890), because `test/e2e` requires the root
-  module through a `replace` directive and the E2E job asserts `test/e2e/go.mod` is tidy — so a
-  root-only `modernc.org/sqlite` bump leaves the e2e module stale and cannot pass CI on its own,
-  which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ## [v0.116.0] - 2026-09-14
 

@@ -5736,11 +5736,18 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 	filters := extractEC2Filters(req.Params)
 
 	// LocationType is a top-level parameter, not a filter name, and it selects what the
-	// locations in the response *are*. Only availability-zone (the default per the
-	// reference — "If no location is specified, the default is to list the instance types
-	// that are offered in the current Region") and region are modeled;
-	// availability-zone-id and outpost are documented as unmodelled in docs/services.md,
-	// and are refused rather than silently treated as availability-zone.
+	// locations in the response *are* — the reference pairs each value with the identifier
+	// it yields: "availability-zone - The Availability Zone", "availability-zone-id - The
+	// AZ ID", "region - The current Region", "outpost - The Outpost ARN". Three of the four
+	// are modeled; outpost is documented as unmodelled in docs/services.md and is refused
+	// rather than silently treated as availability-zone.
+	//
+	// Both zone arms read [ec2SeededZones], the single producer of the name/ID pair
+	// DescribeAvailabilityZones renders, so the two forms of the same zone cannot drift:
+	// us-east-1a and use1-az1 are one entry, not two derivations. availability-zone
+	// enumerated ec2SeededAZSuffixes directly until #893, which was equivalent only for as
+	// long as nothing else about a zone could vary — a zone the seed later reported as
+	// unavailable would have left the two arms disagreeing about which locations exist.
 	locationType := req.Params["LocationType"]
 	if locationType == "" {
 		locationType = "availability-zone"
@@ -5748,12 +5755,16 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 	var locations []string
 	switch locationType {
 	case "availability-zone":
-		for _, suffix := range ec2SeededAZSuffixes {
-			locations = append(locations, reqCtx.Region+suffix)
+		for _, az := range ec2SeededZones(reqCtx.Region) {
+			locations = append(locations, az.ZoneName)
+		}
+	case "availability-zone-id":
+		for _, az := range ec2SeededZones(reqCtx.Region) {
+			locations = append(locations, az.ZoneID)
 		}
 	case "region":
 		locations = []string{reqCtx.Region}
-	case "availability-zone-id", "outpost":
+	case "outpost":
 		return nil, ec2UnmodelledLocationTypeError(locationType)
 	default:
 		return nil, ec2InvalidLocationTypeError(locationType)
