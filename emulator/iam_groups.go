@@ -224,6 +224,10 @@ func (p *IAMPlugin) detachGroupPolicy(ctx *RequestContext, req *AWSRequest) (*AW
 	if params.GroupName == "" || params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "GroupName and PolicyArn are required", http.StatusBadRequest), nil
 	}
+	// Shape, not attachment — see iam_policy_arn.go (#499, #875).
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:DetachGroupPolicy", p.authzResource(ctx, req)); err != nil {
