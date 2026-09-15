@@ -11,6 +11,13 @@ import (
 // string rather than generateRequestID(), which derives from time.Now().UnixNano():
 // an error body has to be byte-identical across two replays of one recorded run, and
 // a caller diffing responses must not see a field that changes on its own.
+//
+// A success body cannot take this route, because a caller correlating a response
+// with a log line needs the id to identify the request rather than the emulator.
+// The same rule is met there by recording the value instead: [Event.RequestID]
+// carries the id the request was served under and a replay is dispatched with it,
+// so the bytes reproduce (#866). This constant is the fixed-value half of one rule,
+// not a separate decision.
 const substrateRequestID = "SUBSTRATE"
 
 // awsErrorProtocol identifies how a service serializes an error response on the
