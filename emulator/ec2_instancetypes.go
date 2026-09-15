@@ -285,17 +285,25 @@ func ec2InvalidLocationTypeError(value string) *AWSError {
 // ec2UnmodelledLocationTypeError returns the error substrate raises for a LocationType
 // real EC2 accepts but substrate does not model.
 //
-// availability-zone-id and outpost are both valid values. Substrate reports AZ IDs from
-// DescribeAvailabilityZones but does not key offerings by them, and models no Outposts at
-// all. Refusing is the honest answer: treating either as availability-zone would return
-// zone *names* under a locationType saying they are IDs or ARNs, which a caller matching
-// the two would silently mis-read. The message names substrate so the divergence is not
-// mistaken for AWS behavior.
+// outpost is the only one left. Its location is an Outpost ARN — the reference reads
+// "outpost - The Outpost ARN. When you specify a location filter, it must be an Outpost ARN
+// for the current Region" — and substrate models no Outpost at all, so there is no ARN it
+// could report. Refusing is the honest answer: treating it as availability-zone would return
+// zone *names* under a locationType saying they are Outpost ARNs, which a caller matching the
+// two would silently mis-read. The message names substrate so the divergence is not mistaken
+// for AWS behavior.
+//
+// availability-zone-id was refused alongside it until #893, on the reasoning that substrate
+// reported AZ IDs from DescribeAvailabilityZones but did not key offerings by them. That
+// reasoning was sound, so the fix was to make its first clause false rather than to relax the
+// refusal: [ec2SeededZones] already produced a zone's name and ID from one entry, and the
+// offerings handler now takes the ID from there. Nothing about the Outpost half changed —
+// there is no seeded Outpost to key by.
 func ec2UnmodelledLocationTypeError(value string) *AWSError {
 	return &AWSError{
 		Code: "InvalidParameterValue",
 		Message: "Value (" + value + ") for parameter LocationType is not modeled by " +
-			"substrate; use availability-zone or region",
+			"substrate; use availability-zone, availability-zone-id or region",
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
