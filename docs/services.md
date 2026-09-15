@@ -3074,7 +3074,7 @@ STS operations are free.
 | CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | HeadBucket | |
 | DeleteBucket | |
-| ListBuckets | |
+| ListBuckets | Honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`; reports `Owner` and a conditional `BucketRegion` — see [Listing buckets](#listing-buckets) |
 | PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes, including a seedable `409 ConditionalRequestConflict` — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
@@ -3107,6 +3107,63 @@ STS operations are free.
 | PutObjectTagging | |
 | GetObjectTagging | |
 | DeleteObjectTagging | |
+
+### Listing buckets
+
+`ListBuckets` honours all four of its query parameters
+([#884](https://github.com/scttfrdmn/substrate/issues/884)). It previously honoured none of
+them, which mattered most for the paging pair: a dropped `max-buckets` is invisible, because a
+short page and a complete listing are the same shape, and a dropped `continuation-token` returns
+page one forever.
+
+| Parameter | Behaviour |
+|-----------|-----------|
+| `max-buckets` | Bounds the page. Valid range 1–10000, per the published `Valid Range`; the default is 10000. A value outside the range, or one that is not an integer, is refused with `400 InvalidArgument` rather than clamped. |
+| `continuation-token` | Pages over the bucket-name order. Base64 of the last bucket returned, matching what `ListObjectsV2` emits — AWS says only that the token "is obfuscated and is not a real key". Refused with `400 InvalidArgument` if it is not decodable or exceeds the documented 1024-character ceiling. |
+| `prefix` | Filters by bucket-name prefix, and is echoed back as `Prefix` when sent. |
+| `bucket-region` | Filters by the Region the bucket was created in, which `CreateBucket` has always recorded. |
+
+The parameters compose: a request naming a prefix, a Region and a page size narrows by all three.
+
+**`ContinuationToken` is the *next* page's token, not an echo of the request's.** This is an
+asymmetry with substrate's other S3 listings and it is AWS's, not substrate's: `ListBuckets`
+publishes no `NextContinuationToken` at all and reuses the one name for the forward cursor,
+where `ListObjectsV2` publishes both. The element appears only when the listing was truncated,
+so a caller loops until it is absent. A listing whose last page exactly fills `max-buckets`
+carries no token, because AWS ties the token to there being "more buckets that can be listed"
+rather than to a full page.
+
+**The order is lexicographic by bucket name, and that is substrate's reading** — see
+[The order a listing returns its members in](#the-order-a-listing-returns-its-members-in).
+Pagination is why the order has to be guaranteed rather than merely tidy: a cursor over an
+unstable order both omits and repeats members between pages.
+
+**`Owner` is reported unconditionally, and its `ID` is the account ID.** Substrate has no
+account-owner concept beyond the account ID, so that is the only account-scoped identifier it
+holds; real S3 returns a 64-character hex canonical user ID unrelated to the account number, so
+a consumer must not read the value as one. `DisplayName` is omitted — it carries no description
+on the `Owner` type and none of AWS's five published examples renders it.
+
+**`BucketRegion` is conditional on the request naming at least one parameter**, quoting the
+`Bucket` type: "If the request contains at least one valid parameter, it is included in the
+response." An unparameterised listing therefore reports `Name` and `CreationDate` only, which
+is what AWS's own unpaginated example shows.
+
+**`BucketArn` is never reported, deliberately.** The `Bucket` type says it "is only supported
+for S3 directory buckets" and `ListBuckets` "is not supported for directory buckets", so no
+`ListBuckets` response AWS produces carries one. Synthesizing a general purpose bucket ARN would
+hand a consumer a field it could read here and never against AWS.
+
+`InvalidArgument` is **substrate's reading of the error code, not a sourced one**:
+`API_ListBuckets` publishes no `Errors` section, and the S3 error-code reference could not be
+retrieved to confirm what AWS returns for an out-of-range `max-buckets`. Refusing rather than
+clamping is the deliberate choice, on the same reasoning as the defect itself — silently
+substituting a value the caller did not ask for is invisible in a well-formed response.
+
+The documented restriction that "Requests made to a Regional endpoint that is different from the
+`bucket-region` parameter are not supported" is **not enforced**. AWS names no error code for
+it, so refusing would mean inventing one, and substrate's endpoint is not Regional in the way
+that rule presumes.
 
 ### Storage classes
 
