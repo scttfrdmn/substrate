@@ -24,7 +24,10 @@ const cliTestStream = "cli-wiring-stream"
 // defect is invisible, because a fresh in-process store legitimately holds nothing.
 // include_bodies must be on, since an event recorded without a request cannot be
 // re-executed and the replay would skip every one of them.
-func writeCLIConfig(t *testing.T, dir string) string {
+//
+// Each extra section is appended verbatim, so a test can add a replay: or state:
+// block without restating the event store (#880, #881).
+func writeCLIConfig(t *testing.T, dir string, extra ...string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "substrate.yaml")
@@ -32,7 +35,8 @@ func writeCLIConfig(t *testing.T, dir string) string {
 		"  enabled: true\n" +
 		"  backend: \"file\"\n" +
 		"  persist_path: \"" + dir + "\"\n" +
-		"  include_bodies: true\n"
+		"  include_bodies: true\n" +
+		strings.Join(extra, "")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -47,17 +51,48 @@ func writeCLIConfig(t *testing.T, dir string) string {
 // req.Operation, needs no prior state, and is not authorized — so an event that
 // fails to replay failed because of the wiring under test and not because of the
 // request.
-func recordCLIStream(t *testing.T, dir string, n int) {
+// The state hashes recordCLIStream attaches under withCLIStateHashes. They are
+// sentinels rather than real hashes on purpose: a replay of the stream computes the
+// hash of its own state and cannot arrive at either, so the comparison
+// replay.validate_state turns on reports a mismatch deterministically, without the
+// test having to reproduce the hashing (#880).
+const (
+	cliRecordedHashBefore = "recorded-before-hash"
+	cliRecordedHashAfter  = "recorded-after-hash"
+)
+
+// cliRecordSettings collects what a [recordCLIStream] option changes.
+type cliRecordSettings struct {
+	stateHashes bool
+}
+
+// withCLIStateHashes records a state hash with every event, which is what a
+// replay's state validation has to have something to compare against.
+func withCLIStateHashes(s *cliRecordSettings) { s.stateHashes = true }
+
+func recordCLIStream(t *testing.T, dir string, n int, opts ...func(*cliRecordSettings)) {
 	t.Helper()
+
+	var settings cliRecordSettings
+	for _, opt := range opts {
+		opt(&settings)
+	}
 
 	cfg := substrate.DefaultConfig()
 	cfg.EventStore.Enabled = true
 	cfg.EventStore.Backend = "file"
 	cfg.EventStore.PersistPath = dir
 	cfg.EventStore.IncludeBodies = true
+	cfg.EventStore.IncludeStateHashes = settings.stateHashes
 
 	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	defer store.Close() //nolint:errcheck
+
+	var recordOpts []substrate.EventRecordOption
+	if settings.stateHashes {
+		recordOpts = append(recordOpts,
+			substrate.WithStateHashes(cliRecordedHashBefore, cliRecordedHashAfter))
+	}
 
 	ctx := context.Background()
 	for i := 0; i < n; i++ {
@@ -74,7 +109,8 @@ func recordCLIStream(t *testing.T, dir string, n int) {
 			Params:    map[string]string{"Action": "GetCallerIdentity", "Version": "2011-06-15"},
 			Path:      "/",
 		}
-		if err := store.RecordRequest(ctx, reqCtx, req, &substrate.AWSResponse{StatusCode: 200}, 0, 0, nil); err != nil {
+		if err := store.RecordRequest(ctx, reqCtx, req, &substrate.AWSResponse{StatusCode: 200}, 0, 0, nil,
+			recordOpts...); err != nil {
 			t.Fatalf("record event %d: %v", i, err)
 		}
 	}
@@ -459,27 +495,42 @@ func TestEventStoreLocation(t *testing.T) {
 
 // TestReplayStateSummary covers the distinction the summary has to draw.
 // ReplayResults.StateValid starts true and is only falsified by a comparison
-// ValidateState gates, so with validation off — the only setting reachable until
-// #880 — a replay that reached a completely different state still reports
-// StateValid: true. Printing that as "valid" would be a verdict nothing produced.
+// ValidateState gates, so a replay that reached a completely different state still
+// reports StateValid: true whenever no comparison ran. Printing that as "valid"
+// would be a verdict nothing produced.
+//
+// The third state — validation on, but nothing in the stream to compare against —
+// became reachable with #880, because event_store.include_state_hashes is off by
+// default and a user who sets replay.validate_state: true is likelier to have a
+// stream without hashes than one with them.
 func TestReplayStateSummary(t *testing.T) {
 	tests := []struct {
-		name    string
-		cfg     substrate.ReplayConfig
-		results *substrate.ReplayResults
-		want    string
+		name       string
+		cfg        substrate.ReplayConfig
+		results    *substrate.ReplayResults
+		comparable bool
+		want       string
 	}{
 		{
-			name:    "validation off is not a passing verdict",
-			cfg:     substrate.ReplayConfig{},
-			results: &substrate.ReplayResults{StateValid: true},
-			want:    "not checked (state validation is off)",
+			name:       "validation off is not a passing verdict",
+			cfg:        substrate.ReplayConfig{},
+			results:    &substrate.ReplayResults{StateValid: true},
+			comparable: true,
+			want:       "not checked (replay.validate_state is off)",
 		},
 		{
-			name:    "validation on and matching",
+			name:    "validation on over a stream with no recorded hashes compared nothing",
 			cfg:     substrate.ReplayConfig{ValidateState: true},
 			results: &substrate.ReplayResults{StateValid: true},
-			want:    "valid",
+			want: "not checked (no event in the stream carries a recorded state hash; " +
+				"record with event_store.include_state_hashes: true)",
+		},
+		{
+			name:       "validation on and matching",
+			cfg:        substrate.ReplayConfig{ValidateState: true},
+			results:    &substrate.ReplayResults{StateValid: true},
+			comparable: true,
+			want:       "valid",
 		},
 		{
 			name: "validation on and diverged reports how many",
@@ -488,16 +539,226 @@ func TestReplayStateSummary(t *testing.T) {
 				StateValid:  false,
 				StateErrors: []string{"seq 1", "seq 4"},
 			},
-			want: "MISMATCH (2 error(s))",
+			comparable: true,
+			want:       "MISMATCH (2 error(s))",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := replayStateSummary(tt.cfg, tt.results); got != tt.want {
+			if got := replayStateSummary(tt.cfg, tt.results, tt.comparable); got != tt.want {
 				t.Errorf("replayStateSummary = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestStreamHasStateHashes covers the input that decision rests on: whether the
+// recording carries anything to compare, which is a property of the events rather
+// than of the config the replay runs under (#880).
+func TestStreamHasStateHashes(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []*substrate.Event
+		want   bool
+	}{
+		{name: "no events", events: nil, want: false},
+		{
+			name:   "a stream recorded without include_state_hashes",
+			events: []*substrate.Event{{ID: "a"}, {ID: "b"}},
+			want:   false,
+		},
+		{
+			name:   "one hashed event is enough to compare",
+			events: []*substrate.Event{{ID: "a"}, {ID: "b", StateHashAfter: "h"}},
+			want:   true,
+		},
+		{
+			name:   "a before hash counts too",
+			events: []*substrate.Event{{ID: "a", StateHashBefore: "h"}},
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := streamHasStateHashes(tt.events); got != tt.want {
+				t.Errorf("streamHasStateHashes = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewReplayEngineWiring_UsesTheConfiguredReplaySection is #880's core
+// criterion: the engine is built from the replay: section rather than from
+// substrate.ReplayConfig{}. Before it, no value written in a config file reached the
+// replay engine at all — ValidateState in particular could not be switched on from
+// the CLI by any means.
+func TestNewReplayEngineWiring_UsesTheConfiguredReplaySection(t *testing.T) {
+	dir := t.TempDir()
+	recordCLIStream(t, dir, 1)
+
+	cfgPath := writeCLIConfig(t, dir,
+		"replay:\n"+
+			"  speed_multiplier: 0\n"+
+			"  stop_on_error: true\n"+
+			"  validate_state: true\n"+
+			"  use_snapshots: false\n"+
+			"  random_seed: 4242\n")
+	cfg, err := substrate.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	wiring, err := newReplayEngineWiring(context.Background(), cfg, &recordingLogger{})
+	if err != nil {
+		t.Fatalf("newReplayEngineWiring: %v", err)
+	}
+	defer wiring.store.Close() //nolint:errcheck
+
+	want := substrate.ReplayConfig{StopOnError: true, ValidateState: true, RandomSeed: 4242}
+	if wiring.config != want {
+		t.Errorf("engine config = %+v, want %+v — the configured section did not reach the engine",
+			wiring.config, want)
+	}
+}
+
+// TestNewReplayEngineWiring_RefusesAnUnsupportedStateBackend covers #881 at the
+// constructor rather than at load: a Config built in process can name a backend
+// Validate never saw, and the answer must be an error rather than a memory manager
+// the caller did not ask for.
+func TestNewReplayEngineWiring_RefusesAnUnsupportedStateBackend(t *testing.T) {
+	dir := t.TempDir()
+	recordCLIStream(t, dir, 1)
+
+	cfg, err := substrate.LoadConfig(writeCLIConfig(t, dir))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.State.Backend = "sqlite"
+
+	wiring, err := newReplayEngineWiring(context.Background(), cfg, &recordingLogger{})
+	if err == nil {
+		wiring.store.Close() //nolint:errcheck,gosec
+		t.Fatal("the replay engine was wired to a state manager the config did not ask for")
+	}
+	for _, want := range []string{"state manager", "sqlite"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err.Error(), want)
+		}
+	}
+}
+
+// TestReplayCmd_StateVerdictFollowsTheConfiguredSection is the end-to-end shape of
+// #880: the same recorded stream, replayed through the command's own RunE, produces
+// a different state verdict for a different replay: section — which is only possible
+// once the section reaches the engine.
+//
+// The MISMATCH case is also the assertion that ReplayResults.StateErrors is
+// populated. Nothing ever appended to it, so with validation newly reachable the
+// summary would have printed "MISMATCH (0 error(s))" and listed nothing.
+func TestReplayCmd_StateVerdictFollowsTheConfiguredSection(t *testing.T) {
+	tests := []struct {
+		name          string
+		stateHashes   bool
+		replaySection string
+		wantState     string
+		wantLines     []string
+	}{
+		{
+			name:        "no replay section leaves validation off",
+			stateHashes: true,
+			wantState:   "State:    not checked (replay.validate_state is off)",
+		},
+		{
+			name:          "validate_state on reports the divergence and describes each one",
+			stateHashes:   true,
+			replaySection: "replay:\n  validate_state: true\n",
+			wantState:     "State:    MISMATCH (2 error(s))",
+			wantLines: []string{
+				"state_hash_before: recorded " + cliRecordedHashBefore,
+				"state_hash_after: recorded " + cliRecordedHashAfter,
+			},
+		},
+		{
+			name:          "validate_state on with no recorded hashes says so instead of passing",
+			stateHashes:   false,
+			replaySection: "replay:\n  validate_state: true\n",
+			wantState:     "State:    not checked (no event in the stream carries a recorded state hash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.stateHashes {
+				recordCLIStream(t, dir, 1, withCLIStateHashes)
+			} else {
+				recordCLIStream(t, dir, 1)
+			}
+			cfgPath := writeCLIConfig(t, dir, tt.replaySection)
+
+			out := captureStdout(t, func() {
+				if err := run([]string{"replay", "--config", cfgPath, cliTestStream}); err != nil {
+					t.Fatalf("replay command: %v", err)
+				}
+			})
+
+			if !strings.Contains(out, tt.wantState) {
+				t.Errorf("summary does not report %q; printed:\n%s", tt.wantState, out)
+			}
+			for _, want := range tt.wantLines {
+				if !strings.Contains(out, want) {
+					t.Errorf("summary omits the mismatch description %q; printed:\n%s", want, out)
+				}
+			}
+			// The event was re-executed either way; the verdict is the only thing
+			// the replay: section changes here.
+			if !strings.Contains(out, "Success:  1") {
+				t.Errorf("summary reports no re-executed event; printed:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestReplayCmd_RefusesAnUnsupportedStateBackend and its server counterpart are
+// #881's startup criterion: a config naming a backend nothing implements fails
+// before anything is built, naming the backend, rather than running in memory.
+func TestReplayCmd_RefusesAnUnsupportedStateBackend(t *testing.T) {
+	dir := t.TempDir()
+	recordCLIStream(t, dir, 1)
+	cfgPath := writeCLIConfig(t, dir, "state:\n  backend: sqlite\n")
+
+	err := run([]string{"replay", "--config", cfgPath, cliTestStream})
+	if err == nil {
+		t.Fatal("replay ran with a state backend the config did not ask for")
+	}
+	for _, want := range []string{"state.backend", "sqlite"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err.Error(), want)
+		}
+	}
+}
+
+// TestServerCmd_RefusesAnUnsupportedStateBackend covers the site #881 names:
+// `substrate server` called NewMemoryStateManager() unconditionally, so state: was
+// configuration the server read nothing from.
+//
+// The address is deliberately unbindable. The refusal happens while loading the
+// config, before anything listens, so a passing run never opens a socket — and if the
+// refusal ever regresses, the run fails at the address instead of binding a port or
+// hanging, and this test says which happened.
+func TestServerCmd_RefusesAnUnsupportedStateBackend(t *testing.T) {
+	cfgPath := writeCLIConfig(t, t.TempDir(), "state:\n  backend: sqlite\n")
+
+	err := run([]string{"server", "--config", cfgPath, "--address", "256.256.256.256:0"})
+	if err == nil {
+		t.Fatal("the server started with a state backend the config did not ask for")
+	}
+	for _, want := range []string{"state.backend", "sqlite"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q; the server got past the config", err.Error(), want)
+		}
 	}
 }
 

@@ -34,6 +34,40 @@ event_store:
   # Maximum NDJSON file size in MB before rotation (0 = no rotation, file backend only).
   # max_file_size_mb: 100
 
+# The state manager behind every plugin's resources, for the server and for
+# `substrate replay` alike — both build it from here through one constructor, so they
+# cannot disagree about which backend is in use (#881).
+state:
+  # "memory" is the only implemented backend. Anything else — including "sqlite",
+  # which is #2 — is refused when the config loads, naming the backend: a caller who
+  # asks for persistence and is silently answered with a manager that forgets
+  # everything at exit has been given a wrong answer rather than an error.
+  backend: "memory"
+  # Reserved for a backend that keeps files. No implemented backend does, so a
+  # non-empty value is refused rather than accepted and ignored.
+  # path: ""
+
+# How `substrate replay <stream>` re-executes a recorded stream.
+# Replay needs a persistent event_store backend (memory holds nothing from a previous
+# process) and include_bodies, since an event recorded without its request cannot be
+# re-executed and is counted as skipped.
+replay:
+  # Scales the recorded delay between events. 0 replays instantly and is the only
+  # value independent of the wall clock; 1.0 replays at the original pace.
+  speed_multiplier: 0
+  # Stop at the first failing event. False reports every failure in the stream.
+  stop_on_error: false
+  # Compare a state hash before and after each event against the hash recorded with
+  # it. Off by default, and it only means something for a stream recorded with
+  # event_store.include_state_hashes: true — with no recorded hashes there is nothing
+  # to compare, and the summary says so rather than reporting a pass (#880).
+  validate_state: false
+  # Start from the nearest stored snapshot instead of replaying from empty state.
+  # A snapshot skips the events it already covers, so the replay verifies less.
+  use_snapshots: false
+  # Seeds the replay engine's random source. 0 leaves it unseeded.
+  random_seed: 0
+
 log:
   # Log level: debug | info | warn | error
   level: "info"

@@ -109,6 +109,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AWS does not publish for it. Because the default is the documented maximum, a `PageSize`
   above 400 is answered indistinguishably from a clamp.
 
+- **A `replay:` configuration section, so `substrate replay` is configurable at all** (#880).
+  The command built its engine with a zero-valued `ReplayConfig` and there was no way to change
+  that: `Config` had no `Replay` field and no `ReplayCfg` type existed, so nothing written in
+  `substrate.yaml` reached the replay engine. The consequence worth naming is `ValidateState`:
+  the state hash comparison — the thing that turns "re-executed 100 events" into "re-executed
+  100 events and reached the same state" — was off on every run and could not be switched on
+  from the CLI by any means.
+
+  `ReplayCfg` exposes the five fields the engine actually reads (`speed_multiplier`,
+  `stop_on_error`, `validate_state`, `use_snapshots`, `random_seed`), each defaulted explicitly
+  in `DefaultConfig` with its reasoning, and `ToReplayConfig` is a struct *conversion* rather
+  than a field-by-field copy — the two types are deliberately identical but for their tags, so
+  a field added to one and forgotten in the other fails to compile instead of arriving silently
+  as a zero value, which is the defect this section exists to fix. `Validate` refuses a negative
+  `speed_multiplier`, which `time.Sleep` would otherwise treat as "instant" — indistinguishable
+  from the default and so a value that appears to have been applied.
+
+  `validate_state` defaults to **false**, and that is a decision rather than a leftover zero:
+  a comparison happens only for an event carrying a recorded hash, which needs
+  `event_store.include_state_hashes`, itself off by default because a hash is a full snapshot of
+  state taken twice per request. Defaulting validation on would therefore have reported "state
+  valid" for the overwhelming majority of streams while comparing nothing. The summary now
+  distinguishes that case explicitly: with validation on over a stream carrying no hashes it
+  prints `not checked (no event in the stream carries a recorded state hash…)` rather than
+  `valid`, because `StateValid` starts `true` and is only ever falsified by a comparison that
+  ran.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -121,6 +148,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **`state:` decides which state manager is built, and an unimplemented backend is refused
+  instead of silently answered with memory** (#881). `Config.State` was configuration nothing
+  read: `DefaultConfig` and `Validate` were its only non-test references and neither constructed
+  anything, while `substrate server` and the replay wiring both called
+  `NewMemoryStateManager()` unconditionally. `Validate` accepted `backend: sqlite`, nothing
+  implements it (that is #2), and the run proceeded in memory — so a caller who asked for
+  persistence got none, with no warning, and would have discovered it as absent state some time
+  later.
+
+  Both call sites now go through one exported constructor, `NewStateManager(StateCfg)`, so the
+  server and the replay engine cannot disagree about which backend is in use, and it returns an
+  error for a backend it does not implement rather than falling back. **Refusing rather than
+  falling back is the whole point**: a fallback answers a request for durability with a manager
+  that forgets everything at process exit, which is a wrong answer dressed as a working one,
+  and it is why this knob went four releases without anyone noticing it turned nothing.
+  `Validate` refuses the same values at load time, so a config file naming `sqlite` or a typo
+  now fails at startup naming the backend instead of starting.
+
+  `state.path` is refused when non-empty for the same reason, resolving #881's "honoured or
+  removed" criterion in a third way that the issue's own argument supports better than either:
+  removing the field would make a `state: {path: …}` in an existing file *silently* ignored by
+  viper, which is the defect being fixed, while refusing it tells the operator that no
+  implemented backend reads it. The field stays so the message can name the value, and it
+  becomes meaningful again when #2 lands a backend that keeps files.
+
+- **A replayed state mismatch is described, not just counted** (#880, found while implementing
+  it). `ReplayResults.StateErrors` is documented to carry "descriptions of any state hash
+  mismatches" and nothing ever appended to it: a mismatch set `StateValid` to false and recorded
+  an `EventDifference`, leaving the slice empty on every run. That was invisible while
+  `ValidateState` could not be reached from the CLI; making it configurable would otherwise have
+  shipped a summary printing `MISMATCH (0 error(s))` for a real divergence and listing none of
+  them. Each entry now names the event, its sequence, which comparison failed, and both hashes.
+
 - **`ListInstanceProfiles` decodes and applies `MaxItems`, `Marker` and `PathPrefix`, the three
   parameters it accepted and ignored** (#873). The operation had no `parseIAMBody` call and no
   params struct at all: it returned every instance profile in the account with `IsTruncated`
