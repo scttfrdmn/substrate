@@ -129,6 +129,24 @@ type Event struct {
 	// ID uniquely identifies this event within the store.
 	ID string `json:"id"`
 
+	// RequestID is the request id the recorded request was served under, i.e. the
+	// value the response body rendered as its RequestId. It is not ID: an event id
+	// is minted by the store from service, operation and sequence
+	// (see generateEventID), while a request id is minted by the parser before the
+	// store sees the request at all.
+	//
+	// It is recorded because a replay cannot re-derive it. generateRequestID
+	// (parser.go) is "req-" + time.Now().UnixNano(), and 66 success bodies render
+	// it, so a recorded run could not be reproduced even in principle while the
+	// event did not carry the value — replay used ID instead, which is a third
+	// shape, neither the recorded id nor a freshly minted one. That is the same rule
+	// substrateRequestID (error_protocol.go) already states for the error path:
+	// a body has to be byte-identical across two replays of one recorded run (#866).
+	//
+	// Empty on a stream recorded before this field existed; see replayRequestID for
+	// what a replay does with that.
+	RequestID string `json:"request_id,omitempty"`
+
 	// Sequence is the monotonically increasing position in the global log.
 	Sequence int64 `json:"sequence"`
 
@@ -407,6 +425,7 @@ func (e *EventStore) RecordRequest(
 ) error {
 	event := &Event{
 		Timestamp: e.now(),
+		RequestID: reqCtx.RequestID,
 		StreamID:  streamIDFromContext(reqCtx),
 		AccountID: reqCtx.AccountID,
 		Region:    reqCtx.Region,

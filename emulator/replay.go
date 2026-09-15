@@ -302,7 +302,7 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	}
 
 	reqCtx := &RequestContext{
-		RequestID: event.ID,
+		RequestID: replayRequestID(event),
 		AccountID: event.AccountID,
 		Region:    event.Region,
 		Timestamp: event.Timestamp,
@@ -400,6 +400,22 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	}
 
 	return true, nil
+}
+
+// replayRequestID is the request id a replayed handler is dispatched under: the
+// one the recording was served with, so a success body rendering ctx.RequestID
+// reproduces the recorded bytes rather than inventing a value (#866).
+//
+// It falls back to the event id for a stream recorded before [Event.RequestID]
+// existed. That is not a reproduction of the original run — nothing can be, since
+// the value was never written down — but it is what such a stream replayed to
+// before, so an older stream keeps replaying exactly as it did instead of carrying
+// an empty RequestId into every body.
+func replayRequestID(event *Event) string {
+	if event.RequestID != "" {
+		return event.RequestID
+	}
+	return event.ID
 }
 
 // StepForward re-executes the next event and advances the position.

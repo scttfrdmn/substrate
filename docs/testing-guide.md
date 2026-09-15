@@ -272,6 +272,31 @@ type ReplayResults struct {
 }
 ```
 
+### What a replayed response reproduces
+
+A replayed success body carries the `RequestId` the **recording** was served under, not
+a freshly minted one. The event records it, and the replay dispatches the handler with
+it, so the 66 places that render a request id into a response reproduce the recorded
+bytes (#866).
+
+A **live** request's id still derives from the wall clock, deliberately. What
+determinism asks for is that a recorded run replays to the same bytes; deriving a live
+id from the request instead would collide two identical requests onto one value, and a
+caller correlating a response with a log line needs them distinct. An error body takes
+the other route and carries the fixed id `SUBSTRATE`, because there the id identifies
+the emulator rather than the request.
+
+So two assertions are safe and one is not:
+
+```go
+// Safe: a replay of a recorded stream renders the recorded id.
+// Safe: an error body's RequestId is always "SUBSTRATE".
+// Not safe: two *live* calls with the same input share a RequestId. They do not.
+```
+
+A stream recorded before the event carried a request id replays with the event id in
+that field, since the original value was never written down and nothing can recover it.
+
 <!-- TODO(#178): add section on persisting streams to SQLite for cross-run replay -->
 
 ## Time-Travel Debugging

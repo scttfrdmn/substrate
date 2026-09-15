@@ -820,6 +820,15 @@ func extractServiceFromAuth(authHeader string) string {
 }
 
 // generateRequestID produces a unique request ID string.
+//
+// A live request's id still derives from the wall clock, deliberately. What the
+// determinism rule asks for is that a *recorded* run replays to the same bytes, and
+// that is met by recording the value on the event ([Event.RequestID]) and
+// dispatching a replay with it (see replayRequestID) rather than by deriving the id
+// from the request. Deriving it would collide two identical requests onto one id —
+// the same objection iamSLRTaskUUID's comment records — and every consumer that
+// correlates a response with a log line needs them distinct. Making every minted
+// value derived, request ids included, is #856's question, not this one's (#866).
 func generateRequestID() string {
 	return fmt.Sprintf("req-%d", time.Now().UnixNano())
 }

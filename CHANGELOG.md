@@ -64,6 +64,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because for `ListBuckets`, `DescribeRules` and EC2's `reservationSet`, AWS documents no order at
   all and a consumer should not read the guarantee as AWS's behaviour.
 
+- **A success body's `RequestId` came from the wall clock and the event never recorded it, so a
+  recorded run could not be reproduced even in principle** (#866). `generateRequestID` is
+  `"req-" + time.Now().UnixNano()` and 66 non-test sites across seven plugins render it into a
+  response, but `Event` had no request-ID field and `RecordRequest` copied none — so no amount of
+  work in the replay engine could reproduce the recorded value, and a replay instead rendered the
+  *event* ID (`service-op-seq-<UnixNano>`), a third shape that was neither the recorded id nor a
+  freshly minted one. `Event` now carries the request id, `RecordRequest` writes it, and a replay
+  dispatches the handler with it, so a replayed success body is byte-identical to the recording.
+  None of the 66 render sites needed editing.
+
+  This is the missing half of a decision already taken and recorded: `substrateRequestID`'s comment
+  states that "an error body has to be byte-identical across two replays of one recorded run", and
+  nothing had generalised the rule to the success path. The two halves now cross-reference each
+  other, and they differ deliberately — an error body carries the fixed id `SUBSTRATE` because
+  there the value identifies the emulator, while a success body's identifies the request.
+
+  A **live** request's id still derives from the wall clock, and that is recorded on
+  `generateRequestID` rather than left implicit: deriving one from the request would collide two
+  identical requests onto a single id — the objection `iamSLRTaskUUID` already records — and making
+  every minted value derived is #856's question. A stream recorded before the field existed replays
+  with the event id in that position, since the original value was never written down; the field
+  round-trips through both the file and SQLite backends, whose rows carry the serialised event.
+  Part of #817, whose response-body comparison cannot run while a body field is guaranteed to
+  differ.
+
 ## [v0.115.0] - 2026-09-14
 
 ### Added
