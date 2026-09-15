@@ -18,6 +18,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root-only `modernc.org/sqlite` bump leaves the e2e module stale and cannot pass CI on its own,
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
+### Fixed
+- **CloudFront answered an untag request with the tagging success and left the tag in place**
+  (#883). CloudFront implemented `TagResource` and `ListTagsForResource` and not
+  `UntagResource`, and `parseCloudFrontOperation` mapped *any* `Resource`-bearing POST to
+  `TagResource` — so `POST /2020-05-31/tagging?Operation=Untag` ran the tag path, where the
+  `<TagKeys>` body decoded as `<Tags>` into an empty item list, the decode error was discarded,
+  and the distribution was written back byte-identical with a 204. The failure was not
+  "operation not supported", which a caller can branch on, but a **successful no-op**: the
+  removal was reported as done, `ListTagsForResource` still reported the tag, and nothing
+  anywhere said otherwise. Same class as the `applyTagsToResource` silent-200 that v0.115.0
+  removed for ECS.
+
+  The dispatch now resolves a tagging POST on the `Operation` value and on nothing else, per
+  the request syntax the CloudFront API Reference publishes for the three operations that share
+  the `/tagging` path — `Operation=Tag`, `Operation=Untag`, and `GET …?Resource={{Resource}}`
+  for the list. A value that is neither resolves to **no operation at all**, so the request
+  keeps its verb, reaches the plugin's default arm and is refused with `InvalidAction`/400
+  rather than performing whichever write happened to be first. The decode error is no longer
+  discarded on either arm either: because the root element name is part of the request shape, a
+  `<Tags>` document sent to the untag and a `<TagKeys>` document sent to the tag are both
+  refused with `InvalidArgument`/400 instead of read as an empty tag set, which closes the
+  silent-no-op behaviour independently of the routing. And an untag with no body is refused,
+  since `TagKeys` is documented `Required: Yes` and a 204 that removed nothing is the defect
+  itself.
+
+  Two things AWS does not publish are recorded rather than assumed. **Removing a key the
+  resource does not carry succeeds** — the operation's error list (`AccessDenied` 403,
+  `InvalidArgument` 400, `InvalidTagging` 400, `NoSuchResource` 404) names nothing for an absent
+  key and the response is documented as an unconditional 204 with an empty body, but the
+  reference does not address the case either way, so success is substrate's reading, taken
+  because the alternative makes a consumer's second teardown pass fail and because a response
+  carrying no per-key result has nowhere to report a partial removal. And **the `Resource`
+  query parameter is required on all three operations**, although the reference documents it
+  for `ListTagsForResource` only and states "the request does not use any URI parameters" on
+  both `TagResource` and `UntagResource` — which cannot be right for operations whose entire
+  request syntax is a bare `/tagging` path. Substrate reads that as a documentation omission.
+
+  The Resource Groups Tagging API is unaffected and deliberately not changed here:
+  `TaggingPlugin.resolveARN` has no `cloudfront` arm, so `UntagResources` against a
+  distribution ARN already refuses with an `InternalServiceException`/500 `FailedResourcesMap`
+  entry rather than reporting a removal it did not make. Its guard table now pins that,
+  alongside a note that giving CloudFront an arm there needs a `mergeResourceTags` case too and
+  stays #835's work. An ARN naming no distribution still answers `NoSuchDistribution`/404
+  rather than the `NoSuchResource` all three tagging pages list, because that is what the rest
+  of the plugin answers and one plugin should not report a missing distribution two ways;
+  aligning them is a separate change from a misrouted request.
+
 ## [v0.116.0] - 2026-09-14
 
 ### Added
