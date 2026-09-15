@@ -175,6 +175,12 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 		name: "service with no arm at all",
 		arn:  "arn:aws:kms:us-east-1:123456789012:key/abcd-1234",
 		why:  "#835's six armless services take the same answer as a wrong type within a service",
+	}, {
+		name: "cloudfront distribution",
+		arn:  "arn:aws:cloudfront::123456789012:distribution/E1AAAAAAAAAAAA",
+		why: "the tagging API has no cloudfront arm, so #883's untag hole in CloudFront's own " +
+			"plugin was never reachable from here — this pins that it refuses rather than " +
+			"reporting a removal it did not make, and that giving it an arm stays #835's work",
 	}}
 
 	for _, tc := range cases {
