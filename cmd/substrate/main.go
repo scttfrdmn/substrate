@@ -130,6 +130,162 @@ func reloadCredentials(registry *substrate.CredentialRegistry, newCfg, cfg *subs
 	}
 }
 
+// eventStoreLocation names where the configured backend keeps its events.
+//
+// It exists so a command that finds nothing can say where it looked. The bare
+// "no events in stream" the replay engine returns is true and useless: the
+// overwhelmingly likely causes are a memory backend (which cannot hold anything
+// across two processes) and a persist path that is not the one the recording was
+// written to, and neither is visible without naming the backend and the path
+// (#855).
+func eventStoreLocation(cfg substrate.EventStoreCfg) string {
+	switch cfg.Backend {
+	case "file":
+		if cfg.PersistPath == "" {
+			return `backend "file" with no persist_path set`
+		}
+		return fmt.Sprintf("backend %q at %s", cfg.Backend, cfg.PersistPath)
+	case "sqlite":
+		dsn := cfg.DSN
+		if dsn == "" {
+			dsn = "substrate.db"
+		}
+		return fmt.Sprintf("backend %q at %s", cfg.Backend, dsn)
+	default:
+		// The memory backend is the interesting case rather than the dull one: it
+		// is the shipped default, and it is why replay, export and debug all
+		// report nothing for a stream a user believes was recorded.
+		return fmt.Sprintf("backend %q, which holds no events from a previous process", cfg.Backend)
+	}
+}
+
+// newLoadedEventStore builds the event store from configuration and loads the
+// recorded events into memory.
+//
+// The Load is the whole point. NewEventStore constructs a file backend eagerly
+// "so Load can be called right away", and until #855 nothing in cmd/ ever called
+// it — so replay failed at "no events in stream", export wrote an empty document
+// with exit status 0, and debug always printed "contains no events" (#879). The
+// three commands share this function so they cannot drift apart again.
+func newLoadedEventStore(
+	ctx context.Context,
+	cfg *substrate.Config,
+	tc *substrate.TimeController,
+	logger substrate.Logger,
+) (*substrate.EventStore, error) {
+	store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig(),
+		substrate.WithTimeController(tc), substrate.WithEventStoreLogger(logger))
+
+	if err := store.Load(ctx); err != nil {
+		return nil, fmt.Errorf("load event store (%s): %w", eventStoreLocation(cfg.EventStore), err)
+	}
+	return store, nil
+}
+
+// replayWiring holds everything the replay command needs from
+// [newReplayEngineWiring].
+//
+// Config is carried alongside the engine rather than being read back off it
+// because the summary has to distinguish "state matched" from "state was never
+// checked", and only the config says which happened. Reporting the second as the
+// first is the whole defect [replayStateSummary] exists to avoid.
+type replayWiring struct {
+	engine *substrate.ReplayEngine
+	store  *substrate.EventStore
+	config substrate.ReplayConfig
+}
+
+// newReplayEngineWiring builds a replay engine wired to a real emulator: a
+// populated plugin registry, a real state manager, and an event store with the
+// recorded events loaded.
+//
+// It replaces three inline values that made the shipped command incapable of
+// replaying anything (#855): an empty PluginRegistry, so every event routed to
+// ServiceNotAvailable; a nil StateManager, which made resetState a no-op and
+// computeStateHash return "", so StateValid was vacuously true; and an unloaded
+// store.
+//
+// The order follows newServerCmd's, and the one ordering constraint is real:
+// authCtrl is built before RegisterDefaultPlugins because CloudFormation takes
+// it — a stack's resource calls are dispatched in process rather than through the
+// server, so they are authorized by the controller the plugin holds.
+//
+// This is a function rather than inline in RunE for the same reason as
+// [newFaultController] and [newCredentialWiring]: a RunE closure cannot be called
+// from a test, which is why none of the above was caught by the one existing
+// replay test — it asserts the command is non-nil and never invokes RunE.
+func newReplayEngineWiring(
+	ctx context.Context,
+	cfg *substrate.Config,
+	logger substrate.Logger,
+) (*replayWiring, error) {
+	registry := substrate.NewPluginRegistry()
+	tc := substrate.NewTimeController(time.Now())
+
+	store, err := newLoadedEventStore(ctx, cfg, tc, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// A real manager rather than nil, and a memory one rather than one selected
+	// from cfg.State: the server itself calls NewMemoryStateManager()
+	// unconditionally, and cfg.State has no reader that constructs anything —
+	// honoring it is #881, and it needs a second backend to select (#2).
+	state := substrate.NewMemoryStateManager()
+
+	authCtrl := substrate.NewAuthController(state, logger,
+		substrate.WithAuthTimeController(tc))
+
+	// The plugins get a recording-disabled store, not the one being replayed. A
+	// replay must not write to the log it is reading: the CloudFormation deployer
+	// records its in-process resource calls (cfn_deployer.go), so replaying one
+	// CreateStack against the loaded store would append events that never happened
+	// in the recorded run — and with a file backend the automatic flush would put
+	// them in the recording, so the next replay of the same stream would read a
+	// longer stream. A disabled store is what the CloudFormation plugin itself
+	// falls back to when no store is supplied (cloudformation_plugin.go).
+	//
+	// The cost is that a plugin which *reads* the log — Cost Explorer is the only
+	// one — sees an empty store on replay, so a ce operation replays against no
+	// cost history. That is a fidelity gap in one service, against corrupting the
+	// event log in every stack replay; it is recorded rather than traded away.
+	pluginStore := substrate.NewEventStore(substrate.EventStoreConfig{Enabled: false})
+
+	if err := substrate.RegisterDefaultPlugins(ctx, registry, state, tc, logger, pluginStore, cfg,
+		substrate.WithPluginAuth(authCtrl)); err != nil {
+		return nil, fmt.Errorf("register plugins: %w", err)
+	}
+
+	// ReplayConfig is still the zero value: populating it needs a replay: config
+	// section that does not exist, which is #880. It is carried on the result so
+	// the summary can say that state was not checked rather than that it matched.
+	replayCfg := substrate.ReplayConfig{}
+
+	return &replayWiring{
+		engine: substrate.NewReplayEngine(store, state, tc, registry, replayCfg, logger),
+		store:  store,
+		config: replayCfg,
+	}, nil
+}
+
+// replayStateSummary renders the state verdict for the replay summary.
+//
+// The distinction it draws is the point. ReplayResults.StateValid starts true and
+// is only ever falsified by a hash comparison that ValidateState gates, so with
+// validation off — the only setting reachable today, per #880 — a replay that
+// reached a completely different state still reports StateValid: true. Printing
+// that as "valid" would be this release's own defect in the release's own output:
+// a value that did not come from where it appears to.
+func replayStateSummary(cfg substrate.ReplayConfig, results *substrate.ReplayResults) string {
+	if !cfg.ValidateState {
+		return "not checked (state validation is off)"
+	}
+	if results.StateValid {
+		return "valid"
+	}
+	return fmt.Sprintf("MISMATCH (%d error(s))", len(results.StateErrors))
+}
+
 func newServerCmd() *cobra.Command {
 	var configPath string
 	var address string
@@ -297,15 +453,29 @@ any determinism differences.`,
 			}
 
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
-			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
-			tc := substrate.NewTimeController(time.Now())
-			registry := substrate.NewPluginRegistry()
-
-			engine := substrate.NewReplayEngine(store, nil, tc, registry,
-				substrate.ReplayConfig{}, logger)
-
 			ctx := context.Background()
-			results, err := engine.Replay(ctx, streamID)
+
+			wiring, err := newReplayEngineWiring(ctx, cfg, logger)
+			if err != nil {
+				return err
+			}
+			defer wiring.store.Close() //nolint:errcheck
+
+			// The stream is checked here rather than left to the engine so the
+			// error names where the events were looked for. Replay's own
+			// "no events in stream: <id>" says nothing a user can act on.
+			events, err := wiring.store.GetStream(ctx, streamID)
+			if err != nil {
+				return fmt.Errorf("get stream %q: %w", streamID, err)
+			}
+			if len(events) == 0 {
+				stats := wiring.store.GetStats(ctx)
+				return fmt.Errorf(
+					"stream %q has no events in event store %s; the store holds %d event(s) in %d stream(s)",
+					streamID, eventStoreLocation(cfg.EventStore), stats.TotalEvents, stats.TotalStreams)
+			}
+
+			results, err := wiring.engine.Replay(ctx, streamID)
 			if err != nil {
 				return fmt.Errorf("replay %q: %w", streamID, err)
 			}
@@ -314,9 +484,26 @@ any determinism differences.`,
 			fmt.Printf("  Total:    %d\n", results.TotalEvents)
 			fmt.Printf("  Success:  %d\n", results.SuccessEvents)
 			fmt.Printf("  Failed:   %d\n", results.FailedEvents)
+			fmt.Printf("  Skipped:  %d\n", results.SkippedEvents)
 			fmt.Printf("  Duration: %s\n", results.Duration)
+			// StateValid and StateErrors are what ReplayResults' own doc comment
+			// names as the verdict, and the summary omitted both — so a replay that
+			// reached a different state than the recording reported nothing but a
+			// success count (#855).
+			fmt.Printf("  State:    %s\n", replayStateSummary(wiring.config, results))
+			for _, se := range results.StateErrors {
+				fmt.Printf("    - %s\n", se)
+			}
 			if len(results.Differences) > 0 {
 				fmt.Printf("  Differences: %d\n", len(results.Differences))
+			}
+			// A stream recorded without event_store.include_bodies carries no
+			// request on any event, so every event is skipped and nothing at all
+			// is verified. Saying "Success: 0, Skipped: N" leaves the reader to
+			// work out why; this says it (#855).
+			if results.SkippedEvents == results.TotalEvents {
+				fmt.Printf("\nNo event was re-executed: every event was skipped for want of a recorded request.\n" +
+					"Record with event_store.include_bodies: true — a stream recorded without it cannot be replayed.\n")
 			}
 			return nil
 		},
@@ -347,7 +534,14 @@ Supports NDJSON (newline-delimited JSON) and CSV output formats.`,
 				return fmt.Errorf("load config: %w", err)
 			}
 
-			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
+			loadCtx := context.Background()
+			store, err := newLoadedEventStore(loadCtx, cfg,
+				substrate.NewTimeController(time.Now()), logger)
+			if err != nil {
+				return err
+			}
+			defer store.Close() //nolint:errcheck
 
 			filter := substrate.EventFilter{
 				StreamID: streamID,
@@ -393,6 +587,23 @@ Supports NDJSON (newline-delimited JSON) and CSV output formats.`,
 			}
 			if output != "" && output != "-" {
 				fmt.Fprintf(os.Stderr, "exported %d events to %s\n", n, output)
+			}
+			// An empty export used to be indistinguishable from a full one: the
+			// document was valid, the exit status was 0, and on the default
+			// --output - there was no stderr line at all. Which of the two empties
+			// this is decides what the user does next — widen the filter, or point
+			// at the backend that has the events (#879).
+			if n == 0 {
+				stats := store.GetStats(ctx)
+				if stats.TotalEvents == 0 {
+					fmt.Fprintf(os.Stderr,
+						"exported 0 events: event store %s holds none\n",
+						eventStoreLocation(cfg.EventStore))
+				} else {
+					fmt.Fprintf(os.Stderr,
+						"exported 0 events: no event matched the filter; the store holds %d event(s) in %d stream(s)\n",
+						stats.TotalEvents, stats.TotalStreams)
+				}
 			}
 			return nil
 		},
@@ -493,21 +704,29 @@ Full interactive time-travel debugging will be available in a later release.`,
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
-			_ = cfg // used for future persistence options
-
-			store := substrate.NewEventStore(substrate.EventStoreConfig{
-				Enabled: true,
-				Backend: "memory",
-			})
-
+			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
 			ctx := context.Background()
+
+			// The configured backend, not a hardcoded memory one. A fresh memory
+			// store in a new process has no events by construction, so this command
+			// printed "contains no events" for every stream that has ever existed —
+			// under help text promising to list them (#879).
+			store, err := newLoadedEventStore(ctx, cfg,
+				substrate.NewTimeController(time.Now()), logger)
+			if err != nil {
+				return err
+			}
+			defer store.Close() //nolint:errcheck
+
 			events, err := store.GetStream(ctx, streamID)
 			if err != nil {
 				return fmt.Errorf("get stream %q: %w", streamID, err)
 			}
 
 			if len(events) == 0 {
-				fmt.Printf("stream %q contains no events\n", streamID)
+				stats := store.GetStats(ctx)
+				fmt.Printf("stream %q contains no events — event store %s holds %d event(s) in %d stream(s)\n",
+					streamID, eventStoreLocation(cfg.EventStore), stats.TotalEvents, stats.TotalStreams)
 				return nil
 			}
 
