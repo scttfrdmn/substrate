@@ -160,6 +160,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **An RDS DB cluster and DB subnet group can be tagged through the ARN RDS reports for them,
+  and tagging one no longer truncates its record** (part of #835). Two defects, and the second
+  is why this is `Fixed` rather than `Added`.
+
+  `CreateDBCluster` and `CreateDBSubnetGroup` report `cluster:` and `subgrp:` ARNs, and
+  substrate's own `AddTagsToResource`, `RemoveTagsFromResource` and `ListTagsForResource` then
+  refused those ARNs as an unsupported resource type — the resolver knew `db:` and `snapshot:`
+  only. So substrate handed a caller a value that its own API would not accept, which is what
+  #765 exists to prevent, and the Resource Groups Tagging API could not reach either resource
+  at all. Both now resolve, through the same builder RDS's own tag operations use, so the two
+  cannot disagree about which record a tag lands on — ECS's arrangement since #826, applied
+  here for the same reason.
+
+  The worse half was in the tagging API's `rds` arm, and it arrived the moment a cluster
+  became reachable. That arm merged a tag by decoding the record into an `RDSDBInstance` and
+  storing the result back, whatever the key named. A cluster round-tripped through an
+  instance-shaped struct loses every member an instance does not carry under the same name, so
+  `DescribeDBClusters` would afterwards report no endpoint, no reader endpoint, no master
+  username and no port. Nothing refuses and the tag itself is correct, which is the shape of
+  defect a test asserting on the tag cannot see; the tests here assert on the *other* members.
+  The arm now edits the tags member of the raw JSON and leaves the rest of the record alone,
+  through a helper the ECS arm's pattern is generalised into. RDS spells the member `Tags` and
+  ECS spells it `tags`, so the name is a parameter — and a member differing only in case is an
+  error rather than a second member written beside the real one, because every way of not
+  writing a tag has to fail rather than answer `200`.
+
+  Three smaller things the same path was getting wrong. A missing resource answered
+  `DBInstanceNotFound` whatever kind the ARN named, which tells a caller polling for a cluster
+  that it asked about the wrong sort of thing; each kind now answers the code AWS publishes for
+  it (`DBClusterNotFoundFault`, `DBSnapshotNotFound`, `DBSubnetGroupNotFoundFault`).
+  `ListTagsForResource` built `TagList` by ranging a Go map, so two identical calls could
+  answer in different orders and a recorded run could not replay; it is sorted by key. And
+  `loadTagsByARN` discarded a JSON unmarshal failure and returned no tags, so a record
+  substrate could not read answered `200` with an empty `TagList`, indistinguishable from an
+  untagged resource — it now reports the error.
+
+  `GetResources` gained scanners for both types, since a resolver arm alone makes a resource
+  taggable by name while leaving it invisible to a caller discovering resources. An automated
+  snapshot's ARN needed no work and the analysis is recorded rather than acted on: AWS writes it
+  `snapshot:rds:{name}` and the extra segment belongs to the identifier, so the existing parse
+  already addresses it correctly.
+
+  Provenance. The four resource-type segments, and `cluster-pg`/`cluster-snapshot` being
+  distinct types rather than prefixes of `cluster`, are AWS's from "Constructing an ARN for
+  Amazon RDS". Three of the four 404 codes are on `AddTagsToResource`' and
+  `ListTagsForResource`' own published error lists verbatim. The subnet-group code and status
+  are AWS's too, from `DescribeDBSubnetGroups`, but **answering it at a tagging operation whose
+  published error list omits any subnet-group fault is substrate's reading** — the alternative,
+  keeping `DBInstanceNotFound`, is wrong under any reading. **Sorting `TagList` is also
+  substrate's reading**: AWS documents no order for it and its own sample response renders
+  `owner` before `environment`.
+
+  This closes two of #835's nine remaining rows, so the issue stays open.
 - **`state:` decides which state manager is built, and an unimplemented backend is refused
   instead of silently answered with memory** (#881). `Config.State` was configuration nothing
   read: `DefaultConfig` and `Validate` were its only non-test references and neither constructed

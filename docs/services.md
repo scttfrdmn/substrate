@@ -8084,11 +8084,11 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans sixteen resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans eighteen resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines, ECR repositories, ECS clusters, Cognito user
-pools, Kinesis streams, RDS DB instances, ElastiCache cache clusters, EFS file
-systems and Glue databases.
+pools, Kinesis streams, RDS DB instances, DB clusters and DB subnet groups,
+ElastiCache cache clusters, EFS file systems and Glue databases.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8148,6 +8148,25 @@ longer receives a request context at all, so no arm can reach for the caller's
 account again. ECS's own `TagResource` had the same defect and now shares one key
 builder with the ARN resolver, which is also what lets the tagging API reach an
 ECS service, task and task definition rather than a cluster only.
+
+RDS follows the same shape as of #835: the `rds` arm and RDS's own three tag
+operations resolve through one builder, so the tagging API now reaches a DB
+cluster and a DB subnet group as well as an instance and a snapshot — see
+[the RDS section](#an-rds-arn-addresses-the-resource-it-names) for the four
+segments and the per-kind 404.
+
+Sharing the resolver is only half of what that took. The `rds` arm merged a tag by
+decoding the record into an `RDSDBInstance` and storing the result back, whatever
+the key named — so tagging a cluster through the tagging API replaced the cluster
+record with an instance-shaped one, and every member an instance does not carry
+under the same name went missing. Nothing refused and the tag itself looked right;
+`DescribeDBClusters` simply stopped reporting the endpoint, the reader endpoint and
+the port. That is data loss rather than a missing feature, which is why the arm now
+edits the tags member of the raw JSON and leaves every other member untouched —
+ECS's pattern, generalised so the two services share it. RDS spells the member
+`Tags` and ECS spells it `tags`, so the member name is a parameter, and a
+case-differing member is an error rather than a second member written alongside the
+real one: every way of not writing a tag has to fail.
 
 AWS does not publish what a cross-account ARN does here: `TagResources` says only
 that "you can only tag resources that are located in the specified AWS Region for
@@ -8905,10 +8924,96 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | DescribeDBInstances | |
 | DeleteDBInstance | |
 | ModifyDBInstance | |
+| StartDBInstance | |
+| StopDBInstance | |
+| RebootDBInstance | |
 | CreateDBSnapshot | |
 | DescribeDBSnapshots | |
 | DeleteDBSnapshot | |
 | RestoreDBInstanceFromDBSnapshot | |
+| CreateDBCluster | |
+| DescribeDBClusters | |
+| DeleteDBCluster | |
+| CreateDBSubnetGroup | |
+| DescribeDBSubnetGroups | |
+| DeleteDBSubnetGroup | |
+| CreateDBParameterGroup | |
+| DescribeDBParameterGroups | |
+| DeleteDBParameterGroup | |
+| ListTagsForResource | `TagList` sorted by key — see below |
+| AddTagsToResource | |
+| RemoveTagsFromResource | |
+
+### An RDS ARN addresses the resource it names
+
+The three tag operations take a `ResourceName` ARN, and so does the Resource
+Groups Tagging API. Both resolve it through one function, for the reason #826
+established: two derivations of one key drift, and where they drift a tag is
+written to a record the other side does not read.
+
+Four of AWS's RDS resource-type segments resolve, and they are the four whose
+records substrate stores tags on:
+
+| Segment | Example | Resource |
+|---------|---------|----------|
+| `db` | `arn:aws:rds:{region}:{account}:db:{name}` | DB instance |
+| `cluster` | `arn:aws:rds:{region}:{account}:cluster:{name}` | DB cluster |
+| `snapshot` | `arn:aws:rds:{region}:{account}:snapshot:{name}` | DB snapshot |
+| `subgrp` | `arn:aws:rds:{region}:{account}:subgrp:{name}` | DB subnet group |
+
+`cluster:` and `subgrp:` were absent until #835, and their absence was a
+self-contradiction rather than a gap: `CreateDBCluster` and `CreateDBSubnetGroup`
+report those ARNs, and substrate's own tag operations then refused them as an
+unsupported resource type. That breaks #765's rule — a value substrate reports has
+to be usable against the API that reported it — and it also put the tagging API's
+`rds` arm out of reach of both resources entirely.
+
+An **automated** snapshot needs no separate handling. AWS writes its ARN as
+`snapshot:rds:{name}`, and the extra segment belongs to the identifier: such a
+snapshot really is named `rds:mydb-2019-07-22-07-23`. The parse keeps the whole
+remainder, so the ARN addresses that identifier rather than a truncated one. For
+the other three types an identifier containing `/` or `:` is refused, because RDS
+accepts neither in a name and a key built from one addresses nothing — reported as
+a malformed ARN rather than as an absent resource, which is the difference between
+a caller fixing its ARN and a caller waiting for a resource to appear.
+
+The account and Region come from the ARN and never from the calling request, so an
+ARN naming another account's cluster resolves that account's cluster or none at
+all. It cannot reach the caller's own same-named one.
+
+`cluster-pg` and `cluster-snapshot` are their own segments in AWS's ARN table, not
+prefixes of `cluster`, and substrate stores neither — so both are refused, as are
+`pg` and `es`.
+
+### A missing resource names its own kind
+
+Each of the three tag operations answers the 404 AWS publishes for the kind of
+resource the ARN named, rather than one code for all four. Reporting
+`DBInstanceNotFound` for a cluster tells a caller polling for a cluster that it
+asked about the wrong sort of thing, and a consumer branching on the code to
+decide whether to keep waiting branches wrong.
+
+| Resource | Code | Status |
+|----------|------|--------|
+| DB instance | `DBInstanceNotFound` | 404 |
+| DB cluster | `DBClusterNotFoundFault` | 404 |
+| DB snapshot | `DBSnapshotNotFound` | 404 |
+| DB subnet group | `DBSubnetGroupNotFoundFault` | 404 |
+
+The first three are on `AddTagsToResource`' and `ListTagsForResource`' own
+published error lists verbatim. The fourth is **substrate's reading** in one
+respect only: a DB subnet group is a taggable type in AWS's ARN table, but neither
+tagging operation's published error list names a subnet-group fault. The code and
+the status are still AWS's — `DescribeDBSubnetGroups` publishes
+`DBSubnetGroupNotFoundFault`/404, "`DBSubnetGroupName` doesn't refer to an existing
+DB subnet group." — so what substrate decides is where to answer it, not what it
+is. Keeping `DBInstanceNotFound` for a subnet group is wrong under any reading.
+
+`TagList` is sorted by key. **AWS documents no order for it** — its own sample
+response renders `owner` before `environment` — so this is substrate's reading,
+taken for the reason #862 records: the list was built by ranging a Go map, so two
+identical calls answered in different orders and a caller asserting on the body
+could not replay a recorded run.
 
 ### CloudFormation resource types
 

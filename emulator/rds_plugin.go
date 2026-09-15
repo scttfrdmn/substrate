@@ -1083,131 +1083,9 @@ func (p *RDSPlugin) deleteDBParameterGroup(reqCtx *RequestContext, req *AWSReque
 }
 
 // --- Tagging operations ---
-
-func (p *RDSPlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	resourceARN := req.Params["ResourceName"]
-	if resourceARN == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
-	}
-	tags, err := p.loadTagsByARN(resourceARN)
-	if err != nil {
-		return nil, err
-	}
-
-	type xmlTag struct {
-		Key   string `xml:"Key"`
-		Value string `xml:"Value"`
-	}
-	type result struct {
-		TagList []xmlTag `xml:"TagList>Tag"`
-	}
-	type response struct {
-		XMLName xml.Name `xml:"ListTagsForResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"ListTagsForResourceResult"`
-	}
-	xmlTags := make([]xmlTag, 0, len(tags))
-	for k, v := range tags {
-		xmlTags = append(xmlTags, xmlTag{Key: k, Value: v})
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{TagList: xmlTags},
-	})
-}
-
-func (p *RDSPlugin) addTagsToResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	resourceARN := req.Params["ResourceName"]
-	if resourceARN == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
-	}
-	newTags := rdsTagsFromParams(req.Params)
-	if err := p.updateTagsByARN(resourceARN, newTags, nil); err != nil {
-		return nil, err
-	}
-	type response struct {
-		XMLName xml.Name `xml:"AddTagsToResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{XMLNS: rdsXMLNS})
-}
-
-func (p *RDSPlugin) removeTagsFromResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	resourceARN := req.Params["ResourceName"]
-	if resourceARN == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
-	}
-	keys := extractIndexedParams(req.Params, "TagKeys.member")
-	if err := p.updateTagsByARN(resourceARN, nil, keys); err != nil {
-		return nil, err
-	}
-	type response struct {
-		XMLName xml.Name `xml:"RemoveTagsFromResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{XMLNS: rdsXMLNS})
-}
-
-// loadTagsByARN resolves an RDS ARN and returns the resource's tags.
-func (p *RDSPlugin) loadTagsByARN(arn string) (map[string]string, error) {
-	ns, key, err := rdsResolveARN(arn)
-	if err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
-	}
-	data, err := p.state.Get(context.Background(), ns, key)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "DBInstanceNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
-	}
-	var res struct {
-		Tags map[string]string `json:"Tags"`
-	}
-	if json.Unmarshal(data, &res) != nil {
-		return nil, nil //nolint:nilerr
-	}
-	return res.Tags, nil
-}
-
-// updateTagsByARN merges or removes tags on the resource identified by arn.
-func (p *RDSPlugin) updateTagsByARN(arn string, add map[string]string, removeKeys []string) error {
-	_, key, err := rdsResolveARN(arn)
-	if err != nil {
-		return &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
-	}
-	// Determine the resource type from the key prefix.
-	var instKey string
-	switch {
-	case strings.HasPrefix(key, "dbinstance:"):
-		instKey = key
-	case strings.HasPrefix(key, "dbsnapshot:"):
-		instKey = key
-	default:
-		instKey = key
-	}
-	data, err := p.state.Get(context.Background(), rdsNamespace, instKey)
-	if err != nil || data == nil {
-		return &AWSError{Code: "DBInstanceNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
-	}
-
-	// Generic tag merge via raw JSON.
-	var m map[string]interface{}
-	if err := json.Unmarshal(data, &m); err != nil {
-		return fmt.Errorf("rds updateTagsByARN unmarshal: %w", err)
-	}
-	existingTags := map[string]string{}
-	if t, ok := m["Tags"]; ok && t != nil {
-		if tagMap, ok := t.(map[string]interface{}); ok {
-			for k, v := range tagMap {
-				if sv, ok := v.(string); ok {
-					existingTags[k] = sv
-				}
-			}
-		}
-	}
-	merged := mergeStringMap(existingTags, add, removeKeys)
-	m["Tags"] = merged
-	updated, _ := json.Marshal(m)
-	return p.state.Put(context.Background(), rdsNamespace, instKey, updated)
-}
+//
+// AddTagsToResource, RemoveTagsFromResource, ListTagsForResource and the shared ARN resolver
+// live in rds_tags.go.
 
 // --- XML types ---
 
@@ -1366,29 +1244,7 @@ func rdsParameterGroupARN(region, acct, name string) string {
 	return "arn:aws:rds:" + region + ":" + acct + ":pg:" + name
 }
 
-// rdsResolveARN parses an RDS ARN and returns (namespace, stateKey).
-// Supported ARN resource types: db (instance), snapshot.
-func rdsResolveARN(arn string) (ns, key string, err error) {
-	// arn:aws:rds:{region}:{acct}:{type}:{id}
-	parts := strings.SplitN(arn, ":", 7)
-	if len(parts) < 7 || parts[0] != "arn" || parts[2] != "rds" {
-		return "", "", fmt.Errorf("invalid RDS ARN: %q", arn)
-	}
-	region := parts[3]
-	acct := parts[4]
-	resType := parts[5]
-	resID := parts[6]
-	scope := acct + "/" + region
-
-	switch resType {
-	case "db":
-		return rdsNamespace, "dbinstance:" + scope + "/" + resID, nil
-	case "snapshot":
-		return rdsNamespace, "dbsnapshot:" + scope + "/" + resID, nil
-	default:
-		return "", "", fmt.Errorf("unsupported RDS ARN resource type: %q", resType)
-	}
-}
+// rdsResolveARN lives in rds_tags.go, alongside the tag operations that call it.
 
 // rdsTagsFromParams extracts Tags.member.N.Key/Value pairs from query params.
 func rdsTagsFromParams(params map[string]string) map[string]string {
