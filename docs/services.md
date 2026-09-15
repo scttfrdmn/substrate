@@ -1603,10 +1603,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteInstanceProfile | |
 | AddRoleToInstanceProfile | |
 | RemoveRoleFromInstanceProfile | |
-| ListInstanceProfiles | |
+| ListInstanceProfiles | Lists the account's profiles; decodes no parameters, so `MaxItems`, `Marker` and `PathPrefix` are ignored and `IsTruncated` is always `false` |
 | TagInstanceProfile | |
 | UntagInstanceProfile | |
 | ListInstanceProfileTags | |
+| GetAccountAuthorizationDetails | Reports the account's users, groups, roles and managed policies with their inline and attached policies in one response. `Filter` selects populations, `MaxItems` counts across all four — see below |
 
 ### What the policy simulator evaluates
 
@@ -2102,11 +2103,12 @@ depend on the event log rather than on state.
 assuming request's region and not the emulator's configured one: assuming the same role from
 `eu-west-2` and then `ap-southeast-1` reports each in turn.
 
-**Only `GetRole` reports it.** The `RoleLastUsed` type says so directly: *"This data type is
-returned as a response element in the GetRole and GetAccountAuthorizationDetails operations."*
-Substrate does not answer `GetAccountAuthorizationDetails` at all, so `GetRole` is the whole of
-the member's reach; if that operation is added later it renders a role through the same wrapper
-and gains the member with it. `ListRoles` excludes it by name, in the same sentence that
+**Only `GetRole` and `GetAccountAuthorizationDetails` report it.** The `RoleLastUsed` type says
+so directly: *"This data type is returned as a response element in the GetRole and
+GetAccountAuthorizationDetails operations."* Substrate answers both since #848, and the second
+renders the member in two places — on a `RoleDetail`, and on each role nested inside that
+detail's `InstanceProfileList`, which is where AWS's own sample response puts it. `ListRoles`
+excludes it by name, in the same sentence that
 excludes `PermissionsBoundary` and `Tags`, and the roles nested inside an instance-profile
 shape are a list too. `CreateRole` and `CreateServiceLinkedRole` share the single-role wrapper
 and report none, because a role created a moment ago has not been assumed.
@@ -2124,6 +2126,99 @@ its absence.
 
 A role record written by an earlier version reads back with no last use, which is the same
 thing a never-assumed role is.
+
+### The account-wide authorization snapshot
+
+`GetAccountAuthorizationDetails` reports the account's users, groups, roles and managed
+policies in one response, each with its inline policies, its attached managed policies and —
+for a user — its group memberships ([#848](https://github.com/scttfrdmn/substrate/issues/848)).
+It answered `InvalidAction`/400 before, while the action was already authorizable, so a
+consumer's permission to call it did not mean the call worked.
+
+It is the **only** operation that reports all four entity shapes together, which is what makes
+it worth having beyond the convenience: `AttachmentCount`,
+`PermissionsBoundaryUsageCount` and `RoleLastUsed` are each derived per read, and nothing else
+puts a derivation side by side with the operation that reports the same value singly. All three
+were defects — #847, #815 and #816 — precisely because no response contained two of them at once.
+
+**The four detail shapes are not the shapes the single-entity reads use.** `UserDetail` has no
+`PasswordLastUsed` and `RoleDetail` has neither `Description` nor `MaxSessionDuration`, though
+`GetUser` and `GetRole` report all three; `GroupDetail`'s scalars match `Group`'s exactly, and
+`ManagedPolicyDetail` carries no `Tags`. The roles nested inside a `RoleDetail`'s
+`InstanceProfileList` are `Role`, not `RoleDetail`, so `Description` and `MaxSessionDuration`
+*are* admissible there. The wrapper names differ from the sibling listings too:
+`AttachedManagedPolicies`, not the `AttachedPolicies` that `ListAttachedRolePolicies` sends.
+
+**An embedded role is re-read from state, never taken from the instance-profile record.**
+`AddRoleToInstanceProfile` stores a copy of the role inside the profile, and every later write
+to that role — STS's `RoleLastUsed`, `UpdateRole`'s description and session duration,
+`UpdateAssumeRolePolicy`'s trust policy — lands on the role's own record and never reaches the
+copy. AWS's sample response renders `<RoleLastUsed>` inside `InstanceProfileList → Roles →
+member`, so rendering the stored copy would report nothing there for essentially every role that
+has been assumed. A role state no longer holds keeps the embedded copy, since that is all there
+is to report.
+
+**`MaxItems` counts across the four lists combined, which AWS does not document.** The page says
+only *"the maximum number of items"*, and the response carries four lists plus one `Marker`.
+Substrate pages one combined, ordered key space — keys composed as `user/<name>`,
+`group/<name>`, `role/<name>` and `policy/<arn>` — so a `Marker` is unambiguous across the
+populations: a per-list cursor would skip or repeat an entity at every page boundary. Each of the
+four list elements is emitted whether or not the page holds a member of it, so a consumer decodes
+one shape rather than branching. With 52 bundled managed policies against a default `MaxItems` of
+100, **truncation is on the default path** for any account of moderate size — a caller that
+ignores `IsTruncated` here sees a partial account, not an edge case.
+
+**Policy documents follow the per-shape pages, not the operation's blanket note**, and AWS's own
+documentation contradicts itself about this. The operation page states that every policy document
+in the response is URL-encoded per RFC 3986, while **its own sample response renders all of them
+as plain JSON**; of the members, only `PolicyVersion.Document`'s type page repeats the mandate,
+and `PolicyDetail.PolicyDocument` and `RoleDetail.AssumeRolePolicyDocument` carry no such
+sentence. Substrate follows the per-shape pages, so one response carries both conventions:
+`PolicyVersionList[].Document` is percent-encoded, byte-identical to `GetPolicyVersion`'s, while
+the inline documents and the trust policy are plain JSON, byte-identical to `GetUserPolicy`'s and
+`GetRole`'s. That is the invariant this operation exists to protect — a shape must not diverge
+between the operations reporting it — and encoding everything instead would be a breaking wire
+change to five shipped operations. The contradiction is recorded rather than silently resolved;
+`GetRole`'s page shows the same one.
+
+`SAMLProviderList` is a `Filter` value AWS accepts and substrate refuses, because substrate
+models no SAML provider: accepting the filter would select nothing, and a caller reading an empty
+`UserDetailList` could not tell that from an account with no users. Errors come from
+`CommonErrors` — the page itself declares only `ServiceFailure`/500 — so an unknown `Filter`
+value is `ValidationError`/400.
+
+### An out-of-range `MaxItems` is refused, not silently rewritten
+
+Every IAM operation that decodes `MaxItems` refuses a value outside 1–1000
+([#868](https://github.com/scttfrdmn/substrate/issues/868)). AWS's `maxItemsType` has `Min: 1`
+and `Max: 1000`, and the service refuses `MaxItems=0` or `MaxItems=1001` rather than choosing a
+value for the caller.
+
+The code is `ValidationError`/400 at nineteen operations and `InvalidInput`/400 at
+`SimulatePrincipalPolicy` and `SimulateCustomPolicy`, and that split is AWS's rather than
+substrate's: the two simulate operations publish `InvalidInput` in their own Errors sections,
+while `ListUsers`, `ListUserTags` and the rest publish only `NoSuchEntity` and `ServiceFailure`
+— so for them the code can only come from `CommonErrors`, which does not list `InvalidInput` at
+all. Only the code differs; the bounds and the presence rule below are the same everywhere, so
+no IAM operation disagrees with another about which values are acceptable.
+
+`ListInstanceProfiles` is the one exception, and it is a gap rather than a decision: it decodes
+no request parameters at all, so it ignores `MaxItems`, `Marker` and `PathPrefix` and always
+reports `IsTruncated` as `false`. There is no decoded value for the guard to range-check, so
+closing the gap means implementing the pagination the operation has never had; that is tracked
+separately as #873.
+
+Substrate coerced instead: the shared paginator rewrote anything outside the range to 100, so a
+caller who asked for 1001 items got 100 and a caller who asked for 0 got 100 — a page size no
+part of the request named. That is the release's theme applied to a request parameter rather than
+a response value. The coercion is still the **defaulting** path for an *absent* `MaxItems`, which
+is what AWS's documented default of 100 means; it is no longer reachable by a value the caller
+actually sent.
+
+A parameter that is present but empty is accepted, and that is a decision rather than an
+oversight: a form body carrying `MaxItems=` expressed no limit, so it takes the default. The
+refusal is per operation, in the handler, rather than in the paginator, because the paginator
+cannot tell an absent parameter from a zero one.
 
 ### The tagging operations, and what a listing reports
 

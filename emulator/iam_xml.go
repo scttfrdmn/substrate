@@ -73,6 +73,31 @@ func xmlEsc(s string) string {
 
 // --- Per-resource XML builders -----------------------------------------------
 
+// iamUserIdentityXML returns the five members every user-shaped element carries:
+// UserId, UserName, Arn, Path and CreateDate.
+//
+// Separate from [iamUserXMLFields] because `UserDetail` —
+// `GetAccountAuthorizationDetails`' user shape — carries exactly these five of the
+// stored entity and *no* `PasswordLastUsed` (#848). Sharing the scalars rather than
+// spelling them a second time is what keeps the two shapes from drifting: a member
+// added here reaches both, and a member that belongs to only one of them cannot be
+// added here at all.
+func iamUserIdentityXML(u *IAMUser) string {
+	var b strings.Builder
+	b.WriteString("<UserId>")
+	b.WriteString(xmlEsc(u.UserID))
+	b.WriteString("</UserId><UserName>")
+	b.WriteString(xmlEsc(u.UserName))
+	b.WriteString("</UserName><Arn>")
+	b.WriteString(xmlEsc(u.ARN))
+	b.WriteString("</Arn><Path>")
+	b.WriteString(xmlEsc(u.Path))
+	b.WriteString("</Path><CreateDate>")
+	b.WriteString(u.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
+	b.WriteString("</CreateDate>")
+	return b.String()
+}
+
 // iamUserXMLFields returns XML element content for an IAMUser (no wrapper tag).
 //
 // PasswordLastUsed is rendered here, so it reaches both user shapes: AWS's `User`
@@ -87,19 +112,13 @@ func xmlEsc(s string) string {
 // The member therefore also cannot appear on `CreateUser`, which shares this
 // builder and is the one operation returning `User` that AWS's sentence excludes: a
 // user created a moment ago has never used a password, so AWS omits it there too.
+//
+// `UserDetail` does *not* share this builder, and that is the whole reason
+// [iamUserIdentityXML] exists: AWS's `UserDetail` has no `PasswordLastUsed` member at
+// all, so rendering it there would report a member the shape cannot carry.
 func iamUserXMLFields(u *IAMUser) string {
 	var b strings.Builder
-	b.WriteString("<UserId>")
-	b.WriteString(xmlEsc(u.UserID))
-	b.WriteString("</UserId><UserName>")
-	b.WriteString(xmlEsc(u.UserName))
-	b.WriteString("</UserName><Arn>")
-	b.WriteString(xmlEsc(u.ARN))
-	b.WriteString("</Arn><Path>")
-	b.WriteString(xmlEsc(u.Path))
-	b.WriteString("</Path><CreateDate>")
-	b.WriteString(u.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
-	b.WriteString("</CreateDate>")
+	b.WriteString(iamUserIdentityXML(u))
 	if u.PasswordLastUsed != nil {
 		b.WriteString("<PasswordLastUsed>")
 		b.WriteString(u.PasswordLastUsed.UTC().Format("2006-01-02T15:04:05Z"))
@@ -108,34 +127,49 @@ func iamUserXMLFields(u *IAMUser) string {
 	return b.String()
 }
 
-// iamPermissionsBoundaryXML renders an entity's permissions boundary for a
-// single-entity shape, and nothing at all when it has none.
+// iamPermissionsBoundaryXML renders an entity's permissions boundary, and nothing at all
+// when it has none.
 //
 // Omitted when absent because `PermissionsBoundary` is `Required: No` on both `User`
 // and `Role`, and rendering an empty element would report a boundary policy with an
 // empty ARN where AWS reports no boundary at all.
 //
-// Called from the single-entity wrappers only, never from a listing builder, for the
-// same reason [iamEntityTagsXML] is: AWS's listing operations exclude it by name.
-// `ListRoles` and `ListUsers` both carry this note verbatim (#807):
+// Substrate renders three populations of user and role element, and this member reaches
+// two of them. The same three-way split governs [iamEntityTagsXML] and
+// [iamRoleLastUsedXML], and it is AWS's, not substrate's (#848):
 //
-//	IAM resource-listing operations return a subset of the available attributes for the
-//	resource. This operation does not return the following attributes, even though they are
-//	an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags. To view
-//	all of the information for a role, see GetRole.
+//   - The **single-entity** shapes — `GetUser`, `GetRole`, `CreateUser`, `CreateRole` —
+//     carry it, via [iamSingleUserXML] and [iamSingleRoleXML].
+//
+//   - The **listing** shapes — `ListUsers`, `ListRoles`, the users inside `GetGroup`, the
+//     roles inside an instance profile — do not. AWS's listing operations exclude it by
+//     name; `ListRoles` and `ListUsers` both carry this note verbatim (#807):
+//
+//     IAM resource-listing operations return a subset of the available attributes for the
+//     resource. This operation does not return the following attributes, even though they are
+//     an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags. To view
+//     all of the information for a role, see GetRole.
+//
+//   - The **detail** shapes — `GetAccountAuthorizationDetails`' `UserDetail` and
+//     `RoleDetail` — carry it, because both type pages list `PermissionsBoundary` among
+//     their members and the operation's own sample response renders it. A detail shape is
+//     not a listing shape: the operation exists to report an account's whole authorization
+//     configuration, so a boundary is exactly what its caller came for.
 //
 // So a consumer that sets a boundary and reads it back through GetRole or GetUser sees
 // it, and one that finds the entity through ListRoles or ListUsers does not, and must
 // read the entity — which is what the note tells them to do. Substrate reported one on
-// both shapes until this release, which is a divergence in the direction where an
-// emulator is *more* generous than the service: a consumer could write an assertion
-// against a list response that AWS never satisfies.
+// both shapes until #807, which is a divergence in the direction where an emulator is
+// *more* generous than the service: a consumer could write an assertion against a list
+// response that AWS never satisfies.
 //
 // The users [iamUserListXML] renders inside `GetGroup`, and the roles
-// [iamRoleMembersXML] renders inside an instance profile, are the list shape too. AWS
-// documents no boundary on either — `GetGroup`'s and `GetInstanceProfile`'s samples both
-// carry a reduced entity — and neither operation is a way to read one entity, so the
-// note's "see GetRole" instruction applies unchanged.
+// [iamRoleMembersXML] renders inside an instance profile *for `GetInstanceProfile` and
+// `ListInstanceProfiles`*, are the list shape. AWS documents no boundary on either —
+// `GetGroup`'s and `GetInstanceProfile`'s samples both carry a reduced entity — and
+// neither operation is a way to read one entity, so the note's "see GetRole" instruction
+// applies unchanged. The same builder rendering an instance profile *inside* a
+// `RoleDetail` is the detail population and is discussed on [iamRoleMembersXML].
 //
 // The two member names are AWS's, which they were not until #852. The element used to carry
 // `PolicyArn` and `PolicyName`, and *neither name exists on AWS's shape*: the
@@ -174,9 +208,10 @@ func iamPermissionsBoundaryXML(boundary *IAMAttachedPolicy) string {
 // consumer who read the prose and asserts `Policy` needs to know which of the two substrate
 // chose and why.
 //
-// A constant rather than a literal at the one call site, so that a future shape rendering a
-// boundary — `GetAccountAuthorizationDetails`' `UserDetail` and `RoleDetail` (#848) — cannot
-// pick the other spelling.
+// A constant rather than a literal at the one call site, so that a second shape rendering a
+// boundary cannot pick the other spelling. That second shape now exists —
+// `GetAccountAuthorizationDetails`' `UserDetail` and `RoleDetail` (#848) — and it reaches the
+// value through this same builder rather than through a spelling of its own.
 const iamPermissionsBoundaryTypePolicy = "PermissionsBoundaryPolicy"
 
 // iamEntityTagsXML renders an entity's tags for a single-entity shape, and nothing at all
@@ -192,7 +227,7 @@ const iamPermissionsBoundaryTypePolicy = "PermissionsBoundaryPolicy"
 // wrapper unconditionally, is right for `ListUserTags`/`ListRoleTags`, where `Tags` is
 // required, and is guarded here (#796).
 //
-// And it is called from the single-entity wrappers only, never from a listing builder,
+// And it reaches the single-entity and the detail shapes but never a listing builder,
 // because AWS's list operations document the opposite of its single reads. `ListRoles`,
 // `ListUsers`, `ListPolicies` and `ListInstanceProfiles` all carry the same note verbatim:
 //
@@ -204,6 +239,15 @@ const iamPermissionsBoundaryTypePolicy = "PermissionsBoundaryPolicy"
 // A consumer that tags a role and reads it back through GetRole sees the tags; one that
 // finds it through ListRoles does not, and must read the entity to see them — which is
 // what the note tells them to do.
+//
+// `GetAccountAuthorizationDetails` is the third population — see
+// [iamPermissionsBoundaryXML] for the split — and there AWS's per-shape pages decide it
+// member by member rather than uniformly (#848): `UserDetail` and `RoleDetail` list `Tags`,
+// so both carry it through this builder, while `GroupDetail` and `ManagedPolicyDetail` do
+// not list it at all. Substrate stores no tags on a group anyway ([IAMGroup] has no field),
+// but a policy's tags exist and are deliberately not rendered on `ManagedPolicyDetail`: the
+// shape has no member to put them in, and `ListPolicyTags` is how that operation's caller
+// reads them.
 func iamEntityTagsXML(tags []IAMTag) string {
 	if len(tags) == 0 {
 		return ""
@@ -230,11 +274,17 @@ func iamUserListXML(users []*IAMUser) string {
 	return b.String()
 }
 
-// iamRoleXMLFields returns XML element content for an IAMRole (no wrapper tag).
+// iamRoleIdentityXML returns the five members every role-shaped element carries:
+// RoleId, RoleName, Arn, Path and CreateDate.
 //
-// `RoleLastUsed` is *not* rendered here; it is single-entity-only, via
-// [iamRoleLastUsedXML], for the reason that function documents.
-func iamRoleXMLFields(r *IAMRole) string {
+// Separate from [iamRoleXMLFields] for the reason [iamUserIdentityXML] is separate from
+// [iamUserXMLFields]: `RoleDetail` —
+// `GetAccountAuthorizationDetails`' role shape — carries these five and neither
+// `Description` nor `MaxSessionDuration`, which its type page does not list (#848). The
+// asymmetry is easy to get wrong, because the roles embedded in `RoleDetail`'s
+// `InstanceProfileList` are `Role` and not `RoleDetail`, so *there* both members are
+// admissible and [iamRoleXMLFields] is the right builder.
+func iamRoleIdentityXML(r *IAMRole) string {
 	var b strings.Builder
 	b.WriteString("<RoleId>")
 	b.WriteString(xmlEsc(r.RoleID))
@@ -247,6 +297,16 @@ func iamRoleXMLFields(r *IAMRole) string {
 	b.WriteString("</Path><CreateDate>")
 	b.WriteString(r.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
 	b.WriteString("</CreateDate>")
+	return b.String()
+}
+
+// iamRoleXMLFields returns XML element content for an IAMRole (no wrapper tag).
+//
+// `RoleLastUsed` is *not* rendered here; it is single-entity-and-detail-only, via
+// [iamRoleLastUsedXML], for the reason that function documents.
+func iamRoleXMLFields(r *IAMRole) string {
+	var b strings.Builder
+	b.WriteString(iamRoleIdentityXML(r))
 	if r.MaxSessionDuration > 0 {
 		fmt.Fprintf(&b, "<MaxSessionDuration>%d</MaxSessionDuration>", r.MaxSessionDuration)
 	}
@@ -255,6 +315,22 @@ func iamRoleXMLFields(r *IAMRole) string {
 		b.WriteString(xmlEsc(r.Description))
 		b.WriteString("</Description>")
 	}
+	b.WriteString(iamAssumeRolePolicyDocumentXML(r))
+	return b.String()
+}
+
+// iamAssumeRolePolicyDocumentXML renders a role's trust policy, and nothing at all when
+// the role has none.
+//
+// Shared by [iamRoleXMLFields] and by `GetAccountAuthorizationDetails`' `RoleDetail`, whose
+// type page lists `AssumeRolePolicyDocument` among its members (#848), so the two cannot
+// disagree about the encoding — which matters here more than anywhere else in the file,
+// because that operation's page claims *every* policy document it returns is RFC 3986
+// URL-encoded while its own sample response renders all of them as plain JSON. Substrate
+// follows the per-shape pages: only `PolicyVersion.Document`'s own type page repeats the
+// mandate, and [iamPolicyVersionXML] is the one builder that percent-encodes.
+func iamAssumeRolePolicyDocumentXML(r *IAMRole) string {
+	var b strings.Builder
 	// The Role shape carries AssumeRolePolicyDocument, so a role's trust policy is
 	// readable through GetRole/ListRoles — which is the only way a caller can
 	// confirm what UpdateAssumeRolePolicy stored (#594). Emitted as JSON rather
@@ -286,23 +362,30 @@ func iamRoleXMLFields(r *IAMRole) string {
 	return b.String()
 }
 
-// iamRoleLastUsedXML renders a role's last use for a single-entity shape, and nothing at
-// all when it has never been assumed.
+// iamRoleLastUsedXML renders a role's last use, and nothing at all when it has never been
+// assumed.
 //
-// Single-entity-only, and AWS scopes this member by naming its operations rather than by
-// leaving it to the listing note — from the `RoleLastUsed` data type (#816):
+// AWS scopes this member by naming its operations rather than by leaving it to the listing
+// note — from the `RoleLastUsed` data type (#816):
 //
 //	This data type is returned as a response element in the GetRole and
 //	GetAccountAuthorizationDetails operations.
 //
-// so it is called from [iamSingleRoleXML] and never from [iamRoleListXML] or
-// [iamRoleMembersXML]. `GetAccountAuthorizationDetails` is not among the operations
-// substrate answers, so `GetRole` is the whole of the member's reach here; if it is
-// implemented later it renders a role through this same wrapper and gains the member with
-// it. `ListRoles` excludes it by name, in the very sentence that already excludes
-// `PermissionsBoundary` and `Tags` — see [iamPermissionsBoundaryXML] for the note
-// verbatim. `CreateRole` and `CreateServiceLinkedRole` share this wrapper and render
-// nothing, because a role created a moment ago has not been assumed.
+// Both are now implemented, and that sentence is the whole rule: it is called from
+// [iamSingleRoleXML], from `GetAccountAuthorizationDetails`' `RoleDetail`, and from
+// [iamRoleMembersXML] *only* for the instance profiles nested inside a `RoleDetail`, whose
+// members that operation's own sample response renders with a `<RoleLastUsed>` (#848).
+// [iamRoleListXML] never renders it: `ListRoles` excludes it by name, in the very sentence
+// that also excludes `PermissionsBoundary` and `Tags` — see [iamPermissionsBoundaryXML] for
+// the note verbatim and for the three-population split this member follows.
+// `CreateRole` and `CreateServiceLinkedRole` share [iamSingleRoleXML] and render nothing,
+// because a role created a moment ago has not been assumed.
+//
+// A role reached through an instance profile is re-read from state before it gets here, not
+// taken from the profile record — see [IAMPlugin.iamInstanceProfilesByRole]. The stored
+// [IAMInstanceProfile.Roles] is a snapshot frozen at attach time, and STS writes
+// `RoleLastUsed` onto the role, so rendering the snapshot would report nothing here for a
+// role that has in fact been assumed.
 //
 // Omitted entirely for a never-assumed role, and **that is substrate's choice rather than
 // AWS's**. AWS's page settles neither half of the question: `LastUsedDate` is documented
@@ -349,12 +432,26 @@ func iamRoleListXML(roles []*IAMRole) string {
 
 // iamRoleMembersXML builds a <Roles> element with embedded role members
 // suitable for use inside an InstanceProfile response.
-func iamRoleMembersXML(roles []IAMRole) string {
+//
+// withRoleLastUsed decides whether each member carries `RoleLastUsed`, which is the one
+// member that differs between the two operations rendering an embedded role.
+// `GetInstanceProfile` and `ListInstanceProfiles` pass false, because their samples carry a
+// reduced entity; `GetAccountAuthorizationDetails` passes true, because its sample renders
+// `<RoleLastUsed>` inside `RoleDetailList → InstanceProfileList → Roles → member` (#848). It
+// is a parameter rather than two builders so the other eight members cannot drift apart.
+//
+// The embedded role is a `Role` and not a `RoleDetail`, so [iamRoleXMLFields] is right in
+// both cases — `Description` and `MaxSessionDuration` are admissible here even though the
+// enclosing `RoleDetail` has neither.
+func iamRoleMembersXML(roles []IAMRole, withRoleLastUsed bool) string {
 	var b strings.Builder
 	b.WriteString("<Roles>")
 	for i := range roles {
 		b.WriteString("<member>")
 		b.WriteString(iamRoleXMLFields(&roles[i]))
+		if withRoleLastUsed {
+			b.WriteString(iamRoleLastUsedXML(roles[i].RoleLastUsed))
+		}
 		b.WriteString("</member>")
 	}
 	b.WriteString("</Roles>")
@@ -537,10 +634,20 @@ func iamAccessKeyMetaListXML(keys []map[string]interface{}) string {
 	return b.String()
 }
 
-// iamAttachedPoliciesXML builds <AttachedPolicies> containing <member> elements.
-func iamAttachedPoliciesXML(policies []IAMAttachedPolicy) string {
+// iamAttachedPoliciesXML builds a named list of `AttachedPolicy` members.
+//
+// The wrapper is a parameter because AWS spells it two ways for one shape: the four
+// `ListAttached*Policies` operations return `AttachedPolicies`, while
+// `GetAccountAuthorizationDetails`' three detail shapes return the same members under
+// `AttachedManagedPolicies` (#848). It was hardcoded until then, following
+// [iamStringListXML], which is the file's precedent for a wrapper-parameterized builder.
+//
+// `PolicyName` precedes `PolicyArn`, which is the order AWS's samples use.
+func iamAttachedPoliciesXML(wrapper string, policies []IAMAttachedPolicy) string {
 	var b strings.Builder
-	b.WriteString("<AttachedPolicies>")
+	b.WriteString("<")
+	b.WriteString(wrapper)
+	b.WriteString(">")
 	for _, p := range policies {
 		b.WriteString("<member><PolicyName>")
 		b.WriteString(xmlEsc(p.PolicyName))
@@ -548,7 +655,9 @@ func iamAttachedPoliciesXML(policies []IAMAttachedPolicy) string {
 		b.WriteString(xmlEsc(p.PolicyARN))
 		b.WriteString("</PolicyArn></member>")
 	}
-	b.WriteString("</AttachedPolicies>")
+	b.WriteString("</")
+	b.WriteString(wrapper)
+	b.WriteString(">")
 	return b.String()
 }
 
@@ -586,7 +695,10 @@ func iamStringListXML(wrapper string, items []string) string {
 }
 
 // iamInstanceProfileXMLFields returns XML fields for an IAMInstanceProfile.
-func iamInstanceProfileXMLFields(p *IAMInstanceProfile) string {
+//
+// withRoleLastUsed is passed straight through to [iamRoleMembersXML], which documents which
+// operation wants which.
+func iamInstanceProfileXMLFields(p *IAMInstanceProfile, withRoleLastUsed bool) string {
 	var b strings.Builder
 	b.WriteString("<InstanceProfileId>")
 	b.WriteString(xmlEsc(p.InstanceProfileID))
@@ -599,26 +711,35 @@ func iamInstanceProfileXMLFields(p *IAMInstanceProfile) string {
 	b.WriteString("</Path><CreateDate>")
 	b.WriteString(p.CreateDate.UTC().Format("2006-01-02T15:04:05Z"))
 	b.WriteString("</CreateDate>")
-	b.WriteString(iamRoleMembersXML(p.Roles))
+	b.WriteString(iamRoleMembersXML(p.Roles, withRoleLastUsed))
 	return b.String()
 }
 
 // iamSingleInstanceProfileXML wraps instance profile fields in <InstanceProfile>.
 func iamSingleInstanceProfileXML(p *IAMInstanceProfile) string {
-	return "<InstanceProfile>" + iamInstanceProfileXMLFields(p) +
+	return "<InstanceProfile>" + iamInstanceProfileXMLFields(p, false) +
 		iamEntityTagsXML(p.Tags) + "</InstanceProfile>"
 }
 
-// iamInstanceProfileListXML builds <InstanceProfiles> containing <member> elements.
-func iamInstanceProfileListXML(profiles []IAMInstanceProfile) string {
+// iamInstanceProfileListXML builds a named list of instance-profile members.
+//
+// The wrapper is a parameter for the reason [iamAttachedPoliciesXML]'s is: AWS returns
+// `InstanceProfiles` from `ListInstanceProfiles` and the same members under
+// `InstanceProfileList` on `GetAccountAuthorizationDetails`' `RoleDetail` (#848).
+// withRoleLastUsed is passed through to [iamRoleMembersXML].
+func iamInstanceProfileListXML(wrapper string, profiles []IAMInstanceProfile, withRoleLastUsed bool) string {
 	var b strings.Builder
-	b.WriteString("<InstanceProfiles>")
+	b.WriteString("<")
+	b.WriteString(wrapper)
+	b.WriteString(">")
 	for i := range profiles {
 		b.WriteString("<member>")
-		b.WriteString(iamInstanceProfileXMLFields(&profiles[i]))
+		b.WriteString(iamInstanceProfileXMLFields(&profiles[i], withRoleLastUsed))
 		b.WriteString("</member>")
 	}
-	b.WriteString("</InstanceProfiles>")
+	b.WriteString("</")
+	b.WriteString(wrapper)
+	b.WriteString(">")
 	return b.String()
 }
 

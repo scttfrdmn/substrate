@@ -172,7 +172,8 @@ func roleLastUsedElement(t *testing.T, body string) string {
 // is assumed and then renders both of its children (#816).
 //
 // AWS's `RoleLastUsed` type is "returned as a response element in the GetRole and
-// GetAccountAuthorizationDetails operations"; substrate answers only the former. The
+// GetAccountAuthorizationDetails operations"; substrate answers both since #848, and
+// TestIAMAccountAuthorizationDetails_RoleLastUsedInsideInstanceProfile covers the other. The
 // omission before the first assume is substrate's choice, not AWS's: AWS documents
 // LastUsedDate as "null if the role has not been used within the IAM tracking period" and
 // says nothing about a role never assumed at all.

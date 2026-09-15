@@ -979,6 +979,20 @@ func IAMInstanceProfileKeyForTest(accountID, name string) string {
 	return iamInstanceProfileKey(accountID, name)
 }
 
+// IAMUserPrefixForTest wraps iamUserPrefix for external tests.
+func IAMUserPrefixForTest(accountID string) string { return iamUserPrefix(accountID) }
+
+// IAMRolePrefixForTest wraps iamRolePrefix for external tests.
+func IAMRolePrefixForTest(accountID string) string { return iamRolePrefix(accountID) }
+
+// IAMGroupPrefixForTest wraps iamGroupPrefix for external tests.
+func IAMGroupPrefixForTest(accountID string) string { return iamGroupPrefix(accountID) }
+
+// IAMInstanceProfilePrefixForTest wraps iamInstanceProfilePrefix for external tests.
+func IAMInstanceProfilePrefixForTest(accountID string) string {
+	return iamInstanceProfilePrefix(accountID)
+}
+
 // ELBTagsByARNForTest wraps elbLoadTagsByARN for external tests, so a test can assert what
 // a create or a tagging call actually persisted rather than re-reading it through
 // DescribeTags — which would let a bug in the reader hide a bug in the writer.
