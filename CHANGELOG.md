@@ -121,6 +121,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **S3 `ListBuckets` honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`,
+  and reports `Owner` and a conditional `BucketRegion`** (#884). The handler took its request as
+  `_ *AWSRequest` and implemented none of the four: it returned every bucket, unfiltered and
+  unpaged, whatever the caller asked for. The paging pair is the sharp end, because a dropped
+  parameter there is invisible in the response — a caller asking for 10 buckets and receiving 500
+  sees a well-formed answer, since a short page and a complete listing are the same shape, and a
+  caller looping on a token received page one every time, so it either spun forever or processed
+  the same buckets twice. `prefix` and `bucket-region` merely over-returned, which a consumer can
+  at least notice.
+
+  The range and default are AWS's: `max-buckets` publishes "Valid Range: Minimum value of 1.
+  Maximum value of 10000" and the page size applied when the caller names none is the documented
+  default of 10,000. An out-of-range or non-integer value is **refused** with `InvalidArgument`
+  rather than clamped, on the same reasoning as the defect itself — silently substituting a value
+  the caller did not ask for is precisely what a well-formed response hides. An undecodable
+  continuation token is refused for the sharper version of that: treating it as "no cursor" would
+  restart the listing, which is the non-terminating loop this issue describes rather than merely a
+  wrong answer. **The error code is unverified**: `API_ListBuckets` publishes no `Errors` section
+  and the S3 error-code reference returns an empty body to automated retrieval, so
+  `InvalidArgument`/400 is substrate's reading of what S3 returns for a malformed query-parameter
+  value, recorded as such in `docs/services.md`.
+
+  `bucket-region` needed no new state. `CreateBucket` already persisted the bucket's Region from
+  the request context, so the filter reads a value substrate has always stored; the issue flagged
+  storing it as "the one non-trivial part" and it was already done.
+
+  Pagination is a cursor over the lexicographic bucket-name order `StateManager.List` now
+  guarantees (#865), which is why that sort had to land first — a cursor over an unstable order
+  both omits and repeats members between pages. The order itself remains **substrate's reading**,
+  as `ListBuckets` documents none.
+
+  Two of the issue's response-member requests were reversed on the documentation rather than
+  implemented. `BucketArn` is **not** reported: the `Bucket` type says it "is only supported for S3
+  directory buckets" while `ListBuckets` "is not supported for directory buckets", so no response
+  AWS produces carries one, and synthesizing a general purpose bucket ARN would hand a consumer a
+  field readable here and empty against AWS. `BucketRegion` is reported *conditionally*, not
+  always — "If the request contains at least one valid parameter, it is included in the response" —
+  which AWS's own examples bear out, the unparameterised one showing no `BucketRegion` and the four
+  parameterised ones all showing it. `Owner` is unconditional, with `ID` set to the account ID,
+  substrate's only account-scoped identifier; `DisplayName` is omitted, as the `Owner` type gives
+  it no description and none of the five published examples renders it.
+
+  `ContinuationToken` carries the *next* page's token rather than echoing the request's, which is
+  an asymmetry with `ListObjectsV2` and AWS's own: `ListBuckets` publishes no
+  `NextContinuationToken` and reuses the one name for the forward cursor. It appears only when the
+  listing was truncated, so a last page that exactly fills `max-buckets` carries none — AWS ties
+  the token to there being "more buckets that can be listed" rather than to a full page.
 - **`ListInstanceProfiles` decodes and applies `MaxItems`, `Marker` and `PathPrefix`, the three
   parameters it accepted and ignored** (#873). The operation had no `parseIAMBody` call and no
   params struct at all: it returned every instance profile in the account with `IsTruncated`
