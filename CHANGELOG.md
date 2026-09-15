@@ -289,6 +289,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CloudFront, so there remains nothing on the service side to remove. Giving an OAI a CloudFront-side
   record is a separate decision.
 
+- **Three CLI commands read the event store's in-memory slice and never loaded it, so all three
+  reported nothing from a persistent backend** (#855, #879). `NewEventStore` builds a file backend
+  eagerly *"so `Load` can be called right away"* — and nothing in `cmd/` ever called it:
+
+  - `substrate replay <stream>` failed at `no events in stream` for **every stream that has ever been
+    recorded**. The command could not succeed;
+  - `substrate export` wrote a **valid, empty** NDJSON or CSV document with exit status 0, and on the
+    default `--output -` printed nothing at all to say so — so a user exporting a recorded run as a
+    regression fixture, one of the documented reasons the event log exists, got an empty file and no
+    indication anything was wrong;
+  - `substrate debug <stream>` loaded the config, **discarded it** (`_ = cfg // used for future
+    persistence options`), hardcoded a memory backend, and therefore always printed `stream %q
+    contains no events` — under help text promising to list them. No configuration and no argument
+    made it print an event.
+
+  All three now go through one `newLoadedEventStore`, so they cannot drift apart again, and a command
+  that finds nothing **names the backend and the path it looked in** and says what the store does
+  hold. The bare `no events in stream` was true and useless: the two overwhelmingly likely causes are
+  a memory backend, which cannot hold anything across two processes and is the shipped default, and a
+  persist path that is not the one the recording was written to — and neither is visible without
+  naming them.
+
+- **`substrate replay` wired the engine to an empty registry and a nil state manager, so even a
+  loaded stream would have verified nothing** (#855). The registry was `NewPluginRegistry()` with no
+  `RegisterDefaultPlugins`, so every event would have routed to `ServiceNotAvailable` and been
+  reported as failed; the state manager was `nil`, which made `resetState` a no-op and
+  `computeStateHash` return `""`, so **`StateValid` was vacuously true** — a passing verdict produced
+  by no comparison.
+
+  `newReplayEngineWiring` builds both, in the order `newServerCmd` fixes: the auth controller is
+  constructed **before** the plugins, because CloudFormation takes it — a stack's resource calls are
+  dispatched in process rather than through the server, so they are authorized by the controller the
+  plugin holds. The wiring is a function rather than inline in `RunE` because a `RunE` closure cannot
+  be called from a test, which is exactly why none of this was caught: the one existing replay test
+  asserts the command is non-nil and never invokes `RunE`.
+
+  **The plugins get a recording-disabled store, not the one being replayed.** Wiring a real registry
+  introduces a hazard the empty one did not have: the CloudFormation deployer records its in-process
+  resource calls, so replaying one `CreateStack` against the loaded store would append events that
+  never happened in the recorded run — and with a file backend the automatic flush would write them
+  into the recording, so the *next* replay of the same stream would read a longer stream. A replay
+  must not write to the log it is reading. The cost, recorded rather than traded away, is that the one
+  plugin which *reads* the log — Cost Explorer — sees an empty store on replay.
+
+  The summary now prints **`Skipped`, `StateValid` and `StateErrors`**, the last two being what
+  `ReplayResults`' own doc comment names as the verdict, and it says explicitly when every event was
+  skipped for want of a recorded request — a stream recorded without
+  `event_store.include_bodies` cannot be replayed at all, and `Success: 0, Skipped: N` left the reader
+  to work that out. State is reported as **"not checked"** rather than "valid" when validation never
+  ran, which is the only setting reachable until a `replay:` config section exists (#880): reporting a
+  verdict that no comparison produced would be this release's own defect in the release's own output.
+
+  Two of #855's acceptance criteria were reversed with citations rather than implemented: a
+  `StateManager` selected *per `cfg.State`* is not implementable, because `Config.State` has no reader
+  that constructs anything and the server itself calls `NewMemoryStateManager()` unconditionally
+  (#881); and populating `ReplayConfig` from config requires a config section that does not exist
+  (#880).
+
 ## [v0.115.0] - 2026-09-14
 
 ### Added
