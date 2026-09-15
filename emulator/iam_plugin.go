@@ -3291,34 +3291,5 @@ func (p *IAMPlugin) instanceProfilesHoldingRole(
 	return holders, nil
 }
 
-// listInstanceProfiles returns persisted IAM instance profiles.
-//
-// AWS publishes no resource types for this action, so [IAMPlugin.authzResource] answers every
-// IAM resource in the account and a statement scoped to one profile grants nothing here — the
-// same treatment ListUsers, ListRoles, ListGroups and ListPolicies get, and for the same
-// reason: a list operation names no resource to scope to.
-func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-
-	if err := p.authorize(goCtx, ctx, "iam:ListInstanceProfiles", p.authzResource(ctx, req)); err != nil {
-		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
-	}
-
-	keys, err := p.state.List(goCtx, iamNamespace, iamInstanceProfilePrefix(ctx.AccountID))
-	if err != nil {
-		return nil, fmt.Errorf("list instance profiles: %w", err)
-	}
-	profiles := make([]IAMInstanceProfile, 0, len(keys))
-	for _, k := range keys {
-		data, getErr := p.state.Get(goCtx, iamNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var profile IAMInstanceProfile
-		if err := json.Unmarshal(data, &profile); err != nil {
-			continue
-		}
-		profiles = append(profiles, profile)
-	}
-	return iamXMLResponse(http.StatusOK, "ListInstanceProfiles", iamInstanceProfileListXML("InstanceProfiles", profiles, false)+"<IsTruncated>false</IsTruncated>")
-}
+// listInstanceProfiles lives in iam_list_instance_profiles.go, with the three request
+// parameters it decodes and the filter-before-paginate order they need (#873).

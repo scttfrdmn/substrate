@@ -1630,7 +1630,7 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteInstanceProfile | |
 | AddRoleToInstanceProfile | |
 | RemoveRoleFromInstanceProfile | |
-| ListInstanceProfiles | Lists the account's profiles; decodes no parameters, so `MaxItems`, `Marker` and `PathPrefix` are ignored and `IsTruncated` is always `false` |
+| ListInstanceProfiles | Lists the account's profiles, narrowed by `PathPrefix` and paged by `MaxItems`/`Marker`; `PathPrefix` is applied before the page is cut — see below |
 | TagInstanceProfile | |
 | UntagInstanceProfile | |
 | ListInstanceProfileTags | |
@@ -2229,11 +2229,12 @@ while `ListUsers`, `ListUserTags` and the rest publish only `NoSuchEntity` and `
 all. Only the code differs; the bounds and the presence rule below are the same everywhere, so
 no IAM operation disagrees with another about which values are acceptable.
 
-`ListInstanceProfiles` is the one exception, and it is a gap rather than a decision: it decodes
-no request parameters at all, so it ignores `MaxItems`, `Marker` and `PathPrefix` and always
-reports `IsTruncated` as `false`. There is no decoded value for the guard to range-check, so
-closing the gap means implementing the pagination the operation has never had; that is tracked
-separately as #873.
+`ListInstanceProfiles` was the one exception, and it was a gap rather than a decision: it decoded
+no request parameters at all, so it ignored `MaxItems`, `Marker` and `PathPrefix` and always
+reported `IsTruncated` as `false`. There was no decoded value for the guard to range-check, so
+closing the gap meant implementing the pagination the operation had never had, which
+[#873](https://github.com/scttfrdmn/substrate/issues/873) did. Every IAM operation that publishes
+`MaxItems` now applies the same bounds.
 
 Substrate coerced instead: the shared paginator rewrote anything outside the range to 100, so a
 caller who asked for 1001 items got 100 and a caller who asked for 0 got 100 — a page size no
@@ -2246,6 +2247,36 @@ A parameter that is present but empty is accepted, and that is a decision rather
 oversight: a form body carrying `MaxItems=` expressed no limit, so it takes the default. The
 refusal is per operation, in the handler, rather than in the paginator, because the paginator
 cannot tell an absent parameter from a zero one.
+
+### `ListInstanceProfiles` filters before it pages
+
+`ListInstanceProfiles` applies `PathPrefix` to the whole account and *then* cuts the page
+([#873](https://github.com/scttfrdmn/substrate/issues/873)). `ListUsers` and `ListRoles` do it the
+other way round — `paginateIAMKeys` slices first and the prefix is checked while the page is
+rendered — which under-fills a page whenever the entities outside the prefix outnumber it. Ask for
+one profile under `/service-role/` with two profiles under `/` sorting ahead of it and the
+filter-after order answers an empty page while `IsTruncated` says there is more; a caller cannot
+tell that from an account with nothing under that path. The order here follows `ListPolicies`,
+which already gets it right. The `ListUsers`/`ListRoles` order is a separate defect and is not
+fixed by #873.
+
+The cost is that every profile in the account is decoded on each call rather than one page's
+worth: `PathPrefix` matches on `Path`, which lives inside the record rather than in its state key,
+so nothing can be filtered until the record is read. A page that under-fills is wrong in a way a
+caller cannot detect; an extra state read is only slower.
+
+`PathPrefix` is **validated**, against the pattern `API_ListInstanceProfiles` publishes —
+`\u002F[\u0021-\u007F]*`, a leading slash followed by any character from `!` to DEL —
+and against its published length of 1–512. An out-of-range or malformed value answers
+`ValidationError`/400. That pattern is deliberately *not* the one `ListPolicies` enforces
+(`policyPathType`, which requires a trailing slash as well): the two operations publish different
+patterns, and sharing one would refuse `/service-role` here, a prefix IAM accepts. Enforcing the
+*leading* slash is worth doing because `service-role/` matches no profile at all, and a silent
+empty result is indistinguishable from "nothing is under that path".
+
+An empty `PathPrefix` is taken as absent rather than refused against the published minimum length
+of 1, matching the `MaxItems` rule above: a form body carrying `PathPrefix=` expressed no filter,
+so it takes the documented default of `/`, which selects every profile.
 
 ### An attached policy cannot be deleted
 

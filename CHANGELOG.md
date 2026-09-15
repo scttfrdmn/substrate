@@ -68,6 +68,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **`ListInstanceProfiles` decodes and applies `MaxItems`, `Marker` and `PathPrefix`, the three
+  parameters it accepted and ignored** (#873). The operation had no `parseIAMBody` call and no
+  params struct at all: it returned every instance profile in the account with `IsTruncated`
+  hardcoded `false`, whichever of the three the caller sent. A consumer's paginator asked for
+  `MaxItems=10`, received the whole account, was told the page was complete, and concluded
+  correctly from substrate's answer and incorrectly about IAM. It is also why #868 could not reach
+  this operation — that fix range-checks a *decoded* `MaxItems`, and there was nothing decoded
+  here to check. An absent `MaxItems` now takes the documented default of 100 and reports
+  `IsTruncated` truthfully; an out-of-range one answers `ValidationError`/400, so every IAM
+  operation publishing `MaxItems` applies the same bounds.
+
+  **`PathPrefix` is applied before the page is cut, deliberately unlike `ListUsers` and
+  `ListRoles`.** Those two slice with `paginateIAMKeys` first and check the prefix while the page
+  is rendered, which under-fills a page whenever the entities outside the prefix outnumber it: one
+  profile under `/service-role/` with two profiles under `/` sorting ahead of it answers an *empty*
+  page while `IsTruncated` says there is more, and a caller cannot tell that from an account with
+  nothing under that path. `ListPolicies` already gets the order right and this follows it; the
+  `ListUsers`/`ListRoles` order is a separate defect and is not fixed here. The cost is that every
+  profile is decoded on each call rather than one page's worth, because `PathPrefix` matches on
+  `Path`, which lives inside the record rather than in its state key — and a page that under-fills
+  is wrong in a way a caller cannot detect, while an extra state read is only slower.
+
+  **`PathPrefix` is validated rather than left advisory**, so the decision is recorded rather than
+  implied by the absence of a check. It is refused against the pattern
+  `API_ListInstanceProfiles` publishes — a leading slash followed by any character from `!` to DEL
+  — and against its published length of 1–512. That pattern is *not* the one `ListPolicies`
+  enforces: `policyPathType` requires a trailing slash as well, and sharing it would refuse
+  `/service-role`, a prefix IAM accepts. Enforcing the *leading* slash is still worth doing,
+  because `service-role/` matches no profile and a silent empty result is indistinguishable from
+  "nothing is under that path" — the same accepted-and-ignored failure, moved from the parameter to
+  its value. An empty `PathPrefix` is taken as absent, matching the `MaxItems` presence rule, so
+  the two parameters cannot disagree about what an empty value means in one request. Recorded in
+  `docs/services.md`.
 - **The three IAM detach operations validate `PolicyArn`'s shape, so a malformed ARN is refused
   with the code the attach already answers** (#875). `DetachUserPolicy`, `DetachRolePolicy` and
   `DetachGroupPolicy` were the last policy-ARN operations without the #499 check. They now answer
