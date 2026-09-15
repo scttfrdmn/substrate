@@ -297,6 +297,70 @@ So two assertions are safe and one is not:
 A stream recorded before the event carried a request id replays with the event id in
 that field, since the original value was never written down and nothing can recover it.
 
+### Replaying from the command line
+
+`substrate replay <stream>` replays a recorded stream outside a Go test. It needs a
+persistent event store — a `memory` backend holds nothing from a previous process —
+and `include_bodies`, because an event recorded without its request cannot be
+re-executed and is reported as skipped:
+
+```yaml
+event_store:
+  enabled: true
+  backend: "file"
+  persist_path: "/var/lib/substrate"
+  include_bodies: true
+  # Needed only for replay.validate_state below. A hash is a full snapshot of
+  # state, taken twice per request, so it is off by default.
+  include_state_hashes: true
+
+replay:
+  # Scales the recorded delay between events. Default 0, which replays instantly
+  # and is the only value independent of the wall clock; 1.0 replays at the
+  # original pace.
+  speed_multiplier: 0
+  # Stop at the first failing event. Default false, so the summary reports every
+  # failure in the stream.
+  stop_on_error: false
+  # Compare a state hash before and after each event against the hash recorded
+  # with it. Default false.
+  validate_state: true
+  # Start from the nearest stored snapshot instead of replaying from empty state.
+  # Default false; a snapshot skips the events it already covers.
+  use_snapshots: false
+  # Seeds the engine's random source. Default 0, which leaves it unseeded.
+  random_seed: 0
+```
+
+Until #880 this section did not exist, and the command built its engine with a
+zero-valued `ReplayConfig` — so `validate_state` could not be switched on by any
+means, and a replay reported how many events it re-executed without ever checking
+that it reached the same state.
+
+The state verdict in the summary distinguishes three outcomes, because two of them
+are not verdicts at all:
+
+```
+  State:    valid                                          # hashes recorded, hashes matched
+  State:    MISMATCH (2 error(s))                           # each one described on the line below
+  State:    not checked (replay.validate_state is off)      # nothing was compared
+```
+
+A fourth line — `not checked (no event in the stream carries a recorded state
+hash…)` — is what you get with `validate_state: true` over a stream recorded
+without `include_state_hashes`. `StateValid` starts `true` and is only ever
+falsified by a comparison, so reporting that run as "valid" would be a pass nothing
+produced.
+
+The `state:` section selects the state manager for both the server and the replay
+engine, through one constructor, so the two cannot disagree about which backend is
+in use. `memory` is the only implemented backend; anything else — `sqlite`
+included, which is [#2](https://github.com/scttfrdmn/substrate/issues/2) — is
+refused when the config loads, naming the backend. Before #881 an unimplemented
+value was accepted and answered with a memory manager, so a config asking for
+persistence got none and no error. `state.path` is refused for the same reason:
+no implemented backend reads it.
+
 <!-- TODO(#178): add section on persisting streams to SQLite for cross-run replay -->
 
 ## Time-Travel Debugging

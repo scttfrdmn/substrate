@@ -227,11 +227,14 @@ func newReplayEngineWiring(
 		return nil, err
 	}
 
-	// A real manager rather than nil, and a memory one rather than one selected
-	// from cfg.State: the server itself calls NewMemoryStateManager()
-	// unconditionally, and cfg.State has no reader that constructs anything —
-	// honoring it is #881, and it needs a second backend to select (#2).
-	state := substrate.NewMemoryStateManager()
+	// The backend cfg.State names, through the same constructor the server uses, so
+	// the two cannot disagree about which one is in use (#881). Until #881 both
+	// called NewMemoryStateManager() unconditionally and cfg.State was read by
+	// nothing.
+	state, err := substrate.NewStateManager(cfg.State)
+	if err != nil {
+		return nil, fmt.Errorf("state manager: %w", err)
+	}
 
 	authCtrl := substrate.NewAuthController(state, logger,
 		substrate.WithAuthTimeController(tc))
@@ -256,10 +259,10 @@ func newReplayEngineWiring(
 		return nil, fmt.Errorf("register plugins: %w", err)
 	}
 
-	// ReplayConfig is still the zero value: populating it needs a replay: config
-	// section that does not exist, which is #880. It is carried on the result so
-	// the summary can say that state was not checked rather than that it matched.
-	replayCfg := substrate.ReplayConfig{}
+	// From the replay: section rather than the zero value (#880). It is carried on
+	// the result as well as handed to the engine, because the summary has to say
+	// whether state was checked and only the config knows.
+	replayCfg := cfg.Replay.ToReplayConfig()
 
 	return &replayWiring{
 		engine: substrate.NewReplayEngine(store, state, tc, registry, replayCfg, logger),
@@ -268,17 +271,42 @@ func newReplayEngineWiring(
 	}, nil
 }
 
+// streamHasStateHashes reports whether any event in the stream carries a recorded
+// state hash for a replay to compare against.
+//
+// It is what lets the summary distinguish the two ways a state verdict can be
+// vacuous: validation switched off, and validation on over a stream recorded
+// without event_store.include_state_hashes. Only the events know which, because
+// whether hashes were recorded is a property of the recording rather than of the
+// config the replay runs under (#880).
+func streamHasStateHashes(events []*substrate.Event) bool {
+	for _, ev := range events {
+		if ev.StateHashBefore != "" || ev.StateHashAfter != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // replayStateSummary renders the state verdict for the replay summary.
 //
 // The distinction it draws is the point. ReplayResults.StateValid starts true and
-// is only ever falsified by a hash comparison that ValidateState gates, so with
-// validation off — the only setting reachable today, per #880 — a replay that
-// reached a completely different state still reports StateValid: true. Printing
-// that as "valid" would be this release's own defect in the release's own output:
-// a value that did not come from where it appears to.
-func replayStateSummary(cfg substrate.ReplayConfig, results *substrate.ReplayResults) string {
+// is only ever falsified by a hash comparison that ValidateState gates, so a
+// replay that reached a completely different state still reports StateValid: true
+// whenever no comparison ran. Printing that as "valid" would be a value that did
+// not come from where it appears to.
+//
+// A comparison runs only when validation is on *and* the recorded events carry
+// hashes, which is why comparable is a parameter: #880 makes validation
+// configurable, so "on but nothing to compare" became reachable, and it is the
+// likelier of the two — event_store.include_state_hashes is off by default.
+func replayStateSummary(cfg substrate.ReplayConfig, results *substrate.ReplayResults, comparable bool) string {
 	if !cfg.ValidateState {
-		return "not checked (state validation is off)"
+		return "not checked (replay.validate_state is off)"
+	}
+	if !comparable {
+		return "not checked (no event in the stream carries a recorded state hash; " +
+			"record with event_store.include_state_hashes: true)"
 	}
 	if results.StateValid {
 		return "valid"
@@ -317,7 +345,12 @@ configured address will have their requests emulated and recorded.`,
 			// without it a persistence problem would be silent (#599).
 			store := substrate.NewEventStore(cfg.EventStore.ToEventStoreConfig(),
 				substrate.WithTimeController(tc), substrate.WithEventStoreLogger(logger))
-			state := substrate.NewMemoryStateManager()
+			// The backend cfg.State names, not an unconditional memory manager:
+			// this line was the reason state: was configuration nothing read (#881).
+			state, err := substrate.NewStateManager(cfg.State)
+			if err != nil {
+				return fmt.Errorf("state manager: %w", err)
+			}
 
 			initCtx := context.Background()
 
@@ -490,7 +523,7 @@ any determinism differences.`,
 			// names as the verdict, and the summary omitted both — so a replay that
 			// reached a different state than the recording reported nothing but a
 			// success count (#855).
-			fmt.Printf("  State:    %s\n", replayStateSummary(wiring.config, results))
+			fmt.Printf("  State:    %s\n", replayStateSummary(wiring.config, results, streamHasStateHashes(events)))
 			for _, se := range results.StateErrors {
 				fmt.Printf("    - %s\n", se)
 			}

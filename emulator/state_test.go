@@ -259,6 +259,79 @@ func TestMemoryStateManager_ImplementsInterfaces(t *testing.T) {
 	var _ emulator.SnapshotableStateManager = (*emulator.MemoryStateManager)(nil)
 }
 
+// TestNewStateManager covers the constructor #881 adds: cfg.State decides which
+// manager the server and the replay engine get, and an unsupported backend is
+// refused rather than answered with a memory manager.
+//
+// The refusal is the point. Both call sites used to construct a
+// MemoryStateManager unconditionally, so `state: {backend: sqlite}` was accepted by
+// Validate, built nothing, and ran in memory — a caller who asked for persistence
+// got no persistence and no error.
+func TestNewStateManager(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     emulator.StateCfg
+		wantErr string
+	}{
+		{
+			name: "memory is the implemented backend",
+			cfg:  emulator.StateCfg{Backend: "memory"},
+		},
+		{
+			name: "an unwritten section means memory, as DefaultConfig says",
+			cfg:  emulator.StateCfg{},
+		},
+		{
+			name:    "sqlite is refused rather than silently answered with memory",
+			cfg:     emulator.StateCfg{Backend: "sqlite"},
+			wantErr: `state.backend "sqlite" is not implemented; choose memory`,
+		},
+		{
+			name:    "an unknown backend names itself in the error",
+			cfg:     emulator.StateCfg{Backend: "postgres"},
+			wantErr: `state.backend "postgres" is not valid; choose memory`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sm, err := emulator.NewStateManager(tt.cfg)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("NewStateManager(%+v) built %T; want an error naming the backend", tt.cfg, sm)
+				}
+				if err.Error() != tt.wantErr {
+					t.Errorf("error = %q, want %q", err.Error(), tt.wantErr)
+				}
+				if sm != nil {
+					t.Errorf("a refused backend returned a %T; a fallback to memory is the defect", sm)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewStateManager(%+v): %v", tt.cfg, err)
+			}
+			if sm == nil {
+				t.Fatal("NewStateManager returned a nil manager and no error")
+			}
+			// Usable, not merely non-nil: a nil StateManager made resetState a
+			// no-op and computeStateHash return "" (#855).
+			ctx := context.Background()
+			if err := sm.Put(ctx, "ns", "k", []byte("v")); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			got, err := sm.Get(ctx, "ns", "k")
+			if err != nil || string(got) != "v" {
+				t.Errorf("Get = %q, %v; want \"v\", nil", got, err)
+			}
+		})
+	}
+}
+
 func TestMemoryStateManager_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 

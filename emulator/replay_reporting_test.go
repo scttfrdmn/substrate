@@ -381,4 +381,35 @@ func TestReplayReporting_ValidateStateIsSilentWithoutRecordedHashes(t *testing.T
 	assert.True(t, results.StateValid, "nothing was compared, so nothing can be reported invalid")
 	assert.Empty(t, replayDifferencesOn(results, "state_hash_before"))
 	assert.Empty(t, replayDifferencesOn(results, "state_hash_after"))
+	assert.Empty(t, results.StateErrors, "a comparison that never ran cannot describe a mismatch")
+}
+
+// TestReplayReporting_StateErrorsDescribeEveryMismatch covers a fourth instance of
+// the same kind, found while making ValidateState configurable (#880):
+// [emulator.ReplayResults.StateErrors] is documented to contain "descriptions of any
+// state hash mismatches" and nothing ever appended to it. A mismatch set StateValid
+// to false and recorded an EventDifference, leaving the slice empty on every run —
+// so `substrate replay`, which counts StateErrors, printed "MISMATCH (0 error(s))"
+// for a real divergence and listed none of them.
+func TestReplayReporting_StateErrorsDescribeEveryMismatch(t *testing.T) {
+	ts := recordRefusedGetObject(t, emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+	require.False(t, results.StateValid, "precondition: the replay must diverge from the recorded state")
+
+	hashDiffs := append(
+		replayDifferencesOn(results, "state_hash_before"),
+		replayDifferencesOn(results, "state_hash_after")...,
+	)
+	require.NotEmpty(t, hashDiffs, "precondition: a hash comparison must have reported a divergence")
+	assert.Len(t, results.StateErrors, len(hashDiffs),
+		"every reported divergence must carry a description a caller can print")
+
+	for _, se := range results.StateErrors {
+		assert.Contains(t, se, "state_hash", "a description must name the comparison that failed: %q", se)
+		assert.Contains(t, se, "recorded", "a description must name the recorded hash: %q", se)
+		assert.Contains(t, se, "replayed", "a description must name the replayed hash: %q", se)
+	}
 }

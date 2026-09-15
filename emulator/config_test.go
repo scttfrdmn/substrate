@@ -97,7 +97,29 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "invalid state backend",
 			mutate:  func(c *emulator.Config) { c.State.Backend = "postgres" },
-			wantErr: "state.backend",
+			wantErr: `state.backend "postgres" is not valid; choose memory`,
+		},
+		{
+			// Accepted until #881 and built by nothing, so it ran in memory: a
+			// caller who asked for persistence got none, and no error.
+			name:    "sqlite state backend is refused rather than falling back to memory",
+			mutate:  func(c *emulator.Config) { c.State.Backend = "sqlite" },
+			wantErr: `state.backend "sqlite" is not implemented; choose memory`,
+		},
+		{
+			name:    "state path is refused while no backend reads it",
+			mutate:  func(c *emulator.Config) { c.State.Path = "/var/lib/substrate" },
+			wantErr: `state.path "/var/lib/substrate" is set but no state backend reads it`,
+		},
+		{
+			name:    "negative replay speed multiplier",
+			mutate:  func(c *emulator.Config) { c.Replay.SpeedMultiplier = -1 },
+			wantErr: "replay.speed_multiplier -1 is out of range; must be >= 0",
+		},
+		{
+			name:    "zero replay speed multiplier is instant replay, not an error",
+			mutate:  func(c *emulator.Config) { c.Replay.SpeedMultiplier = 0 },
+			wantErr: "",
 		},
 		{
 			name:    "invalid log level",
@@ -144,6 +166,94 @@ func TestEventStoreCfg_ToEventStoreConfig(t *testing.T) {
 	assert.Equal(t, "/tmp/events", esCfg.PersistPath)
 	assert.True(t, esCfg.IncludeBodies)
 	assert.True(t, esCfg.IncludeStateHashes)
+}
+
+// TestReplayCfg_Defaults pins the defaults #880 chose for the replay: section.
+//
+// The equality against a zero ReplayConfig is the compatibility assertion: the
+// command passed substrate.ReplayConfig{} before the section existed, so a run with
+// no replay: block must still replay exactly as it did.
+func TestReplayCfg_Defaults(t *testing.T) {
+	cfg := emulator.DefaultConfig()
+
+	assert.Equal(t, 0.0, cfg.Replay.SpeedMultiplier, "0 replays instantly, off the wall clock")
+	assert.False(t, cfg.Replay.StopOnError, "a replay reports every failure, not only the first")
+	assert.False(t, cfg.Replay.ValidateState,
+		"off deliberately: a comparison needs event_store.include_state_hashes, itself off by default")
+	assert.False(t, cfg.Replay.UseSnapshots, "a replay re-executes the stream from empty state")
+	assert.Equal(t, int64(0), cfg.Replay.RandomSeed, "unseeded, as every replay has been")
+
+	assert.Equal(t, emulator.ReplayConfig{}, cfg.Replay.ToReplayConfig(),
+		"the defaults must reproduce the zero value the command used before the section existed")
+}
+
+// TestReplayCfg_ToReplayConfig asserts every field reaches the engine. The
+// conversion is field-for-field on purpose: a knob in the config file that the
+// converter drops is indistinguishable from the defect #880 fixes.
+func TestReplayCfg_ToReplayConfig(t *testing.T) {
+	rc := emulator.ReplayCfg{
+		SpeedMultiplier: 2.5,
+		StopOnError:     true,
+		ValidateState:   true,
+		UseSnapshots:    true,
+		RandomSeed:      99,
+	}.ToReplayConfig()
+
+	assert.Equal(t, 2.5, rc.SpeedMultiplier)
+	assert.True(t, rc.StopOnError)
+	assert.True(t, rc.ValidateState)
+	assert.True(t, rc.UseSnapshots)
+	assert.Equal(t, int64(99), rc.RandomSeed)
+}
+
+// TestLoadConfig_ReplaySection covers the round trip the section exists for: a
+// substrate.yaml naming these values produces them, and a file that says nothing
+// about replay produces the documented defaults.
+func TestLoadConfig_ReplaySection(t *testing.T) {
+	yaml := `
+replay:
+  speed_multiplier: 1.5
+  stop_on_error: true
+  validate_state: true
+  use_snapshots: true
+  random_seed: 4242
+`
+	path := filepath.Join(t.TempDir(), "substrate.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
+
+	cfg, err := emulator.LoadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, emulator.ReplayConfig{
+		SpeedMultiplier: 1.5,
+		StopOnError:     true,
+		ValidateState:   true,
+		UseSnapshots:    true,
+		RandomSeed:      4242,
+	}, cfg.Replay.ToReplayConfig())
+
+	// A config file with no replay: block keeps the defaults.
+	bare := filepath.Join(t.TempDir(), "substrate.yaml")
+	require.NoError(t, os.WriteFile(bare, []byte("log:\n  level: debug\n"), 0o600))
+	cfg, err = emulator.LoadConfig(bare)
+	require.NoError(t, err)
+	assert.Equal(t, emulator.DefaultConfig().Replay, cfg.Replay)
+}
+
+// TestLoadConfig_UnsupportedStateBackend is #881's startup criterion: a config
+// naming a backend nothing implements fails at load, naming the backend, rather
+// than starting with a memory manager the caller did not ask for.
+func TestLoadConfig_UnsupportedStateBackend(t *testing.T) {
+	for _, backend := range []string{"sqlite", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "substrate.yaml")
+			require.NoError(t, os.WriteFile(path,
+				[]byte("state:\n  backend: "+backend+"\n"), 0o600))
+
+			cfg, err := emulator.LoadConfig(path)
+			require.Error(t, err, "loaded %+v instead of refusing an unimplemented backend", cfg)
+			assert.Contains(t, err.Error(), backend, "the error must name the backend that was asked for")
+		})
+	}
 }
 
 func TestQuotaCfg_ToQuotaConfig_Defaults(t *testing.T) {

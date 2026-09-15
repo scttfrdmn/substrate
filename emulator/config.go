@@ -19,6 +19,9 @@ type Config struct {
 	// State controls the state manager backend.
 	State StateCfg `mapstructure:"state"`
 
+	// Replay controls how `substrate replay` re-executes a recorded stream.
+	Replay ReplayCfg `mapstructure:"replay"`
+
 	// Log controls log level and format.
 	Log LogCfg `mapstructure:"log"`
 
@@ -201,12 +204,68 @@ func (c EventStoreCfg) ToEventStoreConfig() EventStoreConfig {
 }
 
 // StateCfg controls the state manager backend.
+// Use [NewStateManager] to build the manager it names.
 type StateCfg struct {
-	// Backend selects the storage driver: "memory" (sqlite deferred to #2).
+	// Backend selects the storage driver. "memory" is the only implemented value;
+	// a persistent backend is #2. An unrecognized value is refused by [Validate]
+	// rather than falling back to memory, because a caller who asked for
+	// persistence and silently got a manager that forgets everything at exit has
+	// been given a wrong answer instead of an error (#881).
 	Backend string `mapstructure:"backend"`
 
-	// Path is the filesystem path used by non-memory backends.
+	// Path is the filesystem path for a backend that keeps files. No implemented
+	// backend does, so [Validate] refuses a non-empty value rather than ignoring
+	// it: this field was read by nothing at all until #881, and a path that is
+	// accepted and dropped reads as persistence that is configured and working.
 	Path string `mapstructure:"path"`
+}
+
+// ReplayCfg is the YAML-friendly configuration for the replay engine.
+// Use [ReplayCfg.ToReplayConfig] to convert it for use with [NewReplayEngine].
+//
+// Every field maps to one [ReplayConfig] field the engine actually reads, and the
+// two structs are deliberately identical in field order and type so
+// [ReplayCfg.ToReplayConfig] is a conversion rather than a copy — a field added to
+// one and forgotten in the other breaks the build instead of silently arriving as
+// a zero value, which is the defect this section exists to fix (#880).
+type ReplayCfg struct {
+	// SpeedMultiplier scales the recorded inter-event delay during replay.
+	// Default 0, which replays instantly and is the only value that keeps a
+	// replay independent of wall-clock time; 1.0 replays at the original pace.
+	SpeedMultiplier float64 `mapstructure:"speed_multiplier"`
+
+	// StopOnError halts the replay at the first event that fails. Default false,
+	// so a replay reports every failure in the stream rather than only the first.
+	StopOnError bool `mapstructure:"stop_on_error"`
+
+	// ValidateState compares a state hash before and after each event against the
+	// hash recorded with it. Default false.
+	//
+	// Off is a decision, not an oversight: a comparison happens only for an event
+	// that carries a recorded hash, which needs
+	// event_store.include_state_hashes — itself off by default, because a hash is
+	// a full snapshot of state taken twice per request. Defaulting this on would
+	// therefore report "state valid" for the overwhelming majority of streams
+	// without comparing anything, which is a verdict nothing produced. Set both
+	// together: record with include_state_hashes, replay with validate_state.
+	ValidateState bool `mapstructure:"validate_state"`
+
+	// UseSnapshots starts the replay from the nearest stored snapshot instead of
+	// resetting state. Default false, so a replay starts from empty state and
+	// re-executes the whole stream.
+	UseSnapshots bool `mapstructure:"use_snapshots"`
+
+	// RandomSeed seeds the replay's random source. Default 0, which leaves it
+	// unseeded, so [ReplayEngine.RandFloat64] and [ReplayEngine.RandInt64] fall
+	// back to the global source. Set it to make those two reproduce across runs;
+	// no plugin draws from them today, so it changes nothing else.
+	RandomSeed int64 `mapstructure:"random_seed"`
+}
+
+// ToReplayConfig converts ReplayCfg to the [ReplayConfig] type used by
+// [NewReplayEngine].
+func (c ReplayCfg) ToReplayConfig() ReplayConfig {
+	return ReplayConfig(c)
 }
 
 // LogCfg controls logging behavior.
@@ -609,6 +668,28 @@ func DefaultConfig() *Config {
 		},
 		State: StateCfg{
 			Backend: "memory",
+			// Path left empty: no implemented backend keeps files, and a default
+			// path would name a location nothing writes to.
+		},
+		Replay: ReplayCfg{
+			// Instant rather than 1.0: a replay that reproduces the recorded delays
+			// takes as long as the original run and its duration depends on the
+			// machine, and no assertion a caller can make needs either.
+			SpeedMultiplier: 0,
+			// False so a replay reports every failing event rather than stopping at
+			// the first, which is what makes the summary a report instead of a hint.
+			StopOnError: false,
+			// False deliberately; see [ReplayCfg.ValidateState] for why on would
+			// report a passing state verdict for streams that recorded no hashes.
+			ValidateState: false,
+			// False so a replay re-executes the stream from empty state. Starting
+			// from a snapshot skips the events the snapshot already covers, so it
+			// verifies less than it appears to.
+			UseSnapshots: false,
+			// Zero leaves the engine's random source unseeded, which is the
+			// behavior every replay has had; a non-zero default would change the
+			// values an existing recorded stream replays with.
+			RandomSeed: 0,
 		},
 		Log: LogCfg{
 			Level:  "info",
@@ -699,6 +780,11 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("event_store.dsn", defaults.EventStore.DSN)
 	v.SetDefault("state.backend", defaults.State.Backend)
 	v.SetDefault("state.path", defaults.State.Path)
+	v.SetDefault("replay.speed_multiplier", defaults.Replay.SpeedMultiplier)
+	v.SetDefault("replay.stop_on_error", defaults.Replay.StopOnError)
+	v.SetDefault("replay.validate_state", defaults.Replay.ValidateState)
+	v.SetDefault("replay.use_snapshots", defaults.Replay.UseSnapshots)
+	v.SetDefault("replay.random_seed", defaults.Replay.RandomSeed)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
 	v.SetDefault("quotas.enabled", defaults.Quotas.Enabled)
@@ -770,9 +856,29 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("event_store.backend %q is not valid; choose memory, sqlite, or file", cfg.EventStore.Backend)
 	}
 
-	validStateBackends := map[string]bool{"memory": true, "sqlite": true}
-	if !validStateBackends[cfg.State.Backend] {
-		return fmt.Errorf("state.backend %q is not valid; choose memory or sqlite", cfg.State.Backend)
+	// Refused rather than accepted: "sqlite" was in this list from the start and
+	// nothing ever built one, so a config asking for a persistent state backend got
+	// a memory manager and no warning — the silent wrong answer #881 records. It
+	// comes back the moment #2 implements it, and until then an error at load is the
+	// only honest response to the request.
+	switch cfg.State.Backend {
+	case "memory":
+	case "sqlite":
+		return fmt.Errorf("state.backend %q is not implemented; choose memory", cfg.State.Backend)
+	default:
+		return fmt.Errorf("state.backend %q is not valid; choose memory", cfg.State.Backend)
+	}
+
+	// A path with no backend to read it is the other half of the same defect: it
+	// was validated by nothing and read by nothing, so it looked like configured
+	// persistence and was decoration.
+	if cfg.State.Path != "" {
+		return fmt.Errorf("state.path %q is set but no state backend reads it; the memory backend keeps no files", cfg.State.Path)
+	}
+
+	if cfg.Replay.SpeedMultiplier < 0 {
+		return fmt.Errorf("replay.speed_multiplier %g is out of range; must be >= 0, and 0 replays instantly",
+			cfg.Replay.SpeedMultiplier)
 	}
 
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}

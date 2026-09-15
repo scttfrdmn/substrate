@@ -324,6 +324,8 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 				Significance: "critical",
 			})
 			replay.Results.StateValid = false
+			replay.Results.StateErrors = append(replay.Results.StateErrors,
+				stateHashError(event, "state_hash_before", event.StateHashBefore, actual))
 		}
 	}
 
@@ -396,10 +398,26 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 				Significance: "critical",
 			})
 			replay.Results.StateValid = false
+			replay.Results.StateErrors = append(replay.Results.StateErrors,
+				stateHashError(event, "state_hash_after", event.StateHashAfter, actual))
 		}
 	}
 
 	return true, nil
+}
+
+// stateHashError describes one state hash mismatch for [ReplayResults.StateErrors].
+//
+// StateErrors was documented to carry "descriptions of any state hash mismatches"
+// and nothing ever appended to it: a mismatch set StateValid to false and recorded
+// an [EventDifference], leaving the slice empty on every run. That was invisible
+// while [ReplayConfig.ValidateState] could not be switched on from the CLI at all;
+// making it configurable (#880) would otherwise have shipped a summary reporting
+// "MISMATCH (0 error(s))" for a real divergence, and printing no line for any of
+// them.
+func stateHashError(event *Event, field, recorded, replayed string) string {
+	return fmt.Sprintf("event %s (seq %d) %s: recorded %s, replayed %s",
+		event.ID, event.Sequence, field, recorded, replayed)
 }
 
 // replayRequestID is the request id a replayed handler is dispatched under: the

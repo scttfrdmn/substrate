@@ -25,6 +25,35 @@ func NewMemoryStateManager() *MemoryStateManager {
 	}
 }
 
+// NewStateManager builds the [StateManager] named by cfg.
+//
+// It exists so that the server and the replay engine cannot disagree about which
+// backend is in use. Before #881 there was nothing to disagree with: `state:` was
+// validated and then read by nobody, and both call sites constructed a
+// [MemoryStateManager] unconditionally — so a config asking for anything else got
+// memory, silently.
+//
+// An unrecognized backend is an error rather than a fallback to memory. A caller
+// who asked for persistence and got a manager that forgets everything at process
+// exit has been handed a wrong answer, and the failure surfaces later as absent
+// state rather than here as a refused configuration. [Validate] refuses an
+// unknown backend at load time, so a Config that came through [LoadConfig] cannot
+// reach this error; a Config built in process can.
+//
+// An empty Backend selects memory, matching [DefaultConfig]: it means the section
+// was not written rather than that another backend was requested.
+func NewStateManager(cfg StateCfg) (StateManager, error) {
+	switch cfg.Backend {
+	case "", "memory":
+		return NewMemoryStateManager(), nil
+	case "sqlite":
+		// Accepted by Validate until #881 and implemented by nothing; #2 adds it.
+		return nil, fmt.Errorf("state.backend %q is not implemented; choose memory", cfg.Backend)
+	default:
+		return nil, fmt.Errorf("state.backend %q is not valid; choose memory", cfg.Backend)
+	}
+}
+
 // Get retrieves the value stored at namespace/key.
 // Returns (nil, nil) if the key does not exist.
 func (m *MemoryStateManager) Get(_ context.Context, namespace, key string) ([]byte, error) {
