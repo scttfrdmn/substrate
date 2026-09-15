@@ -303,12 +303,14 @@ func TestStepFunctions_Tags(t *testing.T) {
 
 	smArn := "arn:aws:states:us-east-1:123456789012:stateMachine:TaggedSM"
 
-	// Tag the resource.
+	// Tag the resource. AWS's tags member is an array of {key, value} objects, not an object —
+	// the shape CreateStateMachine above already accepts, and the one #910 brought these three
+	// operations into line with.
 	tagResp, err := p.HandleRequest(ctx, sfnRequest("TagResource", map[string]any{
 		"resourceArn": smArn,
-		"tags": map[string]string{
-			"env":  "test",
-			"team": "platform",
+		"tags": []map[string]string{
+			{"key": "env", "value": "test"},
+			{"key": "team", "value": "platform"},
 		},
 	}))
 	require.NoError(t, err)
@@ -322,10 +324,12 @@ func TestStepFunctions_Tags(t *testing.T) {
 	assert.Equal(t, 200, listTagsResp.StatusCode)
 
 	listTagsBody := sfnBody(t, listTagsResp)
-	tags, ok := listTagsBody["tags"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "test", tags["env"])
-	assert.Equal(t, "platform", tags["team"])
+	tags, ok := listTagsBody["tags"].([]interface{})
+	require.True(t, ok, "tags should be an array of Tag objects: %v", listTagsBody["tags"])
+	assert.Equal(t, []interface{}{
+		map[string]interface{}{"key": "env", "value": "test"},
+		map[string]interface{}{"key": "team", "value": "platform"},
+	}, tags, "ordered by key, since AWS documents no order and map order cannot replay")
 
 	// Untag one key.
 	_, err = p.HandleRequest(ctx, sfnRequest("UntagResource", map[string]any{
@@ -340,10 +344,9 @@ func TestStepFunctions_Tags(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	listTagsBody2 := sfnBody(t, listTagsResp2)
-	tags2 := listTagsBody2["tags"].(map[string]interface{})
-	assert.Equal(t, "test", tags2["env"])
-	_, hasTeam := tags2["team"]
-	assert.False(t, hasTeam)
+	assert.Equal(t, []interface{}{
+		map[string]interface{}{"key": "env", "value": "test"},
+	}, listTagsBody2["tags"])
 }
 
 func TestStepFunctions_UpdateStateMachine(t *testing.T) {

@@ -8084,11 +8084,12 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans eighteen resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans nineteen resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
-APIs, Step Functions state machines, ECR repositories, ECS clusters, Cognito user
-pools, Kinesis streams, RDS DB instances, DB clusters and DB subnet groups,
-ElastiCache cache clusters, EFS file systems and Glue databases.
+APIs, Step Functions state machines and activities, ECR repositories, ECS
+clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
+DB subnet groups, ElastiCache cache clusters, EFS file systems and Glue
+databases.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8167,6 +8168,20 @@ ECS's pattern, generalised so the two services share it. RDS spells the member
 `Tags` and ECS spells it `tags`, so the member name is a parameter, and a
 case-differing member is an error rather than a second member written alongside the
 real one: every way of not writing a tag has to fail.
+
+Step Functions followed as of #910, and it needed all three parts. The `states`
+arm and Step Functions' own three tag operations now resolve through one builder,
+which is what lets the tagging API reach an **activity** rather than a state
+machine only (part of #835); the arm's merge went through the same shared
+raw-JSON helper, because it decoded a `StateMachineState` whatever the key named
+and so replaced a tagged activity's record with a state-machine-shaped one, losing
+its `activityArn` outright; and the merge sits behind a kind guard, because the
+`states` namespace also holds executions and three index keys that no ARN
+addresses and that store no tags. The guard and the raw-JSON merge fix different
+failures and neither substitutes for the other. Step Functions' own operations
+took the account and Region from the calling request — see
+[the Step Functions section](#a-tagging-arn-addresses-the-resource-it-names) for
+what that reached and for the 400 status `ResourceNotFound` carries.
 
 AWS does not publish what a cross-account ARN does here: `TagResources` says only
 that "you can only tag resources that are located in the specified AWS Region for
@@ -8689,13 +8704,96 @@ routes both.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStateMachine | |
+| CreateStateMachine | `tags` is an array of `{key, value}` objects |
 | DescribeStateMachine | |
+| UpdateStateMachine | |
 | DeleteStateMachine | |
 | ListStateMachines | |
 | StartExecution | Returns RUNNING status immediately |
+| StartSyncExecution | |
 | DescribeExecution | Transitions to SUCCEEDED on describe |
 | StopExecution | |
+| ListExecutions | |
+| GetExecutionHistory | |
+| CreateActivity | `tags` is an array of `{key, value}` objects |
+| DescribeActivity | |
+| ListActivities | |
+| DeleteActivity | |
+| TagResource | State machine or activity — see below |
+| UntagResource | State machine or activity — see below |
+| ListTagsForResource | `tags` sorted by key — see below |
+
+### A tagging ARN addresses the resource it names
+
+`TagResource`, `UntagResource` and `ListTagsForResource` each describe
+`resourceArn` as "the Amazon Resource Name (ARN) for the Step Functions state
+machine or activity", so those two are the whole taggable set:
+
+| Resource | ARN | State key |
+|----------|-----|-----------|
+| State machine | `arn:aws:states:{region}:{account}:stateMachine:{name}` | `statemachine:{account}/{region}/{name}` |
+| Activity | `arn:aws:states:{region}:{account}:activity:{name}` | `activity:{account}/{region}/{name}` |
+
+**The account and Region come from the ARN, not from the calling request.** All
+three operations previously took the resource *name* from the ARN's last
+colon-separated segment and the account and Region from the caller's own request
+context, so an ARN naming another account's state machine reached the caller's
+same-named one — `UntagResource` being the damaging direction, since stripping a
+tag can turn an `aws:ResourceTag` `Deny` into an allow. A cross-Region ARN did
+the same. That is the rule #826 established for SQS and DynamoDB and #845 carried
+across the tagging API's resolver; these three operations were never audited
+against it until #910.
+
+One function builds the key for all four readers — Step Functions' own three
+operations and the Resource Groups Tagging API's `states` arm — and it takes no
+request context at all, so the guarantee is structural rather than something each
+call site has to remember. That is the arrangement ECS has had since #826.
+
+**The resource type is compared against the resource segment, not searched for in
+the ARN.** The previous check was `strings.Contains(arn, ":stateMachine:")`, a
+substring test over the whole ARN, so a *name* carrying that text satisfied it as
+readily as a type segment did: `arn:aws:states:{region}:{account}:activity:x:stateMachine:y`
+took the state-machine branch. The comparison is also case-sensitive, because AWS
+distinguishes the two taggable resources by the literal segment alone —
+`stateMachine` with a capital M against `activity` — so `statemachine:orders` is
+refused rather than treated as the same resource.
+
+An **execution** ARN — `arn:aws:states:{region}:{account}:execution:{sm}:{exec}`
+— is well-formed and names a resource these operations do not accept, so it
+answers `InvalidArn`: the resource may well exist, and it is the ARN that does not
+belong at this operation. It answered `InvalidArn` before #910 too, but by falling
+off the end of the `strings.Contains` chain rather than by a decision.
+
+### A missing resource answers ResourceNotFound at 400
+
+| Code | Status | When |
+|------|--------|------|
+| InvalidArn | 400 | The ARN is malformed, names another service, or names a type these operations do not accept |
+| ResourceNotFound | 400 | The ARN is well-formed and addresses a state machine or activity that does not exist |
+
+**The status is 400, not 404.** All three operations publish `ResourceNotFound`
+with "HTTP Status Code: 400" — unusual enough to be worth stating, because
+substrate answered 404 before #910, which no Step Functions endpoint returns.
+
+`ListTagsForResource` returns `tags` sorted by key. AWS documents no order for
+it; lexicographic is substrate's reading, justified by the replay promise — a
+member order that followed Go's map iteration would differ between two identical
+calls in one run and could not replay from the event log (#862).
+
+### Tags are an array of objects, not an object
+
+AWS's `Tag` shape is `{"key": …, "value": …}`, and both `TagResource`'s request
+and `ListTagsForResource`'s response carry an **array** of them:
+
+```json
+{"tags": [{"key": "env", "value": "test"}]}
+```
+
+Substrate rendered and accepted an *object* at those two operations while
+`CreateStateMachine` and `CreateActivity` in the same plugin already took the
+array — so the plugin disagreed with itself about the wire shape of its own tags:
+a tag set at create time could not be read back in a shape any SDK decodes, and
+`TagResource` could not be called by one at all. Both now use AWS's array (#910).
 
 ### CloudFormation resource types
 

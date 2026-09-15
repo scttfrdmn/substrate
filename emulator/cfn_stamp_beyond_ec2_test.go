@@ -236,11 +236,21 @@ func (f *cfnStampFixture) stateMachineTagsFor(t *testing.T, name string) []strin
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
+	// Step Functions renders tags as AWS's array of {key, value} objects, unlike ECR's and
+	// ECS's object form in the same test file — the shape difference #910 corrected, since this
+	// operation previously answered an object no SDK could decode into its tags field.
 	var doc struct {
-		Tags map[string]string `json:"tags"`
+		Tags []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		} `json:"tags"`
 	}
 	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
-	return cfnSortedTagStrings(doc.Tags)
+	tags := make(map[string]string, len(doc.Tags))
+	for _, t := range doc.Tags {
+		tags[t.Key] = t.Value
+	}
+	return cfnSortedTagStrings(tags)
 }
 
 // repositoryTagsFor reads one ECR repository's tags through ECR's ListTagsForResource.
