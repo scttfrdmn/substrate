@@ -68,6 +68,8 @@ func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.listInvalidations(ctx, distID)
 	case "TagResource":
 		return p.tagResource(ctx, req)
+	case "UntagResource":
+		return p.untagResource(ctx, req)
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
 	default:
@@ -83,18 +85,36 @@ func parseCloudFrontOperation(method, path string, params map[string]string) (op
 	p2 := strings.TrimSuffix(path, "/")
 	p2 = strings.TrimPrefix(p2, apiVersion)
 
-	// Tag operations — check query params first.
-	if method == http.MethodPost {
-		if op, ok := params["Operation"]; ok && strings.EqualFold(op, "Tag") {
-			return "TagResource", ""
-		}
-	}
-	if params["Resource"] != "" {
+	// Tagging is addressed by query string rather than by path shape. The CloudFront
+	// API Reference publishes all three as the same "/tagging" path: ListTagsForResource
+	// is "GET /2020-05-31/tagging?Resource={{Resource}}", TagResource is
+	// "POST /2020-05-31/tagging?Operation=Tag" and UntagResource is
+	// "POST /2020-05-31/tagging?Operation=Untag".
+	//
+	// A POST resolves on the Operation value and on nothing else. Mapping every
+	// Resource-bearing POST to TagResource is what sent an Operation=Untag request into
+	// [CloudFrontPlugin.tagResource], which read the <TagKeys> body as <Tags>, matched no
+	// Tag element, discarded the decode error and wrote the distribution back
+	// byte-identical — answering the tagging success while the tag a caller asked to
+	// remove was still there (#883). An Operation value substrate does not recognize now
+	// resolves to no operation at all, so the request keeps its verb, reaches
+	// [CloudFrontPlugin.HandleRequest]'s default arm and is refused: a write is never the
+	// fallback for a word this function cannot name.
+	//
+	// "/tags" is accepted alongside the documented "/tagging"; it predates #883 and is
+	// substrate tolerance, not a path AWS publishes.
+	if p2 == "/tagging" || p2 == "/tags" || params["Resource"] != "" {
 		switch method {
 		case http.MethodGet:
 			return "ListTagsForResource", ""
 		case http.MethodPost:
-			return "TagResource", ""
+			switch {
+			case strings.EqualFold(params["Operation"], "Tag"):
+				return "TagResource", ""
+			case strings.EqualFold(params["Operation"], "Untag"):
+				return "UntagResource", ""
+			}
+			return "", ""
 		}
 	}
 
@@ -103,13 +123,6 @@ func parseCloudFrontOperation(method, path string, params map[string]string) (op
 		return "CreateDistribution", ""
 	case p2 == "/distribution" && method == http.MethodGet:
 		return "ListDistributions", ""
-	case p2 == "/tagging" || p2 == "/tags":
-		switch method {
-		case http.MethodPost:
-			return "TagResource", ""
-		case http.MethodGet:
-			return "ListTagsForResource", ""
-		}
 	}
 
 	// Paths of the form /distribution/{id}[/...]
@@ -451,21 +464,35 @@ func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string)
 }
 
 // --- Tagging ----------------------------------------------------------------
+//
+// CloudFront publishes three tagging operations and substrate now implements all three.
+// They are the only way a distribution's tags can be changed here: the Resource Groups
+// Tagging API cannot reach a CloudFront ARN at all, because [TaggingPlugin.resolveARN] has
+// no "cloudfront" arm and its default answers a FailedResourcesMap entry of
+// InternalServiceException/500 — "the resource type in the request is not supported by the
+// Resource Groups Tagging API". So `UntagResources` against a distribution has never had
+// #883's silent-success shape: it refuses, in the same answer every armless service gets,
+// and TaggingResolveARN's guard tests pin that. Giving CloudFront an arm there is #835's
+// work — it needs a [mergeResourceTags] case as well as a resolver case, and it changes
+// which resources GetResources enumerates — so it is deliberately not folded into #883.
 
+// tagResource implements CloudFront's TagResource. It merges the tags in the request body
+// into the resource the Resource query parameter names.
+//
+// The body is a <Tags> document, per the operation's published request syntax:
+//
+//	<Tags xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+//	   <Items><Tag><Key>{{string}}</Key><Value>{{string}}</Value></Tag></Items>
+//	</Tags>
+//
+// The decode error is returned rather than discarded, which is the other half of #883.
+// Because the root element name is part of the struct, a <TagKeys> document — an untag
+// request that reached here by the misroute that issue fixes — used to decode into an
+// empty item list, add nothing, and answer 204. A body of the wrong shape is now refused
+// instead of read as "no tags", so no shape of request can be answered with the tagging
+// success having changed nothing.
 func (p *CloudFrontPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// The Resource query param identifies the distribution ARN.
-	resourceARN := req.Params["Resource"]
-	if resourceARN == "" {
-		return nil, &AWSError{Code: "InvalidArgument", Message: "Resource query parameter is required", HTTPStatus: http.StatusBadRequest}
-	}
-
-	// Extract distribution ID from ARN: arn:aws:cloudfront::{acct}:distribution/{id}
-	distID := extractDistIDFromARN(resourceARN)
-	if distID == "" {
-		return nil, &AWSError{Code: "NoSuchDistribution", Message: "Distribution not found for ARN: " + resourceARN, HTTPStatus: http.StatusNotFound}
-	}
-
-	dist, err := p.loadDistribution(ctx, distID)
+	dist, err := p.resolveTagTarget(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +506,9 @@ func (p *CloudFrontPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*A
 		} `xml:"Items>Tag"`
 	}
 	if len(req.Body) > 0 {
-		_ = xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlTags)
+		if decErr := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlTags); decErr != nil {
+			return nil, cfInvalidTagBody("Tags", decErr)
+		}
 	}
 
 	if dist.Tags == nil {
@@ -489,29 +518,71 @@ func (p *CloudFrontPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*A
 		dist.Tags[tag.Key] = tag.Value
 	}
 
-	data, err := json.Marshal(dist)
-	if err != nil {
-		return nil, fmt.Errorf("cloudfront tagResource marshal: %w", err)
+	if err := p.putDistribution(ctx, dist, "tagResource"); err != nil {
+		return nil, err
 	}
-	if err := p.state.Put(context.Background(), cloudfrontNamespace, cfDistKey(ctx.AccountID, distID), data); err != nil {
-		return nil, fmt.Errorf("cloudfront tagResource state.Put: %w", err)
+
+	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
+}
+
+// untagResource implements CloudFront's UntagResource. It removes the tag keys named in the
+// request body from the resource the Resource query parameter names, and answers the
+// documented "HTTP/1.1 204" with an empty body.
+//
+// The body is a <TagKeys> document, per the operation's published request syntax:
+//
+//	<TagKeys xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+//	   <Items><Key>{{string}}</Key></Items>
+//	</TagKeys>
+//
+// TagKeys is documented "Required: Yes", so a request with no body is refused rather than
+// treated as naming no keys — an untag that answers 204 having removed nothing is the
+// defect #883 exists to close, and an absent body is the one remaining way to ask for it.
+// Items is documented "Required: No", so <TagKeys/> with no Items is a legal request that
+// removes nothing.
+//
+// **Removing a key the resource does not carry succeeds, and that is substrate's reading
+// rather than something AWS publishes.** The operation's Errors list — AccessDenied 403,
+// InvalidArgument 400, InvalidTagging 400, NoSuchResource 404 — names nothing for an absent
+// key, and the response section documents an unconditional 204 with an empty body, but the
+// reference does not address the case either way. Substrate treats it as success because the
+// alternative makes a consumer's teardown loop fail on its second run, and because a
+// response shape carrying no per-key result has nowhere to report a partial removal.
+func (p *CloudFrontPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	dist, err := p.resolveTagTarget(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(req.Body) == 0 {
+		return nil, &AWSError{
+			Code:       "InvalidArgument",
+			Message:    "a TagKeys request body is required",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	var xmlKeys struct {
+		XMLName xml.Name `xml:"TagKeys"`
+		Items   []string `xml:"Items>Key"`
+	}
+	if decErr := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlKeys); decErr != nil {
+		return nil, cfInvalidTagBody("TagKeys", decErr)
+	}
+
+	for _, key := range xmlKeys.Items {
+		delete(dist.Tags, key)
+	}
+
+	if err := p.putDistribution(ctx, dist, "untagResource"); err != nil {
+		return nil, err
 	}
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
 func (p *CloudFrontPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	resourceARN := req.Params["Resource"]
-	if resourceARN == "" {
-		return nil, &AWSError{Code: "InvalidArgument", Message: "Resource query parameter is required", HTTPStatus: http.StatusBadRequest}
-	}
-
-	distID := extractDistIDFromARN(resourceARN)
-	if distID == "" {
-		return nil, &AWSError{Code: "NoSuchDistribution", Message: "Distribution not found for ARN: " + resourceARN, HTTPStatus: http.StatusNotFound}
-	}
-
-	dist, err := p.loadDistribution(ctx, distID)
+	dist, err := p.resolveTagTarget(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -535,6 +606,83 @@ func (p *CloudFrontPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequ
 }
 
 // --- Helpers ----------------------------------------------------------------
+
+// resolveTagTarget resolves the Resource query parameter that CloudFront's three tagging
+// operations share to the distribution it names.
+//
+// One function for all three so they cannot drift on which resource an ARN addresses. That
+// they resolved it in three copies is what let #883's routing defect matter: a request the
+// caller aimed at UntagResource ran the tag path against the same target and reported
+// success. A removal pointed at a resource the caller did not name is the more damaging
+// direction, so the three share the resolution rather than each repeating it.
+//
+// The parameter is required. The reference's "URI Request Parameters" section documents
+// Resource for ListTagsForResource only — "An ARN of a CloudFront resource. Pattern:
+// arn:aws(-cn)?:cloudfront::[0-9]+:.* Required: Yes" — and says "the request does not use
+// any URI parameters" on both TagResource and UntagResource, which cannot be right for
+// operations whose request syntax is a bare "/tagging" path with no other way to name a
+// target. Substrate reads that as a documentation omission and requires the parameter on all
+// three; the request syntax those two pages publish shows the same query string carrying
+// Operation, and every SDK sends Resource alongside it.
+//
+// An ARN naming no distribution answers NoSuchDistribution/404 rather than the NoSuchResource
+// the three tagging pages list, because that is the code this plugin's other arms and
+// [CloudFrontPlugin.loadDistribution] already answer and one plugin should not report a
+// missing distribution two ways. Aligning all three tagging arms on the published code is a
+// separate change from #883, which is about a request being routed to the wrong operation.
+func (p *CloudFrontPlugin) resolveTagTarget(ctx *RequestContext, req *AWSRequest) (CloudFrontDistribution, error) {
+	resourceARN := req.Params["Resource"]
+	if resourceARN == "" {
+		return CloudFrontDistribution{}, &AWSError{
+			Code:       "InvalidArgument",
+			Message:    "Resource query parameter is required",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	// arn:aws:cloudfront::{acct}:distribution/{id}
+	distID := extractDistIDFromARN(resourceARN)
+	if distID == "" {
+		return CloudFrontDistribution{}, &AWSError{
+			Code:       "NoSuchDistribution",
+			Message:    "Distribution not found for ARN: " + resourceARN,
+			HTTPStatus: http.StatusNotFound,
+		}
+	}
+	return p.loadDistribution(ctx, distID)
+}
+
+// cfInvalidTagBody refuses a tagging body whose XML does not decode into the root element
+// the operation publishes, naming that element so a caller can see which one was expected.
+//
+// InvalidArgument/400 is the closest of the four codes the tagging operations document
+// (AccessDenied 403, InvalidArgument 400, InvalidTagging 400, NoSuchResource 404): the
+// reference glosses it as "an argument is invalid", and the body is the argument. AWS does
+// not publish which of InvalidArgument and InvalidTagging it answers for an unparsable body,
+// so the choice between the two is substrate's.
+func cfInvalidTagBody(root string, err error) *AWSError {
+	return &AWSError{
+		Code:       "InvalidArgument",
+		Message:    fmt.Sprintf("the request body is not a valid <%s> document: %v", root, err),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// putDistribution persists a distribution record under the key its account and ID name.
+//
+// op names the calling operation and reaches only the wrapped error's text. The tagging arms
+// share this rather than each marshaling and keying by hand, so an untag cannot write to a
+// different key than the tag it is undoing wrote to.
+func (p *CloudFrontPlugin) putDistribution(ctx *RequestContext, dist CloudFrontDistribution, op string) error {
+	data, err := json.Marshal(dist)
+	if err != nil {
+		return fmt.Errorf("cloudfront %s marshal: %w", op, err)
+	}
+	if err := p.state.Put(context.Background(), cloudfrontNamespace, cfDistKey(ctx.AccountID, dist.ID), data); err != nil {
+		return fmt.Errorf("cloudfront %s state.Put: %w", op, err)
+	}
+	return nil
+}
 
 // loadDistribution loads a CloudFrontDistribution from state, returning a
 // NoSuchDistribution error if absent.
