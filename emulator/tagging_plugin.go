@@ -251,6 +251,8 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "cognito-idp", scan: p.scanCognitoUserPools},
 		{typePrefix: "kinesis", scan: p.scanKinesisStreams},
 		{typePrefix: "rds", scan: p.scanRDSInstances},
+		{typePrefix: "rds", scan: p.scanRDSClusters},
+		{typePrefix: "rds", scan: p.scanRDSSubnetGroups},
 		{typePrefix: "elasticache", scan: p.scanElastiCacheClusters},
 		{typePrefix: "elasticfilesystem", scan: p.scanEFSFileSystems},
 		{typePrefix: "glue", scan: p.scanGlueDatabases},
@@ -613,6 +615,62 @@ func (p *TaggingPlugin) scanRDSInstances(_ context.Context, reqCtx *RequestConte
 		out = append(out, resourceTagMapping{
 			ResourceARN: inst.DBInstanceArn,
 			Tags:        mapToTaggingTags(inst.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanRDSClusters reports every Aurora DB cluster in the caller's account.
+//
+// A sibling of [TaggingPlugin.scanRDSInstances] rather than a branch inside it, because the two
+// records are different shapes with the ARN in a different member, and one function decoding both
+// is how the merge arm above came to truncate a cluster in the first place.
+func (p *TaggingPlugin) scanRDSClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := rdsDBClusterKeyPrefix + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, rdsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list rds clusters: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, rdsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var cluster RDSDBCluster
+		if err := json.Unmarshal(raw, &cluster); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: cluster.DBClusterArn,
+			Tags:        mapToTaggingTags(cluster.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanRDSSubnetGroups reports every DB subnet group in the caller's account.
+func (p *TaggingPlugin) scanRDSSubnetGroups(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := rdsDBSubnetGroupKeyPrefix + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, rdsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list rds subnet groups: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, rdsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var group RDSDBSubnetGroup
+		if err := json.Unmarshal(raw, &group); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: group.DBSubnetGroupArn,
+			Tags:        mapToTaggingTags(group.Tags),
 		})
 	}
 	return out, nil
@@ -1027,12 +1085,14 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		return kinesisNamespace, "stream:" + acct + "/" + region + "/" + name, nil
 
 	case "rds":
-		// arn:aws:rds:{region}:{acct}:db:{id}
-		if strings.HasPrefix(resource, "db:") {
-			id := strings.TrimPrefix(resource, "db:")
-			region := parts[3]
-			acct := parts[4]
-			return rdsNamespace, "dbinstance:" + acct + "/" + region + "/" + id, nil
+		// Through [rdsResolveARN] rather than a key built here, so RDS's own three tag
+		// operations and this one cannot disagree about where a resource's tags live — the
+		// arrangement #826 warns about and the one the ecs arm above already follows. It is also
+		// what lets this arm reach a DB cluster, a snapshot and a subnet group at all: it
+		// recognized `db:` only, while RDS mints `cluster:` and `subgrp:` ARNs of its own
+		// (part of #835).
+		if ns, key, resolveErr := rdsResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
 		}
 		return "", "", unsupportedTagResource("RDS %q is not a taggable resource type", resource)
 
@@ -1251,12 +1311,22 @@ func mergeResourceTags(
 		return state.Put(goCtx, ns, key, updated)
 
 	case rdsNamespace:
-		var inst RDSDBInstance
-		if err := json.Unmarshal(raw, &inst); err != nil {
-			return fmt.Errorf("unmarshal RDSDBInstance: %w", err)
+		// Guarded on the prefix and merged through raw JSON, because this one namespace holds a
+		// DB instance, a DB cluster, a snapshot, a subnet group, a parameter group, a container
+		// handle and several index keys. This arm decoded [RDSDBInstance] whatever the key
+		// named — safe only while [TaggingPlugin.resolveARN] could reach nothing but an instance
+		// (part of #835, the same shape #845 fixed for ECS).
+		//
+		// The guard and the raw-JSON merge answer different failures and both are needed: the
+		// guard refuses a key naming something substrate stores no tags on, and the merge keeps
+		// a member of one taggable shape from being dropped because another shape lacks it.
+		if !rdsKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported RDS resource key: %s", key)
 		}
-		inst.Tags = mergeStringMap(inst.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(inst)
+		updated, err := mergeRecordStringMapTags(raw, rdsTagsJSONMember, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge RDS tags for %s: %w", key, err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case elasticacheNamespace:
@@ -1331,6 +1401,54 @@ func mergeResourceTags(
 	default:
 		return fmt.Errorf("unsupported namespace for tag merge: %s", ns)
 	}
+}
+
+// mergeRecordStringMapTags applies addTags and removeKeys to the named tag member of a stored
+// record, returning the re-encoded record. The member must hold a JSON object of string values —
+// the map[string]string shape most services store tags in.
+//
+// It edits the record as raw JSON rather than decoding a concrete type, for the reason
+// [ecsMergeRecordTags] records for ECS: a namespace can hold several record shapes, and a writer
+// that decoded one of them drops every member the others carry and stores the truncated record
+// back. The rds namespace is the case in point — it holds a DB instance, a DB cluster, a
+// snapshot and a subnet group, and this path decoded [RDSDBInstance] whatever the key named, so
+// tagging a cluster would have replaced it with an instance-shaped husk. That is data loss
+// rather than a missing feature, which is why the conversion lands with the resolver arms that
+// make the other shapes reachable at all (part of #835).
+//
+// Unlike [ecsMergeRecordTags] the member name is a parameter, because the shapes disagree about
+// it — ECS's records spell it "tags" and RDS's spell it "Tags". A caller passing a name the
+// record does not use would add a second member and leave the real tags untouched, so a member
+// differing from the requested one only by case is refused rather than written alongside: every
+// way of not writing a tag has to be an error, per [applyTagsToResource].
+func mergeRecordStringMapTags(raw []byte, member string, addTags map[string]string, removeKeys []string) ([]byte, error) {
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("unmarshal record: %w", err)
+	}
+	for name := range record {
+		if name != member && strings.EqualFold(name, member) {
+			return nil, fmt.Errorf("record stores tags in %q, not %q", name, member)
+		}
+	}
+
+	var existing map[string]string
+	if t, ok := record[member]; ok {
+		if err := json.Unmarshal(t, &existing); err != nil {
+			return nil, fmt.Errorf("unmarshal %s member: %w", member, err)
+		}
+	}
+	merged, err := json.Marshal(mergeStringMap(existing, addTags, removeKeys))
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged tags: %w", err)
+	}
+	record[member] = merged
+
+	updated, err := json.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("marshal record: %w", err)
+	}
+	return updated, nil
 }
 
 // mergeStringMap applies addTags and removeKeys to an existing tag map.
