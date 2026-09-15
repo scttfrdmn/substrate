@@ -107,6 +107,10 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:ListGroupsForUser", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
@@ -267,6 +271,10 @@ func (p *IAMPlugin) listAttachedGroupPolicies(ctx *RequestContext, req *AWSReque
 		return iamErrorResponse("ValidationError", "GroupName is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:ListAttachedGroupPolicies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
@@ -283,7 +291,7 @@ func (p *IAMPlugin) listAttachedGroupPolicies(ctx *RequestContext, req *AWSReque
 	}
 
 	return iamXMLResponse(http.StatusOK, "ListAttachedGroupPolicies",
-		iamAttachedPoliciesXML(policies)+"<IsTruncated>false</IsTruncated>")
+		iamAttachedPoliciesXML("AttachedPolicies", policies)+"<IsTruncated>false</IsTruncated>")
 }
 
 // --- Inline policies (group) -----------------------------------------------

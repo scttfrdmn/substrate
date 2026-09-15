@@ -214,14 +214,27 @@ func (p *IAMPlugin) parseSimulateRequest(req *AWSRequest) (*iamSimulateRequest, 
 		}
 	}
 
-	// The model's maxItemsType is min 1 / max 1000. Zero means absent, which the
-	// reference gives a default for. #579 asserted a 25-action cap; no action-count
-	// limit appears anywhere in the reference or the model, so none is modeled —
-	// refusing requests AWS accepts would be worse than accepting a large one.
-	if params.MaxItems != 0 &&
-		(params.MaxItems < 1 || params.MaxItems > iamSimulateMaxMaxItems) {
+	// The model's maxItemsType is min 1 / max 1000, and an explicit `MaxItems=0` is below
+	// the minimum rather than absent — the distinction [iamValidateMaxItems] reads from
+	// req.Params, because the decoded value cannot carry it (#868). Before that, zero was
+	// taken as absent here and got the default, so these two operations answered a page for
+	// a value their seventeen siblings now refuse.
+	//
+	// The code stays `InvalidInput` rather than the `ValidationError` the shared guard
+	// answers, and that difference is AWS's rather than substrate's: both simulate
+	// operations publish `InvalidInput` in their own Errors section, while the seventeen
+	// publish only `NoSuchEntity` and `ServiceFailure` and so can only draw the code from
+	// `CommonErrors`, which does not list `InvalidInput`.
+	//
+	// #579 asserted a 25-action cap; no action-count limit appears anywhere in the
+	// reference or the model, so none is modeled — refusing requests AWS accepts would be
+	// worse than accepting a large one.
+	sentMaxItems := req.Params["MaxItems"] != ""
+	if (params.MaxItems != 0 || sentMaxItems) &&
+		(params.MaxItems < iamMaxItemsMin || params.MaxItems > iamSimulateMaxMaxItems) {
 		return nil, iamErrorResponse("InvalidInput",
-			fmt.Sprintf("MaxItems must be between 1 and %d", iamSimulateMaxMaxItems),
+			fmt.Sprintf("MaxItems must be between %d and %d",
+				iamMaxItemsMin, iamSimulateMaxMaxItems),
 			http.StatusBadRequest)
 	}
 

@@ -7,7 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`GetAccountAuthorizationDetails` answers** (#848) — the account-wide snapshot of every user,
+  group, role and managed policy with its inline policies, its attached managed policies and, for a
+  user, its group memberships. The action was already authorizable: `authzref/iam.json` and the
+  generated reference both carried it, so a consumer could be *granted* permission to make a call
+  that answered `InvalidAction`/400. The only wiring it needed was a handler.
+
+  It is worth more than the convenience, and that is why it is the release's IAM headline.
+  `AttachmentCount`, `PermissionsBoundaryUsageCount` and `RoleLastUsed` are each derived per read,
+  and this is the **only** operation that reports all four entity shapes in one body — so it is the
+  only place a derivation can be seen beside the operation that reports the same value singly. All
+  three were defects (#847, #815, #816) precisely because nothing put two of them side by side, and
+  the tests now assert the agreement across an attach *and* a detach rather than asserting three
+  separately plausible numbers.
+
+  Three decisions are recorded rather than left to the diff. **An embedded role is re-read from
+  state, never taken from the instance-profile record**: `AddRoleToInstanceProfile` stores a frozen
+  copy of the role, and every later write to that role — STS's `RoleLastUsed`, `UpdateRole`'s
+  description and session duration, `UpdateAssumeRolePolicy`'s trust policy — lands on the role's
+  own record and never reaches the copy, while AWS's own sample renders `<RoleLastUsed>` *inside*
+  `InstanceProfileList → Roles → member`. Rendering the stored copy would report nothing there for
+  essentially every role that has been assumed, and no test that attaches a profile and immediately
+  reads it back can tell the two apart. **`MaxItems` counts across the four lists combined**, which
+  AWS does not document either way: substrate pages one ordered key space with keys composed as
+  `user/<name>`, `group/<name>`, `role/<name>` and `policy/<arn>`, because a per-list cursor would
+  skip or repeat an entity at every page boundary. With 52 bundled managed policies against a
+  default of 100, truncation is on the **default** path rather than an edge case. And the four
+  detail shapes are not the shapes the single-entity reads use — `UserDetail` has no
+  `PasswordLastUsed`, `RoleDetail` has neither `Description` nor `MaxSessionDuration`, and the roles
+  nested in an `InstanceProfileList` are `Role`, where both of those *are* admissible.
+
+  **The policy-document encoding follows the per-shape pages, which reverses this issue's fourth
+  acceptance criterion, with the citation.** The operation's page states that every policy document
+  it returns is URL-encoded per RFC 3986 while **its own sample response renders all of them as
+  plain JSON**, and of the members only `PolicyVersion.Document`'s type page repeats the mandate.
+  So one response carries both conventions: `PolicyVersionList[].Document` is percent-encoded and
+  byte-identical to `GetPolicyVersion`'s, while the inline documents and the trust policy are plain
+  JSON and byte-identical to `GetUserPolicy`'s and `GetRole`'s. That satisfies exactly the invariant
+  the issue exists to protect — a shape must not diverge between the operations reporting it — at
+  zero compatibility cost, where encoding everything would have been a breaking wire change to five
+  shipped operations. AWS's contradiction is recorded rather than silently resolved; `GetRole`'s
+  page shows the same one.
+
+  `SAMLProviderList` is a `Filter` value AWS accepts and substrate refuses, because substrate
+  models no SAML provider and accepting the filter would select nothing — an empty `UserDetailList`
+  a caller could not distinguish from an account with no users. A store failure anywhere in the
+  assembly fails the request rather than reporting a smaller account; a record that does not
+  *decode* is skipped instead, since it never will and one bad key must not hide an account's
+  authorization for good.
+
 ### Fixed
+- **An out-of-range `MaxItems` was silently rewritten to 100 at nineteen IAM operations** (#868).
+  AWS's `maxItemsType` is "Minimum value of 1. Maximum value of 1000" and IAM refuses a value
+  outside it; substrate's shared paginator read `if maxItems <= 0 || maxItems > 1000 { maxItems =
+  100 }`, and the tag listings read `if limit <= 0 { limit = 100 }` with no upper bound at all — so
+  `MaxItems=1001` produced a 100-item page at seven operations and a 1001-item page at four more.
+
+  This is the release's theme aimed at a request parameter rather than a response value: the page
+  size a caller got came from neither the request nor a documented default. A consumer wiring up
+  pagination against substrate saw its bad `MaxItems` accepted, built the walk around a page size it
+  never asked for, and got a 400 from IAM the first time it ran for real.
+
+  The guard is in the handler, before the shared paginator, and the coercion stays as the defaulting
+  path for a value that was never sent. Presence is read from the decoded form parameters rather
+  than inferred from the value, because an absent `MaxItems` and an explicit `MaxItems=0` both decode
+  to zero and only one of them is an error; a present-but-empty `MaxItems=` is accepted, which
+  `iamInt`'s own comment already recorded as AWS's behaviour.
+
+  **Widened from the issue's eight `paginateIAMKeys` call sites to all seventeen handlers — nineteen
+  operations — that decode the parameter**, including the ones that decode it and then have nothing
+  to truncate, such as `ListAttachedUserPolicies` and `ListPolicyVersions`: AWS validates a request
+  parameter before it decides whether the request has enough results to use it, and an operation
+  that accepts 1001 while its sibling refuses it is the inconsistency this exists to remove. The
+  code is `ValidationError`/400, which is `CommonErrors`' entry for a parameter that fails a model
+  constraint — `ListUsers` and the rest publish only `NoSuchEntity` and `ServiceFailure`, so no
+  other code is available to them. It stays `InvalidInput`/400 at `SimulatePrincipalPolicy` and
+  `SimulateCustomPolicy`, which publish that code in their own Errors sections; that split is AWS's
+  rather than substrate's. Only the code differs: those two now apply the same bounds and the same
+  presence rule, where an explicit `MaxItems=0` had been taken as absent — the below-minimum value
+  slipping through at the one place that was already validating.
+
+  One row of the issue's inventory is stale and is corrected there rather than acted on:
+  `ListInstanceProfiles` decodes **no** request parameters at all, so it ignores `MaxItems`,
+  `Marker` and `PathPrefix` and hardcodes `IsTruncated=false`. That is the accepted-and-ignored
+  defect class rather than the silently-coerced one — there is no decoded value to range-check —
+  and giving it a guard means implementing pagination it has never had, so it is filed separately as
+  #873.
+
 - **A listing's member order came from Go's map hash seed, so two identical calls in one run could
   differ** (#865). `MemoryStateManager.List` — the only non-test `StateManager` implementation —
   ranged the namespace map and returned without sorting, and `StateManager.List`'s doc comment

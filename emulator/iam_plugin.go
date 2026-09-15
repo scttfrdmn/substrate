@@ -137,6 +137,8 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.getPolicyVersion(ctx, req)
 	case "ListPolicyVersions":
 		return p.listPolicyVersions(ctx, req)
+	case "GetAccountAuthorizationDetails":
+		return p.getAccountAuthorizationDetails(ctx, req)
 
 	case "CreateAccessKey":
 		return p.createAccessKey(ctx, req)
@@ -403,6 +405,10 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
 	}
 
 	goCtx := context.Background()
@@ -711,6 +717,10 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListRoles", p.authzResource(ctx, req)); err != nil {
@@ -811,6 +821,10 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	}
 	if params.GroupName == "" {
 		return iamErrorResponse("ValidationError", "GroupName is required", http.StatusBadRequest), nil
+	}
+
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
 	}
 
 	goCtx := context.Background()
@@ -932,6 +946,10 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
 	}
 
 	goCtx := context.Background()
@@ -1081,6 +1099,10 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListAttachedUserPolicies", p.authzResource(ctx, req)); err != nil {
@@ -1098,7 +1120,7 @@ func (p *IAMPlugin) listAttachedUserPolicies(ctx *RequestContext, req *AWSReques
 		policies = append(policies, IAMAttachedPolicy{PolicyName: name, PolicyARN: arn})
 	}
 
-	return iamXMLResponse(http.StatusOK, "ListAttachedUserPolicies", iamAttachedPoliciesXML(policies)+"<IsTruncated>false</IsTruncated>")
+	return iamXMLResponse(http.StatusOK, "ListAttachedUserPolicies", iamAttachedPoliciesXML("AttachedPolicies", policies)+"<IsTruncated>false</IsTruncated>")
 }
 
 // --- Policy attachment (role) ----------------------------------------------
@@ -1215,6 +1237,10 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListAttachedRolePolicies", p.authzResource(ctx, req)); err != nil {
@@ -1232,7 +1258,7 @@ func (p *IAMPlugin) listAttachedRolePolicies(ctx *RequestContext, req *AWSReques
 		policies = append(policies, IAMAttachedPolicy{PolicyName: name, PolicyARN: arn})
 	}
 
-	return iamXMLResponse(http.StatusOK, "ListAttachedRolePolicies", iamAttachedPoliciesXML(policies)+"<IsTruncated>false</IsTruncated>")
+	return iamXMLResponse(http.StatusOK, "ListAttachedRolePolicies", iamAttachedPoliciesXML("AttachedPolicies", policies)+"<IsTruncated>false</IsTruncated>")
 }
 
 // --- Policy CRUD -----------------------------------------------------------
@@ -1570,6 +1596,10 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 	if err := parseIAMBody(req.Body, &params); err != nil {
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
+	}
+
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
 	}
 
 	goCtx := context.Background()
@@ -2110,6 +2140,10 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 		return iamErrorResponse("ValidationError", "EntityName is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:List"+actionSuffix+"Policies", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
@@ -2466,6 +2500,10 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListUserTags", p.authzResource(ctx, req)); err != nil {
@@ -2598,6 +2636,10 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	if params.RoleName == "" {
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
+	}
+
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
 	}
 
 	goCtx := context.Background()
@@ -2766,8 +2808,13 @@ func paginateIAMKeys(keys []string, marker string, maxItems int) (page []string,
 		}
 	}
 
-	if maxItems <= 0 || maxItems > 1000 {
-		maxItems = 100
+	// Only an unsent MaxItems reaches this now: every handler refuses an out-of-range
+	// value before calling in (#868, [iamValidateMaxItems]), so this is the documented
+	// default and no longer a silent rewrite of what the caller asked for. The bounds stay
+	// as a backstop rather than being deleted, so a paginated operation added without the
+	// handler guard truncates to a documented page size instead of slicing on a negative.
+	if maxItems <= 0 || maxItems > iamMaxItemsMax {
+		maxItems = iamMaxItemsDefault
 	}
 
 	end := startIdx + maxItems
@@ -3206,5 +3253,5 @@ func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, req *AWSRequest) (
 		}
 		profiles = append(profiles, profile)
 	}
-	return iamXMLResponse(http.StatusOK, "ListInstanceProfiles", iamInstanceProfileListXML(profiles)+"<IsTruncated>false</IsTruncated>")
+	return iamXMLResponse(http.StatusOK, "ListInstanceProfiles", iamInstanceProfileListXML("InstanceProfiles", profiles, false)+"<IsTruncated>false</IsTruncated>")
 }

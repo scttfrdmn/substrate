@@ -121,9 +121,13 @@ func iamTagListingResponse(operation string, tags []IAMTag, marker string, maxIt
 	copy(sorted, tags)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
 
+	// Only an unsent MaxItems reaches the default: the four tag listings refuse an
+	// out-of-range value in their handlers (#868, [iamValidateMaxItems]), which is also what
+	// bounds the page above — this helper used to accept a `MaxItems` of any size, so a
+	// caller asking for 5000 got 5000 where IAM answers a validation failure.
 	limit := maxItems.Int()
 	if limit <= 0 {
-		limit = 100
+		limit = iamMaxItemsDefault
 	}
 
 	start := 0
@@ -338,6 +342,10 @@ func (p *IAMPlugin) listPolicyTags(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return iamErrorResponse("ValidationError", "PolicyArn is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:ListPolicyTags", p.authzResource(ctx, req)); err != nil {
@@ -447,6 +455,10 @@ func (p *IAMPlugin) listInstanceProfileTags(ctx *RequestContext, req *AWSRequest
 	}
 	if params.InstanceProfileName == "" {
 		return iamErrorResponse("ValidationError", "InstanceProfileName is required", http.StatusBadRequest), nil
+	}
+
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
 	}
 
 	goCtx := context.Background()

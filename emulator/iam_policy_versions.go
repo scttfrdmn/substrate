@@ -105,6 +105,10 @@ func (p *IAMPlugin) listPolicyVersions(ctx *RequestContext, req *AWSRequest) (*A
 		return iamErrorResponse("ValidationError", "PolicyArn is required", http.StatusBadRequest), nil
 	}
 
+	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+		return errResp, nil
+	}
+
 	goCtx := context.Background()
 	if err := p.authorize(goCtx, ctx, "iam:ListPolicyVersions", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
