@@ -1173,9 +1173,17 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, err
 	}
 
+	// Sorting [StateManager.List] made the instances *within* a reservation deterministic, but
+	// the reservations themselves are bucketed through a map, so the reservationSet's own member
+	// order was still Go's map order and two identical DescribeInstances calls in one run could
+	// answer differently (#865). AWS documents no order for reservationSet, so the reservation ID
+	// is substrate's reading — the same choice, for the same reason, as every other listing here.
 	for _, res := range resMap {
 		resp.Reservations = append(resp.Reservations, *res)
 	}
+	sort.Slice(resp.Reservations, func(i, j int) bool {
+		return resp.Reservations[i].ReservationID < resp.Reservations[j].ReservationID
+	})
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 

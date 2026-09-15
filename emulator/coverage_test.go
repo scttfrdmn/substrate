@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"testing"
 	"time"
 
@@ -85,6 +86,9 @@ func (m *memStateManager) Delete(_ context.Context, namespace, key string) error
 	return nil
 }
 
+// List honors [emulator.StateManager]'s lexicographic ordering contract. This
+// double is the only one in the suite that keeps its own map rather than
+// delegating to an inner manager, so it is the only one that has to sort.
 func (m *memStateManager) List(_ context.Context, namespace, prefix string) ([]string, error) {
 	ns, ok := m.data[namespace]
 	if !ok {
@@ -96,6 +100,7 @@ func (m *memStateManager) List(_ context.Context, namespace, prefix string) ([]s
 			keys = append(keys, k)
 		}
 	}
+	sort.Strings(keys)
 	return keys, nil
 }
 

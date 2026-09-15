@@ -188,7 +188,14 @@ type StateManager interface {
 	// Delete removes namespace/key. No error is returned if the key is absent.
 	Delete(ctx context.Context, namespace, key string) error
 
-	// List returns all keys in namespace that share the given prefix.
+	// List returns all keys in namespace that share the given prefix, sorted
+	// lexicographically.
+	//
+	// The ordering is part of the contract: a caller may rely on it, and an
+	// implementation that returns keys in an arbitrary order — Go map iteration
+	// order, say — does not satisfy this interface. Substrate's replay guarantee
+	// depends on it, because a listing rendered into a response body, or paged
+	// over with a cursor, cannot reproduce byte-for-byte otherwise (#865).
 	List(ctx context.Context, namespace, prefix string) ([]string, error)
 }
 

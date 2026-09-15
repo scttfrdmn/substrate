@@ -2575,6 +2575,21 @@ func (p *S3Plugin) abortMultipartUpload(_ *RequestContext, req *AWSRequest, buck
 }
 
 // listMultipartUploads handles GET /<bucket>?uploads.
+//
+// The uploads are sorted the way AWS documents, which is the one place in
+// substrate's listings where the order is published rather than inferred:
+// API_ListMultipartUploads' "Sorting of multipart uploads in response" section
+// gives ascending object key, then ascending initiation time among uploads
+// sharing a key. Neither falls out of state order — [StateManager.List] returns
+// `multipart:<uploadID>` keys sorted by upload ID, which is unrelated to either
+// (#865).
+//
+// A third tie-break on upload ID is substrate's own, because two uploads of one
+// key can share an initiation instant under a controlled clock where they could
+// not under a real one, and AWS publishes no order for that case. It is the
+// tie-break AWS's own cursor implies: key-marker's description admits an upload
+// "for a key equal to the key-marker" only when its "upload ID [is]
+// lexicographically greater than the specified upload-id-marker".
 func (p *S3Plugin) listMultipartUploads(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
 	ctx := context.Background()
 
@@ -2603,7 +2618,15 @@ func (p *S3Plugin) listMultipartUploads(_ *RequestContext, _ *AWSRequest, bucket
 		Uploads []uploadEntry `xml:"Upload"`
 	}
 
+	// sortable pairs an entry with the initiation time it renders, so the sort
+	// compares the instant rather than its RFC 3339 rendering.
+	type sortable struct {
+		entry     uploadEntry
+		initiated time.Time
+	}
+
 	result := listMultipartUploadsResult{Bucket: bucket}
+	sortables := make([]sortable, 0, len(allKeys))
 
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(ctx, s3Namespace, k)
@@ -2621,12 +2644,29 @@ func (p *S3Plugin) listMultipartUploads(_ *RequestContext, _ *AWSRequest, bucket
 		if storageClass == "" {
 			storageClass = S3StorageClassStandard
 		}
-		result.Uploads = append(result.Uploads, uploadEntry{
-			Key:          upload.Key,
-			UploadId:     upload.UploadID,
-			StorageClass: storageClass,
-			Initiated:    upload.Initiated.UTC().Format(time.RFC3339),
+		sortables = append(sortables, sortable{
+			entry: uploadEntry{
+				Key:          upload.Key,
+				UploadId:     upload.UploadID,
+				StorageClass: storageClass,
+				Initiated:    upload.Initiated.UTC().Format(time.RFC3339),
+			},
+			initiated: upload.Initiated,
 		})
+	}
+
+	sort.Slice(sortables, func(i, j int) bool {
+		if sortables[i].entry.Key != sortables[j].entry.Key {
+			return sortables[i].entry.Key < sortables[j].entry.Key
+		}
+		if !sortables[i].initiated.Equal(sortables[j].initiated) {
+			return sortables[i].initiated.Before(sortables[j].initiated)
+		}
+		return sortables[i].entry.UploadId < sortables[j].entry.UploadId
+	})
+
+	for _, s := range sortables {
+		result.Uploads = append(result.Uploads, s.entry)
 	}
 
 	return s3XMLResponse(http.StatusOK, result)
@@ -4082,6 +4122,16 @@ func (p *S3Plugin) getBucketVersioning(_ *RequestContext, _ *AWSRequest, bucket 
 }
 
 // listObjectVersions handles GET /<bucket>?versions.
+//
+// Keys come out lexicographically and versions within a key newest-first, and
+// both hold without a sort here: [StateManager.List] guarantees the first (#865)
+// and the version list is stored newest-first by prepend, so the order is a
+// recorded property of state rather than of a map walk. AWS states no order for
+// this operation in prose, but its cursor requires one — NextKeyMarker is "the
+// first key not returned that satisfies the search criteria", and a
+// CommonPrefixes entry "is filtered out from results if it is not
+// lexicographically greater than the key-marker" — so a caller paging with
+// KeyMarker over an unstable order could skip or repeat a key.
 func (p *S3Plugin) listObjectVersions(_ *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
 	ctx := context.Background()
 
