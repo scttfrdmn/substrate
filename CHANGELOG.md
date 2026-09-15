@@ -68,6 +68,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes (`ec2_filters.go`), which the same `ec2SeededZones` pairing now makes
   implementable.
 
+- **`DescribeAccountLimits` answers, and the limits it reports are seedable** (#885). The
+  action was authorizable but not dispatched: `elasticloadbalancing:DescribeAccountLimits` was
+  already in the generated authorization reference with an empty resource list, while
+  `ELBPlugin.HandleRequest`'s switch had no arm for it — so a caller could be *granted* a
+  permission substrate then answered `InvalidAction` for. It was also the one shared action
+  name of nine that routed nowhere, correcting #844's claim that all nine reach v2.
+
+  The interesting part is not the arm, it is what number the operation should report.
+  Substrate enforces no ELB quota anywhere and is not going to, so a bare constant here would
+  be a number that does not come from where it appears to — the defect class the previous
+  release was spent removing. Rather than report a decorative constant or omit the operation,
+  the limits are **seedable** via `POST`/`DELETE /v1/elb/account-limits`, keyed by limit name
+  or the `*` wildcard with specific-then-wildcard resolution, following the `ec2FleetShortfall`
+  shape. AWS's published defaults become the default seed value, so the constant that would
+  have been decorative becomes the thing a caller polls this operation *for* — driving its own
+  "approaching my quota" branch — at essentially no extra cost. `docs/services.md` states
+  explicitly that nothing in substrate enforces the number reported, seeded or defaulted;
+  that sentence is what makes choosing this option honest rather than merely plausible.
+
+  **The provenance of the reported names splits, and is recorded rather than smoothed over.**
+  The *shape* is the API model's: `Limits.member.N` of `Max`/`Name` plus `NextMarker`, with
+  `Max` rendered as a **String** per `API_Limit` — the member a caller's code will reach for as
+  an integer, which is why the test asserts on the raw XML. The *names* are not. Classic's
+  2012-06-01 `API_Limit` enumerates exactly three (`classic-listeners`,
+  `classic-load-balancers`, `classic-registered-instances`); **v2's enumerates none** — it says
+  only "The name of the limit." and points at the three Load Balancer quota user guides. The
+  23 v2 names substrate reports are therefore taken verbatim from the example output on the
+  AWS CLI v2 reference page for the operation, the only AWS page found that renders the tokens
+  at all, and are labelled an illustrative example rather than presented as the published API
+  model. Their *values* come from the three quota user guides, which are AWS's normative
+  statement of a default and which the CLI example is not kept in step with: where the two
+  disagree the guide wins (`condition-wildcards-per-alb-rule` is 6, not the example's 5), and
+  the two entries no guide row names cleanly keep the example's value and say so on their own
+  line in the source.
+
+  `NextMarker` is **absent** when the walk is exhausted rather than empty, because the two
+  generations document it differently — v2 "Otherwise, this is null", classic "the string is
+  empty" — and this handler answers v2 shapes. The difference is recorded against #844 rather
+  than resolved silently, since it is published text and not a paraphrase. `Marker` is a
+  decimal offset into a fixed name-ordered set, so a paged walk returns each limit exactly
+  once.
+
+  `PageSize` is documented 1–400, and a value outside it **falls back to the default** rather
+  than being refused — a decision that needed making because substrate's paginators do not
+  agree with each other. The Query-protocol family this operation joins (RDS's and
+  ElastiCache's `MaxRecords`, CloudWatch's) substitutes its default for anything unusable and
+  enforces no maximum; EC2's `DescribeTags` refuses a `MaxResults` outside 5–1000 with
+  `InvalidParameterValue`. ELBv2 had no paginated operation at all before this one, so there
+  was no ELB precedent to match, and the decider is that `DescribeAccountLimits` publishes **no
+  operation-specific error** on either generation's page: refusing would mean inventing a code
+  AWS does not publish for it. Because the default is the documented maximum, a `PageSize`
+  above 400 is answered indistinguishably from a clamp.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -116,6 +169,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   67 default plugin registrations omit `time_controller` and therefore run on wall-clock time
   (#904), which is why the SES v2 case has to wire the clock itself.
 
+- **S3 `ListBuckets` honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`,
+  and reports `Owner` and a conditional `BucketRegion`** (#884). The handler took its request as
+  `_ *AWSRequest` and implemented none of the four: it returned every bucket, unfiltered and
+  unpaged, whatever the caller asked for. The paging pair is the sharp end, because a dropped
+  parameter there is invisible in the response — a caller asking for 10 buckets and receiving 500
+  sees a well-formed answer, since a short page and a complete listing are the same shape, and a
+  caller looping on a token received page one every time, so it either spun forever or processed
+  the same buckets twice. `prefix` and `bucket-region` merely over-returned, which a consumer can
+  at least notice.
+
+  The range and default are AWS's: `max-buckets` publishes "Valid Range: Minimum value of 1.
+  Maximum value of 10000" and the page size applied when the caller names none is the documented
+  default of 10,000. An out-of-range or non-integer value is **refused** with `InvalidArgument`
+  rather than clamped, on the same reasoning as the defect itself — silently substituting a value
+  the caller did not ask for is precisely what a well-formed response hides. An undecodable
+  continuation token is refused for the sharper version of that: treating it as "no cursor" would
+  restart the listing, which is the non-terminating loop this issue describes rather than merely a
+  wrong answer. **The error code is unverified**: `API_ListBuckets` publishes no `Errors` section
+  and the S3 error-code reference returns an empty body to automated retrieval, so
+  `InvalidArgument`/400 is substrate's reading of what S3 returns for a malformed query-parameter
+  value, recorded as such in `docs/services.md`.
+
+  `bucket-region` needed no new state. `CreateBucket` already persisted the bucket's Region from
+  the request context, so the filter reads a value substrate has always stored; the issue flagged
+  storing it as "the one non-trivial part" and it was already done.
+
+  Pagination is a cursor over the lexicographic bucket-name order `StateManager.List` now
+  guarantees (#865), which is why that sort had to land first — a cursor over an unstable order
+  both omits and repeats members between pages. The order itself remains **substrate's reading**,
+  as `ListBuckets` documents none.
+
+  Two of the issue's response-member requests were reversed on the documentation rather than
+  implemented. `BucketArn` is **not** reported: the `Bucket` type says it "is only supported for S3
+  directory buckets" while `ListBuckets` "is not supported for directory buckets", so no response
+  AWS produces carries one, and synthesizing a general purpose bucket ARN would hand a consumer a
+  field readable here and empty against AWS. `BucketRegion` is reported *conditionally*, not
+  always — "If the request contains at least one valid parameter, it is included in the response" —
+  which AWS's own examples bear out, the unparameterised one showing no `BucketRegion` and the four
+  parameterised ones all showing it. `Owner` is unconditional, with `ID` set to the account ID,
+  substrate's only account-scoped identifier; `DisplayName` is omitted, as the `Owner` type gives
+  it no description and none of the five published examples renders it.
+
+  `ContinuationToken` carries the *next* page's token rather than echoing the request's, which is
+  an asymmetry with `ListObjectsV2` and AWS's own: `ListBuckets` publishes no
+  `NextContinuationToken` and reuses the one name for the forward cursor. It appears only when the
+  listing was truncated, so a last page that exactly fills `max-buckets` carries none — AWS ties
+  the token to there being "more buckets that can be listed" rather than to a full page.
 - **`ListInstanceProfiles` decodes and applies `MaxItems`, `Marker` and `PathPrefix`, the three
   parameters it accepted and ignored** (#873). The operation had no `parseIAMBody` call and no
   params struct at all: it returned every instance profile in the account with `IsTruncated`
@@ -178,6 +278,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The malformed-ARN table is now **one** table shared by the attach and the detach tests, and a test
   asserts both directions reach the same verdict on every case. Two tables would let a case be added
   to one side only, which is how the pair came to disagree in the first place.
+- **CloudFront answered an untag request with the tagging success and left the tag in place**
+  (#883). CloudFront implemented `TagResource` and `ListTagsForResource` and not
+  `UntagResource`, and `parseCloudFrontOperation` mapped *any* `Resource`-bearing POST to
+  `TagResource` — so `POST /2020-05-31/tagging?Operation=Untag` ran the tag path, where the
+  `<TagKeys>` body decoded as `<Tags>` into an empty item list, the decode error was discarded,
+  and the distribution was written back byte-identical with a 204. The failure was not
+  "operation not supported", which a caller can branch on, but a **successful no-op**: the
+  removal was reported as done, `ListTagsForResource` still reported the tag, and nothing
+  anywhere said otherwise. Same class as the `applyTagsToResource` silent-200 that v0.115.0
+  removed for ECS.
+
+  The dispatch now resolves a tagging POST on the `Operation` value and on nothing else, per
+  the request syntax the CloudFront API Reference publishes for the three operations that share
+  the `/tagging` path — `Operation=Tag`, `Operation=Untag`, and `GET …?Resource={{Resource}}`
+  for the list. A value that is neither resolves to **no operation at all**, so the request
+  keeps its verb, reaches the plugin's default arm and is refused with `InvalidAction`/400
+  rather than performing whichever write happened to be first. The decode error is no longer
+  discarded on either arm either: because the root element name is part of the request shape, a
+  `<Tags>` document sent to the untag and a `<TagKeys>` document sent to the tag are both
+  refused with `InvalidArgument`/400 instead of read as an empty tag set, which closes the
+  silent-no-op behaviour independently of the routing. And an untag with no body is refused,
+  since `TagKeys` is documented `Required: Yes` and a 204 that removed nothing is the defect
+  itself.
+
+  Two things AWS does not publish are recorded rather than assumed. **Removing a key the
+  resource does not carry succeeds** — the operation's error list (`AccessDenied` 403,
+  `InvalidArgument` 400, `InvalidTagging` 400, `NoSuchResource` 404) names nothing for an absent
+  key and the response is documented as an unconditional 204 with an empty body, but the
+  reference does not address the case either way, so success is substrate's reading, taken
+  because the alternative makes a consumer's second teardown pass fail and because a response
+  carrying no per-key result has nowhere to report a partial removal. And **the `Resource`
+  query parameter is required on all three operations**, although the reference documents it
+  for `ListTagsForResource` only and states "the request does not use any URI parameters" on
+  both `TagResource` and `UntagResource` — which cannot be right for operations whose entire
+  request syntax is a bare `/tagging` path. Substrate reads that as a documentation omission.
+
+  The Resource Groups Tagging API is unaffected and deliberately not changed here:
+  `TaggingPlugin.resolveARN` has no `cloudfront` arm, so `UntagResources` against a
+  distribution ARN already refuses with an `InternalServiceException`/500 `FailedResourcesMap`
+  entry rather than reporting a removal it did not make. Its guard table now pins that,
+  alongside a note that giving CloudFront an arm there needs a `mergeResourceTags` case too and
+  stays #835's work. An ARN naming no distribution still answers `NoSuchDistribution`/404
+  rather than the `NoSuchResource` all three tagging pages list, because that is what the rest
+  of the plugin answers and one plugin should not report a missing distribution two ways;
+  aligning them is a separate change from a misrouted request.
 
 ## [v0.116.0] - 2026-09-14
 

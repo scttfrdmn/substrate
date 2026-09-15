@@ -429,43 +429,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 	return bucket, key, method // fallback: leave as HTTP verb
 }
 
-// listBuckets handles GET / — returns all buckets owned by the account.
-func (p *S3Plugin) listBuckets(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	ctx := context.Background()
-	keys, err := p.state.List(ctx, s3Namespace, "bucket:")
-	if err != nil {
-		return nil, fmt.Errorf("list buckets: %w", err)
-	}
-
-	type bucketEntry struct {
-		Name         string `xml:"Name"`
-		CreationDate string `xml:"CreationDate"`
-	}
-	type listAllMyBucketsResult struct {
-		XMLName xml.Name `xml:"ListAllMyBucketsResult"`
-		Buckets struct {
-			Bucket []bucketEntry `xml:"Bucket"`
-		} `xml:"Buckets"`
-	}
-
-	var result listAllMyBucketsResult
-	for _, k := range keys {
-		data, getErr := p.state.Get(ctx, s3Namespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var b S3Bucket
-		if unmarshalErr := json.Unmarshal(data, &b); unmarshalErr != nil {
-			continue
-		}
-		result.Buckets.Bucket = append(result.Buckets.Bucket, bucketEntry{
-			Name:         b.Name,
-			CreationDate: b.CreationDate.UTC().Format(time.RFC3339),
-		})
-	}
-
-	return s3XMLResponse(http.StatusOK, result)
-}
+// listBuckets lives in s3_list_buckets.go, alongside the validation of the four
+// query parameters it gained in #884 (max-buckets, continuation-token, prefix,
+// bucket-region) and the response's Owner and conditional BucketRegion.
 
 // createBucket handles PUT /<bucket>.
 func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket string) (*AWSResponse, error) {
