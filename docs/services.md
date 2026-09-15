@@ -1568,7 +1568,7 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | ListGroupPolicies | |
 | CreatePolicy | |
 | GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
-| DeletePolicy | |
+| DeletePolicy | `DeleteConflict`/409 while attached, naming the users, groups and roles; `InvalidInput` for a malformed ARN or a bundled AWS managed one — see below |
 | ListPolicies | Applies `Scope`, `PathPrefix` and `OnlyAttached`, and includes the bundled catalog. `PolicyUsageFilter` is validated and narrows nothing (see below) |
 | GetPolicyVersion | Returns the document, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
 | ListPolicyVersions | Returns exactly one version — substrate stores one document per policy |
@@ -2219,6 +2219,56 @@ A parameter that is present but empty is accepted, and that is a decision rather
 oversight: a form body carrying `MaxItems=` expressed no limit, so it takes the default. The
 refusal is per operation, in the handler, rather than in the paginator, because the paginator
 cannot tell an absent parameter from a zero one.
+
+### An attached policy cannot be deleted
+
+`DeletePolicy` answers `DeleteConflict`/**409** while the policy is attached to any user, group
+or role, and the message **names them**. Before #853 it went straight from the `NoSuchEntity`
+check to the delete, and what the silent success left behind is worse than the missing code:
+nothing writes a back-reference onto a policy, so every entity kept its ARN,
+`ListAttachedUserPolicies` still reported it, the authorization evaluator loaded no document for
+it — so the entity silently lost the permissions the policy granted, and a test asserting a
+*deny* passed for the wrong reason — and `GetPolicy` answered `NoSuchEntity` for the same ARN.
+
+The refusal reads the same three `<kind>_policies:` prefixes, through the same loader, that the
+`AttachmentCount` `GetPolicy` and `ListPolicies` report is derived from. That is deliberate: the
+count and the refusal must not be able to disagree about what "attached" means, and reading the
+same keys is what guarantees it rather than promises it. It also closes a hazard the derived
+count made observable — a delete now succeeds only when nothing is attached, so a policy
+re-created under a deleted ARN cannot inherit the previous one's attachments.
+
+Naming the entities matters more here than in the sibling refusals. `API_DeletePolicy`'s
+description tells the caller to use `ListEntitiesForPolicy` to find what to detach, and
+**substrate does not implement that operation**, so the 409's message is the only way a caller
+can learn it. The three refusals that already name what to remove — `DeleteUser`'s group
+memberships, `DeleteRole`'s instance profiles, `DeleteGroup`'s users — set the wording; the four
+that refuse over attached policies name nothing, which is why this message is written rather
+than copied.
+
+A malformed `PolicyArn` answers `InvalidInput`/400 through the same shape check the three attach
+operations and both `Put*PermissionsBoundary` apply. Previously any non-empty string became a
+state key that could never match, so a bare policy name was reported as a policy that does not
+exist — the wrong answer to a request that was never well-formed enough to name one.
+
+AWS's other stated precondition, deleting every non-default version first, needs no code here:
+it publishes no error code — `DeleteConflict`'s own text is about attached subordinate entities —
+and substrate models exactly one version per policy, so there is never a non-default version to
+delete.
+
+A **bundled AWS managed ARN** answers `InvalidInput`/400 rather than `NoSuchEntity`, and that is
+substrate's reading of a constrained choice rather than a documented code. The handler read state
+only, so `arn:aws:iam::aws:policy/PowerUserAccess` was reported as not existing while `GetPolicy`
+resolved the same ARN from the catalog and returned the policy — one ARN, two operations,
+opposite answers about whether the thing exists. `API_DeletePolicy` does not say what happens to
+an AWS managed ARN, and the strongest published statement anywhere is *"You cannot change the
+permissions defined in AWS managed policies"* (*Managed policies and inline policies*), which
+establishes that the customer does not administer them but names no code and does not mention
+deletion. So the code comes from `DeletePolicy`'s own Errors section, and of the five it publishes
+`InvalidInput` is the only one describing a rejected input value: `NoSuchEntity` is false here
+because the policy is readable, `DeleteConflict` means attached subordinate entities, and
+`LimitExceeded` and `ServiceFailure` are unrelated. `UnmodifiableEntity` — which `DeleteRole`
+answers for a service-linked role — fits the meaning better but is not published for this
+operation, and answering a code AWS does not list would trade one wrong answer for another.
 
 ### The tagging operations, and what a listing reports
 

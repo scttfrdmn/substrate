@@ -58,6 +58,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authorization for good.
 
 ### Fixed
+- **`DeletePolicy` deleted a policy that was still attached, leaving every entity holding an ARN
+  pointing at nothing** (#853). The handler went straight from the `NoSuchEntity` check to
+  `state.Delete` with no attachment check, and the silent success was worse than the missing error
+  code. Nothing writes a back-reference onto a policy, so after the delete every entity still named
+  the ARN, `ListAttachedUserPolicies` still reported it, the authorization evaluator loaded no
+  document for it — so the entity silently lost the permissions the policy granted, and a test
+  asserting a **deny** passed for the wrong reason — and `GetPolicy` answered `NoSuchEntity` for the
+  same ARN two other operations still named. It now answers `DeleteConflict`/**409**, which
+  `API_DeletePolicy` publishes for exactly this, and the message **names the users, groups and roles**
+  as that page's description says it does.
+
+  The refusal reads the same three `<kind>_policies:` prefixes, through the same loader, that the
+  `AttachmentCount` `GetPolicy` and `ListPolicies` report is derived from — so the count and the
+  refusal cannot disagree about what "attached" means. The counts helper could not serve both:
+  it accumulates `counts[arn]++` and so answers *whether* a policy is attached rather than *to what*,
+  which is why the names come from a sibling helper over the same keys rather than from a widened
+  signature five callers depend on. Naming them is not a nicety here — `API_DeletePolicy`'s
+  description tells the caller to use `ListEntitiesForPolicy` to find what to detach, and substrate
+  does not implement that operation, so the 409's message is the only way a caller can learn it. Only
+  three of the seven sibling `DeleteConflict` arms name what to remove; the four that refuse over
+  attached policies name nothing, so the wording follows those three rather than the majority.
+
+  The fix also closes a hazard the derived `AttachmentCount` (#847) made observable: a delete now
+  succeeds only when nothing is attached, so a policy re-created under a deleted ARN cannot inherit
+  the previous one's attachments.
+
+  **A malformed `PolicyArn` answers `InvalidInput`/400** through the same shape check the three
+  attach operations and both `Put*PermissionsBoundary` already apply. Previously any non-empty string
+  became a state key that could never match, so a bare policy name was reported as a policy that does
+  not exist — the wrong answer to a request that was never well-formed enough to name one.
+
+  **A bundled AWS managed ARN stops contradicting `GetPolicy`.** The handler read state only, so
+  `arn:aws:iam::aws:policy/PowerUserAccess` was reported as not existing while `GetPolicy` resolved
+  the same ARN from the catalog and returned the policy. It now answers `InvalidInput`/400, and the
+  code is **substrate's reading of a constrained choice, not a documented one**: `API_DeletePolicy`
+  is silent on AWS managed ARNs, and the strongest published statement anywhere is *"You cannot
+  change the permissions defined in AWS managed policies"*, which establishes that the customer does
+  not administer them but names no code and does not mention deletion. So the code is drawn from the
+  operation's own Errors section, where of the five published `InvalidInput` is the only one
+  describing a rejected input value — `NoSuchEntity` is false because the policy is readable,
+  `DeleteConflict` means attached subordinate entities, and `LimitExceeded` and `ServiceFailure` are
+  unrelated. `UnmodifiableEntity`, which `DeleteRole` answers for a service-linked role, fits the
+  meaning better but is not published for this operation, and answering a code AWS does not list
+  would trade one wrong answer for another.
+
+  Recorded rather than implemented: AWS's other stated precondition, deleting every non-default
+  version first, publishes no error code and cannot arise, because substrate models exactly one
+  version per policy. Filed as #875 rather than folded in: the three **detach** operations do not
+  validate `PolicyArn` either, so a malformed one is accepted and silently matches nothing.
+
 - **An out-of-range `MaxItems` was silently rewritten to 100 at nineteen IAM operations** (#868).
   AWS's `maxItemsType` is "Minimum value of 1. Maximum value of 1000" and IAM refuses a value
   outside it; substrate's shared paginator read `if maxItems <= 0 || maxItems > 1000 { maxItems =

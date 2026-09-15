@@ -1437,11 +1437,44 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "PolicyArn is required", http.StatusBadRequest), nil
 	}
+	// Shape, not existence — see iam_policy_arn.go (#499). DeletePolicy publishes InvalidInput
+	// and arnType's 20–2048 length, and the handler used to pass any non-empty string straight
+	// to iamPolicyKey, so a bare policy name became a state key that could never match and the
+	// caller was told the policy did not exist (#853). Before authorize, as the three attach
+	// operations do it: a malformed ARN is not a request an authorization decision can be made
+	// about.
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 
 	if err := p.authorize(goCtx, ctx, "iam:DeletePolicy", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
+	}
+
+	// An AWS managed ARN is refused before the state read, because state is not where such a
+	// policy lives: GetPolicy resolves it from the bundled catalog (see the arm above), while
+	// this handler reads state only and so reported that a policy the caller can read does not
+	// exist — two operations contradicting each other about one ARN (#853).
+	//
+	// The code is substrate's reading, and the reading is constrained rather than invented.
+	// API_DeletePolicy does not say what happens to an AWS managed ARN, and the strongest
+	// published statement anywhere is "You cannot change the permissions defined in AWS managed
+	// policies" (Managed policies and inline policies), which establishes that the customer does
+	// not administer them but names no code and does not mention deletion. So the code is drawn
+	// from DeletePolicy's own Errors section, and among the five it publishes InvalidInput is the
+	// only one that describes a rejected input value: NoSuchEntity is false here (the policy is
+	// readable), DeleteConflict means attached subordinate entities, and LimitExceeded and
+	// ServiceFailure are unrelated. UnmodifiableEntity — which deleteRole answers for a
+	// service-linked role — would fit the meaning better but is not published for this
+	// operation, and answering a code AWS does not list would trade one wrong answer for
+	// another.
+	if iamPolicyARNIsAWSManaged(params.PolicyArn) {
+		return iamErrorResponse("InvalidInput",
+			fmt.Sprintf("Policy %s is an AWS managed policy and cannot be deleted. "+
+				"Only the policies in your own account can be deleted.", params.PolicyArn),
+			http.StatusBadRequest), nil
 	}
 
 	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn))
@@ -1452,6 +1485,32 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse("NoSuchEntity",
 			fmt.Sprintf("Policy %s was not found.", params.PolicyArn),
 			http.StatusNotFound), nil
+	}
+
+	// "Before you can delete a managed policy, you must first detach the policy from all users,
+	// groups, and roles that it is attached to" — the DeletePolicy reference, which publishes
+	// DeleteConflict/409 for the refusal. Without it the delete succeeded and left every entity
+	// holding an ARN pointing at nothing: ListAttachedUserPolicies still reported the ARN, the
+	// authorization evaluator loaded no document for it so the entity silently lost the
+	// permissions it granted, and GetPolicy answered NoSuchEntity for the same ARN.
+	//
+	// This also closes the AttachmentCount hazard #847 made observable: a delete now succeeds
+	// only when nothing is attached, so a policy re-created under the same ARN cannot inherit
+	// the previous one's attachments.
+	//
+	// AWS's other stated precondition — delete every non-default version first — needs no code.
+	// It publishes no error code (DeleteConflict's own text is about attached subordinate
+	// entities), and substrate models exactly one version per policy
+	// (iam_policy_versions.go), so there is never a non-default version to delete.
+	attached, err := p.iamPolicyAttachedEntities(goCtx, ctx.AccountID, params.PolicyArn)
+	if err != nil {
+		return nil, err
+	}
+	if attached.Total() > 0 {
+		return iamErrorResponse("DeleteConflict",
+			fmt.Sprintf("Cannot delete a policy attached to entities, must detach it from all "+
+				"users, groups and roles first. %s", attached.Describe()),
+			http.StatusConflict), nil
 	}
 
 	if err := p.state.Delete(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn)); err != nil {
