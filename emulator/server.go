@@ -425,6 +425,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/ec2/snapshot-status", s.handleEC2SeedSnapshotStatus)
 	r.Delete("/v1/ec2/snapshot-status", s.handleEC2ClearSnapshotStatus)
 
+	// ELB account-limit control-plane endpoints (#885).
+	r.Post("/v1/elb/account-limits", s.handleELBSeedAccountLimit)
+	r.Delete("/v1/elb/account-limits", s.handleELBClearAccountLimit)
+
 	// spore.host spawn task-completion control-plane endpoints (#360).
 	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
 	r.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)

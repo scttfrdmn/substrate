@@ -3074,7 +3074,7 @@ STS operations are free.
 | CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | HeadBucket | |
 | DeleteBucket | |
-| ListBuckets | |
+| ListBuckets | Honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`; reports `Owner` and a conditional `BucketRegion` — see [Listing buckets](#listing-buckets) |
 | PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes, including a seedable `409 ConditionalRequestConflict` — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
 | GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
@@ -3107,6 +3107,63 @@ STS operations are free.
 | PutObjectTagging | |
 | GetObjectTagging | |
 | DeleteObjectTagging | |
+
+### Listing buckets
+
+`ListBuckets` honours all four of its query parameters
+([#884](https://github.com/scttfrdmn/substrate/issues/884)). It previously honoured none of
+them, which mattered most for the paging pair: a dropped `max-buckets` is invisible, because a
+short page and a complete listing are the same shape, and a dropped `continuation-token` returns
+page one forever.
+
+| Parameter | Behaviour |
+|-----------|-----------|
+| `max-buckets` | Bounds the page. Valid range 1–10000, per the published `Valid Range`; the default is 10000. A value outside the range, or one that is not an integer, is refused with `400 InvalidArgument` rather than clamped. |
+| `continuation-token` | Pages over the bucket-name order. Base64 of the last bucket returned, matching what `ListObjectsV2` emits — AWS says only that the token "is obfuscated and is not a real key". Refused with `400 InvalidArgument` if it is not decodable or exceeds the documented 1024-character ceiling. |
+| `prefix` | Filters by bucket-name prefix, and is echoed back as `Prefix` when sent. |
+| `bucket-region` | Filters by the Region the bucket was created in, which `CreateBucket` has always recorded. |
+
+The parameters compose: a request naming a prefix, a Region and a page size narrows by all three.
+
+**`ContinuationToken` is the *next* page's token, not an echo of the request's.** This is an
+asymmetry with substrate's other S3 listings and it is AWS's, not substrate's: `ListBuckets`
+publishes no `NextContinuationToken` at all and reuses the one name for the forward cursor,
+where `ListObjectsV2` publishes both. The element appears only when the listing was truncated,
+so a caller loops until it is absent. A listing whose last page exactly fills `max-buckets`
+carries no token, because AWS ties the token to there being "more buckets that can be listed"
+rather than to a full page.
+
+**The order is lexicographic by bucket name, and that is substrate's reading** — see
+[The order a listing returns its members in](#the-order-a-listing-returns-its-members-in).
+Pagination is why the order has to be guaranteed rather than merely tidy: a cursor over an
+unstable order both omits and repeats members between pages.
+
+**`Owner` is reported unconditionally, and its `ID` is the account ID.** Substrate has no
+account-owner concept beyond the account ID, so that is the only account-scoped identifier it
+holds; real S3 returns a 64-character hex canonical user ID unrelated to the account number, so
+a consumer must not read the value as one. `DisplayName` is omitted — it carries no description
+on the `Owner` type and none of AWS's five published examples renders it.
+
+**`BucketRegion` is conditional on the request naming at least one parameter**, quoting the
+`Bucket` type: "If the request contains at least one valid parameter, it is included in the
+response." An unparameterised listing therefore reports `Name` and `CreationDate` only, which
+is what AWS's own unpaginated example shows.
+
+**`BucketArn` is never reported, deliberately.** The `Bucket` type says it "is only supported
+for S3 directory buckets" and `ListBuckets` "is not supported for directory buckets", so no
+`ListBuckets` response AWS produces carries one. Synthesizing a general purpose bucket ARN would
+hand a consumer a field it could read here and never against AWS.
+
+`InvalidArgument` is **substrate's reading of the error code, not a sourced one**:
+`API_ListBuckets` publishes no `Errors` section, and the S3 error-code reference could not be
+retrieved to confirm what AWS returns for an out-of-range `max-buckets`. Refusing rather than
+clamping is the deliberate choice, on the same reasoning as the defect itself — silently
+substituting a value the caller did not ask for is invisible in a well-formed response.
+
+The documented restriction that "Requests made to a Regional endpoint that is different from the
+`bucket-region` parameter are not supported" is **not enforced**. AWS names no error code for
+it, so refusing would mean inventing one, and substrate's endpoint is not Regional in the way
+that rule presumes.
 
 ### Storage classes
 
@@ -7722,6 +7779,7 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | AddTags | Up to 50 user tags per resource |
 | RemoveTags | |
 | DescribeTags | At most 20 resources per request |
+| DescribeAccountLimits | Reports 23 limits, seedable; `Marker`/`PageSize` paginated |
 
 Every operation whose output shape carries no members answers
 `<OperationResponse><OperationResult/></OperationResponse>`. The empty result element is not
@@ -7732,6 +7790,85 @@ success. `DeleteLoadBalancer`, `DeleteTargetGroup`, `DeleteListener`, `DeleteRul
 `RegisterTargets` and `DeregisterTargets` answered that way and were unusable from a real
 client while substrate's own tests passed, because those tests read the XML directly instead
 of through an SDK's parser.
+
+### Account limits
+
+`DescribeAccountLimits` reports 23 Elastic Load Balancing limits. **Nothing in substrate
+enforces the number it reports** — seeded or defaulted. No ELB operation counts a load
+balancer, target group, listener or rule against a quota, and none is planned to. The number
+exists to be *read*: it is what a consumer's "am I approaching my quota" branch looks at, and
+making it seedable is what lets that branch be exercised. A constant nothing enforces would
+be a number that does not come from where it appears to (#885).
+
+```bash
+# One limit is nearly exhausted.
+curl -X POST http://localhost:4566/v1/elb/account-limits \
+  -d '{"name":"application-load-balancers","max":"1"}'
+
+# Every limit at once, for "the whole account is at quota".
+curl -X POST http://localhost:4566/v1/elb/account-limits -d '{"name":"*","max":"0"}'
+
+# Clear one seed, or all of them.
+curl -X DELETE 'http://localhost:4566/v1/elb/account-limits?name=application-load-balancers'
+curl -X DELETE http://localhost:4566/v1/elb/account-limits
+```
+
+`name` matches a limit name or `*` (the default) for every limit, resolved specific-first.
+`max` is a **string** because the API member is one: `Limit`'s reference gives "Max … Type:
+String", which is the member a caller's code will try to treat as an integer.
+
+The provenance of the reported set splits three ways, and the split is the point:
+
+- The **shape** is the API model's — `elasticloadbalancingv2-2015-12-01`'s
+  `API_DescribeAccountLimits` and `API_Limit`: `Limits.member.N` of `Max`/`Name`, plus
+  `NextMarker`, with `PageSize` valid 1–400 and `Marker` the cursor. The Errors section is
+  Common Errors only; the operation publishes no error of its own.
+- The limit **names** are **not published on the v2 API reference**. That page enumerates
+  none of them — it says only "The name of the limit." and links the Application, Network and
+  Gateway Load Balancer quota user guides. The 23 names substrate reports are taken verbatim
+  from the example output on the AWS CLI v2 reference page for the operation, the only AWS
+  page found that renders the tokens at all. That is an illustrative example, not the model,
+  and is recorded as such rather than presented as the published API model. (Classic's
+  2012-06-01 `API_Limit` *does* enumerate exactly three — `classic-listeners`,
+  `classic-load-balancers`, `classic-registered-instances` — which is a published difference
+  between the generations. They are absent because this handler answers v2 shapes; classic
+  dispatch is #844.)
+- The **values** are the current defaults from those three quota user guides, since a guide
+  is AWS's normative statement of a default and the CLI example is an illustration AWS does
+  not keep in step with it. Where the two disagree the guide wins:
+  `condition-wildcards-per-alb-rule` is 6 per the guide against the example's 5. Two entries
+  no guide row names cleanly keep the example's value and say so in the source:
+  `target-id-registrations-per-application-load-balancer`, which no guide names at all, and
+  `target-groups-per-action-on-network-load-balancer`, whose nearest NLB guide row is "Target
+  groups per listener rule action" at 5 — whether that row is this token could not be
+  established, so the example's 1 stands.
+
+Two behaviors are substrate's decisions rather than AWS's published text:
+
+| | |
+|---|---|
+| `NextMarker` | **Absent** when the walk is exhausted, not empty. v2 documents "Otherwise, this is null"; classic documents "If there are no additional results, the string is empty" — a present-but-empty element. Following v2 is following the shapes this handler answers; the difference is recorded for #844 |
+| `PageSize` | A value outside the documented 1–400, or a non-numeric one, **falls back to the default** rather than being refused. The default is the documented maximum, so an unparameterized call returns the whole set in one page and a `PageSize` above 400 is indistinguishable from a clamp |
+
+The `PageSize` choice needs the citation because substrate's own paginators do not agree.
+The Query-protocol family this operation joins — RDS's and ElastiCache's `MaxRecords`,
+CloudWatch's — takes any positive integer and quietly substitutes its default for anything
+else, enforcing no maximum; EC2's `DescribeTags` goes the other way and refuses a
+`MaxResults` outside 5–1000 with `InvalidParameterValue`. ELBv2 had no paginated operation
+at all before this one, so there was no ELB precedent to match. The decider is that
+`DescribeAccountLimits` publishes no operation-specific error on either generation's page:
+refusing would mean inventing a code AWS does not publish for it, which is a thing EC2's
+`DescribeTags` did not have to do.
+
+`Marker` is a decimal offset into a fixed, name-ordered set, so a paged walk returns each
+limit exactly once. An unparseable `Marker` restarts the walk and an offset past the end
+answers an empty last page — neither being an error the operation publishes a code for.
+
+Authorization needed nothing: `elasticloadbalancing:DescribeAccountLimits` was **already** in
+substrate's generated authorization reference with an empty resource list, which is exactly
+why this was worth fixing — a caller could be *granted* a permission substrate then answered
+`InvalidAction` for. Every ELB request is decided centrally before dispatch, so the arm in
+the action switch was the whole of the wiring the operation needed.
 
 ### Tagging
 
