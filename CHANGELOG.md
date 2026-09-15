@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
+  1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
+  1.11.0→1.12.1. `test/e2e`: `aws-sdk-go-v2/config`, `credentials` and twelve service clients
+  (`account`, `cloudformation`, `configservice`, `dynamodb`, `ec2`, `iam`, `organizations`, `s3`,
+  `servicequotas`, `sts`, `wafv2`, plus eight internal modules). Taken as one change rather than
+  as the two Dependabot PRs that proposed them (#889, #890), because `test/e2e` requires the root
+  module through a `replace` directive and the E2E job asserts `test/e2e/go.mod` is tidy — so a
+  root-only `modernc.org/sqlite` bump leaves the e2e module stale and cannot pass CI on its own,
+  which is exactly how #889 failed as authored. Same reasoning as #786.
+
 ## [v0.116.0] - 2026-09-14
 
 ### Added
