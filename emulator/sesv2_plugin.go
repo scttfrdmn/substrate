@@ -38,6 +38,15 @@ func (p *SESv2Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 // Shutdown is a no-op for SESv2Plugin.
 func (p *SESv2Plugin) Shutdown(_ context.Context) error { return nil }
 
+// ResetForRun rewinds the message counter that SendEmail mints its MessageId from,
+// the only mutable state this plugin keeps outside the [StateManager]. It
+// implements [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay
+// needs it.
+func (p *SESv2Plugin) ResetForRun(_ context.Context) error {
+	p.msgSeq.Store(0)
+	return nil
+}
+
 // HandleRequest dispatches an SES v2 REST/JSON request to the appropriate handler.
 func (p *SESv2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	op, identityName := parseSESv2Operation(requestMethod(req), req.Path)

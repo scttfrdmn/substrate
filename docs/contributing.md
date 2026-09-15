@@ -95,6 +95,31 @@ name) with a stable, documented key shape, e.g. `object:{bucket}/{key}` for S3
 or `queue:{account}/{name}` for SQS. Keep keys consistent across the plugin's
 handlers so `ResetState` and replay behave predictably.
 
+### Mutable state a plugin keeps on itself
+
+Anything a plugin mutates should live in the `StateManager`, because that is what a
+reset clears. If your plugin must keep mutable state on its own struct — a sequence
+counter an identifier is minted from, a cache, a random source — implement the
+optional `ResettablePlugin` interface as well:
+
+```go
+func (p *WeatherPlugin) ResetForRun(_ context.Context) error {
+	p.forecastSeq.Store(0)
+	return nil
+}
+```
+
+`PluginRegistry.ResetPlugins` calls it for every plugin that implements it, and both
+reset paths — `ReplayEngine.resetState` at the start of a replay and
+`POST /v1/state/reset` — go through it. It is optional precisely so the plugins that
+keep everything in the `StateManager` need no method at all.
+
+Without it, a counter carries across a reset and the identifiers your plugin mints
+depend on how many runs preceded them in the process: replaying one recorded stream
+twice produced different values from identical events, which is the property the
+event log exists to rule out (#886). `ResetForRun` must be safe to call on a plugin
+that has never handled a request, and safe to call while requests are in flight.
+
 ### Errors
 
 Return `*AWSError` with the exact AWS `Code` and HTTP status for API-level

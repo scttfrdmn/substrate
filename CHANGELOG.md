@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ResettablePlugin`, an optional plugin capability for state a plugin keeps outside the
+  `StateManager`** (#886). A plugin implements `ResetForRun(ctx) error` when it holds mutable
+  state of its own — a sequence counter an identifier is minted from, a cache, a random source
+  — and `PluginRegistry.ResetPlugins` calls it for every plugin that does. Optional, and
+  discovered by type assertion exactly as `SnapshotableStateManager` already is: 64 of the 67
+  registered plugins need no reset of their own, so a mandatory method on `Plugin` would have
+  added 64 no-op implementations and broken every third-party plugin in order to reach three
+  counters.
+  `PluginRegistry.Plugin(name)` is also new: it returns a registered plugin so a caller can ask
+  what it implements without routing a request to it. See the plugin-author guidance in
+  `docs/contributing.md` and `emulator/doc_plugins.go`.
+
 - **`DescribeInstanceTypeOfferings` answers `LocationType=availability-zone-id`, and the
   refusal narrows to `outpost` alone** (#893). `Added` rather than `Fixed`: the value was
   refused deliberately and visibly with `InvalidParameterValue` and a message naming
@@ -109,6 +121,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   AWS does not publish for it. Because the default is the documented maximum, a `PageSize`
   above 400 is answered indistinguishably from a clamp.
 
+- **A `replay:` configuration section, so `substrate replay` is configurable at all** (#880).
+  The command built its engine with a zero-valued `ReplayConfig` and there was no way to change
+  that: `Config` had no `Replay` field and no `ReplayCfg` type existed, so nothing written in
+  `substrate.yaml` reached the replay engine. The consequence worth naming is `ValidateState`:
+  the state hash comparison — the thing that turns "re-executed 100 events" into "re-executed
+  100 events and reached the same state" — was off on every run and could not be switched on
+  from the CLI by any means.
+
+  `ReplayCfg` exposes the five fields the engine actually reads (`speed_multiplier`,
+  `stop_on_error`, `validate_state`, `use_snapshots`, `random_seed`), each defaulted explicitly
+  in `DefaultConfig` with its reasoning, and `ToReplayConfig` is a struct *conversion* rather
+  than a field-by-field copy — the two types are deliberately identical but for their tags, so
+  a field added to one and forgotten in the other fails to compile instead of arriving silently
+  as a zero value, which is the defect this section exists to fix. `Validate` refuses a negative
+  `speed_multiplier`, which `time.Sleep` would otherwise treat as "instant" — indistinguishable
+  from the default and so a value that appears to have been applied.
+
+  `validate_state` defaults to **false**, and that is a decision rather than a leftover zero:
+  a comparison happens only for an event carrying a recorded hash, which needs
+  `event_store.include_state_hashes`, itself off by default because a hash is a full snapshot of
+  state taken twice per request. Defaulting validation on would therefore have reported "state
+  valid" for the overwhelming majority of streams while comparing nothing. The summary now
+  distinguishes that case explicitly: with validation on over a stream carrying no hashes it
+  prints `not checked (no event in the stream carries a recorded state hash…)` rather than
+  `valid`, because `StateValid` starts `true` and is only ever falsified by a comparison that
+  ran.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -174,6 +213,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `owner` before `environment`.
 
   This closes two of #835's nine remaining rows, so the issue stays open.
+- **`state:` decides which state manager is built, and an unimplemented backend is refused
+  instead of silently answered with memory** (#881). `Config.State` was configuration nothing
+  read: `DefaultConfig` and `Validate` were its only non-test references and neither constructed
+  anything, while `substrate server` and the replay wiring both called
+  `NewMemoryStateManager()` unconditionally. `Validate` accepted `backend: sqlite`, nothing
+  implements it (that is #2), and the run proceeded in memory — so a caller who asked for
+  persistence got none, with no warning, and would have discovered it as absent state some time
+  later.
+
+  Both call sites now go through one exported constructor, `NewStateManager(StateCfg)`, so the
+  server and the replay engine cannot disagree about which backend is in use, and it returns an
+  error for a backend it does not implement rather than falling back. **Refusing rather than
+  falling back is the whole point**: a fallback answers a request for durability with a manager
+  that forgets everything at process exit, which is a wrong answer dressed as a working one,
+  and it is why this knob went four releases without anyone noticing it turned nothing.
+  `Validate` refuses the same values at load time, so a config file naming `sqlite` or a typo
+  now fails at startup naming the backend instead of starting.
+
+  `state.path` is refused when non-empty for the same reason, resolving #881's "honoured or
+  removed" criterion in a third way that the issue's own argument supports better than either:
+  removing the field would make a `state: {path: …}` in an existing file *silently* ignored by
+  viper, which is the defect being fixed, while refusing it tells the operator that no
+  implemented backend reads it. The field stays so the message can name the value, and it
+  becomes meaningful again when #2 lands a backend that keeps files.
+
+- **A replayed state mismatch is described, not just counted** (#880, found while implementing
+  it). `ReplayResults.StateErrors` is documented to carry "descriptions of any state hash
+  mismatches" and nothing ever appended to it: a mismatch set `StateValid` to false and recorded
+  an `EventDifference`, leaving the slice empty on every run. That was invisible while
+  `ValidateState` could not be reached from the CLI; making it configurable would otherwise have
+  shipped a summary printing `MISMATCH (0 error(s))` for a real divergence and listing none of
+  them. Each entry now names the event, its sequence, which comparison failed, and both hashes.
+- **A reset reaches the mutable state plugins keep on themselves, so replaying one stream twice
+  in a process no longer mints different identifiers the second time** (#886).
+  `ReplayEngine.resetState` reset the `StateManager` and nothing else, and its doc comment said
+  as much — but three plugins mint identifiers from state on their own struct, which no reset
+  could reach: `S3Plugin.versionSeq` behind every `x-amz-version-id` and delete-marker ID,
+  `SESv2Plugin.msgSeq` behind every `MessageId`, and `OmicsPlugin.rng` behind every HealthOmics
+  run ID. So a second replay of a recorded stream continued the first replay's counter and
+  produced entirely different identifiers from byte-identical events — and, since the CLI now
+  runs a real registry (#855), from `substrate replay` and not only from a test. A replay whose
+  output depends on how many replays preceded it is the one property the event log exists to
+  rule out.
+
+  `POST /v1/state/reset` is fixed with it, because it is the same defect through a different
+  door: it is documented as wiping emulator state and is what `TestServer.ResetState` calls
+  between test cases, so a surviving counter made the identifiers one test case observes depend
+  on how many test cases ran before it. Both paths clear the state manager *first* and the
+  plugins second, because a plugin's `ResetForRun` may write its start-of-run state into the
+  state manager and clearing the store afterwards would erase it.
+
+  The HealthOmics source is rewound to the seed it was built from rather than re-seeded, so a
+  replay draws the same values the recording drew; the seed itself is still per-process
+  wall-clock, which is #856's question and deliberately not answered here. Its `*rand.Rand`
+  also picked up the mutex it always needed — a reset can now replace it under a concurrent
+  request, and two concurrent `StartRun` calls were already racing on it unguarded.
+
+  The audit #886 asked for turned up four further pieces of plugin-held mutable state, none of
+  which feeds a minted identifier, each filed rather than folded in: S3 object payloads in the
+  plugin filesystem survive a reset (#902); Lambda event-source-mapping poller goroutines and
+  the Lambda/RDS container pools survive one (#903); and `RedshiftDataPlugin.results` is left
+  deliberately — a seeded result set is installed through a control-plane call that streams do
+  not record, so wiping it at replay would make the replay diverge from the recording it is
+  reproducing. A test asserts the implementer set is exactly `{omics, s3, sesv2}`, so a plugin
+  gaining or losing the hook cannot pass unnoticed. Writing the test also exposed that 15 of the
+  67 default plugin registrations omit `time_controller` and therefore run on wall-clock time
+  (#904), which is why the SES v2 case has to wire the clock itself.
+
 - **S3 `ListBuckets` honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`,
   and reports `Owner` and a conditional `BucketRegion`** (#884). The handler took its request as
   `_ *AWSRequest` and implemented none of the four: it returned every bucket, unfiltered and

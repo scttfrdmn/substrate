@@ -20,6 +20,23 @@
 //   - Options — a map[string]any for plugin-specific configuration such as
 //     a TimeController or a PluginRegistry reference for cross-plugin dispatch.
 //
+// # Optional Capabilities
+//
+// A plugin that keeps mutable state on its own struct rather than in the
+// [StateManager] — a sequence counter an identifier is minted from, a cache, a
+// random source — should also implement [ResettablePlugin]:
+//
+//	func (p *MyPlugin) ResetForRun(ctx context.Context) error {
+//	    p.seq.Store(0)
+//	    return nil
+//	}
+//
+// [PluginRegistry.ResetPlugins] calls it for every plugin that implements it, from
+// both reset paths: the start of a replay and POST /v1/state/reset. Without it the
+// state survives a reset and the plugin's minted identifiers depend on how many runs
+// preceded them in the process (#886). The interface is optional, so a plugin that
+// keeps everything in the state manager needs no method.
+//
 // # State Key Naming Conventions
 //
 // To avoid collisions, state keys should follow the pattern:
