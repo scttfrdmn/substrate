@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The three IAM detach operations validate `PolicyArn`'s shape, so a malformed ARN is refused
+  with the code the attach already answers** (#875). `DetachUserPolicy`, `DetachRolePolicy` and
+  `DetachGroupPolicy` were the last policy-ARN operations without the #499 check. They now answer
+  `InvalidInput`/400 for a bare policy name, an ARN for another service, a `role/` where `policy/`
+  belongs, an account that is not twelve digits, and a length outside `arnType`'s published 20–2048.
+
+  **#875's stated consequence was false as present tense and is corrected on the issue.** The
+  report was that a malformed ARN "answers success and detaches nothing", leaving the caller
+  believing a permission was gone. It did not: all three handlers already walked the attached list
+  and answered `NoSuchEntity`/404 when the ARN was not in it. The real defect was the *code* — 404
+  *"the policy is not attached to the specified entity"* where the attach counterpart answered 400
+  *"ARN read-objects is not valid."* for the same string. The two point a caller at different
+  things, and the 404 pointed at the wrong one: a consumer handling it goes and inspects the
+  attachment, finds the policy attached under its real ARN, and has been told the opposite of its
+  actual mistake, which was the string it typed. `API_DetachUserPolicy` publishes `InvalidInput` for
+  *"an invalid or out-of-range value … supplied for an input parameter"* and publishes `PolicyArn`'s
+  length range, so both refusals are the API model's rather than substrate's reading.
+
+  **A well-formed ARN that is not attached still answers `NoSuchEntity`/404** — also published, and
+  now asserted rather than incidental, so the new check cannot quietly turn every unattached detach
+  into a 400. The issue asked for this to be reconciled with #499's refusal to require the policy to
+  exist; there is nothing to reconcile, because the two are about different facts. Substrate holds
+  every attachment it was told about, in full, so an absent attachment is a fact it can report
+  exactly; policy existence is a fact it cannot, bundling 52 of roughly 1,200 managed policies. A
+  detach requires the attachment, never the policy. Recorded in `docs/services.md`.
+
+  The malformed-ARN table is now **one** table shared by the attach and the detach tests, and a test
+  asserts both directions reach the same verdict on every case. Two tables would let a case be added
+  to one side only, which is how the pair came to disagree in the first place.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`

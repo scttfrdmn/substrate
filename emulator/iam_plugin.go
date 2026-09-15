@@ -1052,6 +1052,10 @@ func (p *IAMPlugin) detachUserPolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	if params.UserName == "" || params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "UserName and PolicyArn are required", http.StatusBadRequest), nil
 	}
+	// Shape, not attachment — see iam_policy_arn.go (#499, #875).
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
+	}
 
 	goCtx := context.Background()
 
@@ -1189,6 +1193,10 @@ func (p *IAMPlugin) detachRolePolicy(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if params.RoleName == "" || params.PolicyArn == "" {
 		return iamErrorResponse("ValidationError", "RoleName and PolicyArn are required", http.StatusBadRequest), nil
+	}
+	// Shape, not attachment — see iam_policy_arn.go (#499, #875).
+	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
+		return iamErrorResponse("InvalidInput", message, http.StatusBadRequest), nil
 	}
 
 	goCtx := context.Background()

@@ -1581,13 +1581,13 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | RemoveUserFromGroup | Idempotent — removing a non-member is not an error, per the model |
 | ListGroupsForUser | |
 | AttachUserPolicy | Refuses a malformed `PolicyArn` with `InvalidInput`; a well-formed ARN that resolves nowhere succeeds and logs at `WARN` (see below) |
-| DetachUserPolicy | |
+| DetachUserPolicy | Refuses a malformed `PolicyArn` with `InvalidInput`, as the attach does; a well-formed ARN that is not attached answers `NoSuchEntity`/404 (see below) |
 | ListAttachedUserPolicies | |
 | AttachRolePolicy | Same `PolicyArn` check as `AttachUserPolicy` |
-| DetachRolePolicy | |
+| DetachRolePolicy | Same `PolicyArn` check as `DetachUserPolicy` |
 | ListAttachedRolePolicies | |
 | AttachGroupPolicy | Same `PolicyArn` check as `AttachUserPolicy` |
-| DetachGroupPolicy | |
+| DetachGroupPolicy | Same `PolicyArn` check as `DetachUserPolicy` |
 | ListAttachedGroupPolicies | |
 | PutGroupPolicy | Inline policy |
 | GetGroupPolicy | |
@@ -2888,6 +2888,25 @@ record which managed policies are service-role policies, so it cannot tell the c
 refusing on a guess would be a refusal AWS's own description does not cover. A missing required
 member is `ValidationError` (400), which is on IAM's `CommonErrors` page rather than either
 operation's list, and is what every other IAM operation answers for one.
+
+#### Detaching a policy
+
+`DetachUserPolicy`, `DetachRolePolicy` and `DetachGroupPolicy` apply the **same shape check as
+their attach counterparts**, refusing a malformed `PolicyArn` with `InvalidInput` (400)
+([#875](https://github.com/scttfrdmn/substrate/issues/875)). Before that they answered
+`NoSuchEntity` (404) — "the policy is not attached to the specified entity" — which was true but
+pointed at the wrong thing: a consumer handling it inspects the attachment, finds the policy
+attached under its real ARN, and has been told the opposite of its actual mistake, which was the
+string it typed. `API_DetachUserPolicy` publishes `InvalidInput` for "an invalid or out-of-range
+value ... supplied for an input parameter", and publishes `PolicyArn`'s length range as 20-2048,
+so both refusals come from the API model.
+
+**A well-formed ARN that is not attached still answers `NoSuchEntity` (404)**, which is also
+published, and which is not in tension with the attach side's refusal to require the policy to
+exist. The two are about different facts. Substrate holds every attachment it was told about, in
+full, so an absent attachment is a fact it can report exactly; policy *existence* is a fact it
+cannot report, bundling 52 of roughly 1,200 managed policies — which is why the attach warns
+instead of refusing. A detach therefore requires the attachment, never the policy.
 
 #### Policy documents and versions
 

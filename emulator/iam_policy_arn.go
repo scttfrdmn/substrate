@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Policy-ARN shape validation on attach (#499).
+// Policy-ARN shape validation on attach (#499) and on detach (#875).
 //
 // AttachUserPolicy, AttachRolePolicy and AttachGroupPolicy accepted any PolicyArn and
 // appended it to the entity's list unconditionally, so a consumer could attach a policy that
@@ -30,6 +30,22 @@ import (
 // resolve policies whose documents are empty, which needs its own caveat and is a large data
 // addition; a seedable strict mode (4) would be a second behavior for the same call with no
 // consumer asking for it yet. Either remains open if one does.
+//
+// #875 extended the same check to DetachUserPolicy, DetachRolePolicy and DetachGroupPolicy,
+// which were the last policy-ARN operations without it. They already refused an ARN that was
+// not attached — NoSuchEntity/404, which is what API_DetachUserPolicy publishes — so the gap
+// was not a silent no-op but a wrong code on a malformed ARN: 404 "the policy is not attached"
+// where the attach counterpart answered 400 "ARN read-objects is not valid." for the same
+// string. The two point the caller at different things, and the 404 pointed at the wrong one:
+// a consumer handling it goes and inspects the attachment, finds the policy attached under its
+// real ARN, and has been told the opposite of its actual mistake, which was the string it
+// typed. API_DetachUserPolicy publishes InvalidInput/400 for "an invalid or out-of-range value
+// supplied for an input parameter" and gives PolicyArn a published length range of 20-2048, so
+// the refusal is the API model's, not substrate's.
+//
+// Requiring the *attachment* to exist is not in tension with #499's refusal to require the
+// *policy* to exist. Substrate holds every attachment it was told about, in full, so absence
+// is a fact it can report; policy existence is a fact it cannot, bundling 52 of ~1,200.
 
 // iamPolicyARNPattern is the shape a policy ARN must have.
 //
