@@ -650,15 +650,39 @@ func generateReplayID() string {
 	return fmt.Sprintf("replay-%d", time.Now().UnixNano())
 }
 
-// resetState clears all emulator state in preparation for a fresh replay.
-// When the state manager implements [SnapshotableStateManager] its Reset method
-// is called; otherwise this is a no-op.
+// resetState returns the emulator to a run's starting point in preparation for a
+// fresh replay. That is two things, not one: the [StateManager]'s contents, and
+// whatever mutable state the plugins keep on themselves.
+//
+// The second half was missing until #886. Most of what a plugin mutates lives in
+// the state manager, but a few plugins hold their own — the S3 version-ID counter,
+// the SES v2 message counter, the HealthOmics random source — and nothing reset
+// those. So replaying one stream twice in a single process minted different
+// identifiers each time from identical recorded events, which is the property the
+// event log exists to rule out.
+//
+// The state manager is cleared first and the plugins second, because
+// [ResettablePlugin.ResetForRun] is allowed to write a plugin's start-of-run state
+// into the state manager; wiping the store afterwards would erase exactly what the
+// plugin had just re-established.
+//
+// A missing state manager, a state manager that does not implement
+// [SnapshotableStateManager], and a nil registry are each skipped rather than
+// treated as errors, matching what an engine constructed without them could do
+// before.
 func (r *ReplayEngine) resetState(ctx context.Context) error {
-	if r.stateManager == nil {
+	if r.stateManager != nil {
+		if ss, ok := r.stateManager.(SnapshotableStateManager); ok {
+			if err := ss.Reset(ctx); err != nil {
+				return fmt.Errorf("reset state manager: %w", err)
+			}
+		}
+	}
+	if r.registry == nil {
 		return nil
 	}
-	if ss, ok := r.stateManager.(SnapshotableStateManager); ok {
-		return ss.Reset(ctx)
+	if err := r.registry.ResetPlugins(ctx); err != nil {
+		return fmt.Errorf("reset plugins: %w", err)
 	}
 	return nil
 }

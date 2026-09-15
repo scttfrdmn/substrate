@@ -501,9 +501,16 @@ func (s *Server) handleLocalStackHealth(w http.ResponseWriter, _ *http.Request) 
 	}
 }
 
-// handleStateReset wipes all emulator state. Only available when the
-// [StateManager] implements [SnapshotableStateManager]. Returns 501 otherwise.
-// Primarily used by [TestServer.ResetState] between test cases.
+// handleStateReset wipes emulator state: the [StateManager]'s contents, any
+// mutable state the plugins keep on themselves ([ResettablePlugin]), and any active
+// fault rules. Only available when the [StateManager] implements
+// [SnapshotableStateManager]. Returns 501 otherwise. Primarily used by
+// [TestServer.ResetState] between test cases.
+//
+// The plugin half is the same reset a replay performs (#886) and is here for the
+// same reason: a minting counter that survived the reset made the identifiers a
+// test case observes depend on how many test cases ran before it. Object payloads
+// held in the S3 plugin's filesystem are the known exception (#902).
 func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	sm, ok := s.state.(SnapshotableStateManager)
 	if !ok {
@@ -513,6 +520,15 @@ func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	if err := sm.Reset(r.Context()); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
+	}
+	// Plugins after the state manager, matching [ReplayEngine.resetState]: a plugin's
+	// reset may write its start-of-run state into the state manager, and clearing the
+	// store afterwards would erase it.
+	if s.registry != nil {
+		if err := s.registry.ResetPlugins(r.Context()); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
 	}
 	// Also clear any active fault injection rules so tests start clean.
 	if s.opts.Fault != nil {

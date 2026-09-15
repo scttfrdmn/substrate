@@ -91,6 +91,19 @@ func (p *S3Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 // Shutdown is a no-op for S3Plugin.
 func (p *S3Plugin) Shutdown(_ context.Context) error { return nil }
 
+// ResetForRun rewinds the version-ID counter, which is the only value S3 mints
+// from state it keeps outside the [StateManager]. It implements
+// [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay needs it.
+//
+// The counter is the whole of what is reset here. Object payloads live in p.fs,
+// which a state reset also leaves behind (#902), but a stale payload cannot change
+// a minted identifier: its bucket and key metadata are gone from the state
+// manager, so nothing can read it, and a replayed PutObject overwrites it.
+func (p *S3Plugin) ResetForRun(_ context.Context) error {
+	atomic.StoreInt64(&p.versionSeq, 0)
+	return nil
+}
+
 // HandleRequest dispatches the S3 REST operation to the appropriate handler.
 // It derives the semantic operation, bucket and key from the HTTP method, URL
 // path and query parameters.
