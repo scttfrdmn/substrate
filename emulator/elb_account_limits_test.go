@@ -1,14 +1,18 @@
 package emulator_test
 
 import (
+	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/scttfrdmn/substrate/emulator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -406,6 +410,214 @@ func TestELB_SeedAccountLimit_Rejects(t *testing.T) {
 			_, limits, _ := elbDescribeAccountLimits(t, ts, nil)
 			assert.Equal(t, "3000", elbLimitByName(t, limits, "target-groups").Max,
 				"a refused seed must not have been stored")
+		})
+	}
+}
+
+// elbAccountLimitsNamespace is the state namespace the seed lives in, duplicated here so
+// elbLimitFaultState can scope its faults to it. Failing every namespace would break the
+// server's own per-request bookkeeping and the request would then fail for a reason other
+// than the one under test.
+const elbAccountLimitsNamespace = "elb-limits-ctrl"
+
+// elbLimitFaultState wraps a working StateManager and injects a store failure on one
+// operation within the account-limit namespace, following sqsAlwaysFailState.
+//
+// corruptGet is the separate case of a store that answers successfully with bytes that are
+// not the seed: state written by an older substrate, or by hand. That decodes to a JSON
+// error, not a store error, and the two must not be conflated.
+type elbLimitFaultState struct {
+	emulator.StateManager
+	getErr     error
+	corruptGet bool
+	putErr     error
+	deleteErr  error
+	listErr    error
+}
+
+func (m *elbLimitFaultState) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	if namespace == elbAccountLimitsNamespace {
+		if m.getErr != nil {
+			return nil, m.getErr
+		}
+		if m.corruptGet {
+			return []byte("{not-json"), nil
+		}
+	}
+	return m.StateManager.Get(ctx, namespace, key)
+}
+
+func (m *elbLimitFaultState) Put(ctx context.Context, namespace, key string, value []byte) error {
+	if namespace == elbAccountLimitsNamespace && m.putErr != nil {
+		return m.putErr
+	}
+	return m.StateManager.Put(ctx, namespace, key, value)
+}
+
+func (m *elbLimitFaultState) Delete(ctx context.Context, namespace, key string) error {
+	if namespace == elbAccountLimitsNamespace && m.deleteErr != nil {
+		return m.deleteErr
+	}
+	return m.StateManager.Delete(ctx, namespace, key)
+}
+
+func (m *elbLimitFaultState) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	if namespace == elbAccountLimitsNamespace && m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.StateManager.List(ctx, namespace, prefix)
+}
+
+// newELBTestServerWithState builds the same server newELBTestServer does over a caller's
+// StateManager, so a store fault can be injected.
+func newELBTestServerWithState(t *testing.T, state emulator.StateManager) *httptest.Server {
+	t.Helper()
+	registry := emulator.NewPluginRegistry()
+	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
+	tc := emulator.NewTimeController(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+	logger := emulator.NewDefaultLogger(0, false)
+
+	p := &emulator.ELBPlugin{}
+	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{ //nolint:contextcheck
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(p)
+
+	cfg := emulator.DefaultConfig()
+	ts := httptest.NewServer(emulator.NewServer(*cfg, registry, store, state, tc, logger))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// TestELB_DescribeAccountLimits_StateFailure asserts a store failure during the seed lookup
+// propagates instead of being answered as a successful set of defaults.
+//
+// Silently falling back would be the worse failure: a harness that seeded "every limit is
+// 0" to drive its at-quota branch would be handed 50 back, the assertion would pass
+// vacuously, and the seed would look armed when it was not — the same failure mode #413
+// filed against the SQS consistency seed. A 5xx is a signal the caller can retry; a
+// wrong-but-plausible 200 is not.
+func TestELB_DescribeAccountLimits_StateFailure(t *testing.T) {
+	boom := errors.New("state store unavailable")
+
+	tests := []struct {
+		name  string
+		state emulator.StateManager
+	}{
+		{
+			name:  "seed lookup fails",
+			state: &elbLimitFaultState{StateManager: emulator.NewMemoryStateManager(), getErr: boom},
+		},
+		{
+			name:  "stored seed does not decode",
+			state: &elbLimitFaultState{StateManager: emulator.NewMemoryStateManager(), corruptGet: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newELBTestServerWithState(t, tt.state)
+			resp := elbRequest(t, ts, map[string]string{"Action": "DescribeAccountLimits"})
+			defer resp.Body.Close() //nolint:errcheck
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assert.GreaterOrEqual(t, resp.StatusCode, http.StatusInternalServerError,
+				"a store failure must not be answered as a successful set of defaults; body was %s", raw)
+			assert.NotContains(t, string(raw), "<Limits>",
+				"no limit may be reported when the seed that would override it could not be read")
+		})
+	}
+}
+
+// TestELB_AccountLimitsControlPlane_StateFailures covers the control plane's own store
+// errors. A seed that fails to persist while answering 200 is worse than no seed: the
+// harness proceeds believing the limit is armed and every later assertion passes against
+// the defaults.
+func TestELB_AccountLimitsControlPlane_StateFailures(t *testing.T) {
+	boom := errors.New("state store unavailable")
+
+	tests := []struct {
+		name    string
+		state   func() *elbLimitFaultState
+		preseed bool
+		req     func(t *testing.T, ts *httptest.Server) *http.Request
+	}{
+		{
+			name: "seed put fails",
+			state: func() *elbLimitFaultState {
+				return &elbLimitFaultState{StateManager: emulator.NewMemoryStateManager(), putErr: boom}
+			},
+			req: func(t *testing.T, ts *httptest.Server) *http.Request {
+				t.Helper()
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+					ts.URL+"/v1/elb/account-limits",
+					strings.NewReader(`{"name":"target-groups","max":"1"}`))
+				require.NoError(t, err)
+				return req
+			},
+		},
+		{
+			name: "clear one delete fails",
+			state: func() *elbLimitFaultState {
+				return &elbLimitFaultState{StateManager: emulator.NewMemoryStateManager(), deleteErr: boom}
+			},
+			req: func(t *testing.T, ts *httptest.Server) *http.Request {
+				t.Helper()
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete,
+					ts.URL+"/v1/elb/account-limits?name=target-groups", nil)
+				require.NoError(t, err)
+				return req
+			},
+		},
+		{
+			name: "clear all list fails",
+			state: func() *elbLimitFaultState {
+				return &elbLimitFaultState{StateManager: emulator.NewMemoryStateManager(), listErr: boom}
+			},
+			req: func(t *testing.T, ts *httptest.Server) *http.Request {
+				t.Helper()
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete,
+					ts.URL+"/v1/elb/account-limits", nil)
+				require.NoError(t, err)
+				return req
+			},
+		},
+		{
+			// The sweep needs a seed present for List to return a key to delete. Only
+			// Delete is faulted, so the seed can be written over the wire first and the
+			// fault needs no mutation after the server is serving — which would be a race
+			// the detector would flag.
+			name: "clear all delete fails",
+			state: func() *elbLimitFaultState {
+				return &elbLimitFaultState{StateManager: emulator.NewMemoryStateManager(), deleteErr: boom}
+			},
+			preseed: true,
+			req: func(t *testing.T, ts *httptest.Server) *http.Request {
+				t.Helper()
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete,
+					ts.URL+"/v1/elb/account-limits", nil)
+				require.NoError(t, err)
+				return req
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newELBTestServerWithState(t, tt.state())
+			if tt.preseed {
+				elbSeedAccountLimit(t, ts, `{"name":"target-groups","max":"1"}`)
+			}
+
+			resp, err := http.DefaultClient.Do(tt.req(t, ts))
+			require.NoError(t, err)
+			defer resp.Body.Close() //nolint:errcheck
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body was %s", body)
 		})
 	}
 }
