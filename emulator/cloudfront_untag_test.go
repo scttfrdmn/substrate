@@ -290,6 +290,67 @@ func TestCloudFrontTagging_ARequestThatNamesNoOperationNeverWrites(t *testing.T)
 	}
 }
 
+// TestCloudFrontTagging_ABadTargetIsRefusedTheSameWayByAllThreeOperations exercises the
+// resolver the three tagging arms now share.
+//
+// Sharing it is what stops them drifting on which resource an ARN names, and a shared
+// resolver is only worth having if all three are actually asserted against it: the version
+// this replaces resolved the ARN in three copies, which is the condition under which one
+// operation can answer a target another refuses.
+func TestCloudFrontTagging_ABadTargetIsRefusedTheSameWayByAllThreeOperations(t *testing.T) {
+	t.Parallel()
+
+	targets := []struct {
+		name, arn, wantCode string
+		wantStatus          int
+		why                 string
+	}{{
+		name:       "no Resource parameter at all",
+		arn:        "",
+		wantCode:   "InvalidArgument",
+		wantStatus: http.StatusBadRequest,
+		why:        "the parameter is required on all three, which the reference states for the list only",
+	}, {
+		name:       "an ARN that names no distribution",
+		arn:        "arn:aws:cloudfront::123456789012:function/my-fn",
+		wantCode:   "NoSuchDistribution",
+		wantStatus: http.StatusNotFound,
+		why:        "a distribution is the only CloudFront resource substrate keeps tags for",
+	}, {
+		name:       "a distribution that does not exist",
+		arn:        "arn:aws:cloudfront::123456789012:distribution/E1ZZZZZZZZZZZZ",
+		wantCode:   "NoSuchDistribution",
+		wantStatus: http.StatusNotFound,
+		why:        "the ARN is well formed and names nothing",
+	}}
+
+	ops := []struct{ name, method, query, body string }{
+		{"TagResource", http.MethodPost, "Operation=Tag", cloudfrontTagBody("env", "prod")},
+		{"UntagResource", http.MethodPost, "Operation=Untag", cloudfrontUntagBody("env")},
+		{"ListTagsForResource", http.MethodGet, "", ""},
+	}
+
+	for _, target := range targets {
+		t.Run(target.name, func(t *testing.T) {
+			t.Parallel()
+			ts, _ := cloudfrontTagServer(t)
+
+			for _, op := range ops {
+				query := op.query
+				if target.arn != "" {
+					if query != "" {
+						query += "&"
+					}
+					query += "Resource=" + target.arn
+				}
+				status, body := cloudfrontRequest(t, ts, op.method, cloudfrontTaggingPath, query, op.body)
+				assert.Equal(t, target.wantStatus, status, "%s: %s — body: %s", op.name, target.why, body)
+				assert.Equal(t, target.wantCode, cloudfrontErrorCode(t, body), "%s: %s", op.name, target.why)
+			}
+		})
+	}
+}
+
 // TestCloudFrontTagging_OperationNamesComeFromTheQueryString asserts the name the *pipeline*
 // resolves, which is what authorization, metering and the event log record. The plugin's
 // dispatch and this resolution are the same function (operationResolvers["cloudfront"]), so a
