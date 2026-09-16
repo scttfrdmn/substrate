@@ -44,6 +44,82 @@ import (
 // tagging. See this file's preamble for the types deliberately refused and why.
 const cfDistributionResourceType = "distribution"
 
+// CloudFront state-key prefixes. The namespace holds four kinds: a distribution record, the
+// per-account index of distribution IDs, an invalidation record and the per-distribution index of
+// invalidation IDs. Only the distribution stores tags — the reference says so, in the sentence
+// this file's preamble quotes — hence [cfKeyIsTaggable] in front of the merge.
+//
+// Every prefix is tested colon-terminated, because "cfdist" is a prefix of "cfdist_ids" and
+// "cfinval" of "cfinval_ids". A bare-prefix test would report the distribution index taggable and
+// merge a tags member into a JSON array of ID strings.
+const (
+	cfDistKeyPrefix     = "cfdist:"
+	cfDistIDsKeyPrefix  = "cfdist_ids:"
+	cfInvalKeyPrefix    = "cfinval:"
+	cfInvalIDsKeyPrefix = "cfinval_ids:"
+)
+
+// cfGlobalRegion is the Region AWS attributes a CloudFront distribution to when a per-Region
+// operation has to name one. See [TaggingPlugin.scanCloudFrontDistributions] for the citation and
+// for why the attribution is needed at all.
+const cfGlobalRegion = "us-east-1"
+
+// cfTagsJSONMember is the JSON member a CloudFront distribution record stores its tags in.
+//
+// [CloudFrontDistribution] declares `json:"Tags,omitempty"` (cloudfront_types.go). It is named
+// rather than written inline because [mergeRecordStringMapTags] writes whichever member it is
+// given, and a misspelling would add a second tags member while leaving the real one untouched —
+// a tag call that answers 200 and stores nothing.
+const cfTagsJSONMember = "Tags"
+
+// cfInvalKey returns the state key an invalidation record is stored at, and cfInvalIDsKey the
+// per-distribution index of invalidation IDs.
+//
+// Both existed only as inline string concatenation until the tagging path needed to name the
+// prefixes it refuses. Naming them gives each key kind one producer, which is what keeps
+// [cfKeyIsTaggable]'s enumeration honest — a fifth kind added by hand, spelled inline, would be
+// silently absent from it.
+func cfInvalKey(accountID, distID, invID string) string {
+	return cfInvalKeyPrefix + accountID + "/" + distID + "/" + invID
+}
+
+// cfInvalIDsKey returns the state index key for all invalidation IDs of one distribution.
+func cfInvalIDsKey(accountID, distID string) string {
+	return cfInvalIDsKeyPrefix + accountID + "/" + distID
+}
+
+// cfKeyIsTaggable reports whether a CloudFront state key names a record that stores tags.
+//
+// Only the distribution does, and that is the reference's boundary rather than substrate's
+// convenience: "You can tag distributions, but you can't tag origin access identities or
+// invalidations." The two index keys store no tags either, and no ARN addresses one.
+//
+// A single positive test rather than an enumeration of the three refusals, which is the safe
+// direction: a key kind added later is refused by default, and refusing is the conservative
+// outcome — merging tags into a record that does not model them writes a member nothing reads and
+// reports success.
+func cfKeyIsTaggable(key string) bool {
+	return strings.HasPrefix(key, cfDistKeyPrefix)
+}
+
+// cfResolveARN parses a CloudFront tagging ARN and returns the namespace and state key it
+// addresses, for the Resource Groups Tagging API.
+//
+// A thin wrapper over [cfParseDistributionARN] rather than a second parser, so the tagging API and
+// CloudFront's own three tagging operations cannot disagree about which distribution an ARN names
+// — the arrangement #826 established through ecsTagStateKey and #910 through [sfnResolveARN]. It
+// exists at all because the two callers need different error *shapes*: CloudFront's own operations
+// answer the published InvalidArgument/NoSuchResource codes as an [AWSError], while
+// [TaggingPlugin.resolveARN] returns a plain error that its caller renders into a
+// FailedResourcesMap entry.
+func cfResolveARN(arn string) (ns, key string, err error) {
+	target, arnErr := cfParseDistributionARN(arn)
+	if arnErr != nil {
+		return "", "", fmt.Errorf("%s: %s", arnErr.Code, arnErr.Message)
+	}
+	return cloudfrontNamespace, cfDistKey(target.AccountID, target.DistID), nil
+}
+
 // cfTagTarget is the distribution a CloudFront tagging ARN names: the account that owns it and
 // its identifier, both taken from the ARN.
 type cfTagTarget struct {

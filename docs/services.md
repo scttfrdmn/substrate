@@ -8146,12 +8146,12 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans nineteen resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans twenty-one resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
-DB subnet groups, ElastiCache cache clusters, EFS file systems and Glue
-databases.
+DB subnet groups, ElastiCache cache clusters, EFS file systems, Glue databases,
+ACM certificates and CloudFront distributions.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8251,6 +8251,44 @@ the AWS account", and an explicit refusal is documented for a **partition**
 mismatch but not for an account mismatch. Refusing is substrate's reading,
 applied uniformly.
 
+ACM certificates and CloudFront distributions followed as of #835, and both are on
+AWS's own authoritative list: the tagging guide's welcome page names **AWS
+Certificate Manager** and **Amazon CloudFront** among the services
+`TagResources`/`UntagResources` support. Each row is a resolver arm, a merge arm and
+a scanner, and none of the three substitutes for the others — an arm without a
+scanner leaves the resource writable and invisible, and a scanner without an arm
+leaves it visible and unwritable.
+
+Both resolvers share the key builder the owning service already uses, which is what
+#765's cross-readability criterion asks for. ACM's is the cheaper of the two because
+`acmCertKey` embeds the whole certificate ARN alongside the account and Region it
+names. That redundancy is also why ACM's own three tag operations legitimately key
+from the calling request rather than from the ARN, and are **not** an instance of
+the #918 defect: a lookup keyed by the caller's account can only ever find a record
+whose ARN names that same account, so there is no key at which the two disagree.
+Changing them to key from the ARN would introduce the cross-account reach that
+arrangement forecloses.
+
+Both merges go through the shared raw-JSON helper and both sit behind a kind guard,
+for the reasons the `states` arm established. The guard's prefix is tested
+**colon-terminated** in each namespace, because `cert:` is a prefix of `cert_arns:`
+and `cfdist:` of `cfdist_ids:` — a bare-prefix test would report an index key
+taggable and merge a tags member into a JSON array of identifier strings. Each
+namespace holds a second kind no ARN addresses: ACM's certificate-ARN index, and
+CloudFront's distribution index plus its invalidation records and their index.
+
+**A CloudFront distribution is reported by `GetResources` in `us-east-1` only.**
+CloudFront is global and its ARNs carry an empty Region segment, but `GetResources`
+is a per-Region operation, so a global resource has to be attributed to exactly one
+Region or every Region's call would report it — and `TagResources` states that "you
+can only tag resources that are located in the specified AWS Region for the AWS
+account". Which Region that is, is AWS's: a global resource is attributed to
+`us-east-1`. That the gate exists at all is substrate's reading, because AWS
+publishes the attribution and not a `GetResources` rule. CloudFront's own
+`ListDistributions` keeps answering from any Region, which is not an inconsistency —
+it is what a global service does, and the per-Region attribution belongs to the
+tagging API alone.
+
 ### Which failure gets which error code
 
 A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
@@ -8272,9 +8310,21 @@ distinction a caller can act on differently.
 
 Substrate does **not** distinguish "AWS's tagging API does not support this type"
 from "AWS supports it and substrate has no arm yet". AWS publishes no list that
-could support the distinction: the `supported-services` page its own
+could support the distinction for a *write*: the `supported-services` page its own
 `TagResources` reference links to does not exist, and the list on the guide's
-welcome page is truncated alphabetically at IAM.
+welcome page — which is the authoritative one — is truncated alphabetically at IAM,
+so a type absent from it is unlisted rather than refused.
+
+For a *read* there is no distinction to draw. The same page states that "the
+`GetResources`, `GetTagKeys`, and `GetTagValues` operations support all resource
+types", so every scanner substrate lacks is a gap in substrate rather than a
+boundary of AWS's, and the scanner half of every remaining #835 row is in scope
+unconditionally. The per-service list constrains `TagResources`/`UntagResources`
+only.
+
+One requirement of `TagResources` substrate models at no arm: AWS requires the
+caller to hold `tag:TagResources` **and** the owning service's own tagging
+permission for the type. Substrate authorizes the tagging action alone.
 
 An `ErrorMessage` never carries a state key. The detail naming the offending
 resource portion goes to the log instead, because a state-key layout is
@@ -8631,6 +8681,27 @@ CloudWatch metrics: $0.30 per metric per month. Alarms: $0.10 per alarm per mont
 | DeleteCertificate | |
 | ListCertificates | |
 | AddTagsToCertificate | |
+| RemoveTagsFromCertificate | |
+| ListTagsForCertificate | |
+| RenewCertificate | |
+
+### A certificate is reachable through the tagging API
+
+The Resource Groups Tagging API reaches an ACM certificate as of #835: `TagResources`,
+`UntagResources` and `GetResources` all address it, and a tag written through any of them is
+readable through `ListTagsForCertificate`. All four resolve the certificate's state key through
+one builder, so none can address a certificate another would not.
+
+An ARN naming any other ACM resource type is refused rather than resolved to a certificate. AWS
+scopes these three operations to one type in prose — "This action applies only to the
+`certificate` resource type. For all other ACM resource types, use `TagResource` instead" — and
+publishes at least one other type with its own ARN shape, the ACME endpoint. The published
+`CertificateArn` pattern does not itself restrict the resource portion, so the restriction is the
+prose's and the type match is anchored on the ARN's own first path segment (#910).
+
+Only the certificate record stores tags. The `cert_arns:` index lives in the same namespace and is
+a JSON array of ARN strings, so the merge sits behind a guard whose prefix is tested
+colon-terminated — `cert` alone matches `cert_arns` too.
 
 ### CloudFormation resource types
 
@@ -9053,9 +9124,13 @@ by the query string: `Operation=Tag`, `Operation=Untag`, and a `GET` carrying on
 POST whose `Operation` is neither is refused with `InvalidAction`, never treated as a tag write
 (#883).
 
-The Resource Groups Tagging API cannot reach a CloudFront distribution: `UntagResources` and
-`TagResources` answer an `InternalServiceException` `FailedResourcesMap` entry for a CloudFront
-ARN, so tags here are changed through CloudFront's own operations only (#835).
+The Resource Groups Tagging API reaches a CloudFront distribution as of #835: `TagResources` and
+`UntagResources` resolve a distribution ARN through the same parser these three operations use, so
+a tag written either way is readable through the other. Until #835 both answered an
+`InternalServiceException` `FailedResourcesMap` entry and tags here could be changed through
+CloudFront's own operations only. No other CloudFront resource type is reachable — see
+[the tagging section](#an-arn-resolves-to-the-state-key-its-own-service-uses) for the kind guard and
+for why `GetResources` reports a distribution in `us-east-1` alone.
 
 All CloudFront resources are stored under `us-east-1` (global service).
 

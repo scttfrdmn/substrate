@@ -396,9 +396,9 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest
 	// Persist invalidation.
 	goCtx := context.Background()
 	invData, _ := json.Marshal(inv)
-	invKey := "cfinval:" + ctx.AccountID + "/" + distID + "/" + invID
+	invKey := cfInvalKey(ctx.AccountID, distID, invID)
 	_ = p.state.Put(goCtx, cloudfrontNamespace, invKey, invData)
-	updateStringIndex(goCtx, p.state, cloudfrontNamespace, "cfinval_ids:"+ctx.AccountID+"/"+distID, invID)
+	updateStringIndex(goCtx, p.state, cloudfrontNamespace, cfInvalIDsKey(ctx.AccountID, distID), invID)
 
 	type xmlInvalidation struct {
 		XMLName    xml.Name `xml:"Invalidation"`
@@ -415,7 +415,7 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest
 
 func (p *CloudFrontPlugin) getInvalidation(ctx *RequestContext, distID, invID string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, cloudfrontNamespace, "cfinval:"+ctx.AccountID+"/"+distID+"/"+invID)
+	data, err := p.state.Get(goCtx, cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, invID))
 	if err != nil || data == nil {
 		return nil, &AWSError{Code: "NoSuchInvalidation", Message: "invalidation not found: " + invID, HTTPStatus: http.StatusNotFound}
 	}
@@ -436,7 +436,7 @@ func (p *CloudFrontPlugin) getInvalidation(ctx *RequestContext, distID, invID st
 
 func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	ids, _ := loadStringIndex(goCtx, p.state, cloudfrontNamespace, "cfinval_ids:"+ctx.AccountID+"/"+distID)
+	ids, _ := loadStringIndex(goCtx, p.state, cloudfrontNamespace, cfInvalIDsKey(ctx.AccountID, distID))
 
 	type invSummary struct {
 		ID         string `xml:"Id"`
@@ -451,7 +451,7 @@ func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string)
 	}
 	var items []invSummary
 	for _, id := range ids {
-		data, err := p.state.Get(goCtx, cloudfrontNamespace, "cfinval:"+ctx.AccountID+"/"+distID+"/"+id)
+		data, err := p.state.Get(goCtx, cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, id))
 		if err != nil || data == nil {
 			continue
 		}
