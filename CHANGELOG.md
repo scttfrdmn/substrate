@@ -160,6 +160,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **A CloudFront tagging ARN addresses the distribution it names, in the account it names**
+  (#918). Two defects in the two lines that turned the `Resource` query parameter into a state
+  key, both reached by all three of `TagResource`, `UntagResource` and `ListTagsForResource`.
+
+  The resolver read the distribution *ID* out of the ARN and then keyed the load — and the store
+  — by the **caller's own** `AccountID`. So `arn:aws:cloudfront::999988887777:distribution/E1EXAMPLE`
+  addressed the caller's own `E1EXAMPLE`. `UntagResource` is the damaging direction and it
+  answered the documented `204` while doing it: stripping a tag can turn an `aws:ResourceTag`
+  `Deny` into an allow, and nothing in the response says which resource was reached. The account
+  is in the ARN and the reference says so — `ListTagsForResource` publishes the parameter's
+  pattern as `arn:aws(-cn)?:cloudfront::[0-9]+:.*`, required, in which `[0-9]+` is the account
+  and the empty segment before it is the Region, absent because CloudFront is global.
+
+  This is the rule #826 established for SQS and DynamoDB, #845 carried through the tagging API's
+  own resolver and #910 applied to Step Functions. CloudFront was the last plugin holding out
+  against it. The fix follows the same shape as #910's: the resolver takes **no
+  `*RequestContext` at all**, so the caller's account is not in scope to be reached for, and
+  `putDistribution` lost its context parameter too and keys by the account on the record it was
+  handed — a tagging arm now writes back to the record it read from by construction rather than
+  by both sides happening to agree.
+
+  The second defect was the resource-type match: `strings.LastIndex(arn, "distribution/")`, which
+  is unanchored, so `arn:aws:cloudfront::{account}:streaming-distribution/E1EXAMPLE` resolved to
+  the *web* distribution `E1EXAMPLE`. That is the same anchoring mistake #910 found one layer up
+  in `strings.Contains(arn, ":stateMachine:")`. The type is now the first `/`-delimited segment of
+  the ARN's resource portion, compared whole. Only `distribution` resolves, which is the
+  reference's own boundary rather than substrate's convenience: the developer guide's tagging
+  page states "You can tag distributions, but you can't tag origin access identities or
+  invalidations", and both are reachable-looking targets here — substrate stores invalidations in
+  the same namespace and CloudFormation mints origin access identities (#859).
+
+  **Two refusals, two codes, and the provenance splits.** A malformed ARN — not an ARN, not
+  CloudFront, carrying a Region CloudFront ARNs do not have, naming no account or no resource, or
+  naming something nested under a distribution such as an invalidation — answers
+  `InvalidArgument`/400. A well-formed CloudFront ARN naming a resource type substrate does not
+  model answers `NoSuchResource`/404. Both codes are among the four all three tagging operations
+  publish (`AccessDenied` 403, `InvalidArgument` 400, `InvalidTagging` 400, `NoSuchResource` 404);
+  **which of the two each case gets is substrate's reading**, because AWS publishes the codes and
+  not the conditions that select them. An ARN naming a distribution that does not exist keeps
+  answering `NoSuchDistribution`/404, which is *not* one of the four and is a decision older than
+  this issue: it is what every other arm of this plugin answers for an absent distribution, and
+  one plugin should not report a missing distribution two ways.
+
+  One existing test changed rather than being added to, and it is recorded here rather than in a
+  diff. `TestCloudFrontTagging_ABadTargetIsRefusedTheSameWayByAllThreeOperations` asserted
+  `NoSuchDistribution` for `arn:aws:cloudfront::123456789012:function/my-fn`. That case is now
+  `NoSuchResource` — the ARN is well formed and names a type substrate does not model, so there
+  is no distribution for it to be missing.
+
+  Not in this change, deliberately: the Resource Groups Tagging API still has no `cloudfront`
+  arm, so a CloudFront ARN there still answers an `InternalServiceException`
+  `FailedResourcesMap` entry. Giving it one is #835's CloudFront row, which needs a
+  `mergeResourceTags` case and a scanner as well as a resolver arm, and changes which resources
+  `GetResources` enumerates.
+
+  That row **should** be implemented rather than recorded as unsupported, and the evidence for
+  that is worth putting on the record here because one AWS page looks like it says otherwise.
+  The CloudFront developer guide's tagging page states "Tag Editor and Resource groups aren't
+  currently supported for CloudFront" — but Tag Editor and Resource Groups are not the Resource
+  Groups Tagging API, and AWS's own documentation says so: the Resource Groups user guide defines
+  its "Tag Editor Tagging" column as "You can tag resources of this type by using the Tag Editor
+  console. Otherwise, you must use either the AWS Resource Groups Tagging API or the tagging
+  services supported natively by that resource's owning service", so a Tag Editor "no" routes a
+  caller *to* the tagging API rather than denying it. The tagging API's own `Welcome` page — which
+  `API_TagResources` names as the authoritative list — lists "Amazon CloudFront" under "The AWS
+  services in the following list support the Resource Groups Tagging API `TagResources` and
+  `UntagResources` operations", and states separately that "The `GetResources`, `GetTagKeys`, and
+  `GetTagValues` operations support all resource types".
+
 - **The RDS and ElastiCache `Marker` names the last record of the page it ends, so a listing
   that changes between two pages no longer loses or repeats a record** (#887). Three
   operations were affected — `DescribeDBInstances`, `DescribeDBClusters` and

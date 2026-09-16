@@ -9059,6 +9059,54 @@ ARN, so tags here are changed through CloudFront's own operations only (#835).
 
 All CloudFront resources are stored under `us-east-1` (global service).
 
+### A tagging ARN addresses the distribution it names
+
+The three tagging operations take a `Resource` ARN in the query string, and one function resolves
+it for all three, so they cannot drift on which resource an ARN addresses. Two things about that
+ARN are load-bearing, and until #918 both were wrong.
+
+**The account comes from the ARN, not from the calling request.** `ListTagsForResource` publishes
+the parameter's pattern — `arn:aws(-cn)?:cloudfront::[0-9]+:.*`, required — in which `[0-9]+` is
+the account and the empty segment before it is the Region, absent because CloudFront is global.
+The resolver read the distribution *ID* out of the ARN and then keyed the load and the store by
+the caller's own account, so `arn:aws:cloudfront::{other}:distribution/E1EXAMPLE` addressed the
+caller's `E1EXAMPLE`. `UntagResource` is the damaging direction, and it answered the documented
+`204` while doing it: stripping a tag can turn an `aws:ResourceTag` `Deny` into an allow. This is
+the rule #826 established for SQS and DynamoDB, #845 carried through the tagging API's resolver
+and #910 applied to Step Functions — CloudFront was the last plugin holding out against it, and
+the resolver now takes no request context at all, so the caller's account is not in scope to
+reach for.
+
+**The resource type is matched against the ARN's own segment.** It was
+`strings.LastIndex(arn, "distribution/")`, which is unanchored, so
+`arn:aws:cloudfront::{account}:streaming-distribution/E1EXAMPLE` resolved to the *web*
+distribution `E1EXAMPLE` — a different resource type reaching a record it does not name. That is
+the same anchoring mistake #910 found one layer up. The type is now the first `/`-delimited
+segment of the resource portion and is compared whole.
+
+Only `distribution` resolves, and that is the reference's own boundary rather than substrate's
+convenience: the developer guide's tagging page states *"You can tag distributions, but you can't
+tag origin access identities or invalidations"*. Substrate stores invalidations in the same
+namespace and CloudFormation mints origin access identities (#859), so both are
+reachable-looking targets that have to be refused rather than left to a substring match.
+
+The two refusals answer two different published codes, because they are two different failures:
+
+| Case | Code | Status |
+|------|------|--------|
+| The ARN is malformed — not an ARN, not CloudFront, carrying a Region, naming no account or no resource, or naming something nested under a distribution such as an invalidation | `InvalidArgument` | 400 |
+| The ARN is well formed and names a CloudFront resource type substrate does not model — a streaming distribution, a function, a cache policy, an origin access identity | `NoSuchResource` | 404 |
+| The ARN names a distribution that does not exist in the account it names | `NoSuchDistribution` | 404 |
+
+Both `InvalidArgument` and `NoSuchResource` are among the four codes all three tagging operations
+publish (`AccessDenied` 403, `InvalidArgument` 400, `InvalidTagging` 400, `NoSuchResource` 404);
+which of the two each case gets is substrate's reading, since AWS publishes the codes and not the
+conditions. The third row is not one of the four, and that is deliberate and older than #918: it
+is the code every other arm of this plugin answers for an absent distribution, and one plugin
+should not report a missing distribution two ways. An ARN naming an unmodelled *type* is a
+different case — there is no distribution for it to be missing — which is why it takes the
+published code instead.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

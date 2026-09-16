@@ -311,9 +311,14 @@ func TestCloudFrontTagging_ABadTargetIsRefusedTheSameWayByAllThreeOperations(t *
 		wantStatus: http.StatusBadRequest,
 		why:        "the parameter is required on all three, which the reference states for the list only",
 	}, {
-		name:       "an ARN that names no distribution",
+		// This case asserted NoSuchDistribution until #918. The ARN is well formed and
+		// names a resource type substrate does not model, so there is no distribution for
+		// it to be missing — it answers the published NoSuchResource/404 now, and only the
+		// ARN of a distribution that does not exist keeps the NoSuchDistribution that
+		// [CloudFrontPlugin.resolveTagTarget]'s doc comment argues for.
+		name:       "an ARN that names a resource type substrate does not model",
 		arn:        "arn:aws:cloudfront::123456789012:function/my-fn",
-		wantCode:   "NoSuchDistribution",
+		wantCode:   "NoSuchResource",
 		wantStatus: http.StatusNotFound,
 		why:        "a distribution is the only CloudFront resource substrate keeps tags for",
 	}, {
