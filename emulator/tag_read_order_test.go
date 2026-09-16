@@ -27,11 +27,16 @@ import (
 //     away the very thing under test, and decoding into a slice would still hide a difference in
 //     whitespace or member spelling.
 //
-//  2. **The keys come back sorted.** Byte-identity alone is satisfied by any stable order, including
-//     one that happens to be stable for six keys in one run; only the sorted assertion says which
-//     order was chosen. The six keys are written in reverse-sorted order for this reason — a rotation
-//     of an unsorted insertion order is not sorted for any offset, so an unsorted handler fails this
-//     rather than passing on a lucky iteration.
+//  2. **The keys come back sorted.** Byte-identity alone is satisfied by any stable order, and only
+//     the sorted assertion says which order was chosen. The six keys are written in reverse-sorted
+//     order so that an unsorted handler is unlikely to look sorted by accident, and each read is
+//     repeated three times so that an unstable one is unlikely to look stable.
+//
+// The asymmetry there is deliberate and worth stating: with the sort in place both assertions hold on
+// every run, so nothing here can flake. What is probabilistic is only the reverse — how reliably these
+// tests *would have caught* the map-order handler, since Go's iteration of a six-key map can happen to
+// come out sorted. Removing the five sorts fails four of the five tests immediately and the fifth
+// within a few runs, which is the check that was actually made rather than assumed.
 //
 // The provenance differs across the five and is recorded per site rather than blanket. ACM's
 // ListTagsForCertificate, CloudFront's ListTagsForResource and both S3 tagging reads publish no
@@ -62,6 +67,20 @@ func tagOrderPairs() map[string]string {
 		pairs[k] = "v-" + k
 	}
 	return pairs
+}
+
+// tagOrderStableReads reads the same response three times, requires every body to be byte-identical
+// and returns the first.
+//
+// Three rather than two because one repeat leaves a one-in-six chance that two rangings of a six-key
+// map agree; the cost of a third wire call is nothing next to that.
+func tagOrderStableReads(t *testing.T, read func() string) string {
+	t.Helper()
+	first := read()
+	for attempt := 2; attempt <= 3; attempt++ {
+		assert.Equal(t, first, read(), "read %d answers a body byte-identical to the first", attempt)
+	}
+	return first
 }
 
 // tagOrderJSONKeys reads the Key members out of a {"Tags": [{"Key":…,"Value":…}]} body, in the order
@@ -160,10 +179,8 @@ func TestTagReadOrder_ACMListTagsForCertificateIsSortedAndStable(t *testing.T) {
 	require.Empty(t, errCode, "AddTagsToCertificate")
 	require.Equal(t, http.StatusOK, status, "AddTagsToCertificate")
 
-	first := acmListTagsRaw(t, ts, arn)
-	second := acmListTagsRaw(t, ts, arn)
-	assert.Equal(t, first, second, "two identical reads answer byte-identical bodies")
-	assert.Equal(t, tagOrderSorted, tagOrderJSONKeys(t, first),
+	body := tagOrderStableReads(t, func() string { return acmListTagsRaw(t, ts, arn) })
+	assert.Equal(t, tagOrderSorted, tagOrderJSONKeys(t, body),
 		"API_ListTagsForCertificate documents no order, so sorted by key is substrate's reading (#946)")
 }
 
@@ -188,10 +205,8 @@ func TestTagReadOrder_CloudFrontListTagsForResourceIsSortedAndStable(t *testing.
 	}
 	cloudfrontTag(t, ts, arn, cloudfrontTagBody(pairs...))
 
-	first := cloudfrontListTagsXML(t, ts, arn)
-	second := cloudfrontListTagsXML(t, ts, arn)
-	assert.Equal(t, first, second, "two identical reads answer byte-identical documents")
-	assert.Equal(t, tagOrderSorted, tagOrderXMLKeys(t, first, "Items>Tag"),
+	body := tagOrderStableReads(t, func() string { return cloudfrontListTagsXML(t, ts, arn) })
+	assert.Equal(t, tagOrderSorted, tagOrderXMLKeys(t, body, "Items>Tag"),
 		"CloudFront's ListTagsForResource documents no order, so this is substrate's reading (#946)")
 }
 
@@ -215,12 +230,11 @@ func TestTagReadOrder_KinesisListTagsForStreamIsSortedAndStable(t *testing.T) {
 		return string(raw)
 	}
 
-	first, second := read(), read()
-	assert.Equal(t, first, second, "two identical reads answer byte-identical bodies")
+	body := tagOrderStableReads(t, read)
 	// The one of the five whose order AWS's own cursor implies: ExclusiveStartTagKey selects the tags
 	// that "occur after" a key, which needs an order over keys. Which order is still substrate's
 	// reading — AWS's sample response is not sorted — and the cursor itself is #954.
-	assert.Equal(t, tagOrderSorted, tagOrderJSONKeys(t, first),
+	assert.Equal(t, tagOrderSorted, tagOrderJSONKeys(t, body),
 		"ListTagsForStream's ExclusiveStartTagKey implies an order over keys (#946)")
 }
 
@@ -239,10 +253,8 @@ func TestTagReadOrder_S3GetBucketTaggingIsSortedAndStable(t *testing.T) {
 		tagOrderS3Body(), "application/xml")
 	require.Equal(t, http.StatusNoContent, status, "PutBucketTagging: %s", raw)
 
-	first := tagOrderS3Read(t, ts, "/"+bucket+"?tagging")
-	second := tagOrderS3Read(t, ts, "/"+bucket+"?tagging")
-	assert.Equal(t, first, second, "two identical reads answer byte-identical documents")
-	assert.Equal(t, tagOrderSorted, tagOrderXMLKeys(t, first, "TagSet>Tag"),
+	body := tagOrderStableReads(t, func() string { return tagOrderS3Read(t, ts, "/"+bucket+"?tagging") })
+	assert.Equal(t, tagOrderSorted, tagOrderXMLKeys(t, body, "TagSet>Tag"),
 		"API_GetBucketTagging documents no order, so sorted by key is substrate's reading (#946)")
 }
 
@@ -271,9 +283,9 @@ func TestTagReadOrder_S3GetObjectTaggingIsSortedAndStable(t *testing.T) {
 
 	// The object's tag set is a second map on a second record, so it is asserted separately rather
 	// than assumed to follow the bucket's: the two are different sites and only one shared helper.
-	first := tagOrderS3Read(t, ts, "/"+bucket+"/"+key+"?tagging")
-	second := tagOrderS3Read(t, ts, "/"+bucket+"/"+key+"?tagging")
-	assert.Equal(t, first, second, "two identical reads answer byte-identical documents")
-	assert.Equal(t, tagOrderSorted, tagOrderXMLKeys(t, first, "TagSet>Tag"),
+	body := tagOrderStableReads(t, func() string {
+		return tagOrderS3Read(t, ts, "/"+bucket+"/"+key+"?tagging")
+	})
+	assert.Equal(t, tagOrderSorted, tagOrderXMLKeys(t, body, "TagSet>Tag"),
 		"API_GetObjectTagging documents no order, so sorted by key is substrate's reading (#946)")
 }
