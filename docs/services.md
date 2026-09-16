@@ -8146,12 +8146,12 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans twenty-two resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans twenty-three resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
 DB subnet groups, ElastiCache cache clusters, EFS file systems, Glue databases,
-ACM certificates, CloudFront distributions and KMS keys.
+ACM certificates, CloudFront distributions, KMS keys and SNS topics.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8314,6 +8314,25 @@ wrong-record write into a genuine cross-account one. See
 the four accepted `KeyId` forms and for why the alias case needs an anchored cut on
 the *first* slash rather than the last.
 
+SNS topics followed as of #835, again with the resolution fix (#925) that had to land
+with them, and the row is where the anchored-segment rule of #910 has nothing to
+anchor on: an SNS topic ARN carries no type keyword and no separator, so the resource
+portion *is* the name. The discriminator the shape offers is the colon — a resource
+portion containing one names a subscription — and that is what the resolver refuses.
+See [the SNS section](#a-topic-arn-addresses-the-topic-it-names) for the ten
+operations that shared the defect and for the two tag-parameter spellings AWS's
+reference and its own examples disagree about.
+
+SNS is also the row where sharing the resolver created **no** refusal, and the
+contrast with KMS is the point: no cross-account statement appears on any of SNS's
+three tagging pages. The state key is account- and Region-qualified, so a
+foreign-account ARN builds a key nothing is stored at and the caller gets a
+`FailedResourcesMap` entry — isolation emerges from the key rather than from a guard,
+as ACM's does. Inventing a prohibition AWS does not publish would be substrate's
+invention rather than its reading. Its merge sits behind a colon-terminated kind
+guard for the reason the earlier rows' do: `topic:` is a prefix of `topic_names:`,
+whose value is a JSON array of names.
+
 ### Which failure gets which error code
 
 A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
@@ -8370,17 +8389,100 @@ Resource Groups Tagging API operations are free.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateTopic | |
+| CreateTopic | Decodes `Tags`, in either published spelling |
 | GetTopicAttributes | |
 | SetTopicAttributes | |
 | DeleteTopic | |
-| ListTopics | |
+| ListTopics | Base64 pagination token |
 | Subscribe | Supports lambda, sqs, http, https, email protocols |
-| Unsubscribe | |
+| Unsubscribe | Idempotent |
 | ListSubscriptions | |
 | ListSubscriptionsByTopic | |
+| GetSubscriptionAttributes | |
+| SetSubscriptionAttributes | |
 | Publish | Dispatches to subscribed Lambda/SQS via cross-service dispatch |
 | PublishBatch | |
+| AddPermission | Accepted; no policy is stored |
+| RemovePermission | Accepted; no policy is stored |
+| TagResource | `ResourceNotFound`/404 for an absent topic |
+| UntagResource | |
+| ListTagsForResource | Not paginated, as AWS's reference is not |
+
+### A topic ARN addresses the topic it names
+
+An SNS topic ARN is `arn:aws:sns:{region}:{account}:{topic-name}`. It carries **no
+type keyword and no separator** — the resource portion *is* the name — which makes
+it the one ARN in the tree with no segment to anchor a resource-type match against.
+
+Every operation taking a `TopicArn` or a `ResourceArn` used to split it on `:` and
+take the **last** segment, then key the load and the store by the **caller's** own
+account and Region. Three failures compounded (#925), across ten operations:
+
+- A topic ARN naming another account or Region addressed the caller's own topic of
+  that name. `UntagResource` is the damaging direction and answered `200` while
+  stripping tags from it; `Publish` published to the wrong topic and `DeleteTopic`
+  deleted it. A caller could not tell any of those from a correct call.
+- A subscription ARN is the topic's ARN with an identifier appended —
+  `arn:aws:sns:{region}:{account}:{topic}:{sub-id}` — so its last segment is the
+  subscription's own identifier, handed back as a topic name.
+- The length guard fell through to returning its argument, so any string at all —
+  `arn:aws:sns`, a bare name, a URL — became a topic name and was looked up rather
+  than refused.
+
+The account and Region now come from the ARN, by a parser that takes no request
+context at all, which is the arrangement #826 established for SQS and DynamoDB, #910
+for Step Functions, #918 for CloudFront and #922 for KMS. The discriminator SNS's
+shape does offer is the colon: a resource portion containing one names a
+subscription, and is refused with `InvalidParameter`/400 — which is also what a
+malformed ARN now answers instead of being looked up verbatim.
+
+A subscription ARN is **minted** under the topic's account and Region rather than the
+subscriber's, because the ARN is the topic's own with an identifier appended.
+The subscription record and the two subscription indexes are still keyed by the
+calling account, deliberately: a cross-account subscription is not modeled — nothing
+mints one and no operation distinguishes a subscriber's account from a topic's — so
+moving them would put the index under an account the subscriptions are not stored in
+and `Publish` would silently stop delivering. The key embeds the whole subscription
+ARN, which itself names an account, so a lookup keyed by the caller can only find a
+record whose ARN names that same account — ACM's arrangement, and not an instance of
+the #918 defect.
+
+### An SNS tag
+
+`Tag` is `Key`/`Value`. AWS's reference names the request members `Tags.member.N`
+and `TagKeys.member.N`, but **AWS's own request examples on the same pages wire
+`Tags.Tag.1.Key`, `Tags.Tag.1.Value` and `TagKeys.TagKey.1`**. Substrate decoded
+only the first spelling, so a caller that followed the example got `200` with
+nothing written or nothing removed. Both are accepted, because the reference and its
+example disagree and a caller may reasonably have followed either.
+
+`CreateTopic` publishes a `Tags` parameter that substrate read not at all, so a topic
+created with tags in one call reported none through either API. It is decoded now.
+
+An absent topic answers **`ResourceNotFound`** at 404, which all three tag
+operations publish. Substrate answered the same status under the code name
+`NotFound`, which no SDK models — the status was right and the name was not. The
+plain `NotFound` the topic operations answer is correct for them: only the three tag
+pages publish `ResourceNotFound`.
+
+A topic's tags are stored and reported **ordered by key**, on the write and on the
+read. SNS's own merge was already deterministic — it walks indexed request
+parameters, not a Go map — but it preserved insertion order while the tagging API's
+arm emits key-sorted order, so one topic's tags came back in two different orders
+depending on which API was asked (#862).
+
+Two things are deliberately not modeled. AWS's published `ListTagsForResource`
+sample response emits `<Value>` before `<Key>` and substrate emits `<Key>` first;
+XML member order is not significant to any SDK's parser, so no test could assert a
+difference a caller can act on. And the 10 TPS limit on SNS's tagging actions is not
+modeled, which is a seedable-throttle question rather than an ARN one.
+
+`Publish`, `PublishBatch` and `Subscribe` never load the topic, so they succeed
+against a topic that does not exist where AWS answers `NotFound` — recorded here
+rather than fixed alongside the resolution, and filed as #926. That is a different
+defect from this one: the resolution fix settles *which* topic an ARN addresses,
+while #926 is about whether the topic it addresses has to exist. `Subscribe` is the
+one that writes, so an orphan subscription record and two index entries survive it.
 
 ### CloudFormation resource types
 

@@ -260,6 +260,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "acm", scan: p.scanACMCertificates},
 		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
 		{typePrefix: "kms", scan: p.scanKMSKeys},
+		{typePrefix: "sns", scan: p.scanSNSTopics},
 	}
 
 	var all []resourceTagMapping
@@ -829,6 +830,46 @@ func (p *TaggingPlugin) scanKMSKeys(_ context.Context, reqCtx *RequestContext) (
 	return out, nil
 }
 
+// scanSNSTopics reports every SNS topic in the caller's account and Region, with its tags.
+//
+// The prefix is built from [snsTopicKeyPrefix] — the same constant [snsTopicStateKey] writes and
+// [snsKeyIsTaggable] tests — so the scanner, the resolver and SNS's own operations cannot fall out of
+// step about where a topic record lives.
+//
+// The colon in the prefix is load-bearing here as it is for KMS: this namespace also holds
+// "topic_names:{acct}/{region}", whose value is a JSON array of names, and a bare "topic" prefix would
+// list it, fail to unmarshal it into an [SNSTopic] and skip it silently — reporting nothing rather
+// than reporting wrongly, but for a reason no reader could see.
+func (p *TaggingPlugin) scanSNSTopics(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := snsTopicKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	keys, err := p.state.List(goCtx, snsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list sns topics: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, snsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var topic SNSTopic
+		if err := json.Unmarshal(raw, &topic); err != nil {
+			continue
+		}
+		tags := make([]taggingTag, 0, len(topic.Tags))
+		for _, t := range topic.Tags {
+			tags = append(tags, taggingTag(t))
+		}
+		sortTagsByKey(tags, func(t taggingTag) string { return t.Key })
+		out = append(out, resourceTagMapping{
+			ResourceARN: topic.ARN,
+			Tags:        tags,
+		})
+	}
+	return out, nil
+}
+
 func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	prefix := acmCertKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
@@ -1330,6 +1371,21 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		}
 		return "", "", unsupportedTagResource("KMS %q is not a taggable resource type", resource)
 
+	case "sns":
+		// arn:aws:sns:{region}:{acct}:{topic-name}
+		//
+		// Through [snsResolveARN], which shares [snsTopicStateKey] with SNS's own three tag
+		// operations, so a topic's tags are at one address whichever arm writes them. SNS's ARN
+		// carries no type keyword and no separator — the resource portion *is* the name — so the
+		// discriminator the shape offers is the colon: a subscription ARN appends ":{sub-id}", and
+		// SNS publishes no tagging for subscriptions, so that parser refuses it rather than resolving
+		// it to the topic it names or to its own identifier as a topic (part of #835, on top of the
+		// resolution fix in sns_tags.go).
+		if ns, key, resolveErr := snsResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
+		}
+		return "", "", unsupportedTagResource("SNS %q is not a taggable resource type", resource)
+
 	default:
 		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
 	}
@@ -1565,6 +1621,20 @@ func mergeResourceTags(
 		updated, err := mergeRecordTagListTags(raw, kmsTagsJSONMember, kmsTagKeyField, kmsTagValueField, addTags, removeKeys)
 		if err != nil {
 			return fmt.Errorf("merge KMS tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
+
+	case snsNamespace:
+		// Array-shaped like KMS's, but spelled Key/Value: SNS's Tag shape uses the ordinary names, so
+		// the same helper serves with different field arguments. The guard is colon-terminated because
+		// "topic" is a prefix of "topic_names", whose value is a JSON array of names. See
+		// [snsKeyIsTaggable].
+		if !snsKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported SNS resource key: %s", key)
+		}
+		updated, err := mergeRecordTagListTags(raw, snsTagsJSONMember, snsTagKeyField, snsTagValueField, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge SNS tags for %s: %w", key, err)
 		}
 		return state.Put(goCtx, ns, key, updated)
 
