@@ -387,6 +387,11 @@ func (p *ACMPlugin) listTagsForCertificate(ctx *RequestContext, req *AWSRequest)
 	for k, v := range cert.Tags {
 		tags = append(tags, tagItem{Key: k, Value: v})
 	}
+	// A map flattened into an ordered list carries Go's map order into the response body, so two
+	// identical calls could report one certificate's tags in a different order (#946).
+	// API_ListTagsForCertificate documents no order at all, so sorted-by-key is substrate's reading,
+	// taken for the reason [sortTagsByKey] records.
+	sortTagsByKey(tags, func(t tagItem) string { return t.Key })
 
 	type response struct {
 		Tags []tagItem `json:"Tags"`

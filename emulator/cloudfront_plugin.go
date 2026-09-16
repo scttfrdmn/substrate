@@ -601,6 +601,10 @@ func (p *CloudFrontPlugin) listTagsForResource(_ *RequestContext, req *AWSReques
 	for k, v := range dist.Tags {
 		tags = append(tags, xmlTag{Key: k, Value: v})
 	}
+	// Each <Tag> member is emitted in slice order, so ranging the map put Go's map order on the wire
+	// and two identical calls could differ (#946). CloudFront's ListTagsForResource documents no
+	// order, so sorted-by-key is substrate's reading, taken for the reason [sortTagsByKey] records.
+	sortTagsByKey(tags, func(t xmlTag) string { return t.Key })
 
 	return cloudfrontXMLResponse(http.StatusOK, xmlTags{Items: tags})
 }

@@ -704,6 +704,23 @@ func (p *KinesisPlugin) listTagsForStream(ctx *RequestContext, req *AWSRequest) 
 	for k, v := range stream.Tags {
 		tags = append(tags, tagItem{Key: k, Value: v})
 	}
+	// Ranging the map put Go's map order into the Tags list, so two identical calls could report one
+	// stream's tags in a different order (#946).
+	//
+	// Kinesis is the one of #946's five whose page does not leave the order entirely open: it
+	// publishes a cursor over the tag key itself. ExclusiveStartTagKey is "the key to use as the
+	// starting point for the list of tags. If this parameter is set, ListTagsForStream gets all tags
+	// that occur after ExclusiveStartTagKey", and Tags is "a list of tags associated with StreamName,
+	// starting with the first tag after ExclusiveStartTagKey and up to the specified Limit". A tag
+	// cannot "occur after" a key unless the tags are walked in some order over keys, so an order is
+	// implied even though no sentence names one — the same reasoning that made ListObjectVersions'
+	// order cursor-implied in #865. Which order is still substrate's reading, and lexicographic is
+	// taken for the reason [sortTagsByKey] records; AWS's own sample response is not sorted.
+	//
+	// Substrate implements neither Limit nor ExclusiveStartTagKey and answers HasMoreTags: false
+	// unconditionally, so the cursor cannot be exercised yet — that is #954, for which this sort is
+	// the prerequisite: a cursor over an unstable order can skip or repeat a tag.
+	sortTagsByKey(tags, func(t tagItem) string { return t.Key })
 
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
 		"Tags":        tags,
