@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The Resource Groups Tagging API reports `InvalidParameterException`/400, not
+  `InternalServiceException`/500, when an ARN resolves and names a resource that does not exist**
+  (#939). Both codes were reachable before, but only through the same 500: a `FailedResourcesMap`
+  entry for an absent resource carried "the request failed because of an internal error; retry the
+  request and then call `GetResources` to verify the changes", which told a caller to retry a
+  request that could only fail again, and left "substrate cannot tag this type" and "this resource
+  is not there" indistinguishable. `TagResources` and `UntagResources` both list "[t]he target ID is
+  invalid, unsupported, or doesn't exist" among `InvalidParameterException`'s causes, and a resource
+  that is not there is the third of those three — so unlike the unsupported-*type* case, which
+  substrate splits on whether the ARN parses and documents as its own reading, this one is AWS's.
+  A foreign-account or foreign-Region ARN takes the new code wherever the resolver builds an
+  account- and Region-qualified key, which is every arm except Lambda's (#937).
+
+  `docs/services.md` also now records a contradiction `FailureInfo` publishes about itself rather
+  than resolving it silently: `ErrorCode`'s "Valid Values" are the two codes above, while the same
+  member's prose says it "can also include any valid error code returned by the AWS service that
+  hosts the resource that the ARN key represents", with `AccessDeniedException` as its example.
+  Substrate reports only the two enumerated codes, because the enumeration is the part a caller can
+  switch on.
+
+- **Three rows of the tagging API's wrong-type ARN guard were passing for a reason the table did not
+  claim** (#939). A Step Functions activity, a KMS key and a CloudFront distribution gained resolver
+  arms in #910, #922 and #918, so each ARN resolved to a real state key and the refusal came from
+  the merge finding no record — the same `FailedResourcesMap` entry the row asserted, produced by a
+  different mechanism, which a regression that mis-keyed any of the three would also have produced.
+  The three move to a test that asserts what they now exercise; their slots are filled by ARNs whose
+  type is genuinely unsupported in the same three services (a Step Functions execution, a KMS alias,
+  a CloudFront origin access identity) plus an ELB ARN for the no-arm-at-all case, and every row now
+  asserts through an export helper that the *resolver* refuses it, so the next row to gain an arm
+  fails the test instead of going quietly stale. Two `why` strings that had become false as prose
+  are corrected.
+
 ## [v0.117.0] - 2026-09-15
 
 ### Added

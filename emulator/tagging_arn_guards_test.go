@@ -108,6 +108,16 @@ func awsErrorCode(t string) string {
 // would be asserting the merge instead. The two arms that resolve correctly are asserted from
 // the positive side in TestTaggingResolveARN_TheRightTypeStillResolves, which is what makes
 // the pair meaningful: a resolver that refused everything would pass this test alone.
+//
+// Every row also asserts, through TaggingResolveARNForTest, that the resolver itself refuses it.
+// Without that the table goes stale silently: three rows here — a Step Functions activity, a KMS
+// key and a CloudFront distribution — gained a resolver arm in #910, #922 and #918, so each one
+// resolved to a real state key and failed at the *merge* for want of a record, which produced the
+// same FailedResourcesMap entry the row was written to assert. They stayed green for two releases
+// while guarding nothing, and a regression that mis-keyed any of the three would have kept them
+// green, because a mis-keyed ARN is exactly as absent from state as a correctly-keyed one (#939).
+// Those three now live in TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter, which asserts
+// what they actually exercise.
 func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T) {
 	t.Parallel()
 
@@ -144,9 +154,11 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 		arn:  "arn:aws:apigateway:us-east-1::/apis/abc123",
 		why:  `TrimPrefix("/restapis/") left "/apis/abc123", keying api:…//apis/abc123`,
 	}, {
-		name: "step functions activity",
-		arn:  "arn:aws:states:us-east-1:123456789012:activity:my-activity",
-		why:  "the two types differ only by the literal segment, so an activity tagged a same-named state machine",
+		name: "step functions execution",
+		arn:  "arn:aws:states:us-east-1:123456789012:execution:orders:run-1",
+		why: "an execution is not one of the two taggable Step Functions types, and its ARN is the " +
+			"state machine's with a name appended, so the type segment is the only thing keeping it " +
+			"from keying the machine it runs",
 	}, {
 		name: "kinesis consumer",
 		arn:  "arn:aws:kinesis:us-east-1:123456789012:stream/orders/consumer/reader:1700000000",
@@ -172,21 +184,34 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 		arn:  "arn:aws:ecs:us-east-1:123456789012:service/my-service",
 		why:  "AWS's documented short ARN, whose refusal ECS's own page states outright",
 	}, {
-		name: "service with no arm at all",
-		arn:  "arn:aws:kms:us-east-1:123456789012:key/abcd-1234",
-		why:  "#835's six armless services take the same answer as a wrong type within a service",
+		name: "kms alias",
+		arn:  "arn:aws:kms:us-east-1:123456789012:alias/aws/s3",
+		why: "the developer guide's \"[y]ou cannot tag aliases\", and the alias name's own \"/\" is " +
+			"what made a last-component scan resolve this to \"s3\" as if it were a key ID",
 	}, {
-		name: "cloudfront distribution",
-		arn:  "arn:aws:cloudfront::123456789012:distribution/E1AAAAAAAAAAAA",
-		why: "the tagging API has no cloudfront arm, so #883's untag hole in CloudFront's own " +
-			"plugin was never reachable from here — this pins that it refuses rather than " +
-			"reporting a removal it did not make, and that giving it an arm stays #835's work",
+		name: "cloudfront origin access identity",
+		arn:  "arn:aws:cloudfront::123456789012:origin-access-identity/E1AAAAAAAAAAAA",
+		why: "the developer guide's \"[y]ou can tag distributions, but you can't tag origin access " +
+			"identities or invalidations\", and substrate stores all three in one namespace, so the " +
+			"type segment is the whole of the boundary",
+	}, {
+		name: "service with no arm at all",
+		arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-lb/50dc6c495c0c9188",
+		why: "a service the resolver has no arm for takes the same answer as a wrong type within a " +
+			"service; ELB is the one left after #835, and giving it an arm is #863's work",
 	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ts := arnGuardServer(t)
+
+			// The resolver refuses it, not the merge. Asserted before the wire calls, because
+			// the wire cannot tell the two apart and this is the property the row claims.
+			if ns, key, err := emulator.TaggingResolveARNForTest(tc.arn); err == nil {
+				t.Fatalf("resolveARN(%q) = %q/%q with no error, so this row is asserting the merge "+
+					"rather than the resolver — %s", tc.arn, ns, key, tc.why)
+			}
 
 			for _, op := range []string{"TagResources", "UntagResources"} {
 				failures := tagResourcesFailures(t, ts, op, tc.arn)
@@ -210,11 +235,15 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 // InternalServiceException, and a string that is not an ARN answers
 // InvalidParameterException/400.
 //
-// AWS can be read either way here — FailureInfo documents InternalServiceException for "the
-// resource type in the request is not supported", while the same page's InvalidParameterException
-// bullets say "the target ID is invalid, unsupported, or doesn't exist" — so substrate splits
-// them on whether the ARN parses, because that is the only distinction a caller can act on
-// differently. The test pins the split rather than claiming AWS specifies it.
+// AWS can be read either way for an unsupported *type* — FailureInfo documents
+// InternalServiceException for "the resource type in the request is not supported", while the same
+// page's InvalidParameterException bullets say "the target ID is invalid, unsupported, or doesn't
+// exist" — so substrate splits those two on whether the ARN parses, because that is the only
+// distinction a caller can act on differently. This test pins the split rather than claiming AWS
+// specifies it.
+//
+// The third case, a well-formed ARN of a supported type naming a resource that is not there, is
+// not ambiguous and is asserted in TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter.
 func TestTaggingResolveARN_AMalformedARNIsInvalidParameter(t *testing.T) {
 	t.Parallel()
 
@@ -239,6 +268,68 @@ func TestTaggingResolveARN_AMalformedARNIsInvalidParameter(t *testing.T) {
 			}
 			if got.StatusCode != 400 {
 				t.Errorf("StatusCode = %d, want 400", got.StatusCode)
+			}
+		})
+	}
+}
+
+// TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter asserts the third of the tagging API's
+// three refusals: an ARN that is well formed, of a type substrate keys, naming a resource that is
+// not there.
+//
+// It answers InvalidParameterException at HTTP 400, because TagResources and UntagResources both
+// list "[t]he target ID is invalid, unsupported, or doesn't exist" among that code's causes, and a
+// resource that does not exist is the third of those three. Substrate answered
+// InternalServiceException/500 until #939, which told a caller to retry a request that could only
+// fail again, and left "substrate cannot tag this type" and "this resource is not there"
+// indistinguishable in a FailedResourcesMap entry.
+//
+// The first three ARNs are the rows that went stale in
+// TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed once #910, #918 and #922 gave
+// their types a resolver arm. Each is asserted to *resolve*, which is what makes this the right
+// table for them — and the property whose absence made them the wrong rows there.
+func TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		arn  string
+	}{{
+		name: "step functions activity",
+		arn:  "arn:aws:states:us-east-1:" + taggingTestAccount + ":activity:no-such-activity",
+	}, {
+		name: "kms key",
+		arn:  "arn:aws:kms:us-east-1:" + taggingTestAccount + ":key/abcd-1234",
+	}, {
+		name: "cloudfront distribution",
+		arn:  "arn:aws:cloudfront::" + taggingTestAccount + ":distribution/E1AAAAAAAAAAAA",
+	}, {
+		name: "dynamodb table",
+		arn:  "arn:aws:dynamodb:us-east-1:" + taggingTestAccount + ":table/no-such-table",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := arnGuardServer(t)
+
+			if _, _, err := emulator.TaggingResolveARNForTest(tc.arn); err != nil {
+				t.Fatalf("resolveARN(%q) = %v, so this row asserts the resolver rather than the "+
+					"merge and belongs in the wrong-type table", tc.arn, err)
+			}
+
+			for _, op := range []string{"TagResources", "UntagResources"} {
+				failures := tagResourcesFailures(t, ts, op, tc.arn)
+				got, ok := failures[tc.arn]
+				if !ok {
+					t.Fatalf("%s: %s reported no failure for a resource that does not exist", op, tc.arn)
+				}
+				if got.ErrorCode != "InvalidParameterException" {
+					t.Errorf("%s: ErrorCode = %q, want InvalidParameterException", op, got.ErrorCode)
+				}
+				if got.StatusCode != 400 {
+					t.Errorf("%s: StatusCode = %d, want 400", op, got.StatusCode)
+				}
 			}
 		})
 	}
@@ -269,11 +360,15 @@ func TestTaggingResolveARN_ARefusalNeverPublishesAStateKey(t *testing.T) {
 		}
 	}
 
-	// And the unsupported-type arm, whose message is AWS's published sentence verbatim.
-	const activity = "arn:aws:states:us-east-1:123456789012:activity:my-activity"
-	unsupported := tagResourcesFailures(t, ts, "TagResources", activity)[activity]
-	if strings.Contains(unsupported.ErrorMessage, "statemachine:") {
-		t.Errorf("ErrorMessage %q contains a state key", unsupported.ErrorMessage)
+	// And the unsupported-type arm, whose message is AWS's published sentence verbatim. An
+	// execution ARN rather than an activity's: an activity resolves now (#910), so it exercises the
+	// merge arm above rather than this one (#939).
+	const execution = "arn:aws:states:us-east-1:123456789012:execution:orders:run-1"
+	unsupported := tagResourcesFailures(t, ts, "TagResources", execution)[execution]
+	for _, leak := range []string{"statemachine:", "activity:", "states/"} {
+		if strings.Contains(unsupported.ErrorMessage, leak) {
+			t.Errorf("ErrorMessage %q contains internal detail %q", unsupported.ErrorMessage, leak)
+		}
 	}
 }
 

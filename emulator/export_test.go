@@ -1107,6 +1107,20 @@ func ResourceTypeMatchesForTest(arn string, filters []string) bool {
 	return resourceTypeMatches(arn, filters)
 }
 
+// TaggingResolveARNForTest wraps (*TaggingPlugin).resolveARN, the tagging API's ARN-to-state-key
+// resolver.
+//
+// It is exported so a guard table can assert *where* an ARN is refused rather than only that it
+// is. Both halves of the request path — a resolver that has no arm for the type, and a merge that
+// finds no record at the key — answer a FailedResourcesMap entry over the wire, so a row that was
+// refused by the resolver and is now refused by the merge, because its type gained an arm, stays
+// green while no longer guarding the thing it is named for. That is #939, and three rows had gone
+// stale that way before it was caught by reading a log line. The resolver's body never touches its
+// receiver, so a zero-value plugin is enough to call it.
+func TaggingResolveARNForTest(arn string) (ns, key string, err error) {
+	return (&TaggingPlugin{}).resolveARN(arn)
+}
+
 // ELBResourceKindFromARNForTest wraps elbResourceKindFromARN, which classifies an ELBv2 ARN as
 // one of the four taggable kinds.
 //
