@@ -1094,6 +1094,19 @@ func AuthzResourceARNFormatsForTest(service, resourceType string) ([]string, boo
 	return authzResourceARNFormats(service, resourceType)
 }
 
+// ResourceTypeMatchesForTest wraps resourceTypeMatches, the ResourceTypeFilters comparison
+// GetResources applies to every scanned ARN.
+//
+// It is exported because the property under test is about ARN *shapes*, not about resources: the
+// filter has to read a type out of a slash-delimited portion, a colon-delimited one, one behind a
+// leading slash, and one that embeds no type at all. Reaching every shape through the wire would mean
+// creating a resource in six services to assert one string comparison, and two of the shapes — an S3
+// bucket whose name begins with "bucket", a malformed ARN — cannot be created at all. #936 is
+// precisely a defect in that comparison, so it is pinned where it lives.
+func ResourceTypeMatchesForTest(arn string, filters []string) bool {
+	return resourceTypeMatches(arn, filters)
+}
+
 // ELBResourceKindFromARNForTest wraps elbResourceKindFromARN, which classifies an ELBv2 ARN as
 // one of the four taggable kinds.
 //

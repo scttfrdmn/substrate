@@ -106,8 +106,25 @@ func (p *ECSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // --- State key helpers -------------------------------------------------------
 
+// The prefix of every ECS record key the Resource Groups Tagging API scans. Each is a named
+// constant so the key builder below and the scanner in tagging_plugin.go read the same string and
+// cannot fall out of step about where a record lives — the pattern ssmParameterKeyPrefix and
+// acmCertKeyPrefix already follow.
+//
+// The trailing colon is load-bearing in all four cases. This namespace also holds index keys
+// spelled "cluster_names:", "taskdef_families:", "taskdef_revisions:", "service_names:" and
+// "task_ids:", whose values are JSON arrays of names rather than resource records; a prefix without
+// the colon would list them and then skip them silently when the unmarshal into a resource type
+// failed. ECS is the sixth namespace to need the guard.
+const (
+	ecsClusterKeyPrefix = "cluster:"
+	ecsTaskDefKeyPrefix = "taskdef:"
+	ecsServiceKeyPrefix = "service:"
+	ecsTaskKeyPrefix    = "task:"
+)
+
 func ecsClusterKey(accountID, region, name string) string {
-	return "cluster:" + accountID + "/" + region + "/" + name
+	return ecsClusterKeyPrefix + accountID + "/" + region + "/" + name
 }
 
 func ecsClusterNamesKey(accountID, region string) string {
@@ -115,7 +132,7 @@ func ecsClusterNamesKey(accountID, region string) string {
 }
 
 func ecsTaskDefKey(accountID, region, family string, revision int) string {
-	return "taskdef:" + accountID + "/" + region + "/" + family + "/" + strconv.Itoa(revision)
+	return ecsTaskDefKeyPrefix + accountID + "/" + region + "/" + family + "/" + strconv.Itoa(revision)
 }
 
 func ecsTaskDefFamiliesKey(accountID, region string) string {
@@ -127,7 +144,7 @@ func ecsTaskDefRevisionsKey(accountID, region, family string) string {
 }
 
 func ecsServiceKey(accountID, region, clusterName, serviceName string) string {
-	return "service:" + accountID + "/" + region + "/" + clusterName + "/" + serviceName
+	return ecsServiceKeyPrefix + accountID + "/" + region + "/" + clusterName + "/" + serviceName
 }
 
 func ecsServiceNamesKey(accountID, region, clusterName string) string {
@@ -135,7 +152,7 @@ func ecsServiceNamesKey(accountID, region, clusterName string) string {
 }
 
 func ecsTaskKey(accountID, region, clusterName, taskID string) string {
-	return "task:" + accountID + "/" + region + "/" + clusterName + "/" + taskID
+	return ecsTaskKeyPrefix + accountID + "/" + region + "/" + clusterName + "/" + taskID
 }
 
 func ecsTaskIDsKey(accountID, region, clusterName string) string {

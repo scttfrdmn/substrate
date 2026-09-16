@@ -151,8 +151,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Resource Groups Tagging API reaches an ACM certificate and a CloudFront distribution**
   (part of #835). Both answered an `InternalServiceException` `FailedResourcesMap` entry from
   `resolveARN`'s default arm, while both services tag the resource perfectly well through their
-  own calls — so a tag was writable through one API and invisible to the other. Two of the eleven
-  rows of #835; nine remain.
+  own calls — so a tag was writable through one API and invisible to the other. That makes five of
+  the eleven rows of #835 complete; six remain, two of which — ECS's service and task definition —
+  already have their tagging half and need only a scanner.
 
   Both types are on AWS's own authoritative list: the tagging guide's welcome page names **AWS
   Certificate Manager** and **Amazon CloudFront** among the services `TagResources` and
@@ -215,7 +216,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Resource Groups Tagging API reaches a KMS key** (part of #835). A key ARN answered an
   `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm while KMS's
   own `TagResource` wrote the tag perfectly well, so a tag was writable through one API and
-  invisible to the other. The third of the eleven rows of #835; eight remain.
+  invisible to the other. Six of the eleven rows of #835 are now complete; five remain.
 
   KMS sits on the truncated part of the tagging guide's welcome-page list of services
   `TagResources` and `UntagResources` support, so its write half was unlisted rather than refused,
@@ -253,7 +254,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Resource Groups Tagging API reaches an SNS topic** (part of #835). A topic ARN answered an
   `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm while SNS's
   own `TagResource` wrote the tag, so a tag was writable through one API and invisible to the other.
-  The fourth of the eleven rows of #835; seven remain.
+  Seven of the eleven rows of #835 are now complete; four remain.
 
   SNS sits on the truncated part of the tagging guide's welcome-page list of services `TagResources`
   and `UntagResources` support, so its write half was unlisted rather than refused, while the same
@@ -288,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Resource Groups Tagging API reaches a Secrets Manager secret** (part of #835). A secret ARN
   answered an `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm
   while Secrets Manager's own `TagResource` wrote the tag, and `GetResources` reported no secrets at
-  all. The fifth of the eleven rows of #835; six remain.
+  all. Eight of the eleven rows of #835 are now complete; three remain.
 
   The row is the same three parts as ACM's, CloudFront's, KMS's and SNS's — a resolver arm, a merge
   arm behind a kind guard, and a scanner with its descriptor — and the resolver is the same
@@ -324,7 +325,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Resource Groups Tagging API reaches a Systems Manager parameter** (part of #835). A parameter
   ARN answered an `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm
   while Systems Manager's own `AddTagsToResource` wrote the tag, and `GetResources` reported no
-  parameters at all. The sixth of the eleven rows of #835; five remain.
+  parameters at all. Nine of the eleven rows of #835 are now complete; the two that remain are ECS's
+  service and task definition, which need a scanner and nothing else.
 
   The same three parts as the five rows before it — a resolver arm, a merge arm behind a kind guard,
   and a scanner with its descriptor, now twenty-five — but the resolver is shared differently, because
@@ -351,6 +353,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ListTagsForResource` — an operation Systems Manager genuinely publishes, unlike the one Secrets
   Manager's row had to work around (#929).
 
+- **The Resource Groups Tagging API reports an ECS service, task and task definition, not a cluster
+  only** (#935, closing #835). `scanECSClusters` was the namespace's only descriptor, so a tag
+  written to a service or a task definition through `TagResources` — which has worked since
+  v0.115.0, and reads back through ECS's own `ListTagsForResource` — was invisible to `GetResources`.
+  A caller asking "which of my resources carry this tag?" was answered "none" about a resource the
+  same API had just tagged, which is the asymmetry every row of #835 exists to close. **This is the
+  eleventh and last row**, so all eleven types now meet the issue's three criteria.
+
+  A **task** ships with the two rows #835's table names. `ecsTagStateKey` already resolved a task
+  ARN, so a tag could be written to one before this and read back nowhere; AWS lists tasks first
+  among the taggable ECS resources — "There are multiple ways that Amazon ECS **tasks**, services,
+  task definitions, and clusters are tagged" — so leaving it out would have left the row's own defect
+  behind in a third of the namespace. Four descriptors, twenty-eight resource types scanned.
+
+  Two decisions the task-definition scanner records rather than assumes. **Every revision is
+  reported**, not the family's newest: `RegisterTaskDefinition` accepts tags per revision and
+  `ecsTagStateKey` splits a `{family}:{revision}` ARN to reach exactly one of them, so reporting only
+  the newest would hide a tag the tagging API itself wrote to an older one. **A deregistered
+  (`INACTIVE`) revision is reported too**: AWS's tagging page says nothing about deregistration, and
+  such a revision still answers `DescribeTaskDefinition`, so it is still an observable resource.
+
+  Two things came with the row rather than after it. `scanECSClusters` prefixed its scan by **account
+  alone**, so a `us-east-1` caller was reported a `us-west-2` cluster; had that been left, ECS would
+  have answered one caller cross-Region about clusters and same-Region about the three new types, a
+  worse state than either. `GetResources`' own opening sentence settles which is right — it "[r]eturns
+  all the tagged or previously tagged resources that are **located in the specified AWS Region** for
+  the account" — and all four scanners now go through one `ecsScanPrefix` helper so they cannot
+  disagree about scope. The same Region blindness remains in fourteen other scanners, and a
+  cross-account variant in three; that is #937 rather than a piecemeal fix here. And the
+  `ResourceTypeFilters` comparison had to be anchored first (#936, below), because `ecs:task` selected
+  a task definition and the selectivity assertions could not otherwise have been written honestly.
+
+  The guard in front of the scan tests a **colon-terminated** prefix, the sixth namespace to need one
+  and the first to need it four times over: `cluster:`, `taskdef:`, `service:` and `task:` each sit
+  beside an index key — `cluster_names:`, `taskdef_families:`, `taskdef_revisions:`, `service_names:`,
+  `task_ids:` — whose value is a JSON array of names. A prefix without the colon lists those too and
+  then drops them silently when the unmarshal into a resource type fails, which is the failure mode
+  that hides a defect by making the count right for the wrong reason. `ecsTagsToTaggingTags` also
+  sorts by key now, in the one converter rather than at each of the four call sites, so no ECS scanner
+  can report the order tags happened to be written in (#862).
+
+  The three ECS ARN shapes that carry **no** tag are now listed in `docs/services.md` with the reason
+  for each, which is #835's fourth criterion and the one thing it was still short of: a capacity
+  provider (AWS lists it among the taggable ECS resources but substrate stores no such record, so
+  there is nothing to read a tag back from), AWS's documented **short** service ARN (which names no
+  cluster and so identifies no record — the long `service/{cluster}/{name}` form is what carries a
+  tag), and a task-definition ARN whose revision is not an integer. A container instance, the fourth
+  taggable type AWS names, has no ARN shape here at all for the capacity provider's reason. Until now
+  those refusals existed only as `why` strings in a guard test, which is not where a consumer looks.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -361,6 +413,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module through a `replace` directive and the E2E job asserts `test/e2e/go.mod` is tidy — so a
   root-only `modernc.org/sqlite` bump leaves the e2e module stale and cannot pass CI on its own,
   which is exactly how #889 failed as authored. Same reasoning as #786.
+
+- **A `ResourceTypeFilters` entry of `s3:bucket` no longer selects a bucket whose *name* begins with
+  `bucket`** (#936). An S3 bucket ARN is `arn:aws:s3:::{name}` and embeds no resource type at all, so
+  there is nothing for `s3:bucket` to be "the same as" — AWS's rule is that "[t]he string for each
+  service name and resource type is the same as that embedded in a resource's Amazon Resource Name
+  (ARN)". A bucket called `bucket-logs` matched only through the unanchored prefix comparison #936
+  replaces, i.e. by accident of its first six characters, and a bucket called `assets` never matched.
+  The service-only filter `s3` is the one that reaches a bucket, as it always was.
 
 ### Fixed
 - **A Systems Manager tag call resolves to the resource type it names** (#932). `AddTagsToResource`,
@@ -1005,15 +1065,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both `TagResource` and `UntagResource` — which cannot be right for operations whose entire
   request syntax is a bare `/tagging` path. Substrate reads that as a documentation omission.
 
-  The Resource Groups Tagging API is unaffected and deliberately not changed here:
-  `TaggingPlugin.resolveARN` has no `cloudfront` arm, so `UntagResources` against a
-  distribution ARN already refuses with an `InternalServiceException`/500 `FailedResourcesMap`
-  entry rather than reporting a removal it did not make. Its guard table now pins that,
-  alongside a note that giving CloudFront an arm there needs a `mergeResourceTags` case too and
-  stays #835's work. An ARN naming no distribution still answers `NoSuchDistribution`/404
+  The Resource Groups Tagging API was unaffected and deliberately not changed here: at the time,
+  `TaggingPlugin.resolveARN` had no `cloudfront` arm, so `UntagResources` against a distribution
+  ARN refused with an `InternalServiceException`/500 `FailedResourcesMap` entry rather than
+  reporting a removal it did not make. #920 gave it that arm later in this same release, so the
+  guard-table row asserting the refusal is now stale — it still passes, but because the resolved
+  key holds no record, not because the type is unsupported. That is #939, filed rather than fixed
+  alongside it because deciding what the row should assert instead means first establishing which
+  `FailureInfo.ErrorCode` AWS reports for a resolvable ARN naming a resource that does not exist.
+  An ARN naming no distribution still answers `NoSuchDistribution`/404
   rather than the `NoSuchResource` all three tagging pages list, because that is what the rest
   of the plugin answers and one plugin should not report a missing distribution two ways;
   aligning them is a separate change from a misrouted request.
+
+- **A `ResourceTypeFilters` resource type is matched against the ARN's own segment, not as a prefix of
+  it** (#909, #936 — the same defect filed twice, and both are closed by the one fix).
+  `GetResources` compared the type half of a `service[:resourceType]` filter with
+  `strings.HasPrefix` against the ARN's whole resource portion, which broke AWS's rule — "[s]pecifying
+  a resource type of `ec2:instance` returns **only** EC2 instances" — in both directions at once.
+
+  **Too wide:** `ecs:task` selected a task definition, whose resource portion is
+  `task-definition/{family}:{revision}` and therefore begins with the string `task`. A caller could not
+  express "tasks only" at all, and no filter could separate the two types.
+
+  **Too narrow:** `apigateway:restapis` selected **nothing**. API Gateway's resource portion begins
+  with a slash — AWS publishes the ARN as `arn:{partition}:apigateway:{region}::/restapis/{api-id}` —
+  which a prefix comparison against `restapis` cannot see past. That one was known and worked around in
+  a test comment rather than filed; the comment is now an assertion.
+
+  The type is therefore taken as the segment the ARN itself delimits, with one leading slash stripped
+  first, which covers the four shapes substrate scans — `instance/i-abc`, `stateMachine:hello`,
+  `task-definition/fam:3`, `/restapis/abc123` — and returns the whole portion for an ARN that embeds no
+  type, so a service-only filter still reaches an S3 bucket. This is #910's and #918's anchored-segment
+  rule applied one layer up: those fixed `strings.Contains(arn, ":stateMachine:")` and
+  `strings.LastIndex(arn, "distribution/")` in the *resolvers*, on the ground that a resource type must
+  be matched against the ARN's own delimited segment. The filter matcher is the one comparison of that
+  kind whose left-hand side comes from the **caller**, and it was in neither pass. See `### Changed`
+  for the one narrowing a consumer may notice.
+
+  Two cases come from #909's own analysis and are pinned even though neither is reachable over the
+  wire. AWS's RDS ARN table gives `cluster-pg`, `cluster-snapshot` and `cluster-endpoint` as resource
+  types in their own right, all three beginning with the string `cluster`, so `rds:cluster` would have
+  selected them; nothing can be stored under any of those segments today, so the assertion is on the
+  matcher and fails the moment one becomes storable. And the rule is asserted once **per reachable
+  resource type** — thirty-three rows, being the twenty-nine the twenty-eight `GetResources` scanners
+  produce plus the four that only `TagResources`/`UntagResources` reach — with the row count locked, so
+  a thirty-fourth type fails the test rather than going unexercised.
 
 ## [v0.116.0] - 2026-09-14
 

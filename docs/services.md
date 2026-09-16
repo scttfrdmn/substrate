@@ -6205,22 +6205,21 @@ and an SSM parameter — have both tag state and a tagging call, and are still u
 
 For each of the eleven the missing piece was not a resolver arm alone but an arm in substrate's
 shared tag *writer*, so the same gap also meant the Resource Groups Tagging API could not tag
-them: one defect with two symptoms, tracked there rather than folded in here. Eight of the eleven
-have since had the tagging-API half delivered a row at a time — ECS's service and task definition,
-then an ACM certificate, a CloudFront distribution, a KMS key, an SNS topic, a Secrets Manager
-secret and an SSM parameter — each keying through the one state-key builder the owning service's own
-tag operation uses, and each merging its record as raw JSON so a member the writer does not model is
-preserved rather than dropped. Three rows remain: a Step Functions activity and an RDS DB cluster and
-DB subnet group, plus the two ECS types' **scanner** halves, since `GetResources` still
-enumerates ECS clusters only. The CloudFormation stamp is a separate half again: none of the
-eleven has an entry in the deployer's own type table yet, which is why all eleven are still listed
-here as unstamped.
+them: one defect with two symptoms, tracked there rather than folded in here. **All eleven have
+since had the tagging-API half delivered**, a row at a time — ECS's service and task definition,
+an RDS DB cluster and DB subnet group, a Step Functions activity, an ACM certificate, a CloudFront
+distribution, a KMS key, an SNS topic, a Secrets Manager secret and an SSM parameter — each keying
+through the one state-key builder the owning service's own tag operation uses, and each merging its
+record as raw JSON so a member the writer does not model is preserved rather than dropped. The last
+piece was the ECS namespace's **scanner** half: `GetResources` enumerated ECS clusters only, so a tag
+`TagResources` had written to a service, a task or a task definition was readable through ECS's own
+`ListTagsForResource` and invisible to the tagging API's own inventory call
+([#935](https://github.com/scttfrdmn/substrate/issues/935)).
 
-Two of the nine cannot be tagged through their own service at all — an RDS DB cluster and an RDS
-DB subnet group — because its ARN resolver has no arm for either kind, so that has to be fixed
-before a stamp has anywhere to land. Config is unstamped for a different reason again: it keeps a
-rule's tags in a side-car state record rather than on the rule, so reaching them needs a writer
-that knows that layout.
+The CloudFormation stamp is a separate half again: none of the eleven has an entry in the deployer's
+own type table yet, which is why all eleven are still listed here as unstamped. Config is unstamped
+for a different reason again: it keeps a rule's tags in a side-car state record rather than on the
+rule, so reaching them needs a writer that knows that layout.
 
 Three further limits, each named because a policy or an assertion written against the stamp will
 otherwise assume more:
@@ -8148,20 +8147,98 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans twenty-five resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans twenty-eight resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
-clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
-DB subnet groups, ElastiCache cache clusters, EFS file systems, Glue databases,
-ACM certificates, CloudFront distributions, KMS keys, SNS topics, Secrets
-Manager secrets and Systems Manager parameters.
+clusters, services, tasks and task definitions, Cognito user pools, Kinesis
+streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache
+clusters, EFS file systems, Glue databases, ACM certificates, CloudFront
+distributions, KMS keys, SNS topics, Secrets Manager secrets and Systems Manager
+parameters.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
-reach an ECS service, task and task definition, and EFS access points and Glue's
-other three types. So a tag written to an ECS service is readable through ECS's
-own `ListTagsForResource` but does not yet appear in a `GetResources` listing —
-the scanner half of #835, which stays open.
+reach EFS access points and Glue's other three types. Those four are the whole
+remaining difference between the two halves — the ECS namespace, which was the
+last and largest of them, gained its scanners in #935, so a tag written to an ECS
+service, task or task definition is now both readable through ECS's own
+`ListTagsForResource` and reported by `GetResources`.
+
+An ECS task definition is reported **per revision**, including a deregistered
+(`INACTIVE`) one. Each revision has its own ARN and its own tags —
+`RegisterTaskDefinition` accepts tags per revision, and the tag ARN parser splits
+`{family}:{revision}` to reach exactly one of them — so reporting a family's newest
+revision only would hide a tag the tagging API itself had written to an older one.
+AWS's tagging page says nothing about deregistration, and a deregistered revision
+still answers `DescribeTaskDefinition`, so it remains an observable resource.
+
+All four ECS scanners are scoped to the caller's account **and Region**, through one
+shared prefix helper so they cannot disagree about scope. `GetResources` states that
+it "[r]eturns all the tagged or previously tagged resources that are located in the
+specified AWS Region for the account", and before #935 the cluster scanner prefixed by
+account alone, so a `us-east-1` caller was reported a `us-west-2` cluster. The same
+Region blindness remains in fourteen other scanners, with a cross-account variant in
+three; that is #937.
+
+Three ECS ARN shapes carry no tag, and the reason differs by shape. Each is
+refused rather than accepted silently — ECS's own `TagResource`, `UntagResource`
+and `ListTagsForResource` all answer `InvalidParameterException`/400, and the
+tagging API's `TagResources` reports a `FailedResourcesMap` entry:
+
+| ARN | Reason a tag cannot be written |
+|---|---|
+| `…:capacity-provider/{name}` | AWS lists a capacity provider among the taggable ECS resources, but substrate stores no such record — there is nothing for a tag to sit beside and nothing to read it back from |
+| `…:service/{name}` | AWS's *short* service ARN. The long form `service/{cluster}/{name}` is what addresses a service; the short form names no cluster, so it identifies no record |
+| `…:task-definition/{family}:{revision}` with a non-numeric revision | a revision is an integer, so `web:latest` addresses nothing. A family without a resolvable revision is not an addressable resource |
+
+A container instance is the fourth type AWS lists as taggable
+("capacity providers, tasks, services, task definitions, clusters, and container
+instances") and has no ARN shape here at all, because substrate implements no
+operation that registers one. That is the capacity provider's reason rather than a
+separate one.
+
+Absence is a different answer from either: a well-formed ARN of a type substrate
+*can* key, naming a cluster or a revision that does not exist, answers
+`ResourceNotFoundException` through ECS's own operations. The table above is about
+the shape, not about a missing record.
+
+### A `ResourceTypeFilters` type is the ARN's own segment
+
+A filter entry is `service[:resourceType]`, and AWS pins what the type half means from
+two directions: "[s]pecifying a resource type of `ec2:instance` returns **only** EC2
+instances", and "[t]he string for each service name and resource type is the same as
+that embedded in a resource's Amazon Resource Name (ARN)". Together those say the type
+is delimited by the ARN itself.
+
+Substrate compared it as an unanchored prefix of the ARN's whole resource portion until
+#936, which broke the first sentence in both directions at once. **Too wide:** `ecs:task`
+selected a task definition, whose resource portion is `task-definition/{family}:{revision}`
+and so begins with the string `task` — a caller could not express "tasks only" at all.
+**Too narrow:** `apigateway:restapis` selected nothing, because API Gateway's resource
+portion begins with a slash (`arn:{partition}:apigateway:{region}::/restapis/{api-id}`),
+which a prefix comparison against `restapis` cannot see past.
+
+The type is now the segment the ARN delimits, with one leading slash stripped first. That
+covers the four shapes in the scanned set, and an ARN embedding no type at all yields its
+whole resource portion:
+
+| ARN resource portion | Type |
+|---|---|
+| `instance/i-abc123` | `instance` |
+| `stateMachine:hello` | `stateMachine` |
+| `task-definition/sidecar:3` | `task-definition` |
+| `/restapis/abc123` | `restapis` |
+| `my-bucket` | `my-bucket` (S3 embeds no type) |
+
+The last row is the one narrowing a consumer may notice: an S3 bucket ARN is
+`arn:aws:s3:::{name}`, so there is no type string for `s3:bucket` to be "the same as", and
+a bucket named `bucket-logs` used to match that filter by accident of its first six
+characters. The service-only filter `s3` is what reaches a bucket, as it always was.
+
+This is the anchored-segment rule of #910 and #918 applied one layer up. Those fixed
+`strings.Contains(arn, ":stateMachine:")` and `strings.LastIndex(arn, "distribution/")` in
+the ARN *resolvers*; the filter matcher is the one comparison of that kind whose left-hand
+side comes from the caller, and it was in neither pass.
 
 ### An ARN resolves to the state key its own service uses
 
@@ -8468,9 +8545,9 @@ so a type absent from it is unlisted rather than refused.
 For a *read* there is no distinction to draw. The same page states that "the
 `GetResources`, `GetTagKeys`, and `GetTagValues` operations support all resource
 types", so every scanner substrate lacks is a gap in substrate rather than a
-boundary of AWS's, and the scanner half of every remaining #835 row is in scope
-unconditionally. The per-service list constrains `TagResources`/`UntagResources`
-only.
+boundary of AWS's, and the scanner half of every #835 row was in scope
+unconditionally — the last of them, ECS's, landed in #935. The per-service list
+constrains `TagResources`/`UntagResources` only.
 
 One requirement of `TagResources` substrate models at no arm: AWS requires the
 caller to hold `tag:TagResources` **and** the owning service's own tagging

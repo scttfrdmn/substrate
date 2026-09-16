@@ -893,9 +893,12 @@ func TestTagging_GetResources_APIGateway(t *testing.T) {
 	ts, state := newTaggingTestServer(t)
 	putTestRestAPI(t, state, "abc123", map[string]string{"Env": "prod"})
 
-	// Use no ResourceTypeFilters to scan all resources (APIGateway filter prefix with
-	// leading slash in ARN resource path causes the "apigateway:restapis" filter to not match).
-	resp := taggingRequest(t, ts, "GetResources", map[string]any{})
+	// The filter is asserted rather than worked around: API Gateway's ARN resource portion begins
+	// with a slash ("/restapis/{id}"), which the unanchored prefix match could not see past until
+	// #936 made the type the ARN's own segment.
+	resp := taggingRequest(t, ts, "GetResources", map[string]any{
+		"ResourceTypeFilters": []string{"apigateway:restapis"},
+	})
 	defer resp.Body.Close() //nolint:errcheck
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
