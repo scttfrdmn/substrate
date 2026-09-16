@@ -92,6 +92,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with another about its status. A test asserts the status on the wire rather than through a decoded
   error struct, which carries the code and not the status.
 
+- **ACM answers a `CertificateArn` refusal at HTTP 400, and refuses one that cannot name a certificate
+  before the state lookup** (#921). Every code ACM publishes on the five operations that take a
+  `CertificateArn` carries 400, including `ResourceNotFoundException` — *"The specified certificate
+  cannot be found in the caller's account or the caller's account cannot be found."* — which substrate
+  answered at 404, a status ACM publishes nowhere. A malformed ARN also reached the lookup and was
+  reported absent, which answers a question the caller did not ask: retrying against a real
+  certificate cannot help a string that could not name one.
+
+  The refusal is now three tiers, each with its provenance recorded rather than blended. A value
+  breaking a documented constraint on the member — absent, a length outside the published 20–2048, or
+  failing the published pattern — is `ValidationException`/400, whose own description is exactly that
+  case; **that tier is AWS's.** An ARN that satisfies the pattern and still names no certificate — no
+  Region, another ACM resource type, a type with no identifier after it, something nested under a
+  certificate — is `InvalidArnException`/400; **that tier is substrate's reading**, because AWS
+  publishes the code on all five operations but describes it as *"does not refer to an existing
+  resource"*, a statement about non-existence rather than about syntax. A well-formed certificate ARN
+  with no record keeps `ResourceNotFoundException`, now at 400.
+
+  Because the absent case is caught by the published minimum length, it no longer answers
+  `InvalidParameterException` — a code `ListTagsForCertificate` and `DescribeCertificate` do not
+  publish at all, their error lists being three codes long. An unparseable request body still does,
+  deliberately: that is a protocol-level failure whose code belongs to ACM's common errors rather than
+  to any one operation's list. ACM publishes `AccessDeniedException` at 400 while substrate answers 403
+  from the central authorization check every service shares; that is recorded in `docs/services.md`
+  rather than changed, since moving it for one service would have the emulator answer two statuses for
+  one decision.
+
+  ACM's own operations and the Resource Groups Tagging API resolver run the same validation, so
+  neither can accept an ARN the other refuses. Compatibility: a caller asserting 404 on a missing
+  certificate now sees 400, and a caller who sent an ARN substrate previously reported absent may now
+  see `ValidationException` or `InvalidArnException` instead.
+
 ## [v0.117.0] - 2026-09-15
 
 ### Added

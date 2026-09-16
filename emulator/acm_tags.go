@@ -11,16 +11,18 @@ package emulator
 //
 //	arn:aws:acm:region:123456789012:certificate/12345678-1234-1234-1234-123456789012
 //
-// with Pattern arn:[\w+=/,.@-]+:acm:[\w+=/,.@-]*:[0-9]+:[\w+=,.@-]+(/[\w+=,.@-]+)* and
-// Required: Yes. Note what that pattern does *not* say: the resource tail is any
-// slash-separated run of tag characters, so the pattern alone does not restrict an ARN to the
-// certificate type. The restriction is published in prose instead, on each of the three pages —
-// "This action applies only to the certificate resource type. For all other ACM resource types,
-// use TagResource instead." ACM does have other types with their own ARN shapes; the ACME
-// endpoint publishes arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:acme-endpoint/[a-zA-Z0-9-]+.
-// Substrate models the certificate and no other ACM resource, so [acmResolveARN] resolves
-// "certificate" and refuses every other type by name rather than resolving whatever it is
-// handed — the anchored-segment rule #910 established.
+// with Required: Yes and the Pattern and Length that [acmCertificateARNPattern] carries. Note
+// what that pattern does *not* say: the resource tail is any slash-separated run of tag
+// characters, so the pattern alone does not restrict an ARN to the certificate type. The
+// restriction is published in prose instead, on each of the three pages — "This action applies
+// only to the certificate resource type. For all other ACM resource types, use TagResource
+// instead." ACM does have other types with their own ARN shapes; the ACME endpoint publishes
+// arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:acme-endpoint/[a-zA-Z0-9-]+. Substrate models the
+// certificate and no other ACM resource, so [acmValidateCertificateARN] resolves "certificate"
+// and refuses every other type by name rather than resolving whatever it is handed — the
+// anchored-segment rule #910 established. Both this resolver and ACM's own operations go through
+// that one function (#921), which is what keeps the two arms from disagreeing about which strings
+// name a certificate.
 //
 // ACM's own three tag operations key by the caller's account and Region while the ARN carries
 // both, which is the shape #918 fixed in CloudFront. It is *not* a defect here, and the
@@ -82,34 +84,18 @@ const acmTagsJSONMember = "Tags"
 // the tagging API accepts.
 func acmResolveARN(arn string) (ns, key string, err error) {
 	// arn:aws:acm:{region}:{acct}:certificate/{id}
-	parts := strings.SplitN(arn, ":", 6)
-	if len(parts) < 6 || parts[0] != "arn" || parts[2] != "acm" {
-		return "", "", fmt.Errorf("invalid ACM ARN: %q", arn)
+	//
+	// Validated by [acmValidateCertificateARN] rather than by a second parser here, so the tagging
+	// API and ACM's own operations cannot come to disagree about which strings name a certificate —
+	// the arrangement #826 established through ecsTagStateKey and #910, #924, #925 and #928 through
+	// their own resolvers. The two callers still need different error *shapes*: ACM's operations
+	// answer an [AWSError] carrying a published code, while [TaggingPlugin.resolveARN] returns a
+	// plain error that its caller renders into a FailedResourcesMap entry, so the code and message
+	// are flattened into one here.
+	if arnErr := acmValidateCertificateARN(arn); arnErr != nil {
+		return "", "", fmt.Errorf("%s: %s", arnErr.Code, arnErr.Message)
 	}
-	region := parts[3]
-	acct := parts[4]
-	if region == "" {
-		return "", "", fmt.Errorf("ACM ARN names no Region: %q", arn)
-	}
-	if acct == "" {
-		return "", "", fmt.Errorf("ACM ARN names no account: %q", arn)
-	}
-
-	resType, id, ok := strings.Cut(parts[5], "/")
-	if !ok || id == "" {
-		return "", "", fmt.Errorf("ACM ARN names no resource: %q", arn)
-	}
-	if resType != acmCertificateResourceType {
-		return "", "", fmt.Errorf("unsupported ACM ARN resource type: %q", resType)
-	}
-	// A certificate identifier is a single path segment. Anything carrying a further "/" or a
-	// ":" names something nested under the certificate or is a longer ARN misread as one, and it
-	// would build a key nothing is stored at — reporting the certificate absent rather than the
-	// ARN wrong.
-	if strings.ContainsAny(id, "/:") {
-		return "", "", fmt.Errorf("ACM ARN names something nested under a certificate: %q", arn)
-	}
-
+	acct, region := acmCertificateARNAccountRegion(arn)
 	return acmNamespace, acmCertKey(acct, region, arn), nil
 }
 
