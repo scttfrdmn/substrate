@@ -8146,12 +8146,12 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans twenty-one resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans twenty-two resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
 DB subnet groups, ElastiCache cache clusters, EFS file systems, Glue databases,
-ACM certificates and CloudFront distributions.
+ACM certificates, CloudFront distributions and KMS keys.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8288,6 +8288,31 @@ publishes the attribution and not a `GetResources` rule. CloudFront's own
 `ListDistributions` keeps answering from any Region, which is not an inconsistency —
 it is what a global service does, and the per-Region attribution belongs to the
 tagging API alone.
+
+KMS keys followed as of #835, together with the resolution fix (#922) that had to
+land with them. KMS is on the truncated part of the welcome page's list, so its
+write half is unlisted rather than refused; its read half is unconditional, like
+every other row's. The row is the usual three parts, and two things about it are
+new.
+
+It is the first row whose tags are an **array of two-field objects** rather than a
+map, so the merge goes through a second shared helper alongside the string-map one.
+The element's field names are parameters because the services disagree: KMS spells
+them `TagKey` and `TagValue`, and SNS, Secrets Manager and Systems Manager spell
+them `Key` and `Value`. Both helpers sort the result by key, because a slice built
+by ranging the intermediate map would come out in Go's map hash order and one
+recorded run would not replay byte-identically — the rule #862 settled for the four
+EC2-shaped helpers.
+
+And it is the first row where sharing the resolver *created* a refusal rather than
+only fixing a reach. All three KMS tagging operations publish "Cross-account use:
+No", but while KMS keyed from the calling request a foreign-account key ARN could
+only ever address the caller's own key, so that prohibition had nothing to refuse.
+Honouring the ARN's account without adding the refusal would have turned a
+wrong-record write into a genuine cross-account one. See
+[the KMS section](#a-keyid-is-resolved-from-its-own-arn-not-from-the-caller) for
+the four accepted `KeyId` forms and for why the alias case needs an anchored cut on
+the *first* slash rather than the last.
 
 ### Which failure gets which error code
 
@@ -8451,13 +8476,112 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | Operation | Notes |
 |-----------|-------|
 | CreateKey | |
-| DescribeKey | |
+| DescribeKey | Accepts all four `KeyId` forms — see below |
 | ListKeys | |
+| EnableKey | |
+| DisableKey | |
 | ScheduleKeyDeletion | |
+| CancelKeyDeletion | |
+| GetKeyPolicy | |
+| PutKeyPolicy | |
+| GetKeyRotationStatus | |
+| EnableKeyRotation | |
+| DisableKeyRotation | |
+| TagResource | Tags are keyed `TagKey`/`TagValue`, not `Key`/`Value` |
+| UntagResource | |
+| ListResourceTags | |
+| CreateAlias | Refuses a `TargetKeyId` outside the caller's account and Region |
+| DeleteAlias | |
+| UpdateAlias | Same refusal as `CreateAlias` |
+| ListAliases | |
 | Encrypt | Returns ciphertext blob (base64-encoded stub) |
 | Decrypt | Returns plaintext (stub pass-through) |
 | GenerateDataKey | |
 | GenerateDataKeyWithoutPlaintext | |
+| ReEncrypt | |
+
+### A `KeyId` is resolved from its own ARN, not from the caller
+
+AWS's `KeyId` parameter accepts four forms, and substrate accepts all four:
+
+| Form | Example | Account and Region come from |
+|------|---------|------------------------------|
+| Key ID | `1234abcd-12ab-34cd-56ef-1234567890ab` | the request |
+| Key ARN | `arn:aws:kms:us-west-2:111122223333:key/1234abcd-…` | the ARN |
+| Alias name | `alias/prod` | the request |
+| Alias ARN | `arn:aws:kms:us-west-2:111122223333:alias/prod` | the ARN |
+
+The two ARN forms take their account and Region from the ARN, and the parser that
+reads them takes no request context at all, so that is structural rather than
+remembered at each of eighteen call sites. Before #922 every one of those sites
+keyed its load *and its store* by the caller's account and Region, so a key ARN
+naming another account addressed the caller's own key of that ID — and
+`UntagResource` stripped its tags while answering 200.
+
+The type is the resource portion's first `/`-delimited segment, compared whole.
+That matters twice. An alias ARN's resource portion is `alias/{name}`, so taking
+the last component resolved `…:alias/prod` to the key ID `prod`; and an alias
+name may itself contain a slash — AWS's own example of an AWS managed key's alias
+is `alias/aws/s3` — so a parser that refused a slashed identifier would be wrong
+in the other direction. The cut is on the *first* slash only, and a further slash
+is refused for a `key` and allowed for an `alias`.
+
+A bare identifier is not treated as a malformed ARN. It is a key ID, and one that
+names nothing is not-found; answering `InvalidArnException` would tell a caller
+its ARN was wrong when it sent no ARN.
+
+Two refusals follow from the resolution rather than preceding it. All three
+tagging operations publish *"Cross-account use: No. You cannot perform this
+operation on a KMS key in a different AWS account"*, and the developer guide adds
+*"You cannot tag aliases, custom key stores, AWS managed keys, AWS owned keys, or
+KMS keys in other AWS accounts"* — so a key outside the caller's account or
+Region is refused with `NotFoundException`. While the account came from the
+request context that prohibition had nothing to refuse, because a foreign ARN
+could only ever reach a local record. `CreateAlias` and `UpdateAlias` refuse the
+same way, because an alias is scoped to one account and one Region and a written
+cross-Region pointer is a dangling one that `ListAliases` reports and every later
+resolution fails on. Mapping the prohibition onto `NotFoundException` is
+substrate's reading: AWS publishes the prohibition and the code but does not join
+them.
+
+Two things this deliberately leaves alone, so the residue is recorded rather than
+discovered. The other fifteen `KeyId` operations do not enforce the Region, so
+`DescribeKey` on a foreign-Region key ARN answers with that key — strictly better
+than describing a local impostor, but real KMS would refuse, and AWS publishes no
+per-operation statement to cite for the other fifteen. And `NotFoundException` is
+answered at HTTP 404 where all three tagging operations publish **400** (#923).
+
+### A key is reachable through the tagging API
+
+`TagResources`, `UntagResources` and `GetResources` all reach a KMS key. The
+resolver and KMS's own three tagging operations share one key builder, so a key's
+tags are at one address whichever arm writes them, and a tag written through
+either is readable through the other.
+
+An alias ARN is refused by the tagging API rather than followed to its key. The
+developer guide's list of what cannot be tagged — aliases, custom key stores, AWS
+managed keys, AWS owned keys, and keys in other accounts — is the boundary, and
+an alias is the one of those five substrate stores in the same namespace.
+
+The namespace holds five kinds of key and only the key record stores tags, so the
+merge is guarded on a **colon-terminated** prefix. Without the colon, `key:`
+would match `key_ids:` and `key_policy:` and `alias:` would match
+`alias_names:` — and `key_ids` is a JSON array of identifier strings, which a
+tags merge would leave looking like a record. This is the third namespace to need
+that guard; `cert`/`cert_arns` and `cfdist`/`cfdist_ids` were the first two.
+
+KMS is the first row whose tags are an **array** rather than a map, so the merge
+goes through a separate helper that takes the element's two field names as
+parameters. KMS spells them `TagKey` and `TagValue` — alone among the four
+services #835's remaining rows cover, the other three spelling them `Key` and
+`Value`. Both merge paths sort the result by key, because a slice built by
+ranging a Go map comes out in the map's hash order and one recorded run would not
+replay byte-identically.
+
+A key pending deletion is still reported by `GetResources`. AWS says you may not
+*tag* such a key, but a listing is a read and the key exists until its waiting
+period elapses; refusing the write is a separate unmodelled behaviour recorded on
+#922.
 
 ### CloudFormation resource types
 

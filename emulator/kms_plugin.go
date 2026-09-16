@@ -101,30 +101,40 @@ func (p *KMSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // --- State key helpers ---
 
-func (p *KMSPlugin) keyStateKey(accountID, region, keyID string) string {
-	return "key:" + accountID + "/" + region + "/" + keyID
+// The five key builders are free functions rather than methods because they use no receiver state
+// and because the ARN resolver in kms_tags.go has to build the same key from an ARN alone. A
+// resolver that re-derived the layout would be a second producer of it, which is the arrangement
+// #826 found to have drifted for SQS and #918 for CloudFront. See kms_tags.go's preamble.
+
+// kmsKeyStateKey returns the state key a KMS key record is stored at.
+func kmsKeyStateKey(accountID, region, keyID string) string {
+	return kmsKeyKeyPrefix + accountID + "/" + region + "/" + keyID
 }
 
-func (p *KMSPlugin) keyIDsKey(accountID, region string) string {
-	return "key_ids:" + accountID + "/" + region
+// kmsKeyIDsKey returns the state index key for all key IDs in an account and Region.
+func kmsKeyIDsKey(accountID, region string) string {
+	return kmsKeyIDsKeyPrefix + accountID + "/" + region
 }
 
-func (p *KMSPlugin) aliasKey(accountID, region, aliasName string) string {
-	return "alias:" + accountID + "/" + region + "/" + aliasName
+// kmsAliasKey returns the state key an alias-to-key-ID pointer is stored at.
+func kmsAliasKey(accountID, region, aliasName string) string {
+	return kmsAliasKeyPrefix + accountID + "/" + region + "/" + aliasName
 }
 
-func (p *KMSPlugin) aliasNamesKey(accountID, region string) string {
-	return "alias_names:" + accountID + "/" + region
+// kmsAliasNamesKey returns the state index key for all alias names in an account and Region.
+func kmsAliasNamesKey(accountID, region string) string {
+	return kmsAliasNamesKeyPrefix + accountID + "/" + region
 }
 
-func (p *KMSPlugin) policyKey(accountID, region, keyID string) string {
-	return "key_policy:" + accountID + "/" + region + "/" + keyID
+// kmsPolicyKey returns the state key a key policy document is stored at.
+func kmsPolicyKey(accountID, region, keyID string) string {
+	return kmsKeyPolicyKeyPrefix + accountID + "/" + region + "/" + keyID
 }
 
 // --- State helpers ---
 
 func (p *KMSPlugin) loadKey(ctx context.Context, accountID, region, keyID string) (*KMSKey, error) {
-	data, err := p.state.Get(ctx, kmsNamespace, p.keyStateKey(accountID, region, keyID))
+	data, err := p.state.Get(ctx, kmsNamespace, kmsKeyStateKey(accountID, region, keyID))
 	if err != nil {
 		return nil, fmt.Errorf("kms loadKey state.Get: %w", err)
 	}
@@ -143,11 +153,11 @@ func (p *KMSPlugin) saveKey(ctx context.Context, k *KMSKey) error {
 	if err != nil {
 		return fmt.Errorf("kms saveKey marshal: %w", err)
 	}
-	return p.state.Put(ctx, kmsNamespace, p.keyStateKey(k.AccountID, k.Region, k.KeyID), data)
+	return p.state.Put(ctx, kmsNamespace, kmsKeyStateKey(k.AccountID, k.Region, k.KeyID), data)
 }
 
 func (p *KMSPlugin) loadKeyIDs(ctx context.Context, accountID, region string) ([]string, error) {
-	data, err := p.state.Get(ctx, kmsNamespace, p.keyIDsKey(accountID, region))
+	data, err := p.state.Get(ctx, kmsNamespace, kmsKeyIDsKey(accountID, region))
 	if err != nil {
 		return nil, fmt.Errorf("kms loadKeyIDs: %w", err)
 	}
@@ -166,11 +176,11 @@ func (p *KMSPlugin) saveKeyIDs(ctx context.Context, accountID, region string, id
 	if err != nil {
 		return fmt.Errorf("kms saveKeyIDs marshal: %w", err)
 	}
-	return p.state.Put(ctx, kmsNamespace, p.keyIDsKey(accountID, region), data)
+	return p.state.Put(ctx, kmsNamespace, kmsKeyIDsKey(accountID, region), data)
 }
 
 func (p *KMSPlugin) loadAliasNames(ctx context.Context, accountID, region string) ([]string, error) {
-	data, err := p.state.Get(ctx, kmsNamespace, p.aliasNamesKey(accountID, region))
+	data, err := p.state.Get(ctx, kmsNamespace, kmsAliasNamesKey(accountID, region))
 	if err != nil {
 		return nil, fmt.Errorf("kms loadAliasNames: %w", err)
 	}
@@ -190,29 +200,94 @@ func (p *KMSPlugin) saveAliasNames(ctx context.Context, accountID, region string
 	if err != nil {
 		return fmt.Errorf("kms saveAliasNames marshal: %w", err)
 	}
-	return p.state.Put(ctx, kmsNamespace, p.aliasNamesKey(accountID, region), data)
+	return p.state.Put(ctx, kmsNamespace, kmsAliasNamesKey(accountID, region), data)
 }
 
-// resolveKeyID resolves a KeyId (raw ID, ARN, or alias/name) to the key ID.
-func (p *KMSPlugin) resolveKeyID(ctx context.Context, accountID, region, keyIDOrAlias string) (string, error) {
-	if strings.HasPrefix(keyIDOrAlias, "alias/") {
-		data, err := p.state.Get(ctx, kmsNamespace, p.aliasKey(accountID, region, keyIDOrAlias))
+// resolveKeyTarget resolves a KeyId parameter to the account, Region and key ID it names.
+//
+// AWS documents four accepted forms and this handles all four: a key ID, a key ARN, an alias name
+// and an alias ARN. The account and Region come from the **ARN** for the two ARN forms, and from the
+// calling request only for the two that carry neither — which is the whole point of returning a
+// target rather than a bare key ID. Every caller keyed its load and its store by ctx.AccountID and
+// ctx.Region regardless of what the ARN said, so a key ARN naming another account or another Region
+// addressed the caller's own same-named key. See kms_tags.go's preamble for the rule and its four
+// precedents.
+//
+// The ARN forms delegate to [kmsParseARN], which takes no request context at all, so the rule is
+// structural here rather than remembered at eighteen call sites.
+func (p *KMSPlugin) resolveKeyTarget(ctx context.Context, reqCtx *RequestContext, keyID string) (kmsTagTarget, error) {
+	if strings.HasPrefix(keyID, "arn:") {
+		target, resType, arnErr := kmsParseARN(keyID)
+		if arnErr != nil {
+			return kmsTagTarget{}, arnErr
+		}
+		if resType == kmsKeyResourceType {
+			return target, nil
+		}
+		if resType != kmsAliasResourceType {
+			return kmsTagTarget{}, &AWSError{
+				Code:       "NotFoundException",
+				Message:    fmt.Sprintf("KMS resource type %q does not name a key: %s", resType, keyID),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		// An alias ARN names an alias in the account and Region the ARN carries, so the pointer
+		// is read from there — not from the caller's account, which is what let an alias ARN
+		// reach the caller's own alias of the same name.
+		aliasName := kmsAliasResourceType + "/" + target.KeyID
+		resolved, err := p.followAlias(ctx, target.AccountID, target.Region, aliasName)
 		if err != nil {
-			return "", fmt.Errorf("kms resolveKeyID alias lookup: %w", err)
+			return kmsTagTarget{}, err
 		}
-		if data == nil {
-			return "", &AWSError{Code: "NotFoundException", Message: "alias not found: " + keyIDOrAlias, HTTPStatus: http.StatusNotFound}
-		}
-		return string(data), nil
+		return kmsTagTarget{AccountID: target.AccountID, Region: target.Region, KeyID: resolved}, nil
 	}
-	if strings.HasPrefix(keyIDOrAlias, "arn:") {
-		// ARN: arn:aws:kms:{region}:{acct}:key/{keyID}
-		parts := strings.Split(keyIDOrAlias, "/")
-		if len(parts) >= 2 {
-			return parts[len(parts)-1], nil
+
+	if strings.HasPrefix(keyID, kmsAliasResourceType+"/") {
+		resolved, err := p.followAlias(ctx, reqCtx.AccountID, reqCtx.Region, keyID)
+		if err != nil {
+			return kmsTagTarget{}, err
 		}
+		return kmsTagTarget{AccountID: reqCtx.AccountID, Region: reqCtx.Region, KeyID: resolved}, nil
 	}
-	return keyIDOrAlias, nil
+
+	// A bare key ID carries no account or Region, so the caller's are the only ones available and
+	// using them is not the defect this function fixes.
+	return kmsTagTarget{AccountID: reqCtx.AccountID, Region: reqCtx.Region, KeyID: keyID}, nil
+}
+
+// resolveLocalKeyID resolves a KeyId that must name a key in the caller's own account and Region,
+// for the two operations that write an alias.
+//
+// An alias lives in one account and one Region and can only point at a key in the same two: KMS
+// publishes "Cross-account use: No" on CreateAlias and UpdateAlias, and an alias is itself a
+// Region-scoped resource. Without this check a TargetKeyId naming another account resolves fine and
+// the alias is written into the caller's account pointing at a key ID that account does not have —
+// a dangling pointer that ListAliases reports and every later resolution of it fails on.
+//
+// The refusal is NotFoundException, because from the caller's side that is what a key in another
+// account is: not found. AWS publishes the code on both operations but does not say it covers this
+// case, so the mapping is substrate's reading.
+func (p *KMSPlugin) resolveLocalKeyID(ctx context.Context, reqCtx *RequestContext, keyID string) (string, error) {
+	target, err := p.resolveKeyTarget(ctx, reqCtx, keyID)
+	if err != nil {
+		return "", err
+	}
+	if localErr := kmsRequireLocal(reqCtx, target, "an alias"); localErr != nil {
+		return "", localErr
+	}
+	return target.KeyID, nil
+}
+
+// followAlias reads the key ID an alias points at, in the account and Region given.
+func (p *KMSPlugin) followAlias(ctx context.Context, accountID, region, aliasName string) (string, error) {
+	data, err := p.state.Get(ctx, kmsNamespace, kmsAliasKey(accountID, region, aliasName))
+	if err != nil {
+		return "", fmt.Errorf("kms followAlias lookup: %w", err)
+	}
+	if data == nil {
+		return "", &AWSError{Code: "NotFoundException", Message: "alias not found: " + aliasName, HTTPStatus: http.StatusNotFound}
+	}
+	return string(data), nil
 }
 
 // --- Operations ---
@@ -291,12 +366,13 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
+	keyID := target.KeyID
 
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -403,11 +479,12 @@ func (p *KMSPlugin) disableKey(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, enabled bool) (*AWSResponse, error) {
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, keyIDParam)
+	target, err := p.resolveKeyTarget(goCtx, ctx, keyIDParam)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -431,11 +508,12 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -479,12 +557,13 @@ func (p *KMSPlugin) getKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
+	keyID := target.KeyID
 
-	data, err := p.state.Get(goCtx, kmsNamespace, p.policyKey(ctx.AccountID, ctx.Region, keyID))
+	data, err := p.state.Get(goCtx, kmsNamespace, kmsPolicyKey(target.AccountID, target.Region, keyID))
 	if err != nil {
 		return nil, fmt.Errorf("kms getKeyPolicy state.Get: %w", err)
 	}
@@ -509,11 +588,12 @@ func (p *KMSPlugin) putKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	if err := p.state.Put(goCtx, kmsNamespace, p.policyKey(ctx.AccountID, ctx.Region, keyID), []byte(input.Policy)); err != nil {
+	keyID := target.KeyID
+	if err := p.state.Put(goCtx, kmsNamespace, kmsPolicyKey(target.AccountID, target.Region, keyID), []byte(input.Policy)); err != nil {
 		return nil, fmt.Errorf("kms putKeyPolicy state.Put: %w", err)
 	}
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
@@ -527,11 +607,12 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -552,11 +633,12 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -578,11 +660,12 @@ func (p *KMSPlugin) disableKeyRotation(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -605,11 +688,15 @@ func (p *KMSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	if err := kmsRequireLocal(ctx, target, "TagResource"); err != nil {
+		return nil, err
+	}
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -620,6 +707,8 @@ func (p *KMSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	for _, t := range key.Tags {
 		tagMap[t.TagKey] = t.TagValue
 	}
+	// "If you specify an existing tag key with a different tag value, AWS KMS replaces the current
+	// tag value with the specified one" (API_TagResource), so the request wins on a collision.
 	for _, t := range input.Tags {
 		tagMap[t.TagKey] = t.TagValue
 	}
@@ -627,6 +716,11 @@ func (p *KMSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	for k, v := range tagMap {
 		newTags = append(newTags, KMSTag{TagKey: k, TagValue: v})
 	}
+	// A merged slice built by ranging a Go map comes out in the map's hash order, so two identical
+	// TagResource calls in one run could store — and ListResourceTags report — two different orders.
+	// #862 settled this for the tagging plugin's own merge helpers; this is the same rule applied to
+	// the handler that writes the record they merge into.
+	sortTagsByKey(newTags, func(t KMSTag) string { return t.TagKey })
 	key.Tags = newTags
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms tagResource saveKey: %w", err)
@@ -643,11 +737,15 @@ func (p *KMSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	if err := kmsRequireLocal(ctx, target, "UntagResource"); err != nil {
+		return nil, err
+	}
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -679,19 +777,28 @@ func (p *KMSPlugin) listResourceTags(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	if err := kmsRequireLocal(ctx, target, "ListResourceTags"); err != nil {
+		return nil, err
+	}
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
 	if key == nil {
 		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
 	}
+	// Sorted on the way out as well as on the way in, because a record written before the merge
+	// above started sorting still holds its tags in whatever order it was stored in.
+	tags := make([]KMSTag, len(key.Tags))
+	copy(tags, key.Tags)
+	sortTagsByKey(tags, func(t KMSTag) string { return t.TagKey })
 	out := map[string]interface{}{
-		"Tags":      key.Tags,
+		"Tags":      tags,
 		"Truncated": false,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
@@ -710,12 +817,12 @@ func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.TargetKeyID)
+	keyID, err := p.resolveLocalKeyID(goCtx, ctx, input.TargetKeyID)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := p.state.Put(goCtx, kmsNamespace, p.aliasKey(ctx.AccountID, ctx.Region, input.AliasName), []byte(keyID)); err != nil {
+	if err := p.state.Put(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName), []byte(keyID)); err != nil {
 		return nil, fmt.Errorf("kms createAlias state.Put: %w", err)
 	}
 
@@ -742,7 +849,7 @@ func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	goCtx := context.Background()
-	_ = p.state.Delete(goCtx, kmsNamespace, p.aliasKey(ctx.AccountID, ctx.Region, input.AliasName))
+	_ = p.state.Delete(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName))
 
 	names, err := p.loadAliasNames(goCtx, ctx.AccountID, ctx.Region)
 	if err != nil {
@@ -773,11 +880,11 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.TargetKeyID)
+	keyID, err := p.resolveLocalKeyID(goCtx, ctx, input.TargetKeyID)
 	if err != nil {
 		return nil, err
 	}
-	if err := p.state.Put(goCtx, kmsNamespace, p.aliasKey(ctx.AccountID, ctx.Region, input.AliasName), []byte(keyID)); err != nil {
+	if err := p.state.Put(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName), []byte(keyID)); err != nil {
 		return nil, fmt.Errorf("kms updateAlias state.Put: %w", err)
 	}
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
@@ -829,7 +936,7 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 	entries := make([]aliasEntry, 0, len(page))
 	for _, name := range page {
-		data, loadErr := p.state.Get(goCtx, kmsNamespace, p.aliasKey(ctx.AccountID, ctx.Region, name))
+		data, loadErr := p.state.Get(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, name))
 		if loadErr != nil || data == nil {
 			continue
 		}
@@ -865,11 +972,12 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	}
 
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -908,6 +1016,10 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	}
 
 	goCtx := context.Background()
+	// The caller's account and Region are correct here and this is not a site the ARN rule reaches:
+	// the key ID came out of the ciphertext, not out of a KeyId parameter, so there is no ARN to
+	// take an account from. Decrypt's optional KeyId is a *constraint* on which key may be used,
+	// not a selector.
 	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
 	if err != nil {
 		return nil, err
@@ -937,11 +1049,12 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -977,11 +1090,12 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	}
 
 	goCtx := context.Background()
-	keyID, err := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.KeyID)
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	keyID := target.KeyID
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,11 +1128,12 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 
 	goCtx := context.Background()
-	destKeyID, resolveErr := p.resolveKeyID(goCtx, ctx.AccountID, ctx.Region, input.DestinationKeyID)
+	dest, resolveErr := p.resolveKeyTarget(goCtx, ctx, input.DestinationKeyID)
 	if resolveErr != nil {
 		return nil, resolveErr
 	}
-	destKey, loadErr := p.loadKey(goCtx, ctx.AccountID, ctx.Region, destKeyID)
+	destKeyID := dest.KeyID
+	destKey, loadErr := p.loadKey(goCtx, dest.AccountID, dest.Region, destKeyID)
 	if loadErr != nil {
 		return nil, loadErr
 	}

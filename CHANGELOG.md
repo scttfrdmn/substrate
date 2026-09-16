@@ -212,6 +212,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot reach a CloudFront distribution" — and gains the three ACM tag operations plus
   `RenewCertificate`, which have been dispatched for some time and were missing from the table.
 
+- **The Resource Groups Tagging API reaches a KMS key** (part of #835). A key ARN answered an
+  `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm while KMS's
+  own `TagResource` wrote the tag perfectly well, so a tag was writable through one API and
+  invisible to the other. The third of the eleven rows of #835; eight remain.
+
+  KMS sits on the truncated part of the tagging guide's welcome-page list of services
+  `TagResources` and `UntagResources` support, so its write half was unlisted rather than refused,
+  while the same page's "the `GetResources`, `GetTagKeys`, and `GetTagValues` operations support
+  all resource types" settles the read half unconditionally. The developer guide supplies the
+  boundary the welcome page does not: "You cannot tag aliases, custom key stores, AWS managed keys,
+  AWS owned keys, or KMS keys in other AWS accounts." An alias ARN is therefore refused rather than
+  followed to the key behind it — a tagging API that resolved it would tag a resource AWS says
+  cannot be tagged, and the caller would read the tag back off the key.
+
+  The row is the same three parts as ACM's and CloudFront's — a resolver arm, a merge arm and a
+  scanner — and the resolver is the same context-free parser KMS's own eighteen `KeyId` operations
+  now use, so neither API can address a key the other would not. #765's cross-readability criterion
+  is asserted by reading every tag back through KMS's own `ListResourceTags`, and in the other
+  direction by writing through KMS and reading through `GetResources`.
+
+  The merge is the first that edits an **array**-shaped tags member rather than a map: KMS's `Tag`
+  spells its members `TagKey` and `TagValue`, alone among the services of #835, so
+  `mergeRecordTagListTags` takes the two field names as parameters and is written once for the
+  rows that follow. It folds the array to a map, merges, and re-emits it **sorted by key**, per
+  #862 — a merged slice built from a Go map range would answer differently on each run. An emptied
+  member is emitted as `[]` rather than dropped, so the record keeps the shape `KMSKey` decodes.
+
+  The guard in front of it tests a **colon-terminated** prefix, the third namespace to need one:
+  `key` is a prefix of `key_ids` and `key_policy`, and `alias` of `alias_names`. `key_ids` is a
+  JSON array of identifier strings, which a bare-prefix test would report taggable and a merge
+  would leave looking like a record.
+
+  Account isolation here is emergent rather than guarded, as ACM's is: the resolver builds an
+  account- and Region-qualified state key, so a foreign-account ARN builds a key nothing is stored
+  at and the merge fails "resource not found". A key pending deletion is still reported and still
+  writable — the developer guide says you may not tag one, and substrate models no
+  `KMSInvalidStateException` at either arm, which is recorded on #922 rather than left silent.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -224,6 +262,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **A KMS `KeyId` resolves to the key its own ARN names, in the account and Region the ARN names**
+  (#922). `KMSPlugin.resolveKeyID` split the identifier on `/` and returned the **last** component,
+  and its eighteen callers then keyed the load *and the store* by the caller's own `AccountID` and
+  `Region`. Both halves were wrong and they compounded.
+
+  So `arn:aws:kms:eu-west-1:999988887777:key/1234abcd-…` presented by a `us-east-1` caller in
+  account `111122223333` addressed **that caller's own key of that ID, in their own Region**.
+  `TagResource` wrote onto the wrong key and answered `200`; `UntagResource` — the damaging
+  direction — stripped tags and answered `200`, and stripping a tag can turn an `aws:ResourceTag`
+  `Deny` into an allow. A caller could not tell either from a correct call. This is the rule #826
+  established for SQS and DynamoDB, #845 carried through the tagging API's resolver, #910 applied to
+  Step Functions and #918 to CloudFront: the account and Region come from the ARN, never from the
+  request context. `kmsParseARN` takes no `*RequestContext` at all, so the rule is structural rather
+  than remembered.
+
+  The unanchored type match was the second half. An alias ARN's resource portion is `alias/{name}`,
+  so a last-component scan turned `arn:aws:kms:us-east-1:111122223333:alias/prod` into the key ID
+  `prod` — a different resource type addressing a record it does not name, the mistake #910 found in
+  `strings.Contains(arn, ":stateMachine:")`. The slashed case is worse, and it is AWS's own example:
+  an alias name may contain `/`, and the alias of an AWS managed key is `alias/aws/s3`, which
+  resolved to the key ID `s3`. So the cut is on the **first** `/` and the remainder is not required
+  to be a single segment — a parser that refused a slashed identifier outright would reject a legal
+  ARN. For a key the extra segment *is* refused, because a key ID is a UUID, or `mrk-` followed by
+  one with the hyphens removed, and carries no `/` in either form.
+
+  A bare key ID and a bare `alias/` name still resolve against the caller's account and Region:
+  `KeyId` documents four accepted forms and two of them are not ARNs, so a non-ARN identifier is a
+  key ID and not a malformed ARN. A malformed ARN answers `InvalidArnException`/**400**, which all
+  three tagging operations publish. An alias ARN is followed through the alias pointer stored in the
+  account and Region **the ARN names**, and `CreateAlias`/`UpdateAlias` refuse a `TargetKeyId`
+  outside the caller's own — an alias is scoped to one account and Region, and a written
+  cross-Region pointer is a dangling one that `ListAliases` reports and every later resolution fails
+  on.
+
+  **Fixing the resolution is what made the cross-account case reachable, so the refusal lands in the
+  same commit.** All three tagging operations publish "Cross-account use: No", but while the account
+  came from the request context a foreign-account key ARN could only ever hit the caller's own
+  record, so the prohibition had nothing to refuse. Honouring the ARN's account without adding the
+  refusal would have turned a wrong-record write into a genuine cross-account write. AWS publishes
+  the prohibition and publishes `NotFoundException`, but does not join them; mapping the one onto the
+  other is substrate's reading.
+
+  Two residues are recorded rather than silently left. The other fifteen `KeyId` operations do not
+  enforce the Region, so `DescribeKey` on a foreign-Region key ARN now answers with **that** key
+  rather than with a local impostor — strictly better, but real KMS would refuse, since a Regional
+  endpoint serves only its own Region, and AWS publishes no per-operation statement to cite for the
+  other fifteen. And `NotFoundException` still answers HTTP 404 at fifteen pre-existing sites where
+  KMS publishes 400; that is a compatibility change of its own and is filed as #923, the split #921
+  took for ACM. A test pins the current status so the follow-up has something to change.
+
+  The five KMS key builders are now free functions with no receiver state, so the resolver and the
+  plugin cannot produce two layouts of one key — the drift #826 found for SQS and #918 for
+  CloudFront. `decrypt` deliberately keeps the request context: its key ID comes out of the
+  ciphertext, not out of a `KeyId` parameter, so there is no ARN to take an account from, and
+  `Decrypt`'s optional `KeyId` is a constraint on which key may be used rather than a selector.
+  `TagResource` and `ListResourceTags` also order their tags by key, per #862.
+
 - **A CloudFront tagging ARN addresses the distribution it names, in the account it names**
   (#918). Two defects in the two lines that turned the `Resource` query parameter into a state
   key, both reached by all three of `TagResource`, `UntagResource` and `ListTagsForResource`.
