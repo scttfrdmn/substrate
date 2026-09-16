@@ -491,8 +491,8 @@ func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string)
 // empty item list, add nothing, and answer 204. A body of the wrong shape is now refused
 // instead of read as "no tags", so no shape of request can be answered with the tagging
 // success having changed nothing.
-func (p *CloudFrontPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	dist, err := p.resolveTagTarget(ctx, req)
+func (p *CloudFrontPlugin) tagResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	dist, err := p.resolveTagTarget(req)
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +518,7 @@ func (p *CloudFrontPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*A
 		dist.Tags[tag.Key] = tag.Value
 	}
 
-	if err := p.putDistribution(ctx, dist, "tagResource"); err != nil {
+	if err := p.putDistribution(dist, "tagResource"); err != nil {
 		return nil, err
 	}
 
@@ -548,8 +548,8 @@ func (p *CloudFrontPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*A
 // reference does not address the case either way. Substrate treats it as success because the
 // alternative makes a consumer's teardown loop fail on its second run, and because a
 // response shape carrying no per-key result has nowhere to report a partial removal.
-func (p *CloudFrontPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	dist, err := p.resolveTagTarget(ctx, req)
+func (p *CloudFrontPlugin) untagResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	dist, err := p.resolveTagTarget(req)
 	if err != nil {
 		return nil, err
 	}
@@ -574,15 +574,15 @@ func (p *CloudFrontPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (
 		delete(dist.Tags, key)
 	}
 
-	if err := p.putDistribution(ctx, dist, "untagResource"); err != nil {
+	if err := p.putDistribution(dist, "untagResource"); err != nil {
 		return nil, err
 	}
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
-func (p *CloudFrontPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	dist, err := p.resolveTagTarget(ctx, req)
+func (p *CloudFrontPlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	dist, err := p.resolveTagTarget(req)
 	if err != nil {
 		return nil, err
 	}
@@ -629,8 +629,16 @@ func (p *CloudFrontPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequ
 // the three tagging pages list, because that is the code this plugin's other arms and
 // [CloudFrontPlugin.loadDistribution] already answer and one plugin should not report a
 // missing distribution two ways. Aligning all three tagging arms on the published code is a
-// separate change from #883, which is about a request being routed to the wrong operation.
-func (p *CloudFrontPlugin) resolveTagTarget(ctx *RequestContext, req *AWSRequest) (CloudFrontDistribution, error) {
+// separate change from #883, which is about a request being routed to the wrong operation. An
+// ARN naming a resource type substrate does not model is a different case and does answer the
+// published NoSuchResource/404 — see [cfParseDistributionARN].
+//
+// It takes no *RequestContext, because the account the ARN names is the account the record is
+// read from and written to. Taking it from the caller's context is what #918 fixed: this
+// function used to resolve the distribution *ID* out of the ARN and then key the load by
+// ctx.AccountID, so an ARN naming another account's distribution addressed the caller's
+// same-named one. Not having the context in scope is what keeps that from coming back.
+func (p *CloudFrontPlugin) resolveTagTarget(req *AWSRequest) (CloudFrontDistribution, error) {
 	resourceARN := req.Params["Resource"]
 	if resourceARN == "" {
 		return CloudFrontDistribution{}, &AWSError{
@@ -640,16 +648,11 @@ func (p *CloudFrontPlugin) resolveTagTarget(ctx *RequestContext, req *AWSRequest
 		}
 	}
 
-	// arn:aws:cloudfront::{acct}:distribution/{id}
-	distID := extractDistIDFromARN(resourceARN)
-	if distID == "" {
-		return CloudFrontDistribution{}, &AWSError{
-			Code:       "NoSuchDistribution",
-			Message:    "Distribution not found for ARN: " + resourceARN,
-			HTTPStatus: http.StatusNotFound,
-		}
+	target, arnErr := cfParseDistributionARN(resourceARN)
+	if arnErr != nil {
+		return CloudFrontDistribution{}, arnErr
 	}
-	return p.loadDistribution(ctx, distID)
+	return p.loadDistributionForAccount(target.AccountID, target.DistID)
 }
 
 // cfInvalidTagBody refuses a tagging body whose XML does not decode into the root element
@@ -668,27 +671,51 @@ func cfInvalidTagBody(root string, err error) *AWSError {
 	}
 }
 
-// putDistribution persists a distribution record under the key its account and ID name.
+// putDistribution persists a distribution record under the key its own account and ID name.
 //
 // op names the calling operation and reaches only the wrapped error's text. The tagging arms
 // share this rather than each marshaling and keying by hand, so an untag cannot write to a
 // different key than the tag it is undoing wrote to.
-func (p *CloudFrontPlugin) putDistribution(ctx *RequestContext, dist CloudFrontDistribution, op string) error {
+//
+// The account comes from the record rather than from a *RequestContext, and the parameter is
+// gone so it cannot come from anywhere else (#918). A tagging arm reads the distribution the
+// ARN names and writes back what it read; taking the account from the caller instead let a
+// read from one account be written to another, which is how UntagResource stripped a tag from
+// a distribution the request did not name.
+func (p *CloudFrontPlugin) putDistribution(dist CloudFrontDistribution, op string) error {
+	// A record with no account cannot be keyed. Every writer sets it (createDistribution,
+	// cloudfront_plugin.go), so this is unreachable through the API — but keying an empty
+	// account would write to "cfdist:/{id}", a key no read looks at, and report success.
+	if dist.AccountID == "" {
+		return fmt.Errorf("cloudfront %s: distribution %s record carries no account", op, dist.ID)
+	}
 	data, err := json.Marshal(dist)
 	if err != nil {
 		return fmt.Errorf("cloudfront %s marshal: %w", op, err)
 	}
-	if err := p.state.Put(context.Background(), cloudfrontNamespace, cfDistKey(ctx.AccountID, dist.ID), data); err != nil {
+	if err := p.state.Put(context.Background(), cloudfrontNamespace, cfDistKey(dist.AccountID, dist.ID), data); err != nil {
 		return fmt.Errorf("cloudfront %s state.Put: %w", op, err)
 	}
 	return nil
 }
 
-// loadDistribution loads a CloudFrontDistribution from state, returning a
+// loadDistribution loads a distribution owned by the calling account from state, returning a
 // NoSuchDistribution error if absent.
+//
+// This is the right resolution for the operations that name a distribution by bare ID in the
+// request path — GetDistribution, UpdateDistribution, DeleteDistribution and their siblings —
+// because there the caller's own account is the only account the ID can refer to. The tagging
+// operations name a full ARN and must not use it; they go through
+// [CloudFrontPlugin.resolveTagTarget].
 func (p *CloudFrontPlugin) loadDistribution(ctx *RequestContext, distID string) (CloudFrontDistribution, error) {
+	return p.loadDistributionForAccount(ctx.AccountID, distID)
+}
+
+// loadDistributionForAccount loads a distribution owned by accountID, returning a
+// NoSuchDistribution error if absent.
+func (p *CloudFrontPlugin) loadDistributionForAccount(accountID, distID string) (CloudFrontDistribution, error) {
 	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, distID))
+	data, err := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(accountID, distID))
 	if err != nil {
 		return CloudFrontDistribution{}, fmt.Errorf("cloudfront loadDistribution state.Get: %w", err)
 	}
@@ -742,17 +769,6 @@ func generateCloudFrontID() (string, error) {
 		out[i] = chars[int(ch)%len(chars)]
 	}
 	return "E" + string(out), nil
-}
-
-// extractDistIDFromARN extracts the distribution ID from a CloudFront ARN of the
-// form arn:aws:cloudfront::{acct}:distribution/{id}.
-func extractDistIDFromARN(arn string) string {
-	const prefix = "distribution/"
-	idx := strings.LastIndex(arn, prefix)
-	if idx < 0 {
-		return ""
-	}
-	return arn[idx+len(prefix):]
 }
 
 // cloudfrontXMLResponse serializes v to XML and returns an AWSResponse with
