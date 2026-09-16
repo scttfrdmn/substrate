@@ -8512,10 +8512,12 @@ is real, and it is the identifier that names nothing, which is the honest-empty 
 of #827. Answering one code for both would tell a caller who mistyped `Parameter` that
 their parameter is missing. Substrate models a taggable resource for exactly one of the
 ten today; the other nine are enumerated so that a value AWS publishes can be told apart
-from a value AWS does not. `InvalidResourceId` is answered at HTTP 404 where AWS publishes
-400, tracked in #933 alongside ACM's (#921), KMS's (#923) and Secrets Manager's (#930) —
-and because all three operations now route through one helper, that correction is a single
-line.
+from a value AWS does not. Both are answered at HTTP **400**, which is what all three
+reference pages give every code they publish: `InvalidResourceId` and `InvalidResourceType`
+at 400, `TooManyTagsError` and `TooManyUpdates` at 400, and `InternalServerError` at 500.
+There is no 404 anywhere in the set, so the status carries nothing a caller can branch on
+and the code is the whole signal — which is why #933 was worth fixing even though the
+refusal was already distinguishable by code.
 
 This is also the first row where the owning service's own tag operations take **no ARN at
 all**. AWS is explicit — *"For the `Document` and `Parameter` values, use the name of the
@@ -8874,10 +8876,10 @@ so any type resolved to the same-named Parameter Store parameter:
 |---|---|
 | `ResourceType: "Parameter"`, `ResourceId: "/db/password"` | The parameter `/db/password` |
 | `ResourceType: "Parameter"`, `ResourceId: "db/password"` | The same parameter — the leading `/` is supplied |
-| `ResourceType: "Parameter"`, `ResourceId: "arn:aws:ssm:…"` | `InvalidResourceId`, not normalized into a name (#928) |
-| `ResourceType: "Document"` and the eight other published types | `InvalidResourceId` — the type is real, the resource is not modelled here |
-| `ResourceType: "parameter"`, `"Parameters"`, or anything outside the enum | `InvalidResourceType`, listing the ten valid values |
-| `ResourceType` absent | `ValidationException` |
+| `ResourceType: "Parameter"`, `ResourceId: "arn:aws:ssm:…"` | `InvalidResourceId`/400, not normalized into a name (#928) |
+| `ResourceType: "Document"` and the eight other published types | `InvalidResourceId`/400 — the type is real, the resource is not modelled here |
+| `ResourceType: "parameter"`, `"Parameters"`, or anything outside the enum | `InvalidResourceType`/400, listing the ten valid values |
+| `ResourceType` absent | `ValidationException`/400 |
 
 `ResourceId` is the parameter **name**, not an ARN: AWS states *"For the `Document` and
 `Parameter` values, use the name of the resource"*. It therefore carries no account or
@@ -8891,10 +8893,13 @@ The leading-slash tolerance is substrate's reading, not AWS's: AWS documents it 
 `OpsMetadata`. Substrate needs it because `PutParameter` normalizes `Name` to a leading
 `/`, so a caller who created `MyParam` must be able to tag `MyParam`.
 
-`InvalidResourceId` is answered at HTTP 404; AWS publishes 400 (#933). SSM publishes no
-distinct not-found code for these operations — `InvalidResourceId` *is* how a nonexistent
-resource is reported. Substrate models no tag-count cap here, where AWS caps most resources
-at 50 tags.
+`InvalidResourceId` is answered at HTTP **400**, the status all three reference pages give
+it: *"The resource ID isn't valid. Verify that you entered the correct ID and try again.
+HTTP Status Code: 400"*. Systems Manager publishes no distinct not-found code for these
+operations — `InvalidResourceId` *is* how a nonexistent resource is reported — and no 404
+at all, so the status is not a thing a caller can branch on and the code is the whole
+signal. Substrate models no tag-count cap here, where AWS caps most resources at 50 tags
+and Automations at 5.
 
 ### AWS's public AMI parameters are answered
 

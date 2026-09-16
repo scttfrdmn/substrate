@@ -265,15 +265,17 @@ func ssmResolveTagTarget(resourceType, resourceID string) (string, *AWSError) {
 // reason so a caller can tell a wrong service from a wrong resource type from an absent resource.
 //
 // The code is InvalidResourceId, which all three tag operations publish and which is how Systems
-// Manager reports a nonexistent resource — it publishes no distinct not-found code for them. The HTTP
-// status substrate answers is unchanged by this pass and is tracked in #933: AWS publishes 400, as it
-// does for ACM (#921), KMS (#923) and Secrets Manager (#930). One helper means one fix, which is why
-// the status lives here rather than at each call site.
+// Manager reports a nonexistent resource — it publishes no distinct not-found code for them. The
+// status is 400, which is what all three reference pages give it: "The resource ID isn't valid. Verify
+// that you entered the correct ID and try again. HTTP Status Code: 400". Systems Manager answers no
+// 404 on any of the three, so the status carries no information a caller can branch on and the code is
+// the whole signal (#933). One helper means one status, which is why it lives here rather than at each
+// call site.
 func ssmInvalidResourceID(id, reason string) *AWSError {
 	return &AWSError{
 		Code:       "InvalidResourceId",
 		Message:    fmt.Sprintf("the resource ID %q is not valid: %s", id, reason),
-		HTTPStatus: http.StatusNotFound,
+		HTTPStatus: http.StatusBadRequest,
 	}
 }
 

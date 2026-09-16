@@ -81,6 +81,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails the test instead of going quietly stale. Two `why` strings that had become false as prose
   are corrected.
 
+- **Systems Manager answers `InvalidResourceId` at HTTP 400, the status AWS publishes for it, not 404**
+  (#933). `AddTagsToResource`, `RemoveTagsFromResource` and `ListTagsForResource` each publish
+  `InvalidResourceId` at 400 — *"The resource ID isn't valid. Verify that you entered the correct ID
+  and try again."* — and none of the three publishes a 404 for anything, so substrate's 404 was a
+  status no Systems Manager operation can answer. It mattered because `InvalidResourceId` is also how
+  Systems Manager reports a resource that is not there: there is no distinct not-found code on these
+  operations, so a caller cannot read the absence off the status and the code is the whole signal. All
+  six refusals route through one helper, so the correction is one line and no refusal can now disagree
+  with another about its status. A test asserts the status on the wire rather than through a decoded
+  error struct, which carries the code and not the status.
+
 ## [v0.117.0] - 2026-09-15
 
 ### Added
