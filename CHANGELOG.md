@@ -124,6 +124,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certificate now sees 400, and a caller who sent an ARN substrate previously reported absent may now
   see `ValidationException` or `InvalidArnException` instead.
 
+- **KMS answers every refusal at the status AWS publishes for it, and stops answering a code KMS does
+  not have** (#923). Across every KMS operation substrate models, AWS's reference publishes exactly two
+  statuses — **500** for `DependencyTimeoutException`, `KMSInternalException` and
+  `KeyUnavailableException`, and **400** for everything else. There is no 404 for a missing key, alias
+  or destination key on any operation; the only 404 anywhere in KMS's documentation is
+  `UnknownOperationException`, which reports that the *action name* was not recognised. So a KMS status
+  carries nothing a caller can branch on and the code is the whole signal — which is why three codes
+  could carry a wrong status through a green suite.
+
+  `NotFoundException` answered **404** at fifteen sites, where every operation that can answer it
+  publishes 400: *"The request was rejected because the specified entity or resource could not be
+  found."* Those fifteen span `DescribeKey`, `EnableKey`, `DisableKey`, `CancelKeyDeletion`,
+  `ScheduleKeyDeletion`, `GetKeyRotationStatus`, `EnableKeyRotation`, `DisableKeyRotation`,
+  `TagResource`, `UntagResource`, `ListResourceTags`, `Encrypt`, `Decrypt`, `GenerateDataKey`,
+  `GenerateDataKeyWithoutPlaintext`, `ReEncrypt`, and any `KeyId` given as an alias. The three tagging
+  operations' own refusals were already 400, so the two halves of one plugin disagreed about what a
+  missing KMS resource is worth. `DisabledException` answered **409** at three sites, where
+  `API_Encrypt`, `API_Decrypt` and `API_GenerateDataKey` each publish 400 — *"The request was rejected
+  because the specified KMS key is not enabled"*.
+
+  `InvalidRequest` was answered at twenty-one sites for an unparseable request body, and **that string
+  appears nowhere in KMS's documentation** — not on an operation page, not on the common-errors page —
+  so a caller matching on it matched something no SDK models. It is now `ValidationError`/400, the
+  common error whose description is *"The input doesn't meet the required format or constraints"*;
+  being a common error it applies to every operation, which twenty-one operations need.
+  `TagException` is also 400 but is glossed *"one or more tags are not valid"* — the content of a
+  `Tags` member — and eighteen of the twenty-one take no tags, so it is declined. So is
+  `MalformedHttpRequestException`, whose published scope is the transport layer, *"when the request
+  body can't be decompressed using the specified content encoding algorithm"*. Recorded because both
+  are the obvious guesses: `SerializationException` and `ValidationException` appear nowhere in KMS's
+  documentation either — KMS spells it `ValidationError`, with no `Exception` suffix.
+
+  Each code is now built by one helper, so the status is chosen once rather than at each of the
+  thirty-nine call sites — the arrangement Systems Manager arrived at in #933, reached here from the
+  other direction. `InvalidArnException` moved to the same file, so every KMS refusal is constructed in
+  one place. One adjacent gap is named rather than closed: `API_EnableKeyRotation` and
+  `API_DisableKeyRotation` publish `DisabledException` too, and substrate's handlers do not check
+  whether the key is enabled, so both answer 200 on a disabled key; that is a missing refusal rather
+  than a wrong status and is filed separately.
+
+  Compatibility: a caller asserting **404** on a missing KMS key, alias or destination key now sees
+  **400**; a caller asserting **409** on a disabled key now sees **400**; and a caller matching the
+  error code `InvalidRequest` now sees `ValidationError`.
+
 ## [v0.117.0] - 2026-09-15
 
 ### Added

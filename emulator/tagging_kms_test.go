@@ -295,17 +295,16 @@ func TestKMSResolution_AnARNNamingNoKeyIsRefusedAsInvalid(t *testing.T) {
 // not a malformed ARN — it is a key ID, and one that names nothing is NotFoundException. Answering
 // InvalidArnException here would tell a caller its ARN was wrong when it sent no ARN.
 //
-// The status asserted is the 404 substrate answers today, not the 400 AWS publishes. All three KMS
-// tagging operations publish NotFoundException at 400 and fifteen pre-existing KMS sites answer 404;
-// that is a compatibility change filed as #923 rather than folded in here, the split #921 took for
-// ACM. This assertion pins the current value so #923 has something to change.
+// The status is 400, which every KMS operation that publishes NotFoundException gives it. This
+// assertion read 404 until #923 brought the fifteen sites that answered it into line with the
+// reference pages.
 func TestKMSResolution_ANonARNIdentifierIsTreatedAsAKeyID(t *testing.T) {
 	ts := arnGuardServer(t)
 
 	status, errCode := kmsTagResource(t, ts, kmsTarget, "no-such-key-id", map[string]string{"env": "prod"})
 	assert.Equal(t, "NotFoundException", errCode, "a bare identifier is a key ID, not an ARN")
-	assert.Equal(t, http.StatusNotFound, status,
-		"404 today; AWS publishes 400 and the change is filed separately")
+	assert.Equal(t, http.StatusBadRequest, status,
+		"KMS publishes NotFoundException at 400 and no 404 for any resource")
 }
 
 // TestKMSResolution_ABareKeyIDAndAliasNameStillResolve is the regression guard on the two forms
