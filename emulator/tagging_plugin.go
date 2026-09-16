@@ -261,6 +261,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
+		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
 	}
 
 	var all []resourceTagMapping
@@ -870,6 +871,48 @@ func (p *TaggingPlugin) scanSNSTopics(_ context.Context, reqCtx *RequestContext)
 	return out, nil
 }
 
+// scanSecretsManagerSecrets reports every Secrets Manager secret in the caller's account and Region,
+// with its tags.
+//
+// The prefix is built from [smSecretKeyPrefix] — the same constant [smSecretStateKey] writes and
+// [smKeyIsTaggable] tests — so the scanner, the resolver and Secrets Manager's own operations cannot
+// fall out of step about where a secret record lives.
+//
+// The colon in the prefix is load-bearing, as it is for KMS and SNS: this namespace also holds
+// "secret_names:{acct}/{region}", a JSON array of names, and "secret_version:{...}", whose value is a
+// raw secret payload and not JSON. A bare "secret" prefix would list both, fail to unmarshal them
+// into a [SecretState] and skip them silently — and listing a version key at all would be worse than
+// reporting nothing, because it is the one key in the tree whose value is a caller's secret.
+func (p *TaggingPlugin) scanSecretsManagerSecrets(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := smSecretKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	keys, err := p.state.List(goCtx, secretsManagerNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list secretsmanager secrets: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, secretsManagerNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var secret SecretState
+		if err := json.Unmarshal(raw, &secret); err != nil {
+			continue
+		}
+		tags := make([]taggingTag, 0, len(secret.Tags))
+		for _, t := range secret.Tags {
+			tags = append(tags, taggingTag(t))
+		}
+		sortTagsByKey(tags, func(t taggingTag) string { return t.Key })
+		out = append(out, resourceTagMapping{
+			ResourceARN: secret.ARN,
+			Tags:        tags,
+		})
+	}
+	return out, nil
+}
+
 func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	prefix := acmCertKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
@@ -1386,6 +1429,22 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		}
 		return "", "", unsupportedTagResource("SNS %q is not a taggable resource type", resource)
 
+	case "secretsmanager":
+		// arn:aws:secretsmanager:{region}:{acct}:secret:{name}
+		//
+		// Through [smResolveARN], which shares [smSecretStateKey] with Secrets Manager's own
+		// TagResource and UntagResource, so a secret's tags are at one address whichever arm writes
+		// them. Unlike SNS this shape does have a type keyword to anchor a match against, and
+		// [smParseSecretARN] matches "secret" as a whole colon-delimited segment per #910 rather than
+		// as a prefix. The ARN-only form is deliberate: Secrets Manager's own operations accept a bare
+		// name for SecretId, but the tagging API's parameter is ResourceARNList and a name is not an
+		// ARN, so there is nothing here for a caller's own account to supply (part of #835, on top of
+		// the resolution fix in secretsmanager_tags.go).
+		if ns, key, resolveErr := smResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
+		}
+		return "", "", unsupportedTagResource("Secrets Manager %q is not a taggable resource type", resource)
+
 	default:
 		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
 	}
@@ -1635,6 +1694,20 @@ func mergeResourceTags(
 		updated, err := mergeRecordTagListTags(raw, snsTagsJSONMember, snsTagKeyField, snsTagValueField, addTags, removeKeys)
 		if err != nil {
 			return fmt.Errorf("merge SNS tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
+
+	case secretsManagerNamespace:
+		// Array-shaped and spelled Key/Value, like SNS's. The guard is colon-terminated because
+		// "secret" is a prefix of both "secret_names" and "secret_version" — and the version key's
+		// value is a raw secret payload, not JSON at all, so a merge there would corrupt it rather
+		// than merely write a member nothing reads. See [smKeyIsTaggable].
+		if !smKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported Secrets Manager resource key: %s", key)
+		}
+		updated, err := mergeRecordTagListTags(raw, smTagsJSONMember, smTagKeyField, smTagValueField, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge Secrets Manager tags for %s: %w", key, err)
 		}
 		return state.Put(goCtx, ns, key, updated)
 

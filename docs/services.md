@@ -6203,16 +6203,18 @@ Secrets Manager secret, an SNS topic, a Step Functions activity, an ECS service 
 definition, an RDS DB cluster and DB subnet group, an ACM certificate, a CloudFront distribution
 and an SSM parameter — have both tag state and a tagging call, and are still unstamped.
 
-For nine of the eleven the missing piece is not a resolver arm but an arm in substrate's shared
-tag *writer*, so the same gap also means the Resource Groups Tagging API cannot tag them: one
-defect with two symptoms, tracked there rather than folded in here. **ECS's service and task
-definition are the two exceptions, and they were the two symptoms fixed first.** The resolver now
-keys through the same `ecsTagStateKey` ECS's own `TagResource` uses, and the writer merges an ECS
-record as raw JSON rather than as a cluster, so `TagResources` and `UntagResources` reach an ECS
-service, task and task definition today — and a `TagResource` on a task definition writes the tag
-rather than answering `200` over a record nothing was written to. What remains for those two is
-narrower than for the other nine: the stamp needs an entry in the deployer's own type table, and
-`GetResources` still enumerates ECS clusters only, which is the scanner half of the same issue.
+For each of the eleven the missing piece was not a resolver arm alone but an arm in substrate's
+shared tag *writer*, so the same gap also meant the Resource Groups Tagging API could not tag
+them: one defect with two symptoms, tracked there rather than folded in here. Seven of the eleven
+have since had the tagging-API half delivered a row at a time — ECS's service and task definition,
+then an ACM certificate, a CloudFront distribution, a KMS key, an SNS topic and a Secrets Manager
+secret — each keying through the one state-key builder the owning service's own `TagResource` uses,
+and each merging its record as raw JSON so a member the writer does not model is preserved rather
+than dropped. Four rows remain: a Step Functions activity, an RDS DB cluster and DB subnet group,
+and an SSM parameter, plus the two ECS types' **scanner** halves, since `GetResources` still
+enumerates ECS clusters only. The CloudFormation stamp is a separate half again: none of the
+eleven has an entry in the deployer's own type table yet, which is why all eleven are still listed
+here as unstamped.
 
 Two of the nine cannot be tagged through their own service at all — an RDS DB cluster and an RDS
 DB subnet group — because its ARN resolver has no arm for either kind, so that has to be fixed
@@ -8146,12 +8148,13 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans twenty-three resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans twenty-four resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
 DB subnet groups, ElastiCache cache clusters, EFS file systems, Glue databases,
-ACM certificates, CloudFront distributions, KMS keys and SNS topics.
+ACM certificates, CloudFront distributions, KMS keys, SNS topics and Secrets
+Manager secrets.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8333,6 +8336,40 @@ invention rather than its reading. Its merge sits behind a colon-terminated kind
 guard for the reason the earlier rows' do: `topic:` is a prefix of `topic_names:`,
 whose value is a JSON array of names.
 
+Secrets Manager secrets followed as of #835, with their own resolution fix (#928),
+and the row is the first where the identifier is legitimately **either** an ARN or a
+bare name. AWS documents `SecretId` as "the ARN or name of the secret", and a name
+carries no account — so the caller's own account is the *correct* source for that one
+case, and refusing everything that is not an ARN would have been the easy
+over-correction. The two are separated structurally rather than by convention: the ARN
+parser takes no account, Region or request context at all, and only the name path is
+given them. Anything beginning `arn:` that does not parse is refused rather than
+falling back to a name lookup, because a caller who wrote an ARN prefix meant an ARN.
+
+The tagging arm takes an ARN only, with no name fallback, since its parameter is
+`ResourceARNList` and a bare name is not an ARN. Unlike SNS this shape *does* offer a
+keyword to anchor on — `secret` is the fifth colon-delimited segment — and the name is
+the whole remainder after it, so a hierarchical `prod/db/password` survives the round
+trip where taking the ARN's last component would truncate it to `password`. Isolation
+is emergent as SNS's and ACM's are, with no published cross-account prohibition to
+enforce.
+
+Its merge sits behind a colon-terminated kind guard, which is now the **fifth**
+namespace to need one: `secret:` is a prefix of both `secret_names:` and
+`secret_version:`. Four of the five namespaces reached so far have collided, so the
+guard is the default for a new row rather than a per-service discovery. The version
+key is also the strongest argument for the guard anywhere in the set — its value is a
+caller's secret payload, and not JSON at all, so a tags member merged into it would
+corrupt the secret rather than merely write somewhere nothing reads.
+
+One thing substrate deliberately does not model, because it is what makes this row's
+ARN-to-name derivation exact: AWS appends a hyphen and six random characters to a
+secret's name when it mints the ARN, and warns "do not end your secret name with a
+hyphen followed by six characters" precisely because trimming them back off cannot be
+done in general. Substrate mints no suffix, so the name is recoverable from the ARN
+by construction. Adding one would make the resolver ambiguous and would change a value
+CloudFormation records as a physical ID, so it is a separate decision.
+
 ### Which failure gets which error code
 
 A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
@@ -8506,14 +8543,76 @@ SNS publish: $0.0000005 per message.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateSecret | |
+| CreateSecret | Tags are stored key-ordered, so two identical runs report them alike |
 | GetSecretValue | Returns SecretString or SecretBinary |
 | PutSecretValue | Creates new version |
 | UpdateSecret | |
 | DeleteSecret | Supports ForceDeleteWithoutRecovery |
-| ListSecrets | |
-| DescribeSecret | |
-| TagResource | |
+| ListSecrets | Base64 offset pagination; scoped to the caller's account and Region |
+| DescribeSecret | The read path for a secret's tags; omits `Tags` when there are none |
+| ListSecretVersionIds | Reports the current version only |
+| TagResource | Appends to the existing list rather than replacing it |
+| UntagResource | Idempotent — an absent key is not an error |
+| ListTagsForResource | **Not an operation AWS publishes.** Tracked in #929 |
+| RotateSecret | Records the rotation request; no rotation function is executed |
+
+### A `SecretId` addresses the secret its own ARN names
+
+`SecretId` is documented as "the ARN or name of the secret", and the two halves have
+to be resolved differently. An ARN carries an account and a Region; a bare name
+carries neither, so for a name — and only for a name — the caller's own account and
+Region are the correct source.
+
+Substrate read the caller's for both. The resolver split an identifier on `:` and
+returned the **last** segment, and every one of the ten `SecretId`-taking operations
+then keyed its load and its store by `ctx.AccountID` and `ctx.Region`. So
+`arn:aws:secretsmanager:eu-west-1:999988887777:secret:db-password`, presented by a
+`us-east-1` caller in another account, addressed **that caller's own** `db-password`:
+`GetSecretValue` read its value, `DeleteSecret` deleted it, and `UntagResource`
+answered `200` while stripping its tags. That is the rule #826 settled for SQS and
+#928 applies here — the account and Region come from the ARN, never from the request
+context.
+
+Three further checks were missing and compounded it. The service segment was never
+compared, so an ARN belonging to another service resolved to its own last segment as a
+secret name. The type keyword was never compared either, so
+`arn:aws:secretsmanager:{region}:{account}:other:foo` named a secret called `foo`;
+`secret` is now matched as a whole segment rather than as a prefix, per #910, so
+`secretpolicy` and any keyword AWS adds later are refused rather than accepted. And
+the malformed case fell through to returning its argument, so an ARN with too few
+segments became a *name* and was looked up as one. Anything beginning `arn:` that does
+not parse is now `InvalidParameterException`, because a caller who wrote an ARN prefix
+meant an ARN and a silent name lookup turns a typo into a `200` against the wrong
+resource.
+
+The separation is structural rather than a convention each handler has to remember:
+the ARN parser takes no account, Region or request context **as parameters at all**,
+which is the arrangement Step Functions (#910), CloudFront (#918), KMS (#922) and SNS
+(#925) each settled on. The name is the whole remainder after the keyword, so a
+hierarchical `prod/db/password` round-trips through its own ARN where taking the last
+component would truncate it to `password`.
+
+`DeleteSecret` had the same defect in its index: it removed the name from the
+*caller's* account and Region index while deleting the record the ARN named, so the
+owning Region went on listing a secret whose record had just been removed. Both now
+address the target.
+
+**Why the ARN-to-name derivation is exact, and what substrate deliberately does not
+model.** AWS appends a hyphen and six random characters to a secret's name when it
+mints the ARN, and warns "do not end your secret name with a hyphen followed by six
+characters" — because a name may itself end that way, so trimming the suffix back off
+cannot be done in general. Substrate mints no suffix, which is precisely what makes the
+name recoverable from the ARN here. Adding one would make this resolver ambiguous by
+construction and would change a value CloudFormation records as a physical ID, so it is
+a separate decision rather than part of the fix.
+
+**Tags.** `DescribeSecret` is the read path, because Secrets Manager publishes no
+`ListTagsForResource` — the one substrate answers is an operation AWS does not have
+(#929). An untagged secret now omits the `Tags` member entirely rather than sending
+`null`, following AWS's own statement that "Secrets Manager only returns fields that
+have a value in the response"; the remaining members that are still emitted
+unconditionally are #930, along with the HTTP status of `ResourceNotFoundException`,
+which AWS publishes as `400` where substrate answers `404`.
 
 ### CloudFormation resource types
 
