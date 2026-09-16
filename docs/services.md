@@ -8180,6 +8180,28 @@ account alone, so a `us-east-1` caller was reported a `us-west-2` cluster. The s
 Region blindness remains in fourteen other scanners, with a cross-account variant in
 three; that is #937.
 
+Three ECS ARN shapes carry no tag, and the reason differs by shape. Each is
+refused rather than accepted silently — ECS's own `TagResource`, `UntagResource`
+and `ListTagsForResource` all answer `InvalidParameterException`/400, and the
+tagging API's `TagResources` reports a `FailedResourcesMap` entry:
+
+| ARN | Reason a tag cannot be written |
+|---|---|
+| `…:capacity-provider/{name}` | AWS lists a capacity provider among the taggable ECS resources, but substrate stores no such record — there is nothing for a tag to sit beside and nothing to read it back from |
+| `…:service/{name}` | AWS's *short* service ARN. The long form `service/{cluster}/{name}` is what addresses a service; the short form names no cluster, so it identifies no record |
+| `…:task-definition/{family}:{revision}` with a non-numeric revision | a revision is an integer, so `web:latest` addresses nothing. A family without a resolvable revision is not an addressable resource |
+
+A container instance is the fourth type AWS lists as taggable
+("capacity providers, tasks, services, task definitions, clusters, and container
+instances") and has no ARN shape here at all, because substrate implements no
+operation that registers one. That is the capacity provider's reason rather than a
+separate one.
+
+Absence is a different answer from either: a well-formed ARN of a type substrate
+*can* key, naming a cluster or a revision that does not exist, answers
+`ResourceNotFoundException` through ECS's own operations. The table above is about
+the shape, not about a missing record.
+
 ### A `ResourceTypeFilters` type is the ARN's own segment
 
 A filter entry is `service[:resourceType]`, and AWS pins what the type half means from

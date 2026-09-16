@@ -394,6 +394,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sorts by key now, in the one converter rather than at each of the four call sites, so no ECS scanner
   can report the order tags happened to be written in (#862).
 
+  The three ECS ARN shapes that carry **no** tag are now listed in `docs/services.md` with the reason
+  for each, which is #835's fourth criterion and the one thing it was still short of: a capacity
+  provider (AWS lists it among the taggable ECS resources but substrate stores no such record, so
+  there is nothing to read a tag back from), AWS's documented **short** service ARN (which names no
+  cluster and so identifies no record — the long `service/{cluster}/{name}` form is what carries a
+  tag), and a task-definition ARN whose revision is not an integer. A container instance, the fourth
+  taggable type AWS names, has no ARN shape here at all for the capacity provider's reason. Until now
+  those refusals existed only as `why` strings in a guard test, which is not where a consumer looks.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
