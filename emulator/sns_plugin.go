@@ -92,28 +92,38 @@ func (p *SNSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // --- State helpers ---
 
-func (p *SNSPlugin) topicKey(accountID, region, name string) string {
-	return "topic:" + accountID + "/" + region + "/" + name
+// The five SNS state-key builders. Free functions rather than methods on the plugin, so the Resource
+// Groups Tagging API can build the same key from an ARN alone: a resolver that re-derived the layout
+// would be a second producer of it, which is the drift #826 found for SQS and #918 for CloudFront.
+// The prefixes live in sns_tags.go beside the taggability guard that tests them, so the guard cannot
+// fall out of step with the keys actually written.
+//
+// Every key is account- and Region-qualified, and after #925 the account and Region a topic key
+// carries come from the ARN rather than from the caller. That is what makes isolation emergent: an
+// ARN naming another account builds a key nothing is stored at.
+
+func snsTopicStateKey(accountID, region, name string) string {
+	return snsTopicKeyPrefix + accountID + "/" + region + "/" + name
 }
 
-func (p *SNSPlugin) topicNamesKey(accountID, region string) string {
-	return "topic_names:" + accountID + "/" + region
+func snsTopicNamesStateKey(accountID, region string) string {
+	return snsTopicNamesKeyPrefix + accountID + "/" + region
 }
 
-func (p *SNSPlugin) subKey(accountID, region, subID string) string {
-	return "subscription:" + accountID + "/" + region + "/" + subID
+func snsSubStateKey(accountID, region, subID string) string {
+	return snsSubKeyPrefix + accountID + "/" + region + "/" + subID
 }
 
-func (p *SNSPlugin) subIDsKey(accountID, region string) string {
-	return "sub_all_ids:" + accountID + "/" + region
+func snsSubAllIDsStateKey(accountID, region string) string {
+	return snsSubAllIDsKeyPrefix + accountID + "/" + region
 }
 
-func (p *SNSPlugin) subTopicIDsKey(accountID, region, topicName string) string {
-	return "sub_ids:" + accountID + "/" + region + "/" + topicName
+func snsSubTopicIDsStateKey(accountID, region, topicName string) string {
+	return snsSubTopicIDsKeyPrefix + accountID + "/" + region + "/" + topicName
 }
 
 func (p *SNSPlugin) loadTopic(ctx context.Context, accountID, region, name string) (*SNSTopic, error) {
-	data, err := p.state.Get(ctx, snsNamespace, p.topicKey(accountID, region, name))
+	data, err := p.state.Get(ctx, snsNamespace, snsTopicStateKey(accountID, region, name))
 	if err != nil {
 		return nil, fmt.Errorf("sns loadTopic state.Get: %w", err)
 	}
@@ -132,11 +142,11 @@ func (p *SNSPlugin) saveTopic(ctx context.Context, t *SNSTopic) error {
 	if err != nil {
 		return fmt.Errorf("sns saveTopic marshal: %w", err)
 	}
-	return p.state.Put(ctx, snsNamespace, p.topicKey(t.AccountID, t.Region, t.Name), data)
+	return p.state.Put(ctx, snsNamespace, snsTopicStateKey(t.AccountID, t.Region, t.Name), data)
 }
 
 func (p *SNSPlugin) loadTopicNames(ctx context.Context, accountID, region string) ([]string, error) {
-	data, err := p.state.Get(ctx, snsNamespace, p.topicNamesKey(accountID, region))
+	data, err := p.state.Get(ctx, snsNamespace, snsTopicNamesStateKey(accountID, region))
 	if err != nil {
 		return nil, fmt.Errorf("sns loadTopicNames: %w", err)
 	}
@@ -156,11 +166,11 @@ func (p *SNSPlugin) saveTopicNames(ctx context.Context, accountID, region string
 	if err != nil {
 		return fmt.Errorf("sns saveTopicNames marshal: %w", err)
 	}
-	return p.state.Put(ctx, snsNamespace, p.topicNamesKey(accountID, region), data)
+	return p.state.Put(ctx, snsNamespace, snsTopicNamesStateKey(accountID, region), data)
 }
 
 func (p *SNSPlugin) loadSub(ctx context.Context, accountID, region, subID string) (*SNSSubscription, error) {
-	data, err := p.state.Get(ctx, snsNamespace, p.subKey(accountID, region, subID))
+	data, err := p.state.Get(ctx, snsNamespace, snsSubStateKey(accountID, region, subID))
 	if err != nil {
 		return nil, fmt.Errorf("sns loadSub state.Get: %w", err)
 	}
@@ -179,7 +189,7 @@ func (p *SNSPlugin) saveSub(ctx context.Context, s *SNSSubscription) error {
 	if err != nil {
 		return fmt.Errorf("sns saveSub marshal: %w", err)
 	}
-	return p.state.Put(ctx, snsNamespace, p.subKey(s.AccountID, s.Region, s.ARN), data)
+	return p.state.Put(ctx, snsNamespace, snsSubStateKey(s.AccountID, s.Region, s.ARN), data)
 }
 
 func (p *SNSPlugin) loadSubIDs(ctx context.Context, key string) ([]string, error) {
@@ -248,6 +258,13 @@ func (p *SNSPlugin) createTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if dn := req.Params["DisplayName"]; dn != "" {
 		topic.Attributes = map[string]string{"DisplayName": dn}
 	}
+	// CreateTopic publishes a Tags parameter and substrate decoded none of it, so a topic created
+	// with tags in one call reported none through ListTagsForResource or GetResources (#925). Ordered
+	// by key for the same reason TagResource orders them.
+	if tags := snsTagParams(req.Params); len(tags) > 0 {
+		sortTagsByKey(tags, func(tag SNSTag) string { return tag.Key })
+		topic.Tags = tags
+	}
 	if err := p.saveTopic(goCtx, topic); err != nil {
 		return nil, fmt.Errorf("sns createTopic saveTopic: %w", err)
 	}
@@ -278,11 +295,13 @@ func (p *SNSPlugin) createTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	topicARN := req.Params["TopicArn"]
-	name := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	goCtx := context.Background()
-	t, err := p.loadTopic(goCtx, ctx.AccountID, ctx.Region, name)
+	t, err := p.loadTopic(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -290,19 +309,22 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "NotFound", Message: "Topic not found", HTTPStatus: http.StatusNotFound}
 	}
 
-	_ = p.state.Delete(goCtx, snsNamespace, p.topicKey(ctx.AccountID, ctx.Region, name))
+	// The record and its index entry are removed from the account and Region the ARN names, which
+	// after #925 is where the load found it. Keying the delete by the caller instead removed an entry
+	// from their own index while leaving the record the load had just read in place.
+	_ = p.state.Delete(goCtx, snsNamespace, snsTopicStateKey(target.AccountID, target.Region, target.Name))
 
-	names, err := p.loadTopicNames(goCtx, ctx.AccountID, ctx.Region)
+	names, err := p.loadTopicNames(goCtx, target.AccountID, target.Region)
 	if err != nil {
 		return nil, err
 	}
 	newNames := make([]string, 0, len(names))
 	for _, n := range names {
-		if n != name {
+		if n != target.Name {
 			newNames = append(newNames, n)
 		}
 	}
-	if err := p.saveTopicNames(goCtx, ctx.AccountID, ctx.Region, newNames); err != nil {
+	if err := p.saveTopicNames(goCtx, target.AccountID, target.Region, newNames); err != nil {
 		return nil, fmt.Errorf("sns deleteTopic saveTopicNames: %w", err)
 	}
 
@@ -318,10 +340,12 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	topicARN := req.Params["TopicArn"]
-	name := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
-	t, err := p.loadTopic(context.Background(), ctx.AccountID, ctx.Region, name)
+	t, err := p.loadTopic(context.Background(), target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -363,13 +387,15 @@ func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SNSPlugin) setTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	topicARN := req.Params["TopicArn"]
-	name := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 	attrName := req.Params["AttributeName"]
 	attrValue := req.Params["AttributeValue"]
 
 	goCtx := context.Background()
-	t, err := p.loadTopic(goCtx, ctx.AccountID, ctx.Region, name)
+	t, err := p.loadTopic(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -462,9 +488,18 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, &AWSError{Code: "InvalidParameter", Message: "TopicArn and Protocol are required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	topicName := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(topicARN)
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	topicName := target.Name
 	subID := generateSNSSubID()
-	subARN := snsSubscriptionARN(ctx.Region, ctx.AccountID, topicName, subID)
+	// The subscription ARN is minted under the account and Region of the topic, because a
+	// subscription ARN is the topic's ARN with the subscription's identifier appended — its account
+	// segment is the topic's, not the subscriber's. The record and the two indexes below stay keyed by
+	// the caller, per the note in sns_tags.go: a cross-account subscription is not modeled, and
+	// moving them would leave Publish reading an index the subscriptions are not in.
+	subARN := snsSubscriptionARN(target.Region, target.AccountID, topicName, subID)
 
 	sub := &SNSSubscription{
 		ARN:       subARN,
@@ -481,21 +516,21 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 
 	// Add to per-topic and global lists.
-	allIDs, err := p.loadSubIDs(goCtx, p.subIDsKey(ctx.AccountID, ctx.Region))
+	allIDs, err := p.loadSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region))
 	if err != nil {
 		return nil, err
 	}
 	allIDs = append(allIDs, subARN)
-	if err := p.saveSubIDs(goCtx, p.subIDsKey(ctx.AccountID, ctx.Region), allIDs); err != nil {
+	if err := p.saveSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region), allIDs); err != nil {
 		return nil, fmt.Errorf("sns subscribe saveSubIDs all: %w", err)
 	}
 
-	topicIDs, err := p.loadSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName))
+	topicIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName))
 	if err != nil {
 		return nil, err
 	}
 	topicIDs = append(topicIDs, subARN)
-	if err := p.saveSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName), topicIDs); err != nil {
+	if err := p.saveSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName), topicIDs); err != nil {
 		return nil, fmt.Errorf("sns subscribe saveSubIDs topic: %w", err)
 	}
 
@@ -536,10 +571,10 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		})
 	}
 
-	_ = p.state.Delete(goCtx, snsNamespace, p.subKey(ctx.AccountID, ctx.Region, subARN))
+	_ = p.state.Delete(goCtx, snsNamespace, snsSubStateKey(ctx.AccountID, ctx.Region, subARN))
 
 	// Remove from global list.
-	allIDs, err := p.loadSubIDs(goCtx, p.subIDsKey(ctx.AccountID, ctx.Region))
+	allIDs, err := p.loadSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region))
 	if err != nil {
 		return nil, err
 	}
@@ -549,11 +584,17 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			newAll = append(newAll, id)
 		}
 	}
-	_ = p.saveSubIDs(goCtx, p.subIDsKey(ctx.AccountID, ctx.Region), newAll)
+	_ = p.saveSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region), newAll)
 
-	// Remove from per-topic list.
-	topicName := snsNameFromARN(sub.TopicARN)
-	topicIDs, err := p.loadSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName))
+	// Remove from per-topic list. The topic name comes from the stored subscription's own TopicArn,
+	// which substrate minted, so the parse cannot fail on a caller's input — but it is parsed rather
+	// than string-scanned so there is one producer of a topic name in this file (#925).
+	topicTarget, arnErr := snsParseTopicARN(sub.TopicARN)
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	topicName := topicTarget.Name
+	topicIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName))
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +604,7 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			newTopic = append(newTopic, id)
 		}
 	}
-	_ = p.saveSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName), newTopic)
+	_ = p.saveSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName), newTopic)
 
 	type response struct {
 		XMLName          xml.Name         `xml:"UnsubscribeResponse"`
@@ -578,7 +619,7 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 func (p *SNSPlugin) listSubscriptions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
-	allIDs, err := p.loadSubIDs(goCtx, p.subIDsKey(ctx.AccountID, ctx.Region))
+	allIDs, err := p.loadSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region))
 	if err != nil {
 		return nil, err
 	}
@@ -586,11 +627,13 @@ func (p *SNSPlugin) listSubscriptions(ctx *RequestContext, req *AWSRequest) (*AW
 }
 
 func (p *SNSPlugin) listSubscriptionsByTopic(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	topicARN := req.Params["TopicArn"]
-	topicName := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	goCtx := context.Background()
-	topicIDs, err := p.loadSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName))
+	topicIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, target.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -717,18 +760,21 @@ func (p *SNSPlugin) setSubscriptionAttributes(ctx *RequestContext, req *AWSReque
 }
 
 func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	topicARN := req.Params["TopicArn"]
 	message := req.Params["Message"]
 	subject := req.Params["Subject"]
 
-	topicName := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	topicName := target.Name
 
 	// Parse message attributes from request params (MessageAttributes.entry.N.*).
 	msgAttrs := parseSNSMessageAttributes(req.Params)
 
 	// Fan out to subscriptions.
 	goCtx := context.Background()
-	subIDs, err := p.loadSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName))
+	subIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName))
 	if err != nil {
 		return nil, err
 	}
@@ -901,11 +947,13 @@ func matchesSNSFilterPolicy(policy map[string]interface{}, msgAttrs map[string]s
 }
 
 func (p *SNSPlugin) publishBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	topicARN := req.Params["TopicArn"]
-	topicName := snsNameFromARN(topicARN)
+	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	goCtx := context.Background()
-	subIDs, err := p.loadSubIDs(goCtx, p.subTopicIDsKey(ctx.AccountID, ctx.Region, topicName))
+	subIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, target.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -978,36 +1026,40 @@ func (p *SNSPlugin) removePermission(ctx *RequestContext, _ *AWSRequest) (*AWSRe
 
 func (p *SNSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceArn"]
-	topicName := snsNameFromARN(resourceARN)
+	target, arnErr := snsParseTopicARN(resourceARN)
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	goCtx := context.Background()
-	t, err := p.loadTopic(goCtx, ctx.AccountID, ctx.Region, topicName)
+	t, err := p.loadTopic(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if t == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Resource not found", HTTPStatus: http.StatusNotFound}
+		return nil, snsTopicNotFound(resourceARN)
 	}
 
-	for i := 1; ; i++ {
-		k := req.Params[fmt.Sprintf("Tags.member.%d.Key", i)]
-		v := req.Params[fmt.Sprintf("Tags.member.%d.Value", i)]
-		if k == "" {
-			break
-		}
-		// Merge tag.
+	for _, tag := range snsTagParams(req.Params) {
+		// Replace an existing value rather than appending a second entry for the key. AWS states
+		// "if the tag key already exists, the tag value is replaced".
 		found := false
 		for idx, existing := range t.Tags {
-			if existing.Key == k {
-				t.Tags[idx].Value = v
+			if existing.Key == tag.Key {
+				t.Tags[idx].Value = tag.Value
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Tags = append(t.Tags, SNSTag{Key: k, Value: v})
+			t.Tags = append(t.Tags, tag)
 		}
 	}
+	// Ordered by key, so a topic's tags read back the same however they were written. SNS's own merge
+	// is already deterministic — it walks indexed parameters, not a Go map — but the Resource Groups
+	// Tagging API's arm emits key-sorted order (#862), and without this one topic's tags came back in
+	// two different orders depending on which API was asked.
+	sortTagsByKey(t.Tags, func(tag SNSTag) string { return tag.Key })
 
 	if err := p.saveTopic(goCtx, t); err != nil {
 		return nil, fmt.Errorf("sns tagResource saveTopic: %w", err)
@@ -1026,24 +1078,23 @@ func (p *SNSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 func (p *SNSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceArn"]
-	topicName := snsNameFromARN(resourceARN)
+	target, arnErr := snsParseTopicARN(resourceARN)
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
 	goCtx := context.Background()
-	t, err := p.loadTopic(goCtx, ctx.AccountID, ctx.Region, topicName)
+	t, err := p.loadTopic(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if t == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Resource not found", HTTPStatus: http.StatusNotFound}
+		return nil, snsTopicNotFound(resourceARN)
 	}
 
 	removeKeys := make(map[string]bool)
-	for i := 1; ; i++ {
-		k := req.Params[fmt.Sprintf("TagKeys.member.%d", i)]
-		if k == "" {
-			break
-		}
-		removeKeys[k] = true
+	for _, key := range snsTagKeyParams(req.Params) {
+		removeKeys[key] = true
 	}
 
 	newTags := make([]SNSTag, 0, len(t.Tags))
@@ -1071,14 +1122,17 @@ func (p *SNSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 func (p *SNSPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceArn"]
-	topicName := snsNameFromARN(resourceARN)
+	target, arnErr := snsParseTopicARN(resourceARN)
+	if arnErr != nil {
+		return nil, arnErr
+	}
 
-	t, err := p.loadTopic(context.Background(), ctx.AccountID, ctx.Region, topicName)
+	t, err := p.loadTopic(context.Background(), target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if t == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Resource not found", HTTPStatus: http.StatusNotFound}
+		return nil, snsTopicNotFound(resourceARN)
 	}
 
 	type tagEntry struct {
@@ -1099,6 +1153,9 @@ func (p *SNSPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 	for i, tag := range t.Tags {
 		tags[i] = tagEntry{Key: tag.Key, Value: tag.Value} //nolint:staticcheck
 	}
+	// Sorted on the way out as well as on the way in, so a record written by the Resource Groups
+	// Tagging API's arm — or by an earlier substrate that did not sort — reads back in one order.
+	sortTagsByKey(tags, func(tag tagEntry) string { return tag.Key })
 	return snsXMLResponse(http.StatusOK, response{
 		Xmlns:                     snsXMLNS,
 		ListTagsForResourceResult: result{Tags: tags},
@@ -1125,12 +1182,6 @@ func snsXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 
 // --- Utility ---
 
-// snsNameFromARN extracts the topic name from an SNS topic ARN.
-// ARN format: arn:aws:sns:{region}:{account}:{name}.
-func snsNameFromARN(arn string) string {
-	parts := strings.Split(arn, ":")
-	if len(parts) >= 6 {
-		return parts[len(parts)-1]
-	}
-	return arn
-}
+// The topic name no longer comes from a string scan. [snsParseTopicARN] in sns_tags.go is the one
+// producer, and it takes no *RequestContext, so the account and Region come from the ARN at every one
+// of the ten operations that used to take them from the caller (#925).

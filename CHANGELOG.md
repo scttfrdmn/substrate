@@ -250,6 +250,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writable — the developer guide says you may not tag one, and substrate models no
   `KMSInvalidStateException` at either arm, which is recorded on #922 rather than left silent.
 
+- **The Resource Groups Tagging API reaches an SNS topic** (part of #835). A topic ARN answered an
+  `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm while SNS's
+  own `TagResource` wrote the tag, so a tag was writable through one API and invisible to the other.
+  The fourth of the eleven rows of #835; seven remain.
+
+  SNS sits on the truncated part of the tagging guide's welcome-page list of services `TagResources`
+  and `UntagResources` support, so its write half was unlisted rather than refused, while the same
+  page's "the `GetResources`, `GetTagKeys`, and `GetTagValues` operations support all resource types"
+  settles the read half unconditionally. Unlike KMS there is no boundary to carve out: **no
+  cross-account statement appears on any of SNS's three tagging pages**, so nothing is refused that
+  the ARN's own account and Region do not already refuse by construction.
+
+  The row is the same three parts as ACM's, CloudFront's and KMS's — a resolver arm, a merge arm and
+  a scanner — and the resolver is the same context-free parser SNS's own ten `TopicArn`/`ResourceArn`
+  operations now use, so neither API can address a topic the other would not. #765's
+  cross-readability criterion is asserted by reading every tag back through SNS's own
+  `ListTagsForResource`, and in the other direction by writing through SNS and reading through
+  `GetResources`.
+
+  The merge reuses `mergeRecordTagListTags` for its array-shaped tags member, spelled `Key`/`Value`
+  as AWS's `Tag` shape has it — KMS's `TagKey`/`TagValue` remains the one exception, which is why
+  the helper takes both field names as parameters. Both arms re-emit the list **sorted by key**, per
+  #862, so the two APIs agree on order as well as on content.
+
+  The guard in front of it tests a **colon-terminated** prefix, the fourth namespace to need one:
+  `topic` is a prefix of `topic_names`, whose value is a JSON array of names that a bare-prefix test
+  would report taggable and a merge would leave looking like a record. Only the topic record stores
+  tags; the subscription record and the two subscription indexes are refused.
+
+  Account isolation here is emergent rather than guarded, as ACM's and KMS's read half are: the
+  resolver builds an account- and Region-qualified state key, so a foreign-account ARN builds a key
+  nothing is stored at and the merge fails "resource not found". Deliberately left alone: SNS's
+  response XML emits `<Value>` before `<Key>` where substrate emits `<Key>` first, and the 10 TPS
+  limit AWS documents for the three tagging actions is not modeled.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -262,6 +297,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **An SNS `TopicArn` resolves to the topic its own ARN names, in the account and Region the ARN
+  names** (#925). `snsNameFromARN` split the identifier on `:` and returned the **last** segment, and
+  its callers then keyed the load *and the store* by the caller's own `AccountID` and Region. Three
+  defects compounded across ten operations — `DeleteTopic`, `GetTopicAttributes`,
+  `SetTopicAttributes`, `Subscribe`, `Unsubscribe`, `ListSubscriptionsByTopic`, `Publish`,
+  `PublishBatch`, `TagResource`, `UntagResource` and `ListTagsForResource`:
+
+  1. `arn:aws:sns:eu-west-1:999988887777:orders` presented by a `us-east-1` caller in account
+     `111122223333` addressed **that caller's own** topic named `orders`. `UntagResource` is the
+     damaging direction and answered `200` while stripping tags from it; `Publish` published to the
+     wrong topic and `DeleteTopic` deleted it. This is the rule #826 established for SQS and
+     DynamoDB, #845 carried through the tagging API's resolver, and #910, #918 and #922 applied to
+     Step Functions, CloudFront and KMS: the account and Region come from the ARN, never from the
+     request context. The resolver takes no `*RequestContext` at all, so the rule is structural
+     rather than something ten call sites have to remember.
+  2. A subscription ARN is `arn:aws:sns:{region}:{account}:{topic}:{sub-id}`, so its last segment is
+     the subscription's own identifier — which was returned as a topic name. An SNS topic ARN carries
+     no type keyword and no separator before the name: the resource portion *is* the name, so the
+     anchored-segment rule of #910 has nothing to anchor on. The discriminator the shape does offer is
+     the colon, and a resource portion containing one names a subscription and not a topic.
+  3. The length guard fell through to returning its argument, so any string at all — `arn:aws:sns`, a
+     bare name, a URL — became a topic name and was looked up rather than refused. A malformed ARN is
+     now `InvalidParameter`/400, which every one of those operations publishes.
+
+  A `Subscribe` against a topic in another account or Region now mints its subscription ARN under
+  **the topic's** account and Region rather than the caller's, so the ARN it hands back addresses the
+  topic it subscribed to. `DeleteTopic` removes the owning Region's name-index entry rather than the
+  caller's.
+
+  Two tagging defects in the same pass. SNS's reference names its members `Tags.member.N` and
+  `TagKeys.member.N`, but AWS's own request examples on those same pages wire `Tags.Tag.1.Key`,
+  `Tags.Tag.1.Value` and `TagKeys.TagKey.1`; substrate decoded only the first form, so a caller
+  following the example got `200` with nothing written or nothing removed. **Both spellings are
+  accepted**, because the reference and its example disagree and a caller may reasonably have
+  followed either. `CreateTopic`'s `Tags` parameter was decoded by nobody and is now applied at
+  creation. The three tag operations answer **`ResourceNotFound`**/404, which they publish, rather
+  than the plain `NotFound` substrate used — the status was right and the code name was one no SDK
+  models. The topic operations keep `NotFound`, which is what *they* publish.
+
+  Deliberately unchanged: the subscription record and the account-wide and per-topic subscription
+  indexes stay keyed by the calling account. A cross-account subscription is not modeled at all —
+  nothing mints one and no operation distinguishes a subscriber's account from a topic's — so moving
+  those three would put the index under an account the subscriptions substrate does have are not
+  stored in, and `Publish` would silently stop delivering. The topic *record* is what an ARN
+  addresses, and it is the record tags live on. That `Publish`, `PublishBatch` and `Subscribe` never
+  load the topic at all, and so succeed against one that does not exist where AWS answers `NotFound`,
+  is a separate defect and is filed as #926.
+
 - **A KMS `KeyId` resolves to the key its own ARN names, in the account and Region the ARN names**
   (#922). `KMSPlugin.resolveKeyID` split the identifier on `/` and returned the **last** component,
   and its eighteen callers then keyed the load *and the store* by the caller's own `AccountID` and
