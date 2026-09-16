@@ -192,9 +192,39 @@ func matchesResourceType(arn, filter string) bool {
 		// Service-only filter (e.g. "s3") — match all resources of that service.
 		return true
 	}
-	// Service:type filter (e.g. "ec2:instance") — match resource type prefix.
-	rtype := filterParts[1]
-	return strings.HasPrefix(resource, rtype+"/") || strings.HasPrefix(resource, rtype)
+	// Service:type filter (e.g. "ec2:instance") — the type must be the ARN's own type segment.
+	return arnResourceTypeSegment(resource) == filterParts[1]
+}
+
+// arnResourceTypeSegment returns the resource-type segment of an ARN's resource portion, or the
+// whole portion when it embeds no type.
+//
+// AWS states that a ResourceTypeFilters entry of "ec2:instance" "returns only EC2 instances", and
+// that "[t]he string for each service name and resource type is the same as that embedded in a
+// resource's Amazon Resource Name (ARN)" (GetResources). Matching an unanchored prefix instead — as
+// this did before #936 — broke the first sentence in both directions: "ecs:task" selected a
+// task-definition/… ARN, and "apigateway:restapis" selected nothing at all, because API Gateway's
+// resource portion begins with a slash.
+//
+// So the type is delimited by the ARN itself, which is #910's anchored-segment rule applied to the
+// one comparison whose left-hand side comes from the caller. Four shapes occur across the services
+// substrate scans, and one leading slash is stripped before the segment is taken:
+//
+//	instance/i-abc          -> instance
+//	stateMachine:hello      -> stateMachine
+//	task-definition/fam:3   -> task-definition
+//	/restapis/abc123        -> restapis
+//	my-bucket               -> my-bucket    (S3 embeds no type)
+//
+// The last row is why the whole portion is returned rather than the empty string: a service whose
+// ARNs carry no type can still be named by a service-only filter, and returning "" here would make
+// an empty type string match it.
+func arnResourceTypeSegment(resource string) string {
+	resource = strings.TrimPrefix(resource, "/")
+	if i := strings.IndexAny(resource, "/:"); i >= 0 {
+		return resource[:i]
+	}
+	return resource
 }
 
 // tagFiltersMatch returns true when all tag filters match the resource's tags.
@@ -249,6 +279,9 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "states", scan: p.scanStepFunctionsActivities},
 		{typePrefix: "ecr", scan: p.scanECRRepositories},
 		{typePrefix: "ecs", scan: p.scanECSClusters},
+		{typePrefix: "ecs", scan: p.scanECSServices},
+		{typePrefix: "ecs", scan: p.scanECSTasks},
+		{typePrefix: "ecs", scan: p.scanECSTaskDefinitions},
 		{typePrefix: "cognito-idp", scan: p.scanCognitoUserPools},
 		{typePrefix: "kinesis", scan: p.scanKinesisStreams},
 		{typePrefix: "rds", scan: p.scanRDSInstances},
@@ -556,10 +589,26 @@ func (p *TaggingPlugin) scanECRRepositories(_ context.Context, reqCtx *RequestCo
 	return out, nil
 }
 
+// ecsScanPrefix returns the state-key prefix that selects one ECS resource type in the caller's
+// account and Region.
+//
+// Every ECS scanner goes through it, so the four cannot disagree about scope. That matters more here
+// than in a single-type namespace: scanECSClusters used to prefix by account alone, so a caller in
+// us-west-2 was reported a us-east-1 cluster while the same caller's services — keyed identically —
+// would have been Region-scoped. One service answering a caller two different ways about one
+// namespace is worse than either answer, and GetResources' own opening sentence settles which is
+// right: it "[r]eturns all the tagged or previously tagged resources that are located in the
+// specified AWS Region for the account".
+//
+// The same Region blindness remains in fourteen other scanners and a cross-account variant in three,
+// tracked in #937 rather than fixed piecemeal here.
+func ecsScanPrefix(typePrefix string, reqCtx *RequestContext) string {
+	return typePrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+}
+
 func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "cluster:" + reqCtx.AccountID + "/"
-	keys, err := p.state.List(goCtx, ecsNamespace, prefix)
+	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsClusterKeyPrefix, reqCtx))
 	if err != nil {
 		return nil, fmt.Errorf("list ecs clusters: %w", err)
 	}
@@ -576,6 +625,103 @@ func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContex
 		out = append(out, resourceTagMapping{
 			ResourceARN: cluster.ClusterArn,
 			Tags:        ecsTagsToTaggingTags(cluster.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanECSServices reports every ECS service in the caller's account and Region, with its tags.
+//
+// Without it a service was taggable through TagResources — mergeResourceTags' ecs arm has reached
+// one since #765, and ecsTagStateKey resolves its ARN — and invisible to a caller discovering
+// resources. That asymmetry is what each row of #835 closes: a tag the tagging API writes and the
+// tagging API cannot find is a tag no consumer can audit.
+func (p *TaggingPlugin) scanECSServices(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsServiceKeyPrefix, reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("list ecs services: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ecsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var svc ECSService
+		if err := json.Unmarshal(raw, &svc); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: svc.ServiceArn,
+			Tags:        ecsTagsToTaggingTags(svc.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanECSTasks reports every ECS task in the caller's account and Region, with its tags.
+//
+// A task is not one of the two types #835's table names, and it is in scope with them anyway:
+// ecsTagStateKey already resolves a task ARN, so the tagging API can write a tag there today, and
+// AWS lists tasks first among the taggable ECS resources — "There are multiple ways that Amazon ECS
+// tasks, services, task definitions, and clusters are tagged" (Tagging Amazon ECS resources). A row
+// that left it out would leave the same asymmetry the row exists to close.
+func (p *TaggingPlugin) scanECSTasks(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsTaskKeyPrefix, reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("list ecs tasks: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ecsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var task ECSTask
+		if err := json.Unmarshal(raw, &task); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: task.TaskArn,
+			Tags:        ecsTagsToTaggingTags(task.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanECSTaskDefinitions reports every ECS task-definition revision in the caller's account and
+// Region, with its tags.
+//
+// Every revision is reported, not just the family's newest, because each is a resource with its own
+// ARN and its own tags: RegisterTaskDefinition accepts tags per revision, and ecsTagStateKey splits
+// a "{family}:{revision}" ARN to reach exactly one of them. Reporting only the newest would hide a
+// tag the tagging API itself had written.
+//
+// A revision whose status is INACTIVE is reported too. AWS's tagging page says nothing about
+// deregistration, and a deregistered revision keeps its ARN and remains describable, so omitting it
+// would be substrate inventing a rule; the honest reading is that a resource which still answers
+// DescribeTaskDefinition is still a resource.
+func (p *TaggingPlugin) scanECSTaskDefinitions(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsTaskDefKeyPrefix, reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("list ecs task definitions: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ecsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var td ECSTaskDefinition
+		if err := json.Unmarshal(raw, &td); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: td.TaskDefinitionArn,
+			Tags:        ecsTagsToTaggingTags(td.Tags),
 		})
 	}
 	return out, nil
@@ -2093,7 +2239,10 @@ func ec2TagsToTaggingTags(tags []EC2Tag) []taggingTag {
 	return out
 }
 
-// ecsTagsToTaggingTags converts []ECSTag to []taggingTag.
+// ecsTagsToTaggingTags converts []ECSTag to []taggingTag, ordered by key.
+//
+// The sort is here rather than at each of the four call sites so no ECS scanner can report an order
+// that depends on the order tags happened to be written in, per #862.
 func ecsTagsToTaggingTags(tags []ECSTag) []taggingTag {
 	if len(tags) == 0 {
 		return nil
@@ -2102,6 +2251,7 @@ func ecsTagsToTaggingTags(tags []ECSTag) []taggingTag {
 	for i, t := range tags {
 		out[i] = taggingTag{Key: t.Key, Value: t.Value} //nolint:staticcheck
 	}
+	sortTagsByKey(out, func(t taggingTag) string { return t.Key })
 	return out
 }
 
