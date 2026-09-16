@@ -94,11 +94,14 @@ func TestKMSPlugin_DescribeKey(t *testing.T) {
 	meta2 := body["KeyMetadata"].(map[string]interface{})
 	assert.Equal(t, keyID, meta2["KeyId"])
 
-	// Non-existent key.
+	// Non-existent key. The status is 400, which is what API_DescribeKey publishes for
+	// NotFoundException; this read 404 until #923. The code is asserted alongside it, because a
+	// status alone was what let the wrong one stand for as long as it did.
 	resp2 := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{
 		"KeyId": "00000000-0000-0000-0000-000000000000",
 	})
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp2.StatusCode)
+	assert.Equal(t, "NotFoundException", readKMSBody(t, resp2)["__type"])
 }
 
 func TestKMSPlugin_EncryptDecrypt(t *testing.T) {

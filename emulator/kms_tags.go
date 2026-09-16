@@ -28,7 +28,6 @@ package emulator
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -159,9 +158,9 @@ func kmsParseARN(arn string) (target kmsTagTarget, resType string, err *AWSError
 // NotFoundException rather than InvalidArnException — the ARN is well formed and there is simply no
 // key of that name.
 //
-// The status is 400. All three KMS tagging operations publish NotFoundException at HTTP 400, not
-// 404. Fifteen pre-existing KMS sites answer it at 404 and are left alone here, filed as #923 so one
-// diff does not carry both a resolution fix and a status change — the split #921 took for ACM.
+// The refusal is built by [kmsNotFound], which is the one place the status is chosen; #923 brought
+// the fifteen sites that answered 404 there too, so the package no longer disagrees with itself
+// about what a missing KMS resource is worth. See kms_errors.go for why no KMS refusal is a 404.
 func kmsParseKeyARN(arn string) (kmsTagTarget, *AWSError) {
 	target, resType, err := kmsParseARN(arn)
 	if err != nil {
@@ -172,11 +171,7 @@ func kmsParseKeyARN(arn string) (kmsTagTarget, *AWSError) {
 		if resType == kmsAliasResourceType {
 			detail = fmt.Sprintf("an alias ARN does not name a key: %s", arn)
 		}
-		return kmsTagTarget{}, &AWSError{
-			Code:       "NotFoundException",
-			Message:    detail,
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return kmsTagTarget{}, kmsNotFound(detail)
 	}
 	return target, nil
 }
@@ -220,20 +215,6 @@ func kmsRequireLocal(reqCtx *RequestContext, target kmsTagTarget, operation stri
 	if target.AccountID == reqCtx.AccountID && target.Region == reqCtx.Region {
 		return nil
 	}
-	return &AWSError{
-		Code: "NotFoundException",
-		Message: fmt.Sprintf("%s cannot reach a KMS key in %s/%s from %s/%s", operation,
-			target.AccountID, target.Region, reqCtx.AccountID, reqCtx.Region),
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// kmsInvalidARN reports that an ARN is not one KMS accepts, naming the reason so a caller can tell
-// a wrong service from a wrong resource type.
-func kmsInvalidARN(arn, reason string) *AWSError {
-	return &AWSError{
-		Code:       "InvalidArnException",
-		Message:    fmt.Sprintf("the ARN %q is not valid: %s", arn, reason),
-		HTTPStatus: http.StatusBadRequest,
-	}
+	return kmsNotFound(fmt.Sprintf("%s cannot reach a KMS key in %s/%s from %s/%s", operation,
+		target.AccountID, target.Region, reqCtx.AccountID, reqCtx.Region))
 }

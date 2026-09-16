@@ -9004,12 +9004,58 @@ resolution fails on. Mapping the prohibition onto `NotFoundException` is
 substrate's reading: AWS publishes the prohibition and the code but does not join
 them.
 
-Two things this deliberately leaves alone, so the residue is recorded rather than
-discovered. The other fifteen `KeyId` operations do not enforce the Region, so
+One thing this deliberately leaves alone, so the residue is recorded rather than
+discovered: the other fifteen `KeyId` operations do not enforce the Region, so
 `DescribeKey` on a foreign-Region key ARN answers with that key — strictly better
 than describing a local impostor, but real KMS would refuse, and AWS publishes no
-per-operation statement to cite for the other fifteen. And `NotFoundException` is
-answered at HTTP 404 where all three tagging operations publish **400** (#923).
+per-operation statement to cite for the other fifteen.
+
+### Every KMS refusal is a 400, because KMS publishes no 404
+
+Across every KMS operation substrate models, AWS's reference publishes exactly two
+HTTP statuses: **500** for `DependencyTimeoutException`, `KMSInternalException` and
+`KeyUnavailableException`, and **400** for everything else. There is no 404 for a
+missing key, alias or destination key on any operation. The only 404 anywhere in
+KMS's documentation is `UnknownOperationException` on the common-errors page, which
+reports that the *action name* was not recognised — a different failure entirely.
+
+So a KMS status carries nothing a caller can branch on, and the **code** is the
+whole signal. Substrate answered three codes at a status KMS does not publish, and
+one of the three was not a KMS code at all (#923):
+
+| Code | Was | Is | Sites | Provenance |
+|------|-----|----|-------|------------|
+| `NotFoundException` | 404 | **400** | 15 | Every operation that can answer it — *"The request was rejected because the specified entity or resource could not be found"* |
+| `DisabledException` | 409 | **400** | 3 | `API_Encrypt`, `API_Decrypt`, `API_GenerateDataKey` — *"The request was rejected because the specified KMS key is not enabled"* |
+| `InvalidRequest` | 400 | **`ValidationError`**/400 | 21 | The string appears on no KMS page at all; `ValidationError` is the common error — *"The input doesn't meet the required format or constraints"* |
+
+`ValidationError` rather than `TagException` for the unparseable-body guard: both
+are 400, but `TagException` is glossed *"one or more tags are not valid"* — the
+content of a `Tags` member — and eighteen of those twenty-one operations take no
+tags. `MalformedHttpRequestException` is the other near miss and is also declined:
+its published scope is the transport layer, *"when the request body can't be
+decompressed using the specified content encoding algorithm"*, and a body that
+decompressed and then failed to parse is not that. Note that KMS spells the common
+error `ValidationError`, with no `Exception` suffix, unlike most JSON-protocol
+services; `SerializationException` and `ValidationException` appear nowhere in its
+documentation, so answering either would repeat the defect.
+
+Every code is now constructed by one helper per code, so a status is chosen once
+rather than at each of the thirty-nine call sites that answered it — the
+arrangement Systems Manager arrived at in #933 from the other direction.
+
+The full published surface, for a caller deciding what to branch on:
+
+| Status | Codes |
+|--------|-------|
+| 400 | `NotFoundException`, `DisabledException`, `InvalidArnException`, `KMSInvalidStateException`, `InvalidCiphertextException`, `IncorrectKeyException`, `InvalidKeyUsageException`, `InvalidGrantTokenException`, `LimitExceededException`, `TagException`, `AlreadyExistsException`, `InvalidAliasNameException`, `MalformedPolicyDocumentException`, `UnsupportedOperationException`, `DryRunOperationException`, `ValidationError`, `ThrottlingException` |
+| 500 | `DependencyTimeoutException`, `KMSInternalException`, `KeyUnavailableException` |
+
+One adjacent gap is named rather than closed: `API_EnableKeyRotation` and
+`API_DisableKeyRotation` also publish `DisabledException`, and substrate's two
+handlers do not check whether the key is enabled — they answer 200 on a disabled
+key. That is a missing refusal rather than a wrong status, so it is filed
+separately.
 
 ### A key is reachable through the tagging API
 

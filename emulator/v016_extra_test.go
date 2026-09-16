@@ -1086,11 +1086,13 @@ func TestKMSPlugin_DeleteAlias(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Now describe via alias should fail.
+	// Now describe via alias should fail — at 400, which is the status API_DescribeKey publishes
+	// for NotFoundException. This read 404 until #923.
 	resp2 := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{
 		"KeyId": "alias/to-delete",
 	})
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp2.StatusCode)
+	assert.Equal(t, "NotFoundException", readKMSBody(t, resp2)["__type"])
 }
 
 func TestKMSPlugin_UpdateAlias(t *testing.T) {

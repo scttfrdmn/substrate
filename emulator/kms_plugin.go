@@ -225,11 +225,8 @@ func (p *KMSPlugin) resolveKeyTarget(ctx context.Context, reqCtx *RequestContext
 			return target, nil
 		}
 		if resType != kmsAliasResourceType {
-			return kmsTagTarget{}, &AWSError{
-				Code:       "NotFoundException",
-				Message:    fmt.Sprintf("KMS resource type %q does not name a key: %s", resType, keyID),
-				HTTPStatus: http.StatusBadRequest,
-			}
+			return kmsTagTarget{}, kmsNotFound(
+				fmt.Sprintf("KMS resource type %q does not name a key: %s", resType, keyID))
 		}
 		// An alias ARN names an alias in the account and Region the ARN carries, so the pointer
 		// is read from there — not from the caller's account, which is what let an alias ARN
@@ -285,7 +282,7 @@ func (p *KMSPlugin) followAlias(ctx context.Context, accountID, region, aliasNam
 		return "", fmt.Errorf("kms followAlias lookup: %w", err)
 	}
 	if data == nil {
-		return "", &AWSError{Code: "NotFoundException", Message: "alias not found: " + aliasName, HTTPStatus: http.StatusNotFound}
+		return "", kmsNotFound("alias not found: " + aliasName)
 	}
 	return string(data), nil
 }
@@ -362,7 +359,7 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -377,7 +374,7 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 
 	out := map[string]interface{}{
@@ -462,7 +459,7 @@ func (p *KMSPlugin) enableKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	return p.setKeyState(ctx, input.KeyID, "Enabled", true)
 }
@@ -472,7 +469,7 @@ func (p *KMSPlugin) disableKey(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	return p.setKeyState(ctx, input.KeyID, "Disabled", false)
 }
@@ -489,7 +486,7 @@ func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, e
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	key.KeyState = state
 	key.Enabled = enabled
@@ -505,7 +502,7 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 		PendingWindowInDays int    `json:"PendingWindowInDays"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -518,7 +515,7 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	days := input.PendingWindowInDays
 	if days <= 0 {
@@ -543,7 +540,7 @@ func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AW
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	return p.setKeyState(ctx, input.KeyID, "Enabled", true)
 }
@@ -554,7 +551,7 @@ func (p *KMSPlugin) getKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		PolicyName string `json:"PolicyName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -585,7 +582,7 @@ func (p *KMSPlugin) putKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		Policy     string `json:"Policy"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -604,7 +601,7 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -617,7 +614,7 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	out := map[string]interface{}{
 		"KeyRotationEnabled": key.RotationEnabled,
@@ -630,7 +627,7 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -643,7 +640,7 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	key.RotationEnabled = true
 	if err := p.saveKey(goCtx, key); err != nil {
@@ -657,7 +654,7 @@ func (p *KMSPlugin) disableKeyRotation(ctx *RequestContext, req *AWSRequest) (*A
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -670,7 +667,7 @@ func (p *KMSPlugin) disableKeyRotation(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	key.RotationEnabled = false
 	if err := p.saveKey(goCtx, key); err != nil {
@@ -685,7 +682,7 @@ func (p *KMSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		Tags  []KMSTag `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -701,7 +698,7 @@ func (p *KMSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	tagMap := make(map[string]string, len(key.Tags))
 	for _, t := range key.Tags {
@@ -734,7 +731,7 @@ func (p *KMSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		TagKeys []string `json:"TagKeys"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -750,7 +747,7 @@ func (p *KMSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	removeSet := make(map[string]bool, len(input.TagKeys))
 	for _, k := range input.TagKeys {
@@ -774,7 +771,7 @@ func (p *KMSPlugin) listResourceTags(ctx *RequestContext, req *AWSRequest) (*AWS
 		KeyID string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -790,7 +787,7 @@ func (p *KMSPlugin) listResourceTags(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	// Sorted on the way out as well as on the way in, because a record written before the merge
 	// above started sorting still holds its tags in whatever order it was stored in.
@@ -810,7 +807,7 @@ func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		TargetKeyID string `json:"TargetKeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	if !strings.HasPrefix(input.AliasName, "alias/") {
 		input.AliasName = "alias/" + input.AliasName
@@ -842,7 +839,7 @@ func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		AliasName string `json:"AliasName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	if !strings.HasPrefix(input.AliasName, "alias/") {
 		input.AliasName = "alias/" + input.AliasName
@@ -873,7 +870,7 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		TargetKeyID string `json:"TargetKeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 	if !strings.HasPrefix(input.AliasName, "alias/") {
 		input.AliasName = "alias/" + input.AliasName
@@ -968,7 +965,7 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		Plaintext string `json:"Plaintext"` // base64-encoded
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -982,10 +979,10 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	if !key.Enabled {
-		return nil, &AWSError{Code: "DisabledException", Message: "Key is disabled", HTTPStatus: http.StatusConflict}
+		return nil, kmsKeyDisabled(keyID)
 	}
 
 	plaintext, err := base64.StdEncoding.DecodeString(input.Plaintext)
@@ -1007,7 +1004,7 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		KeyID          string `json:"KeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 
 	keyID, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
@@ -1025,10 +1022,10 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	if !key.Enabled {
-		return nil, &AWSError{Code: "DisabledException", Message: "Key is disabled", HTTPStatus: http.StatusConflict}
+		return nil, kmsKeyDisabled(keyID)
 	}
 
 	out := map[string]interface{}{
@@ -1045,7 +1042,7 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		NumberOfBytes int    `json:"NumberOfBytes"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -1059,10 +1056,10 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 	if !key.Enabled {
-		return nil, &AWSError{Code: "DisabledException", Message: "Key is disabled", HTTPStatus: http.StatusConflict}
+		return nil, kmsKeyDisabled(keyID)
 	}
 
 	// Generate a stub 32-byte data key.
@@ -1086,7 +1083,7 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 		KeySpec string `json:"KeySpec"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -1100,7 +1097,7 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 		return nil, err
 	}
 	if key == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Key not found")
 	}
 
 	dataKeyHex := randomHex(16)
@@ -1119,7 +1116,7 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		DestinationKeyID string `json:"DestinationKeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, kmsInvalidBody()
 	}
 
 	_, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
@@ -1138,7 +1135,7 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, loadErr
 	}
 	if destKey == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Destination key not found", HTTPStatus: http.StatusNotFound}
+		return nil, kmsNotFound("Destination key not found")
 	}
 
 	newCiphertext := kmsEncryptStub(destKeyID, plaintext)
