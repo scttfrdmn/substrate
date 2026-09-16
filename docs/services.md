@@ -9287,6 +9287,36 @@ Only the certificate record stores tags. The `cert_arns:` index lives in the sam
 a JSON array of ARN strings, so the merge sits behind a guard whose prefix is tested
 colon-terminated — `cert` alone matches `cert_arns` too.
 
+### A `CertificateArn` is refused in three tiers, all at HTTP 400
+
+Every code ACM publishes on the five operations that take a `CertificateArn` —
+`DescribeCertificate`, `DeleteCertificate`, `AddTagsToCertificate`, `RemoveTagsFromCertificate`
+and `ListTagsForCertificate` — carries **HTTP 400**. Substrate answered `ResourceNotFoundException`
+at 404, a status ACM publishes nowhere, and sent a malformed ARN through the state lookup so that
+the answer was "not found" for a string that could not name a certificate at all (#921).
+
+| `CertificateArn` | Answer | Whose reading |
+|---|---|---|
+| Absent, length outside 20–2048, or failing the published pattern | `ValidationException`/400 | **AWS's** — *"The supplied input failed to satisfy constraints of an AWS service"*, and `CertificateArn` publishes both constraints |
+| Pattern satisfied but naming no certificate: empty Region, another ACM resource type, a type with no identifier, or something nested under a certificate | `InvalidArnException`/400 | **Substrate's** — AWS publishes the code but describes it as *"does not refer to an existing resource"*, which is about non-existence, not syntax |
+| A well-formed certificate ARN with no record | `ResourceNotFoundException`/400 | **AWS's** — *"The specified certificate cannot be found in the caller's account or the caller's account cannot be found"* |
+
+The absent-`CertificateArn` case is refused on the published minimum length rather than by a
+separate required-member check, which is why it no longer answers `InvalidParameterException` — a
+code `ListTagsForCertificate` and `DescribeCertificate` do not publish at all, their error lists
+being three codes long.
+
+ACM's own operations and the tagging API's resolver run the same validation, so neither can accept
+an ARN the other refuses. The tagging API renders its refusal as a `FailedResourcesMap` entry
+rather than an error response, so the shapes differ and the decision does not.
+
+Two answers are deliberately left as they are. An unparseable request body still answers
+`InvalidParameterException`, because that is a protocol-level failure whose code belongs to ACM's
+common errors rather than to any one operation's published list. And ACM publishes
+`AccessDeniedException` at **400** while substrate answers it at **403**, from the central
+authorization check every service shares — moving it for one service would have the emulator answer
+two statuses for one decision, so it is recorded here rather than changed.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

@@ -146,8 +146,8 @@ func (p *ACMPlugin) describeCertificate(ctx *RequestContext, req *AWSRequest) (*
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
-	if body.CertificateArn == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "CertificateArn is required", HTTPStatus: http.StatusBadRequest}
+	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+		return nil, arnErr
 	}
 
 	goCtx := context.Background()
@@ -157,7 +157,7 @@ func (p *ACMPlugin) describeCertificate(ctx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("acm describeCertificate state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Certificate not found: " + body.CertificateArn, HTTPStatus: http.StatusNotFound}
+		return nil, acmCertificateNotFound(body.CertificateArn)
 	}
 
 	var cert ACMCertificate
@@ -178,8 +178,8 @@ func (p *ACMPlugin) deleteCertificate(ctx *RequestContext, req *AWSRequest) (*AW
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
-	if body.CertificateArn == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "CertificateArn is required", HTTPStatus: http.StatusBadRequest}
+	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+		return nil, arnErr
 	}
 
 	goCtx := context.Background()
@@ -189,7 +189,7 @@ func (p *ACMPlugin) deleteCertificate(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("acm deleteCertificate state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Certificate not found: " + body.CertificateArn, HTTPStatus: http.StatusNotFound}
+		return nil, acmCertificateNotFound(body.CertificateArn)
 	}
 
 	if err := p.state.Delete(goCtx, acmNamespace, stateKey); err != nil {
@@ -271,8 +271,8 @@ func (p *ACMPlugin) addTagsToCertificate(ctx *RequestContext, req *AWSRequest) (
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
-	if body.CertificateArn == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "CertificateArn is required", HTTPStatus: http.StatusBadRequest}
+	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+		return nil, arnErr
 	}
 
 	goCtx := context.Background()
@@ -282,7 +282,7 @@ func (p *ACMPlugin) addTagsToCertificate(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("acm addTagsToCertificate state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Certificate not found: " + body.CertificateArn, HTTPStatus: http.StatusNotFound}
+		return nil, acmCertificateNotFound(body.CertificateArn)
 	}
 
 	var cert ACMCertificate
@@ -319,8 +319,8 @@ func (p *ACMPlugin) removeTagsFromCertificate(ctx *RequestContext, req *AWSReque
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
-	if body.CertificateArn == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "CertificateArn is required", HTTPStatus: http.StatusBadRequest}
+	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+		return nil, arnErr
 	}
 
 	goCtx := context.Background()
@@ -330,7 +330,7 @@ func (p *ACMPlugin) removeTagsFromCertificate(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("acm removeTagsFromCertificate state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Certificate not found: " + body.CertificateArn, HTTPStatus: http.StatusNotFound}
+		return nil, acmCertificateNotFound(body.CertificateArn)
 	}
 
 	var cert ACMCertificate
@@ -360,8 +360,8 @@ func (p *ACMPlugin) listTagsForCertificate(ctx *RequestContext, req *AWSRequest)
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
-	if body.CertificateArn == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "CertificateArn is required", HTTPStatus: http.StatusBadRequest}
+	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+		return nil, arnErr
 	}
 
 	goCtx := context.Background()
@@ -371,7 +371,7 @@ func (p *ACMPlugin) listTagsForCertificate(ctx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("acm listTagsForCertificate state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Certificate not found: " + body.CertificateArn, HTTPStatus: http.StatusNotFound}
+		return nil, acmCertificateNotFound(body.CertificateArn)
 	}
 
 	var cert ACMCertificate
