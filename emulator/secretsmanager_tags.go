@@ -223,15 +223,18 @@ func smInvalidIdentifier(id, reason string) *AWSError {
 
 // smSecretNotFound reports that a well-formed identifier names no secret.
 //
-// The code is ResourceNotFoundException, which every SecretId-taking operation publishes. The HTTP
-// status substrate answers is unchanged by this pass and is tracked in #930: Secrets Manager publishes
-// 400 for it, as ACM does (#921) and KMS did (#923), and correcting the status for all ten operations
-// at once is a different change from correcting which secret an identifier names. One helper means one
-// fix, which is why the status lives here rather than at each call site.
+// The code is ResourceNotFoundException, which every SecretId-taking operation publishes, at HTTP
+// **400** — API_DescribeSecret's error list is three codes long and gives it 400, glossed "Secrets
+// Manager can't find the resource that you asked for", and every other SecretId-taking operation
+// publishes the same status. Substrate answered 404 until #930, the status Secrets Manager publishes
+// nowhere; that is the defect ACM carried (#921) and KMS carried at fifteen sites (#923).
+//
+// One helper means one status, which is why it lives here rather than at each of the nine call sites:
+// a tenth added later cannot disagree with the reference page by accident.
 func smSecretNotFound(id string) *AWSError {
 	return &AWSError{
 		Code:       "ResourceNotFoundException",
 		Message:    fmt.Sprintf("no secret found for the identifier %q", id),
-		HTTPStatus: http.StatusNotFound,
+		HTTPStatus: http.StatusBadRequest,
 	}
 }

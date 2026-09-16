@@ -100,11 +100,14 @@ func TestSMPlugin_GetSecretValue(t *testing.T) {
 	body := readSMBody(t, resp)
 	assert.Equal(t, "hello-world", body["SecretString"])
 
-	// Missing secret.
+	// Missing secret. The status is 400, which is what API_GetSecretValue publishes for
+	// ResourceNotFoundException; this read 404 until #930. The code is asserted alongside it, because a
+	// status alone was what let the wrong one stand for as long as it did.
 	resp2 := smRequest(t, srv, "GetSecretValue", map[string]interface{}{
 		"SecretId": "nonexistent",
 	})
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp2.StatusCode)
+	assert.Equal(t, "ResourceNotFoundException", readSMBody(t, resp2)["Code"])
 }
 
 func TestSMPlugin_PutSecretValue(t *testing.T) {
@@ -142,11 +145,12 @@ func TestSMPlugin_DeleteSecret(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Should be gone.
+	// Should be gone — reported at 400, the status AWS publishes for ResourceNotFoundException (#930).
 	resp2 := smRequest(t, srv, "GetSecretValue", map[string]interface{}{
 		"SecretId": "delete-secret",
 	})
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp2.StatusCode)
+	assert.Equal(t, "ResourceNotFoundException", readSMBody(t, resp2)["Code"])
 }
 
 func TestSMPlugin_ListSecrets(t *testing.T) {

@@ -1387,8 +1387,9 @@ func TestSMPlugin_TagAndUntagResource(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// ListTagsForResource.
-	resp2 := smRequest(t, srv, "ListTagsForResource", map[string]interface{}{
+	// Read the tag back through DescribeSecret, which is Secrets Manager's own read path for tags.
+	// This called ListTagsForResource until #929 removed it — an operation the API does not publish.
+	resp2 := smRequest(t, srv, "DescribeSecret", map[string]interface{}{
 		"SecretId": "sm-tag-test",
 	})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
@@ -1404,17 +1405,14 @@ func TestSMPlugin_TagAndUntagResource(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp3.StatusCode)
 
-	resp4 := smRequest(t, srv, "ListTagsForResource", map[string]interface{}{
+	resp4 := smRequest(t, srv, "DescribeSecret", map[string]interface{}{
 		"SecretId": "sm-tag-test",
 	})
-	body4 := readSMBody(t, resp4)
-	// After all tags removed, Tags may be nil or empty slice.
-	tags4 := body4["Tags"]
-	if tags4 != nil {
-		tagSlice, ok := tags4.([]interface{})
-		require.True(t, ok)
-		assert.Len(t, tagSlice, 0)
-	}
+	// With every tag removed there is no value to report, so the member is absent rather than empty —
+	// AWS: "Secrets Manager only returns fields that have a value in the response". Asserted through
+	// the decoded map here for the round trip; the raw-bytes assertion is in
+	// TestSMTags_AnUntaggedSecretOmitsTheTagsMember.
+	assert.NotContains(t, readSMBody(t, resp4), "Tags")
 }
 
 // ─── SNS extra ───────────────────────────────────────────────────────────────

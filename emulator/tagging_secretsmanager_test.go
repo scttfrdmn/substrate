@@ -37,10 +37,10 @@ import (
 // name still does.
 //
 // Every tag is read back through DescribeSecret, per #765. Secrets Manager publishes no
-// ListTagsForResource at all — substrate implements one anyway, which is #929 — so DescribeSecret is
+// ListTagsForResource at all — substrate answered one until #929 removed it — so DescribeSecret is
 // the owning service's own read path, and the "Tags" member it reports is the only thing that tells a
-// tag that landed on the right record from a tag reported as landed. Nothing here calls the invented
-// operation, so removing it cannot break this file.
+// tag that landed on the right record from a tag reported as landed. Nothing here ever called the
+// invented operation, which is why removing it did not touch this file.
 
 // Wire details a real SDK would send. Two Regions are needed because a secret is Region-scoped and
 // its ARN carries the Region, so a cross-Region assertion needs a secret that genuinely exists
@@ -238,18 +238,20 @@ func TestSMResolution_AForeignAccountARNDoesNotReachTheCallersSecret(t *testing.
 
 	// Well-formed, so it is not refused by the parser — it simply names a secret in an account this
 	// server holds nothing for, which is the isolation the account-qualified state key makes emergent.
+	// The status is 400, which is what every SecretId-taking operation publishes for
+	// ResourceNotFoundException; these read 404 until #930.
 	for _, op := range []string{"DescribeSecret", "GetSecretValue", "DeleteSecret"} {
 		t.Run(op, func(t *testing.T) {
 			status, _, code := smRawCall(t, ts, smTarget, op, map[string]any{"SecretId": foreignARN})
 			assert.Equal(t, "ResourceNotFoundException", code,
 				"%s on a foreign-account ARN reports the secret absent rather than reaching the caller's", op)
-			assert.Equal(t, http.StatusNotFound, status)
+			assert.Equal(t, http.StatusBadRequest, status)
 		})
 	}
 	t.Run("UntagResource", func(t *testing.T) {
 		status, code := smUntagResource(t, ts, smTarget, foreignARN, "env")
 		assert.Equal(t, "ResourceNotFoundException", code)
-		assert.Equal(t, http.StatusNotFound, status)
+		assert.Equal(t, http.StatusBadRequest, status)
 	})
 
 	assert.Equal(t, map[string]string{"env": "mine"}, smTagMap(t, ts, ownARN),
@@ -345,20 +347,22 @@ func TestSMResolution_AnAbsentSecretIsReportedNotFound(t *testing.T) {
 	ts := smTagServer(t)
 	absent := "arn:aws:secretsmanager:us-east-1:" + taggingTestAccount + ":secret:no-such-secret"
 
+	// 400 rather than 404, per #930 — see [TestSMErrorStatus_AnAbsentSecretIsAlways400], which asserts
+	// the same thing across all nine SecretId-taking operations.
 	t.Run("TagResource", func(t *testing.T) {
 		status, code := smTagResource(t, ts, smTarget, absent, map[string]string{"env": "prod"})
 		assert.Equal(t, "ResourceNotFoundException", code)
-		assert.Equal(t, http.StatusNotFound, status)
+		assert.Equal(t, http.StatusBadRequest, status)
 	})
 	t.Run("UntagResource", func(t *testing.T) {
 		status, code := smUntagResource(t, ts, smTarget, absent, "env")
 		assert.Equal(t, "ResourceNotFoundException", code)
-		assert.Equal(t, http.StatusNotFound, status)
+		assert.Equal(t, http.StatusBadRequest, status)
 	})
 	t.Run("DescribeSecret", func(t *testing.T) {
 		status, _, code := smRawCall(t, ts, smTarget, "DescribeSecret", map[string]any{"SecretId": absent})
 		assert.Equal(t, "ResourceNotFoundException", code)
-		assert.Equal(t, http.StatusNotFound, status)
+		assert.Equal(t, http.StatusBadRequest, status)
 	})
 }
 
