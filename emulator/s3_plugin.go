@@ -453,9 +453,15 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket 
 		region = reqCtx.Region
 	}
 
+	var accountID string
+	if reqCtx != nil {
+		accountID = reqCtx.AccountID
+	}
+
 	b := S3Bucket{
 		Name:         bucket,
 		Region:       region,
+		AccountID:    accountID,
 		CreationDate: p.tc.Now(),
 		Tags:         make(map[string]string),
 	}
