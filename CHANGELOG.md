@@ -1070,7 +1070,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aligning them is a separate change from a misrouted request.
 
 - **A `ResourceTypeFilters` resource type is matched against the ARN's own segment, not as a prefix of
-  it** (#936). `GetResources` compared the type half of a `service[:resourceType]` filter with
+  it** (#909, #936 — the same defect filed twice, and both are closed by the one fix).
+  `GetResources` compared the type half of a `service[:resourceType]` filter with
   `strings.HasPrefix` against the ARN's whole resource portion, which broke AWS's rule — "[s]pecifying
   a resource type of `ec2:instance` returns **only** EC2 instances" — in both directions at once.
 
@@ -1092,6 +1093,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be matched against the ARN's own delimited segment. The filter matcher is the one comparison of that
   kind whose left-hand side comes from the **caller**, and it was in neither pass. See `### Changed`
   for the one narrowing a consumer may notice.
+
+  Two cases come from #909's own analysis and are pinned even though neither is reachable over the
+  wire. AWS's RDS ARN table gives `cluster-pg`, `cluster-snapshot` and `cluster-endpoint` as resource
+  types in their own right, all three beginning with the string `cluster`, so `rds:cluster` would have
+  selected them; nothing can be stored under any of those segments today, so the assertion is on the
+  matcher and fails the moment one becomes storable. And the rule is asserted once **per reachable
+  resource type** — thirty-three rows, being the twenty-nine the twenty-eight `GetResources` scanners
+  produce plus the four that only `TagResources`/`UntagResources` reach — with the row count locked, so
+  a thirty-fourth type fails the test rather than going unexercised.
 
 ## [v0.116.0] - 2026-09-14
 
