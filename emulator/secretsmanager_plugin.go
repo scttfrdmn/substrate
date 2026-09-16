@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -72,24 +71,15 @@ func (p *SecretsManagerPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	}
 }
 
-// --- State key helpers ---
-
-func (p *SecretsManagerPlugin) secretKey(accountID, region, name string) string {
-	return "secret:" + accountID + "/" + region + "/" + name
-}
-
-func (p *SecretsManagerPlugin) secretNamesKey(accountID, region string) string {
-	return "secret_names:" + accountID + "/" + region
-}
-
-func (p *SecretsManagerPlugin) versionKey(accountID, region, name, versionID string) string {
-	return "secret_version:" + accountID + "/" + region + "/" + name + "/" + versionID
-}
-
 // --- State helpers ---
 
+// The three state-key builders this plugin writes through are free functions in
+// secretsmanager_tags.go — [smSecretStateKey], [smSecretNamesStateKey] and
+// [smSecretVersionStateKey] — so the Resource Groups Tagging API's resolver reaches the same
+// addresses without holding a plugin, and neither API can address a secret the other would not.
+
 func (p *SecretsManagerPlugin) loadSecret(ctx context.Context, accountID, region, name string) (*SecretState, error) {
-	data, err := p.state.Get(ctx, secretsManagerNamespace, p.secretKey(accountID, region, name))
+	data, err := p.state.Get(ctx, secretsManagerNamespace, smSecretStateKey(accountID, region, name))
 	if err != nil {
 		return nil, fmt.Errorf("sm loadSecret state.Get: %w", err)
 	}
@@ -108,11 +98,11 @@ func (p *SecretsManagerPlugin) saveSecret(ctx context.Context, s *SecretState) e
 	if err != nil {
 		return fmt.Errorf("sm saveSecret marshal: %w", err)
 	}
-	return p.state.Put(ctx, secretsManagerNamespace, p.secretKey(s.AccountID, s.Region, s.Name), data)
+	return p.state.Put(ctx, secretsManagerNamespace, smSecretStateKey(s.AccountID, s.Region, s.Name), data)
 }
 
 func (p *SecretsManagerPlugin) loadSecretNames(ctx context.Context, accountID, region string) ([]string, error) {
-	data, err := p.state.Get(ctx, secretsManagerNamespace, p.secretNamesKey(accountID, region))
+	data, err := p.state.Get(ctx, secretsManagerNamespace, smSecretNamesStateKey(accountID, region))
 	if err != nil {
 		return nil, fmt.Errorf("sm loadSecretNames: %w", err)
 	}
@@ -132,20 +122,7 @@ func (p *SecretsManagerPlugin) saveSecretNames(ctx context.Context, accountID, r
 	if err != nil {
 		return fmt.Errorf("sm saveSecretNames marshal: %w", err)
 	}
-	return p.state.Put(ctx, secretsManagerNamespace, p.secretNamesKey(accountID, region), data)
-}
-
-// resolveSecretID resolves a SecretId (name or ARN) to the secret name.
-func resolveSecretID(secretID string) string {
-	// If it's an ARN, extract the name after the last ":".
-	if strings.HasPrefix(secretID, "arn:") {
-		parts := strings.Split(secretID, ":")
-		if len(parts) >= 7 {
-			// ARN: arn:aws:secretsmanager:{region}:{acct}:secret:{name}
-			return parts[len(parts)-1]
-		}
-	}
-	return secretID
+	return p.state.Put(ctx, secretsManagerNamespace, smSecretNamesStateKey(accountID, region), data)
 }
 
 // --- Operations ---
@@ -179,6 +156,10 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 		}
 	}
 
+	// Key-ordered on the way in, so a secret tagged at creation and a secret tagged by TagResource
+	// report their tags in the same order.
+	sortTagsByKey(input.Tags, func(t SMTag) string { return t.Key })
+
 	now := p.tc.Now()
 	arn := generateSecretARN(ctx.Region, ctx.AccountID, input.Name)
 	versionID := generateVersionID()
@@ -206,7 +187,7 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 		value = input.SecretBinary
 	}
 	if value != "" {
-		if err := p.state.Put(goCtx, secretsManagerNamespace, p.versionKey(ctx.AccountID, ctx.Region, input.Name, versionID), []byte(value)); err != nil {
+		if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(ctx.AccountID, ctx.Region, input.Name, versionID), []byte(value)); err != nil {
 			return nil, fmt.Errorf("sm createSecret store value: %w", err)
 		}
 	}
@@ -237,14 +218,17 @@ func (p *SecretsManagerPlugin) getSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	versionID := input.VersionID
@@ -252,7 +236,7 @@ func (p *SecretsManagerPlugin) getSecretValue(ctx *RequestContext, req *AWSReque
 		versionID = secret.CurrentVersionID
 	}
 
-	valueData, err := p.state.Get(goCtx, secretsManagerNamespace, p.versionKey(ctx.AccountID, ctx.Region, name, versionID))
+	valueData, err := p.state.Get(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID))
 	if err != nil {
 		return nil, fmt.Errorf("sm getSecretValue get value: %w", err)
 	}
@@ -281,14 +265,17 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	versionID := generateVersionID()
@@ -296,7 +283,7 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 	if value == "" {
 		value = input.SecretBinary
 	}
-	if err := p.state.Put(goCtx, secretsManagerNamespace, p.versionKey(ctx.AccountID, ctx.Region, name, versionID), []byte(value)); err != nil {
+	if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID), []byte(value)); err != nil {
 		return nil, fmt.Errorf("sm putSecretValue store value: %w", err)
 	}
 
@@ -322,13 +309,16 @@ func (p *SecretsManagerPlugin) describeSecret(ctx *RequestContext, req *AWSReque
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
-	secret, err := p.loadSecret(context.Background(), ctx.AccountID, ctx.Region, name)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
+	secret, err := p.loadSecret(context.Background(), target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	out := map[string]interface{}{
@@ -339,7 +329,14 @@ func (p *SecretsManagerPlugin) describeSecret(ctx *RequestContext, req *AWSReque
 		"RotationEnabled": secret.RotationEnabled,
 		"CreatedDate":     secret.CreatedDate.Unix(),
 		"LastChangedDate": secret.LastChangedDate.Unix(),
-		"Tags":            secret.Tags,
+	}
+	// AWS states "Secrets Manager only returns fields that have a value in the response", and this is
+	// the operation a caller reads a secret's tags back through — Secrets Manager publishes no
+	// ListTagsForResource at all (#929). An untagged secret emitted "Tags": null, which is not a member
+	// AWS sends; the other members here are left as they are and are tracked in #930, because Tags is
+	// the one #928's tagging row is asserted through and the rest need their own decision.
+	if len(secret.Tags) > 0 {
+		out["Tags"] = secret.Tags
 	}
 	return smJSONResponse(http.StatusOK, out)
 }
@@ -356,14 +353,17 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	if input.Description != "" {
@@ -380,7 +380,7 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 	}
 	if value != "" {
 		versionID = generateVersionID()
-		if err := p.state.Put(goCtx, secretsManagerNamespace, p.versionKey(ctx.AccountID, ctx.Region, name, versionID), []byte(value)); err != nil {
+		if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID), []byte(value)); err != nil {
 			return nil, fmt.Errorf("sm updateSecret store value: %w", err)
 		}
 		secret.CurrentVersionID = versionID
@@ -407,30 +407,36 @@ func (p *SecretsManagerPlugin) deleteSecret(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
-	_ = p.state.Delete(goCtx, secretsManagerNamespace, p.secretKey(ctx.AccountID, ctx.Region, name))
-	_ = p.state.Delete(goCtx, secretsManagerNamespace, p.versionKey(ctx.AccountID, ctx.Region, name, secret.CurrentVersionID))
+	_ = p.state.Delete(goCtx, secretsManagerNamespace, smSecretStateKey(target.AccountID, target.Region, target.Name))
+	_ = p.state.Delete(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, secret.CurrentVersionID))
 
-	names, err := p.loadSecretNames(goCtx, ctx.AccountID, ctx.Region)
+	// The index entry removed is the one in the account and Region that owns the secret, which is
+	// what the identifier named — not the caller's. Deleting the caller's left the owning account
+	// still listing a secret whose record had just been removed.
+	names, err := p.loadSecretNames(goCtx, target.AccountID, target.Region)
 	if err != nil {
 		return nil, err
 	}
 	newNames := make([]string, 0, len(names))
 	for _, n := range names {
-		if n != name {
+		if n != target.Name {
 			newNames = append(newNames, n)
 		}
 	}
-	if err := p.saveSecretNames(goCtx, ctx.AccountID, ctx.Region, newNames); err != nil {
+	if err := p.saveSecretNames(goCtx, target.AccountID, target.Region, newNames); err != nil {
 		return nil, fmt.Errorf("sm deleteSecret saveSecretNames: %w", err)
 	}
 
@@ -509,13 +515,16 @@ func (p *SecretsManagerPlugin) listSecretVersionIDs(ctx *RequestContext, req *AW
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
-	secret, err := p.loadSecret(context.Background(), ctx.AccountID, ctx.Region, name)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
+	secret, err := p.loadSecret(context.Background(), target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	// Stub: return only the current version.
@@ -540,14 +549,17 @@ func (p *SecretsManagerPlugin) tagResource(ctx *RequestContext, req *AWSRequest)
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	tagMap := make(map[string]string, len(secret.Tags))
@@ -561,6 +573,12 @@ func (p *SecretsManagerPlugin) tagResource(ctx *RequestContext, req *AWSRequest)
 	for k, v := range tagMap {
 		newTags = append(newTags, SMTag{Key: k, Value: v})
 	}
+	// Sorted by key, per #862. The merged slice above is built by ranging a Go map, so without this
+	// two identical TagResource calls in one run could store — and DescribeSecret report — the same
+	// tags in a different order, and an assertion on that order could not replay from the event log.
+	// This is the one arm of #835 where the map-range claim held; the SNS pass (#925) corrected the
+	// record that it held there.
+	sortTagsByKey(newTags, func(t SMTag) string { return t.Key })
 	secret.Tags = newTags
 
 	if err := p.saveSecret(goCtx, secret); err != nil {
@@ -578,14 +596,17 @@ func (p *SecretsManagerPlugin) untagResource(ctx *RequestContext, req *AWSReques
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	removeSet := make(map[string]bool, len(input.TagKeys))
@@ -614,13 +635,16 @@ func (p *SecretsManagerPlugin) listTagsForResource(ctx *RequestContext, req *AWS
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
-	secret, err := p.loadSecret(context.Background(), ctx.AccountID, ctx.Region, name)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
+	secret, err := p.loadSecret(context.Background(), target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	out := map[string]interface{}{
@@ -639,14 +663,17 @@ func (p *SecretsManagerPlugin) rotateSecret(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := resolveSecretID(input.SecretID)
+	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
+	if idErr != nil {
+		return nil, idErr
+	}
 	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Secret not found", HTTPStatus: http.StatusNotFound}
+		return nil, smSecretNotFound(input.SecretID)
 	}
 
 	secret.RotationEnabled = true

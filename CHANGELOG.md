@@ -285,6 +285,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response XML emits `<Value>` before `<Key>` where substrate emits `<Key>` first, and the 10 TPS
   limit AWS documents for the three tagging actions is not modeled.
 
+- **The Resource Groups Tagging API reaches a Secrets Manager secret** (part of #835). A secret ARN
+  answered an `InternalServiceException` `FailedResourcesMap` entry from `resolveARN`'s default arm
+  while Secrets Manager's own `TagResource` wrote the tag, and `GetResources` reported no secrets at
+  all. The fifth of the eleven rows of #835; six remain.
+
+  The row is the same three parts as ACM's, CloudFront's, KMS's and SNS's — a resolver arm, a merge
+  arm behind a kind guard, and a scanner with its descriptor — and the resolver is the same
+  context-free parser Secrets Manager's own ten `SecretId` operations now use, so neither API can
+  address a secret the other would not. #765's cross-readability criterion is asserted through
+  **`DescribeSecret`** rather than through a `ListTagsForResource`, because Secrets Manager publishes
+  no such operation; the one substrate answers is an operation AWS does not have, which is filed as
+  #929 rather than removed here.
+
+  Unlike SNS this shape has a keyword to anchor on: `secret` is the fifth colon-delimited segment,
+  matched as a whole segment per #910, so `secretpolicy` and any keyword AWS adds later are refused.
+  The tagging arm takes an ARN only, with no bare-name fallback, because its parameter is
+  `ResourceARNList` and a name is not an ARN — there is nothing there for the caller's own account to
+  supply. Isolation is emergent rather than guarded, as SNS's and ACM's are: no cross-account
+  prohibition appears on Secrets Manager's tagging pages, and an account- and Region-qualified state
+  key means a foreign-account ARN builds a key nothing is stored at.
+
+  The merge reuses `mergeRecordTagListTags` with `Key`/`Value`, and both arms re-emit the list sorted
+  by key per #862 — including `CreateSecret`, so a secret tagged at creation and a secret tagged
+  afterwards report their tags in the same order. Secrets Manager's own `TagResource` builds its
+  merged list by ranging a Go map, so this is the row where that ordering defect was real; the SNS
+  pass corrected the record that it was real there.
+
+  The guard in front of the merge tests a **colon-terminated** prefix, the fifth namespace to need
+  one: `secret` is a prefix of both `secret_names` and `secret_version`. Four of the five namespaces
+  reached so far have collided, so the guard is now the default for a new row rather than a
+  per-service discovery — and the version key is the strongest case for it anywhere in the set, since
+  its value is a caller's secret payload and not JSON at all. A merge there would corrupt the secret
+  rather than merely write where nothing reads, which is also why the scanner reports nothing for it:
+  emitting an ARN for the one key in the tree whose value is a caller's secret would be worse than
+  reporting no secret.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`
@@ -297,6 +333,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **A Secrets Manager `SecretId` resolves to the secret its own ARN names, in the account and Region
+  the ARN names** (#928). `resolveSecretID` split the identifier on `:` and returned the **last**
+  segment, and every one of the ten operations taking a `SecretId` then keyed its load *and its store*
+  by the caller's own `AccountID` and `Region`. Four defects compounded across `GetSecretValue`,
+  `PutSecretValue`, `UpdateSecret`, `DeleteSecret`, `DescribeSecret`, `ListSecretVersionIds`,
+  `RotateSecret`, `TagResource`, `UntagResource` and `ListTagsForResource`:
+
+  1. `arn:aws:secretsmanager:eu-west-1:999988887777:secret:db-password` presented by a `us-east-1`
+     caller in account `111122223333` addressed **that caller's own** secret named `db-password`.
+     `UntagResource` is the damaging direction and answered `200` while stripping its tags;
+     `GetSecretValue` read its value and `DeleteSecret` deleted it. This is the rule #826 established
+     for SQS and DynamoDB, #845 carried through the tagging API's resolver, and #910, #918, #922 and
+     #925 applied to Step Functions, CloudFront, KMS and SNS: the account and Region come from the
+     ARN, never from the request context.
+  2. The type keyword was never compared, so `arn:aws:secretsmanager:{region}:{account}:other:foo`
+     named a secret called `foo`. Unlike SNS this shape *does* have a segment to anchor on — the
+     literal `secret` — and it is now matched as a whole segment rather than as a prefix, per #910, so
+     `secretpolicy` and any keyword AWS adds later are refused rather than resolved.
+  3. The service segment was never compared either, so an ARN belonging to another service resolved
+     to its own last segment as a secret name.
+  4. The length guard fell through to returning its argument, so a malformed ARN — `arn:aws:s3:::b`,
+     an ARN with too few segments — became a *name* and was looked up as one rather than refused.
+
+  Defect 4 is the one that was not entirely wrong, and it is why this row is not simply the previous
+  five repeated. AWS documents `SecretId` as "The ARN or name of the secret", so a bare name **is** a
+  valid identifier — and a name carries no account, which makes the caller's own the *correct* source
+  for that one case. Refusing everything that is not an ARN would have been the easy over-correction.
+  The two are separated structurally rather than by convention: the ARN parser takes no account,
+  Region or `*RequestContext` **as parameters at all**, so the ARN path cannot reach for the caller's,
+  and only the name path is given them. Anything beginning `arn:` that does not parse is now
+  `InvalidParameterException`/400, because a caller who wrote an ARN prefix meant an ARN.
+
+  The name is the whole remainder after the keyword rather than a further split, so a hierarchical
+  `prod/db/password` round-trips through its own ARN where taking the last component would truncate
+  it to `password`. That derivation is exact only because substrate mints **no** random ARN suffix:
+  AWS appends a hyphen and six characters and warns "do not end your secret name with a hyphen
+  followed by six characters" precisely because trimming them back off cannot be done in general.
+  Adding a suffix would make this resolver ambiguous by construction and would change a value
+  CloudFormation records as a physical ID, so it stays out — recorded on #928 rather than left silent.
+
+  `DeleteSecret` had the same defect in its index and it is fixed with the rest: it removed the name
+  from the **caller's** account and Region index while deleting the record the ARN named, so the
+  owning Region went on listing a secret whose record had just been removed.
+
+  `DescribeSecret` now omits `Tags` when a secret has none, rather than sending `"Tags": null` —
+  AWS states "Secrets Manager only returns fields that have a value in the response", and this is the
+  operation a caller reads tags back through. Deliberately left alone and filed rather than folded in:
+  the other members `DescribeSecret` emits unconditionally, and `ResourceNotFoundException`, which AWS
+  publishes as HTTP 400 where substrate answers 404 at all ten operations — both #930, the same class
+  as #921 (ACM) and #923 (KMS).
+
 - **An SNS `TopicArn` resolves to the topic its own ARN names, in the account and Region the ARN
   names** (#925). `snsNameFromARN` split the identifier on `:` and returned the **last** segment, and
   its callers then keyed the load *and the store* by the caller's own `AccountID` and Region. Three
