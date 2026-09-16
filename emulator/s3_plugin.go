@@ -3835,6 +3835,10 @@ func (p *S3Plugin) getBucketTagging(_ *RequestContext, _ *AWSRequest, bucket str
 	for k, v := range b.Tags {
 		result.TagSet.Tags = append(result.TagSet.Tags, s3Tag{Key: k, Value: v})
 	}
+	// The TagSet's members are emitted in slice order, so ranging the map put Go's map order on the
+	// wire (#946). API_GetBucketTagging documents no order, so sorted-by-key is substrate's reading,
+	// taken for the reason [sortTagsByKey] records.
+	sortTagsByKey(result.TagSet.Tags, func(t s3Tag) string { return t.Key })
 	return s3XMLResponse(http.StatusOK, result)
 }
 
@@ -3903,6 +3907,9 @@ func (p *S3Plugin) getObjectTagging(_ *RequestContext, _ *AWSRequest, bucket, ke
 	for k, v := range obj.Tags {
 		result.TagSet.Tags = append(result.TagSet.Tags, s3Tag{Key: k, Value: v})
 	}
+	// The same map-order defect as getBucketTagging above, on the object's own tag set (#946).
+	// API_GetObjectTagging documents no order either, so this is substrate's reading.
+	sortTagsByKey(result.TagSet.Tags, func(t s3Tag) string { return t.Key })
 	return s3XMLResponse(http.StatusOK, result)
 }
 

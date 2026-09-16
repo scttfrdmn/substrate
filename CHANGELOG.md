@@ -28,6 +28,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Five tag reads reported their tags in Go's map order** (#946). ACM's `ListTagsForCertificate`,
+  CloudFront's `ListTagsForResource`, Kinesis's `ListTagsForStream` and S3's `GetBucketTagging` and
+  `GetObjectTagging` each flattened a resource's `map[string]string` of tags into an ordered list by
+  ranging it, so the order on the wire came from the map's hash seed: two identical reads of unchanged
+  state could disagree, which is the one thing an emulator promising byte-identical replay must not do.
+  All five now sort by key, through the same `sortTagsByKey` helper the four tag merge helpers have used
+  since #862, so no sixth ordering rule enters the tree.
+
+  Neither of the two earlier fixes for this defect class could have reached these five. Sorting
+  `StateManager.List` (#865) fixes a listing built from state keys, and these build from one map loaded
+  whole from a single key. A map rendered *as a JSON object* was never affected either, because
+  `encoding/json` sorts map keys itself — the defect is specific to a map flattened into an array or
+  into a repeated XML element.
+
+  Provenance, which differs across the five and is recorded per operation rather than blanket: ACM's
+  page, CloudFront's, and both of S3's publish neither a cursor nor an ordering statement, so
+  lexicographic there is **substrate's reading**, resting on the replay promise. Kinesis's is
+  **implied by AWS's own cursor**: `ExclusiveStartTagKey` is "the key to use as the starting point for
+  the list of tags … gets all tags that occur after `ExclusiveStartTagKey`", and a tag cannot occur
+  after a key unless the tags are walked in some order over keys. Which order is still substrate's
+  reading — AWS's own sample response is not sorted — and the cursor itself is unimplemented, which is
+  #954; this sort is its prerequisite, because a cursor paged over an unstable order skips and repeats.
+
+  Compatibility: a consumer asserting on a tag's position in any of those five responses may now see a
+  different order than before — a stable one. An assertion that happened to pass on Go's map order can
+  fail, and that is the defect surfacing rather than a new one.
 - **`GetResources` reported another account's or another Region's resource** (#937). Three scanners
   narrowed their state-key scan by nothing at all, so an S3 bucket, a Lambda function or an SQS queue
   in any account was reported to any caller; fourteen more narrowed by account without the Region, so

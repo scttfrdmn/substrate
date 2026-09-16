@@ -558,6 +558,37 @@ value outside the documented 20–100 range and silently rewrites an unusable on
 [#913](https://github.com/scttfrdmn/substrate/issues/913). Folding a page-*size* change into a
 page-*contents* change would have made the two indistinguishable in one diff.
 
+### A tag set read back out of a map
+
+[#946](https://github.com/scttfrdmn/substrate/issues/946) is the same defect one layer down, at
+five operations the audit above could not reach: they build their response from a resource's own
+`map[string]string` of tags rather than from `StateManager.List`. They are ACM's
+`ListTagsForCertificate`, CloudFront's `ListTagsForResource`, Kinesis's `ListTagsForStream`, and
+S3's `GetBucketTagging` and `GetObjectTagging`. Each ranged that map and appended, so the order on
+the wire came from the map's hash seed and two identical reads of unchanged state could disagree.
+All five now report their tags **sorted by key**.
+
+Sorting `List` could not have fixed these, and neither could the four tag merge helpers
+[#862](https://github.com/scttfrdmn/substrate/issues/862) sorted: the map is loaded whole from a
+single state key, so no listing is involved. A rendering of a map *as a JSON object* was never
+affected, because `encoding/json` sorts map keys itself — the defect is specific to a map
+flattened into an ordered array or into a repeated XML element, where nothing sorted.
+
+**Four of the five sit in tier 3 and one in tier 2.** ACM's page, CloudFront's, and both of S3's
+publish neither a cursor nor an ordering statement, so lexicographic there is **substrate's
+reading**, resting on the replay promise exactly as `ListBuckets`' order does. Kinesis's is tier 2:
+`ListTagsForStream` states no order in prose either, but it publishes `ExclusiveStartTagKey` — "the
+key to use as the starting point for the list of tags. If this parameter is set,
+`ListTagsForStream` gets all tags that occur after `ExclusiveStartTagKey`" — and a tag cannot occur
+*after* a key unless the tags are walked in some order over keys. *Which* order is still
+substrate's reading, and AWS's own sample response is not sorted.
+
+Substrate implements neither `ExclusiveStartTagKey` nor `Limit` and reports `HasMoreTags` as
+`false` unconditionally, so that cursor cannot be exercised yet
+([#954](https://github.com/scttfrdmn/substrate/issues/954)). This sort is its prerequisite, for the
+reason the tier-2 defect above already demonstrated: a cursor paged over an unstable order skips
+and repeats.
+
 ---
 
 ## CloudFormation
@@ -3164,10 +3195,10 @@ STS operations are free.
 | GetBucketNotificationConfiguration | Reports the stored configuration in the API's element names; an unconfigured bucket is an empty `NotificationConfiguration` — see [Event notifications](#event-notifications) |
 | PutBucketNotificationConfiguration | Dispatches to Lambda, SQS and SNS on `PutObject`/`DeleteObject`; a body naming no recognized element is `400 MalformedXML` — see [Event notifications](#event-notifications) |
 | PutBucketTagging | |
-| GetBucketTagging | |
+| GetBucketTagging | Reports the bucket's `TagSet` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 | DeleteBucketTagging | |
 | PutObjectTagging | |
-| GetObjectTagging | |
+| GetObjectTagging | Reports the object's `TagSet` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 | DeleteObjectTagging | |
 
 ### Listing buckets
@@ -9355,7 +9386,7 @@ CloudWatch metrics: $0.30 per metric per month. Alarms: $0.10 per alarm per mont
 | ListCertificates | |
 | AddTagsToCertificate | |
 | RemoveTagsFromCertificate | |
-| ListTagsForCertificate | |
+| ListTagsForCertificate | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 | RenewCertificate | |
 
 ### A certificate is reachable through the tagging API
@@ -9791,6 +9822,9 @@ Cognito Identity operations are free.
 | PutRecords | Batch put |
 | GetShardIterator | Returns base64-encoded cursor |
 | GetRecords | Ring buffer of last 10,000 records per shard |
+| AddTagsToStream | `Tags` is a JSON object of key/value pairs, not a list |
+| RemoveTagsFromStream | |
+| ListTagsForStream | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map). `Limit` and `ExclusiveStartTagKey` are not read and `HasMoreTags` is always `false` ([#954](https://github.com/scttfrdmn/substrate/issues/954)) |
 
 ### CloudFormation resource types
 
@@ -9820,7 +9854,7 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 | ListDistributions | |
 | TagResource | Body is a `<Tags>` document; a body of another shape is refused rather than read as an empty tag set (#883) |
 | UntagResource | Body is a `<TagKeys><Items><Key>` document. Removing a key the distribution does not carry succeeds — AWS documents no error for it, so that reading is substrate's (#883) |
-| ListTagsForResource | |
+| ListTagsForResource | Reports the `<Tags><Items>` members sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 
 All three tagging operations share the `POST`/`GET /2020-05-31/tagging` path and are told apart
 by the query string: `Operation=Tag`, `Operation=Untag`, and a `GET` carrying only `Resource`. A
