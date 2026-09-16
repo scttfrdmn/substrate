@@ -259,6 +259,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "glue", scan: p.scanGlueDatabases},
 		{typePrefix: "acm", scan: p.scanACMCertificates},
 		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
+		{typePrefix: "kms", scan: p.scanKMSKeys},
 	}
 
 	var all []resourceTagMapping
@@ -788,6 +789,46 @@ func (p *TaggingPlugin) scanGlueDatabases(_ context.Context, reqCtx *RequestCont
 // The prefix is account- *and* Region-qualified because [acmCertKey] is: a certificate is a
 // regional resource, and GetResources is a per-Region operation. The index key ("cert_arns:") is
 // not matched by this prefix and so is never decoded as a certificate.
+// scanKMSKeys reports every KMS key in the caller's account and Region.
+//
+// The prefix is built from [kmsKeyKeyPrefix] rather than a literal, so the scan and KMS's own writers
+// cannot fall out of step about where a key record lives — the drift #918 found in CloudFront's four
+// inline key literals.
+//
+// A key pending deletion is still reported. AWS's tagging page says you may not *tag* such a key, but
+// GetResources is a read and the key exists until the waiting period elapses; suppressing it here
+// would hide a resource whose ARN DescribeKey still resolves. Refusing the write is a separate,
+// unmodelled behavior (KMSInvalidStateException) noted on #922 rather than guessed at.
+func (p *TaggingPlugin) scanKMSKeys(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := kmsKeyKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	keys, err := p.state.List(goCtx, kmsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list kms keys: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, kmsNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var key KMSKey
+		if err := json.Unmarshal(raw, &key); err != nil {
+			continue
+		}
+		tags := make([]taggingTag, 0, len(key.Tags))
+		for _, t := range key.Tags {
+			tags = append(tags, taggingTag{Key: t.TagKey, Value: t.TagValue})
+		}
+		sortTagsByKey(tags, func(t taggingTag) string { return t.Key })
+		out = append(out, resourceTagMapping{
+			ResourceARN: key.ARN,
+			Tags:        tags,
+		})
+	}
+	return out, nil
+}
+
 func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	prefix := acmCertKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
@@ -1274,6 +1315,21 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		}
 		return "", "", unsupportedTagResource("CloudFront %q is not a taggable resource type", resource)
 
+	case "kms":
+		// arn:aws:kms:{region}:{acct}:key/{id}
+		//
+		// Through [kmsResolveARN], which shares [kmsKeyStateKey] with KMS's own three tag operations,
+		// so a key's tags are at one address whichever arm writes them. That parser is also what
+		// refuses an alias ARN: the developer guide states "You cannot tag aliases, custom key stores,
+		// AWS managed keys, AWS owned keys, or KMS keys in other AWS accounts", and an alias is the
+		// one of those five substrate stores in this namespace, keyed by a name whose own "/" made
+		// the previous last-component scan resolve alias/aws/s3 to "s3" (part of #835, on top of the
+		// resolution fix in kms_tags.go).
+		if ns, key, resolveErr := kmsResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
+		}
+		return "", "", unsupportedTagResource("KMS %q is not a taggable resource type", resource)
+
 	default:
 		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
 	}
@@ -1497,6 +1553,21 @@ func mergeResourceTags(
 		}
 		return state.Put(goCtx, ns, key, updated)
 
+	case kmsNamespace:
+		// The first arm to merge an array-shaped tags member, through [mergeRecordTagListTags]. The
+		// guard matters more here than in most namespaces: kms holds five kinds of key and only the
+		// key record stores tags, two of the other four have prefixes the key's own prefix is a
+		// prefix of, and one of those — key_ids — is a JSON array of identifier strings that a tags
+		// merge would leave looking like a record. See [kmsKeyIsTaggable].
+		if !kmsKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported KMS resource key: %s", key)
+		}
+		updated, err := mergeRecordTagListTags(raw, kmsTagsJSONMember, kmsTagKeyField, kmsTagValueField, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge KMS tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
+
 	case elasticacheNamespace:
 		var cluster ElastiCacheCacheCluster
 		if err := json.Unmarshal(raw, &cluster); err != nil {
@@ -1611,6 +1682,83 @@ func mergeRecordStringMapTags(raw []byte, member string, addTags map[string]stri
 		return nil, fmt.Errorf("marshal merged tags: %w", err)
 	}
 	record[member] = merged
+
+	updated, err := json.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("marshal record: %w", err)
+	}
+	return updated, nil
+}
+
+// mergeRecordTagListTags applies addTags and removeKeys to the named tag member of a stored record,
+// returning the re-encoded record. The member must hold a JSON array of two-field objects — the
+// shape a service stores tags in when its API models a Tag structure rather than a map.
+//
+// The array-shaped sibling of [mergeRecordStringMapTags], and raw JSON for the same reason: a
+// namespace holds several record shapes and decoding one of them stores the others back truncated.
+// It is a separate function rather than a mode of that one because the two disagree about more than
+// the member name — an array element's field names are part of the wire shape and vary by service,
+// which is why keyField and valueField are parameters. KMS alone among the services #835's remaining
+// rows cover spells them "TagKey" and "TagValue" (API_Tag); SNS, Secrets Manager and Systems Manager
+// spell them "Key" and "Value".
+//
+// The output is sorted by key. A merge that ranged the intermediate map and stopped there would
+// write a member whose order came from Go's map hash seed, so one recorded run would not replay
+// byte-identically — the rule #862 established for the four EC2-shaped helpers, which this one joins.
+//
+// A member differing from the requested one only by case is refused rather than written alongside,
+// exactly as in [mergeRecordStringMapTags]: adding a second tags member reports success and stores
+// nothing a reader will find.
+func mergeRecordTagListTags(raw []byte, member, keyField, valueField string, addTags map[string]string, removeKeys []string) ([]byte, error) {
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("unmarshal record: %w", err)
+	}
+	for name := range record {
+		if name != member && strings.EqualFold(name, member) {
+			return nil, fmt.Errorf("record stores tags in %q, not %q", name, member)
+		}
+	}
+
+	// Decoded as generic maps rather than a typed pair, because the field names are the caller's.
+	// An element carrying members beyond the two named is preserved as far as the two go and no
+	// further; no service substrate models stores a third, and inventing one here would be writing
+	// a shape no reference publishes.
+	var existing []map[string]string
+	if t, ok := record[member]; ok && len(t) > 0 && string(t) != "null" {
+		if err := json.Unmarshal(t, &existing); err != nil {
+			return nil, fmt.Errorf("unmarshal %s member: %w", member, err)
+		}
+	}
+
+	pairs := make(map[string]string, len(existing))
+	for _, e := range existing {
+		k, ok := e[keyField]
+		if !ok {
+			return nil, fmt.Errorf("%s element has no %q field", member, keyField)
+		}
+		pairs[k] = e[valueField]
+	}
+	merged := mergeStringMap(pairs, addTags, removeKeys)
+
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]map[string]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, map[string]string{keyField: k, valueField: merged[k]})
+	}
+
+	// An emptied member is encoded as an empty array rather than dropped or nulled, because the
+	// owning service's read path ranges it: a record whose tags member is absent and one whose
+	// member is [] are the same to a decoder, and [] is the shape the reference publishes.
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal merged tags: %w", err)
+	}
+	record[member] = encoded
 
 	updated, err := json.Marshal(record)
 	if err != nil {
