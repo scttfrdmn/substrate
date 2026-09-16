@@ -467,9 +467,13 @@ every other caller exposed.
   `ListObjectVersions` is the case in point: `NextKeyMarker` is "the first key not returned that
   satisfies the search criteria" and a `CommonPrefixes` entry "is filtered out from results if it
   is not lexicographically greater than the key-marker", both of which presuppose a key order.
-  RDS's `DescribeDBInstances` pages an offset `Marker` over its listing, and the four ELBv2
-  describes publish a `Marker` and `PageSize`. A cursor over an unstable order is the worst form
-  of this defect, because it loses and duplicates resources rather than merely reordering them.
+  RDS's and ElastiCache's describes are the other: their pages state no order either, but they
+  do state what the `Marker` means — "the response includes only records beyond the marker" — and
+  a record cannot be *beyond* another without an order to be beyond it in. AWS also publishes a
+  `Marker` and `PageSize` on the four ELBv2 describes, though substrate implements neither
+  parameter there yet, so ELBv2's order rests on the replay promise alone for now. A cursor over
+  an unstable order is the worst form of this defect, because it loses and duplicates resources
+  rather than merely reordering them.
 - **AWS documents no order at all, and lexicographic is substrate's reading.** `ListBuckets` says
   nothing about the order buckets come back in; neither does `DescribeRules`, nor EC2's
   `reservationSet`. The guarantee there rests on the replay promise and on the five precedents
@@ -495,6 +499,64 @@ resource type at once, and a tag's state key does not sort by resource ID.
 reservations through a map and then ranges that map, so sorting `List` made the instances within
 a reservation deterministic while leaving `reservationSet`'s own member order in Go's map order.
 It is now ordered by reservation ID.
+
+### Every listing audited against those three tiers
+
+[#865](https://github.com/scttfrdmn/substrate/issues/865) fixed the ordering defect at its source
+and named the three tiers above, but it established them from the listings it happened to touch.
+[#887](https://github.com/scttfrdmn/substrate/issues/887) audited the rest, so that the tier a
+given operation sits in is a recorded finding rather than an assumption. All **128** non-test
+`List` call sites, across **46** files, were classified by whether their order can be observed:
+
+| Class | Sites | What it means |
+|---|---|---|
+| A | 50 | The keys reach a response body, so the order is observable by a caller. |
+| B | 21 | The keys reach one of substrate's own control endpoints, not an AWS-shaped response. |
+| C | 57 | The keys are scanned internally — a single-key lookup, a mutation that stops at the first match, or a set that is re-sorted before it is rendered. |
+
+The `tagging_plugin.go` scanners are the largest block of class C: twenty of them feed
+`GetResources`, which sorts by ARN before paginating, so their own order is discarded.
+
+**The audit found no new tier-1 operation.** Eleven further AWS pages were read — RDS
+`DescribeDBInstances` and `DescribeDBClusters`; ElastiCache `DescribeCacheClusters`,
+`DescribeReplicationGroups` and `DescribeCacheSubnetGroups`; API Gateway `GetRestApis`;
+CloudWatch `DescribeAlarms` and `ListMetrics`; SSM `DescribeParameters` and
+`GetParametersByPath`; and EC2's Query request page — and **none publishes an ordering
+statement**. `ListMultipartUploads` remains the only operation in the tree with a documented
+order. EC2 is settled by a blanket disclaimer on its Query request page rather than per
+operation: "The order of the elements in the response, including those within nested structures,
+might vary. Applications should not assume that the elements appear in a particular order." All
+thirty EC2-family sites are therefore tier 3, and substrate's lexicographic order is a stronger
+guarantee than AWS gives.
+
+**It found one tier-2 defect, at exactly three sites.** RDS's `DescribeDBInstances` and
+`DescribeDBClusters` and ElastiCache's `DescribeCacheClusters` implemented `Marker` as a
+**decimal offset** into the sorted listing. Their pages document the parameter positionally —
+"the response includes only records beyond the marker, up to the value specified by
+`MaxRecords`" — and an offset diverges from that in two ways a caller can observe:
+
+- **A record removed behind the cursor loses a record the caller never sees.** Paging five
+  instances two at a time and deleting the first after page one, the offset cursor answered page
+  two as `items[2:]` of a now-four-record listing, so the third record was never reported. The
+  caller's loop terminated normally with four of five records and nothing to indicate the fifth
+  had been skipped. A record *added* behind the cursor repeated one instead.
+- **A `Marker` substrate never issued was answered with page one.** The offset was parsed with
+  `strconv.Atoi` and the error discarded, so any unparseable marker became `0`. A consumer that
+  persisted a marker across a restart, or truncated one, silently restarted the walk.
+
+Both are fixed by making the `Marker` name the last record of the previous page rather than count
+the records before it, so the next page is the records sorting strictly after it — the pattern
+`ListBuckets`' `continuation-token` already uses. The marker is base64, so one substrate did not
+issue is detectable and is refused with `InvalidParameterValue` / 400. That code is **published**
+for ElastiCache, on `DescribeCacheClusters` and `DescribeReplicationGroups`; the two RDS pages
+publish only their NotFound faults, so for RDS it is **substrate's reading**. Truncation is
+decided on the next matching record rather than on the page filling up, so a full last page
+carries no `Marker` and costs the caller no round trip to an empty page.
+
+`MaxRecords` is a separate matter and deliberately untouched by that fix: substrate honours a
+value outside the documented 20–100 range and silently rewrites an unusable one, which is
+[#913](https://github.com/scttfrdmn/substrate/issues/913). Folding a page-*size* change into a
+page-*contents* change would have made the two indistinguishable in one diff.
 
 ---
 

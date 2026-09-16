@@ -160,57 +160,41 @@ func (p *ElastiCachePlugin) describeCacheClusters(reqCtx *RequestContext, req *A
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["CacheClusterId"]
 
-	keys, err := p.state.List(context.Background(), elasticacheNamespace, "cachecluster:"+scope+"/")
+	// The marker is validated before any state is read, so a request substrate cannot
+	// serve is refused rather than answered with page one.
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+
+	prefix := "cachecluster:" + scope + "/"
+	keys, err := p.state.List(context.Background(), elasticacheNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("elasticache describeCacheClusters list: %w", err)
 	}
 
-	var items []xmlCacheClusterItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), elasticacheNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var cluster ElastiCacheCacheCluster
-		if json.Unmarshal(data, &cluster) != nil {
-			continue
-		}
-		if filterID != "" && cluster.CacheClusterID != filterID {
-			continue
-		}
-		items = append(items, cacheClusterToXML(cluster))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, queryMaxRecords(req.Params["MaxRecords"]),
+		func(key, _ string) (xmlCacheClusterItem, bool) {
+			data, getErr := p.state.Get(context.Background(), elasticacheNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlCacheClusterItem{}, false
+			}
+			var cluster ElastiCacheCacheCluster
+			if json.Unmarshal(data, &cluster) != nil {
+				return xmlCacheClusterItem{}, false
+			}
+			if filterID != "" && cluster.CacheClusterID != filterID {
+				return xmlCacheClusterItem{}, false
+			}
+			return cacheClusterToXML(cluster), true
+		})
 
-	if filterID != "" && len(items) == 0 {
+	if filterID != "" && len(page) == 0 {
 		return nil, &AWSError{
 			Code:       "CacheClusterNotFound",
 			Message:    "CacheCluster " + filterID + " not found.",
 			HTTPStatus: http.StatusNotFound,
 		}
-	}
-
-	// Pagination.
-	maxRecords := 100
-	if s := req.Params["MaxRecords"]; s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			maxRecords = n
-		}
-	}
-	marker := req.Params["Marker"]
-	offset := 0
-	if marker != "" {
-		if n, err := strconv.Atoi(marker); err == nil {
-			offset = n
-		}
-	}
-	if offset > len(items) {
-		offset = len(items)
-	}
-	page := items[offset:]
-	var nextMarker string
-	if len(page) > maxRecords {
-		page = page[:maxRecords]
-		nextMarker = strconv.Itoa(offset + maxRecords)
 	}
 
 	type result struct {
