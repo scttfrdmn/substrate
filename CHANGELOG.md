@@ -148,6 +148,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `valid`, because `StateValid` starts `true` and is only ever falsified by a comparison that
   ran.
 
+- **The Resource Groups Tagging API reaches an ACM certificate and a CloudFront distribution**
+  (part of #835). Both answered an `InternalServiceException` `FailedResourcesMap` entry from
+  `resolveARN`'s default arm, while both services tag the resource perfectly well through their
+  own calls — so a tag was writable through one API and invisible to the other. Two of the eleven
+  rows of #835; nine remain.
+
+  Both types are on AWS's own authoritative list: the tagging guide's welcome page names **AWS
+  Certificate Manager** and **Amazon CloudFront** among the services `TagResources` and
+  `UntagResources` support. The same page settles the other half at a stroke — "the
+  `GetResources`, `GetTagKeys`, and `GetTagValues` operations support all resource types" — so a
+  missing scanner is a gap in substrate rather than a boundary of AWS's, which is recorded in
+  `docs/services.md` because the file previously said AWS published no list at all.
+
+  A row is three parts and none substitutes for the others: a resolver arm, so `TagResources` and
+  `UntagResources` reach the record; a merge arm, so the write edits the tags member of the raw
+  JSON and leaves every other member untouched; and a scanner, so `GetResources` reports it. An
+  arm without a scanner leaves the resource writable and invisible.
+
+  Both resolvers share the key builder the owning service already uses, so neither API can address
+  a resource the other would not — #765's cross-readability criterion, asserted here by reading
+  every tag back through `ListTagsForCertificate` and CloudFront's own `ListTagsForResource`
+  rather than out of the state store. CloudFront's goes through `cfParseDistributionARN`, the
+  parser its own three tagging operations use as of #918, so the account comes from the ARN at the
+  tagging API too and a foreign-account ARN naming the caller's own distribution ID is refused.
+
+  **ACM's own tag operations key from the calling request, and that is correct — it is not an
+  instance of the #918 defect.** `acmCertKey` embeds the whole certificate ARN alongside the
+  account and Region the ARN itself names, so a lookup keyed by the caller's account can only ever
+  find a record whose ARN names that same account: there is no key at which the two disagree.
+  Changing those operations to key from the ARN would *introduce* the cross-account reach the
+  redundancy forecloses. Recorded in `emulator/acm_tags.go` and in `docs/services.md` rather than
+  "fixed".
+
+  Each merge sits behind a kind guard testing a **colon-terminated** prefix, because `cert` is a
+  prefix of `cert_arns` and `cfdist` of `cfdist_ids`: a bare-prefix test would report an index key
+  taggable and merge a tags member into a JSON array of identifier strings. CloudFront's four key
+  kinds now have one producer each — the two invalidation keys were inline concatenation at five
+  sites — so the guard cannot fall out of step with the keys actually written.
+
+  An ARN of any other resource type is refused rather than resolved to a reachable one, following
+  #910's anchored-segment rule. ACM scopes its three tag operations to one type in prose — "This
+  action applies only to the `certificate` resource type" — while the published `CertificateArn`
+  pattern does not itself restrict the resource portion, so the restriction is the prose's; an
+  ACME endpoint ARN, and anything nested under a certificate, are refused. For CloudFront the
+  reference draws the boundary itself — "You can tag distributions, but you can't tag origin
+  access identities or invalidations" — and substrate stores invalidations in the same namespace,
+  so an invalidation ARN nested under the caller's real distribution is a reachable-looking target
+  that is refused, as is `streaming-distribution/{the caller's own ID}`.
+
+  **`GetResources` reports a CloudFront distribution in `us-east-1` only.** CloudFront is global
+  and its ARNs carry an empty Region segment, but `GetResources` is per-Region, so a global
+  resource has to be attributed to exactly one Region or every Region's call would report it, and
+  `TagResources` states "you can only tag resources that are located in the specified AWS Region
+  for the AWS account". Which Region it is, is AWS's; that the gate exists at all is substrate's
+  reading, since AWS publishes the attribution and not a `GetResources` rule. CloudFront's own
+  `ListDistributions` keeps answering from any Region — that is what a global service does, and
+  the per-Region attribution belongs to the tagging API alone. The test asserts the gate against a
+  live control rather than an empty response: an ACM certificate requested in `us-west-2` is
+  reported there while the distribution is not.
+
+  `docs/services.md` also loses a claim the tree no longer had — "The Resource Groups Tagging API
+  cannot reach a CloudFront distribution" — and gains the three ACM tag operations plus
+  `RenewCertificate`, which have been dispatched for some time and were missing from the table.
+
 ### Changed
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.57.0→1.58.0, pulling `modernc.org/libc` 1.74.4→1.75.6 and `modernc.org/memory`

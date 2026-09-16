@@ -257,6 +257,8 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "elasticache", scan: p.scanElastiCacheClusters},
 		{typePrefix: "elasticfilesystem", scan: p.scanEFSFileSystems},
 		{typePrefix: "glue", scan: p.scanGlueDatabases},
+		{typePrefix: "acm", scan: p.scanACMCertificates},
+		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
 	}
 
 	var all []resourceTagMapping
@@ -781,6 +783,79 @@ func (p *TaggingPlugin) scanGlueDatabases(_ context.Context, reqCtx *RequestCont
 	return out, nil
 }
 
+// scanACMCertificates reports every ACM certificate in the caller's account and Region.
+//
+// The prefix is account- *and* Region-qualified because [acmCertKey] is: a certificate is a
+// regional resource, and GetResources is a per-Region operation. The index key ("cert_arns:") is
+// not matched by this prefix and so is never decoded as a certificate.
+func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := acmCertKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	keys, err := p.state.List(goCtx, acmNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list acm certificates: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, acmNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var cert ACMCertificate
+		if err := json.Unmarshal(raw, &cert); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: cert.CertificateArn,
+			Tags:        mapToTaggingTags(cert.Tags),
+		})
+	}
+	return out, nil
+}
+
+// scanCloudFrontDistributions reports every CloudFront distribution in the caller's account, and
+// only when the request names the Region AWS attributes a global resource to.
+//
+// The prefix carries no Region because [cfDistKey] carries none — CloudFront is global and its
+// ARNs have an empty Region segment. But GetResources is a per-Region operation, so a global
+// resource still has to be attributed to one Region or it would be reported by every Region's
+// call. AWS attributes it to us-east-1: the Resource Groups user guide's supported-resources table
+// marks AWS::CloudFront::Distribution "Yes" with the footnote that a global service's resources
+// are found by selecting the us-east-1 Region, and TagResources states that "you can only tag
+// resources that are located in the specified AWS Region for the AWS account".
+//
+// Which Region that is, is AWS's; that the gate exists at all is substrate's reading, because AWS
+// publishes the Tag Editor footnote and not a GetResources rule. CloudFront's own
+// ListDistributions keeps answering from any Region, which is not an inconsistency — it is what a
+// global service does, and the per-Region attribution belongs to the tagging API alone.
+func (p *TaggingPlugin) scanCloudFrontDistributions(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	if reqCtx.Region != cfGlobalRegion {
+		return nil, nil
+	}
+	goCtx := context.Background()
+	prefix := cfDistKeyPrefix + reqCtx.AccountID + "/"
+	keys, err := p.state.List(goCtx, cloudfrontNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list cloudfront distributions: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, cloudfrontNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var dist CloudFrontDistribution
+		if err := json.Unmarshal(raw, &dist); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: dist.ARN,
+			Tags:        mapToTaggingTags(dist.Tags),
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -1170,6 +1245,35 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		}
 		return "", "", unsupportedTagResource("Glue %q is not a taggable resource type", resource)
 
+	case "acm":
+		// arn:aws:acm:{region}:{acct}:certificate/{id}
+		//
+		// Through [acmResolveARN], which builds the key with [acmCertKey] — the same builder ACM's
+		// own three tag operations use, so the two sides cannot disagree about where one
+		// certificate's tags live. AWS scopes those three operations to this one resource type in
+		// prose ("This action applies only to the certificate resource type"), and substrate models
+		// no other ACM resource, so an ACME-endpoint ARN is refused here rather than resolved
+		// (part of #835).
+		if ns, key, resolveErr := acmResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
+		}
+		return "", "", unsupportedTagResource("ACM %q is not a taggable resource type", resource)
+
+	case "cloudfront":
+		// arn:aws:cloudfront::{acct}:distribution/{id} — no Region segment, because CloudFront is
+		// global.
+		//
+		// Through [cfResolveARN], which wraps the parser CloudFront's own three tagging operations
+		// key through, so an ARN addresses the same distribution from either arm. That parser is
+		// also what refuses every other CloudFront resource type by name: the developer guide's
+		// "You can tag distributions, but you can't tag origin access identities or invalidations"
+		// is the boundary, and substrate stores invalidations in the same namespace (part of #835,
+		// on top of #918).
+		if ns, key, resolveErr := cfResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
+		}
+		return "", "", unsupportedTagResource("CloudFront %q is not a taggable resource type", resource)
+
 	default:
 		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
 	}
@@ -1362,6 +1466,34 @@ func mergeResourceTags(
 		updated, err := mergeRecordStringMapTags(raw, rdsTagsJSONMember, addTags, removeKeys)
 		if err != nil {
 			return fmt.Errorf("merge RDS tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
+
+	case acmNamespace:
+		// Guarded on the prefix and merged through raw JSON for the reason the states and rds arms
+		// are: the namespace also holds the per-account/Region index of certificate ARNs, which
+		// stores no tags and is a JSON array rather than a record. Decoding [ACMCertificate]
+		// unconditionally would turn that index into a certificate with every member zero (part of
+		// #835).
+		if !acmKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported ACM resource key: %s", key)
+		}
+		updated, err := mergeRecordStringMapTags(raw, acmTagsJSONMember, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge ACM tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
+
+	case cloudfrontNamespace:
+		// Guarded and merged through raw JSON, same shape: this namespace holds a distribution, an
+		// invalidation and two index keys, and only the distribution stores tags — which is the
+		// reference's boundary, not substrate's convenience. See [cfKeyIsTaggable].
+		if !cfKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported CloudFront resource key: %s", key)
+		}
+		updated, err := mergeRecordStringMapTags(raw, cfTagsJSONMember, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge CloudFront tags for %s: %w", key, err)
 		}
 		return state.Put(goCtx, ns, key, updated)
 

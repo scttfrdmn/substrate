@@ -61,11 +61,14 @@ type CloudFrontInvalidation struct {
 }
 
 // cfDistKey returns the state key for a CloudFront distribution.
+//
+// There is no Region component: CloudFront is a global service and its ARNs carry an empty
+// Region segment, which is also why [cfParseDistributionARN] refuses an ARN that has one.
 func cfDistKey(accountID, distID string) string {
-	return "cfdist:" + accountID + "/" + distID
+	return cfDistKeyPrefix + accountID + "/" + distID
 }
 
 // cfDistIDsKey returns the state index key for all distribution IDs in an account.
 func cfDistIDsKey(accountID string) string {
-	return "cfdist_ids:" + accountID
+	return cfDistIDsKeyPrefix + accountID
 }

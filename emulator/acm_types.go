@@ -48,11 +48,16 @@ type ACMCertificate struct {
 }
 
 // acmCertKey returns the state key for an ACM certificate.
+//
+// The whole ARN is part of the key as well as the account and Region that the ARN itself names.
+// That redundancy is what lets ACM's own operations key by the caller's request context without
+// reaching another account's certificate, and it is why [acmResolveARN] can build the same key
+// from the ARN alone — see acm_tags.go's preamble.
 func acmCertKey(accountID, region, certArn string) string {
-	return "cert:" + accountID + "/" + region + "/" + certArn
+	return acmCertKeyPrefix + accountID + "/" + region + "/" + certArn
 }
 
 // acmCertARNsKey returns the state index key for all certificate ARNs in an account/region.
 func acmCertARNsKey(accountID, region string) string {
-	return "cert_arns:" + accountID + "/" + region
+	return acmCertARNsKeyPrefix + accountID + "/" + region
 }
