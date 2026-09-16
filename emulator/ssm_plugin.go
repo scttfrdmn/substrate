@@ -83,12 +83,16 @@ func (p *SSMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // --- State key helpers ---
 
+// paramKey returns the state key a parameter record is stored at.
+//
+// Through [ssmParameterStateKey], which the Resource Groups Tagging API's resolver and scanner also
+// call, so neither API can address a parameter the other would not (#932).
 func (p *SSMPlugin) paramKey(accountID, region, name string) string {
-	return "parameter:" + accountID + "/" + region + "/" + name
+	return ssmParameterStateKey(accountID, region, name)
 }
 
 func (p *SSMPlugin) paramPathsKey(accountID, region string) string {
-	return "parameter_paths:" + accountID + "/" + region
+	return ssmParameterPathsStateKey(accountID, region)
 }
 
 // --- State helpers ---
@@ -200,6 +204,9 @@ func (p *SSMPlugin) putParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if existing != nil && len(param.Tags) == 0 {
 		param.Tags = existing.Tags
 	}
+	// Sorted so a parameter tagged at creation and one tagged afterwards through AddTagsToResource
+	// report their tags in the same order (#932, on the rule #862 established).
+	sortTagsByKey(param.Tags, func(t SSMTag) string { return t.Key })
 
 	if err := p.saveParam(goCtx, param); err != nil {
 		return nil, fmt.Errorf("ssm putParameter saveParam: %w", err)
@@ -646,9 +653,11 @@ func (p *SSMPlugin) addTagsToResource(ctx *RequestContext, req *AWSRequest) (*AW
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
-	name := input.ResourceID
-	if !strings.HasPrefix(name, "/") {
-		name = "/" + name
+	// ResourceType is honored rather than decoded and discarded: without this, a Document or an
+	// OpsItem ResourceId tagged the same-named parameter and the read-back confirmed it (#932).
+	name, resolveErr := ssmResolveTagTarget(input.ResourceType, input.ResourceID)
+	if resolveErr != nil {
+		return nil, resolveErr
 	}
 
 	goCtx := context.Background()
@@ -657,7 +666,7 @@ func (p *SSMPlugin) addTagsToResource(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 	if param == nil {
-		return nil, &AWSError{Code: "InvalidResourceId", Message: "Parameter not found", HTTPStatus: http.StatusNotFound}
+		return nil, ssmInvalidResourceID(input.ResourceID, "no such parameter")
 	}
 
 	tagMap := make(map[string]string, len(param.Tags))
@@ -671,6 +680,10 @@ func (p *SSMPlugin) addTagsToResource(ctx *RequestContext, req *AWSRequest) (*AW
 	for k, v := range tagMap {
 		newTags = append(newTags, SSMTag{Key: k, Value: v})
 	}
+	// The merge above ranges a Go map, so the order it produces is the map's hash seed. Sorted for the
+	// reason #862 sorted all four tagging-API merge helpers: two identical calls in one run must store,
+	// and ListTagsForResource must report, one order.
+	sortTagsByKey(newTags, func(t SSMTag) string { return t.Key })
 	param.Tags = newTags
 
 	if err := p.saveParam(goCtx, param); err != nil {
@@ -688,9 +701,12 @@ func (p *SSMPlugin) removeTagsFromResource(ctx *RequestContext, req *AWSRequest)
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
-	name := input.ResourceID
-	if !strings.HasPrefix(name, "/") {
-		name = "/" + name
+	// ResourceType is honored here for the same reason as in addTagsToResource, and this is the
+	// damaging direction: without it, RemoveTagsFromResource for a Document stripped tags from the
+	// same-named parameter and answered 200 (#932).
+	name, resolveErr := ssmResolveTagTarget(input.ResourceType, input.ResourceID)
+	if resolveErr != nil {
+		return nil, resolveErr
 	}
 
 	goCtx := context.Background()
@@ -699,7 +715,7 @@ func (p *SSMPlugin) removeTagsFromResource(ctx *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 	if param == nil {
-		return nil, &AWSError{Code: "InvalidResourceId", Message: "Parameter not found", HTTPStatus: http.StatusNotFound}
+		return nil, ssmInvalidResourceID(input.ResourceID, "no such parameter")
 	}
 
 	removeSet := make(map[string]bool, len(input.TagKeys))
@@ -728,9 +744,9 @@ func (p *SSMPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
-	name := input.ResourceID
-	if !strings.HasPrefix(name, "/") {
-		name = "/" + name
+	name, resolveErr := ssmResolveTagTarget(input.ResourceType, input.ResourceID)
+	if resolveErr != nil {
+		return nil, resolveErr
 	}
 
 	param, err := p.loadParam(context.Background(), ctx.AccountID, ctx.Region, name)
@@ -738,11 +754,19 @@ func (p *SSMPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 		return nil, err
 	}
 	if param == nil {
-		return nil, &AWSError{Code: "InvalidResourceId", Message: "Parameter not found", HTTPStatus: http.StatusNotFound}
+		return nil, ssmInvalidResourceID(input.ResourceID, "no such parameter")
 	}
 
+	// TagList is an array, so an untagged parameter reports [] and not null. SSMParameter.Tags is
+	// `omitempty` and therefore nil on an untagged parameter, which rendered as "TagList": null — not a
+	// list, and a strict client decoding a list member from it is entitled to fail (#932).
+	tags := param.Tags
+	if tags == nil {
+		tags = []SSMTag{}
+	}
+	sortTagsByKey(tags, func(t SSMTag) string { return t.Key })
 	out := map[string]interface{}{
-		"TagList": param.Tags,
+		"TagList": tags,
 	}
 	return ssmJSONResponse(http.StatusOK, out)
 }

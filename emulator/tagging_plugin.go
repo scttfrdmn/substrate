@@ -262,6 +262,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
+		{typePrefix: "ssm", scan: p.scanSSMParameters},
 	}
 
 	var all []resourceTagMapping
@@ -913,6 +914,46 @@ func (p *TaggingPlugin) scanSecretsManagerSecrets(_ context.Context, reqCtx *Req
 	return out, nil
 }
 
+// scanSSMParameters reports every Systems Manager parameter in the caller's account and Region, with
+// its tags.
+//
+// The prefix is built from [ssmParameterKeyPrefix] — the same constant [ssmParameterStateKey] writes
+// and [ssmKeyIsTaggable] tests — so the scanner, the resolver and Systems Manager's own operations
+// cannot fall out of step about where a parameter record lives.
+//
+// The colon in the prefix is load-bearing, as it is for KMS, SNS and Secrets Manager: this namespace
+// also holds "parameter_paths:{acct}/{region}", a JSON array of names, which a bare "parameter"
+// prefix would list and then skip silently when it failed to unmarshal into an [SSMParameter].
+func (p *TaggingPlugin) scanSSMParameters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := ssmParameterKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	keys, err := p.state.List(goCtx, ssmNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list ssm parameters: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ssmNamespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var param SSMParameter
+		if err := json.Unmarshal(raw, &param); err != nil {
+			continue
+		}
+		tags := make([]taggingTag, 0, len(param.Tags))
+		for _, t := range param.Tags {
+			tags = append(tags, taggingTag(t))
+		}
+		sortTagsByKey(tags, func(t taggingTag) string { return t.Key })
+		out = append(out, resourceTagMapping{
+			ResourceARN: param.ARN,
+			Tags:        tags,
+		})
+	}
+	return out, nil
+}
+
 func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	prefix := acmCertKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
@@ -1445,6 +1486,25 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		}
 		return "", "", unsupportedTagResource("Secrets Manager %q is not a taggable resource type", resource)
 
+	case "ssm":
+		// arn:aws:ssm:{region}:{acct}:parameter{name} — the name's own leading "/" is the separator,
+		// which [ssmParameterARN] relies on and [ssmParseParameterARN] inverts exactly.
+		//
+		// Through [ssmResolveARN], which shares [ssmParameterStateKey] with Systems Manager's own
+		// AddTagsToResource and RemoveTagsFromResource, so a parameter's tags are at one address
+		// whichever arm writes them. Systems Manager's own operations do not take an ARN at all — AWS
+		// documents a Parameter ResourceId as the parameter *name* — so this is the one arm of #835
+		// where the two sides take different identifier forms and still have to agree; sharing the key
+		// builder is what makes them (part of #835, on top of the resolution fix in ssm_tags.go).
+		//
+		// The type segment is matched whole per #910: this namespace also addresses document/,
+		// servicesetting/, opsmetadata/, maintenancewindow/, patchbaseline/ and managed-instance/
+		// resources, none of which store tags here.
+		if ns, key, resolveErr := ssmResolveARN(arn); resolveErr == nil {
+			return ns, key, nil
+		}
+		return "", "", unsupportedTagResource("Systems Manager %q is not a taggable resource type", resource)
+
 	default:
 		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
 	}
@@ -1708,6 +1768,20 @@ func mergeResourceTags(
 		updated, err := mergeRecordTagListTags(raw, smTagsJSONMember, smTagKeyField, smTagValueField, addTags, removeKeys)
 		if err != nil {
 			return fmt.Errorf("merge Secrets Manager tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
+
+	case ssmNamespace:
+		// Array-shaped and spelled Key/Value, like SNS's and Secrets Manager's. The guard is
+		// colon-terminated because "parameter" is a prefix of "parameter_paths", whose value is a JSON
+		// array of names — the sixth namespace to need that. The namespace also holds Run Command's
+		// command and invocation records, which store no tags. See [ssmKeyIsTaggable].
+		if !ssmKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported Systems Manager resource key: %s", key)
+		}
+		updated, err := mergeRecordTagListTags(raw, ssmTagsJSONMember, ssmTagKeyField, ssmTagValueField, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge Systems Manager tags for %s: %w", key, err)
 		}
 		return state.Put(goCtx, ns, key, updated)
 
