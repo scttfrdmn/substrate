@@ -334,19 +334,51 @@ func TestSSMTagType_ABareNameStillResolves(t *testing.T) {
 
 // TestSSMTagType_AnAbsentParameterIsReportedInvalidResourceId is a regression guard: Systems Manager
 // publishes no distinct not-found code for these three operations, so InvalidResourceId is how a
-// nonexistent parameter is reported. The HTTP status is not asserted here because substrate answers
-// 404 where AWS publishes 400, which is #933.
+// nonexistent parameter is reported.
+//
+// The status is asserted alongside the code because that is the whole of #933: all three reference
+// pages give InvalidResourceId HTTP 400 and publish no 404 at all, so substrate's 404 was a status no
+// Systems Manager operation can answer. It is asserted on the response rather than through a decoded
+// error struct, which carries the code and not the status.
 func TestSSMTagType_AnAbsentParameterIsReportedInvalidResourceId(t *testing.T) {
 	ts := ssmTagServer(t)
 
-	_, code := ssmAddTags(t, ts, ssmTagTarget, "Parameter", "/nothing/here", map[string]string{"k": "v"})
+	status, code := ssmAddTags(t, ts, ssmTagTarget, "Parameter", "/nothing/here", map[string]string{"k": "v"})
 	assert.Equal(t, "InvalidResourceId", code, "AddTagsToResource on an absent parameter")
+	assert.Equal(t, http.StatusBadRequest, status, "AddTagsToResource on an absent parameter")
 
-	_, code = ssmRemoveTags(t, ts, ssmTagTarget, "Parameter", "/nothing/here", "k")
+	status, code = ssmRemoveTags(t, ts, ssmTagTarget, "Parameter", "/nothing/here", "k")
 	assert.Equal(t, "InvalidResourceId", code, "RemoveTagsFromResource on an absent parameter")
+	assert.Equal(t, http.StatusBadRequest, status, "RemoveTagsFromResource on an absent parameter")
 
-	_, _, _, code = ssmListTags(t, ts, ssmTagTarget, "Parameter", "/nothing/here")
+	status, _, _, code = ssmListTags(t, ts, ssmTagTarget, "Parameter", "/nothing/here")
 	assert.Equal(t, "InvalidResourceId", code, "ListTagsForResource on an absent parameter")
+	assert.Equal(t, http.StatusBadRequest, status, "ListTagsForResource on an absent parameter")
+}
+
+// TestSSMTagType_EveryRefusalOfAnIdentifierIsA400 covers the other five reasons
+// [ssmInvalidResourceID] is reached, because the status lives in that one helper and a test that only
+// exercised the absent-parameter path would leave the rest resting on nothing. AWS publishes no 404
+// on these operations, so no input should produce one.
+func TestSSMTagType_EveryRefusalOfAnIdentifierIsA400(t *testing.T) {
+	ts := ssmTagServer(t)
+
+	for _, tc := range []struct {
+		name       string
+		resourceID string
+	}{
+		{"an empty ResourceId", ""},
+		{"an ARN where a name belongs", "arn:aws:ssm:us-east-1:123456789012:parameter/app"},
+		{"an ARN of another service", "arn:aws:s3:::a-bucket"},
+		{"a parameter that does not exist", "/nothing/here"},
+		{"a bare name that does not exist", "nothing-here"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code := ssmAddTags(t, ts, ssmTagTarget, "Parameter", tc.resourceID, map[string]string{"k": "v"})
+			assert.Equal(t, "InvalidResourceId", code, "AddTagsToResource with %s", tc.name)
+			assert.Equal(t, http.StatusBadRequest, status, "AddTagsToResource with %s", tc.name)
+		})
+	}
 }
 
 // ─── Systems Manager's own tags ──────────────────────────────────────────────
