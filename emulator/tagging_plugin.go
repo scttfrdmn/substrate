@@ -265,6 +265,61 @@ type resourceDescriptor struct {
 	scan       func(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error)
 }
 
+// taggingScanPrefix returns the state-key prefix that selects one resource type in the caller's
+// account and Region.
+//
+// Every scanner whose owning service builds an account- and Region-qualified key goes through it, so
+// no two can disagree about scope and none has to remember to include the Region. Forgetting is the
+// documented failure: scanECSClusters prefixed by account alone, so a caller in us-west-2 was
+// reported a us-east-1 cluster while the same caller's services — keyed identically — were
+// Region-scoped. One service answering a caller two different ways about one namespace is worse than
+// either answer, and GetResources' own opening sentence settles which is right: it "[r]eturns all
+// the tagged or previously tagged resources that are located in the specified AWS Region for the
+// account".
+//
+// Four scanners deliberately do not use it, and each for a reason the key or the ARN gives:
+// DynamoDB's key carries no Region, Lambda's and S3's carry neither, and CloudFront's ARNs are
+// global. IAM's are global in the Region axis alone, so it stays account-only. What holds the scope
+// for all of them is [taggingResourceInScope], which is the guarantee; this prefix is the narrowing
+// (#937).
+func taggingScanPrefix(typePrefix string, reqCtx *RequestContext) string {
+	return typePrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+}
+
+// taggingResourceInScope reports whether a scanned resource's own ARN places it in the caller's
+// account and Region.
+//
+// GetResources "[r]eturns all the tagged or previously tagged resources that are located in the
+// specified AWS Region for the account", so the scan is scoped by where a resource *is* — and an ARN
+// is where AWS states that. Reading the scope from the reported ARN rather than from each scanner's
+// state-key prefix is what makes it one rule instead of twenty-nine: a scanner whose key carries no
+// Region cannot express the scope in a prefix at all, and one that can has to remember to. This is
+// the read-side form of the rule #826 through #932 established for the write side, where every
+// resolver takes account and Region from the ARN and never from the caller.
+//
+// An empty account or Region segment means the ARN states no such scope, and such a resource is in
+// scope everywhere. IAM depends on that: its ARNs carry no Region, so an IAM user is reported to a
+// caller in any Region, which is what a global service's resource should do. It is also why this
+// filter does not replace CloudFront's own us-east-1 gate — CloudFront ARNs are Region-less too, but
+// AWS publishes its tagging through that one Region, which is a narrower rule than this one can
+// express.
+//
+// An ARN that does not parse is left in scope rather than dropped. A scan that silently discarded a
+// resource because substrate had built a malformed ARN for it would hide the ARN defect behind a
+// missing row, which is the opposite of what #827 settled: report what is there rather than
+// swallowing it.
+func taggingResourceInScope(arn string, reqCtx *RequestContext) bool {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) < 6 || parts[0] != "arn" {
+		return true
+	}
+	region, account := parts[3], parts[4]
+	if region != "" && region != reqCtx.Region {
+		return false
+	}
+	return account == "" || account == reqCtx.AccountID
+}
+
 func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	descriptors := []resourceDescriptor{
@@ -305,12 +360,32 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 			p.logger.Warn("tagging: scan error", "type", d.typePrefix, "err", err)
 			continue
 		}
-		all = append(all, resources...)
+		// Scope is decided here rather than in each scanner, so a scanner that cannot narrow its
+		// state-key prefix — or forgets to — still cannot report another account's or Region's
+		// resource. See [taggingResourceInScope].
+		for _, r := range resources {
+			if !taggingResourceInScope(r.ResourceARN, reqCtx) {
+				continue
+			}
+			all = append(all, r)
+		}
 	}
 	return all, nil
 }
 
-func (p *TaggingPlugin) scanS3Buckets(_ context.Context, _ *RequestContext) ([]resourceTagMapping, error) {
+// scanS3Buckets lists the caller's buckets.
+//
+// S3 is the one service whose scope [taggingResourceInScope] cannot decide, because an S3 bucket ARN
+// is arn:aws:s3:::{name} — it carries neither an account nor a Region segment, S3's bucket namespace
+// being global. So the scope comes off the record instead: [S3Bucket] stores the Region it was
+// created in, and #937 added the account that created it. The key cannot carry either, since a bucket
+// name is globally unique and the key is what makes that true here as well.
+//
+// An empty Region or AccountID is in scope, on the same rule [taggingResourceInScope] applies to an
+// absent ARN segment: a record that states no scope is not evidence of a scope to exclude it from,
+// and a bucket written by a path that does not set the field would otherwise disappear from
+// GetResources rather than be reported with what is known about it.
+func (p *TaggingPlugin) scanS3Buckets(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	keys, err := p.state.List(goCtx, s3Namespace, "bucket:")
 	if err != nil {
@@ -326,6 +401,12 @@ func (p *TaggingPlugin) scanS3Buckets(_ context.Context, _ *RequestContext) ([]r
 		if err := json.Unmarshal(raw, &b); err != nil {
 			continue
 		}
+		if b.Region != "" && b.Region != reqCtx.Region {
+			continue
+		}
+		if b.AccountID != "" && b.AccountID != reqCtx.AccountID {
+			continue
+		}
 		out = append(out, resourceTagMapping{
 			ResourceARN: s3BucketARN(b.Name),
 			Tags:        mapToTaggingTags(b.Tags),
@@ -334,6 +415,14 @@ func (p *TaggingPlugin) scanS3Buckets(_ context.Context, _ *RequestContext) ([]r
 	return out, nil
 }
 
+// scanLambdaFunctions lists the caller's functions.
+//
+// It narrows by nothing, because the key is "function:{name}" — neither the account nor the Region is
+// in it, and a function name is unique per account per Region only, so this key cannot tell two
+// callers' functions of one name apart in the first place. Both halves of the scope come from the
+// function's own ARN through [taggingResourceInScope], which is enough for the read side; the write
+// side has the same blindness in resolveARN's lambda arm and needs the key change this does not make
+// (#943).
 func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, _ *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	keys, err := p.state.List(goCtx, lambdaNamespace, "function:")
@@ -358,9 +447,15 @@ func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, _ *RequestContext
 	return out, nil
 }
 
-func (p *TaggingPlugin) scanSQSQueues(_ context.Context, _ *RequestContext) ([]resourceTagMapping, error) {
+// scanSQSQueues lists the caller's queues.
+//
+// Account-qualified but not Region-qualified, because that is as far as the key goes: [sqsURLKey]
+// builds it from the last two components of a queue URL and a queue URL's penultimate component is
+// the account, with no Region anywhere in it. The Region half of the scope comes from the queue's own
+// ARN through [taggingResourceInScope] (#937).
+func (p *TaggingPlugin) scanSQSQueues(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, sqsNamespace, "queue:")
+	keys, err := p.state.List(goCtx, sqsNamespace, "queue:"+reqCtx.AccountID+"/")
 	if err != nil {
 		return nil, fmt.Errorf("list sqs queues: %w", err)
 	}
@@ -382,6 +477,11 @@ func (p *TaggingPlugin) scanSQSQueues(_ context.Context, _ *RequestContext) ([]r
 	return out, nil
 }
 
+// scanDynamoDBTables lists the caller's tables.
+//
+// Account-qualified but not Region-qualified, because [tableStateKey] carries no Region — it is the
+// one Tier-2 key that cannot express the whole scope. The Region half comes from the table's own ARN
+// through [taggingResourceInScope] (#937).
 func (p *TaggingPlugin) scanDynamoDBTables(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	prefix := "table:" + reqCtx.AccountID + "/"
@@ -409,7 +509,7 @@ func (p *TaggingPlugin) scanDynamoDBTables(_ context.Context, reqCtx *RequestCon
 
 func (p *TaggingPlugin) scanEC2Instances(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "instance:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("instance:", reqCtx)
 	keys, err := p.state.List(goCtx, ec2Namespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list ec2 instances: %w", err)
@@ -486,7 +586,7 @@ func (p *TaggingPlugin) scanIAMEntities(_ context.Context, reqCtx *RequestContex
 
 func (p *TaggingPlugin) scanAPIGatewayAPIs(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "api:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("api:", reqCtx)
 	keys, err := p.state.List(goCtx, apigatewayNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list apigateway apis: %w", err)
@@ -512,7 +612,7 @@ func (p *TaggingPlugin) scanAPIGatewayAPIs(_ context.Context, reqCtx *RequestCon
 
 func (p *TaggingPlugin) scanStepFunctionsStateMachines(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "statemachine:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix(sfnStateMachineKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, statesNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list stepfunctions state machines: %w", err)
@@ -541,7 +641,7 @@ func (p *TaggingPlugin) scanStepFunctionsStateMachines(_ context.Context, reqCtx
 // a caller discovering resources — the two halves of #835's criterion per resource type.
 func (p *TaggingPlugin) scanStepFunctionsActivities(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := sfnActivityKeyPrefix + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix(sfnActivityKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, statesNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list stepfunctions activities: %w", err)
@@ -566,7 +666,7 @@ func (p *TaggingPlugin) scanStepFunctionsActivities(_ context.Context, reqCtx *R
 
 func (p *TaggingPlugin) scanECRRepositories(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "ecrrepo:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("ecrrepo:", reqCtx)
 	keys, err := p.state.List(goCtx, ecrNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list ecr repositories: %w", err)
@@ -589,26 +689,9 @@ func (p *TaggingPlugin) scanECRRepositories(_ context.Context, reqCtx *RequestCo
 	return out, nil
 }
 
-// ecsScanPrefix returns the state-key prefix that selects one ECS resource type in the caller's
-// account and Region.
-//
-// Every ECS scanner goes through it, so the four cannot disagree about scope. That matters more here
-// than in a single-type namespace: scanECSClusters used to prefix by account alone, so a caller in
-// us-west-2 was reported a us-east-1 cluster while the same caller's services — keyed identically —
-// would have been Region-scoped. One service answering a caller two different ways about one
-// namespace is worse than either answer, and GetResources' own opening sentence settles which is
-// right: it "[r]eturns all the tagged or previously tagged resources that are located in the
-// specified AWS Region for the account".
-//
-// The same Region blindness remains in fourteen other scanners and a cross-account variant in three,
-// tracked in #937 rather than fixed piecemeal here.
-func ecsScanPrefix(typePrefix string, reqCtx *RequestContext) string {
-	return typePrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
-}
-
 func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsClusterKeyPrefix, reqCtx))
+	keys, err := p.state.List(goCtx, ecsNamespace, taggingScanPrefix(ecsClusterKeyPrefix, reqCtx))
 	if err != nil {
 		return nil, fmt.Errorf("list ecs clusters: %w", err)
 	}
@@ -638,7 +721,7 @@ func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContex
 // tagging API cannot find is a tag no consumer can audit.
 func (p *TaggingPlugin) scanECSServices(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsServiceKeyPrefix, reqCtx))
+	keys, err := p.state.List(goCtx, ecsNamespace, taggingScanPrefix(ecsServiceKeyPrefix, reqCtx))
 	if err != nil {
 		return nil, fmt.Errorf("list ecs services: %w", err)
 	}
@@ -669,7 +752,7 @@ func (p *TaggingPlugin) scanECSServices(_ context.Context, reqCtx *RequestContex
 // that left it out would leave the same asymmetry the row exists to close.
 func (p *TaggingPlugin) scanECSTasks(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsTaskKeyPrefix, reqCtx))
+	keys, err := p.state.List(goCtx, ecsNamespace, taggingScanPrefix(ecsTaskKeyPrefix, reqCtx))
 	if err != nil {
 		return nil, fmt.Errorf("list ecs tasks: %w", err)
 	}
@@ -705,7 +788,7 @@ func (p *TaggingPlugin) scanECSTasks(_ context.Context, reqCtx *RequestContext) 
 // DescribeTaskDefinition is still a resource.
 func (p *TaggingPlugin) scanECSTaskDefinitions(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, ecsNamespace, ecsScanPrefix(ecsTaskDefKeyPrefix, reqCtx))
+	keys, err := p.state.List(goCtx, ecsNamespace, taggingScanPrefix(ecsTaskDefKeyPrefix, reqCtx))
 	if err != nil {
 		return nil, fmt.Errorf("list ecs task definitions: %w", err)
 	}
@@ -729,7 +812,7 @@ func (p *TaggingPlugin) scanECSTaskDefinitions(_ context.Context, reqCtx *Reques
 
 func (p *TaggingPlugin) scanCognitoUserPools(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "userpool:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("userpool:", reqCtx)
 	keys, err := p.state.List(goCtx, cognitoIDPNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list cognito user pools: %w", err)
@@ -754,7 +837,7 @@ func (p *TaggingPlugin) scanCognitoUserPools(_ context.Context, reqCtx *RequestC
 
 func (p *TaggingPlugin) scanKinesisStreams(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "stream:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("stream:", reqCtx)
 	keys, err := p.state.List(goCtx, kinesisNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list kinesis streams: %w", err)
@@ -779,7 +862,7 @@ func (p *TaggingPlugin) scanKinesisStreams(_ context.Context, reqCtx *RequestCon
 
 func (p *TaggingPlugin) scanRDSInstances(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "dbinstance:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix(rdsDBInstanceKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list rds instances: %w", err)
@@ -809,7 +892,7 @@ func (p *TaggingPlugin) scanRDSInstances(_ context.Context, reqCtx *RequestConte
 // is how the merge arm above came to truncate a cluster in the first place.
 func (p *TaggingPlugin) scanRDSClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := rdsDBClusterKeyPrefix + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix(rdsDBClusterKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list rds clusters: %w", err)
@@ -835,7 +918,7 @@ func (p *TaggingPlugin) scanRDSClusters(_ context.Context, reqCtx *RequestContex
 // scanRDSSubnetGroups reports every DB subnet group in the caller's account.
 func (p *TaggingPlugin) scanRDSSubnetGroups(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := rdsDBSubnetGroupKeyPrefix + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix(rdsDBSubnetGroupKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list rds subnet groups: %w", err)
@@ -860,7 +943,7 @@ func (p *TaggingPlugin) scanRDSSubnetGroups(_ context.Context, reqCtx *RequestCo
 
 func (p *TaggingPlugin) scanElastiCacheClusters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "cachecluster:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("cachecluster:", reqCtx)
 	keys, err := p.state.List(goCtx, elasticacheNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list elasticache clusters: %w", err)
@@ -885,7 +968,7 @@ func (p *TaggingPlugin) scanElastiCacheClusters(_ context.Context, reqCtx *Reque
 
 func (p *TaggingPlugin) scanEFSFileSystems(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "filesystem:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("filesystem:", reqCtx)
 	keys, err := p.state.List(goCtx, efsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list efs filesystems: %w", err)
@@ -910,7 +993,7 @@ func (p *TaggingPlugin) scanEFSFileSystems(_ context.Context, reqCtx *RequestCon
 
 func (p *TaggingPlugin) scanGlueDatabases(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "database:" + reqCtx.AccountID + "/"
+	prefix := taggingScanPrefix("database:", reqCtx)
 	keys, err := p.state.List(goCtx, glueNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list glue databases: %w", err)
@@ -950,7 +1033,7 @@ func (p *TaggingPlugin) scanGlueDatabases(_ context.Context, reqCtx *RequestCont
 // unmodelled behavior (KMSInvalidStateException) noted on #922 rather than guessed at.
 func (p *TaggingPlugin) scanKMSKeys(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := kmsKeyKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	prefix := taggingScanPrefix(kmsKeyKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, kmsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list kms keys: %w", err)
@@ -990,7 +1073,7 @@ func (p *TaggingPlugin) scanKMSKeys(_ context.Context, reqCtx *RequestContext) (
 // than reporting wrongly, but for a reason no reader could see.
 func (p *TaggingPlugin) scanSNSTopics(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := snsTopicKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	prefix := taggingScanPrefix(snsTopicKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, snsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list sns topics: %w", err)
@@ -1032,7 +1115,7 @@ func (p *TaggingPlugin) scanSNSTopics(_ context.Context, reqCtx *RequestContext)
 // reporting nothing, because it is the one key in the tree whose value is a caller's secret.
 func (p *TaggingPlugin) scanSecretsManagerSecrets(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := smSecretKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	prefix := taggingScanPrefix(smSecretKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, secretsManagerNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list secretsmanager secrets: %w", err)
@@ -1072,7 +1155,7 @@ func (p *TaggingPlugin) scanSecretsManagerSecrets(_ context.Context, reqCtx *Req
 // prefix would list and then skip silently when it failed to unmarshal into an [SSMParameter].
 func (p *TaggingPlugin) scanSSMParameters(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := ssmParameterKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	prefix := taggingScanPrefix(ssmParameterKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, ssmNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list ssm parameters: %w", err)
@@ -1102,7 +1185,7 @@ func (p *TaggingPlugin) scanSSMParameters(_ context.Context, reqCtx *RequestCont
 
 func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := acmCertKeyPrefix + reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	prefix := taggingScanPrefix(acmCertKeyPrefix, reqCtx)
 	keys, err := p.state.List(goCtx, acmNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list acm certificates: %w", err)

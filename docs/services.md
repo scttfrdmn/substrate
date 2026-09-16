@@ -8172,13 +8172,57 @@ revision only would hide a tag the tagging API itself had written to an older on
 AWS's tagging page says nothing about deregistration, and a deregistered revision
 still answers `DescribeTaskDefinition`, so it remains an observable resource.
 
-All four ECS scanners are scoped to the caller's account **and Region**, through one
-shared prefix helper so they cannot disagree about scope. `GetResources` states that
-it "[r]eturns all the tagged or previously tagged resources that are located in the
-specified AWS Region for the account", and before #935 the cluster scanner prefixed by
-account alone, so a `us-east-1` caller was reported a `us-west-2` cluster. The same
-Region blindness remains in fourteen other scanners, with a cross-account variant in
-three; that is #937.
+All four ECS scanners are scoped to the caller's account **and Region**, through the
+same shared prefix helper every other scanner now uses, so none of them can disagree
+about scope. Before #935 the cluster scanner prefixed by account alone, so a `us-east-1`
+caller was reported a `us-west-2` cluster while the same caller's services — keyed
+identically — were Region-scoped. The section below is the general rule that grew out of
+that one.
+
+### Every scanned resource is scoped to the caller's account and Region
+
+`GetResources` "[r]eturns all the tagged or previously tagged resources that are located
+in the specified AWS Region for the account", so a scan is scoped by where a resource
+*is* — and an ARN is where AWS states that. Substrate therefore decides scope at one
+choke point in the scan loop, off each reported ARN's own account and Region segments,
+rather than once per scanner. Before #937 three scanners narrowed by nothing at all, so
+an S3 bucket, a Lambda function or an SQS queue in any account was reported to any
+caller, and fourteen more narrowed by account without the Region, so a `us-east-1` caller
+was reported a `us-west-2` EC2 instance.
+
+Reading the scope from the reported ARN rather than from each scanner's state-key prefix
+is what makes it one rule instead of one per scanner. A scanner whose key carries no
+Region cannot express the scope in a prefix at all — DynamoDB's key carries no Region,
+and Lambda's and S3's carry neither — and a scanner that can express it has to remember
+to, which the ECS cluster scanner did not. The state-key prefixes still narrow wherever
+the key can carry the scope, through one shared helper, but that is a narrowing of what
+gets loaded rather than the guarantee. This is the read-side form of the rule #826
+through #932 established for the write side, where every resolver takes the account and
+Region from the ARN and never from the caller. Two of those keys are themselves wrong and
+are corrected separately as #943: a Lambda function name is unique per account per Region
+and a DynamoDB table name per Region, so neither key can hold two resources AWS would let
+a caller create. S3's is right as it stands, because a bucket name really is global.
+
+An empty account or Region segment means the ARN states no such scope, and such a
+resource is in scope everywhere. IAM depends on that: an IAM ARN carries no Region, so an
+IAM user is reported to a caller in any Region, which is what a global service's resource
+should do. It is also why this rule does not replace CloudFront's own `us-east-1` gate — a
+CloudFront ARN is Region-less too, but AWS publishes CloudFront tagging through that one
+Region, which is a narrower rule than an empty segment can express.
+
+An ARN that does not parse — no `arn:` prefix, or fewer than six colon-separated
+segments — is left in scope rather than dropped. A scan that silently discarded a resource
+because substrate had built a malformed ARN for it would hide the ARN defect behind a
+missing row, which is the opposite of what #827 settled: report what is there.
+
+**An S3 bucket is the one resource scoped off its record rather than its ARN**, and that
+part is substrate's reading. A bucket ARN is `arn:aws:s3:::{name}`: S3's bucket namespace
+is global, so the ARN carries neither an account nor a Region segment to read, and the
+state key cannot carry either for the same reason. The record does instead — a bucket
+stores the Region it was created in, and #937 added the account that created it. A record
+whose Region or account is empty stays in scope, on the same rule an absent ARN segment
+gets, so a bucket written by a path that has no request context is reported with what is
+known about it rather than vanishing from the listing.
 
 Three ECS ARN shapes carry no tag, and the reason differs by shape. Each is
 refused rather than accepted silently — ECS's own `TagResource`, `UntagResource`

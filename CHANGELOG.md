@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`S3Bucket.AccountID`, the account that created a bucket** (#937). Every other taggable resource
+  records its account in its ARN or its state key; a bucket ARN is `arn:aws:s3:::{name}` and S3's
+  bucket namespace is global, so neither the ARN nor the key can carry one. The field is what lets
+  `GetResources` answer a per-account question about a bucket at all. It is empty on a record written
+  by a path with no request context, and an empty value stays in scope rather than disappearing from
+  the listing.
+
 ### Fixed
+- **`GetResources` reported another account's or another Region's resource** (#937). Three scanners
+  narrowed their state-key scan by nothing at all, so an S3 bucket, a Lambda function or an SQS queue
+  in any account was reported to any caller; fourteen more narrowed by account without the Region, so
+  a `us-east-1` caller was reported a `us-west-2` EC2 instance, API, state machine, activity, ECR
+  repository, user pool, Kinesis stream, RDS instance, cluster or subnet group, cache cluster, file
+  system, Glue database or DynamoDB table. `GetResources` "[r]eturns all the tagged or previously
+  tagged resources that are located in the specified AWS Region for the account", which is the
+  sentence the fix is measured against.
+
+  Scope is now decided at **one choke point** in the scan loop, off each reported ARN's own account and
+  Region segments, rather than once per scanner — the read-side form of the rule #826 through #932
+  established for the write side, where every resolver takes the account and Region from the ARN and
+  never from the caller. That is what makes it one rule rather than one per scanner: a scanner whose
+  key carries no Region cannot express the scope in a prefix at all, and a scanner that can has to
+  remember to, which the ECS cluster scanner did not (#935). The state-key prefixes still narrow
+  wherever the key can carry the scope, through one shared helper, but they narrow what gets loaded
+  rather than holding the guarantee. **No state-key shapes changed**, so nothing that reads state by
+  key is affected. Two of those keys are wrong on their own terms — a Lambda function name is unique
+  per account per Region and a DynamoDB table name per Region, so neither key can hold two resources
+  AWS would let a caller create — and that is corrected separately as #943 rather than folded into a
+  read-side fix.
+
+  An empty account or Region segment means the ARN states no such scope and the resource stays in
+  scope everywhere — which is how an IAM entity, whose ARN carries no Region, keeps being reported to a
+  caller in any Region without needing an exception. It is also why the rule does not replace
+  CloudFront's own `us-east-1` gate: a CloudFront ARN is Region-less too, but AWS publishes CloudFront
+  tagging through that one Region, a narrower rule than an empty segment can express. An ARN that does
+  not parse is left in scope rather than dropped, so a malformed ARN substrate built shows up as a
+  wrong row instead of hiding behind a missing one (#827). An S3 bucket is scoped off its record
+  instead, because its ARN carries neither segment; that part is substrate's reading.
+
 - **The Resource Groups Tagging API reports `InvalidParameterException`/400, not
   `InternalServiceException`/500, when an ARN resolves and names a resource that does not exist**
   (#939). Both codes were reachable before, but only through the same 500: a `FailedResourcesMap`
@@ -19,7 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is not there is the third of those three — so unlike the unsupported-*type* case, which
   substrate splits on whether the ARN parses and documents as its own reading, this one is AWS's.
   A foreign-account or foreign-Region ARN takes the new code wherever the resolver builds an
-  account- and Region-qualified key, which is every arm except Lambda's (#937).
+  account- and Region-qualified key, which is every arm except Lambda's and — for the Region half
+  only — DynamoDB's, whose keys are corrected as #943. An S3 ARN names neither, and cannot: a bucket
+  name is global, so a foreign-account bucket ARN resolves to the one bucket that name means.
 
   `docs/services.md` also now records a contradiction `FailureInfo` publishes about itself rather
   than resolving it silently: `ErrorCode`'s "Valid Values" are the two codes above, while the same
