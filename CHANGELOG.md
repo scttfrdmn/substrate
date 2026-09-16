@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a path with no request context, and an empty value stays in scope rather than disappearing from
   the listing.
 
+### Removed
+- **Secrets Manager's `ListTagsForResource`, an operation AWS does not publish** (#929). The Secrets
+  Manager API publishes twenty-three operations and that is not among them; a secret's tags are read
+  through `DescribeSecret`, which is the read path substrate's own tagging tests already used. The name
+  now falls to `UnknownOperationException`/404 like any other operation the service does not have,
+  which is what a caller reaching for it against real AWS gets. Answering it was worse than not
+  answering it: code written against substrate would have passed a test and then failed against AWS on
+  an operation that never existed.
+
+  Compatibility: a caller of Secrets Manager's `ListTagsForResource` must read `DescribeSecret`'s
+  `Tags` member instead.
+
 ### Fixed
 - **`GetResources` reported another account's or another Region's resource** (#937). Three scanners
   narrowed their state-key scan by nothing at all, so an S3 bucket, a Lambda function or an SQS queue
@@ -167,6 +179,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Compatibility: a caller asserting **404** on a missing KMS key, alias or destination key now sees
   **400**; a caller asserting **409** on a disabled key now sees **400**; and a caller matching the
   error code `InvalidRequest` now sees `ValidationError`.
+
+- **Secrets Manager answers `ResourceNotFoundException` at HTTP 400, the status AWS publishes for it,
+  not 404** (#930). `API_DescribeSecret`'s error list is three codes long — `InternalServiceError` at
+  500, `InvalidParameterException` at 400 and `ResourceNotFoundException` at **400**, glossed "Secrets
+  Manager can't find the resource that you asked for" — and every other operation that takes a
+  `SecretId` publishes the same status. Substrate answered 404, which Secrets Manager publishes
+  nowhere. All nine call sites are corrected at once, because they share one constructor: the status is
+  chosen in `smSecretNotFound` and a tenth operation added later cannot disagree with the reference
+  page by accident. This is the third service to carry the same defect, after ACM at one site (#921)
+  and KMS at fifteen (#923).
+
+- **`DescribeSecret` reports only the members it has a value for, and distinguishes the two things AWS
+  says about that** (#930). The blanket rule is one sentence — "Secrets Manager only returns fields
+  that have a value in the response" — but the per-member text does not distribute uniformly over it,
+  and a caller can tell the outcomes apart. Four members carry an explicit "this field is omitted"
+  (`DeletedDate`, `KmsKeyId`, `LastAccessedDate`, `RotationRules`); three carry an explicit "Secrets
+  Manager returns null" (`LastRotatedDate`, `NextRotationDate`, `RotationEnabled`); the rest carry no
+  per-member statement at all. So `KmsKeyId` is omitted **on AWS's statement** and `Description` is
+  omitted **on substrate's reading** of the blanket sentence, and the two are recorded apart rather
+  than presented alike — #930's own criterion named `Description` as though AWS had stated it, and the
+  page does not.
+
+  `RotationEnabled` needed no decision, because AWS published one: "If the secret has never been
+  configured for rotation, Secrets Manager returns null." It is therefore emitted either way, as
+  `null` before a `RotateSecret` and `true` after — never `false`, which is a claim AWS does not make.
+  That needs no new state: rotation is set by `RotateSecret` and by nothing else, and there is no
+  `CancelRotateSecret`, so "false" and "never configured" are the same condition. Absence is asserted
+  on the **raw bytes** throughout, since a decoded struct cannot tell an absent member from a null or a
+  zero-valued one. Ten published members substrate holds no value for stay absent, along with the three
+  managed-external-secret members `Type`, `ExternalSecretRotationRoleArn` and
+  `ExternalSecretRotationMetadata`; that is correct under the same sentence rather than a gap, and it
+  is asserted so that modelling one later comes with a decision about how it is reported.
+
+  Compatibility: a caller asserting **404** on an absent secret now sees **400** at all nine
+  `SecretId`-taking operations, and `DescribeSecret` no longer emits a member it has no value for, so
+  an assertion that a member is present-and-empty now sees it absent — except `RotationEnabled`, which
+  is present as `null` where it previously read `false`.
 
 ## [v0.117.0] - 2026-09-15
 

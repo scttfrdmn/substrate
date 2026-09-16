@@ -14,7 +14,11 @@ import (
 // SecretsManagerPlugin emulates the AWS Secrets Manager JSON-protocol API.
 // It handles CreateSecret, GetSecretValue, PutSecretValue, DescribeSecret,
 // UpdateSecret, DeleteSecret, ListSecrets, ListSecretVersionIds,
-// TagResource, UntagResource, ListTagsForResource, and RotateSecret.
+// TagResource, UntagResource, and RotateSecret.
+//
+// It deliberately does not handle ListTagsForResource, which the Secrets Manager API does not publish
+// among its twenty-three operations; substrate answered one until #929. Tags are read through
+// DescribeSecret.
 type SecretsManagerPlugin struct {
 	state  StateManager
 	logger Logger
@@ -62,8 +66,11 @@ func (p *SecretsManagerPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.tagResource(ctx, req)
 	case "UntagResource":
 		return p.untagResource(ctx, req)
-	case "ListTagsForResource":
-		return p.listTagsForResource(ctx, req)
+	// No ListTagsForResource arm: the Secrets Manager API does not publish that operation, and
+	// substrate answered it until #929. A secret's tags are read through DescribeSecret's Tags member,
+	// which is the read path #928's tagging row asserts through. The name now falls to
+	// unknownActionError like any other operation AWS does not have, which is what a caller reaching
+	// for it against real AWS gets.
 	case "RotateSecret":
 		return p.rotateSecret(ctx, req)
 	default:
@@ -321,24 +328,69 @@ func (p *SecretsManagerPlugin) describeSecret(ctx *RequestContext, req *AWSReque
 		return nil, smSecretNotFound(input.SecretID)
 	}
 
+	return smJSONResponse(http.StatusOK, smDescribeSecretBody(secret))
+}
+
+// smDescribeSecretBody renders a secret as DescribeSecret's response, emitting only the members AWS
+// emits for it.
+//
+// AWS's rule is one sentence on API_DescribeSecret — "Secrets Manager only returns fields that have a
+// value in the response" — but the page does **not** apply it uniformly, and the difference is
+// load-bearing because a caller can distinguish the two outcomes:
+//
+//   - Four members are documented "this field is omitted": DeletedDate, KmsKeyId ("If the secret is
+//     encrypted with the AWS managed key aws/secretsmanager"), LastAccessedDate and RotationRules.
+//     **That tier is AWS's**, stated per member.
+//   - Three are documented "Secrets Manager returns null": LastRotatedDate, NextRotationDate and
+//     RotationEnabled ("If the secret has never been configured for rotation"). A null member is
+//     present, so these are emitted rather than omitted.
+//   - The rest — ARN, CreatedDate, Description, LastChangedDate, Name, Tags and the others — carry no
+//     per-member statement at all, so omitting an empty one rests on the blanket sentence alone.
+//     **That tier is substrate's reading**, and #930's own criterion named Description as if AWS had
+//     stated it, which the page does not.
+//
+// RotationEnabled needs no extra state to answer correctly: [SecretState.RotationEnabled] is set by
+// RotateSecret and by nothing else, and substrate models no CancelRotateSecret, so false is exactly
+// AWS's "never been configured for rotation" and true is exactly "configured". A false value would
+// therefore be a claim AWS does not make, which is why it is emitted as null.
+//
+// The members substrate does not model stay absent, which the same sentence makes correct rather than
+// a gap: LastRotatedDate and NextRotationDate (nothing records a rotation time), DeletedDate,
+// LastAccessedDate, OwningService, PrimaryRegion, ReplicationStatus, RotationLambdaARN, RotationRules,
+// VersionIdsToStages, and the three managed-external-secret members AWS publishes — Type,
+// ExternalSecretRotationRoleArn and ExternalSecretRotationMetadata — which belong to a partner
+// integration substrate models nothing of.
+func smDescribeSecretBody(secret *SecretState) map[string]interface{} {
 	out := map[string]interface{}{
-		"ARN":             secret.ARN,
-		"Name":            secret.Name,
-		"Description":     secret.Description,
-		"KmsKeyId":        secret.KMSKeyID,
-		"RotationEnabled": secret.RotationEnabled,
-		"CreatedDate":     secret.CreatedDate.Unix(),
-		"LastChangedDate": secret.LastChangedDate.Unix(),
+		"ARN":  secret.ARN,
+		"Name": secret.Name,
 	}
-	// AWS states "Secrets Manager only returns fields that have a value in the response", and this is
-	// the operation a caller reads a secret's tags back through — Secrets Manager publishes no
-	// ListTagsForResource at all (#929). An untagged secret emitted "Tags": null, which is not a member
-	// AWS sends; the other members here are left as they are and are tracked in #930, because Tags is
-	// the one #928's tagging row is asserted through and the rest need their own decision.
+	if secret.Description != "" {
+		out["Description"] = secret.Description
+	}
+	if secret.KMSKeyID != "" {
+		out["KmsKeyId"] = secret.KMSKeyID
+	}
+	if !secret.CreatedDate.IsZero() {
+		out["CreatedDate"] = secret.CreatedDate.Unix()
+	}
+	if !secret.LastChangedDate.IsZero() {
+		out["LastChangedDate"] = secret.LastChangedDate.Unix()
+	}
+	// Emitted either way, because AWS documents a null rather than an omission — see above. A nil
+	// interface value is what renders the JSON null.
+	if secret.RotationEnabled {
+		out["RotationEnabled"] = true
+	} else {
+		out["RotationEnabled"] = nil
+	}
+	// This is the operation a caller reads a secret's tags back through, Secrets Manager publishing no
+	// ListTagsForResource at all (#929). An untagged secret emitted "Tags": null before #928, which is
+	// not a member AWS sends and not the null AWS documents for the three rotation members.
 	if len(secret.Tags) > 0 {
 		out["Tags"] = secret.Tags
 	}
-	return smJSONResponse(http.StatusOK, out)
+	return out
 }
 
 func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -625,34 +677,6 @@ func (p *SecretsManagerPlugin) untagResource(ctx *RequestContext, req *AWSReques
 		return nil, fmt.Errorf("sm untagResource saveSecret: %w", err)
 	}
 	return smJSONResponse(http.StatusOK, map[string]interface{}{})
-}
-
-func (p *SecretsManagerPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		SecretID string `json:"SecretId"`
-	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
-	if idErr != nil {
-		return nil, idErr
-	}
-	secret, err := p.loadSecret(context.Background(), target.AccountID, target.Region, target.Name)
-	if err != nil {
-		return nil, err
-	}
-	if secret == nil {
-		return nil, smSecretNotFound(input.SecretID)
-	}
-
-	out := map[string]interface{}{
-		"ARN":  secret.ARN,
-		"Name": secret.Name,
-		"Tags": secret.Tags,
-	}
-	return smJSONResponse(http.StatusOK, out)
 }
 
 func (p *SecretsManagerPlugin) rotateSecret(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

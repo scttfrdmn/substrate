@@ -8764,11 +8764,10 @@ SNS publish: $0.0000005 per message.
 | UpdateSecret | |
 | DeleteSecret | Supports ForceDeleteWithoutRecovery |
 | ListSecrets | Base64 offset pagination; scoped to the caller's account and Region |
-| DescribeSecret | The read path for a secret's tags; omits `Tags` when there are none |
+| DescribeSecret | The read path for a secret's tags; reports only the members it has a value for |
 | ListSecretVersionIds | Reports the current version only |
 | TagResource | Appends to the existing list rather than replacing it |
 | UntagResource | Idempotent — an absent key is not an error |
-| ListTagsForResource | **Not an operation AWS publishes.** Tracked in #929 |
 | RotateSecret | Records the rotation request; no rotation function is executed |
 
 ### A `SecretId` addresses the secret its own ARN names
@@ -8821,13 +8820,57 @@ name recoverable from the ARN here. Adding one would make this resolver ambiguou
 construction and would change a value CloudFormation records as a physical ID, so it is
 a separate decision rather than part of the fix.
 
+### An absent secret is a `400`, and `DescribeSecret` reports only what it has a value for
+
+**`ResourceNotFoundException` is `400`.** Substrate answered `404` at all nine
+`SecretId`-taking operations until #930 — a status Secrets Manager publishes nowhere.
+`API_DescribeSecret`'s error list is three codes long: `InternalServiceError` at `500`,
+`InvalidParameterException` at `400`, and `ResourceNotFoundException` at **`400`**,
+glossed "Secrets Manager can't find the resource that you asked for". Every other
+operation that takes a `SecretId` publishes the same status. This is the defect ACM
+carried at one site (#921) and KMS at fifteen (#923), and the fix is the same shape: one
+constructor chooses the status, so a tenth operation added later cannot disagree with
+the reference page by accident.
+
+**`DescribeSecret` omits a member it has no value for — but AWS says two different
+things, and the difference is observable.** The blanket rule is one sentence: "Secrets
+Manager only returns fields that have a value in the response". The per-member text does
+not distribute uniformly over it, so the members fall into three tiers, and substrate
+keeps them apart deliberately:
+
+| Tier | Members | Treatment |
+|------|---------|-----------|
+| AWS states "this field is omitted" | `DeletedDate`, `KmsKeyId`, `LastAccessedDate`, `RotationRules` | Absent |
+| AWS states "Secrets Manager returns null" | `LastRotatedDate`, `NextRotationDate`, `RotationEnabled` | Emitted as JSON `null` |
+| AWS states nothing per member | `ARN`, `CreatedDate`, `Description`, `LastChangedDate`, `Name`, `Tags`, and the rest | Absent when empty — **substrate's reading**, on the blanket sentence alone |
+
+`KmsKeyId` is omitted on AWS's own statement ("If the secret is encrypted with the AWS
+managed key `aws/secretsmanager`, this field is omitted"). `Description` is omitted on
+substrate's reading of the blanket sentence, which is a weaker basis and is recorded as
+such rather than presented as matching AWS — #930's own criterion named it as though AWS
+had stated it, and the page does not.
+
+`RotationEnabled` needed no decision at all, because AWS published one: "If the secret
+has never been configured for rotation, Secrets Manager returns null." So it is emitted
+either way, as `null` before a `RotateSecret` and `true` after — never `false`, which is
+a claim AWS does not make. Substrate needs no extra state to answer that correctly:
+rotation is set by `RotateSecret` and by nothing else, and there is no
+`CancelRotateSecret`, so "false" and "never configured" are the same condition.
+
+Nine of the twenty-one published response members are absent because substrate models no
+value for them, which the same sentence makes correct rather than a gap:
+`DeletedDate`, `LastAccessedDate`, `LastRotatedDate`, `NextRotationDate`,
+`OwningService`, `PrimaryRegion`, `ReplicationStatus`, `RotationLambdaARN`,
+`RotationRules` and `VersionIdsToStages`. So are the three managed-external-secret
+members — `Type`, `ExternalSecretRotationRoleArn` and
+`ExternalSecretRotationMetadata` — which belong to a partner integration substrate
+models nothing of.
+
 **Tags.** `DescribeSecret` is the read path, because Secrets Manager publishes no
-`ListTagsForResource` — the one substrate answers is an operation AWS does not have
-(#929). An untagged secret now omits the `Tags` member entirely rather than sending
-`null`, following AWS's own statement that "Secrets Manager only returns fields that
-have a value in the response"; the remaining members that are still emitted
-unconditionally are #930, along with the HTTP status of `ResourceNotFoundException`,
-which AWS publishes as `400` where substrate answers `404`.
+`ListTagsForResource`. Substrate answered one until #929 removed it: the API publishes
+twenty-three operations and that is not among them, so the name now falls to
+`UnknownOperationException`, which is what a caller reaching for it against real AWS
+gets. An untagged secret omits the `Tags` member entirely rather than sending `null`.
 
 ### CloudFormation resource types
 
