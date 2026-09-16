@@ -8519,21 +8519,44 @@ as `null` rather than as the empty array AWS publishes.
 ### Which failure gets which error code
 
 A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
-enumerates, split on whether the ARN parsed:
+enumerates, split three ways:
 
 | Case | Code | Status |
 |------|------|--------|
 | A well-formed ARN naming a resource type substrate cannot key | `InternalServiceException` | 500 |
+| A well-formed ARN of a type substrate keys, naming a resource that does not exist | `InvalidParameterException` | 400 |
 | Not an ARN: no `arn:` prefix, or fewer than six colon-separated segments | `InvalidParameterException` | 400 |
 
 `FailureInfo` documents `InternalServiceException` as covering "the resource type
 in the request is not supported by the Resource Groups Tagging API", and tells the
 caller "it's safe to retry the request and then call `GetResources` to verify the
-changes". The split is substrate's reading rather than AWS's: the same page's
-`InvalidParameterException` bullets also say "the target ID is invalid,
-unsupported, or doesn't exist", so both codes can be read to cover an unsupported
-type. Substrate splits them on whether the ARN parses, because that is the only
-distinction a caller can act on differently.
+changes". Which of the two codes an unsupported *type* earns is substrate's reading
+rather than AWS's: the same page's `InvalidParameterException` bullets also say
+"the target ID is invalid, unsupported, or doesn't exist", so both codes can be
+read to cover it. Substrate splits those two on whether the ARN parses, because
+that is the only distinction a caller can act on differently.
+
+The middle row is **not** ambiguous, and substrate answered the 500 for it until
+#939. `TagResources` and `UntagResources` both list "[t]he target ID is invalid,
+unsupported, or doesn't exist" among `InvalidParameterException`'s causes, and a
+resource that is not there is the third of those three; a 500 telling the caller it
+is "safe to retry" pointed at a request that could only fail again. Wherever the
+resolver builds an account- and Region-qualified state key from the ARN, a
+foreign-account or foreign-Region ARN takes this row rather than one of its own: it
+addresses a key nothing is stored at, so the refusal is emergent rather than a
+separate guard. One arm does not: Lambda's key is `function:{name}` with no account
+in it, so a foreign-account function ARN still reaches the caller's own function of
+that name. That is #937, not this row. An S3 bucket ARN — `arn:aws:s3:::{name}` —
+carries no account or Region to honour in the first place, so the question does not
+arise there.
+
+AWS publishes a contradiction about this field, recorded here rather than resolved:
+`FailureInfo.ErrorCode` carries "Valid Values: `InternalServiceException` |
+`InvalidParameterException`", while the same member's prose says it "can also
+include any valid error code returned by the AWS service that hosts the resource
+that the ARN key represents" and offers `AccessDeniedException` as an example.
+Substrate reports only the two enumerated codes, because the enumeration is the
+part a caller can switch on.
 
 Substrate does **not** distinguish "AWS's tagging API does not support this type"
 from "AWS supports it and substrate has no arm yet". AWS publishes no list that

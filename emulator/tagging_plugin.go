@@ -1316,7 +1316,33 @@ func (p *TaggingPlugin) tagResolveFailure(arn string, err error) failedResources
 
 // tagMergeFailure maps a tag-merge error onto a FailureInfo. The error's own text names the
 // state key it failed at, so it is logged rather than returned.
+//
+// The two codes split on whose failure it is. An ARN that resolved and addressed no record is
+// [errTagResourceNotFound], and that is InvalidParameterException at HTTP 400: TagResources and
+// UntagResources both list "[t]he target ID is invalid, unsupported, or doesn't exist" among that
+// code's causes, and a resource that is not there is exactly the third of the three. Every other
+// merge error — a stored record that will not unmarshal, a Get or a Put that failed — is
+// InternalServiceException at HTTP 500, whose published gloss is that the request "failed because
+// of an internal error" and that it is "safe to retry the request and then call GetResources to
+// verify the changes". Answering 500 for both, as substrate did before #939, told a caller to
+// retry a request that could only fail again, and left "substrate cannot tag this type" and "this
+// resource does not exist" indistinguishable.
+//
+// AWS publishes a contradiction about this field that substrate records rather than resolves:
+// FailureInfo's ErrorCode carries "Valid Values: InternalServiceException |
+// InvalidParameterException" while the same member's prose says it "can also include any valid
+// error code returned by the AWS service that hosts the resource that the ARN key represents",
+// offering AccessDeniedException as an example. Substrate reports only the two enumerated codes,
+// because the enumeration is the part a caller can switch on.
 func (p *TaggingPlugin) tagMergeFailure(arn string, err error) failedResourcesInfo {
+	if errors.Is(err, errTagResourceNotFound) {
+		p.logger.Warn("tagging API found no resource at the ARN", "arn", arn, "error", err)
+		return failedResourcesInfo{
+			ErrorCode:    "InvalidParameterException",
+			ErrorMessage: "the target ID is invalid, unsupported, or doesn't exist",
+			StatusCode:   http.StatusBadRequest,
+		}
+	}
 	p.logger.Error("tagging API failed to merge tags", "arn", arn, "error", err)
 	return failedResourcesInfo{
 		ErrorCode:    "InternalServiceException",
@@ -1665,6 +1691,15 @@ func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags
 	return mergeResourceTags(goCtx, p.state, ns, key, addTags, removeKeys)
 }
 
+// errTagResourceNotFound reports that ns/key addressed no record, so there was nothing for a tag
+// to merge into.
+//
+// It is a sentinel rather than a plain error string because the tagging API answers it with a
+// different FailureInfo code from every other merge failure, and the caller that needs to tell
+// them apart — [TaggingPlugin.tagMergeFailure] — is not the caller that produces it. The error's
+// text still names the state key, which is why that mapping logs it instead of returning it (#939).
+var errTagResourceNotFound = errors.New("no resource at the resolved state key")
+
 // mergeResourceTags loads the resource at ns/key, applies addTags (merge) and removes
 // removeKeys, then persists the updated resource.
 //
@@ -1693,7 +1728,7 @@ func mergeResourceTags(
 		return fmt.Errorf("get resource: %w", err)
 	}
 	if raw == nil {
-		return fmt.Errorf("resource not found: %s/%s", ns, key)
+		return fmt.Errorf("%w: %s/%s", errTagResourceNotFound, ns, key)
 	}
 
 	switch ns {
