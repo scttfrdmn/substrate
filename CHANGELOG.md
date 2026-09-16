@@ -160,6 +160,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is exactly how #889 failed as authored. Same reasoning as #786.
 
 ### Fixed
+- **The RDS and ElastiCache `Marker` names the last record of the page it ends, so a listing
+  that changes between two pages no longer loses or repeats a record** (#887). Three
+  operations were affected — `DescribeDBInstances`, `DescribeDBClusters` and
+  `DescribeCacheClusters` — and both defects are observable through the wire, not internal.
+
+  The `Marker` was a decimal offset into the sorted listing. All five relevant AWS pages
+  document the parameter positionally — "the response includes only records beyond the marker,
+  up to the value specified by `MaxRecords`" — and an offset diverges from that as soon as the
+  set changes behind the cursor. Paging five instances two at a time and deleting the first
+  after page one, page two was answered as `items[2:]` of a now-four-record listing, so the
+  third record was never reported: the caller's loop terminated normally having seen four of
+  five records with nothing to indicate the fifth was skipped. A record *created* behind the
+  cursor repeated one instead. The previous pagination test asserted only that page one carried
+  a `Marker`, then fetched page two with a hand-written offset and discarded the body, so it
+  passed against a cursor that dropped a record.
+
+  Separately, the offset was parsed with `strconv.Atoi` and the error discarded, so **any**
+  unparseable marker became `0` and was answered with page one. A consumer that persisted a
+  marker across a restart, or truncated one, silently restarted its walk rather than being told
+  the marker was unusable.
+
+  The `Marker` now names the last record of the previous page and the next page is the records
+  sorting strictly after it — the pattern `ListBuckets`' `continuation-token` already uses. It
+  is base64, so a marker substrate did not issue is detectable and is refused with
+  `InvalidParameterValue` / 400. That code is published for ElastiCache on
+  `DescribeCacheClusters` and `DescribeReplicationGroups`; the two RDS pages publish only their
+  NotFound faults, so for RDS it is recorded as substrate's reading. Truncation is decided on
+  the next matching record rather than on the page filling up, so a full last page carries no
+  `Marker`.
+
+  The audit behind this also classified all 128 non-test `List` call sites across 46 files
+  against #865's three provenance tiers and found **no** new tier-1 operation: eleven further
+  AWS pages publish no ordering statement, and EC2's Query request page disclaims order for the
+  whole family, so `ListMultipartUploads` remains the only documented order in the tree. The
+  classification, the citations and the two corrections to #887's own premise — only one of
+  ElastiCache's four describes had a cursor, and there are 128 sites rather than the estimated
+  ~60 — are recorded in `docs/services.md` and on the issue. `MaxRecords` is left alone
+  deliberately: substrate still honours a value outside the documented 20–100 range and
+  silently rewrites an unusable one, which is #913, and folding a page-*size* change into a
+  page-*contents* change would have made the two indistinguishable in one diff.
+
 - **Step Functions' three tagging operations address the resource their ARN names, and an
   activity is reachable from the Resource Groups Tagging API** (#910, part of #835). Four
   defects in the same three functions, and the wire-shape one made two of them uncallable from

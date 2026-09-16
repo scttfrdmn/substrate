@@ -205,57 +205,41 @@ func (p *RDSPlugin) describeDBInstances(reqCtx *RequestContext, req *AWSRequest)
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["DBInstanceIdentifier"]
 
-	keys, err := p.state.List(context.Background(), rdsNamespace, "dbinstance:"+scope+"/")
+	// The marker is validated before any state is read, so a request substrate cannot
+	// serve is refused rather than answered with page one.
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+
+	prefix := "dbinstance:" + scope + "/"
+	keys, err := p.state.List(context.Background(), rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("rds describeDBInstances list: %w", err)
 	}
 
-	var items []xmlDBInstanceItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), rdsNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var inst RDSDBInstance
-		if json.Unmarshal(data, &inst) != nil {
-			continue
-		}
-		if filterID != "" && inst.DBInstanceIdentifier != filterID {
-			continue
-		}
-		items = append(items, dbInstanceToXML(inst))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, queryMaxRecords(req.Params["MaxRecords"]),
+		func(key, _ string) (xmlDBInstanceItem, bool) {
+			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlDBInstanceItem{}, false
+			}
+			var inst RDSDBInstance
+			if json.Unmarshal(data, &inst) != nil {
+				return xmlDBInstanceItem{}, false
+			}
+			if filterID != "" && inst.DBInstanceIdentifier != filterID {
+				return xmlDBInstanceItem{}, false
+			}
+			return dbInstanceToXML(inst), true
+		})
 
-	if filterID != "" && len(items) == 0 {
+	if filterID != "" && len(page) == 0 {
 		return nil, &AWSError{
 			Code:       "DBInstanceNotFound",
 			Message:    "DBInstance " + filterID + " not found.",
 			HTTPStatus: http.StatusNotFound,
 		}
-	}
-
-	// Pagination.
-	maxRecords := 100
-	if s := req.Params["MaxRecords"]; s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			maxRecords = n
-		}
-	}
-	marker := req.Params["Marker"]
-	offset := 0
-	if marker != "" {
-		if n, err := strconv.Atoi(marker); err == nil {
-			offset = n
-		}
-	}
-	if offset > len(items) {
-		offset = len(items)
-	}
-	page := items[offset:]
-	var nextMarker string
-	if len(page) > maxRecords {
-		page = page[:maxRecords]
-		nextMarker = strconv.Itoa(offset + maxRecords)
 	}
 
 	type result struct {
@@ -534,7 +518,15 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["DBClusterIdentifier"]
 
-	keys, err := p.state.List(context.Background(), rdsNamespace, "dbcluster:"+scope+"/")
+	// The marker is validated before any state is read, so a request substrate cannot
+	// serve is refused rather than answered with page one.
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+
+	prefix := "dbcluster:" + scope + "/"
+	keys, err := p.state.List(context.Background(), rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("rds describeDBClusters list: %w", err)
 	}
@@ -553,64 +545,40 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 		DBClusterArn        string `xml:"DBClusterArn"`
 	}
 
-	var items []xmlClusterItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), rdsNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var c RDSDBCluster
-		if json.Unmarshal(data, &c) != nil {
-			continue
-		}
-		if filterID != "" && c.DBClusterIdentifier != filterID {
-			continue
-		}
-		items = append(items, xmlClusterItem{
-			DBClusterIdentifier: c.DBClusterIdentifier,
-			Engine:              c.Engine,
-			EngineVersion:       c.EngineVersion,
-			Status:              c.Status,
-			Endpoint:            c.Endpoint,
-			ReaderEndpoint:      c.ReaderEndpoint,
-			Port:                c.Port,
-			MasterUsername:      c.MasterUsername,
-			DBSubnetGroup:       c.DBSubnetGroupName,
-			MultiAZ:             c.MultiAZ,
-			DBClusterArn:        c.DBClusterArn,
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, queryMaxRecords(req.Params["MaxRecords"]),
+		func(key, _ string) (xmlClusterItem, bool) {
+			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlClusterItem{}, false
+			}
+			var c RDSDBCluster
+			if json.Unmarshal(data, &c) != nil {
+				return xmlClusterItem{}, false
+			}
+			if filterID != "" && c.DBClusterIdentifier != filterID {
+				return xmlClusterItem{}, false
+			}
+			return xmlClusterItem{
+				DBClusterIdentifier: c.DBClusterIdentifier,
+				Engine:              c.Engine,
+				EngineVersion:       c.EngineVersion,
+				Status:              c.Status,
+				Endpoint:            c.Endpoint,
+				ReaderEndpoint:      c.ReaderEndpoint,
+				Port:                c.Port,
+				MasterUsername:      c.MasterUsername,
+				DBSubnetGroup:       c.DBSubnetGroupName,
+				MultiAZ:             c.MultiAZ,
+				DBClusterArn:        c.DBClusterArn,
+			}, true
 		})
-	}
 
-	if filterID != "" && len(items) == 0 {
+	if filterID != "" && len(page) == 0 {
 		return nil, &AWSError{
 			Code:       "DBClusterNotFoundFault",
 			Message:    "DBCluster " + filterID + " not found.",
 			HTTPStatus: http.StatusNotFound,
 		}
-	}
-
-	// Pagination.
-	maxRecords := 100
-	if s := req.Params["MaxRecords"]; s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			maxRecords = n
-		}
-	}
-	marker := req.Params["Marker"]
-	offset := 0
-	if marker != "" {
-		if n, err := strconv.Atoi(marker); err == nil {
-			offset = n
-		}
-	}
-	if offset > len(items) {
-		offset = len(items)
-	}
-	page := items[offset:]
-	var nextMarker string
-	if len(page) > maxRecords {
-		page = page[:maxRecords]
-		nextMarker = strconv.Itoa(offset + maxRecords)
 	}
 
 	type result struct {

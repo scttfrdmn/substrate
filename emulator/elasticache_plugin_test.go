@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -769,16 +770,28 @@ func TestElastiCachePlugin_CacheClusterPagination(t *testing.T) {
 	if !strings.Contains(body, "<Marker>") {
 		t.Error("page 1 should include a Marker")
 	}
+	page1 := ecClusterPage(t, body)
 
-	// Page 2: use marker.
+	// Page 2 continues from the Marker page 1 returned. This test used to send a
+	// hand-written "2" — the offset the old cursor happened to emit — and to assert
+	// nothing at all about the records that came back, which is why it passed while the
+	// cursor was skipping records (#887). A marker the caller invents is now refused.
 	resp = ecRequest(t, ts, map[string]string{
 		"Action":     "DescribeCacheClusters",
 		"MaxRecords": "2",
-		"Marker":     "2",
+		"Marker":     page1.Marker,
 	})
 	body = ecBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DescribeCacheClusters page2 status %d", resp.StatusCode)
+		t.Fatalf("DescribeCacheClusters page2 status %d, body: %s", resp.StatusCode, body)
 	}
-	_ = body
+	page2 := ecClusterPage(t, body)
+	if len(page2.IDs) != 2 {
+		t.Errorf("page 2 = %v, want two records", page2.IDs)
+	}
+	for _, id := range page2.IDs {
+		if slices.Contains(page1.IDs, id) {
+			t.Errorf("page 2 repeats %q from page 1: page1=%v page2=%v", id, page1.IDs, page2.IDs)
+		}
+	}
 }
