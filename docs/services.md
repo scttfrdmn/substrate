@@ -6205,13 +6205,13 @@ and an SSM parameter — have both tag state and a tagging call, and are still u
 
 For each of the eleven the missing piece was not a resolver arm alone but an arm in substrate's
 shared tag *writer*, so the same gap also meant the Resource Groups Tagging API could not tag
-them: one defect with two symptoms, tracked there rather than folded in here. Seven of the eleven
+them: one defect with two symptoms, tracked there rather than folded in here. Eight of the eleven
 have since had the tagging-API half delivered a row at a time — ECS's service and task definition,
-then an ACM certificate, a CloudFront distribution, a KMS key, an SNS topic and a Secrets Manager
-secret — each keying through the one state-key builder the owning service's own `TagResource` uses,
-and each merging its record as raw JSON so a member the writer does not model is preserved rather
-than dropped. Four rows remain: a Step Functions activity, an RDS DB cluster and DB subnet group,
-and an SSM parameter, plus the two ECS types' **scanner** halves, since `GetResources` still
+then an ACM certificate, a CloudFront distribution, a KMS key, an SNS topic, a Secrets Manager
+secret and an SSM parameter — each keying through the one state-key builder the owning service's own
+tag operation uses, and each merging its record as raw JSON so a member the writer does not model is
+preserved rather than dropped. Three rows remain: a Step Functions activity and an RDS DB cluster and
+DB subnet group, plus the two ECS types' **scanner** halves, since `GetResources` still
 enumerates ECS clusters only. The CloudFormation stamp is a separate half again: none of the
 eleven has an entry in the deployer's own type table yet, which is why all eleven are still listed
 here as unstamped.
@@ -8148,13 +8148,13 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans twenty-four resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans twenty-five resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, Cognito user pools, Kinesis streams, RDS DB instances, DB clusters and
 DB subnet groups, ElastiCache cache clusters, EFS file systems, Glue databases,
-ACM certificates, CloudFront distributions, KMS keys, SNS topics and Secrets
-Manager secrets.
+ACM certificates, CloudFront distributions, KMS keys, SNS topics, Secrets
+Manager secrets and Systems Manager parameters.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally
@@ -8369,6 +8369,75 @@ hyphen followed by six characters" precisely because trimming them back off cann
 done in general. Substrate mints no suffix, so the name is recoverable from the ARN
 by construction. Adding one would make the resolver ambiguous and would change a value
 CloudFormation records as a physical ID, so it is a separate decision.
+
+Systems Manager parameters came next, and the row is the first where the confusion the
+resolver exists to prevent is between resource **types** rather than between accounts
+(#932). Every earlier row asked *whose* resource an identifier names; this one asks
+*what kind*. AWS publishes `ResourceType` as `Required: Yes` over a ten-value enum
+(`Document | ManagedInstance | MaintenanceWindow | Parameter | PatchBaseline | OpsItem |
+OpsMetadata | Automation | Association | CloudConnector`), and all three of Systems
+Manager's own tag operations decoded it and never read it — so
+`{"ResourceType": "Document", "ResourceId": "MyRunbook"}` tagged the *parameter* named
+`/MyRunbook`, and `ListTagsForResource` with the same pair read the tag back, confirming
+that the wrong resource had been tagged. A value outside the enum was accepted too, which
+made `InvalidResourceType` — a code AWS publishes at all three operations —
+unreachable.
+
+The two refusals are deliberately distinct, because they tell a caller two different
+things. A `ResourceType` outside the enum is `InvalidResourceType`, whose own description
+— *"The resource type isn't valid"* — is the true statement about it. A `ResourceType` AWS
+publishes but substrate models no taggable resource for is `InvalidResourceId`: the type
+is real, and it is the identifier that names nothing, which is the honest-empty behavior
+of #827. Answering one code for both would tell a caller who mistyped `Parameter` that
+their parameter is missing. Substrate models a taggable resource for exactly one of the
+ten today; the other nine are enumerated so that a value AWS publishes can be told apart
+from a value AWS does not. `InvalidResourceId` is answered at HTTP 404 where AWS publishes
+400, tracked in #933 alongside ACM's (#921), KMS's (#923) and Secrets Manager's (#930) —
+and because all three operations now route through one helper, that correction is a single
+line.
+
+This is also the first row where the owning service's own tag operations take **no ARN at
+all**. AWS is explicit — *"For the `Document` and `Parameter` values, use the name of the
+resource"* — so a parameter's `ResourceId` carries neither account nor Region, and the
+caller's own are the only possible source for them. "The account comes from the ARN"
+(#826) is therefore inapplicable to that half and has nothing to guard; the tagging API's
+half does take an ARN, and its parser accordingly takes no account, Region or request
+context, so it structurally cannot reach for the caller's. Anything beginning `arn:`
+arriving as a `ResourceId` is refused rather than normalized into a name, per #928: a
+caller who wrote an ARN prefix meant an ARN. Previously such a value became the *name*
+`/arn:aws:ssm:us-east-1:123456789012:parameter/db/password` and was looked up as one —
+refused either way, but for the wrong reason and after a normalization that makes the
+message nonsense.
+
+The leading-slash tolerance in the other direction is kept, and it is substrate's reading
+rather than AWS's. AWS documents that tolerance explicitly only for `OpsMetadata`, whose
+`ResourceID` may be given as either `aws/ssm/MyGroup/appmanager` or
+`/aws/ssm/MyGroup/appmanager`. For a `Parameter` it is *required* by substrate's own
+behavior: `PutParameter` normalizes `Name` to a leading `/`, so a caller who created
+`MyParam` would otherwise be unable to tag it.
+
+The tagging arm's ARN shape has one feature none of the earlier rows do: there is no
+separator between the type segment and the name, because the name carries its own. The
+resource portion of `arn:aws:ssm:us-east-1:123456789012:parameter/db/password` is
+`parameter/db/password`, so the first `/`-delimited segment must be exactly `parameter`
+(per #910's whole-segment rule — the same namespace addresses `document/`,
+`servicesetting/`, `opsmetadata/`, `maintenancewindow/`, `patchbaseline/` and
+`managed-instance/`) and the name is the whole remainder with the `/` restored. Taking the
+ARN's last component would truncate a hierarchical name to `password`, and a prefix match
+would grow wrong the moment AWS adds a type whose name begins `parameter`. The state key
+consequently holds a doubled separator, `parameter:{account}/{region}//db/password`; that
+is the shape already on disk and is left alone, since changing it would orphan every
+stored parameter.
+
+Its merge sits behind a colon-terminated kind guard, the **sixth** namespace to need one:
+`parameter:` is a prefix of `parameter_paths:`, whose value is a JSON array of names. Five
+of the six namespaces reached so far have collided, so the guard is now unambiguously the
+default for a new row. Tag order at both arms is sorted by key, because
+`AddTagsToResource` appended in Go map order while `PutParameter` stored the caller's
+order — so a parameter tagged at creation and one tagged afterwards reported their tags
+differently, which is the defect #862 fixed in the four merge helpers, re-verified here
+rather than assumed. `ListTagsForResource` also rendered an untagged parameter's `TagList`
+as `null` rather than as the empty array AWS publishes.
 
 ### Which failure gets which error code
 
@@ -8635,12 +8704,53 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 
 | Operation | Notes |
 |-----------|-------|
-| PutParameter | Supports String, StringList, SecureString types |
-| GetParameter | Supports WithDecryption |
+| PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/` |
+| GetParameter | Supports WithDecryption; reports the parameter's ARN |
 | GetParameters | Batch get |
 | GetParametersByPath | Recursive path traversal |
+| GetParameterHistory | |
 | DeleteParameter | |
+| DeleteParameters | |
 | DescribeParameters | |
+| AddTagsToResource | `ResourceType` is required and is resolved — see below |
+| RemoveTagsFromResource | Removes only the named keys |
+| ListTagsForResource | Reports `TagList` sorted by key; an empty list, never `null` |
+| LabelParameterVersion | Accepted; always reports `ParameterVersion: 1` |
+| SendCommand | Run Command; records the intent — substrate does not execute the command |
+| GetCommandInvocation | |
+| DescribeInstanceInformation | |
+
+### How a `(ResourceType, ResourceId)` pair resolves
+
+`ResourceType` is `Required: Yes` at all three tag operations, over the ten-value enum
+AWS publishes. Substrate reads it (#932); it previously decoded the member and ignored it,
+so any type resolved to the same-named Parameter Store parameter:
+
+| Request | Answer |
+|---|---|
+| `ResourceType: "Parameter"`, `ResourceId: "/db/password"` | The parameter `/db/password` |
+| `ResourceType: "Parameter"`, `ResourceId: "db/password"` | The same parameter — the leading `/` is supplied |
+| `ResourceType: "Parameter"`, `ResourceId: "arn:aws:ssm:…"` | `InvalidResourceId`, not normalized into a name (#928) |
+| `ResourceType: "Document"` and the eight other published types | `InvalidResourceId` — the type is real, the resource is not modelled here |
+| `ResourceType: "parameter"`, `"Parameters"`, or anything outside the enum | `InvalidResourceType`, listing the ten valid values |
+| `ResourceType` absent | `ValidationException` |
+
+`ResourceId` is the parameter **name**, not an ARN: AWS states *"For the `Document` and
+`Parameter` values, use the name of the resource"*. It therefore carries no account or
+Region, and the caller's own supply them — the one arm in the tagging set where that is
+correct rather than a defect. The Resource Groups Tagging API's arm for the same parameter
+takes an ARN and takes account and Region from it; both arms build the same state key, so
+the two cannot disagree about which parameter an identifier names. See
+[Resource Groups Tagging](#resource-groups-tagging).
+
+The leading-slash tolerance is substrate's reading, not AWS's: AWS documents it only for
+`OpsMetadata`. Substrate needs it because `PutParameter` normalizes `Name` to a leading
+`/`, so a caller who created `MyParam` must be able to tag `MyParam`.
+
+`InvalidResourceId` is answered at HTTP 404; AWS publishes 400 (#933). SSM publishes no
+distinct not-found code for these operations — `InvalidResourceId` *is* how a nonexistent
+resource is reported. Substrate models no tag-count cap here, where AWS caps most resources
+at 50 tags.
 
 ### AWS's public AMI parameters are answered
 
