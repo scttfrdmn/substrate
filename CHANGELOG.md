@@ -74,8 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as given and never validated, while a zone *ID* must resolve because it has to be
   translated, and a pair naming two different zones answers `InvalidParameterCombination`. Nothing
   consumes a reservation — `RunInstances` has no `CapacityReservationTarget` arm here — so
-  `availableInstanceCount` equals `totalInstanceCount` for a reservation's whole life, including a
-  `targeted` one, whose `instanceMatchCriteria` is recorded and matches nothing. `ClientToken` is
+  `availableInstanceCount` equals `totalInstanceCount` for as long as a reservation holds capacity,
+  including a `targeted` one, whose `instanceMatchCriteria` is recorded and matches nothing. Only a
+  cancel releases capacity, taking `availableInstanceCount` to zero while `totalInstanceCount` keeps
+  reporting what was reserved. `ClientToken` is
   accepted and inert, so two identical creates make two reservations where AWS's token would make the
   second idempotent. Cancelling an already-cancelled or expired reservation answers `IncorrectState`,
   which is **substrate's reading**: AWS publishes no code for cancelling from a non-cancellable state

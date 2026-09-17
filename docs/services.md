@@ -8704,9 +8704,12 @@ describes ("the reserved capacity becomes available for use immediately after yo
 stage every create passes through.
 
 **Nothing consumes a reservation.** `RunInstances` has no `CapacityReservationTarget` parameter
-here, so `availableInstanceCount` equals `totalInstanceCount` for the whole life of a
-reservation and no instance ever occupies one — including a `targeted` reservation, whose
-`instanceMatchCriteria` is recorded and matches nothing. A consumer testing "did my launch land
+here, so `availableInstanceCount` equals `totalInstanceCount` for as long as a reservation holds
+capacity and no instance ever occupies one — including a `targeted` reservation, whose
+`instanceMatchCriteria` is recorded and matches nothing. Only a **cancel** releases capacity, and
+it takes `availableInstanceCount` to zero while `totalInstanceCount` keeps reporting what was
+reserved; AWS publishes what neither becomes, and of the two readings this is the one that does not
+report remaining capacity on a reservation that has none. A consumer testing "did my launch land
 in the reservation I paid for" cannot ask that question here; what it *can* test is that the
 reservation exists, reports the capacity it asked for, is discoverable by filter and by tag, and
 reaches the state its outcome implies.

@@ -61,7 +61,8 @@ import (
 //
 // Also not modeled, and recorded rather than refused: a reservation is never *consumed*.
 // RunInstances has no CapacityReservationTarget arm, so availableInstanceCount equals
-// totalInstanceCount for the whole life of a reservation, and no instance ever occupies one.
+// totalInstanceCount for as long as a reservation holds capacity, and no instance ever
+// occupies one. Only a cancel releases it — see [EC2Plugin.cancelCapacityReservation].
 
 // ec2CRMinInstanceCount and ec2CRMaxInstanceCount are InstanceCount's range.
 //
