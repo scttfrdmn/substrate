@@ -5274,7 +5274,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | Operation | Notes |
 |-----------|-------|
 | RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
@@ -5282,13 +5282,13 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
-| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet` |
+| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteVpc | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them) |
-| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them) |
+| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSecurityGroup | |
-| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
+| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
 | AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules |
 | AuthorizeSecurityGroupEgress | Supports destination security groups |
@@ -5308,7 +5308,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSnapshot | `VolumeId` is required and checked; `volumeSize` and `encrypted` come from the source volume, and `status` is `completed` at once — see [A snapshot has a real size](#a-snapshot-has-a-real-size) |
-| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account). Paginates on `MaxResults`/`NextToken`, as does `DescribeVolumes` — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account). Paginates on `MaxResults`/`NextToken`, as do `DescribeVolumes` and `DescribeImages` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSnapshot | `SnapshotId` is required and checked; refuses one a registered AMI still references with `InvalidSnapshot.InUse`, and is **not** idempotent — see [Deleting a snapshot](#deleting-a-snapshot-refuses-what-aws-refuses) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
@@ -5586,9 +5586,12 @@ the template is resolved, so a typo answers `InvalidParameterValue` rather than
 
 - **No pagination was added.** `DescribeAddresses`, `DescribeKeyPairs`,
   `DescribeAvailabilityZones` and `DescribePlacementGroups` document **no** `MaxResults` or
-  `NextToken` at all, so there is nothing to add. `DescribeInstanceStatus`, `DescribeVpcs`,
+  `NextToken` at all, so there is nothing to add. `DescribeInstanceStatus`,
   `DescribeInternetGateways`, `DescribeInstanceTypes`, `DescribeSpotPriceHistory` and
-  `DescribeLaunchTemplates` document both and still answer in one page.
+  `DescribeLaunchTemplates` document both and still answer in one page. `DescribeVpcs` was in that
+  list until #917 converted it, along with `DescribeSubnets`, `DescribeSecurityGroups`,
+  `DescribeInstances`, `DescribeImages`, `DescribeVolumes` and `DescribeSnapshots` — see
+  [One offset paginator, shared](#one-offset-paginator-shared).
 - **`IncludeAllInstances` is not read** on `DescribeInstanceStatus`. AWS defaults it to `false`,
   meaning "running instances only"; substrate reports every instance whatever its state, so a
   caller relying on the default to exclude stopped instances gets them. Filter on
@@ -8221,8 +8224,10 @@ describes published both parameters and implemented neither. Those answered the 
 with no token**, which is the one divergence a paginating caller cannot see: the loop terminates
 on the first page against substrate and finds a second page in production. #917 replaced the two
 copies with one shared paginator and converted the unpaginated operations onto it, so the count
-of implementations went down rather than up. `DescribeVolumes` and `DescribeSnapshots` are the
-first two converted; their wire behaviour for a caller that sends neither parameter is unchanged.
+of implementations went down rather than up. Converted so far: `DescribeVolumes` and
+`DescribeSnapshots`, then `DescribeImages`, `DescribeVpcs`, `DescribeSubnets`,
+`DescribeSecurityGroups` and `DescribeInstances`. Wire behaviour for a caller that sends neither
+parameter is unchanged at every one of them.
 
 AWS publishes the mechanism **once for the whole service**, in the Query Requests page's
 *Pagination* section rather than per operation, and two of its sentences decide the design:
@@ -8254,7 +8259,8 @@ Maximum value of 1000.`; `API_DescribeTags` (5–1000) and `API_DescribeLaunchTe
 `API_DescribeVolumes` and `API_DescribeSnapshots` publish **no bound at all** — only "the maximum
 number of items to return for this request", type `Integer`. Substrate does not borrow 5–1000
 from the siblings at those four, per the scope rule that only what the API model states is
-modelled: `MaxResults=5000` is accepted on volumes and snapshots and refused on VPCs.
+modelled: `MaxResults=5000` is accepted on volumes, snapshots, images and instances, and
+`MaxResults=1` is accepted there and refused on VPCs, subnets and security groups.
 
 The floor of **one** at those four pages is *substrate's reading*, and it is the single bound the
 published pagination rule forces. `MaxResults=0` under "you continue to call the action until
@@ -8274,6 +8280,29 @@ Paging is a cut of an already-assembled answer rather than an early exit from th
 load-bearing at `DescribeSnapshots`: a [seeded status progression](#seeding-a-snapshot-progression)
 advances once per observation, so stopping the scan at the page boundary would make a countdown
 advance by an amount that depended on the caller's page size.
+
+**`DescribeInstances` counts instances, not reservations** — *substrate's reading*, because its
+answer is the one nested listing in the set: `reservationSet > item > instancesSet`. The page says
+only "the maximum number of items" and never states which of the two lists an item is. Counting
+reservations would leave `MaxResults` unable to bound a response at all, since one `RunInstances`
+with `MinCount=500` is a single reservation and a page of five could hold five hundred instances;
+and `NextToken`'s own text — "Pagination continues from the end of the items returned by the
+previous request" — describes a position in a flat sequence rather than in the grouping.
+
+The visible consequence, also substrate's reading and also unpublished, is that **a reservation
+whose instances straddle a page boundary is reported on both pages**, each carrying only the
+instances belonging to that page. The alternative — never splitting a reservation — would have to
+answer either more instances than `MaxResults` asked for or fewer than are available alongside a
+token, each of which contradicts the parameter more visibly than a repeated reservation ID does. An
+*instance* is still reported on exactly one page, which is what a caller assembling a walk relies
+on.
+
+**`GroupName.N` does not conflict with `MaxResults`** on `DescribeSecurityGroups`, where `GroupId.N`
+does — substrate's reading again. The service-wide rule is stated against "a list of IDs", and a
+group name is not an ID; it is not what `InvalidGroup.NotFound` is about either (see
+[Which selectors assert existence](#which-selectors-assert-existence)). AWS publishes nothing about
+the combination, so refusing the name form would mean extending a published rule to a parameter it
+does not name.
 
 ### Seeding EC2 Fleet partial fulfillment
 

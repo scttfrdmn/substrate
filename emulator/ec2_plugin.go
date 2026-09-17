@@ -1099,8 +1099,54 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 	}
 }
 
+// ec2ReservationItem is one member of DescribeInstances' reservationSet.
+//
+// Package-level rather than local to the handler so [ec2PageReservations] can be a named,
+// documented helper beside the other pagination rules instead of twenty lines inlined in the
+// middle of the walk — the same reason [ec2InstanceItem] is declared once.
+type ec2ReservationItem struct {
+	// ReservationID is the ID of the reservation the instances were launched under.
+	ReservationID string `xml:"reservationId"`
+
+	// OwnerID is the account that owns the reservation.
+	OwnerID string `xml:"ownerId"`
+
+	// Instances are the reservation's instances that this page reports, which for a reservation
+	// straddling a page boundary is a subset of the ones it holds.
+	Instances []ec2InstanceItem `xml:"instancesSet>item"`
+}
+
+// describeInstances reports the account's instances in the region, grouped into the reservations
+// they were launched under, one page at a time.
+//
+// It paginates as of #917. API_DescribeInstances publishes MaxResults with no Valid Range and no
+// Default, so the bound is [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling] rather than
+// the 5–1000 three sibling pages publish (#671). It is also the one page of the nine that repeats
+// the ID-list rule against its own parameter — "You cannot specify this parameter and the instance
+// IDs parameter in the same request" — which [ec2RefuseIDsWithMaxResults] answers.
+//
+// **MaxResults counts instances, not reservations**, and that is substrate's reading: the page says
+// only "the maximum number of items", and nowhere states which of the two nested lists an item is.
+// It is the reading the parameter's purpose forces. Counting reservations would leave MaxResults
+// unable to bound a response at all — one RunInstances with MinCount=500 is a single reservation,
+// so a page of five could hold five hundred instances — and NextToken's own text, "Pagination
+// continues from the end of the items returned by the previous request", describes a position in a
+// flat sequence rather than in the grouping. See [ec2PageReservations] for what that means for a
+// reservation whose instances straddle a boundary.
 func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InstanceId"), ec2InstanceIDKind)
+	instanceIDs := extractIndexedParams(req.Params, "InstanceId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "InstanceId", instanceIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(instanceIDs, ec2InstanceIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -1118,15 +1164,11 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("ec2 describeInstances list: %w", err)
 	}
 
-	type reservationItem struct {
-		ReservationID string            `xml:"reservationId"`
-		OwnerID       string            `xml:"ownerId"`
-		Instances     []ec2InstanceItem `xml:"instancesSet>item"`
-	}
 	type response struct {
-		XMLName      xml.Name          `xml:"DescribeInstancesResponse"`
-		XMLNS        string            `xml:"xmlns,attr"`
-		Reservations []reservationItem `xml:"reservationSet>item"`
+		XMLName      xml.Name             `xml:"DescribeInstancesResponse"`
+		XMLNS        string               `xml:"xmlns,attr"`
+		Reservations []ec2ReservationItem `xml:"reservationSet>item"`
+		NextToken    string               `xml:"nextToken,omitempty"`
 	}
 
 	// Every volume in the account and region, read once and bucketed by instance:
@@ -1138,7 +1180,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	resMap := make(map[string]*reservationItem)
+	resMap := make(map[string]*ec2ReservationItem)
 
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
@@ -1161,7 +1203,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID])
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
-			resMap[inst.ReservationID] = &reservationItem{
+			resMap[inst.ReservationID] = &ec2ReservationItem{
 				ReservationID: inst.ReservationID,
 				OwnerID:       reqCtx.AccountID,
 			}
@@ -1184,6 +1226,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 	sort.Slice(resp.Reservations, func(i, j int) bool {
 		return resp.Reservations[i].ReservationID < resp.Reservations[j].ReservationID
 	})
+	resp.Reservations, resp.NextToken = ec2PageReservations(resp.Reservations, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -1545,8 +1588,31 @@ func ec2VPCXML(vpc EC2VPC) ec2VPCItem {
 	}
 }
 
+// describeVPCs reports the VPCs the account holds in the region, narrowed by VpcId.N and by the
+// filters [ec2VPCFilterSpec] evaluates, one page at a time.
+//
+// It paginates as of #917: API_DescribeVpcs publishes MaxResults with "Valid Range: Minimum value
+// of 5. Maximum value of 1000." and NextToken, and substrate implemented neither — so a caller
+// paging this listing saw one page here and several in production. The three rules are
+// [ec2MaxResults], [ec2NextTokenOffset] and [ec2Page], and the fourth — that an ID list may not
+// accompany MaxResults — is [ec2RefuseIDsWithMaxResults].
+//
+// The pagination parameters are read before the ID list's syntax and before the filter spec, so a
+// refusal cannot depend on how many VPCs the account holds, which is the ordering #887 established.
 func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "VpcId"), ec2VPCIDKind)
+	vpcIDs := extractIndexedParams(req.Params, "VpcId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "VpcId", vpcIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(vpcIDs, ec2VPCIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -1559,9 +1625,10 @@ func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("ec2 describeVpcs: %w", err)
 	}
 	type response struct {
-		XMLName xml.Name     `xml:"DescribeVpcsResponse"`
-		XMLNS   string       `xml:"xmlns,attr"`
-		Vpcs    []ec2VPCItem `xml:"vpcSet>item"`
+		XMLName   xml.Name     `xml:"DescribeVpcsResponse"`
+		XMLNS     string       `xml:"xmlns,attr"`
+		Vpcs      []ec2VPCItem `xml:"vpcSet>item"`
+		NextToken string       `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -1584,6 +1651,10 @@ func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	// The page is cut after the whole answer is assembled, and after the ID list is resolved: an
+	// unresolved ID is an error about the request, so it must not depend on which page the walk is
+	// on. It cannot interact with paging anyway, since naming an ID list forbids MaxResults.
+	resp.Vpcs, resp.NextToken = ec2Page(resp.Vpcs, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -1670,8 +1741,24 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // Filter.N was parsed nowhere here before #685. The spec check runs before the scan so a
 // refusal cannot depend on whether any subnet matched, and ids.match runs before the filters
 // so a subnet a filter excluded still counts as resolved for [ec2IDFilter.unresolved].
+//
+// It paginates as of #917, on the range API_DescribeSubnets publishes — "Valid Range: Minimum
+// value of 5. Maximum value of 1000." — through the same three helpers every other converted
+// describe uses; see [EC2Plugin.describeVPCs] for the ordering and the fourth rule.
 func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SubnetId"), ec2SubnetIDKind)
+	subnetIDs := extractIndexedParams(req.Params, "SubnetId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "SubnetId", subnetIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(subnetIDs, ec2SubnetIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -1684,9 +1771,10 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("ec2 describeSubnets: %w", err)
 	}
 	type response struct {
-		XMLName xml.Name        `xml:"DescribeSubnetsResponse"`
-		XMLNS   string          `xml:"xmlns,attr"`
-		Subnets []ec2SubnetItem `xml:"subnetSet>item"`
+		XMLName   xml.Name        `xml:"DescribeSubnetsResponse"`
+		XMLNS     string          `xml:"xmlns,attr"`
+		Subnets   []ec2SubnetItem `xml:"subnetSet>item"`
+		NextToken string          `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -1709,6 +1797,7 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	resp.Subnets, resp.NextToken = ec2Page(resp.Subnets, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -1795,8 +1884,32 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 // [EC2Plugin.describeKeyPairs], which declines the same invention for the same reason. The ID
 // half keeps its full contract: a malformed ID is refused before the walk and an unresolved one
 // after it.
+//
+// It paginates as of #917. This page publishes the range twice — as "Valid Range: Minimum value
+// of 5. Maximum value of 1000." and in prose, where it is also the one page of the nine that says
+// what an absent MaxResults means: "If this parameter is not specified, then all items are
+// returned." That sentence is why [ec2MaxResults] reads an absent parameter as the whole listing
+// everywhere rather than as a default page size.
+//
+// A third substrate reading joins the two above: **GroupName.N does not conflict with
+// MaxResults**, where GroupId.N does. Query-Requests.html states the rule against "a list of IDs",
+// and a group name is not an ID — it is not what InvalidGroup.NotFound is about either, per the
+// paragraph above — so refusing the name form would be extending a published rule to a parameter
+// it does not name. AWS publishes nothing about the combination.
 func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "GroupId"), ec2SecurityGroupIDKind)
+	groupIDs := extractIndexedParams(req.Params, "GroupId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "GroupId", groupIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(groupIDs, ec2SecurityGroupIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -1834,9 +1947,10 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		IPPermissionsE []permItem `xml:"ipPermissionsEgress>item"` //nolint:revive
 	}
 	type response struct {
-		XMLName xml.Name `xml:"DescribeSecurityGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Groups  []sgItem `xml:"securityGroupInfo>item"`
+		XMLName   xml.Name `xml:"DescribeSecurityGroupsResponse"`
+		XMLNS     string   `xml:"xmlns,attr"`
+		Groups    []sgItem `xml:"securityGroupInfo>item"`
+		NextToken string   `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -1890,6 +2004,7 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	resp.Groups, resp.NextToken = ec2Page(resp.Groups, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -4308,6 +4423,12 @@ func ec2RegisteredRootDeviceType(params map[string]string) string {
 // sets substrate does not model. Reading the parameter would let a caller believe a
 // narrowing happened. A bundled public AMI is reachable by naming it, which is the case
 // generated IaC actually produces.
+//
+// It paginates as of #917. API_DescribeImages publishes MaxResults with **no** Valid Range and no
+// Default — only "The maximum number of items to return for this request" — so, per #671, the
+// 5–1000 the VPC, subnet and security-group pages publish is not borrowed here: the floor is
+// [ec2MinUnpublishedMaxResults] and there is no ceiling. See [ec2MinUnpublishedMaxResults] for why
+// a floor of one is forced by the published pagination rule even though the page states none.
 func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Before v0.108.0 this read no ImageId.N at all, so a caller naming one AMI was
 	// answered with every AMI the account owned — a superset, which is worse than an
@@ -4316,8 +4437,21 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	// that the AMI ID cannot be found".
 	//
 	// The ID list is validated before the filter spec, matching the eleven other
-	// ID-asserting describes.
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "ImageId"), ec2ImageIDKind)
+	// ID-asserting describes — and the pagination parameters before both, so that neither
+	// refusal depends on how many AMIs the account owns.
+	imageIDs := extractIndexedParams(req.Params, "ImageId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "ImageId", imageIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(imageIDs, ec2ImageIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -4394,9 +4528,10 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Tags                   []ec2TagItem      `xml:"tagSet>item"`
 	}
 	type response struct {
-		XMLName xml.Name    `xml:"DescribeImagesResponse"`
-		XMLNS   string      `xml:"xmlns,attr"`
-		Images  []imageItem `xml:"imagesSet>item"`
+		XMLName   xml.Name    `xml:"DescribeImagesResponse"`
+		XMLNS     string      `xml:"xmlns,attr"`
+		Images    []imageItem `xml:"imagesSet>item"`
+		NextToken string      `xml:"nextToken,omitempty"`
 	}
 
 	// The mapping's volumeSize is read from the backing snapshot rather than rendered as
@@ -4539,6 +4674,12 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	// The page is cut after the bundled-catalog pass as well, so the two passes cannot answer a
+	// different number of items than the walk reports. They cannot interact in practice — the
+	// second pass runs only for a named ID, and naming an ID list forbids MaxResults — but cutting
+	// before it would make that an invariant the reader has to verify rather than one the order
+	// states.
+	resp.Images, resp.NextToken = ec2Page(resp.Images, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 

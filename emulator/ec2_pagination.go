@@ -59,6 +59,24 @@ const ec2MinUnpublishedMaxResults = 1
 // operation's page publishes no maximum, so no upper bound is enforced.
 const ec2NoMaxResultsCeiling = 0
 
+// ec2MinPublishedMaxResults and ec2MaxPublishedMaxResults are the range three of the pages #917
+// names publish verbatim, as "Valid Range: Minimum value of 5. Maximum value of 1000."
+//
+// API_DescribeVpcs, API_DescribeSubnets and API_DescribeSecurityGroups carry that line
+// identically, and the last states it in prose as well — "This value can be between 5 and 1000.
+// If this parameter is not specified, then all items are returned." One pair of constants serves
+// all three because the published fact is one fact, not three that happen to agree.
+//
+// DescribeTags' and DescribeLaunchTemplateVersions' bounds stay their own
+// ([ec2MinTagResults], [ec2MinLaunchTemplateVersionResults]): the second publishes 1 to 200 and
+// so is a different range, and the first doubles as that operation's default page size, which
+// this pair is not. The four pages publishing no range at all use
+// [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling] instead.
+const (
+	ec2MinPublishedMaxResults = 5
+	ec2MaxPublishedMaxResults = 1000
+)
+
 // ec2MaxResults reads MaxResults against the range minResults..maxResults, where a maxResults
 // of [ec2NoMaxResultsCeiling] means the page publishes no maximum.
 //
@@ -145,6 +163,60 @@ func ec2Page[T any](items []T, offset, maxResults int) ([]T, string) {
 	page := items[offset:]
 	if maxResults > 0 && len(page) > maxResults {
 		return page[:maxResults], strconv.Itoa(offset + maxResults)
+	}
+	return page, ""
+}
+
+// ec2PageReservations cuts a DescribeInstances answer at an instance boundary rather than a
+// reservation one, and returns the token for the page after it.
+//
+// It exists because that operation is the one converted describe whose answer is nested:
+// reservationSet > item > instancesSet, where every other listing is flat and uses [ec2Page].
+// MaxResults counts the instances, which is substrate's reading and is argued in
+// [EC2Plugin.describeInstances]' doc comment — the page states only "the maximum number of items"
+// and never says which of the two lists an item is.
+//
+// A reservation whose instances straddle the boundary is therefore reported on **both** pages,
+// carrying only the instances belonging to each. AWS publishes nothing about that either, and the
+// alternative — never splitting one — would have to answer either more items than MaxResults asked
+// for or fewer than are available with a token, each of which contradicts the parameter more
+// visibly than a reservation ID appearing twice does. A caller assembling instances across pages
+// sees each exactly once regardless, which is what the walk is for.
+//
+// The offset counts instances too, so a token names a position in the flattened sequence: that is
+// what NextToken's "Pagination continues from the end of the items returned by the previous
+// request" describes. A maxResults of zero means no limit, as everywhere else.
+func ec2PageReservations(reservations []ec2ReservationItem, offset, maxResults int) ([]ec2ReservationItem, string) {
+	var page []ec2ReservationItem
+	seen, taken := 0, 0
+	for _, res := range reservations {
+		// res is a copy, so trimming its Instances slice header cannot disturb the caller's.
+		start := 0
+		if offset > seen {
+			start = min(offset-seen, len(res.Instances))
+		}
+		seen += len(res.Instances)
+		remaining := res.Instances[start:]
+		if len(remaining) == 0 {
+			continue
+		}
+		if maxResults > 0 {
+			room := maxResults - taken
+			if room <= 0 {
+				// A further instance exists, so the page is full and the walk continues. The
+				// token is emitted here rather than at the end of the loop for the reason
+				// [ec2Page] gives: a listing that is an exact multiple of the page size must
+				// end without one.
+				return page, strconv.Itoa(offset + taken)
+			}
+			if len(remaining) > room {
+				res.Instances = remaining[:room]
+				return append(page, res), strconv.Itoa(offset + taken + room)
+			}
+		}
+		res.Instances = remaining
+		page = append(page, res)
+		taken += len(remaining)
 	}
 	return page, ""
 }
