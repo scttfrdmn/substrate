@@ -42,7 +42,7 @@ func ec2StatePrefix(namespace, accountID, region string) string {
 
 // ec2StateKeyTail returns the last path segment of an EC2 state key.
 //
-// For thirteen of the fifteen namespaces in [ec2TagScanTargets] that segment is the
+// For fourteen of the sixteen namespaces in [ec2TagScanTargets] that segment is the
 // resource's own ID, which is both what a caller passes to CreateTags and what AWS's
 // TagDescription reports. For the other two it is the resource's *name* — a placement group
 // and a key pair are keyed by name — which is why [ec2TagScanTarget.idMember] exists and why
@@ -88,6 +88,7 @@ type ec2TagScanTarget struct {
 // by [ec2SortTagDescriptions] regardless.
 func ec2TagScanTargets() []ec2TagScanTarget {
 	return []ec2TagScanTarget{
+		{namespace: "cr", resourceType: "capacity-reservation"},
 		{namespace: "eip", resourceType: "elastic-ip"},
 		{namespace: "fleet", resourceType: "fleet"},
 		{namespace: "image", resourceType: "image"},

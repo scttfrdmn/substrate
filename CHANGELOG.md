@@ -8,6 +8,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **EC2 On-Demand Capacity Reservations — `CreateCapacityReservation`,
+  `DescribeCapacityReservations` and `CancelCapacityReservation`, with the outcome seedable**
+  (#891). All three reached the dispatcher's default arm and answered `InvalidAction`, so a consumer
+  whose probe primitive *is* an immediate reservation — reserve, read the outcome, cancel — could not
+  run against substrate at all. A reservation is now created `active`, which is what AWS's examples
+  show and what the User Guide states ("the reserved capacity becomes available for use immediately
+  after you create it"), and is discoverable by ID, by all twelve documented filters, and by tag
+  through `DescribeTags`.
+
+  **The reason a consumer reserves capacity is that capacity is finite, so the observation worth
+  testing is the one where the request does not succeed** — and a capacity failure has **two**
+  documented observable shapes: the call fails with a code from EC2's error tables, or it succeeds and
+  the reservation reports a non-nominal `state` (AWS's own words for `failed` are "A request can fail
+  due to request parameters that are not valid, capacity constraints, or instance limit
+  constraints"). Which of the two AWS produces for a given cell is undocumented, so a new
+  control-plane pair, `POST`/`DELETE /v1/ec2/capacity-reservation-outcomes`, seeds one rather than
+  substrate choosing; a seed naming both is refused. Five error codes are seedable
+  (`InsufficientInstanceCapacity`, `RequestLimitExceeded`, `InstanceLimitExceeded`,
+  `VcpuLimitExceeded`, `Unsupported`) and a code outside them is refused rather than defaulted,
+  because the HTTP class is the half substrate cannot derive. Five of the thirteen `state` values are
+  seedable — `active`, `pending`, `failed`, `expired`, `cancelled` — and a seeded state survives into
+  every later describe, unlike a seeded error, which prevents the create from writing anything at all.
+
+  A seed is scoped to an (instance type, Availability Zone) pair, because that pair is what a consumer
+  treats as one capacity cell, and either half may be omitted to mean "every". The most specific scope
+  carrying a seed decides — cell, then type in any zone, then any type in the zone, then wildcard — so
+  seeding one scarce type inside an otherwise-seeded zone works rather than being overwritten by the
+  coarser seed. Type before zone is substrate's ordering: a seed naming an instance type is a
+  statement about that type's scarcity, the narrower claim of the two.
+
+  **Two of the five codes answer a 500-series status deliberately.** EC2's errors-overview page places
+  `InsufficientInstanceCapacity` and `RequestLimitExceeded` in its *server* error table, whose preamble
+  says such errors "are accompanied by a 500-series HTTP response code", while the other three are in
+  the client table. A consumer reads `InsufficientInstanceCapacity` as a capacity signal and would
+  expect a 400; answering one would let retry logic pass here and fail in production. The exact number
+  is **unverified** — neither page assigns one, only a class — so `500` and `400` are substrate's
+  reading. The same page contradicts itself once, writing the throttle code as
+  `Client.RequestLimitExceeded` in prose while listing `RequestLimitExceeded` in the server table, and
+  `CommonErrors` does not list it at all; the server table is followed because it is the one place the
+  code appears in a table at all.
+
+  `EndDateType` is **inferred rather than defaulted**. AWS publishes no `Default:` line and forbids
+  exactly two combinations — `limited` with no `EndDate`, and `unlimited` with one — so an `EndDate`
+  alone infers `limited` and no `EndDate` infers `unlimited`. Defaulting an absent `EndDateType` to
+  `unlimited` would turn a request naming only an `EndDate`, which nothing forbids, into the second
+  refusal. Expiry is then derived at observation time from the simulated clock, per `endDate`'s own
+  sentence ("the Capacity Reservation's state changes to expired when it reaches its end date and
+  time"), so it is assertable without depending on wall-clock time — and only an `active` reservation
+  expires, since a seeded `failed` one has already reached a terminal state and reporting `expired`
+  for it would lose the outcome the test seeded.
+
+  **A future-dated reservation is refused rather than answered falsely**: `StartDate` and
+  `CommitmentDuration` each answer `Unsupported`/400. A future-dated reservation is a different
+  observable thing from an immediate one — assessed, then scheduled, then delivered or delayed or
+  unsupported — and eight of the `state` member's thirteen values exist only for one of those or for a
+  Capacity Block, which substrate models neither of. Answering `active` to a request for capacity two
+  days out would be a false observation with nothing in it to tell a caller the request was not
+  modelled. The code is substrate's reading: the operation's Errors section is common-types
+  boilerplate, and `Unsupported` ("The specified request is unsupported") is the client-table code
+  whose gloss covers the shape.
+
+  `AvailabilityZone` and `AvailabilityZoneId` are both `Required: No` with no published rule on the
+  pair, so a request naming **neither** is accepted and reports neither element; a zone *name* is
+  recorded as given and never validated, while a zone *ID* must resolve because it has to be
+  translated, and a pair naming two different zones answers `InvalidParameterCombination`. Nothing
+  consumes a reservation — `RunInstances` has no `CapacityReservationTarget` arm here — so
+  `availableInstanceCount` equals `totalInstanceCount` for a reservation's whole life, including a
+  `targeted` one, whose `instanceMatchCriteria` is recorded and matches nothing. `ClientToken` is
+  accepted and inert, so two identical creates make two reservations where AWS's token would make the
+  second idempotent. Cancelling an already-cancelled or expired reservation answers `IncorrectState`,
+  which is **substrate's reading**: AWS publishes no code for cancelling from a non-cancellable state
+  (the only state-shaped code in the reference is
+  `InvalidCapacityReservationState.PendingActivation`, for a Capacity Block that is not active yet, and
+  AWS's own sample tooling pre-checks the state through a describe), and `IncorrectState` is what
+  substrate already answers for this shape on a volume and a snapshot.
+
+  `cr-` becomes the sixteenth EC2 ID prefix `CreateTags`, `DeleteTags` and `DescribeTags` resolve. The
+  seven members a request can leave unset are **absent** rather than empty, including `tagSet` for an
+  untagged reservation — none of the four API pages publishes a sample response, so member order is
+  alphabetical from the type page and an unwritten member follows the shape its neighbours follow.
+  `ModifyCapacityReservation`, `GetCapacityReservationUsage`, `GetGroupsForCapacityReservation`, the
+  four Capacity Reservation *fleet* operations and `PurchaseCapacityBlock`/
+  `DescribeCapacityBlockOfferings` remain unrouted, so a reservation cannot be modified after creation
+  and `reservationType` is always `default`.
+
+  `DescribeCapacityReservations` refuses `CapacityReservationId.N` alongside `MaxResults` with
+  `InvalidParameterCombination`, the service-wide rule EC2 publishes once for the whole Query API,
+  matching the seven other paginating EC2 describes that already apply it; it is checked before the ID
+  list's own syntax. A well-formed but unknown ID **narrows to an empty set** rather than erroring,
+  following `DescribeFleets`, while a malformed one is refused — `InvalidCapacityReservationId.NotFound`
+  is answered by cancel, the operation for which AWS publishes it. `DryRun` is accepted and inert, as
+  at every EC2 operation substrate routes.
 - **EC2 `GetSpotPlacementScores`, with the score itself seedable** (#892). The action reached the
   dispatcher's default arm and answered `InvalidAction`, so a consumer that samples a placement score
   alongside each on-demand probe — the free signal it correlates against paid fulfillment — could not

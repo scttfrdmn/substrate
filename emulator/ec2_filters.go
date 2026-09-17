@@ -723,3 +723,30 @@ func ec2LaunchTemplateVersionFilterSpec() ec2FilterSpec {
 		},
 	}
 }
+
+// ec2CapacityReservationFilterSpec is DescribeCapacityReservations' filter set, from
+// https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeCapacityReservations.html.
+//
+// Twelve names, all evaluated, and **no tag filter** — neither tag:<key> nor tag-key — even
+// though a Capacity Reservation carries tags and this operation renders them. That is AWS's
+// set and not an omission on substrate's part, and it is the third operation in the tree where
+// the page documents no tag filter: DescribeFleets and DescribeInstanceTypeOfferings are the
+// other two. So tag:<key> is refused here while it is accepted on most neighboring describes.
+//
+// A caller looking for a reservation by tag uses DescribeTags, which documents tag:<key>,
+// resource-type and resource-id, and which reaches a reservation because "cr" is registered in
+// [ec2TagScanTargets]. Resource Groups Tagging does **not** reach one: its EC2 scanner covers
+// instances only.
+//
+// Nothing here is inert. outpost-arn and placement-group-arn are evaluated rather than accepted
+// because CreateCapacityReservation takes and stores both, so each has a value to compare even
+// though substrate models neither an Outpost nor placement.
+func ec2CapacityReservationFilterSpec() ec2FilterSpec {
+	return ec2FilterSpec{
+		evaluated: []string{
+			"availability-zone", "end-date", "end-date-type", "instance-match-criteria",
+			"instance-platform", "instance-type", "outpost-arn", "owner-id",
+			"placement-group-arn", "start-date", "state", "tenancy",
+		},
+	}
+}
