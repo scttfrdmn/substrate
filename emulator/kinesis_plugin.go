@@ -680,15 +680,62 @@ func (p *KinesisPlugin) removeTagsFromStream(ctx *RequestContext, req *AWSReques
 	return kinesisJSONResponse(http.StatusOK, struct{}{})
 }
 
+// kinesisMinListTagsLimit and kinesisMaxListTagsLimit bound ListTagsForStream's Limit, whose published
+// Valid Range is "Minimum value of 1. Maximum value of 50".
+//
+// AWS's own numbers do not agree about how large the set being paged can get, and the disagreement is
+// recorded rather than resolved: the response's Tags array publishes "Maximum number of 200 items" and
+// AddTagsToStream's Tags map publishes the same 200, while both operations' prose caps a stream at 50
+// tags ("you can assign up to 50 tags to a data stream", "you can add up to 50 tags per resource") —
+// exactly Limit's maximum. Read by the prose a single maximum-Limit page holds every tag a stream may
+// legally carry, and the 200 is a shape number nothing else supports; substrate enforces no tag quota
+// on AddTagsToStream, so a caller can exceed 50 here and the cursor pages whatever is stored.
+const (
+	kinesisMinListTagsLimit = 1
+	kinesisMaxListTagsLimit = 50
+)
+
+// kinesisMaxTagKeyLength is the published maximum length of ExclusiveStartTagKey, which is also the
+// maximum length of a tag key itself.
+const kinesisMaxTagKeyLength = 128
+
 func (p *KinesisPlugin) listTagsForStream(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		StreamName string `json:"StreamName"`
+		StreamName           string `json:"StreamName"`
+		ExclusiveStartTagKey string `json:"ExclusiveStartTagKey"`
+		// A pointer, because Limit's absence and a Limit of 0 mean different things: absent returns
+		// every tag, and 0 is outside the published 1–50 range and is refused. Decoding into an int
+		// would collapse the two and make the refusal below unreachable.
+		Limit *int `json:"Limit"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 	if body.StreamName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "StreamName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	// InvalidArgumentException/400 is one of this operation's four published errors and its description
+	// is exactly this case: "A specified parameter exceeds its restrictions, is not supported, or can't
+	// be used." The two restrictions the request model states are Limit's 1–50 range and
+	// ExclusiveStartTagKey's 1–128 length, so both are refused under it. The surrounding handlers answer
+	// InvalidParameterException, which Kinesis does not publish at all — that mismatch is #950's, and it
+	// is deliberately not corrected here, because a fix that renamed the other thirty-three sites in
+	// this file would bury the cursor this change is about.
+	if body.Limit != nil && (*body.Limit < kinesisMinListTagsLimit || *body.Limit > kinesisMaxListTagsLimit) {
+		return nil, &AWSError{
+			Code: "InvalidArgumentException",
+			Message: fmt.Sprintf("Limit must be between %d and %d, inclusive; got %d",
+				kinesisMinListTagsLimit, kinesisMaxListTagsLimit, *body.Limit),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if len(body.ExclusiveStartTagKey) > kinesisMaxTagKeyLength {
+		return nil, &AWSError{
+			Code: "InvalidArgumentException",
+			Message: fmt.Sprintf("ExclusiveStartTagKey must be at most %d characters; got %d",
+				kinesisMaxTagKeyLength, len(body.ExclusiveStartTagKey)),
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
 
 	stream, err := p.loadStream(ctx, body.StreamName)
@@ -717,14 +764,41 @@ func (p *KinesisPlugin) listTagsForStream(ctx *RequestContext, req *AWSRequest) 
 	// order cursor-implied in #865. Which order is still substrate's reading, and lexicographic is
 	// taken for the reason [sortTagsByKey] records; AWS's own sample response is not sorted.
 	//
-	// Substrate implements neither Limit nor ExclusiveStartTagKey and answers HasMoreTags: false
-	// unconditionally, so the cursor cannot be exercised yet — that is #954, for which this sort is
-	// the prerequisite: a cursor over an unstable order can skip or repeat a tag.
+	// The sort is the cursor's prerequisite rather than a separate nicety, which is why it landed
+	// first: a cursor over an unstable order can skip a tag or report it twice (#954).
 	sortTagsByKey(tags, func(t tagItem) string { return t.Key })
+
+	// "Gets all tags that occur after ExclusiveStartTagKey" — strictly after, so the named key is
+	// excluded and a caller that passes back the last key it received advances rather than repeating.
+	// An empty string is read as absent, not as a min-length-1 violation: it is what an omitted member
+	// decodes to and what a caller starting the walk sends, and no tag key can sort before it anyway.
+	if body.ExclusiveStartTagKey != "" {
+		cut := len(tags)
+		for i, t := range tags {
+			if t.Key > body.ExclusiveStartTagKey {
+				cut = i
+				break
+			}
+		}
+		tags = tags[cut:]
+	}
+
+	// HasMoreTags is "true exactly when tags were withheld", which is substrate's reading of two AWS
+	// sentences that do not agree. Limit's says HasMoreTags is set "if this number is less than the
+	// total number of tags associated with the stream" — read literally, a walk at Limit 2 over six
+	// tags would report true on every page including the last, and the loop AWS itself describes
+	// ("to list additional tags, set ExclusiveStartTagKey to the last key in the response") would never
+	// terminate. HasMoreTags' own description is the coherent one: "if set to true, more tags are
+	// available", i.e. more remain after this page. That is what is implemented.
+	hasMore := false
+	if body.Limit != nil && len(tags) > *body.Limit {
+		tags = tags[:*body.Limit]
+		hasMore = true
+	}
 
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
 		"Tags":        tags,
-		"HasMoreTags": false,
+		"HasMoreTags": hasMore,
 	})
 }
 

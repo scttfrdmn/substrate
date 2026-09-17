@@ -583,11 +583,11 @@ key to use as the starting point for the list of tags. If this parameter is set,
 *after* a key unless the tags are walked in some order over keys. *Which* order is still
 substrate's reading, and AWS's own sample response is not sorted.
 
-Substrate implements neither `ExclusiveStartTagKey` nor `Limit` and reports `HasMoreTags` as
-`false` unconditionally, so that cursor cannot be exercised yet
-([#954](https://github.com/scttfrdmn/substrate/issues/954)). This sort is its prerequisite, for the
-reason the tier-2 defect above already demonstrated: a cursor paged over an unstable order skips
-and repeats.
+That cursor is implemented as of [#954](https://github.com/scttfrdmn/substrate/issues/954), and this
+sort was its prerequisite for the reason the tier-2 defect above already demonstrated: a cursor
+paged over an unstable order skips and repeats. See
+[Paging the tags on a stream](#paging-the-tags-on-a-stream) for what a page contains and for the two
+AWS sentences about `HasMoreTags` that do not agree.
 
 ---
 
@@ -10012,7 +10012,48 @@ Cognito Identity operations are free.
 | GetRecords | Ring buffer of last 10,000 records per shard |
 | AddTagsToStream | `Tags` is a JSON object of key/value pairs, not a list |
 | RemoveTagsFromStream | |
-| ListTagsForStream | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map). `Limit` and `ExclusiveStartTagKey` are not read and `HasMoreTags` is always `false` ([#954](https://github.com/scttfrdmn/substrate/issues/954)) |
+| ListTagsForStream | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) — and pages them with `Limit` and `ExclusiveStartTagKey`; see [Paging the tags on a stream](#paging-the-tags-on-a-stream). `StreamARN` is not accepted, so a stream must be named |
+
+### Paging the tags on a stream
+
+`ListTagsForStream` publishes both halves of a cursor over the tag key, and until
+[#954](https://github.com/scttfrdmn/substrate/issues/954) substrate read neither: every call returned
+every tag and `HasMoreTags` was the literal `false`, so a caller's paging loop was told there was
+nothing more by a response that had not looked. Now `Limit` caps a page, `ExclusiveStartTagKey`
+positions it, and `HasMoreTags` says whether anything remains.
+
+| Call | Answer |
+|------|--------|
+| No `Limit` | Every tag, `HasMoreTags: false` — `Limit` is optional and the page states no default |
+| `Limit` of 1–50 | At most that many tags, taken from the front of the remaining set |
+| `Limit` of 0, 51 or any other value outside 1–50 | `InvalidArgumentException`/400 — the operation's own published error, whose description is *"a specified parameter exceeds its restrictions"* |
+| `ExclusiveStartTagKey` | The tags whose keys sort **strictly after** it, per *"gets all tags that occur after `ExclusiveStartTagKey`"* — so a caller that passes back the last key it received advances instead of repeating it |
+| `ExclusiveStartTagKey` naming no tag | Positions the walk anyway: the cursor is over the key space, so a value between two keys starts at the later one |
+| `ExclusiveStartTagKey` of `""` | Read as absent rather than as a violation of the published minimum length of 1 — it is what an omitted member decodes to and what a caller starting a walk sends |
+| `ExclusiveStartTagKey` longer than 128 characters | `InvalidArgumentException`/400, the published maximum length, which is also the maximum length of a tag key |
+
+**The walk order is substrate's reading**, as [the tag-order section](#a-tag-set-read-back-out-of-a-map)
+records: AWS names no order for these tags anywhere, and its own sample response is unsorted. The
+cursor *requires* one — a tag cannot occur "after" a key otherwise — so substrate walks keys
+lexicographically, and that is what makes a page's contents predictable rather than a function of Go's
+map seed.
+
+**`HasMoreTags` is `true` exactly when tags were withheld, which resolves two AWS sentences that do
+not agree.** Under `Limit`, the page says `HasMoreTags` is set *"if this number is less than the total
+number of tags associated with the stream"*; read literally, a walk at `Limit` 2 over six tags would
+report `true` on the last page too, since 2 is still less than 6, and the loop AWS itself describes —
+*"to list additional tags, set `ExclusiveStartTagKey` to the last key in the response"* — would never
+terminate. `HasMoreTags`' own description is the coherent one, *"if set to true, more tags are
+available"*, so substrate reports whether anything remains **after this page**. A `Limit` equal to or
+larger than the remaining set is therefore not a truncation.
+
+**AWS's own numbers disagree about how large the set being paged can get, and substrate enforces
+neither.** The response's `Tags` array publishes *"Maximum number of 200 items"* and
+`AddTagsToStream`'s `Tags` map publishes the same 200, while both operations' prose caps a stream at 50
+tags — exactly `Limit`'s maximum. Read by the prose, one maximum-`Limit` page holds every tag a stream
+may legally carry and the cursor is a formality; read by the shape, it is not. Substrate enforces no
+tag quota on `AddTagsToStream`, so a caller can store more than 50 and the cursor pages whatever is
+there.
 
 ### CloudFormation resource types
 
