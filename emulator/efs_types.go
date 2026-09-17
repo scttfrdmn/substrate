@@ -51,6 +51,9 @@ type EFSFileSystem struct {
 
 	// Region is the AWS region where this file system resides.
 	Region string `json:"Region"`
+
+	// EverTagged records that this file system has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // EFSAccessPoint represents an Amazon EFS access point.
@@ -84,6 +87,9 @@ type EFSAccessPoint struct {
 
 	// Region is the AWS region where this access point resides.
 	Region string `json:"Region"`
+
+	// EverTagged records that this access point has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // EFSMountTarget represents an Amazon EFS mount target.

@@ -245,6 +245,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page is exactly when someone working from the struct would put #971's member back.
 
 ### Changed
+- **`GetResources` reports what has been tagged, not everything that exists, which is a compatibility
+  break** (#938). `API_GetResources` publishes two rules that end at the same place — a record whose tag
+  set is empty — and substrate could not tell them apart. It "does not return untagged resources"; and,
+  on `TagFilters`, *"[i]f you don't specify a `TagFilter`, the response includes all resources that are
+  currently tagged or ever had a tag. Resources that were previously tagged, but do not currently have
+  tags, are shown with an empty tag set, like this: `"Tags": []`."* Substrate reported all three states,
+  so a scan answered with every resource the caller had ever created and an inventory of tags was
+  indistinguishable from an inventory. A never-tagged resource is now **absent**, and a previously
+  tagged one is reported with `"Tags": []` — `[]` rather than `null`, because that is the rendering AWS
+  publishes and a decoded tag list cannot tell the two apart. A test that created a resource, wrote no
+  tag, and expected `GetResources` to report it must now write one; the empty-list rendering is asserted
+  on raw JSON per member, since only raw bytes can distinguish `[]` from `null`.
+
+  The third state needs state the tags do not carry, so each of the 33 scanned records gains a persisted
+  `ever_tagged` boolean and the scan reads `len(Tags) > 0 || ever_tagged` **once**, in the loop, rather
+  than once per scanner. Applying it inside the scan rather than over its result is what keeps a page
+  from being under-filled: a filter applied after pagination cuts a page from a list that still holds
+  never-tagged records, so a caller asking for one resource per page would be handed a short page for a
+  reason they cannot see — a cursor walk at `ResourcesPerPage=1` over five tagged tables interleaved with
+  four untagged ones is the test that pins it. A side-car keyed by ARN was the alternative and was
+  rejected: a scanner already loads the record, so a second load per resource buys nothing, and a
+  side-car and a record can disagree about a resource deleted and recreated under one name. The member is
+  spelled `ever_tagged` on all 33 records and carries `,omitempty`, and #1013's projection rule is what
+  makes a persisted-only field safe from the wire.
+
+  The flag is written by whichever writer *removes* a tag rather than by whichever writes one: a resource
+  holding a tag is reported for holding it, and the first writer to empty the set is the one looking at
+  the set it is about to empty — so a create-with-tags path stamps nothing and does not need to, and
+  nothing ever clears the flag, because the rule is about history. Both writer directions are covered,
+  the tagging API's own `TagResources`/`UntagResources` and each owning service's native tag operation.
+  The one shape that has to read the set it replaces is a writer that replaces a whole tag set rather
+  than merging into it, since it never sees a per-key removal: S3's `PutBucketTagging` and
+  `DeleteBucketTagging` and Systems Manager's `PutParameter` overwrite are the three in the tree, and all
+  three now carry the stored flag forward. A writer added later that rebuilds a record from the request
+  without reading the stored one would make a previously tagged resource never-tagged again; that is the
+  gap to check for, and it is a property of the writer rather than of the scan.
+
 - **KMS's stub ciphertext format, which is a compatibility break** (#979). The blob was a delimited string
   carrying a key ID and a plaintext — enough for `Decrypt` to find its key and nothing else. It is now a
   base64-wrapped JSON envelope carrying the key ID, the encryption algorithm, the encryption context and

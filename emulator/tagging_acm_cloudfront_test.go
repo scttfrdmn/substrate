@@ -68,6 +68,26 @@ func requestACMCertificateIn(t *testing.T, ts *emulator.TestServer, tgt signedRe
 	return out.CertificateArn
 }
 
+// acmAddTagsIn writes tags through ACM's own AddTagsToCertificate against a chosen Region's
+// endpoint.
+//
+// It exists for the Region-attribution assertions, whose control resource lives in us-west-2: an
+// untagged certificate is absent from GetResources by rule (#938), so a control that was never
+// tagged would let "the distribution is absent from us-west-2" pass against an endpoint that
+// scanned nothing at all — the very thing the control is there to rule out.
+func acmAddTagsIn(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget, arn string, tags map[string]string) {
+	t.Helper()
+	list := make([]map[string]string, 0, len(tags))
+	for k, v := range tags {
+		list = append(list, map[string]string{"Key": k, "Value": v})
+	}
+	status, errCode := decodeAWSResponse(t,
+		signedRequest(t, ts, tgt, taggingTestAccount, "AddTagsToCertificate",
+			map[string]any{"CertificateArn": arn, "Tags": list}), nil)
+	require.Empty(t, errCode, "AddTagsToCertificate %s", arn)
+	require.Equal(t, http.StatusOK, status, "AddTagsToCertificate %s", arn)
+}
+
 // acmTags reads a certificate's tags through ACM's own ListTagsForCertificate.
 func acmTags(t *testing.T, ts *emulator.TestServer, arn string) map[string]string {
 	t.Helper()
@@ -308,6 +328,7 @@ func TestTaggingCloudFront_ADistributionIsReportedOnlyInTheGlobalRegion(t *testi
 	// from us-west-2" would pass just as well against an endpoint that scanned nothing at all, and
 	// the Region gate would be asserted by an empty response rather than by the gate.
 	west2Cert := requestACMCertificateIn(t, ts, acmWest2Target, "control.example.com")
+	acmAddTagsIn(t, ts, acmWest2Target, west2Cert, map[string]string{"env": "control"})
 	west2 := getResourcesARNsIn(t, ts, taggingWest2Target)
 	require.Contains(t, west2, west2Cert, "GetResources in us-west-2 scans that Region's resources")
 	assert.NotContains(t, west2, arn,

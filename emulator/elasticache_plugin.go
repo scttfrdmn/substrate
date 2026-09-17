@@ -816,6 +816,9 @@ func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, r
 			}
 		}
 	}
+	if err := taggingStampRecordAnyEverTagged(m, len(existingTags), len(add)); err != nil {
+		return fmt.Errorf("elasticache updateTagsByARN: %w", err)
+	}
 	merged := mergeStringMap(existingTags, add, removeKeys)
 	m["Tags"] = merged
 	updated, _ := json.Marshal(m)

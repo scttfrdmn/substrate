@@ -693,6 +693,8 @@ func (p *KinesisPlugin) addTagsToStream(ctx *RequestContext, req *AWSRequest) (*
 		return nil, quotaErr
 	}
 
+	stream.EverTagged = taggingEverTagged(stream.EverTagged, len(stream.Tags), len(body.Tags))
+
 	if stream.Tags == nil {
 		stream.Tags = make(map[string]string)
 	}
@@ -724,6 +726,8 @@ func (p *KinesisPlugin) removeTagsFromStream(ctx *RequestContext, req *AWSReques
 	if err != nil {
 		return nil, err
 	}
+
+	stream.EverTagged = taggingEverTagged(stream.EverTagged, len(stream.Tags), 0)
 
 	for _, k := range body.TagKeys {
 		delete(stream.Tags, k)

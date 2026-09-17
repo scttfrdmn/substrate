@@ -511,6 +511,8 @@ func (p *CloudFrontPlugin) tagResource(_ *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
+	dist.EverTagged = taggingEverTagged(dist.EverTagged, len(dist.Tags), len(xmlTags.Items))
+
 	if dist.Tags == nil {
 		dist.Tags = make(map[string]string)
 	}
@@ -569,6 +571,8 @@ func (p *CloudFrontPlugin) untagResource(_ *RequestContext, req *AWSRequest) (*A
 	if decErr := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlKeys); decErr != nil {
 		return nil, cfInvalidTagBody("TagKeys", decErr)
 	}
+
+	dist.EverTagged = taggingEverTagged(dist.EverTagged, len(dist.Tags), 0)
 
 	for _, key := range xmlKeys.Items {
 		delete(dist.Tags, key)

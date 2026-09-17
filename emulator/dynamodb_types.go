@@ -104,6 +104,9 @@ type DynamoDBTable struct {
 	// TableDescription has no Tags member, and AWS's Tags is a list of {Key, Value}
 	// rather than the map stored here.
 	Tags map[string]string `json:"Tags,omitempty"`
+
+	// EverTagged records that this table has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // DynamoDBKeySchemaElement specifies a single attribute that forms the primary key.

@@ -40,6 +40,9 @@ type RDSDBInstance struct {
 	Region string `json:"Region"`
 	// CreatedAt is the time the instance was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this DB instance has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // RDSEndpoint holds the endpoint address and port for a DB instance.
@@ -94,6 +97,9 @@ type RDSDBSubnetGroup struct {
 	AccountID string `json:"AccountID"`
 	// Region is the AWS region where the subnet group resides.
 	Region string `json:"Region"`
+
+	// EverTagged records that this subnet group has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // RDSDBParameterGroup represents an RDS DB parameter group.
@@ -146,6 +152,9 @@ type RDSDBCluster struct {
 	Region string `json:"Region"`
 	// CreatedAt is the time the cluster was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this DB cluster has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // rdsDefaultPort returns the default port for the given database engine.

@@ -30,6 +30,9 @@ type SQSQueue struct {
 
 	// FifoQueue indicates whether this is a FIFO queue.
 	FifoQueue bool `json:"FifoQueue"`
+
+	// EverTagged records that this queue has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // SQSMessage represents a single message in an SQS queue.

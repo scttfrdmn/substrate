@@ -43,6 +43,9 @@ type CloudFrontDistribution struct {
 	// AccountID is the AWS account that owns the distribution.
 	// CloudFront is a global service; no Region field is stored.
 	AccountID string `json:"AccountID"`
+
+	// EverTagged records that this distribution has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // CloudFrontInvalidation holds state for a CloudFront invalidation request.

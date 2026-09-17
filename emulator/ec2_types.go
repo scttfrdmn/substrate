@@ -123,6 +123,9 @@ type EC2Instance struct {
 	// slice, and its flat fields still describe its one interface, so a replayed log
 	// still describes correctly (#455).
 	NetworkInterfaces []EC2NetworkInterface `json:"network_interfaces,omitempty"`
+
+	// EverTagged records that this instance has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // EC2NetworkInterface is one interface attached to an instance at launch, from a

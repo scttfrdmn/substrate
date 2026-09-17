@@ -432,6 +432,7 @@ func (p *DynamoDBPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWS
 	if err != nil {
 		return nil, err
 	}
+	tbl.EverTagged = taggingEverTagged(tbl.EverTagged, len(tbl.Tags), len(input.Tags))
 	if tbl.Tags == nil {
 		tbl.Tags = make(map[string]string, len(input.Tags))
 	}
@@ -456,6 +457,7 @@ func (p *DynamoDBPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*A
 	if err != nil {
 		return nil, err
 	}
+	tbl.EverTagged = taggingEverTagged(tbl.EverTagged, len(tbl.Tags), 0)
 	for _, k := range input.TagKeys {
 		delete(tbl.Tags, k)
 	}

@@ -1021,6 +1021,7 @@ func (p *KMSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	key.EverTagged = taggingEverTagged(key.EverTagged, len(key.Tags), len(input.Tags))
 	tagMap := make(map[string]string, len(key.Tags))
 	for _, t := range key.Tags {
 		tagMap[t.TagKey] = t.TagValue
@@ -1070,6 +1071,7 @@ func (p *KMSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	key.EverTagged = taggingEverTagged(key.EverTagged, len(key.Tags), 0)
 	removeSet := make(map[string]bool, len(input.TagKeys))
 	for _, k := range input.TagKeys {
 		removeSet[k] = true

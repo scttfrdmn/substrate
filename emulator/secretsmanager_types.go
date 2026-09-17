@@ -79,6 +79,9 @@ type SecretState struct {
 	// refuses while it is set, and RestoreSecret clears it (#953). It is never a wall-clock time — it is
 	// the simulated clock at the request plus RecoveryWindowInDays.
 	DeletionDate time.Time `json:"DeletionDate,omitempty"`
+
+	// EverTagged records that this secret has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // SMRotationRules is a secret's rotation schedule, as RotateSecret configures it and DescribeSecret

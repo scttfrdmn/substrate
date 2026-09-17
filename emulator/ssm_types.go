@@ -41,6 +41,9 @@ type SSMParameter struct {
 
 	// ARN is the Amazon Resource Name of the parameter.
 	ARN string `json:"ARN"`
+
+	// EverTagged records that this parameter has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // SSMTag is a key-value tag for SSM resources.

@@ -3807,6 +3807,10 @@ func (p *S3Plugin) putBucketTagging(_ *RequestContext, req *AWSRequest, bucket s
 	if err := json.Unmarshal(data, &b); err != nil {
 		return nil, fmt.Errorf("putBucketTagging unmarshal: %w", err)
 	}
+	// PutBucketTagging replaces the whole set rather than merging into it, so it is one of the two
+	// writers that would drop the previously-tagged flag if it did not read the set it replaces — see
+	// [taggingEverTagged] (#938).
+	b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(tagging.TagSet.Tags))
 	b.Tags = make(map[string]string)
 	for _, tag := range tagging.TagSet.Tags {
 		b.Tags[tag.Key] = tag.Value
@@ -3852,6 +3856,7 @@ func (p *S3Plugin) deleteBucketTagging(_ *RequestContext, _ *AWSRequest, bucket 
 	if unmarshalErr := json.Unmarshal(data, &b); unmarshalErr != nil {
 		return nil, fmt.Errorf("deleteBucketTagging unmarshal: %w", unmarshalErr)
 	}
+	b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), 0)
 	b.Tags = make(map[string]string)
 	newData, marshalErr := json.Marshal(b)
 	if marshalErr != nil {

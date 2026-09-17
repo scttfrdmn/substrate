@@ -79,6 +79,11 @@ type resourceTagMapping struct {
 	ResourceARN       string       `json:"ResourceARN"`
 	Tags              []taggingTag `json:"Tags"`
 	ComplianceDetails *struct{}    `json:"ComplianceDetails,omitempty"`
+
+	// everTagged is the scanned record's previously-tagged flag. It is unexported because it is not a
+	// response member: AWS reports the history by including the resource with an empty tag set, not by
+	// publishing a flag. See [taggingResourceReported] (#938).
+	everTagged bool
 }
 
 type taggingTag struct {
@@ -367,6 +372,21 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 			if !taggingResourceInScope(r.ResourceARN, reqCtx) {
 				continue
 			}
+			// Never-tagged resources are dropped here rather than in each scanner, for the reason
+			// the scope check is: it is one rule instead of twenty-nine, and it is inside the scan,
+			// so a page cut at ResourcesPerPage=1 is not under-filled by a filter applied after the
+			// cut. See [taggingResourceReported] (#938).
+			if !taggingResourceReported(r) {
+				continue
+			}
+			// A previously-tagged resource is reported with "Tags": [], which is what AWS publishes
+			// and what its own sample response shows. The tag converters return nil for an empty
+			// set, and resourceTagMapping.Tags carries no omitempty, so without this the member
+			// would render as null — a shape no reference publishes, and one an SDK decodes into a
+			// nil slice indistinguishable from an absent member.
+			if r.Tags == nil {
+				r.Tags = []taggingTag{}
+			}
 			all = append(all, r)
 		}
 	}
@@ -410,6 +430,7 @@ func (p *TaggingPlugin) scanS3Buckets(_ context.Context, reqCtx *RequestContext)
 		out = append(out, resourceTagMapping{
 			ResourceARN: s3BucketARN(b.Name),
 			Tags:        mapToTaggingTags(b.Tags),
+			everTagged:  b.EverTagged,
 		})
 	}
 	return out, nil
@@ -443,6 +464,7 @@ func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, reqCtx *RequestCo
 		out = append(out, resourceTagMapping{
 			ResourceARN: fn.FunctionArn,
 			Tags:        mapToTaggingTags(fn.Tags),
+			everTagged:  fn.EverTagged,
 		})
 	}
 	return out, nil
@@ -473,6 +495,7 @@ func (p *TaggingPlugin) scanSQSQueues(_ context.Context, reqCtx *RequestContext)
 		out = append(out, resourceTagMapping{
 			ResourceARN: q.QueueARN,
 			Tags:        mapToTaggingTags(q.Tags),
+			everTagged:  q.EverTagged,
 		})
 	}
 	return out, nil
@@ -505,6 +528,7 @@ func (p *TaggingPlugin) scanDynamoDBTables(_ context.Context, reqCtx *RequestCon
 		out = append(out, resourceTagMapping{
 			ResourceARN: t.TableARN,
 			Tags:        mapToTaggingTags(t.Tags),
+			everTagged:  t.EverTagged,
 		})
 	}
 	return out, nil
@@ -531,6 +555,7 @@ func (p *TaggingPlugin) scanEC2Instances(_ context.Context, reqCtx *RequestConte
 		out = append(out, resourceTagMapping{
 			ResourceARN: arn,
 			Tags:        ec2TagsToTaggingTags(inst.Tags),
+			everTagged:  inst.EverTagged,
 		})
 	}
 	return out, nil
@@ -563,6 +588,7 @@ func (p *TaggingPlugin) scanIAMEntities(_ context.Context, reqCtx *RequestContex
 		out = append(out, resourceTagMapping{
 			ResourceARN: u.ARN,
 			Tags:        iamTagsToTaggingTags(u.Tags),
+			everTagged:  u.EverTagged,
 		})
 	}
 
@@ -582,6 +608,7 @@ func (p *TaggingPlugin) scanIAMEntities(_ context.Context, reqCtx *RequestContex
 		out = append(out, resourceTagMapping{
 			ResourceARN: r.ARN,
 			Tags:        iamTagsToTaggingTags(r.Tags),
+			everTagged:  r.EverTagged,
 		})
 	}
 	return out, nil
@@ -608,6 +635,7 @@ func (p *TaggingPlugin) scanAPIGatewayAPIs(_ context.Context, reqCtx *RequestCon
 		out = append(out, resourceTagMapping{
 			ResourceARN: arn,
 			Tags:        mapToTaggingTags(api.Tags),
+			everTagged:  api.EverTagged,
 		})
 	}
 	return out, nil
@@ -633,6 +661,7 @@ func (p *TaggingPlugin) scanStepFunctionsStateMachines(_ context.Context, reqCtx
 		out = append(out, resourceTagMapping{
 			ResourceARN: sm.StateMachineArn,
 			Tags:        mapToTaggingTags(sm.Tags),
+			everTagged:  sm.EverTagged,
 		})
 	}
 	return out, nil
@@ -662,6 +691,7 @@ func (p *TaggingPlugin) scanStepFunctionsActivities(_ context.Context, reqCtx *R
 		out = append(out, resourceTagMapping{
 			ResourceARN: act.ActivityArn,
 			Tags:        mapToTaggingTags(act.Tags),
+			everTagged:  act.EverTagged,
 		})
 	}
 	return out, nil
@@ -687,6 +717,7 @@ func (p *TaggingPlugin) scanECRRepositories(_ context.Context, reqCtx *RequestCo
 		out = append(out, resourceTagMapping{
 			ResourceARN: repo.RepositoryArn,
 			Tags:        mapToTaggingTags(repo.Tags),
+			everTagged:  repo.EverTagged,
 		})
 	}
 	return out, nil
@@ -711,6 +742,7 @@ func (p *TaggingPlugin) scanECSClusters(_ context.Context, reqCtx *RequestContex
 		out = append(out, resourceTagMapping{
 			ResourceARN: cluster.ClusterArn,
 			Tags:        ecsTagsToTaggingTags(cluster.Tags),
+			everTagged:  cluster.EverTagged,
 		})
 	}
 	return out, nil
@@ -741,6 +773,7 @@ func (p *TaggingPlugin) scanECSServices(_ context.Context, reqCtx *RequestContex
 		out = append(out, resourceTagMapping{
 			ResourceARN: svc.ServiceArn,
 			Tags:        ecsTagsToTaggingTags(svc.Tags),
+			everTagged:  svc.EverTagged,
 		})
 	}
 	return out, nil
@@ -772,6 +805,7 @@ func (p *TaggingPlugin) scanECSTasks(_ context.Context, reqCtx *RequestContext) 
 		out = append(out, resourceTagMapping{
 			ResourceARN: task.TaskArn,
 			Tags:        ecsTagsToTaggingTags(task.Tags),
+			everTagged:  task.EverTagged,
 		})
 	}
 	return out, nil
@@ -808,6 +842,7 @@ func (p *TaggingPlugin) scanECSTaskDefinitions(_ context.Context, reqCtx *Reques
 		out = append(out, resourceTagMapping{
 			ResourceARN: td.TaskDefinitionArn,
 			Tags:        ecsTagsToTaggingTags(td.Tags),
+			everTagged:  td.EverTagged,
 		})
 	}
 	return out, nil
@@ -833,6 +868,7 @@ func (p *TaggingPlugin) scanCognitoUserPools(_ context.Context, reqCtx *RequestC
 		out = append(out, resourceTagMapping{
 			ResourceARN: pool.Arn,
 			Tags:        mapToTaggingTags(pool.Tags),
+			everTagged:  pool.EverTagged,
 		})
 	}
 	return out, nil
@@ -858,6 +894,7 @@ func (p *TaggingPlugin) scanKinesisStreams(_ context.Context, reqCtx *RequestCon
 		out = append(out, resourceTagMapping{
 			ResourceARN: stream.StreamArn,
 			Tags:        mapToTaggingTags(stream.Tags),
+			everTagged:  stream.EverTagged,
 		})
 	}
 	return out, nil
@@ -883,6 +920,7 @@ func (p *TaggingPlugin) scanRDSInstances(_ context.Context, reqCtx *RequestConte
 		out = append(out, resourceTagMapping{
 			ResourceARN: inst.DBInstanceArn,
 			Tags:        mapToTaggingTags(inst.Tags),
+			everTagged:  inst.EverTagged,
 		})
 	}
 	return out, nil
@@ -913,6 +951,7 @@ func (p *TaggingPlugin) scanRDSClusters(_ context.Context, reqCtx *RequestContex
 		out = append(out, resourceTagMapping{
 			ResourceARN: cluster.DBClusterArn,
 			Tags:        mapToTaggingTags(cluster.Tags),
+			everTagged:  cluster.EverTagged,
 		})
 	}
 	return out, nil
@@ -939,6 +978,7 @@ func (p *TaggingPlugin) scanRDSSubnetGroups(_ context.Context, reqCtx *RequestCo
 		out = append(out, resourceTagMapping{
 			ResourceARN: group.DBSubnetGroupArn,
 			Tags:        mapToTaggingTags(group.Tags),
+			everTagged:  group.EverTagged,
 		})
 	}
 	return out, nil
@@ -964,6 +1004,7 @@ func (p *TaggingPlugin) scanElastiCacheClusters(_ context.Context, reqCtx *Reque
 		out = append(out, resourceTagMapping{
 			ResourceARN: cluster.CacheClusterARN,
 			Tags:        mapToTaggingTags(cluster.Tags),
+			everTagged:  cluster.EverTagged,
 		})
 	}
 	return out, nil
@@ -989,6 +1030,7 @@ func (p *TaggingPlugin) scanEFSFileSystems(_ context.Context, reqCtx *RequestCon
 		out = append(out, resourceTagMapping{
 			ResourceARN: fs.FileSystemArn,
 			Tags:        efsTagsToTaggingTags(fs.Tags),
+			everTagged:  fs.EverTagged,
 		})
 	}
 	return out, nil
@@ -1014,6 +1056,7 @@ func (p *TaggingPlugin) scanGlueDatabases(_ context.Context, reqCtx *RequestCont
 		out = append(out, resourceTagMapping{
 			ResourceARN: db.Arn,
 			Tags:        mapToTaggingTags(db.Tags),
+			everTagged:  db.EverTagged,
 		})
 	}
 	return out, nil
@@ -1059,6 +1102,7 @@ func (p *TaggingPlugin) scanKMSKeys(_ context.Context, reqCtx *RequestContext) (
 		out = append(out, resourceTagMapping{
 			ResourceARN: key.ARN,
 			Tags:        tags,
+			everTagged:  key.EverTagged,
 		})
 	}
 	return out, nil
@@ -1099,6 +1143,7 @@ func (p *TaggingPlugin) scanSNSTopics(_ context.Context, reqCtx *RequestContext)
 		out = append(out, resourceTagMapping{
 			ResourceARN: topic.ARN,
 			Tags:        tags,
+			everTagged:  topic.EverTagged,
 		})
 	}
 	return out, nil
@@ -1141,6 +1186,7 @@ func (p *TaggingPlugin) scanSecretsManagerSecrets(_ context.Context, reqCtx *Req
 		out = append(out, resourceTagMapping{
 			ResourceARN: secret.ARN,
 			Tags:        tags,
+			everTagged:  secret.EverTagged,
 		})
 	}
 	return out, nil
@@ -1181,6 +1227,7 @@ func (p *TaggingPlugin) scanSSMParameters(_ context.Context, reqCtx *RequestCont
 		out = append(out, resourceTagMapping{
 			ResourceARN: param.ARN,
 			Tags:        tags,
+			everTagged:  param.EverTagged,
 		})
 	}
 	return out, nil
@@ -1206,6 +1253,7 @@ func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestCo
 		out = append(out, resourceTagMapping{
 			ResourceARN: cert.CertificateArn,
 			Tags:        mapToTaggingTags(cert.Tags),
+			everTagged:  cert.EverTagged,
 		})
 	}
 	return out, nil
@@ -1249,6 +1297,7 @@ func (p *TaggingPlugin) scanCloudFrontDistributions(_ context.Context, reqCtx *R
 		out = append(out, resourceTagMapping{
 			ResourceARN: dist.ARN,
 			Tags:        mapToTaggingTags(dist.Tags),
+			everTagged:  dist.EverTagged,
 		})
 	}
 	return out, nil
@@ -1832,6 +1881,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &b); err != nil {
 			return fmt.Errorf("unmarshal S3Bucket: %w", err)
 		}
+		b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(addTags))
 		b.Tags = mergeStringMap(b.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(b)
 		return state.Put(goCtx, ns, key, updated)
@@ -1841,6 +1891,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &fn); err != nil {
 			return fmt.Errorf("unmarshal LambdaFunction: %w", err)
 		}
+		fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), len(addTags))
 		fn.Tags = mergeStringMap(fn.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(fn)
 		return state.Put(goCtx, ns, key, updated)
@@ -1850,6 +1901,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &q); err != nil {
 			return fmt.Errorf("unmarshal SQSQueue: %w", err)
 		}
+		q.EverTagged = taggingEverTagged(q.EverTagged, len(q.Tags), len(addTags))
 		q.Tags = mergeStringMap(q.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(q)
 		return state.Put(goCtx, ns, key, updated)
@@ -1859,6 +1911,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &t); err != nil {
 			return fmt.Errorf("unmarshal DynamoDBTable: %w", err)
 		}
+		t.EverTagged = taggingEverTagged(t.EverTagged, len(t.Tags), len(addTags))
 		t.Tags = mergeStringMap(t.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(t)
 		return state.Put(goCtx, ns, key, updated)
@@ -1868,6 +1921,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &inst); err != nil {
 			return fmt.Errorf("unmarshal EC2Instance: %w", err)
 		}
+		inst.EverTagged = taggingEverTagged(inst.EverTagged, len(inst.Tags), len(addTags))
 		inst.Tags = mergeEC2Tags(inst.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(inst)
 		return state.Put(goCtx, ns, key, updated)
@@ -1878,6 +1932,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &u); err != nil {
 				return fmt.Errorf("unmarshal IAMUser: %w", err)
 			}
+			u.EverTagged = taggingEverTagged(u.EverTagged, len(u.Tags), len(addTags))
 			u.Tags = mergeIAMTags(u.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(u)
 			return state.Put(goCtx, ns, key, updated)
@@ -1887,6 +1942,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &r); err != nil {
 				return fmt.Errorf("unmarshal IAMRole: %w", err)
 			}
+			r.EverTagged = taggingEverTagged(r.EverTagged, len(r.Tags), len(addTags))
 			r.Tags = mergeIAMTags(r.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(r)
 			return state.Put(goCtx, ns, key, updated)
@@ -1898,6 +1954,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &api); err != nil {
 			return fmt.Errorf("unmarshal RestAPIState: %w", err)
 		}
+		api.EverTagged = taggingEverTagged(api.EverTagged, len(api.Tags), len(addTags))
 		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(api)
 		return state.Put(goCtx, ns, key, updated)
@@ -1924,6 +1981,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &repo); err != nil {
 			return fmt.Errorf("unmarshal ECRRepository: %w", err)
 		}
+		repo.EverTagged = taggingEverTagged(repo.EverTagged, len(repo.Tags), len(addTags))
 		repo.Tags = mergeStringMap(repo.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(repo)
 		return state.Put(goCtx, ns, key, updated)
@@ -1944,6 +2002,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &pool); err != nil {
 			return fmt.Errorf("unmarshal CognitoUserPool: %w", err)
 		}
+		pool.EverTagged = taggingEverTagged(pool.EverTagged, len(pool.Tags), len(addTags))
 		pool.Tags = mergeStringMap(pool.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(pool)
 		return state.Put(goCtx, ns, key, updated)
@@ -1953,6 +2012,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &stream); err != nil {
 			return fmt.Errorf("unmarshal KinesisStream: %w", err)
 		}
+		stream.EverTagged = taggingEverTagged(stream.EverTagged, len(stream.Tags), len(addTags))
 		stream.Tags = mergeStringMap(stream.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(stream)
 		return state.Put(goCtx, ns, key, updated)
@@ -2066,6 +2126,7 @@ func mergeResourceTags(
 		if err := json.Unmarshal(raw, &cluster); err != nil {
 			return fmt.Errorf("unmarshal ElastiCacheCacheCluster: %w", err)
 		}
+		cluster.EverTagged = taggingEverTagged(cluster.EverTagged, len(cluster.Tags), len(addTags))
 		cluster.Tags = mergeStringMap(cluster.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(cluster)
 		return state.Put(goCtx, ns, key, updated)
@@ -2076,6 +2137,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &fs); err != nil {
 				return fmt.Errorf("unmarshal EFSFileSystem: %w", err)
 			}
+			fs.EverTagged = taggingEverTagged(fs.EverTagged, len(fs.Tags), len(addTags))
 			fs.Tags = mergeEFSTags(fs.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(fs)
 			return state.Put(goCtx, ns, key, updated)
@@ -2085,6 +2147,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &ap); err != nil {
 				return fmt.Errorf("unmarshal EFSAccessPoint: %w", err)
 			}
+			ap.EverTagged = taggingEverTagged(ap.EverTagged, len(ap.Tags), len(addTags))
 			ap.Tags = mergeEFSTags(ap.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(ap)
 			return state.Put(goCtx, ns, key, updated)
@@ -2097,6 +2160,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &db); err != nil {
 				return fmt.Errorf("unmarshal GlueDatabase: %w", err)
 			}
+			db.EverTagged = taggingEverTagged(db.EverTagged, len(db.Tags), len(addTags))
 			db.Tags = mergeStringMap(db.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(db)
 			return state.Put(goCtx, ns, key, updated)
@@ -2106,6 +2170,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &job); err != nil {
 				return fmt.Errorf("unmarshal GlueJob: %w", err)
 			}
+			job.EverTagged = taggingEverTagged(job.EverTagged, len(job.Tags), len(addTags))
 			job.Tags = mergeStringMap(job.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(job)
 			return state.Put(goCtx, ns, key, updated)
@@ -2115,6 +2180,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &crawler); err != nil {
 				return fmt.Errorf("unmarshal GlueCrawler: %w", err)
 			}
+			crawler.EverTagged = taggingEverTagged(crawler.EverTagged, len(crawler.Tags), len(addTags))
 			crawler.Tags = mergeStringMap(crawler.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(crawler)
 			return state.Put(goCtx, ns, key, updated)
@@ -2124,6 +2190,7 @@ func mergeResourceTags(
 			if err := json.Unmarshal(raw, &conn); err != nil {
 				return fmt.Errorf("unmarshal GlueConnection: %w", err)
 			}
+			conn.EverTagged = taggingEverTagged(conn.EverTagged, len(conn.Tags), len(addTags))
 			conn.Tags = mergeStringMap(conn.Tags, addTags, removeKeys)
 			updated, _ := json.Marshal(conn)
 			return state.Put(goCtx, ns, key, updated)
@@ -2169,6 +2236,9 @@ func mergeRecordStringMapTags(raw []byte, member string, addTags map[string]stri
 		if err := json.Unmarshal(t, &existing); err != nil {
 			return nil, fmt.Errorf("unmarshal %s member: %w", member, err)
 		}
+	}
+	if err := taggingStampRecordEverTagged(record, len(existing), len(addTags)); err != nil {
+		return nil, err
 	}
 	merged, err := json.Marshal(mergeStringMap(existing, addTags, removeKeys))
 	if err != nil {
@@ -2231,6 +2301,9 @@ func mergeRecordTagListTags(raw []byte, member, keyField, valueField string, add
 			return nil, fmt.Errorf("%s element has no %q field", member, keyField)
 		}
 		pairs[k] = e[valueField]
+	}
+	if err := taggingStampRecordEverTagged(record, len(pairs), len(addTags)); err != nil {
+		return nil, err
 	}
 	merged := mergeStringMap(pairs, addTags, removeKeys)
 

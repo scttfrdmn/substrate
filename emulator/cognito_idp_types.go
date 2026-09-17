@@ -51,6 +51,9 @@ type CognitoUserPool struct {
 
 	// Region is the AWS region where the pool resides.
 	Region string `json:"Region"`
+
+	// EverTagged records that this user pool has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // CognitoUserPoolClient holds the persisted state of a User Pool app client.

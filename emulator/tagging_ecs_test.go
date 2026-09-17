@@ -138,6 +138,25 @@ func ecsFourResources(t *testing.T, ts *emulator.TestServer) (cluster, taskDef, 
 	return cluster, taskDef, service, task
 }
 
+// ecsFourTaggedResourcesIn is [ecsFourResources] in a chosen Region, with each of the four tagged
+// through ECS's own TagResource.
+//
+// A tag is what makes a resource discoverable at all: GetResources reports what has been tagged, and
+// one that never was is absent by rule (#938). The tests that assert a scanner's *selection* — which
+// type a filter picks, which Region a resource is attributed to, which keys are records — therefore
+// need every subject tagged before the assertion, or the scanner would have nothing to select from.
+func ecsFourTaggedResourcesIn(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget) (cluster, taskDef, service, task string) {
+	t.Helper()
+	cluster = createECSClusterIn(t, ts, tgt, "web")
+	taskDef = registerECSTaskDefinitionIn(t, ts, tgt, "sidecar")
+	service = createECSServiceIn(t, ts, tgt, "web", taskDef, "api")
+	task = runECSTaskIn(t, ts, tgt, "web", taskDef)
+	for _, arn := range []string{cluster, taskDef, service, task} {
+		ecsTagResourceIn(t, ts, tgt, arn, map[string]string{"env": "test"})
+	}
+	return cluster, taskDef, service, task
+}
+
 // TestTaggingECS_GetResourcesReportsEveryECSType is the row itself: each of the four types is created
 // through its owning operation, tagged through the tagging API, and then found by the tagging API's
 // own discovery call carrying that tag.
@@ -199,7 +218,7 @@ func TestTaggingECS_ATagIsReadableThroughBothAPIsForEveryType(t *testing.T) {
 // string "task", so before #936 asking for tasks answered with both.
 func TestTaggingECS_AResourceTypeFilterSelectsOnlyItsOwnType(t *testing.T) {
 	ts := ecsTagServer(t)
-	cluster, taskDef, service, task := ecsFourResources(t, ts)
+	cluster, taskDef, service, task := ecsFourTaggedResourcesIn(t, ts, ecsTarget)
 
 	for _, tc := range []struct {
 		filter string
@@ -230,13 +249,12 @@ func TestTaggingECS_AResourceTypeFilterSelectsOnlyItsOwnType(t *testing.T) {
 // one-sided assertion passes against a scanner that reports nothing at all.
 func TestTaggingECS_GetResourcesDoesNotReportAnotherRegionsResources(t *testing.T) {
 	ts := ecsTagServer(t)
-	eastCluster, eastTaskDef, eastService, eastTask := ecsFourResources(t, ts)
+	eastCluster, eastTaskDef, eastService, eastTask := ecsFourTaggedResourcesIn(t, ts, ecsTarget)
 
 	// The same names in us-west-2, so a Region-blind prefix would report eight ARNs to each caller.
-	westCluster := createECSClusterIn(t, ts, ecsWest2Target, "web")
-	westTaskDef := registerECSTaskDefinitionIn(t, ts, ecsWest2Target, "sidecar")
-	westService := createECSServiceIn(t, ts, ecsWest2Target, "web", westTaskDef, "api")
-	westTask := runECSTaskIn(t, ts, ecsWest2Target, "web", westTaskDef)
+	// Tagged as well, because an untagged resource is absent from GetResources for a reason that is
+	// not the Region (#938), and this assertion has to fail if the Region gate is what breaks.
+	westCluster, westTaskDef, westService, westTask := ecsFourTaggedResourcesIn(t, ts, ecsWest2Target)
 
 	assert.ElementsMatch(t, []string{eastCluster, eastTaskDef, eastService, eastTask},
 		getResourcesARNsIn(t, ts, taggingTarget), "us-east-1 reports only its own")
@@ -257,7 +275,7 @@ func TestTaggingECS_GetResourcesDoesNotReportAnotherRegionsResources(t *testing.
 // malformed ARN fails it rather than being absorbed.
 func TestTaggingECS_AnIndexKeyIsNotReportedAsAResource(t *testing.T) {
 	ts := ecsTagServer(t)
-	cluster, taskDef, service, task := ecsFourResources(t, ts)
+	cluster, taskDef, service, task := ecsFourTaggedResourcesIn(t, ts, ecsTarget)
 
 	got := getResourcesARNs(t, ts, "ecs")
 	assert.ElementsMatch(t, []string{cluster, taskDef, service, task}, got,
@@ -318,12 +336,19 @@ func TestTaggingECS_GetResourcesReportsTagsInKeyOrder(t *testing.T) {
 // asserted from.
 func ecsTagResource(t *testing.T, ts *emulator.TestServer, arn string, tags map[string]string) {
 	t.Helper()
+	ecsTagResourceIn(t, ts, ecsTarget, arn, tags)
+}
+
+// ecsTagResourceIn is [ecsTagResource] against a chosen Region's endpoint, for the Region-attribution
+// assertions, which have to write a tag in each of the two Regions they compare.
+func ecsTagResourceIn(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget, arn string, tags map[string]string) {
+	t.Helper()
 	list := make([]map[string]string, 0, len(tags))
 	for k, v := range tags {
 		list = append(list, map[string]string{"key": k, "value": v})
 	}
 	status, errCode := decodeAWSResponse(t,
-		signedRequest(t, ts, ecsTarget, taggingTestAccount, "TagResource",
+		signedRequest(t, ts, tgt, taggingTestAccount, "TagResource",
 			map[string]any{"resourceArn": arn, "tags": list}), nil)
 	require.Empty(t, errCode, "ECS TagResource %s", arn)
 	require.Equal(t, 200, status, "ECS TagResource %s", arn)

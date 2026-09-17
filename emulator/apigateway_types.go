@@ -30,6 +30,9 @@ type RestAPIState struct {
 
 	// Region is the AWS region where the REST API lives.
 	Region string `json:"Region"`
+
+	// EverTagged records that this REST API has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ResourceState holds the state of an API Gateway v1 resource.

@@ -290,6 +290,8 @@ func (p *ACMPlugin) addTagsToCertificate(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("acm addTagsToCertificate unmarshal: %w", err)
 	}
 
+	cert.EverTagged = taggingEverTagged(cert.EverTagged, len(cert.Tags), len(body.Tags))
+
 	if cert.Tags == nil {
 		cert.Tags = make(map[string]string)
 	}
@@ -337,6 +339,8 @@ func (p *ACMPlugin) removeTagsFromCertificate(ctx *RequestContext, req *AWSReque
 	if err := json.Unmarshal(data, &cert); err != nil {
 		return nil, fmt.Errorf("acm removeTagsFromCertificate unmarshal: %w", err)
 	}
+
+	cert.EverTagged = taggingEverTagged(cert.EverTagged, len(cert.Tags), 0)
 
 	for _, t := range body.Tags {
 		delete(cert.Tags, t.Key)

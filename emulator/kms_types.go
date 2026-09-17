@@ -211,6 +211,9 @@ type KMSKey struct {
 
 	// CreationDate is when the key was created.
 	CreationDate time.Time `json:"CreationDate"`
+
+	// EverTagged records that this key has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // KMSTag is a key-value tag for KMS resources.

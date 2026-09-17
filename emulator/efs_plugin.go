@@ -563,6 +563,7 @@ func (p *EFSPlugin) mergeEFSTags(goCtx context.Context, reqCtx *RequestContext, 
 		if err := json.Unmarshal(raw, &fs); err != nil {
 			return fmt.Errorf("efs mergeEFSTags unmarshal fs: %w", err)
 		}
+		fs.EverTagged = taggingEverTagged(fs.EverTagged, len(fs.Tags), len(addTags))
 		fs.Tags = mergeEFSTagSlice(fs.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(fs)
 		return p.state.Put(goCtx, efsNamespace, key, updated)
@@ -581,6 +582,7 @@ func (p *EFSPlugin) mergeEFSTags(goCtx context.Context, reqCtx *RequestContext, 
 		if err := json.Unmarshal(raw, &ap); err != nil {
 			return fmt.Errorf("efs mergeEFSTags unmarshal ap: %w", err)
 		}
+		ap.EverTagged = taggingEverTagged(ap.EverTagged, len(ap.Tags), len(addTags))
 		ap.Tags = mergeEFSTagSlice(ap.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(ap)
 		return p.state.Put(goCtx, efsNamespace, key, updated)

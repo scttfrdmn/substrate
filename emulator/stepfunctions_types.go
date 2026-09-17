@@ -240,6 +240,9 @@ type StateMachineState struct {
 
 	// Region is the AWS region.
 	Region string `json:"Region"`
+
+	// EverTagged records that this state machine has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ExecutionState holds the persisted state of a Step Functions execution.
@@ -300,4 +303,7 @@ type ActivityState struct {
 
 	// Region is the AWS region.
 	Region string `json:"Region"`
+
+	// EverTagged records that this activity has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }

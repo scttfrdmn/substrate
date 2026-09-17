@@ -8520,7 +8520,7 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 
 | Operation | Notes |
 |-----------|-------|
-| GetResources | Supports ResourceTypeFilters, TagFilters; base64 pagination token |
+| GetResources | Supports ResourceTypeFilters, TagFilters; base64 pagination token; reports tagged and previously tagged resources only |
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
@@ -8555,6 +8555,54 @@ about scope. Before #935 the cluster scanner prefixed by account alone, so a `us
 caller was reported a `us-west-2` cluster while the same caller's services — keyed
 identically — were Region-scoped. The section below is the general rule that grew out of
 that one.
+
+### `GetResources` reports what has been tagged, not what is tagged
+
+`GetResources` publishes two rules that end at the same place — a record whose tag set is
+empty — and until #938 substrate could not tell them apart. It "does not return untagged
+resources"; and, on `TagFilters`, "[i]f you don't specify a `TagFilter`, the response
+includes all resources that are currently tagged or ever had a tag. Resources that were
+previously tagged, but do not currently have tags, are shown with an empty tag set, like
+this: `"Tags": []`."
+
+So a resource is in one of three states, and only two of them are reported:
+
+| State | Reported | Tag set |
+|---|---|---|
+| Never tagged | No | — |
+| Tagged | Yes | its tags |
+| Previously tagged, now empty | Yes, and only when no `TagFilter` is given | `[]` |
+
+Before #938 substrate reported all three, so a scan answered with every resource the
+caller had ever created — an inventory call that cannot distinguish "tagged with nothing"
+from "not tagged" is not an inventory of tags. The rendering matters as much as the
+membership: `[]` rather than `null` is what AWS publishes, and a caller decoding a tag
+list cannot tell the two apart, so substrate normalises an absent set to an empty list at
+one place in the scan rather than in each of the scanners.
+
+**The third state needs state the tags do not carry**, so each scanned record gains a
+persisted `ever_tagged` boolean and the scan reads `len(Tags) > 0 || ever_tagged` once, in
+the loop, rather than once per scanner. A side-car keyed by ARN was the alternative and was
+rejected: a scanner already loads the record, so a second load per resource buys nothing,
+and a side-car and a record can disagree about a resource that was deleted and recreated
+under one name. Putting it on the record is safe against leaking onto the wire because
+#1013 established that every scanned type either is a state-only record or projects through
+a separate wire struct.
+
+The flag is written by whichever writer *removes* a tag, not by whichever writes one: a
+resource holding a tag is reported for holding it, and the first writer to empty the set is
+the one looking at the set it is about to empty. A create-with-tags path therefore stamps
+nothing and does not need to. Nothing ever clears the flag — the rule is about history, and
+a resource that was tagged once stays previously tagged.
+
+Both writer directions are covered: the tagging API's own `TagResources`/`UntagResources`,
+and each owning service's native tag operation. **The one shape that has to read the set it
+writes** is a writer that replaces a whole tag set rather than merging into it, because it
+never sees a per-key removal — S3's `PutBucketTagging` and `DeleteBucketTagging` and Systems
+Manager's `PutParameter` overwrite are the three in the tree, and each now carries the
+stored flag forward. A writer added later that rebuilds a record from the request without
+reading the stored one would make a previously tagged resource never-tagged again; that is
+the gap to check for, and it is a property of the writer rather than of the scan.
 
 ### Every scanned resource is scoped to the caller's account and Region
 
@@ -10841,10 +10889,10 @@ services #835's remaining rows cover, the other three spelling them `Key` and
 ranging a Go map comes out in the map's hash order and one recorded run would not
 replay byte-identically.
 
-A key pending deletion is still reported by `GetResources`. AWS says you may not
-*tag* such a key, but a listing is a read and the key exists until its waiting
-period elapses; refusing the write is a separate unmodelled behaviour recorded on
-#922.
+A key pending deletion is still reported by `GetResources` if it has been tagged, or
+once was (#938). AWS says you may not *tag* such a key, but a listing is a read and
+the key exists until its waiting period elapses; refusing the write is a separate
+unmodelled behaviour recorded on #922.
 
 ### CloudFormation resource types
 

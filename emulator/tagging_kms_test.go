@@ -380,7 +380,14 @@ func TestTaggingKMS_ATagWrittenThroughKMSIsReportedByGetResources(t *testing.T) 
 // resource writable and invisible — a caller can tag it and then cannot find it.
 func TestTaggingKMS_GetResourcesReportsTheKey(t *testing.T) {
 	ts := arnGuardServer(t)
-	arn, _ := createKMSKey(t, ts)
+	arn, keyID := createKMSKey(t, ts)
+
+	// Tagged first, because GetResources reports what has been tagged and a key that never was is
+	// absent by rule (#938). The tag goes on through KMS's own TagResource, so the scanner is still
+	// being asked about a resource whose tag the owning service wrote.
+	status, errCode := kmsTagResource(t, ts, kmsTarget, keyID, map[string]string{"env": "test"})
+	require.Empty(t, errCode, "TagResource")
+	require.Equal(t, http.StatusOK, status, "TagResource")
 
 	assert.Contains(t, getResourcesARNs(t, ts, "kms"), arn,
 		"GetResources reports the key under a kms type filter")
@@ -392,7 +399,13 @@ func TestTaggingKMS_GetResourcesReportsTheKey(t *testing.T) {
 // a us-east-1 GetResources.
 func TestTaggingKMS_GetResourcesDoesNotReportAKeyFromAnotherRegion(t *testing.T) {
 	ts := arnGuardServer(t)
-	westARN, _ := createKMSKeyIn(t, ts, kmsWest2Target)
+	westARN, westKeyID := createKMSKeyIn(t, ts, kmsWest2Target)
+
+	// Tagged, so the Region rule is what keeps the key out of the answer rather than #938's — an
+	// untagged key is now absent everywhere, which would pass this assertion for the wrong reason.
+	status, errCode := kmsTagResource(t, ts, kmsWest2Target, westKeyID, map[string]string{"env": "west"})
+	require.Empty(t, errCode, "TagResource in us-west-2")
+	require.Equal(t, http.StatusOK, status, "TagResource in us-west-2")
 
 	assert.NotContains(t, getResourcesARNs(t, ts, "kms"), westARN,
 		"a us-west-2 key is not reported by a us-east-1 GetResources")

@@ -628,6 +628,7 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, sqsQueueDoesNotExist()
 	}
 
+	tagsBefore := len(q.Tags)
 	if q.Tags == nil {
 		q.Tags = make(map[string]string)
 	}
@@ -650,6 +651,10 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 			q.Tags[k] = v
 		}
 	}
+
+	// Counted after the merge because the two protocols carry the tags differently and neither count is
+	// available before the branch; the merged size is what both agree on. See [taggingEverTagged] (#938).
+	q.EverTagged = taggingEverTagged(q.EverTagged, tagsBefore, len(q.Tags))
 
 	if err := p.saveQueue(context.Background(), q); err != nil {
 		return nil, fmt.Errorf("sqs tagQueue saveQueue: %w", err)
@@ -678,6 +683,8 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if q == nil {
 		return nil, sqsQueueDoesNotExist()
 	}
+
+	q.EverTagged = taggingEverTagged(q.EverTagged, len(q.Tags), 0)
 
 	if sqsIsJSONProtocol(req) {
 		var input struct {

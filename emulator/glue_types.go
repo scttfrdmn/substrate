@@ -33,6 +33,9 @@ type GlueDatabase struct {
 
 	// CreatedAt is the time the database was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this database has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // GlueColumn represents a single column in a Glue table's StorageDescriptor.
@@ -138,6 +141,9 @@ type GlueConnection struct {
 
 	// CreatedAt is the time the connection was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this connection has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // GlueCrawler represents an AWS Glue crawler.
@@ -174,6 +180,9 @@ type GlueCrawler struct {
 
 	// CreatedAt is the time the crawler was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this crawler has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // GlueJob represents an AWS Glue ETL job.
@@ -204,6 +213,9 @@ type GlueJob struct {
 
 	// CreatedAt is the time the job was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this job has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // GlueJobCommand describes the script command for a Glue job.

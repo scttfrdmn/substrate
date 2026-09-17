@@ -34,14 +34,56 @@ import (
 // per-Region test already and are not repeated here — ACM and CloudFront in
 // tagging_acm_cloudfront_test.go, ECS in tagging_ecs_test.go, SSM in tagging_ssm_test.go.
 //
-// One dependency worth naming: none of these resources is tagged, because GetResources reports an
-// untagged resource today. AWS omits one, which is #938; when that lands every row here needs a tag
-// written before the assertion, and the row that fails will say which.
+// Every resource here carries one tag, written by the row that creates it. That is #938's
+// consequence, and it arrived exactly as this file's earlier note predicted: GetResources "does not
+// return untagged resources", so a row that created its resource untagged would now assert the scope
+// filter against a response that was empty for a reason having nothing to do with the scope. Fourteen
+// rows write the tag through the create call itself, which is where AWS puts it; the other three —
+// s3 bucket, sqs queue and kinesis stream — write it through the owning service's own tag operation,
+// because their create operations take no tags substrate honors.
+//
+// What is still not asserted here is the tag set reported: these tests collect ResourceARN alone and
+// discard Tags, so a scanner reporting the wrong tags for the right ARN passes. That is deliberate —
+// the subject is scope, and each service's tag round-trip is asserted in its own file — but it is
+// worth naming, because the tag is now load-bearing for the assertion rather than incidental to it.
 
 const (
 	scanScopeEast = "us-east-1"
 	scanScopeWest = "us-west-2"
+
+	// scanScopeTagKey and scanScopeTagValue are the one tag every row writes, so that GetResources
+	// reports the resource at all (#938). One key for all seventeen, because no assertion here reads
+	// the value: what a row needs is to be reportable, not to be distinguishable by tag — the marker
+	// the create returns is what distinguishes it.
+	scanScopeTagKey   = "scope"
+	scanScopeTagValue = "asserted"
 )
+
+// scanScopeTagMap is the tag as the map-shaped members take it.
+func scanScopeTagMap() map[string]string {
+	return map[string]string{scanScopeTagKey: scanScopeTagValue}
+}
+
+// scanScopeTagPairs is the tag as the members that take a list of key/value objects take it, under
+// the capitalised member names DynamoDB and EFS publish.
+func scanScopeTagPairs() []map[string]string {
+	return []map[string]string{{"Key": scanScopeTagKey, "Value": scanScopeTagValue}}
+}
+
+// scanScopeTagPairsLower is [scanScopeTagPairs] under the lower-case member names Step Functions
+// publishes. The two spellings are separate helpers rather than one parameterised builder, because
+// which spelling a service takes is the fact each row is asserting it got right.
+func scanScopeTagPairsLower() []map[string]string {
+	return []map[string]string{{"key": scanScopeTagKey, "value": scanScopeTagValue}}
+}
+
+// scanScopeTagQueryParams is the tag as the query protocol's indexed members take it, which RDS and
+// ElastiCache both spell Tags.member.N.
+func scanScopeTagQueryParams(params map[string]string) map[string]string {
+	params["Tags.member.1.Key"] = scanScopeTagKey
+	params["Tags.member.1.Value"] = scanScopeTagValue
+	return params
+}
 
 // scanScopeServer starts a server that both taggingTestAccount and taggingForeignAccount can sign
 // as, which is the only way to be a second caller.
@@ -242,6 +284,14 @@ var scanScopeServices = []scanScopeService{
 			raw, status := scanScopeSigned(t, ts, account, http.MethodPut,
 				"s3."+region+".amazonaws.com", "s3", region, "/"+id, nil, "")
 			require.Equalf(t, http.StatusOK, status, "CreateBucket %s in %s: %s", id, region, raw)
+
+			// CreateBucket takes no tags, so the tag goes through PutBucketTagging — the sub-resource
+			// request, whose whole tag set is the document, not a member of the create call.
+			raw, status = scanScopeSigned(t, ts, account, http.MethodPut,
+				"s3."+region+".amazonaws.com", "s3", region, "/"+id+"?tagging",
+				[]byte(`<Tagging><TagSet><Tag><Key>`+scanScopeTagKey+`</Key><Value>`+
+					scanScopeTagValue+`</Value></Tag></TagSet></Tagging>`), "application/xml")
+			require.Equalf(t, http.StatusNoContent, status, "PutBucketTagging %s in %s: %s", id, region, raw)
 			return id
 		},
 	},
@@ -259,6 +309,7 @@ var scanScopeServices = []scanScopeService{
 					"Role":         "arn:aws:iam::" + account + ":role/lambda-exec",
 					"Handler":      "index.handler",
 					"Code":         map[string]any{"ZipFile": "ZHVtbXk="},
+					"Tags":         scanScopeTagMap(),
 				}, &out)
 			require.NotEmptyf(t, out.FunctionArn, "CreateFunction %s reports an ARN", id)
 			return out.FunctionArn
@@ -274,6 +325,11 @@ var scanScopeServices = []scanScopeService{
 			scanScopeJSON(t, ts, account, "sqs", region, "AmazonSQS", "CreateQueue",
 				map[string]any{"QueueName": id}, &out)
 			require.NotEmptyf(t, out.QueueURL, "CreateQueue %s reports a URL", id)
+
+			// Through TagQueue rather than CreateQueue's own tags member, which substrate decodes
+			// nowhere: createQueue reads QueueName and Attributes only.
+			scanScopeJSON(t, ts, account, "sqs", region, "AmazonSQS", "TagQueue",
+				map[string]any{"QueueUrl": out.QueueURL, "Tags": scanScopeTagMap()}, nil)
 			return id
 		},
 	},
@@ -292,6 +348,7 @@ var scanScopeServices = []scanScopeService{
 					"BillingMode":          "PAY_PER_REQUEST",
 					"KeySchema":            []map[string]string{{"AttributeName": "pk", "KeyType": "HASH"}},
 					"AttributeDefinitions": []map[string]string{{"AttributeName": "pk", "AttributeType": "S"}},
+					"Tags":                 scanScopeTagPairs(),
 				}, &out)
 			require.NotEmptyf(t, out.TableDescription.TableArn, "CreateTable %s reports an ARN", id)
 			return out.TableDescription.TableArn
@@ -318,6 +375,11 @@ var scanScopeServices = []scanScopeService{
 				"InstanceType": "t3.micro",
 				"MinCount":     "1",
 				"MaxCount":     "1",
+				// EC2 carries a create-time tag in a TagSpecification keyed by resource type, not in a
+				// flat Tags list, and the type has to be named or the specification is skipped.
+				"TagSpecification.1.ResourceType": "instance",
+				"TagSpecification.1.Tag.1.Key":    scanScopeTagKey,
+				"TagSpecification.1.Tag.1.Value":  scanScopeTagValue,
 			}, &out)
 			require.Lenf(t, out.Instances, 1, "RunInstances reports one instance")
 			require.NotEmptyf(t, out.Instances[0].InstanceID, "RunInstances reports an instance ID")
@@ -332,7 +394,7 @@ var scanScopeServices = []scanScopeService{
 				ID string `json:"id"`
 			}
 			scanScopeREST(t, ts, account, "apigateway", region, http.MethodPost, "/restapis",
-				map[string]any{"name": id}, &out)
+				map[string]any{"name": id, "tags": scanScopeTagMap()}, &out)
 			require.NotEmptyf(t, out.ID, "CreateRestApi %s reports an ID", id)
 			return "/restapis/" + out.ID
 		},
@@ -349,6 +411,7 @@ var scanScopeServices = []scanScopeService{
 					"name":       id,
 					"definition": `{"StartAt":"Done","States":{"Done":{"Type":"Succeed"}}}`,
 					"roleArn":    "arn:aws:iam::" + account + ":role/states-exec",
+					"tags":       scanScopeTagPairsLower(),
 				}, &out)
 			require.NotEmptyf(t, out.StateMachineArn, "CreateStateMachine %s reports an ARN", id)
 			return out.StateMachineArn
@@ -362,7 +425,7 @@ var scanScopeServices = []scanScopeService{
 				ActivityArn string `json:"activityArn"`
 			}
 			scanScopeJSON(t, ts, account, "states", region, "AWSStepFunctions", "CreateActivity",
-				map[string]any{"name": id}, &out)
+				map[string]any{"name": id, "tags": scanScopeTagPairsLower()}, &out)
 			require.NotEmptyf(t, out.ActivityArn, "CreateActivity %s reports an ARN", id)
 			return out.ActivityArn
 		},
@@ -376,8 +439,15 @@ var scanScopeServices = []scanScopeService{
 					RepositoryArn string `json:"repositoryArn"`
 				} `json:"repository"`
 			}
+			// A map rather than the list of Key/Value objects ECR's reference publishes, because
+			// substrate's createRepository decodes tags as map[string]string and a list reaches
+			// nothing. Written as substrate parses it, since this row's subject is the scanner's
+			// scope; the shape difference is its own defect, not this test's to assert.
 			scanScopeJSON(t, ts, account, "ecr", region, "AmazonEC2ContainerRegistry_V20150921",
-				"CreateRepository", map[string]any{"repositoryName": id}, &out)
+				"CreateRepository", map[string]any{
+					"repositoryName": id,
+					"tags":           scanScopeTagMap(),
+				}, &out)
 			require.NotEmptyf(t, out.Repository.RepositoryArn, "CreateRepository %s reports an ARN", id)
 			return out.Repository.RepositoryArn
 		},
@@ -393,7 +463,7 @@ var scanScopeServices = []scanScopeService{
 			}
 			scanScopeJSON(t, ts, account, "cognito-idp", region,
 				"AWSCognitoIdentityProviderService", "CreateUserPool",
-				map[string]any{"PoolName": id}, &out)
+				map[string]any{"PoolName": id, "UserPoolTags": scanScopeTagMap()}, &out)
 			require.NotEmptyf(t, out.UserPool.Arn, "CreateUserPool %s reports an ARN", id)
 			return out.UserPool.Arn
 		},
@@ -404,6 +474,11 @@ var scanScopeServices = []scanScopeService{
 			t.Helper()
 			scanScopeJSON(t, ts, account, "kinesis", region, "Kinesis_20131202", "CreateStream",
 				map[string]any{"StreamName": id, "ShardCount": 1}, nil)
+
+			// Through AddTagsToStream, because CreateStream carries no tags member at all — Kinesis
+			// publishes tagging as a separate operation.
+			scanScopeJSON(t, ts, account, "kinesis", region, "Kinesis_20131202", "AddTagsToStream",
+				map[string]any{"StreamName": id, "Tags": scanScopeTagMap()}, nil)
 			return ":stream/" + id
 		},
 	},
@@ -414,13 +489,13 @@ var scanScopeServices = []scanScopeService{
 			var out struct {
 				ARN string `xml:"CreateDBInstanceResult>DBInstance>DBInstanceArn"`
 			}
-			scanScopeQuery(t, ts, account, "rds", region, map[string]string{
+			scanScopeQuery(t, ts, account, "rds", region, scanScopeTagQueryParams(map[string]string{
 				"Action":               "CreateDBInstance",
 				"DBInstanceIdentifier": id,
 				"DBInstanceClass":      "db.t3.micro",
 				"Engine":               "postgres",
 				"MasterUsername":       "admin",
-			}, &out)
+			}), &out)
 			require.NotEmptyf(t, out.ARN, "CreateDBInstance %s reports an ARN", id)
 			return out.ARN
 		},
@@ -432,12 +507,12 @@ var scanScopeServices = []scanScopeService{
 			var out struct {
 				ARN string `xml:"CreateDBClusterResult>DBCluster>DBClusterArn"`
 			}
-			scanScopeQuery(t, ts, account, "rds", region, map[string]string{
+			scanScopeQuery(t, ts, account, "rds", region, scanScopeTagQueryParams(map[string]string{
 				"Action":              "CreateDBCluster",
 				"DBClusterIdentifier": id,
 				"Engine":              "aurora-postgresql",
 				"MasterUsername":      "admin",
-			}, &out)
+			}), &out)
 			require.NotEmptyf(t, out.ARN, "CreateDBCluster %s reports an ARN", id)
 			return out.ARN
 		},
@@ -449,12 +524,12 @@ var scanScopeServices = []scanScopeService{
 			var out struct {
 				ARN string `xml:"CreateDBSubnetGroupResult>DBSubnetGroup>DBSubnetGroupArn"`
 			}
-			scanScopeQuery(t, ts, account, "rds", region, map[string]string{
+			scanScopeQuery(t, ts, account, "rds", region, scanScopeTagQueryParams(map[string]string{
 				"Action":                   "CreateDBSubnetGroup",
 				"DBSubnetGroupName":        id,
 				"DBSubnetGroupDescription": "subnets for " + id,
 				"VpcId":                    "vpc-0123456789abcdef0",
-			}, &out)
+			}), &out)
 			require.NotEmptyf(t, out.ARN, "CreateDBSubnetGroup %s reports an ARN", id)
 			return out.ARN
 		},
@@ -463,13 +538,13 @@ var scanScopeServices = []scanScopeService{
 		name: "elasticache cache cluster",
 		create: func(t *testing.T, ts *emulator.TestServer, account, region, id string) string {
 			t.Helper()
-			scanScopeQuery(t, ts, account, "elasticache", region, map[string]string{
+			scanScopeQuery(t, ts, account, "elasticache", region, scanScopeTagQueryParams(map[string]string{
 				"Action":         "CreateCacheCluster",
 				"CacheClusterId": id,
 				"CacheNodeType":  "cache.t3.micro",
 				"Engine":         "redis",
 				"NumCacheNodes":  "1",
-			}, nil)
+			}), nil)
 			return ":cluster:" + id
 		},
 	},
@@ -481,7 +556,10 @@ var scanScopeServices = []scanScopeService{
 				FileSystemID string `json:"FileSystemId"`
 			}
 			scanScopeREST(t, ts, account, "elasticfilesystem", region, http.MethodPost,
-				"/2015-02-01/file-systems", map[string]any{"CreationToken": id}, &out)
+				"/2015-02-01/file-systems", map[string]any{
+					"CreationToken": id,
+					"Tags":          scanScopeTagPairs(),
+				}, &out)
 			require.NotEmptyf(t, out.FileSystemID, "CreateFileSystem %s reports an ID", id)
 			return out.FileSystemID
 		},
@@ -490,8 +568,13 @@ var scanScopeServices = []scanScopeService{
 		name: "glue database",
 		create: func(t *testing.T, ts *emulator.TestServer, account, region, id string) string {
 			t.Helper()
+			// Glue's tags member sits beside DatabaseInput rather than inside it, which is what the
+			// reference publishes and what substrate decodes.
 			scanScopeJSON(t, ts, account, "glue", region, "AWSGlue", "CreateDatabase",
-				map[string]any{"DatabaseInput": map[string]any{"Name": id}}, nil)
+				map[string]any{
+					"DatabaseInput": map[string]any{"Name": id},
+					"Tags":          scanScopeTagMap(),
+				}, nil)
 			return ":database/" + id
 		},
 	},
@@ -574,7 +657,7 @@ func TestTaggingScanScope_AGlobalResourceIsReportedInEveryRegion(t *testing.T) {
 	ts := scanScopeServer(t)
 
 	status, code, _ := iamScopeResult(t, ts, taggingTestAccount, "CreateUser",
-		map[string]string{"UserName": "scope-global-1"})
+		scanScopeTagQueryParams(map[string]string{"UserName": "scope-global-1"}))
 	require.Emptyf(t, code, "CreateUser: %d", status)
 	require.Equal(t, http.StatusOK, status, "CreateUser")
 

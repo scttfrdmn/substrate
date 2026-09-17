@@ -573,8 +573,12 @@ func TestTaggingSNS_ATagWrittenThroughSNSIsReportedByGetResources(t *testing.T) 
 // than membership is what catches that.
 func TestTaggingSNS_GetResourcesReportsTheTopicAndNothingElse(t *testing.T) {
 	ts := snsTagServer(t)
-	first := snsCreateTopic(t, ts, "alpha")
-	second := snsCreateTopic(t, ts, "beta")
+	// Both topics are created with a tag, because GetResources reports what has been tagged and a topic
+	// that never was is absent by rule (#938). CreateTopic's own Tags parameter carries it, so the
+	// scanner is still being asked about a resource SNS itself tagged.
+	tagged := map[string]string{"Tags.member.1.Key": "env", "Tags.member.1.Value": "test"}
+	first := snsCreateTopicIn(t, ts, snsEastRegion, "alpha", tagged)
+	second := snsCreateTopicIn(t, ts, snsEastRegion, "beta", tagged)
 
 	assert.ElementsMatch(t, []string{first, second}, getResourcesARNs(t, ts, "sns"),
 		"GetResources reports the two topics under an sns filter, and not the topic-name index")
@@ -585,7 +589,9 @@ func TestTaggingSNS_GetResourcesReportsTheTopicAndNothingElse(t *testing.T) {
 // Region for the AWS account", so a us-west-2 topic must not appear in a us-east-1 GetResources.
 func TestTaggingSNS_GetResourcesDoesNotReportATopicFromAnotherRegion(t *testing.T) {
 	ts := snsTagServer(t)
-	westARN := snsCreateTopicIn(t, ts, snsWestRegion, "elsewhere", nil)
+	// Tagged, so the Region rule is what keeps it out of the answer rather than #938's.
+	westARN := snsCreateTopicIn(t, ts, snsWestRegion, "elsewhere",
+		map[string]string{"Tags.member.1.Key": "env", "Tags.member.1.Value": "west"})
 
 	assert.NotContains(t, getResourcesARNs(t, ts, "sns"), westARN,
 		"a us-west-2 topic is not reported by a us-east-1 GetResources")
