@@ -493,6 +493,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A tag set was reported in Go map iteration order at the two readers #946 could not see, so two
+  identical calls disagreed** (#1011). Found by measuring rather than by reading: twelve identical
+  `GetResources` calls against one eight-tag resource in one process produced **eight distinct bodies**,
+  all rotations of the sorted order — the signature of Go's randomised map-range start offset over a map
+  whose insertion order was already sorted.
+
+  The first reader is the Resource Groups Tagging API's own `GetResources`, which #946's sweep could not
+  have covered because it is not a per-service tag listing: it renders every service's tags through four
+  shared converters. `mapToTaggingTags` is the load-bearing one — most of the twenty-eight scanners call
+  it, and it is the only one of the four that passes through a map at all, so the other three were
+  order-preserving by luck and it could not be. All four sort now, including the three already fed a
+  sorted slice by #862's merge helpers, so the guarantee no longer rests on every writer remembering to
+  sort: a raw writer bypassing a merge helper cannot make the response non-deterministic through them.
+  The four scanners that build the list by hand — KMS, SNS, Secrets Manager and Systems Manager — already
+  sorted, so the converters were the whole gap.
+
+  `GetResources` had exactly one sort before this, on `ResourceARN`. That made the *resource* order
+  deterministic and left the tag order inside each resource to the map, which is why a reader checking
+  the write path found nothing wrong: state on disk was ordered by #862, and the disorder was introduced
+  on the way out, when the stored pairs were re-collected into a map and ranged.
+
+  The second reader is **ElastiCache's `ListTagsForResource`**, which is exactly the shape #946 swept and
+  was missed for a reason worth naming: all five of #946's operations answer JSON, and ElastiCache
+  flattens its `map[string]string` into a repeated **XML** element, so it did not match that sweep's
+  shape. The rest of the tree was swept for the pattern at the same time; every other site that ranges a
+  tag map either already sorts or writes into another map, where no order is observable.
+
+  Both are tier 3 — **substrate's reading**, not a match with AWS. `API_GetResources` says nothing about
+  the order of `Tags` within a `ResourceTagMapping`, and `API_ResourceTagMapping` describes `Tags` only as
+  *"the tags that have been applied to one or more AWS resources"*; ElastiCache's
+  `API_ListTagsForResource` describes `TagList.Tag.N` only as *"A list of tags as key-value pairs"* and
+  publishes no cursor at all, so unlike Kinesis's `ExclusiveStartTagKey` there is nothing here implying an
+  order even indirectly. Lexicographic by key rests on the replay promise and on the precedents at #764,
+  #862 and #946. No tie-break is needed, because a tag set cannot carry a duplicate key.
+
+  The finding underneath the finding is why nothing caught it: the existing tagging suite decoded
+  `ResourceTagMappingList` and then collected `ResourceARN` only, **discarding `Tags`**, so it was
+  structurally incapable of seeing this — the same way #950's suite could not see a parse guard. A decoded
+  tag set compares equal whatever order it arrived in, so the new tests assert on the **raw response
+  bytes**, and both were confirmed to fail with the sorts reverted.
 - **Eighty-three more sites in twelve services answered an error code their own operation does not
   publish, for a request body that would not parse — and twenty-two of them handed the caller
   `encoding/json`'s error text as the message** (#950). This is the rest of the class the entry below

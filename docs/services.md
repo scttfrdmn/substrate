@@ -846,6 +846,49 @@ paged over an unstable order skips and repeats. See
 [Paging the tags on a stream](#paging-the-tags-on-a-stream) for what a page contains and for the two
 AWS sentences about `HasMoreTags` that do not agree.
 
+### The two readers #946 could not see
+
+[#1011](https://github.com/scttfrdmn/substrate/issues/1011) is the same defect at the two sites that
+sweep missed, and it was found the way the others were not — by measuring rather than by reading.
+Twelve identical `GetResources` calls against one eight-tag resource in one process produced **eight
+distinct bodies**, all rotations of the sorted order, which is the signature of Go's randomised
+map-range start offset over a map whose insertion order was already sorted.
+
+The first site is the Resource Groups Tagging API's own `GetResources`, which #946 could not have
+covered because it is not a per-service tag listing: it renders **every** service's tags, through four
+shared converters in `tagging_plugin.go`. `mapToTaggingTags` is the load-bearing one — it has most of
+the scanners as call sites and is the only one of the four that passes through a map at all, so the
+other three (`iamTagsToTaggingTags`, `ec2TagsToTaggingTags`, `efsTagsToTaggingTags`) were
+order-preserving by luck and it could not be. All four sort now, including the three that were already
+fed a sorted slice by #862's merge helpers, so the guarantee does not rest on every writer remembering
+to sort: a raw writer that bypasses a merge helper cannot make the response non-deterministic through
+them. The four scanners that build the list by hand — KMS, SNS, Secrets Manager and Systems Manager —
+already sorted, so the converters were the whole gap.
+
+`GetResources` had exactly one sort before this, on `ResourceARN`, which made the *resource* order
+deterministic and left the tag order inside each resource to the map. That is why a reader checking the
+write path found nothing wrong: state on disk was ordered by #862, and the disorder was introduced on
+the way out.
+
+The second site is **ElastiCache's `ListTagsForResource`**, which is exactly the shape #946 swept and
+was missed for a reason worth naming: all five of #946's operations answer JSON, and ElastiCache
+flattens its `map[string]string` into a repeated **XML** element instead, so it did not match that
+sweep's shape. The rest of the tree was swept for this pattern at the same time; every other site that
+ranges a tag map either already sorts or writes into another map, where no order is observable.
+
+Both sit in tier 3. `API_GetResources` says nothing about the order of `Tags` within a
+`ResourceTagMapping`, and `API_ResourceTagMapping` describes `Tags` only as "the tags that have been
+applied to one or more AWS resources"; ElastiCache's `API_ListTagsForResource` describes
+`TagList.Tag.N` only as "A list of tags as key-value pairs" and publishes no cursor at all, so unlike
+Kinesis there is nothing here implying an order even indirectly. Lexicographic by key is **substrate's
+reading** at both, resting on the replay promise. No tie-break is needed, because a tag set cannot
+carry a duplicate key.
+
+The assertion is made on the **raw response bytes**, and that is the finding underneath the finding:
+the existing tagging suite decoded `ResourceTagMappingList` and then collected `ResourceARN` only,
+discarding `Tags`, so it was structurally incapable of seeing this — the same way #950's suite could
+not see a parse guard. A decoded tag set compares equal whatever order it arrived in.
+
 ---
 
 ## CloudFormation
