@@ -265,6 +265,77 @@ changed where IAM's code, message and status come from and left the shape alone.
 
 ---
 
+## A request body that will not parse
+
+An unimplemented operation is refused before a plugin sees it. A body that arrives at a
+real operation and then fails to decode is the plugin's own refusal, and it was the
+largest single source of unpublished error codes in the tree: **46 sites across the
+services audited so far answered a code that appears nowhere in their service's
+documentation** — not on an operation page, not on the common-errors page
+([#923](https://github.com/scttfrdmn/substrate/issues/923),
+[#950](https://github.com/scttfrdmn/substrate/issues/950)).
+
+The answer is now `ValidationError` at **400**, and it comes from the service's own
+common-errors page: "The input doesn't meet the required format or constraints. Check
+that all required parameters are included and that values are valid."
+
+### Why the code has to come from the common-errors page
+
+A body that will not parse belongs to no single operation. Substrate cannot know which
+operation the caller meant beyond the `X-Amz-Target` header, and it certainly cannot know
+which of that operation's parameters was wrong — nothing was decoded. Every affected
+operation page ends its own Errors section by deferring to the common page, and for
+Systems Manager the deferral is not a convenience but the only route: all twelve guarded
+operations were read, and each publishes only narrow resource-specific 400s —
+`ParameterNotFound`, `InvalidKeyId`, `InvalidResourceType`, `HierarchyLevelLimitExceeded`
+and the like — plus `InternalServerError` at 500. Not one of them describes a request that
+could not be read at all.
+
+### That page is AWS boilerplate, which is what makes the answer transfer
+
+Step Functions', Systems Manager's and KMS's common-errors pages are **byte-identical**:
+the same fifteen entries in the same order with the same statuses. The code is spelled
+**`ValidationError`**, with no `Exception` suffix. So the finding at one service is a
+finding at the others, rather than a coincidence to re-derive per plugin.
+
+### Two near misses, and why neither is the answer
+
+| Candidate | Published | Declined because |
+|---|---|---|
+| `ValidationException` | Step Functions publishes it at 400 on **five** of the fifteen operations that carry a parse guard | Answering it everywhere leaves ten sites reporting a code their own operation does not publish — the same defect relocated. Answering it at only five makes one failure produce two codes inside one plugin. |
+| `MalformedHttpRequestException` | On the common page at 400 | Its published scope is the transport layer: "the request body can't be processed. This typically happens when the request body can't be decompressed using the specified content encoding algorithm." A body that arrived intact and then failed to parse is not that. |
+
+**The trap worth naming: an error mentioned in prose is not an error a shape publishes.**
+Five Systems Manager pages name `ValidationException` in prose — "if the specified name
+for a parameter contains spaces between characters, the request fails with a
+`ValidationException` error" — and **none of the five lists it in an Errors section**.
+Four Step Functions pages do the same for the Distributed Map note. A reader who greps
+for the word finds a pattern the reference does not actually publish, which is how the
+wrong code survives a careful reading.
+
+### The message describes the request, not the emulator
+
+Two Systems Manager sites — `SendCommand` and `GetCommandInvocation` — passed
+`encoding/json`'s own error text through as the message, so a caller was told which Go
+struct field failed to unmarshal by an endpoint that is meant to look like AWS. The
+message is now substrate's: "the request body is not valid JSON". Nothing a caller can
+act on was lost, because the only actionable fact is that the body was not JSON.
+
+### Why a green suite held 46 wrong codes
+
+Every test that builds a request from a Go value is structurally incapable of reaching
+these guards: `json.Marshal` produces valid JSON by construction. The only way in is to
+hand the server bytes, which is what the suite now does — one case per guarded operation,
+asserting **the status and the code together**, since a decoded error struct carries only
+the code and a consumer's retry logic branches on the status.
+
+**One service is outside this rule by design.** CloudWatch speaks Smithy RPC v2 CBOR, and
+its refusal names the modeled shape rather than a code from a common-errors page; neither
+the protocol nor the CloudWatch model names a shape for an undecodable body, so it answers
+`SerializationException` at 400 as substrate's own choice. See the CloudWatch section.
+
+---
+
 ## Which account a request is attributed to
 
 Most plugins scope a resource to the account of the request that created it, and
@@ -9307,6 +9378,16 @@ at all, so the status is not a thing a caller can branch on and the code is the 
 signal. Substrate models no tag-count cap here, where AWS caps most resources at 50 tags
 and Automations at 5.
 
+**A body that will not parse answers `ValidationError`/400**, at all twelve operations
+that decode one. Two of the twelve — `SendCommand` and `GetCommandInvocation` — answered
+`SerializationException` with `encoding/json`'s own error text as the message, so a caller
+was told about the emulator's decoder and the Go type it was unmarshalling into; the other
+ten answered `InvalidRequest`. Neither code appears anywhere in Systems Manager's
+documentation. All twelve operation pages were read and none publishes an error for a
+request that could not be read at all, so the code comes from the common-errors page — see
+*A request body that will not parse* above for why, and for the two published near misses
+that are not the answer (#950).
+
 ### AWS's public AMI parameters are answered
 
 A `/aws/service/…` path whose shape says "AMI" is answered without anyone having
@@ -11020,7 +11101,7 @@ because the executor invokes through Lambda's unqualified path; invoking a
 specific version or alias from a Task state is not modelled. An optimized
 integration is not dispatched to Lambda at all and returns the empty-object stub.
 
-### A missing resource answers its own code at 400
+### Every refusal answers its own code at 400
 
 | Code | Status | When |
 |------|--------|------|
@@ -11029,6 +11110,7 @@ integration is not dispatched to Lambda at all and returns the empty-object stub
 | ActivityDoesNotExist | 400 | A well-formed activity ARN names an activity that does not exist |
 | ExecutionDoesNotExist | 400 | A well-formed execution ARN names an execution that does not exist, including any express execution ARN |
 | ResourceNotFound | 400 | The tagging operations' code for a state machine or activity that does not exist, and `ListExecutions`' answer for a `mapRunArn` |
+| ValidationError | 400 | The request body is not valid JSON, at all fifteen operations that decode one — the common error, for the reasons in *A request body that will not parse* above (#950) |
 
 **Every one of these is 400, not 404.** All eleven Step Functions API reference
 pages consulted for #910 and #912 publish every error at "HTTP Status Code: 400",

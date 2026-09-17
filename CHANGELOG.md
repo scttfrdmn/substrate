@@ -493,6 +493,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Twenty-seven Step Functions and Systems Manager sites answered an error code their own service does
+  not publish, for a request body that would not parse** (part of #950). Fifteen Step Functions handlers
+  and ten Systems Manager ones answered `InvalidRequest`; the remaining two Systems Manager handlers —
+  `SendCommand` and `GetCommandInvocation` — answered `SerializationException`. Neither string appears
+  anywhere in either service's documentation: not on an operation page, not on the common-errors page. A
+  consumer branching on either was matching something no SDK models, which is the defect #923 found and
+  fixed at twenty-one KMS sites.
+
+  All twenty-seven now answer **`ValidationError` at 400**, from the service's own common-errors page:
+  *"The input doesn't meet the required format or constraints. Check that all required parameters are
+  included and that values are valid."* The code has to come from the common page because a body that
+  will not parse belongs to no single operation — nothing was decoded, so substrate knows only what the
+  `X-Amz-Target` header claimed. For Systems Manager that is not an argument from convenience but the
+  only route available: all twelve operation pages were read, and each publishes only narrow
+  resource-specific 400s (`ParameterNotFound`, `InvalidKeyId`, `InvalidResourceType`,
+  `HierarchyLevelLimitExceededException` and the like) plus `InternalServerError` at 500, and not one
+  describes a request that could not be read at all.
+
+  **The page the answer comes from is AWS boilerplate, which is what makes the KMS finding transfer
+  rather than coincide.** Step Functions', Systems Manager's and KMS's common-errors pages are
+  byte-identical — the same fifteen entries in the same order with the same statuses — and all three
+  spell the code `ValidationError`, with no `Exception` suffix.
+
+  **Two published near misses were declined, and the reasons are on the record because each looks like
+  the obvious answer.** `ValidationException` is real at Step Functions, at 400, glossed *"the input does
+  not satisfy the constraints specified by an AWS service"* — but it is in the Errors section of only
+  **five** of the fifteen operations that carry a parse guard (`CreateStateMachine`,
+  `UpdateStateMachine`, `DeleteStateMachine`, `StartExecution`, `StopExecution`). Answering it everywhere
+  would leave ten sites reporting a code their own operation does not publish, which is this defect
+  relocated rather than fixed; answering it at five only would make one failure produce two codes inside
+  one plugin. `MalformedHttpRequestException`, also on the common page at 400, is declined for the reason
+  #923 declined it: its published scope is the transport layer — *"the request body can't be processed.
+  This typically happens when the request body can't be decompressed using the specified content encoding
+  algorithm"* — and a body that arrived intact and then failed to parse is not that.
+
+  **An error named in prose is not an error a shape publishes**, and that trap is what makes
+  `ValidationException` look right. Five Systems Manager pages name it in prose — *"if the specified name
+  for a parameter contains spaces between characters, the request fails with a `ValidationException`
+  error"* — and none of the five lists it in an Errors section; four Step Functions pages do the same for
+  their Distributed Map note. The issue's own premise was wrong here in the other direction, asserting
+  that neither service lists `ValidationException` at all, and it is corrected on the record rather than
+  quietly implemented around.
+
+  **The message now describes the request rather than the emulator.** The two `SerializationException`
+  sites passed `encoding/json`'s error text through, so a caller was told which Go struct field failed to
+  unmarshal by an endpoint whose whole purpose is to look like AWS. Every one of the twenty-seven answers
+  *"the request body is not valid JSON"*, which is the only actionable fact a caller has — the issue
+  counted ten Systems Manager sites, and these two are the same defect wearing a second wrong code, which
+  is what made them easy to miss.
+
+  Each service's refusals are now constructed in one file — new `emulator/stepfunctions_errors.go` and
+  `emulator/ssm_errors.go`, following `emulator/kms_errors.go` — so a code's status is chosen once rather
+  than at each call site that answers it, and seven existing constructors moved into them unchanged.
+
+  **Why a green suite held all twenty-seven.** Every test that builds a request from a Go value is
+  structurally incapable of reaching these guards, because `json.Marshal` produces valid JSON by
+  construction. The suite now hands the server raw bytes through a shared helper, one case per guarded
+  operation — twenty-seven in all, not a representative sample, since the defect was per-site duplication
+  of one literal — and asserts the status and the code together, a decoded error struct carrying only the
+  code while a consumer's retry logic branches on the status.
+
 - **Two accounts could not each hold a Lambda function named `orders`, and one account could not hold a
   DynamoDB table named `orders` in two Regions** (#943). A function's state key was `function:{name}` and a
   table's was `table:{account}/{name}`, so the second create in either pair found the first's record and was

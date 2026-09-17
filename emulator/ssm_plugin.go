@@ -157,7 +157,7 @@ func (p *SSMPlugin) putParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		Tags        []SSMTag `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	if input.Name == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
@@ -236,7 +236,7 @@ func (p *SSMPlugin) getParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		WithDecryption bool   `json:"WithDecryption"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	name := input.Name
 	if !strings.HasPrefix(name, "/") {
@@ -313,7 +313,7 @@ func (p *SSMPlugin) getParameters(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		WithDecryption bool     `json:"WithDecryption"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -358,7 +358,7 @@ func (p *SSMPlugin) deleteParameter(ctx *RequestContext, req *AWSRequest) (*AWSR
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	name := input.Name
 	if !strings.HasPrefix(name, "/") {
@@ -398,7 +398,7 @@ func (p *SSMPlugin) deleteParameters(ctx *RequestContext, req *AWSRequest) (*AWS
 		Names []string `json:"Names"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -451,7 +451,7 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 		NextToken      string `json:"NextToken"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	if input.MaxResults <= 0 {
 		input.MaxResults = 10
@@ -611,7 +611,7 @@ func (p *SSMPlugin) getParameterHistory(ctx *RequestContext, req *AWSRequest) (*
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	name := input.Name
 	if !strings.HasPrefix(name, "/") {
@@ -651,7 +651,7 @@ func (p *SSMPlugin) addTagsToResource(ctx *RequestContext, req *AWSRequest) (*AW
 		Tags         []SSMTag `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	// ResourceType is honored rather than decoded and discarded: without this, a Document or an
 	// OpsItem ResourceId tagged the same-named parameter and the read-back confirmed it (#932).
@@ -699,7 +699,7 @@ func (p *SSMPlugin) removeTagsFromResource(ctx *RequestContext, req *AWSRequest)
 		TagKeys      []string `json:"TagKeys"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	// ResourceType is honored here for the same reason as in addTagsToResource, and this is the
 	// damaging direction: without it, RemoveTagsFromResource for a Document stripped tags from the
@@ -742,7 +742,7 @@ func (p *SSMPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 		ResourceID   string `json:"ResourceId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	name, resolveErr := ssmResolveTagTarget(input.ResourceType, input.ResourceID)
 	if resolveErr != nil {
@@ -860,7 +860,7 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		Parameters   map[string][]string `json:"Parameters"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	if input.DocumentName == "" {
 		return nil, &AWSError{Code: "InvalidDocument", Message: "DocumentName is required", HTTPStatus: http.StatusBadRequest}
@@ -937,7 +937,7 @@ func (p *SSMPlugin) getCommandInvocation(ctx *RequestContext, req *AWSRequest) (
 		InstanceID string `json:"InstanceId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, ssmInvalidBody()
 	}
 	if input.CommandID == "" || input.InstanceID == "" {
 		return nil, &AWSError{Code: "InvalidCommandId", Message: "CommandId and InstanceId are required", HTTPStatus: http.StatusBadRequest}

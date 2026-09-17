@@ -358,7 +358,7 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 		Tags       []map[string]string `json:"tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 	if input.Name == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
@@ -424,7 +424,7 @@ func (p *StepFunctionsPlugin) describeStateMachine(_ *RequestContext, req *AWSRe
 		StateMachineArn string `json:"stateMachineArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	sm, _, err := p.requireStateMachine(context.Background(), input.StateMachineArn)
@@ -442,7 +442,7 @@ func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequ
 		RoleArn         string `json:"roleArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -473,7 +473,7 @@ func (p *StepFunctionsPlugin) deleteStateMachine(_ *RequestContext, req *AWSRequ
 		StateMachineArn string `json:"stateMachineArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -580,7 +580,7 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 		Input           string `json:"input"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -649,7 +649,7 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 		Input           string `json:"input"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	sm, target, err := p.requireStateMachine(context.Background(), input.StateMachineArn)
@@ -709,7 +709,7 @@ func (p *StepFunctionsPlugin) stopExecution(_ *RequestContext, req *AWSRequest) 
 		Error        string `json:"error"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -737,7 +737,7 @@ func (p *StepFunctionsPlugin) describeExecution(_ *RequestContext, req *AWSReque
 		ExecutionArn string `json:"executionArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	exec, _, err := p.requireExecution(context.Background(), input.ExecutionArn)
@@ -867,7 +867,7 @@ func (p *StepFunctionsPlugin) getExecutionHistory(_ *RequestContext, req *AWSReq
 		ExecutionArn string `json:"executionArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	exec, _, err := p.requireExecution(context.Background(), input.ExecutionArn)
@@ -891,7 +891,7 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 		Tags []map[string]string `json:"tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 	if input.Name == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
@@ -949,7 +949,7 @@ func (p *StepFunctionsPlugin) describeActivity(_ *RequestContext, req *AWSReques
 		ActivityArn string `json:"activityArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	act, _, err := p.requireActivity(context.Background(), input.ActivityArn)
@@ -1034,7 +1034,7 @@ func (p *StepFunctionsPlugin) deleteActivity(_ *RequestContext, req *AWSRequest)
 		ActivityArn string `json:"activityArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 
 	goCtx := context.Background()
