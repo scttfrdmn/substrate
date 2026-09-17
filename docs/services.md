@@ -5308,7 +5308,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSnapshot | `VolumeId` is required and checked; `volumeSize` and `encrypted` come from the source volume, and `status` is `completed` at once — see [A snapshot has a real size](#a-snapshot-has-a-real-size) |
-| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account) |
+| DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account). Paginates on `MaxResults`/`NextToken`, as does `DescribeVolumes` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSnapshot | `SnapshotId` is required and checked; refuses one a registered AMI still references with `InvalidSnapshot.InUse`, and is **not** idempotent — see [Deleting a snapshot](#deleting-a-snapshot-refuses-what-aws-refuses) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
@@ -5317,14 +5317,14 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DeleteLaunchTemplate | |
 | CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
 | ModifyLaunchTemplate | `SetDefaultVersion` only, which is AWS's only modifiable attribute |
-| DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken`, and the account-wide form. Four of fourteen filters, applied **before** pagination, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) before the template is resolved |
+| DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken` (1–200, through the [shared paginator](#one-offset-paginator-shared)), and the account-wide form. Four of fourteen filters, applied **before** pagination, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) before the template is resolved — as is the token, so a malformed one is refused whether or not the template exists |
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, [need an AMI that resolves](#runinstances-requires-a-resolvable-ami), and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
 | CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all fifteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same fifteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
-| DescribeTags | Every tag in the region, across [the same fifteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken`, and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
+| DescribeTags | Every tag in the region, across [the same fifteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken` (through the [shared paginator](#one-offset-paginator-shared)), and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
 ### One rule for an unrecognized filter name
 
@@ -8212,6 +8212,68 @@ emulator cannot answer one request two ways.
 
 Authorization needs nothing special: the Service Authorization Reference gives
 `DescribeTags` resource type "—", and substrate authorizes it against `*`.
+
+#### One offset paginator, shared
+
+`DescribeTags` and `DescribeLaunchTemplateVersions` each carried their own copy of the same
+three rules — read `MaxResults`, decode `NextToken`, cut the page — while roughly twenty other
+describes published both parameters and implemented neither. Those answered the **whole listing
+with no token**, which is the one divergence a paginating caller cannot see: the loop terminates
+on the first page against substrate and finds a second page in production. #917 replaced the two
+copies with one shared paginator and converted the unpaginated operations onto it, so the count
+of implementations went down rather than up. `DescribeVolumes` and `DescribeSnapshots` are the
+first two converted; their wire behaviour for a caller that sends neither parameter is unchanged.
+
+AWS publishes the mechanism **once for the whole service**, in the Query Requests page's
+*Pagination* section rather than per operation, and two of its sentences decide the design:
+
+> With pagination, you continue to call the action until `nextToken` is null, even if you receive
+> less than `MaxResults` items, including zero items.
+
+> If you call a describe API action with both a list of IDs and `MaxResults`, the request fails
+> with the error `InvalidParameterCombination`.
+
+So a **short page is not the end of the listing** — the token is emitted from whether a further
+record exists, not from whether the page filled up, which is also why a listing whose size is an
+exact multiple of the page size costs no extra round trip to an empty page. And the **last page
+carries no token at all**, because a caller told to keep calling until the token is null would
+otherwise loop forever.
+
+| Behaviour | Answer |
+|---|---|
+| An absent `MaxResults` | The whole listing, with no `nextToken` element. `API_DescribeSecurityGroups` is the one page that states this outright — "If this parameter is not specified, then all items are returned" — and it is what every converted operation answered before it paginated. `DescribeTags` and `DescribeLaunchTemplateVersions` keep their own defaults of 1000 and 200, since neither page publishes the sentence and both defaults shipped deliberately |
+| `MaxResults` out of range | **Refused** with `InvalidParameterValue` / 400, never clamped: a caller who asked for 2000 items asked for something the operation cannot do, and silently answering 1000 hides that |
+| `NextToken` | A plain decimal offset, and a token that is not a non-negative integer is refused with `InvalidParameterValue` / 400. It is validated **before any state is read**, so the refusal does not depend on how many resources happen to exist |
+| An offset past the end | Clamped to an empty last page rather than refused — a caller resuming a walk after a record was deleted holds a token that was valid when it was issued |
+| An ID list **and** `MaxResults` | `InvalidParameterCombination` / 400. Checked before the ID list's own syntax: whether two parameters may appear together does not depend on either being well formed. Which refusal AWS answers first is not published, so the ordering is substrate's |
+
+**The range is per operation, and four of the nine pages publish none.** `API_DescribeVpcs`,
+`API_DescribeSubnets` and `API_DescribeSecurityGroups` publish `Valid Range: Minimum value of 5.
+Maximum value of 1000.`; `API_DescribeTags` (5–1000) and `API_DescribeLaunchTemplateVersions`
+(1–200) state theirs in prose only; `API_DescribeInstances`, `API_DescribeImages`,
+`API_DescribeVolumes` and `API_DescribeSnapshots` publish **no bound at all** — only "the maximum
+number of items to return for this request", type `Integer`. Substrate does not borrow 5–1000
+from the siblings at those four, per the scope rule that only what the API model states is
+modelled: `MaxResults=5000` is accepted on volumes and snapshots and refused on VPCs.
+
+The floor of **one** at those four pages is *substrate's reading*, and it is the single bound the
+published pagination rule forces. `MaxResults=0` under "you continue to call the action until
+`nextToken` is null, even if you receive less than `MaxResults` items, including zero items"
+describes a walk that can never advance — every call answers nothing and hands back a token — so
+refusing it is the only answer that does not invite an infinite loop.
+
+The token is a **decimal** offset rather than the base64 form the CloudWatch, Systems Manager and
+S3 listings use (see [A pagination token substrate never
+issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one)). That
+is the shape both original EC2 operations already issued, so it is part of every run already
+recorded against them; and the property base64 buys — that a token substrate never issued is
+detectable — is worth less here, because an invented decimal offset resumes the walk from that
+offset instead of silently restarting it.
+
+Paging is a cut of an already-assembled answer rather than an early exit from the scan, which is
+load-bearing at `DescribeSnapshots`: a [seeded status progression](#seeding-a-snapshot-progression)
+advances once per observation, so stopping the scan at the page boundary would make a countdown
+advance by an amount that depended on the caller's page size.
 
 ### Seeding EC2 Fleet partial fulfillment
 

@@ -39,6 +39,14 @@ const (
 // values: Minimum value of 1. Maximum value of 200").
 const ec2MaxLaunchTemplateVersionResults = 200
 
+// ec2MinLaunchTemplateVersionResults is the lower bound on the same parameter, from the same
+// sentence.
+//
+// It is one where DescribeTags' floor is five, which is why #917's shared [ec2MaxResults] takes
+// the range as arguments: the bounds are per operation, and four of the pages it covers publish
+// none at all.
+const ec2MinLaunchTemplateVersionResults = 1
+
 // ec2ResolveTemplateVersion returns the version of lt that spec names.
 //
 // An empty spec resolves to the template's *default* version, not its latest. That
@@ -560,17 +568,20 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 	}
 	filters := extractEC2Filters(req.Params)
 
-	maxResults := ec2MaxLaunchTemplateVersionResults
-	if raw := req.Params["MaxResults"]; raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > ec2MaxLaunchTemplateVersionResults {
-			return nil, &AWSError{
-				Code:       "InvalidParameterValue",
-				Message:    "MaxResults must be between 1 and " + strconv.Itoa(ec2MaxLaunchTemplateVersionResults),
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-		maxResults = n
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinLaunchTemplateVersionResults, ec2MaxLaunchTemplateVersionResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	// Naming no MaxResults pages at the published maximum rather than answering the whole
+	// listing, which is DescribeTags' default too and is kept for the same reason (#917): this
+	// page publishes no unpaginated default, and paging at 200 is the behavior the operation
+	// shipped with.
+	if maxResults == 0 {
+		maxResults = ec2MaxLaunchTemplateVersionResults
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	specs := indexedParams(req.Params, "LaunchTemplateVersion.%d", "Versions.member.%d")
@@ -610,28 +621,10 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 	}
 
 	// Pagination is offset-based over a stable ordering, matching the other EC2
-	// describes: the token is the index to resume at.
-	start := 0
-	if tok := req.Params["NextToken"]; tok != "" {
-		n, err := strconv.Atoi(tok)
-		if err != nil || n < 0 {
-			return nil, &AWSError{
-				Code:       "InvalidParameterValue",
-				Message:    "The token '" + tok + "' is invalid",
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-		start = n
-	}
-	if start > len(items) {
-		start = len(items)
-	}
-	page := items[start:]
-	nextToken := ""
-	if len(page) > maxResults {
-		page = page[:maxResults]
-		nextToken = strconv.Itoa(start + maxResults)
-	}
+	// describes: the token is the index to resume at. Since #917 the offset is read before the
+	// templates are resolved, so a token that is not one is refused whether or not the request
+	// also names a template that does not exist.
+	page, nextToken := ec2Page(items, offset, maxResults)
 
 	type response struct {
 		XMLName   xml.Name           `xml:"DescribeLaunchTemplateVersionsResponse"`

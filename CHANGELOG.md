@@ -530,6 +530,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **EC2's describes had two copies of a paginator and twenty operations with none** (#917, part one of
+  three). `DescribeVolumes` and `DescribeSnapshots` publish `MaxResults` and `NextToken` and read
+  neither: every request answered the whole listing and emitted no token, so a consumer's paging loop
+  terminated on the first response here and first executed for real against a listing long enough to
+  page. Both now paginate, and the two operations that already did — `DescribeTags` and
+  `DescribeLaunchTemplateVersions` — were converted onto the same helpers in the same change, so the
+  count of implementations went from two to **one** rather than from two to three. Their wire behaviour
+  is unchanged, as is the answer to any request that sends neither parameter: an absent `MaxResults`
+  means the whole listing, which `API_DescribeSecurityGroups` is the one page of the nine to state
+  outright ("If this parameter is not specified, then all items are returned").
+
+  AWS publishes the mechanism **once for the whole service** rather than per operation, in the Query
+  Requests page's *Pagination* section, and two of its sentences are what the shared helpers encode.
+  "You continue to call the action until `nextToken` is null, even if you receive less than `MaxResults`
+  items, including zero items" means a short page is not the end of a listing, so the token is emitted
+  from whether a further record exists rather than from whether the page filled up — a listing that is an
+  exact multiple of the page size therefore costs no extra round trip — and the last page carries no
+  token at all, or a conforming caller loops forever. "If you call a describe API action with both a list
+  of IDs and `MaxResults`, the request fails with the error `InvalidParameterCombination`" is now
+  answered; without it the combination succeeded here and failed in production, which is the divergence
+  direction that matters. The **code** is published and the message wording is substrate's, since only
+  `API_DescribeInstances` repeats the rule against its own parameter and no page gives a message.
+
+  **The range is per operation, and four of the nine pages publish none at all** — which corrects this
+  issue's own second acceptance criterion, recorded on the record before the work started rather than
+  implied by the diff. `API_DescribeVpcs`, `API_DescribeSubnets` and `API_DescribeSecurityGroups` publish
+  `Valid Range: Minimum value of 5. Maximum value of 1000.`; `API_DescribeTags` (5–1000) and
+  `API_DescribeLaunchTemplateVersions` (1–200) state theirs in prose only; and `API_DescribeInstances`,
+  `API_DescribeImages`, `API_DescribeVolumes` and `API_DescribeSnapshots` publish no bound whatever —
+  only "the maximum number of items to return for this request", type `Integer`. Substrate does not
+  borrow 5–1000 from the siblings at those four, per #671's rule that only what the API model states is
+  modelled, so `MaxResults=5000` is accepted on volumes and snapshots and refused on tags. The floor of
+  **one** there is substrate's reading and is the single bound the published pagination rule forces: a
+  page of zero items describes a walk that answers nothing and hands back a token forever. A value
+  outside a range is refused rather than clamped, at every one of the four.
+
+  The token is a plain **decimal** offset rather than the base64 form #915 introduced at four other
+  services. That is the shape both original EC2 operations already issued, so it is part of every run
+  already recorded against them, and the property base64 buys — that a token substrate never issued is
+  detectable — is worth less here, because an invented decimal resumes the walk from that offset instead
+  of silently restarting it. A token that is not a non-negative integer is still refused, and — as #887
+  established and #915 extended — **before any state is read**, which a sealed-store test pins at both
+  converted operations; `DescribeLaunchTemplateVersions` gained that ordering in the conversion, having
+  previously decoded its token after resolving the template. An offset past the end of a listing is
+  clamped to an empty last page rather than refused, so resuming a walk after a record was deleted is not
+  an error.
+
+  Five operations (`DescribeInstances`, `DescribeImages`, `DescribeVpcs`, `DescribeSubnets`,
+  `DescribeSecurityGroups`) and two stragglers outside EC2 remain, and #917 stays open for them.
+
 - **Six describes published a cursor and implemented none of it** (#916). RDS `DescribeDBSnapshots`,
   `DescribeDBSubnetGroups` and `DescribeDBParameterGroups`, and ElastiCache `DescribeReplicationGroups`,
   `DescribeCacheSubnetGroups` and `DescribeCacheParameterGroups` each publish `Marker` and `MaxRecords`

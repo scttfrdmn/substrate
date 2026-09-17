@@ -6568,7 +6568,27 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 	// empty VolumeId.1 discarded VolumeId.2 and everything after it. And it read only
 	// the indexed form, so the un-indexed VolumeId some hand-built requests send was
 	// ignored entirely — a request naming one volume was answered about every volume.
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "VolumeId"), ec2VolumeIDKind)
+	// The three pagination parameters are read before anything is resolved, and the
+	// combination refusal before the ID list's own syntax, for the reasons
+	// [ec2RefuseIDsWithMaxResults] and [ec2NextTokenOffset] give: a refusal that depends on
+	// which volumes happen to exist is a refusal a caller cannot predict. API_DescribeVolumes
+	// publishes no range for MaxResults — only "The maximum number of items to return for this
+	// request", type Integer — so the floor of one is substrate's reading and no ceiling is
+	// enforced.
+	named := extractIndexedParams(req.Params, "VolumeId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "VolumeId", named); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
+	ids := newEC2IDFilter(named, ec2VolumeIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -6674,6 +6694,11 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 
+	// Paging cuts the built slice rather than stopping the scan, so a filter still applies to
+	// every volume in the region and a page holds MaxResults *matching* volumes — the property
+	// DescribeLaunchTemplateVersions' doc comment states and #695 pinned there.
+	page, nextToken := ec2Page(volumes, offset, maxResults)
+
 	type volumeSet struct {
 		Items []volItem `xml:"item"`
 	}
@@ -6681,9 +6706,10 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		XMLName   xml.Name  `xml:"DescribeVolumesResponse"`
 		XMLNS     string    `xml:"xmlns,attr"`
 		VolumeSet volumeSet `xml:"volumeSet"`
+		NextToken string    `xml:"nextToken,omitempty"`
 	}
-	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	resp.VolumeSet.Items = volumes
+	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", NextToken: nextToken}
+	resp.VolumeSet.Items = page
 	if resp.VolumeSet.Items == nil {
 		resp.VolumeSet.Items = []volItem{}
 	}
@@ -6935,7 +6961,24 @@ func (p *EC2Plugin) deleteSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 // rather than from the record, and with no seed in place they are the record's own state at
 // 100%.
 func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "SnapshotId"), ec2SnapshotIDKind)
+	// Pagination is read first, and the ID-list-with-MaxResults refusal before the ID syntax
+	// check, per [ec2RefuseIDsWithMaxResults]. API_DescribeSnapshots publishes no range for
+	// MaxResults, so the floor of one is substrate's reading and no ceiling is enforced — see
+	// [ec2MinUnpublishedMaxResults].
+	named := extractIndexedParams(req.Params, "SnapshotId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "SnapshotId", named); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
+	ids := newEC2IDFilter(named, ec2SnapshotIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -6975,6 +7018,7 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 		XMLName   xml.Name       `xml:"DescribeSnapshotsResponse"`
 		XMLNS     string         `xml:"xmlns,attr"`
 		Snapshots []snapshotItem `xml:"snapshotSet>item"`
+		NextToken string         `xml:"nextToken,omitempty"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -7023,5 +7067,11 @@ func (p *EC2Plugin) describeSnapshots(reqCtx *RequestContext, req *AWSRequest) (
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	// The page is cut after every snapshot has been observed, which is what keeps a seeded
+	// progression (#715) independent of the caller's page size: the countdown advances once per
+	// observation, so a scan that stopped at the page boundary would spend a different number of
+	// observations depending on MaxResults, and a poll loop's seeded transition would land on a
+	// different call. Pagination here is a render-time cut and nothing else.
+	resp.Snapshots, resp.NextToken = ec2Page(resp.Snapshots, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
