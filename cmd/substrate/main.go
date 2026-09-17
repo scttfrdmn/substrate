@@ -264,11 +264,44 @@ func newReplayEngineWiring(
 	// whether state was checked and only the config knows.
 	replayCfg := cfg.Replay.ToReplayConfig()
 
+	// The four pre-plugin controllers, built from the same config sections the
+	// server reads, so a replay refuses a request exactly where the recording did
+	// (#833). A replay reproduces a recorded refusal only when it is configured as
+	// the recording was; a configuration difference shows up as a divergence rather
+	// than being hidden, which is the honest answer for a stream whose recording
+	// config is not itself recorded.
+	consistencyCtrl, err := substrate.NewConsistencyController(replayConsistencyConfig(cfg, logger), tc)
+	if err != nil {
+		return nil, fmt.Errorf("initialize consistency controller: %w", err)
+	}
+
 	return &replayWiring{
-		engine: substrate.NewReplayEngine(store, state, tc, registry, replayCfg, logger),
+		engine: substrate.NewReplayEngine(store, state, tc, registry, replayCfg, logger,
+			substrate.WithReplayPipeline(substrate.ReplayPipeline{
+				Auth:        authCtrl,
+				Quota:       substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc),
+				Consistency: consistencyCtrl,
+				Fault:       newFaultController(cfg.Fault),
+			})),
 		store:  store,
 		config: replayCfg,
 	}, nil
+}
+
+// replayConsistencyConfig parses the consistency: section for a replay, falling back
+// to disabled when it does not parse.
+//
+// The fallback matches newServerCmd's: Validate has already run over the same
+// section, so a parse failure here is not a user error to report but a state that
+// should not be reachable, and a replay that refused to start over it would be
+// refusing for a reason unrelated to the stream it was asked to check.
+func replayConsistencyConfig(cfg *substrate.Config, logger substrate.Logger) substrate.ConsistencyConfig {
+	cc, err := cfg.Consistency.ToConsistencyConfig()
+	if err != nil {
+		logger.Warn("consistency config parse failed, disabling", "err", err)
+		return substrate.ConsistencyConfig{Enabled: false}
+	}
+	return cc
 }
 
 // streamHasStateHashes reports whether any event in the stream carries a recorded

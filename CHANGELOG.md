@@ -804,6 +804,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A replay re-executed a request the recording refused, and succeeded: the four pre-plugin
+  controllers were never consulted** (#833). `ReplayEngine.replayEvent` called
+  `PluginRegistry.RouteRequest` directly, so authorization, quota, consistency and fault injection —
+  steps 2 through 4.5 of the server pipeline — were all bypassed on replay. A recorded `403` or
+  injected `500` replayed as a `200`, and the replay then applied a state change the recorded run never
+  made: the bucket the recording was refused permission to create existed afterwards.
+
+  **Both halves of the contract had been written and never joined.** `QuotaController.CheckQuota` and
+  `ConsistencyController.CheckRead` each open with an `isReplaying` guard, and `replayEvent` has always
+  set the flag those guards read — but no replay ever called either controller, so the guards were
+  unreachable from the only path that sets the flag. A shared `prePluginGates` now runs the four in one
+  place for both callers and reports which step refused, so the live path and the replay path cannot
+  answer differently; `Server.handleAWSRequest` keeps its own per-step recording and metrics by
+  switching on the returned step, with the ordering, the nil-controller skips and the
+  latency-then-error sequence preserved exactly. The two other dispatch paths,
+  `StackDeployer.dispatch` and `Server.stateAtSequence`, keep their own narrower subsets.
+
+  **Authorization is re-decided against a principal restored from `Event.Principal`, and that is why
+  it needs nothing from #856.** The blocker recorded on the issue — that a mid-stream
+  `CreateAccessKey` or `AssumeRole` mints a different key on replay, so the recorded `Authorization`
+  header names a key absent from replayed state — is true of *re-resolving the recorded key*, and the
+  key is the wrong input. Nothing in the authorization path reads it: `CheckAccess` and every plugin's
+  own `authorize` resolve the caller with `resolveIAMEntity(…, Principal.ARN)`, and an ARN survives a
+  replay where a key does not, because an IAM user's `user/<path><name>` and an assumed role's
+  `assumed-role/<Role>/<Session>` are derived from names the recorded requests themselves carried. The
+  restored principal takes its tags from the *replayed* entity's record and its user name from the ARN
+  only when that record exists — per #745, since a registry hit with no IAM entity behind it
+  synthesizes `…:user/<access-key-id>` and deriving a user name from that would publish a credential
+  ID as `aws:username`. Worth noting what this alone fixes: a replayed request previously carried **no
+  principal at all**, so every plugin's own door was unenforced on replay too, not just the pipeline's.
+
+  **The one residue that stays with #856 is `aws:userid`.** An IAM user's `AIDA…` and an assumed
+  role's `<role-id>:<session-name>` are minted, are not recoverable from the ARN, and a replay's own
+  value would be a *different* identifier rather than the recorded one — so a replayed principal
+  publishes no `aws:userid` at all, which is the shape `Principal.UserID` already defines for a caller
+  substrate has no ID for and the answer #745 chose over a substituted-but-wrong value. A policy
+  conditioning on it replays as though the key were absent. An event with no principal — an unsigned
+  request, which is most of them — replays unenforced exactly as it was served; that is a reproduction,
+  not a bypass.
+
+  **Quota and consistency are consulted and exempt a replay**, which is what makes the three
+  `isReplaying` guards reachable rather than dead. Consistency has the stronger reason: `RecordWrite`
+  is guarded on the same flag, so no propagation window ever opens during a replay and a `CheckRead`
+  that enforced would be refusing against a window that does not exist.
+
+  **Fault injection is re-decided with the controller rewound to its armed state** at the start of each
+  replay, beside `ResetPlugins`. Without the rewind a rule that fired during the recording has spent
+  its `times` bound and advanced its per-rule PRNG, so an in-process record-then-replay would take the
+  *unfaulted* path — precisely the bug this issue is about, arriving through the fix for it. It is the
+  same class as #886/#902/#903, and the armed counts are restored rather than zeroed because a rule may
+  be armed carrying a non-zero `fired`. A latency rule's delay is reported to the caller and **not**
+  slept on replay: the recorded `Duration` is what the live run took, and no replay may consume
+  wall-clock time. One honest dependency follows — a probabilistic rule's draw sequence depends on the
+  requests it sees, so reproducing one takes a stream recorded with `include_bodies`.
+
+  **Four steps stay skipped, each for a stated reason.** SigV4 verification, because the canonical
+  request cannot be rebuilt — the raw query string is never recorded and the body is re-encoded for
+  iam/sts/sqs/sns — and because a replay re-executes a request whose signature was already verified
+  once; presigned-URL expiry, which is a statement about the wall-clock moment the URL was signed;
+  the rpc-v2-cbor/target conflict, a property of the HTTP request no event carries; and the region
+  allow-list, a property of the *replay's* configuration rather than of the recorded run, where
+  refusing would report a divergence caused by the config file the replay was started with.
+
+  A refusal on replay stops before `RouteRequest`, is compared against `event.Error`, and counts in
+  `FailedEvents` — which means "returned an error", not "diverged", exactly as a recorded plugin error
+  already does. It is reported as an `EventDifference` only when it disagrees with the recording; the
+  reverse case, a recorded refusal replaying as a success, has been critical since #857.
+
+  The controllers reach the engine through one variadic option, `WithReplayPipeline`, following
+  `NewEventStore`'s pattern rather than growing a seventh positional parameter — so a caller that
+  supplies none gets the previous ungated behaviour rather than a compile error, and
+  `substrate replay` now builds all four from the same `quotas:`, `consistency:` and `fault:` sections
+  `substrate server` reads. A replay reproduces a recorded refusal only when it is configured as the
+  recording was; a configuration difference surfaces as a divergence rather than being hidden.
+  `TestServer` gained `AuthController()` and `FaultController()` accessors so a test can hand a replay
+  the controllers its own recording was served by, and `docs/testing-guide.md` gained a *What a replay
+  re-executes* section stating the per-step decisions next to what `include_bodies` changes about them.
 - **A state reset released what a plugin had minted but not what it had *started*: S3's object bytes,
   Lambda's event-source-mapping pollers and warm containers, and RDS's Postgres containers all
   outlived it** (#902, #903). #886 gave the registry a `ResetForRun` hook and three plugins used it for

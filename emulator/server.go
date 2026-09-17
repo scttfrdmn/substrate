@@ -658,11 +658,18 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //     (per the service's wire protocol; see accessDeniedCodeFor)
 //  3. quota.CheckQuota()        → 429 ThrottlingException
 //  4. consistency.CheckRead()   → 409 InconsistentStateException
+//     4.5. fault injection      → the armed rule's own code, or a latency delay
 //  5. registry.RouteRequest()   (plugin dispatch)
 //  6. cost := costs.CostForRequest(req)
 //  7. if success && mutating: consistency.RecordWrite(req)
 //  8. store.RecordRequest(…, cost, routeErr, WithStateHashes(before, after))
 //  9. write response
+//
+// Steps 2 through 4.5 are the four controllers of [prePluginGates], which
+// [ReplayEngine.replayEvent] runs as well: a refusal before plugin dispatch is part
+// of what a recorded run means, so replaying it has to reach the same decisions
+// (#833). Everything above step 2 reads the live *http.Request and is skipped on
+// replay, with the reason for each recorded on [ReplayEngine.replayEvent].
 func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -840,68 +847,38 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// which case this is free (#833).
 	stateBefore := s.recordedStateHash(ctx)
 
-	// Step 2: cross-service IAM authorization.
-	if s.opts.Auth != nil {
-		if authErr := s.opts.Auth.CheckAccess(reqCtx, req); authErr != nil {
-			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, authErr,
-				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
-				s.logger.Warn("failed to record auth event", "err", recordErr)
-			}
-			s.writeError(w, authErr, r, req.Service)
-			return
-		}
+	// Steps 2, 3, 4 and 4.5: authorization, quota, consistency and fault injection,
+	// run through the same [prePluginGates] a replay runs — so a request the recording
+	// refused before it reached a plugin is refused on replay too, instead of being
+	// re-executed and succeeding (#833).
+	gate := s.prePluginGates().check(reqCtx, req)
+	if gate.latency > 0 {
+		// A latency rule delays the response and lets the request through, so this is
+		// deliberately not gated on gate.err. A replay does not sleep here; see
+		// [prePluginOutcome.latency].
+		time.Sleep(gate.latency)
 	}
-
-	// Step 3: quota enforcement.
-	if s.opts.Quota != nil {
-		if quotaErr := s.opts.Quota.CheckQuota(reqCtx, req); quotaErr != nil {
-			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, quotaErr,
-				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
-				s.logger.Warn("failed to record quota event", "err", recordErr)
-			}
-			if s.opts.Metrics != nil {
+	if gate.err != nil {
+		duration := time.Since(start)
+		if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, gate.err,
+			WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
+			s.logger.Warn("failed to record refused event", "step", string(gate.step), "err", recordErr)
+		}
+		// Only two of the four steps have ever had a counter of their own; the switch
+		// says which rather than every gate publishing one it does not have.
+		if s.opts.Metrics != nil {
+			switch gate.step {
+			case stepQuota:
 				s.opts.Metrics.RecordQuotaHit(req.Service, req.Operation)
 				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, "ThrottlingException")
-			}
-			s.writeError(w, quotaErr, r, req.Service)
-			return
-		}
-	}
-
-	// Step 4: consistency check for reads.
-	if s.opts.Consistency != nil {
-		if consErr := s.opts.Consistency.CheckRead(reqCtx, req); consErr != nil {
-			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, consErr,
-				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
-				s.logger.Warn("failed to record consistency event", "err", recordErr)
-			}
-			if s.opts.Metrics != nil {
+			case stepConsistency:
 				s.opts.Metrics.RecordConsistencyDelay(req.Service)
 				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, "InconsistentStateException")
+			case stepAuth, stepFault:
 			}
-			s.writeError(w, consErr, r, req.Service)
-			return
 		}
-	}
-
-	// Step 4.5: fault injection.
-	if s.opts.Fault != nil {
-		faultErr, faultDelay := s.opts.Fault.InjectFault(reqCtx, req)
-		if faultDelay > 0 {
-			time.Sleep(faultDelay)
-		}
-		if faultErr != nil {
-			duration := time.Since(start)
-			if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, faultErr,
-				WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
-				s.logger.Warn("failed to record fault event", "err", recordErr)
-			}
-			s.writeError(w, faultErr, r, req.Service)
-			return
-		}
+		s.writeError(w, gate.err, r, req.Service)
+		return
 	}
 
 	// Step 5: route to plugin.
