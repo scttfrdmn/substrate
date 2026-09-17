@@ -9197,8 +9197,8 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 
 | Operation | Notes |
 |-----------|-------|
-| CreateKey | |
-| DescribeKey | Accepts all four `KeyId` forms; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
+| CreateKey | Answers the same `KeyMetadata` shape `DescribeKey` does, from the same builder — see below |
+| DescribeKey | Accepts all four `KeyId` forms; answers 16 of `KeyMetadata`'s 26 members, including `AWSAccountId`, `KeyManager`, `Origin` and the key's algorithm list; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
 | ListKeys | |
 | EnableKey | Refuses a key pending deletion, so recovery stays two calls — see below |
 | DisableKey | Same refusal as `EnableKey` |
@@ -9584,10 +9584,120 @@ shown to have removed a duplicate route rather than the only one.
 Restoring it under another name would be worse than the original defect, because the
 rules the real operation carries — the symmetric-only restriction, the key-state
 refusals, the documented `false` while a key is pending deletion — belong to
-`GetKeyRotationStatus` and would all be bypassed. The opposite direction, the sixteen
-`KeyMetadata` members substrate does **not** answer, is
-[#974](https://github.com/scttfrdmn/substrate/issues/974); five of them would be
-present on every real `DescribeKey` call for a plain customer symmetric key.
+`GetKeyRotationStatus` and would all be bypassed. The opposite direction — the sixteen
+`KeyMetadata` members substrate did **not** answer, five of which are present on every
+real `DescribeKey` call for a plain customer symmetric key — was
+[#974](https://github.com/scttfrdmn/substrate/issues/974), and it is the next section.
+
+### One `KeyMetadata` builder, and the six members it stopped withholding
+
+`API_KeyMetadata` publishes 26 members. `DescribeKey` answered 10 and `CreateKey`
+answered 9 from a second map of its own
+([#974](https://github.com/scttfrdmn/substrate/issues/974)). Five of the absent ones
+are sent by AWS on every call for a plain customer symmetric key —
+`AWSAccountId`, `KeyManager`, `Origin`, `EncryptionAlgorithms` and the deprecated
+`CustomerMasterKeySpec` — so a consumer reading any of them got a missing field from
+substrate where AWS always has a value. That is #765's failure mode aimed at a response
+shape, and it is #971 read from the other side: that issue removed the one member
+substrate emitted and AWS does not publish, and this one adds the members AWS publishes
+and substrate did not emit.
+
+**Nothing here is a simulation.** Three of the five are constants for every key
+substrate can create and the other two are functions of `KeySpec` and `KeyUsage`, both
+of which the key already carries. Every member added is a value substrate already knew
+and withheld, which is what makes the two issues the same finding rather than two.
+
+**The builder is shared because AWS shares the shape.** The type's own page says it
+*"is used as a response element for the `CreateKey`, `DescribeKey`, and `ReplicateKey`
+operations"*, and substrate's two hand-built maps had already drifted apart: #963 added
+`DeletionDate` to `DescribeKey`'s and left `CreateKey`'s alone, so two operations
+disagreed about one documented type. That is the defect class #952 catalogues, and
+neither operation's own test could see it, because each asserted its own response
+against the page rather than against the other. Both now build from one function, and a
+test compares the two responses member by member on raw bytes. `ReplicateKey` is the
+third caller AWS names; substrate does not implement it, and when it arrives it must
+build from here rather than growing a third map.
+
+#### Three constants, and what each one records
+
+| Member | Value | Why it is a constant rather than a stored field |
+|--------|-------|-------------------------------------------------|
+| `AWSAccountId` | The key's own account | Not the caller's. A cross-account `DescribeKey` is the only call that separates the two, so that is the call the test makes |
+| `KeyManager` | `CUSTOMER` | Substrate mints no AWS managed key; every key in state came from a `CreateKey` request in the caller's own account |
+| `Origin` | `AWS_KMS` | Substrate implements neither `ImportKeyMaterial` nor any custom key store, so no request can produce another origin |
+
+`KeyManager` is also why `EnableKeyRotation`'s *"you cannot enable or disable automatic
+rotation of AWS managed KMS keys"* is recorded as **unreachable** rather than
+unenforced, and `Origin` is why three further members are: `ExpirationModel` and
+`ValidTo` are published *"only when `Origin` is `EXTERNAL`"*, and
+`XksKeyConfiguration` only for an external key store.
+
+#### One algorithm list, selected by the key usage
+
+Each of the four algorithm members names a `KeyUsage` as its presence condition, and a
+key has exactly one usage — so a key carries exactly one list, and the four are
+mutually exclusive rather than four independent members. The contents come from the
+developer guide's key spec reference, which tabulates them for the reason it states
+twice: *"you cannot configure a KMS key to use a particular encryption algorithm"* and
+*"you cannot configure a KMS key to use particular signing algorithms."*
+
+| `KeyUsage` | Member | Example |
+|------------|--------|---------|
+| `ENCRYPT_DECRYPT` | `EncryptionAlgorithms` | `SYMMETRIC_DEFAULT` → itself; `RSA_2048` → the two `RSAES_OAEP` |
+| `SIGN_VERIFY` | `SigningAlgorithms` | every RSA spec → the same six; `ECC_NIST_P384` → `ECDSA_SHA_384`; `ECC_NIST_EDWARDS25519` → **two**; the three ML-DSA specs → `ML_DSA_SHAKE_256` |
+| `GENERATE_VERIFY_MAC` | `MacAlgorithms` | `HMAC_384` → `HMAC_SHA_384`, one per spec because *"the length of the key determines the MAC algorithm"* |
+| `KEY_AGREEMENT` | `KeyAgreementAlgorithms` | `ECDH`, for the NIST curves and `SM2` |
+
+**`KeyAgreementAlgorithms`' presence condition is substrate's reading.** The other three
+members publish one; this member publishes none at all — its entire description is
+*"the key agreement algorithm used to derive a shared secret"*. `KEY_AGREEMENT` is a
+published `KeyUsage` and a key has one usage, so following the pattern of the three that
+do state a condition is the narrowest available reading. The alternative — reporting
+`ECDH` on a NIST-curve **signing** key, whose spec does admit it — would tell a caller
+`DeriveSharedSecret` was available on a key AWS reserves for `Sign`. A test pins exactly
+that case.
+
+**An empty list is omitted rather than sent as `[]`.** `CreateKey` validates neither
+`KeySpec` nor `KeyUsage` ([#977](https://github.com/scttfrdmn/substrate/issues/977)), so
+a caller can create an ECC key with `KeyUsage` `ENCRYPT_DECRYPT` — a pair AWS would
+refuse — and that key admits no encryption algorithm. An empty array would say *"this
+key supports no encryption algorithms"*, a claim AWS never makes about a key it
+accepted; the absent member says nothing, which is the honest-empty reading #827
+established. The two are indistinguishable in a decoded struct, so that assertion is on
+raw JSON like the rest of this file's.
+
+#### `CustomerMasterKeySpec` is answered, and omitted outside its own enum
+
+AWS still sends the deprecated member — *"the `KeySpec` and `CustomerMasterKeySpec`
+fields have the same value. We recommend that you use the `KeySpec` field in your code.
+However, to avoid breaking changes, AWS KMS supports both fields"* — so substrate
+answers it rather than dropping it as obsolete: a consumer written against an older SDK
+reads it, and omitting a member AWS sends is what this issue is about.
+
+Its enum is **narrower** than `KeySpec`'s: `API_KeyMetadata` gives it 13 valid values
+against `KeySpec`'s 17. The four specs added since the deprecation — `ML_DSA_44`,
+`ML_DSA_65`, `ML_DSA_87` and `ECC_NIST_EDWARDS25519` — appear only under `KeySpec`, so a
+key with one of those has no admissible value for the older member. **Substrate omits it
+there**, which is a reading rather than a match: AWS documents no answer for the case,
+and the alternative puts a value outside the member's own published set on the wire.
+
+#### The ten members that stay absent
+
+Six are unreachable for reasons already given above (`KeyManager` covers one, `Origin`
+covers three) and the rest are:
+
+| Member | What it would need |
+|--------|--------------------|
+| `CloudHsmClusterId`, `CustomKeyStoreId` | A custom key store, which substrate does not implement |
+| `MultiRegionConfiguration` | Published *"only when the value of the `MultiRegion` field is `True`"*. Substrate stores the flag but models no replica, so it would have to report a primary with an empty `ReplicaKeys` list — a shape describing a multi-Region key nothing can replicate |
+| `PendingDeletionWindowInDays` | `KeyState` `PendingReplicaDeletion`, which only a multi-Region primary that still has replicas reaches. Its range is 1–365, not `ScheduleKeyDeletion`'s 7–30, so reporting the waiting period under it would be wrong twice over |
+| `CurrentKeyMaterialId` | A key material identity, which is [#978](https://github.com/scttfrdmn/substrate/issues/978) |
+| `RotationEnabled` | Nothing — AWS does not publish it, per #971 above |
+
+All ten are asserted **absent** by a test, `RotationEnabled` included. Adding sixteen
+members from a page is exactly the moment someone working from the struct rather than
+the page would put #971's member back, so the guard against that sits beside the guard
+for the other nine.
 
 ### Cancelling a deletion leaves the key disabled, not enabled
 
