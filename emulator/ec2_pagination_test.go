@@ -2,9 +2,11 @@ package emulator_test
 
 // Offset pagination shared by the EC2 describes (#917).
 //
-// DescribeVolumes and DescribeSnapshots published MaxResults and NextToken and implemented
-// neither: a request naming either was answered with the whole listing and no token, so a caller
-// paging in one page against substrate found a second page in production. The two operations that
+// Roughly twenty EC2 describes published MaxResults and NextToken and implemented neither: a
+// request naming either was answered with the whole listing and no token, so a caller paging in one
+// page against substrate found a second page in production. The six flat listings converted so far
+// are the table below — DescribeVolumes and DescribeSnapshots in #917's first part, DescribeImages,
+// DescribeVpcs, DescribeSubnets and DescribeSecurityGroups in its second. The two operations that
 // already paginated — DescribeTags and DescribeLaunchTemplateVersions — carried a private copy of
 // the same three rules each, and their behavior is unchanged by the conversion, which
 // TestEC2_DescribeTags_Pagination and TestEC2_DescribeLaunchTemplateVersions' own MaxResults cases
@@ -47,6 +49,16 @@ type ec2PagedOp struct {
 	name string
 	// idParam is the resource-ID list parameter, unindexed as AWS names it.
 	idParam string
+	// published is true when the operation's page publishes "Valid Range: Minimum value of 5.
+	// Maximum value of 1000." API_DescribeVpcs, API_DescribeSubnets and
+	// API_DescribeSecurityGroups do; API_DescribeVolumes, API_DescribeSnapshots and
+	// API_DescribeImages publish no range at all, only "The maximum number of items to return
+	// for this request".
+	//
+	// It is a column here rather than a test of its own because #671 forbids borrowing the range
+	// by analogy: one table asserting both directions is what pins that the three publishing
+	// pages did not lend their bounds to the three that publish none.
+	published bool
 	// create makes n records through real calls and returns their IDs.
 	create func(t *testing.T, ts *httptest.Server, n int) []string
 	// describe sends the operation with extra params and returns the IDs it reported, in the
@@ -54,7 +66,20 @@ type ec2PagedOp struct {
 	describe func(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string)
 }
 
-// ec2PagedOps is every operation #917's first part converted.
+// ec2PagedPageSize is the MaxResults every walk below is driven at.
+//
+// Five, because it is the smallest value the whole table accepts: three of the six pages publish a
+// floor of five and the other three a floor of one (substrate's reading, see
+// ec2MinUnpublishedMaxResults), so one page size exercises the walk at every operation without the
+// cases having to know which range each carries. That the floors really do differ is asserted
+// separately, by TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused.
+const ec2PagedPageSize = 5
+
+// ec2PagedOps is every flat listing #917 converted onto the shared offset paginator.
+//
+// DescribeInstances is deliberately absent: its answer nests reservationSet > item > instancesSet,
+// so it pages through ec2PageReservations rather than ec2Page and its cases live in
+// ec2_pagination_instances_test.go.
 func ec2PagedOps() []ec2PagedOp {
 	return []ec2PagedOp{
 		{
@@ -68,6 +93,33 @@ func ec2PagedOps() []ec2PagedOp {
 			idParam:  "SnapshotId",
 			create:   ec2CreatePagedSnapshots,
 			describe: ec2DescribePagedSnapshots,
+		},
+		{
+			name:     "DescribeImages",
+			idParam:  "ImageId",
+			create:   ec2CreatePagedImages,
+			describe: ec2DescribePagedImages,
+		},
+		{
+			name:      "DescribeVpcs",
+			idParam:   "VpcId",
+			published: true,
+			create:    ec2CreatePagedVPCs,
+			describe:  ec2DescribePagedVPCs,
+		},
+		{
+			name:      "DescribeSubnets",
+			idParam:   "SubnetId",
+			published: true,
+			create:    ec2CreatePagedSubnets,
+			describe:  ec2DescribePagedSubnets,
+		},
+		{
+			name:      "DescribeSecurityGroups",
+			idParam:   "GroupId",
+			published: true,
+			create:    ec2CreatePagedSecurityGroups,
+			describe:  ec2DescribePagedSecurityGroups,
 		},
 	}
 }
@@ -145,6 +197,132 @@ func ec2DescribePagedSnapshots(t *testing.T, ts *httptest.Server, extra map[stri
 	return ids, decoded.NextToken
 }
 
+// ec2CreatePagedImages registers n AMIs and returns their IDs.
+//
+// RegisterImage rather than CreateImage: the listing wanted is n AMIs and nothing else, and
+// CreateImage would need an instance per AMI, each of which is itself a record another operation in
+// this table pages. A bundled public AMI is not part of the answer — those are absent from state
+// (#733) and reachable only by name — so the registered set is the whole listing.
+func ec2CreatePagedImages(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ids = append(ids, ec2RegisterImageID(t, ts, "paged-ami-"+strconv.Itoa(i)))
+	}
+	return ids
+}
+
+// ec2CreatePagedVPCs creates n VPCs and returns their IDs.
+func ec2CreatePagedVPCs(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ids = append(ids, ec2CreateVPC(t, ts, "10."+strconv.Itoa(i)+".0.0/16"))
+	}
+	return ids
+}
+
+// ec2CreatePagedSubnets creates n subnets in one VPC and returns their IDs.
+func ec2CreatePagedSubnets(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ids = append(ids, ec2CreateTaggedSubnet(t, ts, vpcID,
+			"10.0."+strconv.Itoa(i)+".0/24", "us-east-1a", nil))
+	}
+	return ids
+}
+
+// ec2CreatePagedSecurityGroups creates n security groups and returns their IDs.
+//
+// No VPC, because CreateVpc mints no default security group here and a group needs none: the
+// listing is then exactly the n groups created, with nothing the account acquired implicitly.
+func ec2CreatePagedSecurityGroups(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ids = append(ids, ec2CreateSG(t, ts, "paged-"+strconv.Itoa(i), "paged group", ""))
+	}
+	return ids
+}
+
+// ec2DescribePagedImages reads a DescribeImages page.
+func ec2DescribePagedImages(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName xml.Name `xml:"DescribeImagesResponse"`
+		Images  []struct {
+			ImageID string `xml:"imageId"`
+		} `xml:"imagesSet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeImages", extra), &decoded)
+	ids := make([]string, 0, len(decoded.Images))
+	for _, img := range decoded.Images {
+		ids = append(ids, img.ImageID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedVPCs reads a DescribeVpcs page.
+func ec2DescribePagedVPCs(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName xml.Name `xml:"DescribeVpcsResponse"`
+		Vpcs    []struct {
+			VpcID string `xml:"vpcId"`
+		} `xml:"vpcSet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeVpcs", extra), &decoded)
+	ids := make([]string, 0, len(decoded.Vpcs))
+	for _, vpc := range decoded.Vpcs {
+		ids = append(ids, vpc.VpcID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedSubnets reads a DescribeSubnets page.
+func ec2DescribePagedSubnets(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName xml.Name `xml:"DescribeSubnetsResponse"`
+		Subnets []struct {
+			SubnetID string `xml:"subnetId"`
+		} `xml:"subnetSet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeSubnets", extra), &decoded)
+	ids := make([]string, 0, len(decoded.Subnets))
+	for _, subnet := range decoded.Subnets {
+		ids = append(ids, subnet.SubnetID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedSecurityGroups reads a DescribeSecurityGroups page.
+//
+// The group ID is read as a direct child of securityGroupInfo>item for the reason
+// [ec2DescribePagedVolumes] gives about volumeId: a permission's groups>item carries a groupId too,
+// so an unanchored match would report a group that referenced another one twice.
+func ec2DescribePagedSecurityGroups(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName xml.Name `xml:"DescribeSecurityGroupsResponse"`
+		Groups  []struct {
+			GroupID string `xml:"groupId"`
+		} `xml:"securityGroupInfo>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeSecurityGroups", extra), &decoded)
+	ids := make([]string, 0, len(decoded.Groups))
+	for _, group := range decoded.Groups {
+		ids = append(ids, group.GroupID)
+	}
+	return ids, decoded.NextToken
+}
+
 // ec2PagedParams is extra with the action added, so a case can name only what it is testing.
 func ec2PagedParams(action string, extra map[string]string) map[string]string {
 	params := map[string]string{"Action": action}
@@ -184,11 +362,11 @@ func ec2PagedWalk(t *testing.T, ts *httptest.Server, op ec2PagedOp, pageSize, wa
 // TestEC2_OffsetPagination_AbsentMaxResultsReportsTheWholeListing pins the compatibility half of
 // the conversion.
 //
-// API_DescribeVolumes and API_DescribeSnapshots publish no unpaginated default — the sentence
-// belongs to API_DescribeSecurityGroups, "If this parameter is not specified, then all items are
-// returned" — so substrate reads an absent MaxResults as the whole listing at both, which is also
-// what each answered before it paginated. A caller that never sent MaxResults therefore sees no
-// wire change at all, token included: the element is omitted rather than emitted empty.
+// Only API_DescribeSecurityGroups publishes what an absent MaxResults means — "If this parameter is
+// not specified, then all items are returned" — and substrate reads it that way at every operation
+// in the table, which is also what each answered before it paginated. A caller that never sent
+// MaxResults therefore sees no wire change at all, token included: the element is omitted rather
+// than emitted empty.
 func TestEC2_OffsetPagination_AbsentMaxResultsReportsTheWholeListing(t *testing.T) {
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
@@ -215,12 +393,12 @@ func TestEC2_OffsetPagination_AWalkReportsEveryRecordExactlyOnce(t *testing.T) {
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			created := op.create(t, ts, 7)
+			created := op.create(t, ts, 2*ec2PagedPageSize+1)
 
 			whole, _ := op.describe(t, ts, nil)
 			require.Len(t, whole, len(created))
 
-			walked := ec2PagedWalk(t, ts, op, 3, len(created))
+			walked := ec2PagedWalk(t, ts, op, ec2PagedPageSize, len(created))
 			assert.Equal(t, whole, walked, "paging must not change what is reported or its order")
 		})
 	}
@@ -230,7 +408,7 @@ func TestEC2_OffsetPagination_AWalkReportsEveryRecordExactlyOnce(t *testing.T) {
 // multiple of the page size.
 //
 // The token is emitted from whether a further record exists, not from whether the page filled up,
-// so six records at three per page is two pages and not three-with-an-empty-tail. Getting this
+// so ten records at five per page is two pages and not three-with-an-empty-tail. Getting this
 // backwards is not a crash: a caller told to keep calling until the token is null would make one
 // extra request per walk, which only shows up as a wasted round trip until the empty page is
 // mistaken for a truncated listing.
@@ -238,14 +416,15 @@ func TestEC2_OffsetPagination_AFullLastPageCarriesNoToken(t *testing.T) {
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			created := op.create(t, ts, 6)
+			created := op.create(t, ts, 2*ec2PagedPageSize)
+			pageSize := strconv.Itoa(ec2PagedPageSize)
 
-			first, token := op.describe(t, ts, map[string]string{"MaxResults": "3"})
-			require.Len(t, first, 3)
+			first, token := op.describe(t, ts, map[string]string{"MaxResults": pageSize})
+			require.Len(t, first, ec2PagedPageSize)
 			require.NotEmpty(t, token)
 
-			second, token := op.describe(t, ts, map[string]string{"MaxResults": "3", "NextToken": token})
-			assert.Len(t, second, 3)
+			second, token := op.describe(t, ts, map[string]string{"MaxResults": pageSize, "NextToken": token})
+			assert.Len(t, second, ec2PagedPageSize)
 			assert.Empty(t, token, "a full last page must not carry a token")
 			assert.ElementsMatch(t, created, append(first, second...))
 		})
@@ -271,7 +450,7 @@ func TestEC2_OffsetPagination_AnInventedTokenIsRefused(t *testing.T) {
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			created := op.create(t, ts, 3)
+			created := op.create(t, ts, ec2PagedPageSize+1)
 
 			for _, tc := range bad {
 				t.Run(tc.name, func(t *testing.T) {
@@ -290,8 +469,9 @@ func TestEC2_OffsetPagination_AnInventedTokenIsRefused(t *testing.T) {
 			})
 
 			t.Run("a token the operation issued resumes the walk", func(t *testing.T) {
-				first, token := op.describe(t, ts, map[string]string{"MaxResults": "1"})
-				require.Len(t, first, 1)
+				first, token := op.describe(t, ts,
+					map[string]string{"MaxResults": strconv.Itoa(ec2PagedPageSize)})
+				require.Len(t, first, ec2PagedPageSize)
 				require.NotEmpty(t, token)
 				rest, _ := op.describe(t, ts, map[string]string{"NextToken": token})
 				assert.ElementsMatch(t, created, append(first, rest...))
@@ -325,46 +505,61 @@ func TestEC2_OffsetPagination_TokenIsRefusedBeforeStateIsRead(t *testing.T) {
 	}
 }
 
-// TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused covers the bound at the two
-// operations whose page publishes none.
+// TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused asserts each operation's bound is the
+// one its own page publishes, and nothing wider.
 //
-// API_DescribeVolumes and API_DescribeSnapshots say only "The maximum number of items to return
-// for this request", type Integer, with no Valid Range line — where API_DescribeVpcs,
-// API_DescribeSubnets and API_DescribeSecurityGroups all publish 5 to 1000. Per #671 substrate
-// does not borrow the siblings' range by analogy, which is what the accepted 5000 case pins: it
-// would fail against a ceiling nothing published. The floor of one is substrate's reading and is
-// forced by the published pagination rule — a page of zero items describes a walk that answers
-// nothing and hands back a token forever.
+// API_DescribeVpcs, API_DescribeSubnets and API_DescribeSecurityGroups publish "Valid Range:
+// Minimum value of 5. Maximum value of 1000."; API_DescribeVolumes, API_DescribeSnapshots and
+// API_DescribeImages say only "The maximum number of items to return for this request", type
+// Integer, with no Valid Range line at all. Per #671 substrate does not borrow the published range
+// by analogy, and the two directions are asserted in one table because that is what pins it: 1 and
+// 5000 are **accepted** where no range is published and **refused** where 5–1000 is, so a helper
+// that had defaulted to one range for the family would fail on half the rows.
+//
+// Where no range is published the floor of one is substrate's reading, forced by the published
+// pagination rule — a page of zero items describes a walk that answers nothing and hands back a
+// token forever. A value that is not a number is refused at every operation, since AWS types the
+// parameter Integer everywhere.
 func TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused(t *testing.T) {
 	cases := []struct {
 		name       string
 		maxResults string
-		refused    bool
+		// refusedWhenPublished and refusedWhenNot say which operations refuse the value, which is
+		// the whole point of the case: only "0" and "many" are refused by both.
+		refusedWhenPublished bool
+		refusedWhenNot       bool
 	}{
-		{"a page of zero items", "0", true},
-		{"a negative page", "-1", true},
-		{"not a number", "many", true},
-		{"the floor substrate reads", "1", false},
-		{"above the range the siblings publish", "5000", false},
+		{"a page of zero items", "0", true, true},
+		{"a negative page", "-1", true, true},
+		{"not a number", "many", true, true},
+		{"below the published floor", "1", true, false},
+		{"above the published ceiling", "5000", true, false},
+		{"inside the published range", "5", false, false},
 	}
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			created := op.create(t, ts, 3)
+			created := op.create(t, ts, ec2PagedPageSize+1)
 
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
-					params := ec2PagedParams(op.name, map[string]string{"MaxResults": tc.maxResults})
-					if !tc.refused {
+					refused := tc.refusedWhenNot
+					message := "MaxResults must be at least 1"
+					if op.published {
+						refused = tc.refusedWhenPublished
+						message = "MaxResults must be between 5 and 1000"
+					}
+					if !refused {
 						ids, _ := op.describe(t, ts, map[string]string{"MaxResults": tc.maxResults})
 						assert.NotEmpty(t, ids)
 						assert.LessOrEqual(t, len(ids), len(created))
 						return
 					}
-					status, code, message := ec2ErrorDetail(t, ts, params)
+					params := ec2PagedParams(op.name, map[string]string{"MaxResults": tc.maxResults})
+					status, code, got := ec2ErrorDetail(t, ts, params)
 					assert.Equal(t, http.StatusBadRequest, status)
 					assert.Equal(t, "InvalidParameterValue", code)
-					assert.Contains(t, message, "MaxResults must be at least 1")
+					assert.Contains(t, got, message)
 				})
 			}
 		})
@@ -386,7 +581,7 @@ func TestEC2_OffsetPagination_AnIDListWithMaxResultsIsRefused(t *testing.T) {
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
-			created := op.create(t, ts, 3)
+			created := op.create(t, ts, ec2PagedPageSize+1)
 
 			t.Run("together", func(t *testing.T) {
 				status, code, message := ec2ErrorDetail(t, ts, ec2PagedParams(op.name, map[string]string{
@@ -406,8 +601,9 @@ func TestEC2_OffsetPagination_AnIDListWithMaxResultsIsRefused(t *testing.T) {
 			})
 
 			t.Run("MaxResults alone", func(t *testing.T) {
-				ids, _ := op.describe(t, ts, map[string]string{"MaxResults": "2"})
-				assert.Len(t, ids, 2)
+				ids, _ := op.describe(t, ts,
+					map[string]string{"MaxResults": strconv.Itoa(ec2PagedPageSize)})
+				assert.Len(t, ids, ec2PagedPageSize)
 			})
 
 			// The refusal is checked before the ID list's own syntax, because whether two

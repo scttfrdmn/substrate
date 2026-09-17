@@ -530,6 +530,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **The five remaining EC2 describes that published a cursor and read neither half of it** (#917, part
+  two of three). `DescribeInstances`, `DescribeImages`, `DescribeVpcs`, `DescribeSubnets` and
+  `DescribeSecurityGroups` each publish `MaxResults` and `NextToken` and answered the whole listing with
+  no token, so a consumer's paging loop terminated on the first response here and first ran for real
+  against an account large enough to page. All five now paginate on the helpers part one extracted, so
+  the count of implementations is still **one**, and a request sending neither parameter answers exactly
+  what it did before — token element omitted rather than emitted empty.
+
+  Three of the five carry a published range and two carry none, and the difference is preserved rather
+  than harmonised. `API_DescribeVpcs`, `API_DescribeSubnets` and `API_DescribeSecurityGroups` publish
+  `Valid Range: Minimum value of 5. Maximum value of 1000.` — the last in prose as well, and it is also
+  the one page of the nine to state what an absent `MaxResults` means — so `MaxResults=1` is refused
+  there. `API_DescribeInstances` and `API_DescribeImages` publish no bound at all, so `MaxResults=5000`
+  is accepted at both, per #671's rule that only what the API model states is modelled; the floor of one
+  is substrate's reading, forced by the published pagination rule, as it was at volumes and snapshots.
+  The service-wide `InvalidParameterCombination` for a request naming both an ID list and `MaxResults` is
+  answered at all five, and `API_DescribeInstances` is the one page that repeats that rule against its own
+  parameter.
+
+  **`DescribeInstances` needed a paginator of its own, because its answer is the only nested one and AWS
+  never says which list `MaxResults` counts.** The page publishes only "the maximum number of items to
+  return for this request" against a body shaped `reservationSet > item > instancesSet`. Substrate reads
+  an item as an **instance**: counting reservations would leave the parameter unable to bound a response
+  at all, since one `RunInstances` with `MinCount=500` is a single reservation, and `NextToken`'s own text
+  — "Pagination continues from the end of the items returned by the previous request" — describes a
+  position in a flat sequence. The visible consequence is substrate's reading too and is asserted rather
+  than left to be discovered: a reservation whose instances straddle a page boundary is reported on
+  **both** pages under its own ID, carrying only the instances belonging to each, because the alternative
+  is to answer either more items than `MaxResults` asked for or fewer than exist together with a token. An
+  instance is still reported exactly once across a walk, which is what a caller assembling pages relies
+  on.
+
+  **`GroupName.N` does not conflict with `MaxResults`, where `GroupId.N` does** — also substrate's
+  reading. The published rule is stated against "a list of IDs", and a group name is not an ID; refusing
+  the name form would extend a published rule to a parameter it does not name, and the two selectors
+  already differ here in whether they assert existence.
+
+  The page is cut after the whole answer is assembled and after the ID list is resolved, so an unresolved
+  ID is an error about the request rather than about which page the walk is on. At `DescribeImages` that
+  ordering is load-bearing rather than incidental: the cut follows the bundled-catalog pass, or naming a
+  page size would change which images an account can see.
+
+  Two stragglers outside EC2 remain — Lambda's `ListEventSourceMappings` and API Gateway's
+  `GetBasePathMappings` — and #917 stays open for them.
+
 - **EC2's describes had two copies of a paginator and twenty operations with none** (#917, part one of
   three). `DescribeVolumes` and `DescribeSnapshots` publish `MaxResults` and `NextToken` and read
   neither: every request answered the whole listing and emitted no token, so a consumer's paging loop
