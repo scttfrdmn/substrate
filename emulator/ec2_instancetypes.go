@@ -36,14 +36,12 @@ type ec2InstanceTypeSize struct {
 	SpotPrice string
 }
 
-// ec2InstanceTypeFamily describes one instance-type family in the seeded catalog.
+// ec2InstanceTypeFamily describes one non-accelerated instance-type family in the seeded
+// catalog. Accelerated families are [ec2AcceleratedFamily], which carries a per-size
+// accelerator count this type has no room for.
 type ec2InstanceTypeFamily struct {
 	// Name is the family prefix, e.g. "c5".
 	Name string
-	// GPUs is the accelerator count every size in the family carries. Sizes within a
-	// real family differ here; the catalog holds a single accelerated size per family,
-	// so one value per family is enough.
-	GPUs int
 	// Sizes are the family's members, smallest first.
 	Sizes []ec2InstanceTypeSize
 }
@@ -59,6 +57,11 @@ type ec2InstanceTypeFamily struct {
 // common general-purpose, compute-optimized, memory-optimized and burstable families.
 // A family substrate does not carry at all is still refused; see the doc for which.
 //
+// Accelerated families live in [ec2AcceleratedFamilies] and are flattened into the same
+// catalog by the same function. The split is a shape difference, not a policy one: an
+// accelerator count varies across the sizes of one real family, so it cannot hang off the
+// family the way everything here does.
+//
 // vCPU and memory figures come from the AWS instance-type guides — general purpose
 // (https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html), compute optimized
 // (.../co.html) and memory optimized (.../mo.html). Bare-metal sizes are excluded: they
@@ -68,11 +71,12 @@ type ec2InstanceTypeFamily struct {
 // SpotPrice values are **deterministic stubs, not AWS prices**, and are not researched
 // against AWS pricing — the emulator has no price feed and the values exist so a spot
 // price history response has a plausible, stable number in it. Within a family they are a
-// fixed rate per GiB of memory, which keeps them monotonic in size. The eight values
-// #234's catalog shipped (t3.micro 0.0042, c5.xlarge 0.068, c5.2xlarge 0.136, m5.large
-// 0.038, r5.xlarge 0.076, p3.2xlarge 0.918, g4dn.xlarge 0.188, inf1.xlarge 0.076) are
-// preserved verbatim and every family's rate is calibrated to them, so no existing
-// fixture moves. Assert on the shape of a spot price response, never on the amount.
+// fixed rate per GiB of memory, which keeps them monotonic in size. The five values
+// #234's catalog shipped for these families (t3.micro 0.0042, c5.xlarge 0.068, c5.2xlarge
+// 0.136, m5.large 0.038, r5.xlarge 0.076) are preserved verbatim and every family's rate
+// is calibrated to them, so no existing fixture moves; the other three are pinned the same
+// way in [ec2AcceleratedFamilies]. Assert on the shape of a spot price response, never on
+// the amount.
 var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 	// Burstable, Intel. 0.0042 USD/GiB.
 	{Name: "t3", Sizes: []ec2InstanceTypeSize{
@@ -150,52 +154,220 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"16xlarge", 64, 524288, "1.216"},
 		{"24xlarge", 96, 786432, "1.824"},
 	}},
-	// Accelerated. These are the single sizes #234 seeded rather than whole families:
-	// the accelerated families are large, their specs vary widely across sizes, and no
-	// consumer has asked for more of them. p3.2xlarge carries one NVIDIA V100 and
-	// g4dn.xlarge one T4; inf1.xlarge's accelerator is an AWS Inferentia chip, which
-	// real EC2 does not report through gpuInfo, so its GPU count stays zero.
-	{Name: "p3", GPUs: 1, Sizes: []ec2InstanceTypeSize{
-		{"2xlarge", 8, 62464, "0.918"},
+}
+
+// ec2AcceleratedSize is one size within an [ec2AcceleratedFamily].
+//
+// It carries an accelerator count where [ec2InstanceTypeSize] does not, because the count
+// is not a property of the family and cannot be hoisted onto one: g5.12xlarge carries four
+// accelerators and g5.16xlarge, the next size up, carries one.
+type ec2AcceleratedSize struct {
+	// Size is the part of the instance type after the dot, e.g. "12xlarge".
+	Size string
+	// VCpus is the default vCPU count.
+	VCpus int
+	// MemoryMiB is the memory size in MiB.
+	MemoryMiB int
+	// Accelerators is the number of accelerator devices the size carries. It is recorded
+	// for every family, including the ones whose count no response reports because AWS
+	// carries it under a member substrate does not model; see [ec2AcceleratedFamily].
+	Accelerators int
+	// SpotPrice is the stub spot price in USD/hour.
+	SpotPrice string
+}
+
+// ec2AcceleratedFamily describes one accelerated-computing family in the seeded catalog.
+type ec2AcceleratedFamily struct {
+	// Name is the family prefix, e.g. "g5".
+	Name string
+	// ReportedAsGPU says whether DescribeInstanceTypes reports this family's accelerators
+	// through gpuInfo. See [ec2AcceleratedFamilies] for the three members AWS splits
+	// accelerators across and why only one of them is modeled.
+	ReportedAsGPU bool
+	// Sizes are the family's members, smallest first.
+	Sizes []ec2AcceleratedSize
+}
+
+// ec2AcceleratedFamilies is the accelerated-computing half of the seeded instance-type
+// catalog. [buildEC2InstanceTypeCatalog] flattens it into the same catalog and index as
+// [ec2InstanceTypeFamilies].
+//
+// #234 seeded three of these as a single size each — p3.2xlarge, g4dn.xlarge, inf1.xlarge —
+// with the recorded reason that "the accelerated families are large, their specs vary
+// widely across sizes, and no consumer has asked for more of them". The first two clauses
+// are still true and the third stopped being true: #891, #892 and #894 all arrive from a
+// consumer probing g6.xlarge, and each was refused with InvalidInstanceType before any of
+// its own logic ran. So the exception is retired rather than restated (#896) — every family
+// here is complete, which is the invariant [ec2InstanceTypeFamilies] documents and the one
+// that makes [ec2CheckInstanceTypesExist]'s refusal honest. p3.8xlarge is a type that
+// plainly exists and used to be refused.
+//
+// vCPU, memory and accelerator counts come from the AWS accelerated-computing instance-type
+// guide (https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html), except p3's, which
+// AWS publishes on the previous-generation page
+// (https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html) — p3 is the one family
+// here AWS lists as previous generation, and DescribeInstanceTypes reports every catalog
+// type as current generation regardless; see docs/services.md.
+//
+// Bare metal is excluded as it is everywhere else in the catalog, which costs this table one
+// size: g4dn.metal. The families deliberately absent are the ones whose specs could not be
+// pinned or that AWS lists as their own family: p3dn, trn1n, p5e and p5en are separate
+// single-size families AWS publishes beside the ones here, and trn2u.48xlarge is published
+// with **no** accelerator count at all, which is almost certainly an AWS documentation gap
+// rather than a zero-accelerator instance — inferring 16 from trn2.48xlarge would be
+// substrate inventing a spec. A family absent from the catalog is still refused, so
+// widening later is additive.
+//
+// **Which accelerators reach gpuInfo.** DescribeInstanceTypes' InstanceTypeInfo shape has
+// three separate accelerator members: gpuInfo ("Describes the GPU accelerator settings for
+// the instance type"), inferenceAcceleratorInfo and neuronInfo, plus fpgaInfo and
+// mediaAcceleratorInfo. Substrate models gpuInfo only, so the NVIDIA families report their
+// count and the Inferentia and Trainium families report nothing — which is #234's reading
+// for inf1, that "real EC2 does not report [Inferentia] through gpuInfo", carried forward to
+// inf2, trn1 and trn2 on the strength of the shape rather than of a capture. Which of
+// inferenceAcceleratorInfo and neuronInfo real EC2 populates for each of those four is
+// **not** stated by either member's reference page, so modeling them would mean guessing
+// where the count goes; a caller reading gpuInfo for an inf or trn type gets nothing, which
+// is what it gets from AWS.
+//
+// SpotPrice follows [ec2InstanceTypeFamilies]' rule — a fixed rate per GiB of memory within
+// a family, deterministic stub, never an AWS price. The three #234 values are preserved
+// verbatim and each family's rate is calibrated to them where one exists: g4dn 0.01175
+// USD/GiB from g4dn.xlarge 0.188, inf1 0.0095 from inf1.xlarge 0.076, and p3 0.918 per 61
+// GiB, which makes every p3 size an exact multiple of the seeded p3.2xlarge value. The rates
+// for the families with no seeded value are substrate's, ordered so a newer generation costs
+// more per GiB than the one it replaces.
+var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
+	// NVIDIA V100. Previous generation, and the only family here that is. 0.918/61 GiB.
+	{Name: "p3", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"2xlarge", 8, 62464, 1, "0.918"},
+		{"8xlarge", 32, 249856, 4, "3.672"},
+		{"16xlarge", 64, 499712, 8, "7.344"},
 	}},
-	{Name: "g4dn", GPUs: 1, Sizes: []ec2InstanceTypeSize{
-		{"xlarge", 4, 16384, "0.188"},
+	// NVIDIA A100 40 GiB. One size is the whole family. 0.0175 USD/GiB.
+	{Name: "p4d", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"24xlarge", 96, 1179648, 8, "20.16"},
 	}},
-	{Name: "inf1", Sizes: []ec2InstanceTypeSize{
-		{"xlarge", 4, 8192, "0.076"},
+	// NVIDIA A100 80 GiB — AWS's own family, not a p4d size. 0.0195 USD/GiB.
+	{Name: "p4de", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"24xlarge", 96, 1179648, 8, "22.464"},
+	}},
+	// NVIDIA H100. 0.0225 USD/GiB.
+	{Name: "p5", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"4xlarge", 16, 262144, 1, "5.76"},
+		{"48xlarge", 192, 2097152, 8, "46.08"},
+	}},
+	// NVIDIA T4. 0.01175 USD/GiB. The accelerator count is not monotonic in size and AWS
+	// publishes it that way: the 12xlarge carries four and the 16xlarge one.
+	{Name: "g4dn", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"xlarge", 4, 16384, 1, "0.188"},
+		{"2xlarge", 8, 32768, 1, "0.376"},
+		{"4xlarge", 16, 65536, 1, "0.752"},
+		{"8xlarge", 32, 131072, 1, "1.504"},
+		{"12xlarge", 48, 196608, 4, "2.256"},
+		{"16xlarge", 64, 262144, 1, "3.008"},
+	}},
+	// NVIDIA A10G. 0.0125 USD/GiB. Same non-monotonic count as g4dn, plus a 24xlarge that
+	// carries four where the 48xlarge carries eight.
+	{Name: "g5", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"xlarge", 4, 16384, 1, "0.2"},
+		{"2xlarge", 8, 32768, 1, "0.4"},
+		{"4xlarge", 16, 65536, 1, "0.8"},
+		{"8xlarge", 32, 131072, 1, "1.6"},
+		{"12xlarge", 48, 196608, 4, "2.4"},
+		{"16xlarge", 64, 262144, 1, "3.2"},
+		{"24xlarge", 96, 393216, 4, "4.8"},
+		{"48xlarge", 192, 786432, 8, "9.6"},
+	}},
+	// NVIDIA L4. 0.013 USD/GiB. g6.xlarge is the type #891, #892 and #894 probe.
+	{Name: "g6", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+		{"xlarge", 4, 16384, 1, "0.208"},
+		{"2xlarge", 8, 32768, 1, "0.416"},
+		{"4xlarge", 16, 65536, 1, "0.832"},
+		{"8xlarge", 32, 131072, 1, "1.664"},
+		{"12xlarge", 48, 196608, 4, "2.496"},
+		{"16xlarge", 64, 262144, 1, "3.328"},
+		{"24xlarge", 96, 393216, 4, "4.992"},
+		{"48xlarge", 192, 786432, 8, "9.984"},
+	}},
+	// AWS Inferentia. 0.0095 USD/GiB. Not reported through gpuInfo; see above.
+	{Name: "inf1", Sizes: []ec2AcceleratedSize{
+		{"xlarge", 4, 8192, 1, "0.076"},
+		{"2xlarge", 8, 16384, 1, "0.152"},
+		{"6xlarge", 24, 49152, 4, "0.456"},
+		{"24xlarge", 96, 196608, 16, "1.824"},
+	}},
+	// AWS Inferentia2. 0.0105 USD/GiB. The count runs 1, 1, 6, 12 — not powers of two.
+	{Name: "inf2", Sizes: []ec2AcceleratedSize{
+		{"xlarge", 4, 16384, 1, "0.168"},
+		{"8xlarge", 32, 131072, 1, "1.344"},
+		{"24xlarge", 96, 393216, 6, "4.032"},
+		{"48xlarge", 192, 786432, 12, "8.064"},
+	}},
+	// AWS Trainium. 0.0115 USD/GiB.
+	{Name: "trn1", Sizes: []ec2AcceleratedSize{
+		{"2xlarge", 8, 32768, 1, "0.368"},
+		{"32xlarge", 128, 524288, 16, "5.888"},
+	}},
+	// AWS Trainium2. 0.0135 USD/GiB. The small size is a 3xlarge, not a 2xlarge.
+	{Name: "trn2", Sizes: []ec2AcceleratedSize{
+		{"3xlarge", 12, 131072, 1, "1.728"},
+		{"48xlarge", 192, 2097152, 16, "27.648"},
 	}},
 }
 
-// ec2InstanceTypeCatalog is the flattened [ec2InstanceTypeFamilies], in family and then
-// size order. ec2InstanceTypeIndex is the same data keyed by type name.
+// ec2InstanceTypeCatalog is the flattened [ec2InstanceTypeFamilies] followed by the
+// flattened [ec2AcceleratedFamilies], in family and then size order.
+// ec2InstanceTypeIndex is the same data keyed by type name.
 //
 // Both are built by one function so a type can never be in one and not the other — the
 // eight-type catalog and its parallel spot-price map had exactly that hazard, and a type
-// missing from the price map was silently dropped from DescribeSpotPriceHistory.
+// missing from the price map was silently dropped from DescribeSpotPriceHistory. The same
+// reasoning is why the two family tables are flattened by one function rather than
+// concatenated by their readers: DescribeInstanceTypes, DescribeInstanceTypeOfferings and
+// DescribeSpotPriceHistory each walk the catalog once and cannot disagree about what is in
+// it.
 var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 
-// buildEC2InstanceTypeCatalog flattens [ec2InstanceTypeFamilies] into the catalog slice
-// and its by-name index.
+// buildEC2InstanceTypeCatalog flattens both family tables into the catalog slice and its
+// by-name index.
 //
 // Every catalog entry is x86_64 and supports both on-demand and spot. That is true of
 // every family listed, so it is applied here rather than repeated per row; a family with
-// a different architecture or usage class would need this widening first.
+// a different architecture or usage class would need this widening first. Graviton-based
+// accelerated families are the nearest real example — g5g is ARM — which is one reason the
+// catalog does not carry them.
 func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2InstanceTypeInfo) {
 	var catalog []ec2InstanceTypeInfo
 	index := make(map[string]ec2InstanceTypeInfo)
+	add := func(name string, vcpus, memoryMiB, gpu int, spotPrice string) {
+		info := ec2InstanceTypeInfo{
+			InstanceType:          name,
+			VCpus:                 vcpus,
+			MemoryMiB:             memoryMiB,
+			GPU:                   gpu,
+			SpotPrice:             spotPrice,
+			SupportedArchs:        []string{"x86_64"},
+			SupportedUsageClasses: []string{"on-demand", "spot"},
+		}
+		catalog = append(catalog, info)
+		index[info.InstanceType] = info
+	}
 	for _, family := range ec2InstanceTypeFamilies {
 		for _, size := range family.Sizes {
-			info := ec2InstanceTypeInfo{
-				InstanceType:          family.Name + "." + size.Size,
-				VCpus:                 size.VCpus,
-				MemoryMiB:             size.MemoryMiB,
-				GPU:                   family.GPUs,
-				SpotPrice:             size.SpotPrice,
-				SupportedArchs:        []string{"x86_64"},
-				SupportedUsageClasses: []string{"on-demand", "spot"},
+			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, size.SpotPrice)
+		}
+	}
+	for _, family := range ec2AcceleratedFamilies {
+		for _, size := range family.Sizes {
+			// A family whose accelerators AWS reports under inferenceAcceleratorInfo or
+			// neuronInfo reports nothing under gpuInfo, so the count is dropped rather
+			// than moved: substrate models gpuInfo only.
+			gpu := 0
+			if family.ReportedAsGPU {
+				gpu = size.Accelerators
 			}
-			catalog = append(catalog, info)
-			index[info.InstanceType] = info
+			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, size.SpotPrice)
 		}
 	}
 	return catalog, index

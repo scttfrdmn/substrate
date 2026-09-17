@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Eleven complete accelerated-computing instance-type families in the EC2 catalog, retiring the one
+  place its completeness invariant did not hold** (#896). `ec2InstanceTypeFamilies` documents that the
+  catalog is deliberately not exhaustive *but complete per family*, because
+  `ec2CheckInstanceTypesExist` refuses a type the catalog does not carry — so a family that stops
+  mid-ladder answers `InvalidInstanceType` for a type that plainly exists. The accelerated families
+  were the exception: `p3`, `g4dn` and `inf1` carried one size each, and the recorded reason was that
+  "the accelerated families are large, their specs vary widely across sizes, and no consumer has asked
+  for more of them". The first two clauses still hold; the third stopped holding. #891, #892 and #894
+  all arrive from a consumer probing `g6.xlarge`, and each was refused before any of its own logic ran.
+  So `p3`, `g4dn` and `inf1` are completed and eight further families are seeded — `p4d`, `p4de`, `p5`,
+  `g5`, `g6`, `inf2`, `trn1`, `trn2` — for forty-one accelerated types where there were three.
+  `DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and `DescribeSpotPriceHistory` share one
+  catalog built by one function, so all three report every added type; a test asserts the three agree
+  set-for-set, which is the hazard that function exists to prevent.
+
+  vCPU, memory and accelerator counts come from AWS's accelerated-computing instance-type guide, and
+  from the previous-generation page for `p3`, which is the one family here AWS lists as previous
+  generation. The counts are **not monotonic in size** and AWS publishes them that way: `g4dn`, `g5`
+  and `g6` each have a `12xlarge` carrying four accelerators and a `16xlarge` carrying one, `g5`/`g6`
+  have a `24xlarge` carrying four below a `48xlarge` carrying eight, and `inf2`'s counts run 1, 1, 6,
+  12. Each of those is pinned by a test, because a plausible "correction" to powers of two is wrong.
+
+  Accelerated sizes live in a second table, `ec2AcceleratedFamilies`, rather than in the existing one.
+  The split is a shape difference rather than a policy one: an accelerator count varies across the
+  sizes of one real family, so it cannot hang off the family the way vCPU rate and spot rate do. One
+  function still flattens both into the single catalog and index.
+
+  `inf1`, `inf2`, `trn1` and `trn2` render **no `gpuInfo` element at all**, not a zero count.
+  `InstanceTypeInfo` splits accelerators across `gpuInfo`, `inferenceAcceleratorInfo` and `neuronInfo`
+  (plus `fpgaInfo` and `mediaAcceleratorInfo`), and substrate models `gpuInfo` only. That is #234's
+  reading for `inf1` — real EC2 does not report Inferentia through `gpuInfo` — carried to the other
+  three on the strength of the shape rather than of a capture: neither `InferenceAcceleratorInfo`'s nor
+  `NeuronInfo`'s reference page states which family populates which member, so a count under `gpuInfo`
+  would be a real number in a member AWS does not put it in. The counts are recorded in the table
+  regardless, so modelling either member later needs no research.
+
+  Spot prices follow the catalog's existing calibration rule — a fixed rate per GiB of memory within a
+  family, a deterministic stub and never an AWS price. The three values #234 seeded (`p3.2xlarge`
+  0.918, `g4dn.xlarge` 0.188, `inf1.xlarge` 0.076) are preserved verbatim and their families are
+  calibrated from them, so no existing fixture moves; a test asserts each family's rate against every
+  one of its sizes, which is the only check on a column of hand-computed decimals.
+
+  Four families AWS publishes beside these are deliberately left out and `docs/services.md` names them:
+  `p3dn`, `trn1n`, `p5e` and `p5en` are separate single-size families, and `trn2u.48xlarge` is published
+  with no accelerator count at all — almost certainly a documentation gap, and inferring 16 from
+  `trn2.48xlarge` would be substrate inventing a spec. `g5g` is out because every catalog entry reports
+  `x86_64`. A family absent from the catalog is still refused, so widening later is additive.
 - **KMS `EncryptionContext`, at all six members that carry one, and the two refusals a recorded context
   makes reachable** (#979). `Encrypt`, `Decrypt`, both `GenerateDataKey*` operations and both ends of
   `ReEncrypt` take an encryption context. Substrate decoded none of them, so a context was accepted and
@@ -245,6 +292,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page is exactly when someone working from the struct would put #971's member back.
 
 ### Changed
+- **`RunInstances` accepting an instance type `DescribeInstanceTypes` refuses is recorded as a
+  divergence rather than closed** (#896). `RunInstances` reads `InstanceType` and stores it verbatim;
+  `ec2InstanceTypeIndex` has exactly one non-test reader. So a launch of `g6.xlarge` succeeded and
+  `DescribeInstances` reported it while `DescribeInstanceTypes` refused the same string in the same
+  session — two operations disagreeing about whether a type exists, with the permissive one creating
+  the state. Real EC2 refuses at launch. Substrate does not, and validating there would move the exact
+  failure the catalog's completeness invariant exists to prevent onto the operation that creates state:
+  `m7i.large`, `t2.micro`, `c7i.xlarge`, `t4g.nano`, `m7i.xlarge` and `c6a.xlarge` are all launched by
+  fixtures in this repository and none is in the catalog, so a launch-time check would refuse types AWS
+  plainly offers. `docs/services.md` now states the divergence, its reason, and the consequence a caller
+  needs: an instance's reported `instanceType` is recorded intent, not an assertion that substrate
+  models the type. A test asserts the divergence rather than the fix, so closing it later is a
+  deliberate edit and not a silent behaviour change.
+- **`docs/services.md` lists the instance-type catalog's families, and records that `currentGeneration`
+  is always `true`** (#896). The reference is what tells a caller which types will be refused, so the
+  family table now carries all eighteen families with their full size ladders, the four accelerated
+  families deliberately left out with the reason for each, and which accelerator counts reach `gpuInfo`.
+  It also records that `DescribeInstanceTypes` reports every catalog type as current generation, of
+  which `p3` — the one family AWS publishes on the previous-generation page — is the standing exception;
+  the `current-generation` filter is inert, which is why no single response contradicts itself.
 - **`GetResources` reports what has been tagged, not everything that exists, which is a compatibility
   break** (#938). `API_GetResources` publishes two rules that end at the same place — a record whose tag
   set is empty — and substrate could not tell them apart. It "does not return untagged resources"; and,

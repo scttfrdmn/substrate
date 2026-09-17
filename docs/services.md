@@ -5663,6 +5663,11 @@ the template is resolved, so a typo answers `InvalidParameterValue` rather than
   `opt-in-not-required`, so the opt-in filtering the parameter controls has nothing to exclude.
 - **`IncludeUnsupportedInRegion` is not read** on `DescribeInstanceTypes`; the seeded catalog is
   the same in every region.
+- **`RunInstances` does not validate `InstanceType` against the catalog**, so it launches a type
+  `DescribeInstanceTypes` refuses in the same session. Deliberate, because the catalog is not
+  exhaustive; see
+  [RunInstances accepts a type DescribeInstanceTypes refuses](#runinstances-accepts-a-type-describeinstancetypes-refuses)
+  for why and for what an instance's reported `instanceType` does and does not mean.
 - **Eight selector families answer an empty set where AWS answers `NotFound`.** `KeyName.N`
   and `KeyPairId.N` (AWS: `InvalidKeyPair.NotFound`), `GroupName.N` and `GroupId.N` on
   `DescribePlacementGroups` (`InvalidPlacementGroup.Unknown`), `ZoneName.N`/`ZoneId.N`,
@@ -7209,16 +7214,69 @@ exhaustive** — EC2 offers some 800 types — but it is **complete per family**
 | `t3`, `t3a` | `nano`, `micro`, `small`, `medium`, `large`, `xlarge`, `2xlarge` |
 | `m5`, `m5a`, `r5`, `c5a` | `large`, `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge`, `24xlarge` |
 | `c5` | `large`, `xlarge`, `2xlarge`, `4xlarge`, `9xlarge`, `12xlarge`, `18xlarge`, `24xlarge` — note the ladder is **not** the same as `c5a`'s |
-| accelerated | `p3.2xlarge`, `g4dn.xlarge`, `inf1.xlarge` |
+| `p3` | `2xlarge`, `8xlarge`, `16xlarge` |
+| `p4d`, `p4de` | `24xlarge` — AWS publishes these as two families, not two sizes of one |
+| `p5` | `4xlarge`, `48xlarge` |
+| `g4dn` | `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge` |
+| `g5`, `g6` | `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge`, `24xlarge`, `48xlarge` |
+| `inf1` | `xlarge`, `2xlarge`, `6xlarge`, `24xlarge` |
+| `inf2` | `xlarge`, `8xlarge`, `24xlarge`, `48xlarge` |
+| `trn1` | `2xlarge`, `32xlarge` |
+| `trn2` | `3xlarge`, `48xlarge` |
 
 Whole families rather than a sample, because an absent type is *refused* (below) —
 a catalog stopping at `c5.xlarge` would answer `InvalidInstanceType` for
 `c5.large`, which is the right code for a bogus type and the wrong one for a real
-one. Bare-metal sizes (`m5.metal` and friends) are deliberately excluded: they are
-real types, but nothing else in the plugin models their behaviour, so returning
-them would advertise fidelity that is not there. vCPU and memory figures come from
-the AWS instance-type guides. `inf1`'s Inferentia accelerator is not reported
-through `gpuInfo`, matching real EC2, so its GPU count is zero.
+one. Bare-metal sizes (`m5.metal`, `g4dn.metal` and friends) are deliberately
+excluded: they are real types, but nothing else in the plugin models their
+behaviour, so returning them would advertise fidelity that is not there. vCPU and
+memory figures come from the AWS instance-type guides — general purpose, compute
+optimized, memory optimized, and, for the accelerated families,
+[accelerated computing](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html)
+(`p3` from the [previous generation](https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html)
+page).
+
+A family absent from the table above is refused outright, so the ones deliberately
+left out are worth naming: `p3dn`, `trn1n`, `p5e` and `p5en` are single-size
+families AWS publishes beside the ones here, and `trn2u.48xlarge` is published with
+**no** accelerator count at all — almost certainly a documentation gap rather than a
+zero-accelerator instance, and inferring `16` from `trn2.48xlarge` would be substrate
+inventing a spec. Graviton-based accelerated families (`g5g`) are out because every
+catalog entry reports `x86_64`. Widening later is additive (#896).
+
+#### Which accelerators reach `gpuInfo`
+
+`InstanceTypeInfo` splits accelerators across three members — `gpuInfo`,
+`inferenceAcceleratorInfo` and `neuronInfo` — plus `fpgaInfo` and
+`mediaAcceleratorInfo`. Substrate models **`gpuInfo` only**, so:
+
+- the NVIDIA families (`p3`, `p4d`, `p4de`, `p5`, `g4dn`, `g5`, `g6`) report their
+  accelerator count under `gpuInfo>gpus>item>count`;
+- the Inferentia and Trainium families (`inf1`, `inf2`, `trn1`, `trn2`) render **no
+  `gpuInfo` element at all** — not a zero count.
+
+The `inf1` half of that matches real EC2 and predates #896. It is carried to `inf2`,
+`trn1` and `trn2` on the strength of the shape rather than of a capture: neither
+`InferenceAcceleratorInfo`'s nor `NeuronInfo`'s reference page states which family
+populates which member, so a count reported under `gpuInfo` would be a real number in
+a member AWS does not put it in. Substrate records the counts internally; nothing
+reports them.
+
+Accelerator counts are **not monotonic in size** and AWS publishes them that way, so
+do not derive one from the size: `g4dn`, `g5` and `g6` each have a `12xlarge` carrying
+four accelerators and a `16xlarge` carrying one, `g5`/`g6` have a `24xlarge` carrying
+four below a `48xlarge` carrying eight, and `inf2`'s counts run 1, 1, 6, 12. Read the
+count from `DescribeInstanceTypes`.
+
+#### `currentGeneration` is always `true`, and `p3` is the exception
+
+`DescribeInstanceTypes` reports `currentGeneration` as `true` for every catalog type.
+`p3` is the one family AWS publishes on the *previous* generation page, so its four
+rows carry a value AWS would report as `false`. The `current-generation` filter is
+[inert](#what-is-refused-and-what-is-merely-inert), which is why the divergence is not
+visible as a self-contradiction within one response — a filtered query is not narrowed
+either way. Do not use `currentGeneration` to decide whether substrate models a type;
+use the family table above.
 
 #### A type outside the catalog: refused, or empty?
 
@@ -7242,6 +7300,31 @@ InvalidInstanceType: The following supplied instance types do not exist: [zz9.bo
 One bad type fails the whole request; the known types are not returned. The
 message is verbatim from a real `us-east-1` capture for the single-type case; the
 `", "` separator for a list is substrate's choice, so dispatch on the code.
+
+##### `RunInstances` accepts a type `DescribeInstanceTypes` refuses
+
+`RunInstances` does **not** validate `InstanceType` against the catalog. It stores
+whatever string it is given, and `DescribeInstances` reports it back, so:
+
+```
+aws ec2 run-instances --instance-type m7i.large ...   # succeeds
+aws ec2 describe-instance-types --instance-types m7i.large   # InvalidInstanceType, HTTP 400
+```
+
+Two operations therefore disagree about whether a type exists, and the permissive one
+is the one that creates state. Real EC2 refuses at launch. Substrate does not, and the
+reason is the catalog's deliberate non-exhaustiveness: refusing here would move the
+very failure the completeness invariant exists to prevent onto the operation that
+creates state, and it would refuse types AWS plainly offers. That is not hypothetical —
+`m7i.large`, `t2.micro`, `c7i.xlarge`, `t4g.nano`, `m7i.xlarge` and `c6a.xlarge` are all
+launched by fixtures in this repository and none of them is in the catalog.
+
+The consequence for a caller: **an instance's `instanceType` is recorded intent, not an
+assertion that substrate models the type.** A launch tells you nothing about whether
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` or `DescribeSpotPriceHistory`
+will report that type. Closing the divergence means widening the catalog to every type
+a consumer launches, which is the direction #896 took rather than tightening the launch
+path.
 
 `DescribeInstanceTypes` applies **five** of the fifty-seven filter names its reference
 documents — `instance-type`, `memory-info.size-in-mib`,
