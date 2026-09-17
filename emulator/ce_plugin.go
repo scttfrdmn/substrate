@@ -97,7 +97,7 @@ func (p *CEPlugin) getCostAndUsage(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, ceInvalidBody()
 		}
 	}
 
@@ -255,7 +255,7 @@ func (p *CEPlugin) getCostForecast(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, ceInvalidBody()
 		}
 	}
 
@@ -291,7 +291,7 @@ func (p *CEPlugin) getDimensionValues(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, ceInvalidBody()
 		}
 	}
 

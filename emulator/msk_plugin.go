@@ -105,11 +105,11 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "BadRequest", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, mskInvalidBody()
 		}
 	}
 	if input.ClusterName == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "ClusterName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("ClusterName is required")
 	}
 
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
@@ -166,7 +166,7 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 
 func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "cluster ARN is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -179,7 +179,7 @@ func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN
 
 func (p *MSKPlugin) getBootstrapBrokers(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "cluster ARN is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -223,7 +223,7 @@ func (p *MSKPlugin) listClusters(reqCtx *RequestContext, _ *AWSRequest) (*AWSRes
 
 func (p *MSKPlugin) deleteCluster(reqCtx *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "cluster ARN is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -251,14 +251,14 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 	// Parse region and account from ARN.
 	parts := strings.SplitN(clusterARN, ":", 7)
 	if len(parts) < 6 || parts[2] != "kafka" {
-		return nil, &AWSError{Code: "BadRequest", Message: "invalid MSK cluster ARN: " + clusterARN, HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("invalid MSK cluster ARN: " + clusterARN)
 	}
 	region := parts[3]
 	acct := parts[4]
 	// parts[5] is "cluster/{name}/{uuid}"
 	resParts := strings.SplitN(parts[5], "/", 3)
 	if len(resParts) < 2 {
-		return nil, &AWSError{Code: "BadRequest", Message: "invalid MSK cluster ARN resource: " + clusterARN, HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("invalid MSK cluster ARN resource: " + clusterARN)
 	}
 	name := resParts[1]
 
@@ -291,11 +291,11 @@ func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "BadRequest", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, mskInvalidBody()
 		}
 	}
 	if input.ClusterName == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "ClusterName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("ClusterName is required")
 	}
 	// Prefer fields from the Provisioned sub-object (V2 shape).
 	if input.Provisioned != nil {
@@ -333,7 +333,7 @@ func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*A
 // describeClusterV2 returns cluster details in the V2 ClusterInfo shape.
 func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "cluster ARN is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -375,7 +375,7 @@ func (p *MSKPlugin) listClustersV2(reqCtx *RequestContext, req *AWSRequest) (*AW
 // listNodes returns synthetic broker node information for an MSK cluster.
 func (p *MSKPlugin) listNodes(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "cluster ARN is required", HTTPStatus: http.StatusBadRequest}
+		return nil, mskBadRequest("cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {

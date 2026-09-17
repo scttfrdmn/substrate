@@ -80,10 +80,10 @@ func (p *EventBridgePlugin) putRule(ctx *RequestContext, req *AWSRequest) (*AWSR
 		EventBusName       string `json:"EventBusName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 	if body.Name == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ebValidationError("Name is required")
 	}
 
 	state := body.State
@@ -128,10 +128,10 @@ func (p *EventBridgePlugin) deleteRule(ctx *RequestContext, req *AWSRequest) (*A
 		EventBusName string `json:"EventBusName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 	if body.Name == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ebValidationError("Name is required")
 	}
 
 	goCtx := context.Background()
@@ -248,10 +248,10 @@ func (p *EventBridgePlugin) describeRule(ctx *RequestContext, req *AWSRequest) (
 		EventBusName string `json:"EventBusName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 	if body.Name == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ebValidationError("Name is required")
 	}
 
 	goCtx := context.Background()
@@ -279,10 +279,10 @@ func (p *EventBridgePlugin) putTargets(ctx *RequestContext, req *AWSRequest) (*A
 		Targets      []EBTarget `json:"Targets"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 	if body.Rule == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "Rule is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ebValidationError("Rule is required")
 	}
 
 	goCtx := context.Background()
@@ -339,10 +339,10 @@ func (p *EventBridgePlugin) removeTargets(ctx *RequestContext, req *AWSRequest) 
 		IDs          []string `json:"Ids"` //nolint:revive
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 	if body.Rule == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "Rule is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ebValidationError("Rule is required")
 	}
 
 	goCtx := context.Background()
@@ -388,10 +388,10 @@ func (p *EventBridgePlugin) listTargetsByRule(ctx *RequestContext, req *AWSReque
 		Limit        int    `json:"Limit"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 	if body.Rule == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "Rule is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ebValidationError("Rule is required")
 	}
 
 	goCtx := context.Background()
@@ -433,7 +433,7 @@ func (p *EventBridgePlugin) putEvents(ctx *RequestContext, req *AWSRequest) (*AW
 		} `json:"Entries"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, ebInvalidBody()
 	}
 
 	goCtx := context.Background()

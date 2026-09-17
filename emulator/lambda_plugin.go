@@ -252,10 +252,10 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		} `json:"Environment"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidBody()
 	}
 	if body.FunctionName == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "FunctionName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidParameterValue("FunctionName is required")
 	}
 
 	// Check for existing function.
@@ -709,10 +709,10 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 		EventSourceToken string `json:"EventSourceToken"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidBody()
 	}
 	if body.StatementID == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "StatementId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidParameterValue("StatementId is required")
 	}
 
 	// Load existing policy or create new one.
@@ -887,7 +887,7 @@ func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn str
 		Tags map[string]string `json:"Tags"`
 	}
 	if unmarshalErr := json.Unmarshal(req.Body, &body); unmarshalErr != nil {
-		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidBody()
 	}
 	if fn.Tags == nil {
 		fn.Tags = make(map[string]string)
@@ -1207,10 +1207,10 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		Enabled          *bool  `json:"Enabled"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidBody()
 	}
 	if input.FunctionName == "" || input.EventSourceArn == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "FunctionName and EventSourceArn are required", HTTPStatus: http.StatusBadRequest}
+		return nil, lambdaInvalidParameterValue("FunctionName and EventSourceArn are required")
 	}
 
 	batchSize := input.BatchSize

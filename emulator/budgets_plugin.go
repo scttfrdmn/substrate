@@ -139,7 +139,7 @@ func (p *BudgetsPlugin) createBudget(reqCtx *RequestContext, req *AWSRequest) (*
 		Budget    Budget `json:"Budget"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, budgetsInvalidBody()
 	}
 	acct := input.AccountID
 	if acct == "" {
@@ -189,7 +189,7 @@ func (p *BudgetsPlugin) describeBudgets(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, budgetsInvalidBody()
 		}
 	}
 	acct := input.AccountID
@@ -227,7 +227,7 @@ func (p *BudgetsPlugin) describeBudget(reqCtx *RequestContext, req *AWSRequest) 
 		BudgetName string `json:"BudgetName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, budgetsInvalidBody()
 	}
 	acct := input.AccountID
 	if acct == "" {
@@ -260,7 +260,7 @@ func (p *BudgetsPlugin) updateBudget(reqCtx *RequestContext, req *AWSRequest) (*
 		NewBudget Budget `json:"NewBudget"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, budgetsInvalidBody()
 	}
 	acct := input.AccountID
 	if acct == "" {
@@ -301,7 +301,7 @@ func (p *BudgetsPlugin) deleteBudget(reqCtx *RequestContext, req *AWSRequest) (*
 		BudgetName string `json:"BudgetName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, budgetsInvalidBody()
 	}
 	acct := input.AccountID
 	if acct == "" {

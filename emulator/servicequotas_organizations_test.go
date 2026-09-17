@@ -320,23 +320,28 @@ func TestServiceQuotas_RequiredMembersAreEnforced(t *testing.T) {
 // TestServiceQuotas_BodyDecodeFailures covers the decode path with bodies the
 // shared helper cannot produce, since it substitutes "{}" for an absent one.
 //
-// A body that is not JSON is a serialization failure. A body that is *absent*
-// is not: it carries no members, so the useful answer is the missing required
-// member rather than a decode error about the empty string — which is why the
-// zero-length case is handled before the unmarshal rather than by it.
+// Both bodies answer IllegalArgumentException, which is the only input-validation
+// code Service Quotas publishes on any of the four operations substrate
+// implements (#950). The distinction the plugin still draws lives in the message,
+// which is what the two want values below assert: a body that is not JSON is
+// refused as such, while a body that is *absent* carries no members, so the
+// useful answer is the missing required member rather than a decode complaint
+// about the empty string — which is why the zero-length case is handled before
+// the unmarshal rather than by it.
 func TestServiceQuotas_BodyDecodeFailures(t *testing.T) {
 	srv := emulator.StartTestServer(t)
 
 	tests := []struct {
-		name string
-		op   string
-		body string
-		code string
+		name    string
+		op      string
+		body    string
+		code    string
+		message string
 	}{
-		{"unparseable on list", "ListServiceQuotas", "{not json", "SerializationException"},
-		{"unparseable on get", "GetServiceQuota", "{not json", "SerializationException"},
-		{"empty on list", "ListServiceQuotas", "", "IllegalArgumentException"},
-		{"empty on get", "GetServiceQuota", "", "IllegalArgumentException"},
+		{"unparseable on list", "ListServiceQuotas", "{not json", "IllegalArgumentException", "the request body is not valid JSON"},
+		{"unparseable on get", "GetServiceQuota", "{not json", "IllegalArgumentException", "the request body is not valid JSON"},
+		{"empty on list", "ListServiceQuotas", "", "IllegalArgumentException", "ServiceCode is required"},
+		{"empty on get", "GetServiceQuota", "", "IllegalArgumentException", "ServiceCode and QuotaCode are required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -355,13 +360,19 @@ func TestServiceQuotas_BodyDecodeFailures(t *testing.T) {
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400", resp.StatusCode)
 			}
-			code, _ := sqDecode(t, resp)["__type"].(string)
+			doc := sqDecode(t, resp)
+			code, _ := doc["__type"].(string)
 			if i := strings.LastIndex(code, "#"); i >= 0 {
 				code = code[i+1:]
 			}
 			if code != tt.code {
 				t.Errorf("code = %q, want %q", code, tt.code)
 			}
+			message, _ := doc["message"].(string)
+			if message != tt.message {
+				t.Errorf("message = %q, want %q", message, tt.message)
+			}
+			assertNoDecoderText(t, tt.op, message)
 		})
 	}
 }

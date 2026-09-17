@@ -159,7 +159,7 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, bedrockInvalidBody()
 	}
 
 	// Extract input text from first text content item.
@@ -328,8 +328,11 @@ func (p *BedrockRuntimePlugin) createModelInvocationJob(ctx *RequestContext, req
 		InputDataConfig  json.RawMessage `json:"inputDataConfig"`
 		OutputDataConfig json.RawMessage `json:"outputDataConfig"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.JobName == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "jobName is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, bedrockInvalidBody()
+	}
+	if body.JobName == "" {
+		return nil, bedrockValidationError("jobName is required")
 	}
 
 	jobID := generateBedrockJobID()

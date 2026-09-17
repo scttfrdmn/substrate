@@ -102,10 +102,10 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 		ShardCount int    `json:"ShardCount"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	if body.StreamName == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "StreamName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidArgument("StreamName is required")
 	}
 	if body.ShardCount <= 0 {
 		body.ShardCount = 1
@@ -164,7 +164,7 @@ func (p *KinesisPlugin) deleteStream(ctx *RequestContext, req *AWSRequest) (*AWS
 		kinesisStreamRef
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -200,7 +200,7 @@ func (p *KinesisPlugin) describeStream(ctx *RequestContext, req *AWSRequest) (*A
 		kinesisStreamRef
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -223,7 +223,7 @@ func (p *KinesisPlugin) describeStreamSummary(ctx *RequestContext, req *AWSReque
 		kinesisStreamRef
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -270,7 +270,7 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 		ScalingType      string `json:"ScalingType"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -307,7 +307,7 @@ func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		PartitionKey string `json:"PartitionKey"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -357,7 +357,7 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		} `json:"Records"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -419,14 +419,14 @@ func (p *KinesisPlugin) getShardIterator(ctx *RequestContext, req *AWSRequest) (
 		StartingSequenceNumber string `json:"StartingSequenceNumber"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
 		return nil, refErr
 	}
 	if body.ShardID == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "ShardId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidArgument("ShardId is required")
 	}
 
 	// Validate stream exists.
@@ -479,10 +479,10 @@ func (p *KinesisPlugin) getRecords(_ *RequestContext, req *AWSRequest) (*AWSResp
 		StreamARN string `json:"StreamARN"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	if body.ShardIterator == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "ShardIterator is required", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidArgument("ShardIterator is required")
 	}
 	limit := body.Limit
 	if limit <= 0 {
@@ -608,7 +608,7 @@ func (p *KinesisPlugin) mergeShards(ctx *RequestContext, req *AWSRequest) (*AWSR
 		AdjacentShardToMerge string `json:"AdjacentShardToMerge"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -639,7 +639,7 @@ func (p *KinesisPlugin) splitShard(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		NewStartingHashKey string `json:"NewStartingHashKey"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -669,7 +669,7 @@ func (p *KinesisPlugin) addTagsToStream(ctx *RequestContext, req *AWSRequest) (*
 		Tags map[string]string `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -713,7 +713,7 @@ func (p *KinesisPlugin) removeTagsFromStream(ctx *RequestContext, req *AWSReques
 		TagKeys []string `json:"TagKeys"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -766,7 +766,7 @@ func (p *KinesisPlugin) listTagsForStream(ctx *RequestContext, req *AWSRequest) 
 		Limit *int `json:"Limit"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -777,9 +777,9 @@ func (p *KinesisPlugin) listTagsForStream(ctx *RequestContext, req *AWSRequest) 
 	// be used." The two restrictions the request model states are Limit's 1–50 range and
 	// ExclusiveStartTagKey's 1–128 length, so both are refused under it. It is also what
 	// [kinesisResolveStream] answers, so this operation's two parameter refusals and its stream
-	// resolution agree on one code. The InvalidParameterException still answered by every handler's
-	// body-decode guard is published by Kinesis nowhere at all; that mismatch is #950's and is not
-	// corrected here.
+	// resolution agree on one code — and, since #950 corrected the nineteen sites that answered a code
+	// Kinesis publishes nowhere at all, so does every other refusal in the plugin. See
+	// [kinesisInvalidBody].
 	if body.Limit != nil && (*body.Limit < kinesisMinListTagsLimit || *body.Limit > kinesisMaxListTagsLimit) {
 		return nil, &AWSError{
 			Code: "InvalidArgumentException",
@@ -869,7 +869,7 @@ func (p *KinesisPlugin) enableEnhancedMonitoring(ctx *RequestContext, req *AWSRe
 		ShardLevelMetrics []string `json:"ShardLevelMetrics"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {
@@ -908,7 +908,7 @@ func (p *KinesisPlugin) disableEnhancedMonitoring(ctx *RequestContext, req *AWSR
 		ShardLevelMetrics []string `json:"ShardLevelMetrics"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, kinesisInvalidBody()
 	}
 	target, refErr := kinesisResolveStream(ctx, body.kinesisStreamRef)
 	if refErr != nil {

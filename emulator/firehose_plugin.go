@@ -63,11 +63,11 @@ func (p *FirehosePlugin) createDeliveryStream(reqCtx *RequestContext, req *AWSRe
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, firehoseInvalidBody()
 		}
 	}
 	if input.DeliveryStreamName == "" {
-		return nil, &AWSError{Code: "InvalidArgumentException", Message: "DeliveryStreamName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, firehoseValidationError("DeliveryStreamName is required")
 	}
 	if input.DeliveryStreamType == "" {
 		input.DeliveryStreamType = "DirectPut"
@@ -116,11 +116,11 @@ func (p *FirehosePlugin) describeDeliveryStream(reqCtx *RequestContext, req *AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, firehoseInvalidBody()
 		}
 	}
 	if input.DeliveryStreamName == "" {
-		return nil, &AWSError{Code: "InvalidArgumentException", Message: "DeliveryStreamName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, firehoseValidationError("DeliveryStreamName is required")
 	}
 
 	goCtx := context.Background()
@@ -225,11 +225,11 @@ func (p *FirehosePlugin) deleteDeliveryStream(reqCtx *RequestContext, req *AWSRe
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, firehoseInvalidBody()
 		}
 	}
 	if input.DeliveryStreamName == "" {
-		return nil, &AWSError{Code: "InvalidArgumentException", Message: "DeliveryStreamName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, firehoseValidationError("DeliveryStreamName is required")
 	}
 
 	goCtx := context.Background()

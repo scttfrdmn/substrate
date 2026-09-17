@@ -163,8 +163,11 @@ func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 		DomainID        string `json:"DomainId"`
 		UserProfileName string `json:"UserProfileName"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.AppName == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "AppName is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, sagemakerInvalidBody()
+	}
+	if body.AppName == "" {
+		return nil, sagemakerValidationError("AppName is required")
 	}
 
 	appArn := fmt.Sprintf("arn:aws:sagemaker:%s:%s:app/%s/%s/%s/%s",
@@ -203,7 +206,7 @@ func (p *SageMakerPlugin) deleteApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 		UserProfileName string `json:"UserProfileName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, sagemakerInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -225,7 +228,7 @@ func (p *SageMakerPlugin) describeApp(ctx *RequestContext, req *AWSRequest) (*AW
 		UserProfileName string `json:"UserProfileName"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, sagemakerInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -252,8 +255,11 @@ func (p *SageMakerPlugin) createTrainingJob(ctx *RequestContext, req *AWSRequest
 	var body struct {
 		TrainingJobName string `json:"TrainingJobName"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.TrainingJobName == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "TrainingJobName is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, sagemakerInvalidBody()
+	}
+	if body.TrainingJobName == "" {
+		return nil, sagemakerValidationError("TrainingJobName is required")
 	}
 
 	jobArn := fmt.Sprintf("arn:aws:sagemaker:%s:%s:training-job/%s", ctx.Region, ctx.AccountID, body.TrainingJobName)
@@ -284,8 +290,11 @@ func (p *SageMakerPlugin) describeTrainingJob(ctx *RequestContext, req *AWSReque
 	var body struct {
 		TrainingJobName string `json:"TrainingJobName"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.TrainingJobName == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "TrainingJobName is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, sagemakerInvalidBody()
+	}
+	if body.TrainingJobName == "" {
+		return nil, sagemakerValidationError("TrainingJobName is required")
 	}
 
 	goCtx := context.Background()
@@ -331,8 +340,11 @@ func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) 
 	var body struct {
 		TrainingJobName string `json:"TrainingJobName"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.TrainingJobName == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "TrainingJobName is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, sagemakerInvalidBody()
+	}
+	if body.TrainingJobName == "" {
+		return nil, sagemakerValidationError("TrainingJobName is required")
 	}
 
 	goCtx := context.Background()

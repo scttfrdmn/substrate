@@ -140,9 +140,9 @@ func kinesisParseStreamARN(arn string) (kinesisStreamTarget, *AWSError) {
 //   - **Neither** — refused. "You must use either the StreamARN or the StreamName parameter, or
 //     both" makes a request carrying neither invalid, and this is the guard that replaces the
 //     "StreamName is required" one. The code moves with it: InvalidArgumentException is published on
-//     all fifteen operations, where the InvalidParameterException the old guard answered is
-//     published by Kinesis nowhere at all. The remaining sites answering that code are the
-//     body-decode guards, which are #950's and are not touched here.
+//     all fifteen operations, where the code the old guard answered is published by Kinesis nowhere
+//     at all. #950 moved the rest of the plugin onto it too, so nothing is left answering the old
+//     one; see [kinesisInvalidBody].
 //
 // **What happens when the two disagree is substrate's reading**, because no Kinesis page states it:
 // the request is refused rather than one member silently winning. A caller that names two different

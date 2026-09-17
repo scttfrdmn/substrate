@@ -80,7 +80,7 @@ func (p *ACMPlugin) requestCertificate(ctx *RequestContext, req *AWSRequest) (*A
 		} `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, acmInvalidBody()
 	}
 	if body.DomainName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "DomainName is required", HTTPStatus: http.StatusBadRequest}
@@ -144,7 +144,7 @@ func (p *ACMPlugin) describeCertificate(ctx *RequestContext, req *AWSRequest) (*
 		CertificateArn string `json:"CertificateArn"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, acmInvalidBody()
 	}
 	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
 		return nil, arnErr
@@ -176,7 +176,7 @@ func (p *ACMPlugin) deleteCertificate(ctx *RequestContext, req *AWSRequest) (*AW
 		CertificateArn string `json:"CertificateArn"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, acmInvalidBody()
 	}
 	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
 		return nil, arnErr
@@ -269,7 +269,7 @@ func (p *ACMPlugin) addTagsToCertificate(ctx *RequestContext, req *AWSRequest) (
 		} `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, acmInvalidBody()
 	}
 	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
 		return nil, arnErr
@@ -317,7 +317,7 @@ func (p *ACMPlugin) removeTagsFromCertificate(ctx *RequestContext, req *AWSReque
 		} `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, acmInvalidBody()
 	}
 	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
 		return nil, arnErr
@@ -358,7 +358,7 @@ func (p *ACMPlugin) listTagsForCertificate(ctx *RequestContext, req *AWSRequest)
 		CertificateArn string `json:"CertificateArn"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, acmInvalidBody()
 	}
 	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
 		return nil, arnErr
