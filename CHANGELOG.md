@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **KMS `EncryptionContext`, at all six members that carry one, and the two refusals a recorded context
+  makes reachable** (#979). `Encrypt`, `Decrypt`, both `GenerateDataKey*` operations and both ends of
+  `ReEncrypt` take an encryption context. Substrate decoded none of them, so a context was accepted and
+  lost, and the refusal AWS publishes for a mismatch could not be reached. `API_Encrypt` states the rule
+  as a consequence rather than a footnote: *"if you specify an `EncryptionContext` when encrypting data,
+  you must specify the same encryption context (a case-sensitive exact match) when decrypting the data.
+  Otherwise, the request to decrypt fails with an `InvalidCiphertextException`."* An application that
+  encrypts under `{"tenant": "acme"}` and decrypts without it is broken in production and passed here.
+
+  `Decrypt` and `ReEncrypt`'s source end now answer `InvalidCiphertextException`/400 for a context that
+  is not an exact case-sensitive match, in every shape it can differ: a context recorded and none
+  supplied, none recorded and one supplied, a differing value, a differing key, and a difference of case
+  in either. The message names both contexts, which AWS licenses — *"an encryption context is a
+  collection of non-secret key-value pairs"*, and *"this field may be displayed in plaintext in
+  CloudTrail logs and other output"* — because a caller whose context differs in one character cannot act
+  on a refusal that will not say which. An empty context and an absent one compare equal, in both
+  directions, which is substrate's reading: AWS documents no way to tell them apart on the wire.
+
+  The same envelope makes a second published behaviour reachable. `API_Decrypt` requires the caller to
+  *"specify the same algorithm that was used to encrypt the data. If you specify a different algorithm,
+  the `Decrypt` operation fails"*, and both operations now refuse an algorithm the key admits but which
+  did not write these bytes — distinct from `InvalidKeyUsageException`, which is about an algorithm the
+  key spec does not admit at all. AWS names no code for it; `InvalidCiphertextException` is substrate's
+  reading, resting on that code's *"or otherwise invalid"*. The algorithm is checked before the context,
+  also substrate's ordering, because the algorithm is what a real implementation needs in order to
+  attempt a decryption at all.
+
+  `ReEncrypt` is where the two members are visibly different things: `SourceEncryptionContext` is matched
+  against the incoming blob while `DestinationEncryptionContext` is written into the outgoing one, so a
+  `ReEncrypt` is the call that *changes* a context — and re-encrypting with no destination context
+  **strips** it rather than inheriting the source's, which a test pins because a caller relying on
+  inheritance would find its data readable without the context it believed it had set.
+
+  A context is recorded **only under a symmetric encryption key**, and that split is AWS's:
+  `API_ReEncrypt` states that *"the standard ciphertext format for asymmetric KMS keys does not include
+  fields for metadata"*, so an asymmetric ciphertext has nowhere to hold one and AWS publishes no code
+  for sending one — recording it would invent a refusal AWS cannot produce. Substrate accepts the member
+  and ignores it there, and a test asserts the opposite shape from every other one: two different
+  contexts across an `Encrypt` and a `Decrypt` under an RSA key must succeed. The *algorithm* is recorded
+  for every key regardless, because AWS reaches the same observable answer cryptographically — the wrong
+  OAEP hash fails to decrypt — and substrate models the observation rather than the mechanism.
+
+  Two IAM condition keys built on this member remain unmodelled and are now recorded as such:
+  `kms:EncryptionContext:<key>` and `kms:EncryptionContextKeys` are not evaluated, so a key policy or
+  grant constraining a context has no effect on whether a request is authorized. The published limits on
+  a context's total size and on the reserved `aws:` key prefix are likewise unenforced.
+
 - **A key material identity, and the six response members that report it** (#978). `API_KeyMetadata`
   publishes `CurrentKeyMaterialId` — *"identifies the current key material… AWS KMS uses the current key
   material for both encryption and decryption, and the non-current key material for decryption operations
@@ -198,6 +245,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page is exactly when someone working from the struct would put #971's member back.
 
 ### Changed
+- **KMS's stub ciphertext format, which is a compatibility break** (#979). The blob was a delimited string
+  carrying a key ID and a plaintext — enough for `Decrypt` to find its key and nothing else. It is now a
+  base64-wrapped JSON envelope carrying the key ID, the encryption algorithm, the encryption context and
+  the plaintext, with a format marker. A ciphertext written by an earlier release no longer decodes:
+  `Decrypt` and `ReEncrypt` answer `InvalidCiphertextException`/400 for it rather than reading its fields
+  under the new meanings, which is the honest answer and the one the marker exists to give. Any test
+  holding a hard-coded substrate ciphertext, or one persisted across releases, must be regenerated by
+  calling `Encrypt` again.
+
+  JSON rather than a delimiter is a correctness requirement rather than a preference: an encryption
+  context is caller-supplied text, so a key or a value may contain any delimiter, and an escaping bug
+  would produce a ciphertext that decrypts to the *wrong* context — the exact failure the member exists to
+  detect. `json.Marshal` sorts map keys, so one input produces one blob however the caller ordered its
+  context, and a test asserts that two `Encrypt` calls whose contexts differ only in JSON key order
+  return byte-identical ciphertext. A blob that varied with the caller's ordering could not be replayed.
+
 - **KMS `CreateKey` reads `CustomerMasterKeySpec`, the deprecated name for `KeySpec`** (#985). The member is
   a request parameter as well as a response member and substrate decoded only the response half, so a caller
   on an SDK old enough to still send the deprecated name asked for an `RSA_4096` key and silently got a

@@ -311,8 +311,10 @@ func kmsPutKeyMaterialID(out map[string]interface{}, member string, key *KMSKey)
 // symmetric encryption KMS key"; ReEncrypt's two members each name the symmetric encryption key on their
 // own side. Substrate's only origin is [kmsKeyOriginAWSKMS], so the origin half is always satisfied and
 // what remains is the key spec — and "symmetric encryption key" is narrower than "symmetric key", since
-// an HMAC key is symmetric and encrypts nothing. [kmsSymmetricDefaultKeySpec] is the one spec that
-// answers to it, which is why this reads as a single comparison.
+// an HMAC key is symmetric and encrypts nothing. [kmsIsSymmetricEncryptionKey] is where that comparison
+// lives, shared with #979's ciphertext envelope, which needs the identical condition to decide whether a
+// blob records an encryption context. Sharing it is the same argument this function makes one level up:
+// two places deciding "is this a symmetric encryption key" separately is two places to get it wrong.
 //
 // GenerateDataKey and GenerateDataKeyWithoutPlaintext are the two whose pages state no such condition:
 // the first bounds its member only by the Recipient parameter, the second not at all. Both are held to
@@ -327,7 +329,7 @@ func kmsPutKeyMaterialID(out map[string]interface{}, member string, key *KMSKey)
 // A key with no stored material ID is treated as having none rather than reporting an empty member,
 // which is the same reading and matters for a key written directly into state by a test.
 func kmsReportsKeyMaterialID(key *KMSKey) bool {
-	return key.KeySpec == kmsSymmetricDefaultKeySpec && key.KeyMaterialID != ""
+	return kmsIsSymmetricEncryptionKey(key) && key.KeyMaterialID != ""
 }
 
 // kmsPutAlgorithms sets an algorithm-list member, or leaves it absent when the list is empty.

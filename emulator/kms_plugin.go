@@ -1287,21 +1287,29 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 // that was used and an Encrypt that neither accepts nor reports one leaves a caller unable to learn
 // what to send back. The value is traceable: it is the caller's own, or the default AWS documents.
 //
-// Three request members remain unmodelled and each is recorded rather than silently absent. DryRun and
-// GrantTokens are seedable-outcome and authorization surface substrate has no equivalent of.
-// EncryptionContext is decoded by nobody, which is #979 — and it is the load-bearing one, because a
-// context supplied here must be supplied again on Decrypt or AWS answers
-// InvalidCiphertextException, a refusal substrate cannot reach while a stub ciphertext carries only a
-// key ID. Plaintext's published length range, 1-4096, is likewise unenforced.
+// #979 added EncryptionContext, and this is the end that makes it mean something: the context is
+// recorded into the ciphertext here, and Decrypt refuses a request that does not repeat it. AWS states
+// the consequence on this page — "if you specify an EncryptionContext when encrypting data, you must
+// specify the same encryption context (a case-sensitive exact match) when decrypting the data.
+// Otherwise, the request to decrypt fails with an InvalidCiphertextException" — so the value is not
+// merely echoed, it is the thing a later refusal is measured against. See [kmsEncryptStub] for why a
+// context is recorded only under a symmetric encryption key, and note that the response publishes no
+// EncryptionContext member at all: what a caller gets back is the blob that carries it.
+//
+// Two request members remain unmodelled and each is recorded rather than silently absent: DryRun and
+// GrantTokens are seedable-outcome and authorization surface substrate has no equivalent of. Plaintext's
+// published length range, 1-4096, is likewise unenforced, as are the smaller per-spec maxima AWS
+// publishes for the asymmetric specs.
 //
 // The response is complete at three members: CiphertextBlob, EncryptionAlgorithm and KeyId. Note that
 // API_Encrypt publishes no KeyMaterialId, unlike Decrypt and ReEncrypt — so #978, which adds that
 // member elsewhere, must leave this operation alone.
 func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		KeyID               string `json:"KeyId"`
-		Plaintext           string `json:"Plaintext"` // base64-encoded
-		EncryptionAlgorithm string `json:"EncryptionAlgorithm"`
+		KeyID               string            `json:"KeyId"`
+		Plaintext           string            `json:"Plaintext"` // base64-encoded
+		EncryptionAlgorithm string            `json:"EncryptionAlgorithm"`
+		EncryptionContext   map[string]string `json:"EncryptionContext"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
@@ -1347,7 +1355,7 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, &AWSError{Code: "InvalidCiphertextException", Message: "invalid base64 plaintext", HTTPStatus: http.StatusBadRequest}
 	}
 
-	ciphertext := kmsEncryptStub(keyID, plaintext)
+	ciphertext := kmsEncryptStub(key, algorithm, input.EncryptionContext, plaintext)
 	// Three members, and deliberately no KeyMaterialId. Encrypt is the one operation in the crypto set
 	// whose Response Syntax does not publish one — Decrypt, ReEncrypt and both GenerateDataKey* operations
 	// all do, and #978 added it to all four — so it is named here to keep a later sweep over "the
@@ -1382,7 +1390,15 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 // GrantTokens, and the DryRun/DryRunModifiers pair — the last of which is why CiphertextBlob is
 // published as Required: No, since it "is required in all cases except when DryRun is true and
 // DryRunModifiers is set to IGNORE_CIPHERTEXT". Substrate requires it always, which is correct for
-// every request it can answer. EncryptionContext is #979.
+// every request it can answer.
+//
+// EncryptionContext, added by #979, is the one member here that can *refuse*. AWS requires "the same (an
+// exact case-sensitive match) encryption context" that encrypted the data, and until #979 substrate
+// decoded none, so an application that encrypted under a tenant context and decrypted without one passed
+// here and failed in production. [kmsCheckCiphertextMatchesRequest] holds both that check and the
+// algorithm's, and runs last of the five: a caller is told about the key it named, that key's usage, that
+// key's state and whether its spec admits the algorithm at all before being told that this particular
+// ciphertext disagrees with the request.
 //
 // KeyMaterialId is reported, and it is read from the key rather than from the ciphertext — which is what
 // makes it worth asserting. AWS glosses it as "the identifier of the key material used to decrypt the
@@ -1392,9 +1408,10 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 // symmetric-encryption-key condition, which this operation's own page states.
 func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		CiphertextBlob      string `json:"CiphertextBlob"`
-		KeyID               string `json:"KeyId"`
-		EncryptionAlgorithm string `json:"EncryptionAlgorithm"`
+		CiphertextBlob      string            `json:"CiphertextBlob"`
+		KeyID               string            `json:"KeyId"`
+		EncryptionAlgorithm string            `json:"EncryptionAlgorithm"`
+		EncryptionContext   map[string]string `json:"EncryptionContext"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
@@ -1405,7 +1422,7 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, algErr
 	}
 
-	keyID, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
+	envelope, err := kmsDecryptStub([]byte(input.CiphertextBlob))
 	if err != nil {
 		return nil, &AWSError{Code: "InvalidCiphertextException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
@@ -1415,7 +1432,7 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	// the key ID came out of the ciphertext, not out of a KeyId parameter, so there is no ARN to
 	// take an account from. Decrypt's optional KeyId is a *constraint* on which key may be used,
 	// not a selector.
-	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, envelope.KeyID)
 	if err != nil {
 		return nil, err
 	}
@@ -1444,10 +1461,19 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if algErr := kmsCheckEncryptionAlgorithmForKey(key, "EncryptionAlgorithm", algorithm); algErr != nil {
 		return nil, algErr
 	}
+	// Last of the five, and after the key-spec check for a reason worth stating: an algorithm the key does
+	// not admit is a fact about the key, which a caller can act on without holding the ciphertext, where
+	// this is a fact about these particular bytes. Shared with ReEncrypt's source end — see
+	// [kmsCheckCiphertextMatchesRequest].
+	if matchErr := kmsCheckCiphertextMatchesRequest(
+		key, envelope, "EncryptionAlgorithm", "EncryptionContext", algorithm, input.EncryptionContext,
+	); matchErr != nil {
+		return nil, matchErr
+	}
 
 	out := map[string]interface{}{
 		"KeyId":               key.ARN,
-		"Plaintext":           base64.StdEncoding.EncodeToString(plaintext),
+		"Plaintext":           base64.StdEncoding.EncodeToString(envelope.Plaintext),
 		"EncryptionAlgorithm": algorithm,
 	}
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
@@ -1489,11 +1515,29 @@ func (p *KMSPlugin) checkNamedKeyMatches(goCtx context.Context, ctx *RequestCont
 	return nil
 }
 
+// generateDataKey mints a data key and returns it both in plaintext and wrapped under a KMS key.
+//
+// #979 added EncryptionContext, which this operation takes for the same reason Encrypt does and with the
+// same consequence: it is recorded into the returned CiphertextBlob, and AWS states the round trip on this
+// page — "if you specify an EncryptionContext, you must specify the same encryption context (a
+// case-sensitive exact match) when decrypting the data. Otherwise, the request to decrypt fails with an
+// InvalidCiphertextException." That refusal is Decrypt's to answer, not this operation's; this end only
+// has to record the value, which is why the page publishes no InvalidCiphertextException of its own.
+//
+// The wrap is recorded as SYMMETRIC_DEFAULT because AWS requires a symmetric encryption key here — "you
+// cannot use an asymmetric KMS key to encrypt data keys" — and takes no EncryptionAlgorithm member at all.
+// Substrate's usage check still admits an RSA key, which is #988; until that lands, such a call records an
+// algorithm the key does not admit, and the honest reading is that the call should not have succeeded.
+//
+// KeySpec and NumberOfBytes are decoded and unused: substrate always mints 32 bytes, so neither the
+// AES_128 spec nor the published 1-1024 range is honored, and AWS's "specify either... but not both" is
+// unenforced.
 func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		KeyID         string `json:"KeyId"`
-		KeySpec       string `json:"KeySpec"`
-		NumberOfBytes int    `json:"NumberOfBytes"`
+		KeyID             string            `json:"KeyId"`
+		KeySpec           string            `json:"KeySpec"`
+		NumberOfBytes     int               `json:"NumberOfBytes"`
+		EncryptionContext map[string]string `json:"EncryptionContext"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
@@ -1526,9 +1570,8 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 	// Generate a stub 32-byte data key.
 	dataKeyHex := randomHex(16)
-	dataKeyBytes, _ := base64.StdEncoding.DecodeString(base64.StdEncoding.EncodeToString([]byte(dataKeyHex)))
 	plaintextB64 := base64.StdEncoding.EncodeToString([]byte(dataKeyHex))
-	ciphertext := kmsEncryptStub(keyID, []byte(dataKeyHex))
+	ciphertext := kmsEncryptStub(key, kmsSymmetricDefaultAlgorithm, input.EncryptionContext, []byte(dataKeyHex))
 
 	out := map[string]interface{}{
 		"KeyId":          key.ARN,
@@ -1541,14 +1584,20 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	// the short version is that substrate's usage check still admits an RSA key here — #988 — so reporting
 	// unconditionally would invent a value for a response AWS cannot produce.
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
-	_ = dataKeyBytes
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// generateDataKeyWithoutPlaintext mints a data key and returns only the wrapped copy.
+//
+// It is [KMSPlugin.generateDataKey] minus the Plaintext member, and #979's EncryptionContext behaves
+// identically here: recorded into the blob, refused later by Decrypt. AWS's own framing makes the context
+// more load-bearing at this operation than at its sibling — the caller never sees the data key, so the
+// blob and the context are the whole of what it holds.
 func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		KeyID   string `json:"KeyId"`
-		KeySpec string `json:"KeySpec"`
+		KeyID             string            `json:"KeyId"`
+		KeySpec           string            `json:"KeySpec"`
+		EncryptionContext map[string]string `json:"EncryptionContext"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
@@ -1581,7 +1630,7 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	}
 
 	dataKeyHex := randomHex(16)
-	ciphertext := kmsEncryptStub(keyID, []byte(dataKeyHex))
+	ciphertext := kmsEncryptStub(key, kmsSymmetricDefaultAlgorithm, input.EncryptionContext, []byte(dataKeyHex))
 
 	out := map[string]interface{}{
 		"KeyId":          key.ARN,
@@ -1619,8 +1668,9 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 //
 // The source key is loaded from the *caller's* account and Region for the reason [KMSPlugin.decrypt]
 // records: the key ID came out of the ciphertext, so there is no ARN to take an account from. AWS
-// permits a cross-account source here; substrate cannot address one until a ciphertext carries more
-// than a bare key ID, which is the stub's shape (see [kmsEncryptStub]).
+// permits a cross-account source here; substrate cannot address one until the stub ciphertext carries an
+// account and a Region alongside the key ID, which #979's envelope does not add (see [kmsStubEnvelope] —
+// it records what a refusal needs, not what a lookup needs).
 //
 // #969 added the three members this operation was missing that substrate can derive: SourceKeyId's
 // *request* form, which had gone undecoded so that the IncorrectKeyException AWS publishes was
@@ -1633,9 +1683,14 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 // destination key is loaded at all, which is the same "half that fails first" rule #961 applied to the
 // key-state checks.
 //
-// Four request members remain unmodelled and are recorded rather than absent: DryRun, GrantTokens and
-// the source and destination EncryptionContext pair, the last of which is #979 — and it is what makes
-// this operation's context handling non-trivial, since it *reads* one context and *writes* the other.
+// #979 added the context pair, and this is the operation where the two halves are visibly different
+// things: SourceEncryptionContext is matched against the incoming blob — "enter the same encryption
+// context that was used to encrypt the ciphertext" — while DestinationEncryptionContext is recorded into
+// the outgoing one, so one is a refusal and the other a write. A ReEncrypt is therefore the call that
+// *changes* a ciphertext's context, which is what AWS documents it for, and the two members are
+// independent in exactly the way the two algorithm members are.
+//
+// Two request members remain unmodelled and are recorded rather than absent: DryRun and GrantTokens.
 // #978 added the last two response members, SourceKeyMaterialId and DestinationKeyMaterialId, and this
 // is the operation that makes them worth having: they are the only place two key material identities
 // appear in one response, so a caller can see that the data moved between two distinct materials rather
@@ -1644,11 +1699,13 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 // ReEncrypt out of an asymmetric key and into a symmetric one reports the destination member alone.
 func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		CiphertextBlob                 string `json:"CiphertextBlob"`
-		DestinationKeyID               string `json:"DestinationKeyId"`
-		SourceKeyID                    string `json:"SourceKeyId"`
-		SourceEncryptionAlgorithm      string `json:"SourceEncryptionAlgorithm"`
-		DestinationEncryptionAlgorithm string `json:"DestinationEncryptionAlgorithm"`
+		CiphertextBlob                 string            `json:"CiphertextBlob"`
+		DestinationKeyID               string            `json:"DestinationKeyId"`
+		SourceKeyID                    string            `json:"SourceKeyId"`
+		SourceEncryptionAlgorithm      string            `json:"SourceEncryptionAlgorithm"`
+		DestinationEncryptionAlgorithm string            `json:"DestinationEncryptionAlgorithm"`
+		SourceEncryptionContext        map[string]string `json:"SourceEncryptionContext"`
+		DestinationEncryptionContext   map[string]string `json:"DestinationEncryptionContext"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
@@ -1665,13 +1722,13 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, algErr
 	}
 
-	sourceKeyID, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
+	envelope, err := kmsDecryptStub([]byte(input.CiphertextBlob))
 	if err != nil {
 		return nil, &AWSError{Code: "InvalidCiphertextException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
 	goCtx := context.Background()
-	sourceKey, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, sourceKeyID)
+	sourceKey, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, envelope.KeyID)
 	if err != nil {
 		return nil, err
 	}
@@ -1696,6 +1753,17 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 	if algErr := kmsCheckEncryptionAlgorithmForKey(sourceKey, "SourceEncryptionAlgorithm", sourceAlgorithm); algErr != nil {
 		return nil, algErr
+	}
+	// The last of the source-side checks, and still ahead of every destination-side one: a request whose
+	// source context does not match is refused before the destination key is loaded, which is the same
+	// source-before-destination rule the two enums and the two state checks follow. Shared with Decrypt —
+	// see [kmsCheckCiphertextMatchesRequest].
+	if matchErr := kmsCheckCiphertextMatchesRequest(
+		sourceKey, envelope,
+		"SourceEncryptionAlgorithm", "SourceEncryptionContext",
+		sourceAlgorithm, input.SourceEncryptionContext,
+	); matchErr != nil {
+		return nil, matchErr
 	}
 
 	dest, resolveErr := p.resolveKeyTarget(goCtx, ctx, input.DestinationKeyID)
@@ -1722,7 +1790,10 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, algErr
 	}
 
-	newCiphertext := kmsEncryptStub(destKeyID, plaintext)
+	// The destination context is written, not matched, so the new blob carries whatever this request asked
+	// for and the source's context is not inherited. That is what makes ReEncrypt the operation that
+	// *changes* a context: re-encrypting with no DestinationEncryptionContext strips one.
+	newCiphertext := kmsEncryptStub(destKey, destAlgorithm, input.DestinationEncryptionContext, envelope.Plaintext)
 	// SourceKeyId is the source key's ARN, matching the sample response on API_ReEncrypt and the
 	// element's own gloss, "unique identifier of the KMS key used to originally encrypt the data". It
 	// held input.CiphertextBlob until #961 — a value that is not an identifier of anything, and one a

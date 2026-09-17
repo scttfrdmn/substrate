@@ -252,7 +252,9 @@ func TestKMSKeyMaterialID_ReEncryptReportsOneMaterialPerSide(t *testing.T) {
 // The source key is asymmetric with KeyUsage ENCRYPT_DECRYPT, a pair AWS publishes and CreateKey must
 // accept, and the source algorithm is one the spec admits. Its ciphertext is built by hand for the reason
 // [kmsStubCiphertext] records: nothing but Encrypt mints one, and Encrypt would need the same algorithm
-// threaded through to no additional effect.
+// threaded through to no additional effect. It uses [kmsStubCiphertextWith] because #979 made the blob
+// record the algorithm that wrote it — a blob claiming SYMMETRIC_DEFAULT against a request naming
+// RSAES_OAEP_SHA_256 is now refused as a mismatch before this assertion is reached.
 func TestKMSKeyMaterialID_EachReEncryptMemberFollowsItsOwnKey(t *testing.T) {
 	t.Parallel()
 	ts := arnGuardServer(t)
@@ -261,7 +263,7 @@ func TestKMSKeyMaterialID_EachReEncryptMemberFollowsItsOwnKey(t *testing.T) {
 	_, destKeyID := createKMSKey(t, ts)
 
 	out := kmsRawBody(t, ts, "ReEncrypt", map[string]any{
-		"CiphertextBlob":            kmsStubCiphertext(rsaKeyID, []byte("the plaintext")),
+		"CiphertextBlob":            kmsStubCiphertextWith(rsaKeyID, "RSAES_OAEP_SHA_256", nil, []byte("the plaintext")),
 		"SourceEncryptionAlgorithm": "RSAES_OAEP_SHA_256",
 		"DestinationKeyId":          destKeyID,
 	})

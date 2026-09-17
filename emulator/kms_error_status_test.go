@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -65,11 +66,40 @@ func kmsCall(t *testing.T, ts *emulator.TestServer, op string, body map[string]a
 //
 // Those two operations are the only ones whose key does not come from a KeyId parameter — it comes
 // out of the ciphertext — so they cannot be driven to the not-found path through a request member.
-// The format is the stub's own (kms_types.go); a test that could not build it would have to skip the
+// The format is the stub's own (kms_ciphertext.go); a test that could not build it would have to skip the
 // two operations, which are two of the fifteen sites the issue is about.
+//
+// SYMMETRIC_DEFAULT and no encryption context, which is what a Decrypt sending neither member matches.
+// A test that needs either recorded reaches for [kmsStubCiphertextWith].
 func kmsStubCiphertext(keyID string, plaintext []byte) string {
-	inner := base64.StdEncoding.EncodeToString(plaintext)
-	return base64.StdEncoding.EncodeToString([]byte("kms:" + keyID + ":" + inner))
+	return kmsStubCiphertextWith(keyID, "SYMMETRIC_DEFAULT", nil, plaintext)
+}
+
+// kmsStubCiphertextWith builds a stub ciphertext recording a chosen algorithm and encryption context.
+//
+// It exists because #979 made the blob's contents load-bearing: the algorithm and the context are what
+// Decrypt and ReEncrypt now *compare* a request against, so a test for either refusal has to be able to
+// write a blob that disagrees with the request it then sends. The envelope is duplicated from
+// kmsEncryptStub rather than shared, which is the point — a test asserting a wire behavior must not be
+// able to pass because it and the code agree on a mistake.
+//
+// The context is omitted when empty so that the blob is byte-identical to one written with no context at
+// all, matching what kmsEncryptStub's omitempty tag produces.
+func kmsStubCiphertextWith(keyID, algorithm string, encryptionContext map[string]string, plaintext []byte) string {
+	envelope := map[string]any{
+		"format":    "substrate-kms-v2",
+		"keyId":     keyID,
+		"algorithm": algorithm,
+		"plaintext": plaintext,
+	}
+	if len(encryptionContext) > 0 {
+		envelope["encryptionContext"] = encryptionContext
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		panic("kms stub ciphertext: " + err.Error())
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
 
 // kmsAbsentKeyID is a well-formed key identifier no CreateKey minted.
