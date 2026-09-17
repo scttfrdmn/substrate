@@ -49,13 +49,22 @@ import (
 // order.
 
 // queryMaxRecordsDefault is the page size an RDS or ElastiCache describe applies when
-// the caller names no MaxRecords.
+// the caller names no MaxRecords, and queryMaxRecordsMin and queryMaxRecordsMax are the
+// range a named one must fall in.
 //
-// It is the default both families publish on the parameter: "Default: 100". The
-// documented range — "Constraints: Minimum 20, maximum 100" — is deliberately not
-// enforced here; substrate honors an out-of-range MaxRecords today, and refusing it is
-// a separate defect from the cursor basis (#913).
-const queryMaxRecordsDefault = 100
+// All three are published on the parameter by both families, in the same words up to
+// capitalisation: "Default: 100" and "Constraints: Minimum 20, maximum 100."
+// (API_DescribeDBInstances, API_DescribeDBClusters) or "Constraints: minimum 20;
+// maximum 100." (API_DescribeCacheClusters, API_DescribeReplicationGroups,
+// API_DescribeCacheSubnetGroups).
+//
+// The default applies only to an *absent* MaxRecords. A value outside the range is
+// refused by [queryMaxRecords] rather than defaulted or clamped, which is #913.
+const (
+	queryMaxRecordsDefault = 100
+	queryMaxRecordsMin     = 20
+	queryMaxRecordsMax     = 100
+)
 
 // queryMarkerCursor is a decoded RDS or ElastiCache Marker: the record identifier that
 // the next page starts after.
@@ -118,20 +127,43 @@ func encodeQueryMarker(id string) string {
 	return base64.StdEncoding.EncodeToString([]byte(id))
 }
 
-// queryMaxRecords reads a MaxRecords request parameter, falling back to
-// [queryMaxRecordsDefault] when it is absent or unusable.
+// queryMaxRecords reads a MaxRecords request parameter, reporting the error response to
+// send when the caller named a page size the operation does not accept.
 //
-// Coercion rather than refusal is what substrate does today at all three call sites;
-// see [queryMaxRecordsDefault] for why correcting it is filed separately rather than
-// folded in here.
-func queryMaxRecords(raw string) int {
+// An absent MaxRecords is [queryMaxRecordsDefault], which is what both families publish.
+// Anything else must be an integer within [queryMaxRecordsMin] and [queryMaxRecordsMax];
+// a value outside the range, and a value that is not an integer at all, is refused (#913).
+//
+// Refusing rather than honoring or coercing is the point. Substrate honored
+// MaxRecords=5, which real RDS refuses, so a consumer paging five records at a time
+// worked here and failed against AWS — the direction of divergence that matters — and it
+// rewrote MaxRecords=0, -1 and abc to 100, a substitution invisible in a well-formed
+// response: a caller asking for a small page and receiving a hundred records sees the
+// same shape as a caller whose listing is short. This is the argument the IAM MaxItems
+// coercion was corrected on, and the message names the range as parseSimulateRequest and
+// parseS3ListBucketsParams already do.
+//
+// **The code is substrate's reading for RDS.** API_DescribeCacheClusters and
+// API_DescribeReplicationGroups both publish InvalidParameterValue with HTTP 400 ("The
+// value for a parameter is invalid."), so ElastiCache is sourced; API_DescribeDBInstances
+// publishes only DBInstanceNotFound/404 and API_DescribeDBClusters only its own NotFound
+// fault, so nothing on either page says what an out-of-range MaxRecords answers. One code
+// serves both families, matching [parseQueryMarker], so the two parameters of one cursor
+// cannot be refused under different codes.
+func queryMaxRecords(raw string) (int, *AWSError) {
 	if raw == "" {
-		return queryMaxRecordsDefault
+		return queryMaxRecordsDefault, nil
 	}
-	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-		return n
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < queryMaxRecordsMin || n > queryMaxRecordsMax {
+		return 0, &AWSError{
+			Code: "InvalidParameterValue",
+			Message: "MaxRecords must be an integer between " +
+				strconv.Itoa(queryMaxRecordsMin) + " and " + strconv.Itoa(queryMaxRecordsMax) + ".",
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
-	return queryMaxRecordsDefault
+	return n, nil
 }
 
 // queryMarkerPage collects one page of records from keys, resuming after cursor and

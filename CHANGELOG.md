@@ -530,6 +530,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A page size the service refuses was honoured, and one it cannot read was silently rewritten** (#913).
+  RDS `DescribeDBInstances` and `DescribeDBClusters` and ElastiCache `DescribeCacheClusters` read
+  `MaxRecords` with `if n, err := strconv.Atoi(raw); err == nil && n > 0`, so the parameter failed in two
+  opposite directions at once. An out-of-range value was **honoured**: `MaxRecords=5` produced a
+  five-record page here and is refused by real RDS, so a consumer written against substrate broke the
+  first time it ran against AWS — the direction of divergence an emulator must never permit. A value that
+  is not a page size at all was **rewritten** to 100: `MaxRecords=0`, `-1` and `abc` all answered a
+  hundred records, and a caller asking for a small page and receiving a hundred sees the same well-formed
+  shape as a caller whose listing is simply short, so the substitution is invisible in the response.
+
+  Both families publish the same three facts on the parameter, in the same words up to capitalisation —
+  `Default: 100` and "Constraints: Minimum 20, maximum 100." (`API_DescribeDBInstances`,
+  `API_DescribeDBClusters`) or "Constraints: minimum 20; maximum 100." (`API_DescribeCacheClusters`,
+  `API_DescribeReplicationGroups`, `API_DescribeCacheSubnetGroups`). An **absent** `MaxRecords` still
+  defaults to 100, which is the only case AWS publishes a default for; anything else must be an integer
+  within 20–100, and the ends are accepted, because narrowing a published range would be substrate
+  inventing a contract of its own. A refusal answers `InvalidParameterValue` / 400 with a message naming
+  the range, following `parseSimulateRequest` and `parseS3ListBucketsParams`, both of which already
+  refuse an out-of-range page size that way rather than coercing it.
+
+  **The code is published for ElastiCache and is substrate's reading for RDS.**
+  `API_DescribeCacheClusters` and `API_DescribeReplicationGroups` both list `InvalidParameterValue` at
+  400, "The value for a parameter is invalid."; `API_DescribeDBInstances` publishes `DBInstanceNotFound`
+  at 404 and nothing else, and neither RDS page says what an unusable `MaxRecords` answers. One code
+  serves both families, as it already does for the `Marker` (#887), so the two parameters of one cursor
+  cannot be refused under different codes.
+
+  **Both pagination parameters are now validated before any state is read**, the ordering rule #887
+  established and #915 extended: each of the three handlers checked nothing until after `p.state.List`,
+  so a request substrate cannot serve was answered with page one of whatever happened to exist. The
+  refusals are asserted against an *empty* listing, which is what makes them parameter checks rather
+  than data-dependent ones.
+
+  **A finding recorded rather than quietly fixed.** Eleven request sites across eight tests paged at
+  `MaxRecords=2` — a page size both real services refuse — and passed only because substrate was
+  permissive. A test that passes only because the emulator is lax is evidence of the divergence, not
+  noise, so it is on the record here, in `docs/services.md`, and in the doc comment of the constant that
+  replaced it: those tests now page at the documented minimum of twenty, which is why each creates
+  twenty-odd records to reach a second page. Their identifiers are zero-padded to a width that scales
+  with the count, because the cursor and the listing order are both lexicographic and an unpadded `-10`
+  sorts before `-9`.
+
 - **A pagination token substrate never issued was answered with page one, at four operations** (#915).
   CloudWatch `DescribeAlarms`, Systems Manager `DescribeParameters` and `GetParametersByPath`, and S3
   `ListObjectsV2` each decoded their token inside an `if err == nil` and discarded the failure, so a

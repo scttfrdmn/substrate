@@ -160,11 +160,15 @@ func (p *ElastiCachePlugin) describeCacheClusters(reqCtx *RequestContext, req *A
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["CacheClusterId"]
 
-	// The marker is validated before any state is read, so a request substrate cannot
-	// serve is refused rather than answered with page one.
+	// Both pagination parameters are validated before any state is read, so a request
+	// substrate cannot serve is refused rather than answered with page one.
 	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
 	if cursorErr != nil {
 		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
 	}
 
 	prefix := "cachecluster:" + scope + "/"
@@ -173,7 +177,7 @@ func (p *ElastiCachePlugin) describeCacheClusters(reqCtx *RequestContext, req *A
 		return nil, fmt.Errorf("elasticache describeCacheClusters list: %w", err)
 	}
 
-	page, nextMarker := queryMarkerPage(keys, prefix, cursor, queryMaxRecords(req.Params["MaxRecords"]),
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
 		func(key, _ string) (xmlCacheClusterItem, bool) {
 			data, getErr := p.state.Get(context.Background(), elasticacheNamespace, key)
 			if getErr != nil || data == nil {
