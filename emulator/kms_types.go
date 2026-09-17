@@ -26,6 +26,17 @@ const kmsKeyStatePendingDeletion = "PendingDeletion"
 // state and the boolean cannot be set independently, and a test asserts they agree.
 const kmsKeyStateDisabled = "Disabled"
 
+// kmsSymmetricDefaultKeySpec is the one key spec that supports symmetric encryption, and the only one
+// that supports automatic rotation.
+//
+// It has the same value as [kmsSymmetricDefaultAlgorithm] and is a separate constant because the two are
+// different kinds of thing: one is a KeySpec on a key, the other an EncryptionAlgorithm in a request, and
+// they coincide only because AWS reused the name. Sharing one identifier would read as though a key spec
+// and an algorithm were interchangeable, which is exactly the confusion
+// [kmsEncryptionAlgorithmsByKeySpec] exists to resolve — every other spec maps to algorithms with
+// different names.
+const kmsSymmetricDefaultKeySpec = "SYMMETRIC_DEFAULT"
+
 // kmsMinPendingWindowInDays and kmsMaxPendingWindowInDays bound ScheduleKeyDeletion's waiting period.
 //
 // API_ScheduleKeyDeletion publishes PendingWindowInDays with a Valid Range of 7 to 30 inclusive. The
@@ -138,6 +149,32 @@ type KMSKey struct {
 	// disables and re-enables with an explicit period never sees a stale one; a re-enable that omits the
 	// period overwrites it with [kmsDefaultRotationPeriodInDays] regardless, per that constant's note.
 	RotationPeriodInDays int `json:"RotationPeriodInDays,omitempty"`
+
+	// RotationEnabledDate is when the last successful EnableKeyRotation ran, zero if none has.
+	//
+	// Stored by #973 for one reason: it is the other half of NextRotationDate, which
+	// API_EnableKeyRotation defines against it — "the rotation period defines the number of days after
+	// you enable automatic key rotation that AWS KMS will rotate your key material, and the number of
+	// days between each automatic rotation thereafter." So the next date is this date plus
+	// [KMSKey.RotationPeriodInDays], and neither half alone yields it.
+	//
+	// [KMSKey.CreationDate] is not it. A key can be created long before rotation is turned on, and the
+	// page ties the schedule to the enable date rather than the creation date, so reusing CreationDate
+	// would report a rotation in the past for any key whose rotation was enabled later than a period ago.
+	//
+	// Every successful EnableKeyRotation overwrites it, including one that only changes the period. AWS
+	// documents no answer for what a period change does to an existing schedule, so this is substrate's
+	// reading, and it is the one that cannot report a date already past: keeping the first enable date and
+	// shortening the period would do exactly that. DisableKeyRotation leaves it alone, matching what
+	// RotationPeriodInDays above does and for the same reason — what changes is whether the schedule is
+	// reported, not whether it is remembered.
+	//
+	// Nothing rotates. Substrate models no key material and ListKeyRotations is unimplemented, so this is
+	// a schedule reported to a caller rather than an event that fires; the clock never advances it and no
+	// rotation is recorded when it passes. AWS's own re-enable rules — "if the key material in the
+	// re-enabled KMS key hasn't been rotated in one year, AWS KMS rotates it immediately" — describe
+	// rotations substrate does not perform, and are out of scope for the same reason.
+	RotationEnabledDate time.Time `json:"RotationEnabledDate,omitempty"`
 
 	// Tags holds resource tags.
 	Tags []KMSTag `json:"Tags,omitempty"`

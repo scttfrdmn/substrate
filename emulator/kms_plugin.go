@@ -762,29 +762,59 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 	// the published KMSInvalidStateException belongs to the states substrate never writes (Creating,
 	// Updating, Unavailable), and guarding here would invent a refusal AWS does not have.
 	//
-	// Substrate reports the stored setting in every state, so that documented false is *not* modeled yet
-	// — a key pending deletion still reports true here. That is #973, along with the restore-on-cancel
-	// behavior the same paragraph describes.
-	//
 	// KeyId is the bare key ID, not the ARN. The response element is glossed only "Identifies the
 	// specified symmetric encryption KMS key", with none of the "Amazon Resource Name (key ARN)" wording
 	// that API_ScheduleKeyDeletion and API_ReEncrypt use for their KeyId elements, and the page's sample
 	// response renders "1234abcd-12ab-34cd-56ef-1234567890ab". Where AWS distinguishes the two forms this
 	// precisely, echoing the caller's own input would be the wrong answer for an alias or an ARN.
+	//
+	// The reported rotation status is *derived*, and is not the stored flag in one state. AWS spells that
+	// state out — "while a KMS key is pending deletion, its key rotation status is false and AWS KMS does
+	// not rotate the key material. If you cancel the deletion, the original key rotation status returns to
+	// true" — and the second sentence is what forces a derivation rather than a write: there has to be
+	// something to restore *from*, so ScheduleKeyDeletion must leave [KMSKey.RotationEnabled] alone and
+	// this handler must answer false without it. The restore then needs no code at all — it is what
+	// removing the pending-deletion state already produces, which #963 made observable by leaving a
+	// canceled key Disabled rather than Enabled.
+	//
+	// The Disabled state is the same rule seen from the other side and needs no arm here: "the key
+	// rotation status does not change when you disable a KMS key", so the stored flag is reported
+	// unchanged, which is what #949 already pinned by asserting a refused rotation call leaves it alone.
+	// AWS adds that no rotation happens while a key is disabled and that a re-enabled key catches up if a
+	// period has passed; substrate rotates nothing and records no rotations, so there is no catch-up to
+	// model — see [KMSKey.RotationEnabledDate].
+	rotationEnabled := key.RotationEnabled && key.KeyState != kmsKeyStatePendingDeletion
 	out := map[string]interface{}{
 		"KeyId":              key.KeyID,
-		"KeyRotationEnabled": key.RotationEnabled,
+		"KeyRotationEnabled": rotationEnabled,
 	}
-	// Emitted only when rotation is on. AWS documents no answer for a key that has never rotated, and a
-	// "number of days between each automatic rotation" is not a fact about a key with no rotations — so
-	// this is substrate's reading, and the honest-empty one #827 established. The stored period is kept
-	// across a DisableKeyRotation regardless (see [KMSKey.RotationPeriodInDays]); what changes is whether
-	// it is reported, not whether it is remembered.
+	// The period and the next date follow the *reported* status, not the stored one, so a key pending
+	// deletion reports none of the three. Answering a schedule beside a false rotation status would
+	// describe a rotation AWS has just said will not happen, and a caller cannot tell which of the two to
+	// believe.
 	//
-	// NextRotationDate is the third member this could carry and does not: it needs the date rotation was
-	// enabled, which nothing stores. #973.
-	if key.RotationEnabled && key.RotationPeriodInDays > 0 {
+	// Both are emitted only when rotation is on. AWS documents no answer for a key that has never rotated,
+	// and neither a "number of days between each automatic rotation" nor a "next date" is a fact about a
+	// key with no rotation schedule — so this is substrate's reading, and the honest-empty one #827
+	// established. The stored period and enable date are kept across a DisableKeyRotation regardless (see
+	// [KMSKey.RotationPeriodInDays]); what changes is whether they are reported.
+	//
+	// NextRotationDate is the enable date plus the period, per API_EnableKeyRotation's definition of what
+	// a rotation period is, and it is rendered as a Unix timestamp to match what DescribeKey does with
+	// DeletionDate. AWS's Response Syntax types the member number while its sample renders an ISO-8601
+	// string; the two disagree on the page itself, and answering seconds keeps one KMS timestamp
+	// convention rather than two.
+	//
+	// OnDemandRotationStartDate is the one published member still absent, and it is blocked rather than
+	// deferred: it reports an in-progress RotateKeyOnDemand, an operation substrate does not implement, so
+	// there is no request that could set it. Emitting a zero timestamp would report a rotation that was
+	// never initiated, which is worse than omitting the member (#827). #973 records it; the operation is
+	// what unblocks it.
+	if rotationEnabled && key.RotationPeriodInDays > 0 {
 		out["RotationPeriodInDays"] = key.RotationPeriodInDays
+		if !key.RotationEnabledDate.IsZero() {
+			out["NextRotationDate"] = key.RotationEnabledDate.AddDate(0, 0, key.RotationPeriodInDays).Unix()
+		}
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -826,9 +856,10 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 // rotation status is false" — so a refusal there would suppress an answer AWS publishes. (The page does
 // list KMSInvalidStateException among its six errors, as every key-reading KMS operation does; that
 // covers the key states substrate never writes, not these two. An earlier version of this comment said
-// the page published neither code, which is wrong about that one, and #973 is where the pending-deletion
-// `false` itself is owed.) [TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey] pins
-// the behavior.
+// the page published neither code, which is wrong about that one.) The second of those two sentences is
+// an answer rather than a passthrough, and #973 is where the pending-deletion `false` became one — see
+// [KMSPlugin.getKeyRotationStatus], which derives it.
+// [TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey] pins both answers.
 //
 // EnableKey and DisableKey must not call this either, and for a different reason: their rows permit a
 // Disabled key, so the !key.Enabled arm here would refuse a call AWS accepts. They need the
@@ -840,6 +871,35 @@ func kmsKeyStateError(key *KMSKey) *AWSError {
 	}
 	if !key.Enabled {
 		return kmsKeyDisabled(key.KeyID)
+	}
+	return nil
+}
+
+// kmsRotationKeySpecError reports the refusal EnableKeyRotation and DisableKeyRotation owe a key whose
+// type cannot have automatic rotation, or nil when the key spec permits it.
+//
+// Only those two operations call it, and both must: their pages carry the identical symmetric-only
+// sentence and the identical seven-error list, so a guard on one and not the other would let a caller turn
+// rotation off on a key it could not turn it on for. GetKeyRotationStatus deliberately does not call it —
+// the sentence says you cannot *enable* rotation on such a key, not that you cannot ask, and the operation
+// answering false for a key that will never rotate is a true answer rather than a refusal. See
+// [kmsRotationUnsupportedKeySpec] for the code and for why KeySpec rather than KeyUsage is the test.
+//
+// **It runs before [kmsKeyStateError]**, and the order is substrate's reading: a disabled asymmetric key
+// has two applicable refusals and AWS publishes no precedence between them. The key type is chosen because
+// it is the permanent one. A key state is transient and has a remedy — EnableKey, or CancelKeyDeletion then
+// EnableKey — so answering it first would tell a caller that fixing the state makes the call succeed, which
+// for an asymmetric key is false however many times it is retried. That is the same principle as #964's
+// request-before-resource ordering, applied one level down between two conditions of the same resource.
+//
+// Three of AWS's five restrictions are unreachable rather than unguarded, and are recorded here rather
+// than half-implemented: imported key material needs an Origin substrate does not model and an
+// ImportKeyMaterial it does not implement; a custom key store needs a CustomKeyStoreId it does not model;
+// and an AWS managed key needs a KeyManager it neither mints nor reports (#974 is where that member is
+// owed). Each would be a second condition on this function the day it becomes reachable.
+func kmsRotationKeySpecError(key *KMSKey) *AWSError {
+	if key.KeySpec != kmsSymmetricDefaultKeySpec {
+		return kmsRotationUnsupportedKeySpec(key)
 	}
 	return nil
 }
@@ -888,13 +948,18 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	// Before the write, so a refusal leaves RotationEnabled as it was rather than half-applying the
-	// call it declined — the property #949 asks to be asserted by reading GetKeyRotationStatus back.
+	// Both guards precede the write, so a refusal leaves RotationEnabled as it was rather than
+	// half-applying the call it declined — the property #949 asks to be asserted by reading
+	// GetKeyRotationStatus back.
+	if specErr := kmsRotationKeySpecError(key); specErr != nil {
+		return nil, specErr
+	}
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
 	key.RotationEnabled = true
 	key.RotationPeriodInDays = period
+	key.RotationEnabledDate = p.tc.Now()
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms enableKeyRotation saveKey: %w", err)
 	}
@@ -921,9 +986,13 @@ func (p *KMSPlugin) disableKeyRotation(ctx *RequestContext, req *AWSRequest) (*A
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	// Refused on the same key states as its sibling: API_DisableKeyRotation publishes the identical
-	// seven-error list, so "rotation is already off, so turning it off cannot hurt" is not a reading
-	// AWS's table supports.
+	// Refused on the same key states and the same key types as its sibling: API_DisableKeyRotation
+	// publishes the identical seven-error list and carries the identical symmetric-only sentence, so
+	// "rotation is already off, so turning it off cannot hurt" is not a reading AWS's table or its prose
+	// supports. #949 rejected that argument for the key state and #972 rejects it again for the key type.
+	if specErr := kmsRotationKeySpecError(key); specErr != nil {
+		return nil, specErr
+	}
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}

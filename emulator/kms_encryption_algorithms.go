@@ -63,11 +63,11 @@ var kmsEncryptionAlgorithms = []string{
 // because CreateKey validates KeySpec against nothing (#977), which is its own defect; when it is
 // fixed this map becomes total over the specs a key can carry.
 var kmsEncryptionAlgorithmsByKeySpec = map[string][]string{
-	"SYMMETRIC_DEFAULT": {kmsSymmetricDefaultAlgorithm},
-	"RSA_2048":          {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"},
-	"RSA_3072":          {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"},
-	"RSA_4096":          {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"},
-	"SM2":               {"SM2PKE"},
+	kmsSymmetricDefaultKeySpec: {kmsSymmetricDefaultAlgorithm},
+	"RSA_2048":                 {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"},
+	"RSA_3072":                 {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"},
+	"RSA_4096":                 {"RSAES_OAEP_SHA_1", "RSAES_OAEP_SHA_256"},
+	"SM2":                      {"SM2PKE"},
 }
 
 // kmsResolveEncryptionAlgorithm defaults an absent encryption algorithm and refuses one outside the

@@ -194,6 +194,39 @@ func kmsInvalidRotationPeriod(days int) *AWSError {
 	}
 }
 
+// kmsRotationUnsupportedKeySpec reports that EnableKeyRotation or DisableKeyRotation named a key whose
+// type cannot have automatic rotation.
+//
+// UnsupportedOperationException at 400, published on both pages and glossed "the request was rejected
+// because a specified parameter is not supported or a specified resource is not valid for this
+// operation". A key of the wrong type is the second half of that gloss — a specified resource not valid
+// for this operation — and it is the case [kmsInvalidRotationPeriod] names when it declines the same code
+// for a number out of range, so the two readings are one decision seen from both sides.
+//
+// The restriction is stated twice on API_EnableKeyRotation, once in the prose and once on the KeyId
+// parameter: "automatic key rotation is supported only on symmetric encryption KMS keys. You cannot
+// enable automatic rotation of asymmetric KMS keys, HMAC KMS keys, KMS keys with imported key material,
+// or KMS keys in a custom key store." API_GetKeyRotationStatus repeats it verbatim, which is corroboration
+// that the restriction is a property of the key rather than of the call.
+//
+// The discriminator is KeySpec, not KeyUsage. SYMMETRIC_DEFAULT is the only spec that rotates, so one
+// equality test covers all three unsupported families at once — the asymmetric specs, the HMAC specs and
+// the ML-DSA specs — where KeyUsage would separate the HMAC case from the asymmetric one and still need
+// the spec to tell RSA from symmetric. That CreateKey today accepts a KeySpec and KeyUsage that cannot
+// occur together is #977; this refusal reads the member AWS's own sentence is about.
+//
+// The spec is named in the message so a caller can tell this refusal from a key-state one, which is the
+// other reason an EnableKeyRotation gets a 400.
+func kmsRotationUnsupportedKeySpec(key *KMSKey) *AWSError {
+	return &AWSError{
+		Code: "UnsupportedOperationException",
+		Message: fmt.Sprintf(
+			"the KMS key %q has key spec %q, and automatic rotation is supported only on %s keys",
+			key.KeyID, key.KeySpec, kmsSymmetricDefaultKeySpec),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsIncorrectKey reports that a caller named a key that is not the one which encrypted the ciphertext.
 //
 // IncorrectKeyException at 400, published on API_Decrypt and API_ReEncrypt and glossed identically on
