@@ -377,20 +377,32 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, kmsNotFound("Key not found")
 	}
 
-	out := map[string]interface{}{
-		"KeyMetadata": map[string]interface{}{
-			"KeyId":           key.KeyID,
-			"Arn":             key.ARN,
-			"Description":     key.Description,
-			"KeyUsage":        key.KeyUsage,
-			"KeySpec":         key.KeySpec,
-			"KeyState":        key.KeyState,
-			"Enabled":         key.Enabled,
-			"MultiRegion":     key.MultiRegion,
-			"RotationEnabled": key.RotationEnabled,
-			"CreationDate":    key.CreationDate.Unix(),
-		},
+	metadata := map[string]interface{}{
+		"KeyId":           key.KeyID,
+		"Arn":             key.ARN,
+		"Description":     key.Description,
+		"KeyUsage":        key.KeyUsage,
+		"KeySpec":         key.KeySpec,
+		"KeyState":        key.KeyState,
+		"Enabled":         key.Enabled,
+		"MultiRegion":     key.MultiRegion,
+		"RotationEnabled": key.RotationEnabled,
+		"CreationDate":    key.CreationDate.Unix(),
 	}
+	// Emitted on the key state rather than on the field being non-zero, because that is the condition
+	// API_KeyMetadata publishes: "this value is present only when the KMS key is scheduled for
+	// deletion, that is, when its KeyState is PendingDeletion". Added by #963 — before it the deletion
+	// date ScheduleKeyDeletion computed reached the caller once and was never stored, so DescribeKey
+	// could not report when a pending key was due to go.
+	//
+	// PendingDeletionWindowInDays, the adjacent member, is deliberately absent: the page confines it to
+	// KeyState PendingReplicaDeletion, which only a multi-Region primary that still has replicas
+	// reaches and substrate never writes. Its range is 1-365, not ScheduleKeyDeletion's 7-30, so the
+	// two are different members and reporting the waiting period under it would be wrong twice over.
+	if key.KeyState == kmsKeyStatePendingDeletion {
+		metadata["DeletionDate"] = key.DeletionDate.Unix()
+	}
+	out := map[string]interface{}{"KeyMetadata": metadata}
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
@@ -471,7 +483,7 @@ func (p *KMSPlugin) disableKey(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
 	}
-	return p.setKeyState(ctx, input.KeyID, "Disabled", false)
+	return p.setKeyState(ctx, input.KeyID, kmsKeyStateDisabled, false)
 }
 
 func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, enabled bool) (*AWSResponse, error) {
@@ -490,12 +502,39 @@ func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, e
 	}
 	key.KeyState = state
 	key.Enabled = enabled
+	// Neither caller writes PendingDeletion, so leaving a deletion date behind here would be a stored
+	// contradiction: a key reported Enabled that still remembers when it is due to be deleted.
+	// DescribeKey renders the date only for a pending key, so the contradiction is not observable
+	// today — clearing it keeps that a consequence of the state being consistent rather than of one
+	// renderer's condition.
+	if state != kmsKeyStatePendingDeletion {
+		key.DeletionDate = time.Time{}
+	}
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms setKeyState saveKey: %w", err)
 	}
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
+// scheduleKeyDeletion schedules a key for deletion after a waiting period.
+//
+// The three things #963 changed here, in the order the handler does them:
+//
+// The waiting period is checked against the published 7-30 range before the key is resolved. AWS does
+// not publish which of a bad window and an absent key it reports first, so the precedence is
+// substrate's reading: a value that is wrong on the face of the request is refused without a lookup,
+// which is how kmsInvalidBody already behaves one line above. Before #963 the guard was
+// "if days <= 0 { days = 30 }", which got the default right and the range not at all — 1, 365 and -5
+// were all accepted and the last silently became 30.
+//
+// A key already in PendingDeletion is refused rather than re-stamped. Its row in the developer
+// guide's key-state table is footnote [3] and the page carries the compatible-key-state sentence, so
+// the previous behavior — recomputing the deletion date and saving it — silently moved a deadline the
+// caller believed it had set. Updating, the table's other refused state, is unreachable: nothing in
+// substrate writes it.
+//
+// The response gained PendingWindowInDays and its KeyId became the key ARN, both of which
+// API_ScheduleKeyDeletion publishes and its own sample response carries.
 func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID               string `json:"KeyId"`
@@ -503,6 +542,18 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
+	}
+	days := input.PendingWindowInDays
+	switch {
+	case days == 0:
+		// Absent, not zero: the field is an int with no pointer, so a body that omits it and a body
+		// sending 0 are indistinguishable here. AWS refuses 0 and defaults an absent value, and
+		// substrate cannot tell them apart without decoding into a *int — which is worth doing only
+		// if a caller is ever shown to send an explicit 0, since defaulting is by far the commoner
+		// intent. Recorded rather than papered over.
+		days = kmsDefaultPendingWindowInDays
+	case days < kmsMinPendingWindowInDays || days > kmsMaxPendingWindowInDays:
+		return nil, kmsInvalidPendingWindow(days)
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -517,24 +568,46 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	days := input.PendingWindowInDays
-	if days <= 0 {
-		days = 30
+	if key.KeyState == kmsKeyStatePendingDeletion {
+		return nil, kmsInvalidKeyState(key.KeyID, key.KeyState)
 	}
-	deletionDate := p.tc.Now().AddDate(0, 0, days)
+	// Before the writes, so a refusal leaves the existing deletion date and key state alone rather
+	// than half-applying the call it declined — the property #949 established and this asserts by
+	// reading the date back through DescribeKey.
 	key.KeyState = kmsKeyStatePendingDeletion
 	key.Enabled = false
+	key.DeletionDate = p.tc.Now().AddDate(0, 0, days)
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms scheduleKeyDeletion saveKey: %w", err)
 	}
 	out := map[string]interface{}{
-		"KeyId":        key.KeyID,
-		"DeletionDate": deletionDate.Unix(),
-		"KeyState":     key.KeyState,
+		"KeyId":               key.ARN,
+		"DeletionDate":        key.DeletionDate.Unix(),
+		"KeyState":            key.KeyState,
+		"PendingWindowInDays": days,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// cancelKeyDeletion cancels a scheduled deletion, leaving the key disabled.
+//
+// It no longer delegates to setKeyState, which is what made all three of #963's defects here one
+// change: that helper writes whatever state it is handed, answers an empty body, and checks nothing.
+// All three are wrong for this operation.
+//
+// The resulting state is Disabled, not Enabled. API_CancelKeyDeletion's first sentence is explicit —
+// "when this operation succeeds, the key state of the KMS key is Disabled. To enable the KMS key, use
+// EnableKey" — so recovery from a scheduled deletion is two calls. Answering Enabled collapsed it to
+// one, and a consumer's recovery path written against substrate would have passed with its EnableKey
+// step missing.
+//
+// A key that is not pending deletion is refused. CancelKeyDeletion is the only operation in the
+// key-state table whose permitted set is a single state, every other row being footnote [4]. Without
+// the check the operation enabled any key it was pointed at, which is EnableKey under another name and
+// reachable by a caller authorized for one and not the other.
+//
+// The body is the key ARN under KeyId, the single response element the page publishes, where
+// setKeyState answered {} and a consumer reading response["KeyId"] got nothing.
 func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID string `json:"KeyId"`
@@ -542,7 +615,28 @@ func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AW
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
 	}
-	return p.setKeyState(ctx, input.KeyID, "Enabled", true)
+	goCtx := context.Background()
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, target.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, kmsNotFound("Key not found")
+	}
+	if key.KeyState != kmsKeyStatePendingDeletion {
+		return nil, kmsKeyNotPendingDeletion(key.KeyID)
+	}
+	key.KeyState = kmsKeyStateDisabled
+	key.Enabled = false
+	key.DeletionDate = time.Time{}
+	if err := p.saveKey(goCtx, key); err != nil {
+		return nil, fmt.Errorf("kms cancelKeyDeletion saveKey: %w", err)
+	}
+	return kmsJSONResponse(http.StatusOK, map[string]interface{}{"KeyId": key.ARN})
 }
 
 func (p *KMSPlugin) getKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

@@ -9198,12 +9198,12 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | Operation | Notes |
 |-----------|-------|
 | CreateKey | |
-| DescribeKey | Accepts all four `KeyId` forms — see below |
+| DescribeKey | Accepts all four `KeyId` forms; reports `DeletionDate` while a key is pending deletion — see below |
 | ListKeys | |
 | EnableKey | |
 | DisableKey | |
-| ScheduleKeyDeletion | |
-| CancelKeyDeletion | |
+| ScheduleKeyDeletion | Waiting period range-checked at 7–30; refuses a key already pending deletion — see below |
+| CancelKeyDeletion | Requires a key pending deletion, and leaves it `Disabled` — see below |
 | GetKeyPolicy | |
 | PutKeyPolicy | |
 | GetKeyRotationStatus | Answers in every key state substrate can produce — see below |
@@ -9370,6 +9370,116 @@ The four unreachable states are recorded rather than implemented because
 `Disabled`: there is no operation a caller could use to reach them, so a guard for
 them could only be exercised by fabricating a key record, which is the kind of test
 that proves nothing about the wire.
+
+### Cancelling a deletion leaves the key disabled, not enabled
+
+`API_CancelKeyDeletion`'s first sentence is the whole of it: *"Cancels the deletion
+of a KMS key. When this operation succeeds, the key state of the KMS key is
+`Disabled`. To enable the KMS key, use `EnableKey`."* Recovery from a scheduled
+deletion is two calls, and substrate answered `Enabled` — collapsing it to one.
+
+That is not a cosmetic difference in a reported string. A consumer's recovery path
+written against substrate would have passed with its `EnableKey` step missing, and
+then failed against AWS. Substrate now leaves the key `Disabled` with `Enabled`
+false, and the test asserts it by encrypting: `Encrypt` still refuses with
+`DisabledException`/400 after the cancel, and succeeds only once `EnableKey` has
+run. Reading `KeyState` back says the state changed; `Encrypt` refusing says the
+state means what it says.
+
+`API_KeyMetadata` states the invariant the two fields have to satisfy — *"`Enabled`:
+when `KeyState` is `Enabled` this value is true, otherwise it is false"* — so the
+state and the boolean are not independent, and a test asserts they agree.
+
+### The deletion pair each permit one side of a single key state
+
+`CancelKeyDeletion` and `ScheduleKeyDeletion` are each other's inverse, and the
+*Key states of AWS KMS keys* table treats them that way. Both carry the
+compatible-key-state sentence and both publish `KMSInvalidStateException`/400;
+substrate checked neither.
+
+| Operation | Permitted from | Refused from |
+|-----------|----------------|--------------|
+| `CancelKeyDeletion` | `PendingDeletion` **only** | Every other state — footnote `[4]`, *"KMSInvalidStateException: `<key ARN>` is not pending deletion"* |
+| `ScheduleKeyDeletion` | Every state but the two at right | `PendingDeletion` — footnote `[3]`; `Updating` — footnote `[15]`, **unreachable in substrate** |
+
+`CancelKeyDeletion` is the only operation in the table whose permitted set is a
+single state, and the only one whose footnote is phrased as a **negation**. So it
+gets its own refusal helper: naming the offending state, as every other refusal in
+this package does, would read as though some other state were the problem when the
+problem is the absence of the one state the operation needs.
+
+Without that check the operation enabled any key it was pointed at, which is
+`EnableKey` under another name — reachable by a caller holding
+`kms:CancelKeyDeletion` and not `kms:EnableKey`.
+
+On `ScheduleKeyDeletion` the missing check was quieter and no less real: a second
+call against an already-pending key recomputed the deletion date and saved it, so a
+caller that had scheduled a 7-day deletion and then called again silently moved a
+deadline it believed was fixed. `Updating`, the row's other refused state, is
+recorded as unreachable for the same reason the four rotation states are: nothing
+in substrate writes it.
+
+### `DescribeKey` reports a deletion date, so a refused schedule can be shown to have changed nothing
+
+Substrate computed the deletion date inside `ScheduleKeyDeletion` and discarded it.
+A caller could therefore learn when a key was due to be deleted exactly once — from
+the response to the call that set it — and any later observation had lost it.
+
+`API_KeyMetadata` publishes the member and bounds when it appears: *"the date and
+time after which AWS KMS deletes this KMS key. This value is present only when the
+KMS key is scheduled for deletion, that is, when its `KeyState` is
+`PendingDeletion`."* Substrate now stores the date and renders it on that condition
+— on the key state, not on the field being non-zero, so a cancelled deletion leaves
+no date behind and the zero value is never emitted as an epoch timestamp.
+
+Storing it is what makes the refusal above assertable. A re-stamped deadline is
+invisible if the date is computed and thrown away, so the test reads the date back
+through `DescribeKey` after the refused call rather than inspecting state.
+
+**`PendingDeletionWindowInDays` is deliberately absent from `KeyMetadata`.** The
+page confines it to `KeyState` `PendingReplicaDeletion`, which only a multi-Region
+primary that still has replica keys reaches and substrate never writes — and its
+range is **1–365**, not `ScheduleKeyDeletion`'s 7–30. The two are different members
+measuring different things, so reporting the waiting period under it would be wrong
+twice over.
+
+### The waiting period is range-checked, at a code substrate chooses
+
+`API_ScheduleKeyDeletion` states the range twice — *"you can specify a waiting
+period of 7-30 days"* in the prose, and *"if you include a value, it must be between
+7 and 30, inclusive"* on the parameter, with a published Valid Range to match.
+Substrate's guard was `if days <= 0 { days = 30 }`, which got the default right and
+the range not at all: `1`, `365` and `-5` were all accepted, and the last silently
+became 30.
+
+The response now echoes `PendingWindowInDays`, which AWS publishes and its own
+sample response carries, so the default is observable rather than inferable from
+date arithmetic. `KeyId` also became the key **ARN**, as the page says (*"the Amazon
+Resource Name (key ARN)"*) and its sample shows; and `CancelKeyDeletion`, which
+answered `{}`, now answers the single element the page publishes — `KeyId`, again
+the key ARN — so a consumer reading `response["KeyId"]` gets something.
+
+Two decisions here are substrate's, not AWS's:
+
+**The refusal code.** AWS publishes no error for a range violation on this page: its
+list is `DependencyTimeoutException`, `InvalidArnException`, `KMSInternalException`,
+`KMSInvalidStateException` and `NotFoundException`, none of which describes a bad
+parameter value. `ValidationError`/400 comes from `CommonErrors` for the same reason
+an unparseable body does — a failure belonging to no operation-specific code has to
+come from the common set. The bound is stated in the message, because a caller that
+sent 1 has no way to discover 7–30 from a bare refusal.
+
+**Which check runs first.** The range is checked before the key is resolved, so a
+bad window against a key that does not exist answers `ValidationError` rather than
+`NotFoundException`. AWS does not publish the precedence. A value wrong on the face
+of the request is refused without a lookup, which is how an unparseable body already
+behaves one line earlier.
+
+One thing recorded rather than fixed: `PendingWindowInDays` decodes into an `int`, so
+a body that omits the member and a body sending an explicit `0` are indistinguishable.
+AWS refuses `0` and defaults an absent value. Substrate defaults both, because
+telling them apart needs a `*int` and defaulting is by far the commoner intent — worth
+changing only if a caller is ever shown to send an explicit zero.
 
 ### A key is reachable through the tagging API
 

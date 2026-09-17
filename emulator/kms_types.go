@@ -17,6 +17,35 @@ const kmsNamespace = "kms"
 // rather than failing to compile. The Enabled/Disabled literals are only ever written.
 const kmsKeyStatePendingDeletion = "PendingDeletion"
 
+// kmsKeyStateDisabled is the KeyState CancelKeyDeletion leaves behind, and the state DisableKey
+// writes.
+//
+// It became a constant with #963 for the same reason [kmsKeyStatePendingDeletion] is one: it is now
+// compared as well as written. API_KeyMetadata states the invariant that makes the comparison worth
+// having — "Enabled: when KeyState is Enabled this value is true, otherwise it is false" — so the
+// state and the boolean cannot be set independently, and a test asserts they agree.
+const kmsKeyStateDisabled = "Disabled"
+
+// kmsMinPendingWindowInDays and kmsMaxPendingWindowInDays bound ScheduleKeyDeletion's waiting period.
+//
+// API_ScheduleKeyDeletion publishes PendingWindowInDays with a Valid Range of 7 to 30 inclusive. The
+// bounds are named rather than inlined because three places need the same pair — the guard, the
+// message [kmsInvalidPendingWindow] builds, and the default below — and a range enforced against one
+// number and reported as another is worse than no range at all.
+const (
+	kmsMinPendingWindowInDays = 7
+	kmsMaxPendingWindowInDays = 30
+)
+
+// kmsDefaultPendingWindowInDays is the waiting period ScheduleKeyDeletion applies when the caller
+// sends none.
+//
+// API_ScheduleKeyDeletion: "By default, AWS KMS applies a waiting period of 30 days" and "if you do
+// not include a value, it defaults to 30". It coincides with [kmsMaxPendingWindowInDays] and is a
+// separate constant regardless, because the two are the same number for no reason a caller can rely
+// on: AWS could widen the range without moving the default.
+const kmsDefaultPendingWindowInDays = 30
+
 // KMSKey represents a KMS customer master key.
 type KMSKey struct {
 	// KeyID is the unique identifier for the key.
@@ -34,9 +63,25 @@ type KMSKey struct {
 	// KeySpec is the key spec: SYMMETRIC_DEFAULT, RSA_2048, etc.
 	KeySpec string `json:"KeySpec"`
 
-	// KeyState is the state: Enabled, Disabled or [kmsKeyStatePendingDeletion]. AWS publishes four
-	// more — PendingImport, Unavailable, Creating and Updating — that substrate never writes.
+	// KeyState is the state: Enabled, [kmsKeyStateDisabled] or [kmsKeyStatePendingDeletion]. AWS
+	// publishes five more — PendingImport, PendingReplicaDeletion, Unavailable, Creating and
+	// Updating — that substrate never writes.
 	KeyState string `json:"KeyState"`
+
+	// DeletionDate is when a key scheduled for deletion is deleted, zero for a key that is not.
+	//
+	// Stored by #963 so that the date ScheduleKeyDeletion reports is the date DescribeKey reports.
+	// Before it the value was computed inside the handler and discarded, so a caller could learn the
+	// deletion date exactly once — from the response to the call that set it — and any later
+	// observation had lost it. That also left the refusal #963 adds unassertable: a ScheduleKeyDeletion
+	// declined against an already-pending key must leave the existing date alone, and a date nothing
+	// reads back cannot be shown to be unchanged.
+	//
+	// API_KeyMetadata makes it observable and bounds when: "the date and time after which AWS KMS
+	// deletes this KMS key. This value is present only when the KMS key is scheduled for deletion,
+	// that is, when its KeyState is PendingDeletion." Rendered on that condition alone, so the zero
+	// value is never emitted as an epoch timestamp.
+	DeletionDate time.Time `json:"DeletionDate,omitempty"`
 
 	// Enabled indicates whether the key is enabled.
 	Enabled bool `json:"Enabled"`
