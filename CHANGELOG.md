@@ -493,6 +493,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A Kinesis stream could hold three hundred tags, so `ListTagsForStream` answered an array longer than
+  its own published maximum** (#965). `API_AddTagsToStream` states two different limits *inside a single
+  parameter entry*: the `Tags` member's description reads *"A set of up to 50 key-value pairs to use to
+  create the tags… You can add up to 50 tags per resource"*, and the constraint lines directly beneath it
+  read *"Map Entries: Maximum number of 200 items."* The operation's lede says fifty a third time, and
+  `API_ListTagsForStream`'s `Limit` maxes out at exactly fifty while its response array publishes 0–200.
+  Substrate enforced neither, and #954 recorded the disagreement as unenforced rather than deciding it.
+
+  **Both figures are real, they bound different things, and both are now enforced under different
+  codes** — which is what makes them consistent rather than contradictory. More than two hundred entries
+  in one request is a violation of the request's own shape and answers `InvalidArgumentException`/400,
+  whose description (*"a specified parameter exceeds its restrictions, is not supported, or can't be
+  used"*) is this case exactly; it is checked first, against the request alone, because a request that
+  does not satisfy its own shape cannot be evaluated against account state. More than fifty tags on the
+  stream once the request is applied is a quota violation and answers `LimitExceededException`/400, whose
+  description is *"the requested resource exceeds the maximum number allowed"*. Both codes are published
+  on the operation, at 400, as every Kinesis error is. The distinction is observable, and a consumer's
+  retry path may reasonably care which it hit: a request it can split versus a stream it must prune.
+
+  **The quota is counted against the merged set, not the incoming map**, because it is a property of the
+  stream rather than of the request — two accepted requests of thirty tags each are refused on the
+  second. A key the stream already carries does not count twice, since AWS states that *"`AddTagsToStream`
+  overwrites any existing tags that correspond to the specified tag keys"*: re-tagging a stream that is
+  already at fifty with a key it already has is a rewrite, and it succeeds. The check runs before the
+  merge, so a refused request writes **nothing** — not even the tags that would have fit — and
+  `RemoveTagsFromStream` freeing slots admits later adds, so the limit is read off current state rather
+  than off anything the stream remembers. Since #966 the count follows the ARN's account, so a request
+  naming another account's stream is measured against that stream's tags and not the caller's own.
+
+  The same pass enforces the `Tags` member's other published constraints, each under the same
+  `InvalidArgumentException`: a key of 1–128 characters and a value of at most 256. An empty **value** is
+  accepted where an empty **key** is not, per *"a tag consists of a required key and an optional value"*
+  and the published minimums that say the same. An absent `Tags` member is refused, being the operation's
+  one `Required: Yes` member other than the stream reference; an **empty** map is accepted as a no-op,
+  which is substrate's reading — the map publishes a maximum and no minimum where the sibling
+  `RemoveTagsFromStream`'s `TagKeys` publishes *"Minimum number of 1 item"*, so AWS states a minimum where
+  it means one, and reading one in here anyway would refuse a request the shape admits. A refusal names
+  the offending key, the current count and the limit, because a caller whose one bad tag is among fifty
+  cannot act on a message that will not say which.
+
+  This is substrate's first per-resource tag quota for any service, and the Resource Groups Tagging API
+  does not enforce it: that path merges tags for sixteen services through one helper, and refusing there
+  needs the per-resource `FailedResourcesMap` semantics `TagResources` publishes. So a caller can still
+  push a stream past fifty tags through `TagResources` — filed as #1000 rather than half-done here —
+  after which `AddTagsToStream` refuses every further add, which is the right answer for a stream over
+  quota however it got there.
+
 - **Fifteen Kinesis operations refused the form AWS recommends, because substrate decoded no
   `StreamARN` anywhere** (#966). Every operation but `CreateStream` and `ListStreams` publishes
   `StreamARN` beside `StreamName`, both `Required: No`, under a Note that is byte-identical on all
