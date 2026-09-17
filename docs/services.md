@@ -9717,23 +9717,92 @@ refusal on this operation answers. That is deliberate rather than incidental —
 for one class of defect on one operation is what #977's analysis warned against, and this
 member joins that decision rather than introducing a second.
 
-#### The ten members that stay absent
-
-Six are unreachable for reasons already given above (`KeyManager` covers one, `Origin`
-covers three) and the rest are:
+#### The eight members that stay absent
 
 | Member | What it would need |
 |--------|--------------------|
-| `CloudHsmClusterId`, `CustomKeyStoreId` | A custom key store, which substrate does not implement |
+| `CloudHsmClusterId`, `CustomKeyStoreId`, `XksKeyConfiguration` | A custom or external key store, which substrate does not implement |
+| `ExpirationModel`, `ValidTo` | An `EXTERNAL` origin, which the `Origin` section above records as unreachable — substrate's key material is always `AWS_KMS` |
 | `MultiRegionConfiguration` | Published *"only when the value of the `MultiRegion` field is `True`"*. Substrate stores the flag but models no replica, so it would have to report a primary with an empty `ReplicaKeys` list — a shape describing a multi-Region key nothing can replicate |
 | `PendingDeletionWindowInDays` | `KeyState` `PendingReplicaDeletion`, which only a multi-Region primary that still has replicas reaches. Its range is 1–365, not `ScheduleKeyDeletion`'s 7–30, so reporting the waiting period under it would be wrong twice over |
-| `CurrentKeyMaterialId` | A key material identity, which is [#978](https://github.com/scttfrdmn/substrate/issues/978) |
 | `RotationEnabled` | Nothing — AWS does not publish it, per #971 above |
 
-All ten are asserted **absent** by a test, `RotationEnabled` included. Adding sixteen
+All eight are asserted **absent** by a test, `RotationEnabled` included. Adding sixteen
 members from a page is exactly the moment someone working from the struct rather than
 the page would put #971's member back, so the guard against that sits beside the guard
-for the other nine.
+for the other seven.
+
+`CurrentKeyMaterialId` was the ninth until substrate gained a key material identity;
+the section below is what it needed.
+
+### A key has a material identity, and six members report it
+
+`API_KeyMetadata` publishes `CurrentKeyMaterialId` — *"identifies the current key
+material… AWS KMS uses the current key material for both encryption and decryption, and
+the non-current key material for decryption operations only"* — and five operation
+responses carry the same identity under four other names. Substrate modelled no key
+material at all, so all six were absent
+([#978](https://github.com/scttfrdmn/substrate/issues/978)).
+
+| Where | Member | Reported when |
+|-------|--------|---------------|
+| `CreateKey`, `DescribeKey` | `CurrentKeyMaterialId` | *"present for symmetric encryption keys with `AWS_KMS` or `EXTERNAL` origin"* |
+| `Decrypt` | `KeyMaterialId` | *"present only when the operation uses a symmetric encryption KMS key"* |
+| `ReEncrypt` | `SourceKeyMaterialId` | *"present only when the original encryption used a symmetric encryption KMS key"* |
+| `ReEncrypt` | `DestinationKeyMaterialId` | *"present only when data is reencrypted using a symmetric encryption KMS key"* |
+| `GenerateDataKey` | `KeyMaterialId` | The page states no key-type condition, only that it *"is omitted if the request includes the `Recipient` parameter"* |
+| `GenerateDataKeyWithoutPlaintext` | `KeyMaterialId` | The page states no condition at all |
+
+`Encrypt` publishes **none**, and that is recorded rather than left to be noticed: its
+Response Syntax is exactly `CiphertextBlob`, `EncryptionAlgorithm` and `KeyId`, and a
+test asserts those three exactly, so a later sweep over "the operations that report key
+material" cannot add a site AWS does not have. The asymmetry is AWS's and is not
+obviously deliberate — `Encrypt` names the material it used no more than `Decrypt` names
+the material that produced the ciphertext it was handed.
+
+**The value is stored on the key and read from it at all six sites, which is the point.**
+AWS's member is named *Current*, and "current" is only meaningful against material that
+can change; more practically, a caller compares what `Decrypt` reports against what
+`DescribeKey` reports and learns that the material which decrypted its data is the
+material the key holds. A value each site computed for itself would satisfy that
+comparison by construction and prove nothing. `ReEncrypt` is where it shows: its two
+members are the only two material identities in one response, they differ when the keys
+differ, and each follows its own key — so a re-encryption out of an asymmetric key into a
+symmetric one reports the destination member alone.
+
+The identifier is derived, not drawn from `crypto/rand`: `SHA-256` over the key's own ARN
+with a domain-separation prefix. AWS constrains all six members to a **fixed length of
+64** with pattern `^[a-f0-9]+$`, and a `SHA-256` digest hex-encodes to exactly 64
+lowercase hex characters, so no truncation or reshaping is involved. The ARN already
+carries the account, the Region and the key ID, so two keys never collide and the
+material ID inherits exactly the determinism the key ID has — becoming fully
+deterministic once #856 reaches the key ID itself.
+
+Two readings are substrate's rather than AWS's:
+
+- **Rotation mints no new material.** Nothing rotates: `ListKeyRotations` and
+  `RotateKeyOnDemand` are unimplemented, and the rotation section above already records
+  that a rotation schedule here is a value reported to a caller rather than an event that
+  fires. A second material identity nothing can list or ask for would be a value no call
+  could reach, so `Current` is true in the trivial sense — it is the only material the key
+  has ever had. Minting on rotation means implementing `ListKeyRotations` alongside it, so
+  that the non-current identities `Decrypt` is documented to still accept are observable.
+- **The two `GenerateDataKey*` operations are held to the same symmetric-encryption-key
+  condition as the other four**, although their own pages state none. Both operations
+  *require* a symmetric encryption key at AWS, which is why neither page needs a
+  condition — but substrate does not yet enforce that, since its check tests the key usage
+  rather than the key spec, so an `RSA_2048` key with `KeyUsage` `ENCRYPT_DECRYPT` reaches
+  both ([#988](https://github.com/scttfrdmn/substrate/issues/988)). Reporting
+  unconditionally would put a material ID on a response AWS cannot produce; omitting says
+  nothing about a request that should not have succeeded, which is the honest-empty
+  reading. When #988 refuses the request, the condition stops carrying those two sites and
+  becomes a guard at them.
+
+Note that *"symmetric encryption key"* is narrower than *"symmetric key"*: the four
+`HMAC_*` specs are symmetric, hold key material, and encrypt nothing, so they report no
+material identity. All seventeen key specs are walked by a test for exactly that reason —
+an implementation reading the condition as "not asymmetric" passes every other row and
+fails those four.
 
 ### Cancelling a deletion leaves the key disabled, not enabled
 

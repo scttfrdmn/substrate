@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A key material identity, and the six response members that report it** (#978). `API_KeyMetadata`
+  publishes `CurrentKeyMaterialId` — *"identifies the current key material… AWS KMS uses the current key
+  material for both encryption and decryption, and the non-current key material for decryption operations
+  only"* — and five operation responses carry the same identity under four other names: `Decrypt`'s
+  `KeyMaterialId`, `ReEncrypt`'s `SourceKeyMaterialId` and `DestinationKeyMaterialId`, and a
+  `KeyMaterialId` on each of `GenerateDataKey` and `GenerateDataKeyWithoutPlaintext`. Substrate modelled no
+  key material at all, so all six were absent.
+
+  The value is stored on the key and read from it at every site, which is what makes it worth reporting: a
+  caller compares what `Decrypt` reports against what `DescribeKey` reports and learns that the material
+  which decrypted its data is the material the key holds. A value each site computed for itself would
+  satisfy that comparison by construction. `ReEncrypt` is where it shows — its two members are the only two
+  material identities in one response, and each follows its own key, so a re-encryption out of an
+  asymmetric key into a symmetric one reports the destination member alone.
+
+  The identifier is derived rather than drawn from `crypto/rand`: SHA-256 over the key's own ARN with a
+  domain-separation prefix. All six members are constrained to a fixed length of 64 with pattern
+  `^[a-f0-9]+$`, and a SHA-256 digest hex-encodes to exactly 64 lowercase hex characters, so nothing is
+  truncated or reshaped. It inherits exactly the determinism the key ID has and becomes fully deterministic
+  once #856 reaches the key ID itself.
+
+  `Encrypt` publishes no such member — its Response Syntax is exactly `CiphertextBlob`,
+  `EncryptionAlgorithm` and `KeyId` — and a test asserts those three exactly, so a later sweep over "the
+  operations that report key material" cannot add a site AWS does not have.
+
+  Two readings are substrate's rather than AWS's. **Rotation mints no new material**: nothing rotates,
+  `ListKeyRotations` and `RotateKeyOnDemand` are unimplemented, and a second identity nothing can list or
+  ask for would be a value no call could reach — so `Current` is true in the trivial sense, and minting on
+  rotation means implementing `ListKeyRotations` alongside it so the non-current identities `Decrypt`
+  still accepts are observable. And **both `GenerateDataKey*` operations are held to the same
+  symmetric-encryption-key condition as the other four** although their own pages state none: both
+  operations require a symmetric encryption key at AWS, which is why neither page needs a condition, but
+  substrate's check tests the key usage rather than the key spec, so an `RSA_2048` key with `KeyUsage`
+  `ENCRYPT_DECRYPT` reaches both (#988). Reporting unconditionally would put a material ID on a response
+  AWS cannot produce. Note that *"symmetric encryption key"* is narrower than *"symmetric key"* — the four
+  `HMAC_*` specs hold key material and encrypt nothing, so they report none, and all seventeen key specs
+  are walked by a test for that reason.
+
 - **`S3Bucket.AccountID`, the account that created a bucket** (#937). Every other taggable resource
   records its account in its ARN or its state key; a bucket ARN is `arn:aws:s3:::{name}` and S3's
   bucket namespace is global, so neither the ARN nor the key can carry one. The field is what lets
