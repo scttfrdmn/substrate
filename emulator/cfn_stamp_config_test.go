@@ -222,6 +222,63 @@ func TestCFN_AConfigSideCarIsReadBeforeItIsReconciled(t *testing.T) {
 		f.configResourceTagsFor(t, arns["Rule"]))
 }
 
+// TestCFN_AnUnreachableConfigResourceIsSkippedNotFailed covers the two guards each Config arm opens
+// with, which are the two a template cannot reach.
+//
+// Both are contracts rather than dead code, and the contract is the deployer's: a `(false, nil)` is
+// rendered as "skipped in silence" while an error is logged as a failure to stamp, so what is asserted
+// here is that a resource the bookkeeping cannot reach never fails a stack. Neither shape arises from a
+// deploy — a recorder's and a rule's ARN is read back from the service, so a resource that deployed has
+// one and resolves — which is exactly why they are asserted directly, following
+// [emulator.CFNDecodeRecordTagsForTest]'s reason for existing.
+//
+// The unresolvable case is the one with a real occasion behind it: a caller can delete a Config rule
+// through Config's own `DeleteConfigRule` between two runs against one event stream, and a
+// reconciliation that then failed the stack would make a stack undeployable over a resource somebody
+// else removed.
+func TestCFN_AnUnreachableConfigResourceIsSkippedNotFailed(t *testing.T) {
+	state := emulator.NewMemoryStateManager()
+	reqCtx := cfnStampReqCtx()
+	stamp := []emulator.EC2Tag{{Key: "aws:cloudformation:stack-name", Value: "s"}}
+	next := map[string]string{"team": "platform"}
+
+	for _, tc := range []struct {
+		name string
+		dr   emulator.DeployedResource
+	}{
+		{
+			name: "no ARN was read back",
+			dr: emulator.DeployedResource{
+				Type: "AWS::Config::ConfigRule", LogicalID: "Rule", PhysicalID: "orders",
+			},
+		},
+		{
+			name: "the ARN names no such resource",
+			dr: emulator.DeployedResource{
+				Type: "AWS::Config::ConfigRule", LogicalID: "Rule", PhysicalID: "orders",
+				ARN: "arn:aws:config:" + cfnStampRegion + ":" + cfnStampAccount +
+					":config-rule/config-rule-abc123",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stamped, err := emulator.CFNStampConfigResourceForTest(state, reqCtx, tc.dr, stamp)
+			require.NoError(t, err, "an unreachable resource must not fail the stack")
+			assert.False(t, stamped, "and must report that nothing was stamped")
+
+			reconciled, err := emulator.CFNPropagateConfigStackTagsForTest(
+				state, reqCtx, tc.dr, nil, next,
+			)
+			require.NoError(t, err)
+			assert.False(t, reconciled)
+		})
+	}
+
+	keys, err := state.List(context.Background(), "config", "tags:")
+	require.NoError(t, err)
+	assert.Empty(t, keys, "neither arm wrote a side-car for a resource it could not reach")
+}
+
 // configResourceTagsFor reads one Config resource's tags through Config's own
 // `ListTagsForResource`, which names the resource in a `ResourceArn` body member and answers a
 // `Key`/`Value` list — the shape [cfnUpperTagListJSONStrings] already reads.
