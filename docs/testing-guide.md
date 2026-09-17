@@ -364,6 +364,67 @@ manager the replay rebuilds IAM into. A replay
 therefore reproduces a recorded refusal only when it is configured as the recording
 was; a configuration difference surfaces as a divergence rather than being hidden.
 
+### What a replay compares
+
+Once an event has been re-executed, four comparisons run and each records its own
+`EventDifference`: the state hash before the event and after it (only with
+`validate_state`, and only for an event that carries one), the error, the status code,
+and the **response body** — path by path (#817). Until #817 the body was not compared
+at all, so two runs that agreed on `200` and differed on every value inside the
+document were reported as matching. Response *headers* are not compared.
+
+A body difference names where it is: `response_body` followed by the path within the
+document, alongside the sequence number and the operation.
+
+```
+  Differences: 1
+    - seq 3 ListBuckets response_body/ListAllMyBucketsResult/Buckets/Bucket[2]/Name [major]
+      recorded: orders-archive
+      replayed: orders-archives
+```
+
+JSON paths follow **JSON Pointer** (RFC 6901) — slash-separated, array indices
+zero-based, `~1` for a `/` in a member name. XML paths follow **XPath** — a repeated
+sibling carries a one-based `[n]`, an attribute carries `@`. Each format gets the
+syntax its own ecosystem already has, which is why the two differ in index base.
+
+Three normalisations are applied, and **nothing else**:
+
+| Normalised | Why |
+|---|---|
+| JSON member order | An object is a map; two orderings are one document to every SDK |
+| XML whitespace between elements | Indentation, not content. Non-whitespace text is always compared |
+| A body that parses as neither format | Compared as bytes, so a CBOR document or an object payload is reported whole rather than as a parse failure |
+
+Everything else is reported as it stands. In particular:
+
+- **Collection order is a difference.** An array element and an XML sibling are
+  matched by position. Sorting either side first would hide exactly the defect #864
+  fixed — a listing rendered in Go map order — which *is* a body that differs between
+  two runs of one input.
+- **A minted identifier is a difference.** A resource id, an ARN, an access key or a
+  secret minted during the recording is re-minted differently on replay, and the
+  comparison reports it by path. This is the practical consequence to know about:
+  **a recording that creates a resource reports body differences today**, and that is
+  an honest report of [#856](https://github.com/scttfrdmn/substrate/issues/856) rather
+  than a defect in the comparison. Masking it would report a reproduced run that was
+  not one, which is the failure mode the whole verification exists to prevent.
+- **A timestamp is expected to match.** The engine sets the simulated clock to the
+  recorded event's timestamp before re-executing, so a body rendered from that clock
+  reproduces. One that does not is a finding about the clock.
+
+A body difference is graded `major`, never `critical`. The critical band is for a
+divergence in *outcome* — a different state, or a refusal that replayed as a success —
+because those make a passing test meaningless; a difference in a reported value is
+what this comparison exists to surface. At most twenty differences are reported per
+body, and when the walk stops it appends a difference saying so rather than leaving a
+truncated list that looks complete.
+
+The comparison runs whether or not `validate_state` is on. The two answer different
+questions, and a read is where they come apart: a listing that rendered the wrong
+value writes nothing, so its state hash is untouched and no hash comparison — even an
+enabled one — can see it.
+
 ### Replaying from the command line
 
 `substrate replay <stream>` replays a recorded stream outside a Go test. It needs a

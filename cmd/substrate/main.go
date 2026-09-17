@@ -500,6 +500,14 @@ configured address will have their requests emulated and recorded.`,
 	return cmd
 }
 
+// replayDifferencePrintLimit caps how many differences the replay summary prints.
+//
+// One diverging response body can contribute up to twenty differences on its own,
+// so a stream of them would bury the counters the summary exists to show. The
+// remainder is announced rather than dropped silently, and nothing is lost: the full
+// list is on [substrate.ReplayResults.Differences] for a caller using the package.
+const replayDifferencePrintLimit = 20
+
 func newReplayCmd() *cobra.Command {
 	var configPath string
 
@@ -560,8 +568,22 @@ any determinism differences.`,
 			for _, se := range results.StateErrors {
 				fmt.Printf("    - %s\n", se)
 			}
+			// Each difference is printed, not just counted. A count says a replay
+			// diverged and nothing about where, and since #817 a difference names the
+			// path within the response body it was found at — which is the whole
+			// point of comparing bodies rather than bytes.
 			if len(results.Differences) > 0 {
 				fmt.Printf("  Differences: %d\n", len(results.Differences))
+				for i, diff := range results.Differences {
+					if i == replayDifferencePrintLimit {
+						fmt.Printf("    … %d more not shown; use the API for the full list\n",
+							len(results.Differences)-replayDifferencePrintLimit)
+						break
+					}
+					fmt.Printf("    - seq %d %s %s [%s]\n      recorded: %v\n      replayed: %v\n",
+						diff.Sequence, diff.Operation, diff.Field, diff.Significance,
+						diff.Expected, diff.Actual)
+				}
 			}
 			// A stream recorded without event_store.include_bodies carries no
 			// request on any event, so every event is skipped and nothing at all

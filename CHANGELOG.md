@@ -804,6 +804,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Replay verification did not compare response bodies, so two runs that agreed on `200` and differed
+  on every value inside the document were reported as matching** (#817). `ReplayEngine.replayEvent`
+  compared a recorded outcome at the granularity of the status code and the error string, and carried
+  a `TODO` where the body comparison belonged. That is the weakest place for the verification to be
+  coarse: a regression inside a body is what a replay is meant to catch, and a state hash cannot see
+  one at all whenever the operation is a read, because a read writes nothing.
+
+  Each body is now parsed and walked, and every divergence names its own path — `response_body`
+  followed by **JSON Pointer** (RFC 6901) for a JSON body and **XPath**-style for an XML one, so a
+  repeated sibling carries a one-based `[n]` and an attribute carries `@`. Each format gets the syntax
+  its own ecosystem has rather than one invented syntax matching neither, which is why the index bases
+  differ. A difference also now carries the `Operation` it came from, so a report names the call
+  without a reader having to parse it back out of the composite event id. `substrate replay` prints
+  each difference instead of only counting them — a count says a replay diverged and nothing about
+  where, which was the state of the summary before #817.
+
+  **Three normalisations are applied and nothing else**, all three stated with the reason in
+  `emulator/replay_body_diff.go` and in `docs/testing-guide.md`: JSON member order is ignored, because
+  an object is a map and two orderings are one document to every SDK; XML whitespace between elements
+  is ignored, because that text is indentation rather than content; and a body that parses as neither
+  format — a CBOR document, an S3 object payload — is compared as bytes and reported whole, rather
+  than as a parse failure. A body that sniffs as JSON or XML but does not parse falls back to the byte
+  comparison, so a wrong guess costs precision and never correctness.
+
+  **Everything else is reported as it stands, and two of those decisions matter more than the
+  normalisations.** *Collection order is a difference*: an array element and an XML sibling are matched
+  by position, because sorting either side first would hide exactly the defect #864 fixed — a listing
+  rendered in Go map order, which is precisely a body that differs between two runs of one input.
+  *A minted identifier is a difference*: a resource id, ARN, access key or secret minted during the
+  recording is re-minted differently on replay and is reported by path. So **a recording that creates a
+  resource reports body differences today**, and that is an honest report of #856 rather than a defect
+  in the comparison — masking it would report a reproduced run that was not one, which is the failure
+  mode the verification exists to prevent. The test that closed #833 now demonstrates this directly:
+  its `CreateUser`/`CreateAccessKey` events report three differences, at `User/UserId`,
+  `AccessKey/AccessKeyId` and `AccessKey/SecretAccessKey`, and nothing else in the stream diverges.
+  Timestamps, by contrast, are expected to match, because the engine sets the simulated clock to the
+  recorded event's timestamp before re-executing; one that does not is a finding about the clock.
+
+  A body difference is graded `major`, never `critical`: the critical band is for a divergence in
+  *outcome* — a different state, or a refusal that replayed as a success — and marking a reported value
+  critical would leave no band above it for the divergences that are strictly worse. An absent member
+  reports the marker `<absent>` rather than `nil`, because a JSON `null` is a value a body can carry
+  and collapsing the two would make one difference read as `nil` versus `nil`. At most twenty
+  differences are reported per body; when the walk stops it appends a difference saying so, rather than
+  leaving a truncated list that looks complete.
+
+  The comparison is unconditional rather than gated behind a `ReplayConfig` flag. A flag defaulting to
+  off would recreate the hole #833 closed — a replay verifying less than the reader assumes and saying
+  nothing about it — and one defaulting to on is a flag nobody sets. It runs whether or not
+  `validate_state` is set, for the read-only reason above.
+
 - **A replay re-executed a request the recording refused, and succeeded: the four pre-plugin
   controllers were never consulted** (#833). `ReplayEngine.replayEvent` called
   `PluginRegistry.RouteRequest` directly, so authorization, quota, consistency and fault injection —
