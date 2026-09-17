@@ -322,89 +322,152 @@ func (p *ConfigServicePlugin) cfgsvcResolveTaggable(goCtx context.Context, ctx *
 		return "", cfgsvcValidation("ResourceArn may be up to 1000 characters long.")
 	}
 
-	prefix := "arn:aws:config:" + ctx.Region + ":" + ctx.AccountID + ":"
-	if !strings.HasPrefix(arn, prefix) {
+	stored, found, err := cfgsvcFindTaggable(goCtx, p.state, ctx.AccountID, ctx.Region, arn)
+	if err != nil {
+		return "", err
+	}
+	if !found {
 		return "", cfgsvcResourceNotFound()
+	}
+	return stored, nil
+}
+
+// cfgsvcFindTaggable resolves an ARN to the ARN a Config resource's tags are keyed by,
+// reporting found=false when it names no resource this account and Region holds.
+//
+// The two validation complaints stay with the caller above, because they are
+// `ValidationException` rather than `ResourceNotFoundException` and only a request can
+// carry an ARN that is empty or over 1000 characters. What is here is the lookup, and it is
+// free of the plugin for one reason: the CloudFormation deployer stamps a Config resource
+// through it (#819), and if it wrote through a second copy of this walk the stamp could
+// land under an ARN spelling that `ListTagsForResource` never looks at — the failure #826
+// taught `cfn_resource_tags.go` to avoid, here with an index walk in the middle rather than
+// a key built from parts.
+func cfgsvcFindTaggable(
+	goCtx context.Context, state StateManager, accountID, region, arn string,
+) (string, bool, error) {
+	prefix := "arn:aws:config:" + region + ":" + accountID + ":"
+	if !strings.HasPrefix(arn, prefix) {
+		return "", false, nil
 	}
 	resource := strings.TrimPrefix(arn, prefix)
 	kind, rest, ok := strings.Cut(resource, "/")
 	if !ok || rest == "" {
-		return "", cfgsvcResourceNotFound()
+		return "", false, nil
 	}
 
 	switch kind {
 	case "configuration-recorder":
-		return p.cfgsvcResolveRecorderARN(goCtx, ctx, arn)
+		return cfgsvcFindRecorderARN(goCtx, state, accountID, region, arn)
 	case "config-rule":
-		return p.cfgsvcResolveRuleARN(goCtx, ctx, rest)
+		return cfgsvcFindRuleARN(goCtx, state, accountID, region, rest)
 	case "conformance-pack":
-		return p.cfgsvcResolvePackARN(goCtx, ctx, arn, rest)
+		return cfgsvcFindPackARN(goCtx, state, accountID, region, arn, rest)
 	default:
-		return "", cfgsvcResourceNotFound()
+		return "", false, nil
 	}
 }
 
-// cfgsvcResolveRecorderARN matches an ARN against the account's recorder.
+// cfgsvcFindRecorderARN matches an ARN against the account's recorder.
 //
 // The whole ARN is compared rather than just the name, because the template carries a
 // name *and* an ID (configuration-recorder/${RecorderName}/${RecorderId}) and the ID is
 // derived from the name — so an ARN pairing a real name with a wrong ID names no
 // resource and must not tag the real one.
-func (p *ConfigServicePlugin) cfgsvcResolveRecorderARN(goCtx context.Context, ctx *RequestContext,
-	arn string) (string, error) {
+func cfgsvcFindRecorderARN(
+	goCtx context.Context, state StateManager, accountID, region, arn string,
+) (string, bool, error) {
 	var recorder ConfigRecorder
-	found, err := p.cfgsvcGetJSON(goCtx, cfgsvcRecorderKey(ctx.AccountID, ctx.Region), &recorder)
+	found, err := cfgsvcGetStateJSON(goCtx, state, cfgsvcRecorderKey(accountID, region), &recorder)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if !found || recorder.ARN != arn {
-		return "", cfgsvcResourceNotFound()
+		return "", false, nil
 	}
-	return recorder.ARN, nil
+	return recorder.ARN, true, nil
 }
 
-// cfgsvcResolveRuleARN matches a config-rule/${ConfigRuleId} ARN against the account's
+// cfgsvcFindRuleARN matches a config-rule/${ConfigRuleId} ARN against the account's
 // rules.
 //
 // A rule's ARN names it by ID and not by name, so the index is walked to find the rule
 // holding that ID. The alternative — deriving the name back from the ID — is impossible
 // by construction: the ID is a hash.
-func (p *ConfigServicePlugin) cfgsvcResolveRuleARN(goCtx context.Context, ctx *RequestContext,
-	ruleID string) (string, error) {
-	names, err := p.cfgsvcRuleNames(goCtx, ctx)
-	if err != nil {
-		return "", err
+func cfgsvcFindRuleARN(
+	goCtx context.Context, state StateManager, accountID, region, ruleID string,
+) (string, bool, error) {
+	var names []string
+	if _, err := cfgsvcGetStateJSON(
+		goCtx, state, cfgsvcRuleNamesKey(accountID, region), &names,
+	); err != nil {
+		return "", false, err
 	}
 	for _, name := range names {
 		var rule ConfigRule
-		found, err := p.cfgsvcGetJSON(goCtx, cfgsvcRuleKey(ctx.AccountID, ctx.Region, name), &rule)
+		found, err := cfgsvcGetStateJSON(goCtx, state, cfgsvcRuleKey(accountID, region, name), &rule)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if found && rule.ConfigRuleId == ruleID {
-			return rule.ConfigRuleArn, nil
+			return rule.ConfigRuleArn, true, nil
 		}
 	}
-	return "", cfgsvcResourceNotFound()
+	return "", false, nil
 }
 
-// cfgsvcResolvePackARN matches a conformance-pack/${Name}/${Id} ARN against the
+// cfgsvcFindPackARN matches a conformance-pack/${Name}/${Id} ARN against the
 // account's packs, comparing the whole ARN for the reason the recorder's does.
-func (p *ConfigServicePlugin) cfgsvcResolvePackARN(goCtx context.Context, ctx *RequestContext,
-	arn, rest string) (string, error) {
+func cfgsvcFindPackARN(
+	goCtx context.Context, state StateManager, accountID, region, arn, rest string,
+) (string, bool, error) {
 	name, _, ok := strings.Cut(rest, "/")
 	if !ok || name == "" {
-		return "", cfgsvcResourceNotFound()
+		return "", false, nil
 	}
 	var pack ConfigConformancePack
-	found, err := p.cfgsvcGetJSON(goCtx, cfgsvcPackKey(ctx.AccountID, ctx.Region, name), &pack)
+	found, err := cfgsvcGetStateJSON(goCtx, state, cfgsvcPackKey(accountID, region, name), &pack)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if !found || pack.ConformancePackArn != arn {
-		return "", cfgsvcResourceNotFound()
+		return "", false, nil
 	}
-	return pack.ConformancePackArn, nil
+	return pack.ConformancePackArn, true, nil
+}
+
+// cfgsvcResolveStampTags resolves a Config ARN and reads the tags currently on it, for the
+// CloudFormation stamp and the stack-tag reconciliation (#819).
+//
+// One function rather than a resolve and a read at each caller, because the two are a pair
+// here in a way they are not for any other service: a Config resource's tags live in a
+// side-car record whose *whole document* is the tag map, so the record proving the resource
+// exists and the record holding its tags are two different keys. Reading the side-car alone
+// cannot tell "this rule has no tags" from "there is no such rule", and getting that
+// backwards is the direction that matters — a stamp written for a resource that is gone
+// leaves a side-car nothing reads and Config's own delete no longer removes.
+//
+// found=false means the ARN names no resource. A resource that exists with no tags is
+// found=true with an empty map, which is the case the caller has to create the side-car for.
+func cfgsvcResolveStampTags(
+	state StateManager, accountID, region, arn string,
+) (string, map[string]string, bool, error) {
+	goCtx := context.Background()
+	stored, found, err := cfgsvcFindTaggable(goCtx, state, accountID, region, arn)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if !found {
+		return "", nil, false, nil
+	}
+	var tags map[string]string
+	if _, err := cfgsvcGetStateJSON(goCtx, state, cfgsvcTagsKey(stored), &tags); err != nil {
+		return "", nil, false, err
+	}
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	return stored, tags, true, nil
 }
 
 // --- authorization hooks ---

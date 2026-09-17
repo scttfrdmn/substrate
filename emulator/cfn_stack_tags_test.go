@@ -71,16 +71,21 @@ type cfnStampFixture struct {
 	acm            *emulator.ACMPlugin
 	cloudfront     *emulator.CloudFrontPlugin
 
+	// AWS Config, #819's last row and the only service here whose tags live in a record of
+	// their own rather than on the resource's — which is why it needed a writer instead of a
+	// line in a table.
+	configservice *emulator.ConfigServicePlugin
+
 	state emulator.StateManager
 }
 
 // newCFNStampFixture builds the fixture over the given state, so a test that also needs an
 // AuthController can share one store with it. A nil state gets a fresh one.
 //
-// Twenty plugins rather than the two #746 needed: #765 widened the stamp past EC2 and #819
-// widened it twice more, and the criterion all three work to is that each tag is readable through
-// the owning service's own call — which means the plugin that owns the record has to be here to
-// answer it.
+// Twenty-one plugins rather than the two #746 needed: #765 widened the stamp past EC2 and #819
+// widened it three times more, and the criterion all of them work to is that each tag is readable
+// through the owning service's own call — which means the plugin that owns the record has to be
+// here to answer it.
 func newCFNStampFixture(t *testing.T, state emulator.StateManager) *cfnStampFixture {
 	t.Helper()
 	return newCFNStampFixtureWithLogger(t, state,
@@ -181,6 +186,12 @@ func newCFNStampFixtureWithLogger(
 	acmPlugin := cfnStampRegister(t, registry, &emulator.ACMPlugin{}, state, logger, tc)
 	cfPlugin := cfnStampRegister(t, registry, &emulator.CloudFrontPlugin{}, state, logger, tc)
 
+	// AWS Config, through the same registrar again. It is registered rather than only held
+	// because the deployer *dispatches* to it: the recorder, the channel and the rule are
+	// created through Config's own Put operations, so an unregistered plugin would make every
+	// Config resource in a template fail to deploy rather than fail to be stamped.
+	configPlugin := cfnStampRegister(t, registry, &emulator.ConfigServicePlugin{}, state, logger, tc)
+
 	return &cfnStampFixture{
 		deployer:    emulator.NewStackDeployer(registry, store, state, tc, logger, costs),
 		ec2:         ec2Plugin,
@@ -204,6 +215,8 @@ func newCFNStampFixtureWithLogger(
 		ssm:            ssmPlugin,
 		acm:            acmPlugin,
 		cloudfront:     cfPlugin,
+
+		configservice: configPlugin,
 
 		state: state,
 	}

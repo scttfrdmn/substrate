@@ -1495,8 +1495,33 @@ func DefaultQuotaRulesForTest() map[string]RateRule { return defaultQuotaRules()
 // record in the tree spelling its members `TagKey`/`TagValue` belongs to a KMS key, whose
 // `UpdateStack` mints a new key rather than reusing the one a caller could have tagged — so the
 // reconciliation never sees the record whose shape is at issue. The end-to-end assertion for the
-// same defect goes through an ECS service, whose identity does survive an update; this covers the
-// spelling that one cannot reach (#819).
+// same defect goes through an SNS topic and an SSM parameter, whose identities do survive an update;
+// this covers the spelling that one cannot reach (#819).
 func CFNDecodeRecordTagsForTest(member []byte) map[string]string {
 	return cfnDecodeRecordTags(member)
+}
+
+// CFNStampConfigResourceForTest wraps cfnStampConfigResource, the AWS Config arm of #819's stamp.
+//
+// CFNPropagateConfigStackTagsForTest wraps its #764 counterpart. Both are exported for the same
+// reason, and it is the reason [CFNDecodeRecordTagsForTest] gives: each opens with two guards no
+// template can reach. A recorder's and a rule's ARN is read back from the service at deploy time, so
+// a resource that deployed always has one and always resolves — an empty ARN means the read-back
+// failed and an unresolvable one means somebody deleted the resource between two runs. Both are
+// nonetheless contracts rather than dead code: each answers `(false, nil)`, which the deployer
+// renders as "skipped in silence", so a stack is never failed by a resource its own bookkeeping
+// cannot reach. Asserting that here is what keeps a later `return true, err` from turning a deleted
+// Config rule into a failed `UpdateStack`.
+func CFNStampConfigResourceForTest(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, tags []EC2Tag,
+) (bool, error) {
+	return cfnStampConfigResource(state, reqCtx, dr, tags)
+}
+
+// CFNPropagateConfigStackTagsForTest wraps cfnPropagateConfigStackTags — see
+// [CFNStampConfigResourceForTest] for why both are exported.
+func CFNPropagateConfigStackTagsForTest(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+) (bool, error) {
+	return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 }

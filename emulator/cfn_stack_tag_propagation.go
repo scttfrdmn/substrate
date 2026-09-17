@@ -77,9 +77,10 @@ func cfnStackTagChanges(existing, prev, next map[string]string) (map[string]stri
 // cfnPropagateStackTags reconciles one resource's tags with the stack's, reporting whether the
 // resource's tags could be reached at all.
 //
-// The three families are the three tag stores, exactly as in [cfnStampResourceTags]: ELBv2's
-// ordered `[]ELBTag` found by ARN, the services keyed by [cfnResolveStampTarget], and
-// EC2's own prefix-keyed resolver for everything else. The CFN resource type decides which,
+// The four families are the four tag stores, exactly as in [cfnStampResourceTags]: ELBv2's
+// ordered `[]ELBTag` found by ARN, AWS Config's ARN-keyed side-car whose whole document is the
+// tag map, the services keyed by [cfnResolveStampTarget], and EC2's own prefix-keyed resolver for
+// everything else. The CFN resource type decides which,
 // rather than the physical ID: a type the type-keyed resolver claims is never also an EC2 one,
 // and asking the ID first would let a bucket named `i-orders` be reconciled as an instance —
 // which the stamp does do, and which is recorded in `docs/services.md` as a limit rather than
@@ -92,6 +93,9 @@ func cfnPropagateStackTags(
 ) (bool, error) {
 	if cfnELBStampableTypes[dr.Type] {
 		return cfnPropagateELBStackTags(state, reqCtx, dr, prev, next)
+	}
+	if cfnConfigStampableTypes[dr.Type] {
+		return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 	}
 	if target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID, reqCtx.Region); ok {
 		return cfnPropagateRecordStackTags(state, target, dr, prev, next)
@@ -293,6 +297,54 @@ func cfnPropagateELBStackTags(
 		return true, fmt.Errorf("stack tags %s %s: marshal: %w", dr.Type, dr.ARN, err)
 	}
 	if err := state.Put(context.Background(), elbNamespace, res.stateKey, updated); err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.ARN, err)
+	}
+	return true, nil
+}
+
+// cfnPropagateConfigStackTags reconciles the tags on one AWS Config resource, found by its ARN.
+//
+// The ARN for the reason [cfnStampConfigResource] gives: a Config tag is keyed by ARN, and neither
+// a rule's nor a recorder's ARN is derivable from the physical ID the deployer records.
+//
+// This arm reads and writes the side-car directly rather than through [cfnRecordTags] and
+// [mergeResourceTags], and both halves are load-bearing. On the read side the side-car has no tag
+// *member* — the document is the map — so `cfnRecordTags` would find neither `tags` nor `Tags` and
+// report the resource as carrying none. That is not a missing read but the KMS defect this file
+// already records: an empty existing set makes [cfnStackTagChanges] overwrite a caller's own tag
+// of the same name and never remove a withdrawn stack tag, so both of the reconciliation's
+// safeguards fail together. On the write side the side-car goes through
+// [cfgsvcSaveStateTags], the same writer Config's own `UntagResource` uses, so the rule that
+// distinguishes an untagged resource from one holding `{}` has one implementation rather than a
+// copy here that could drift — even though this path cannot reach the empty case while the
+// three stamp keys are written before it runs.
+func cfnPropagateConfigStackTags(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+) (bool, error) {
+	if dr.ARN == "" {
+		return false, nil
+	}
+	arn, existing, found, err := cfgsvcResolveStampTags(
+		state, reqCtx.AccountID, reqCtx.Region, dr.ARN,
+	)
+	if err != nil {
+		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.ARN, err)
+	}
+	if !found {
+		return false, nil
+	}
+
+	write, remove := cfnStackTagChanges(existing, prev, next)
+	if len(write) == 0 && len(remove) == 0 {
+		return true, nil
+	}
+	for key, value := range write {
+		existing[key] = value
+	}
+	for _, key := range remove {
+		delete(existing, key)
+	}
+	if err := cfgsvcSaveStateTags(context.Background(), state, arn, existing); err != nil {
 		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.ARN, err)
 	}
 	return true, nil

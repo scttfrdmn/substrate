@@ -314,7 +314,16 @@ func cfgsvcUnmarshal(body []byte, out interface{}) error {
 // cfgsvcGetJSON loads and decodes the value at key, reporting found=false when the
 // key is absent so a caller can tell "no such entity" from a read error.
 func (p *ConfigServicePlugin) cfgsvcGetJSON(ctx context.Context, key string, out interface{}) (bool, error) {
-	data, err := p.state.Get(ctx, configServiceNamespace, key)
+	return cfgsvcGetStateJSON(ctx, p.state, key, out)
+}
+
+// cfgsvcGetStateJSON is cfgsvcGetJSON against a state manager rather than a plugin.
+//
+// A free function because the CloudFormation deployer reads Config's records too and
+// holds no ConfigServicePlugin — the same reason mergeResourceTags is free (#819). The
+// method above delegates here so a read is one implementation, not two.
+func cfgsvcGetStateJSON(ctx context.Context, state StateManager, key string, out interface{}) (bool, error) {
+	data, err := state.Get(ctx, configServiceNamespace, key)
 	if err != nil {
 		return false, fmt.Errorf("config get %s: %w", key, err)
 	}
@@ -358,10 +367,39 @@ func (p *ConfigServicePlugin) cfgsvcDeleteKey(ctx context.Context, key string) e
 // record exists yet, which is what makes an updating Put carry the existing tags
 // forward rather than dropping them.
 func (p *ConfigServicePlugin) cfgsvcSaveTags(ctx context.Context, arn string, tags map[string]string) error {
+	return cfgsvcSaveStateTags(ctx, p.state, arn, tags)
+}
+
+// cfgsvcSaveStateTags is cfgsvcSaveTags against a state manager rather than a plugin, for
+// the reason cfgsvcGetStateJSON gives.
+//
+// The delete-when-empty rule stays here rather than being restated at the
+// CloudFormation caller, because it is the difference between a resource that carries no
+// tags and one carrying "{}" — cfgsvcLoadTags cannot tell the two apart — and one
+// implementation is the only way the two writers cannot disagree about it. The
+// CloudFormation path does not reach the empty case today: the three
+// aws:cloudformation:* keys are stamped before the stack-tag reconciliation runs, so a
+// resource a stack touched carries at least three tags. That is the argument for keeping
+// the rule here rather than duplicating it there — a caller restating a branch its own
+// tests cannot exercise is a copy that drifts unnoticed.
+func cfgsvcSaveStateTags(
+	ctx context.Context, state StateManager, arn string, tags map[string]string,
+) error {
+	key := cfgsvcTagsKey(arn)
 	if len(tags) == 0 {
-		return p.cfgsvcDeleteKey(ctx, cfgsvcTagsKey(arn))
+		if err := state.Delete(ctx, configServiceNamespace, key); err != nil {
+			return fmt.Errorf("config delete %s: %w", key, err)
+		}
+		return nil
 	}
-	return p.cfgsvcPutJSON(ctx, cfgsvcTagsKey(arn), tags)
+	data, err := json.Marshal(tags)
+	if err != nil {
+		return fmt.Errorf("config marshal %s: %w", key, err)
+	}
+	if err := state.Put(ctx, configServiceNamespace, key, data); err != nil {
+		return fmt.Errorf("config put %s: %w", key, err)
+	}
+	return nil
 }
 
 // --- tag validation ---
