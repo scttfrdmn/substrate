@@ -202,6 +202,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **KMS's `EnableKeyRotation` and `DisableKeyRotation` checked no key state** (#949). Both operations
+  carry the sentence *"the KMS key that you use for this operation must be in a compatible key state"*
+  and publish an identical seven-error list, and substrate checked nothing: it wrote `RotationEnabled`
+  and answered 200 whatever the key was. #923 recorded the gap while correcting
+  `DisabledException`'s status and named it as a missing refusal rather than folding it into a status
+  change; this closes it.
+
+  **The two forbidding states answer different codes, and that is the whole of the fix.** The developer
+  guide's *Key states of AWS KMS keys* table gives these two operations one row each with identical
+  contents: a `Disabled` key is footnote `[1]`, *"DisabledException: `<key ARN>` is disabled"*, while a
+  key pending deletion is footnote `[3]`, *"KMSInvalidStateException: `<key ARN>` is pending
+  deletion"*. Both states are reachable in substrate — `ScheduleKeyDeletion` writes the state and
+  clears the enabled flag in a single write — so a lone "is it enabled?" test would have answered
+  `DisabledException` for a key pending deletion, which is the wrong one of the two codes AWS
+  publishes and points a caller at the wrong remedy: enable the key and retry, versus cancel the
+  deletion and retry. `PendingDeletion` is therefore checked first, and a new `KMSInvalidStateException`
+  helper joins the four `kms_errors.go` already had.
+
+  The check runs before the write, so a refused call leaves `RotationEnabled` as it was — asserted by
+  reading it back through `GetKeyRotationStatus` over the wire, not by inspecting state, since a guard
+  placed after the assignment would answer the right code while having already changed the value.
+
+  **`GetKeyRotationStatus` is deliberately not guarded**, and a test pins that. Its row in the same
+  table permits `Enabled`, `Disabled` and `PendingDeletion` alike and `API_GetKeyRotationStatus`
+  publishes neither code, so a later sweep guarding "every key-state-sensitive operation" cannot
+  quietly introduce a refusal AWS does not have.
+
+  The four remaining states AWS's table refuses — `PendingImport`, `Unavailable`, `Creating`,
+  `Updating` — are recorded as unreachable rather than implemented: `ScheduleKeyDeletion` is
+  substrate's only writer of a state other than `Enabled` or `Disabled`, so no caller can reach them
+  and a guard for them could only be exercised by fabricating a key record. Left open by the same
+  reading, and filed as #961: `Encrypt`, `Decrypt` and `GenerateDataKey` answer `DisabledException`
+  for a key pending deletion, where their pages publish `KMSInvalidStateException` beside it.
+
+  Compatibility: `EnableKeyRotation` and `DisableKeyRotation` against a disabled key now answer
+  `DisabledException`/400 where they answered 200, and against a key scheduled for deletion
+  `KMSInvalidStateException`/400. A caller that turned rotation on or off before disabling or
+  scheduling the key sees no change, and neither does `GetKeyRotationStatus` in any state.
+
 - **Five tag reads reported their tags in Go's map order** (#946). ACM's `ListTagsForCertificate`,
   CloudFront's `ListTagsForResource`, Kinesis's `ListTagsForStream` and S3's `GetBucketTagging` and
   `GetObjectTagging` each flattened a resource's `map[string]string` of tags into an ordered list by

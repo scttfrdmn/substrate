@@ -63,17 +63,45 @@ func kmsNotFound(detail string) *AWSError {
 	}
 }
 
-// kmsKeyDisabled reports that a cryptographic operation named a key that exists and is not enabled.
+// kmsKeyDisabled reports that an operation named a key that exists and is not enabled.
 //
-// The code is DisabledException at 400, published on API_Encrypt, API_Decrypt and
-// API_GenerateDataKey — the three operations substrate refuses this way. Note that
-// API_EnableKeyRotation and API_DisableKeyRotation publish it too and substrate does not check
-// there; that is a missing refusal rather than a wrong status, recorded on #923 and filed
-// separately rather than folded into a status change.
+// The code is DisabledException at 400, published identically on API_Encrypt, API_Decrypt,
+// API_GenerateDataKey, API_EnableKeyRotation and API_DisableKeyRotation — the five operations
+// substrate refuses this way. The last two were added by #949; before it they wrote
+// RotationEnabled against a disabled key and answered 200, which #923 recorded as a missing
+// refusal rather than a wrong status.
+//
+// A caller reaching this helper must have ruled out PendingDeletion first, because the key-state
+// table gives that state its own code — see [kmsInvalidKeyState].
 func kmsKeyDisabled(keyID string) *AWSError {
 	return &AWSError{
 		Code:       "DisabledException",
 		Message:    fmt.Sprintf("the KMS key %q is not enabled", keyID),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsInvalidKeyState reports that a key exists but is in a key state the operation does not permit.
+//
+// The code is KMSInvalidStateException at 400 — "the request was rejected because the state of the
+// specified resource is not valid for this request" — published on every operation reached from this
+// package that reads or writes a key, API_EnableKeyRotation and API_DisableKeyRotation included.
+//
+// It is a separate code from DisabledException rather than a synonym for it, and the developer
+// guide's "Key states of AWS KMS keys" table is where the two divide: for both rotation operations a
+// Disabled key is footnote [1], "DisabledException: <key ARN> is disabled", while a key pending
+// deletion is footnote [3], "KMSInvalidStateException: <key ARN> is pending deletion". So a caller
+// distinguishing "enable the key and retry" from "cancel the deletion and retry" reads the code, and
+// answering DisabledException for both would collapse two different remedies into one. The state is
+// named in the message for the same reason.
+//
+// PendingDeletion is the only state substrate can be in here: ScheduleKeyDeletion is the sole writer
+// of anything but Enabled or Disabled, so PendingImport, Unavailable, Creating and Updating — which
+// the table also refuses — are unreachable and are recorded as such rather than guarded against.
+func kmsInvalidKeyState(keyID, state string) *AWSError {
+	return &AWSError{
+		Code:       "KMSInvalidStateException",
+		Message:    fmt.Sprintf("the KMS key %q is in state %q, which this operation does not permit", keyID, state),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

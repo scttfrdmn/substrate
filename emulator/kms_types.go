@@ -9,6 +9,14 @@ import (
 
 const kmsNamespace = "kms"
 
+// kmsKeyStatePendingDeletion is the KeyState a key scheduled for deletion carries.
+//
+// It is a constant, where "Enabled" and "Disabled" remain literals at the sites that write them,
+// because it is the one key state substrate *compares* against: ScheduleKeyDeletion writes it and
+// #949's rotation guard reads it, so a typo in either would silently stop the guard from firing
+// rather than failing to compile. The Enabled/Disabled literals are only ever written.
+const kmsKeyStatePendingDeletion = "PendingDeletion"
+
 // KMSKey represents a KMS customer master key.
 type KMSKey struct {
 	// KeyID is the unique identifier for the key.
@@ -26,7 +34,8 @@ type KMSKey struct {
 	// KeySpec is the key spec: SYMMETRIC_DEFAULT, RSA_2048, etc.
 	KeySpec string `json:"KeySpec"`
 
-	// KeyState is the state: Enabled, Disabled, PendingDeletion, etc.
+	// KeyState is the state: Enabled, Disabled or [kmsKeyStatePendingDeletion]. AWS publishes four
+	// more — PendingImport, Unavailable, Creating and Updating — that substrate never writes.
 	KeyState string `json:"KeyState"`
 
 	// Enabled indicates whether the key is enabled.

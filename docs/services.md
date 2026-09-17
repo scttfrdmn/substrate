@@ -9206,9 +9206,9 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | CancelKeyDeletion | |
 | GetKeyPolicy | |
 | PutKeyPolicy | |
-| GetKeyRotationStatus | |
-| EnableKeyRotation | |
-| DisableKeyRotation | |
+| GetKeyRotationStatus | Answers in every key state substrate can produce — see below |
+| EnableKeyRotation | Refuses a disabled key and a key pending deletion, with a different code for each — see below |
+| DisableKeyRotation | Same refusals as `EnableKeyRotation` |
 | TagResource | Tags are keyed `TagKey`/`TagValue`, not `Key`/`Value` |
 | UntagResource | |
 | ListResourceTags | |
@@ -9313,11 +9313,63 @@ The full published surface, for a caller deciding what to branch on:
 | 400 | `NotFoundException`, `DisabledException`, `InvalidArnException`, `KMSInvalidStateException`, `InvalidCiphertextException`, `IncorrectKeyException`, `InvalidKeyUsageException`, `InvalidGrantTokenException`, `LimitExceededException`, `TagException`, `AlreadyExistsException`, `InvalidAliasNameException`, `MalformedPolicyDocumentException`, `UnsupportedOperationException`, `DryRunOperationException`, `ValidationError`, `ThrottlingException` |
 | 500 | `DependencyTimeoutException`, `KMSInternalException`, `KeyUnavailableException` |
 
-One adjacent gap is named rather than closed: `API_EnableKeyRotation` and
-`API_DisableKeyRotation` also publish `DisabledException`, and substrate's two
-handlers do not check whether the key is enabled — they answer 200 on a disabled
-key. That is a missing refusal rather than a wrong status, so it is filed
-separately.
+The adjacent gap #923 named rather than closed — `API_EnableKeyRotation` and
+`API_DisableKeyRotation` publish `DisabledException` too, and substrate's two
+handlers checked nothing — is closed by [#949](https://github.com/scttfrdmn/substrate/issues/949).
+It was a missing refusal rather than a wrong status, and it is described in the
+next section, because getting it right needed a second code rather than a second
+call to the same helper.
+
+The same gap remains open on three cryptographic operations, and is named here for
+the same reason: `Encrypt`, `Decrypt` and `GenerateDataKey` answer
+`DisabledException` for a key pending deletion, where AWS publishes
+`KMSInvalidStateException`. That is
+[#961](https://github.com/scttfrdmn/substrate/issues/961).
+
+### A key state can forbid rotation, and the two forbidding states answer different codes
+
+`API_EnableKeyRotation` and `API_DisableKeyRotation` both carry the sentence *"the
+KMS key that you use for this operation must be in a compatible key state"*, and
+both publish the identical seven-error list — `DisabledException` and
+`KMSInvalidStateException` among them, each at 400. Substrate checked no state at
+all: it wrote `RotationEnabled` and answered 200 whatever the key was.
+
+The developer guide's *Key states of AWS KMS keys* table is what decides which of
+the two codes a state gets, and for these two operations its row is:
+
+| Key state | Substrate answers | Provenance |
+|-----------|-------------------|------------|
+| `Enabled` | 200 | Permitted |
+| `Disabled` | `DisabledException`/400 | Footnote `[1]` — *"DisabledException: `<key ARN>` is disabled"* |
+| `PendingDeletion` | `KMSInvalidStateException`/400 | Footnote `[3]` — *"KMSInvalidStateException: `<key ARN>` is pending deletion (or pending replica deletion)"* |
+| `PendingImport`, `Unavailable`, `Creating`, `Updating` | — | Refused by AWS, **unreachable in substrate**: no operation writes any of the four, so nothing can be in one of these states to be answered |
+
+Two of those rows are load-bearing.
+
+**`PendingDeletion` is reachable, so the naive check would answer the wrong code.**
+`ScheduleKeyDeletion` writes the state *and* clears the enabled flag in one go, so
+a lone "is it enabled?" test would report `DisabledException` for a key pending
+deletion. The two codes carry different remedies — enable the key and retry, or
+cancel the deletion and retry — so collapsing them leaves a caller's error handler
+unable to tell which. `PendingDeletion` is therefore checked first.
+
+**`GetKeyRotationStatus` is deliberately not guarded.** Its row in the same table
+permits `Enabled`, `Disabled` and `PendingDeletion` alike, and
+`API_GetKeyRotationStatus` publishes neither code, so reading whether rotation is
+on succeeds in every state substrate can produce. A test pins that, so a later
+sweep guarding "every key-state-sensitive operation" cannot quietly introduce a
+refusal AWS does not have.
+
+The refusal is checked **before** the write, so a refused call leaves
+`RotationEnabled` exactly as it was — asserted by reading it back through
+`GetKeyRotationStatus` rather than by inspecting state, since a guard placed after
+the assignment would answer the right code while having already changed the value.
+
+The four unreachable states are recorded rather than implemented because
+`ScheduleKeyDeletion` is substrate's only writer of a state other than `Enabled` or
+`Disabled`: there is no operation a caller could use to reach them, so a guard for
+them could only be exercised by fabricating a key record, which is the kind of test
+that proves nothing about the wire.
 
 ### A key is reachable through the tagging API
 
