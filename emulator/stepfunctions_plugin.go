@@ -192,8 +192,13 @@ func (p *StepFunctionsPlugin) loadExecution(goCtx context.Context, accountID, re
 	return &exec, nil
 }
 
-func (p *StepFunctionsPlugin) saveExecution(goCtx context.Context, exec *ExecutionState) error {
-	smName := extractSMNameFromARN(exec.StateMachineArn)
+// saveExecution writes an execution's record under the state machine named by smName.
+//
+// smName is a parameter rather than being re-derived from exec.StateMachineArn, which is what this
+// function used to do through extractSMNameFromARN (#912): every caller has already parsed an ARN by
+// the time it gets here, so re-extracting was both redundant and the one place a write could land at
+// a different key from the read that found it — the ARN is parsed once and the name is carried.
+func (p *StepFunctionsPlugin) saveExecution(goCtx context.Context, smName string, exec *ExecutionState) error {
 	data, err := json.Marshal(exec)
 	if err != nil {
 		return fmt.Errorf("stepfunctions saveExecution marshal: %w", err)
@@ -271,26 +276,75 @@ func (p *StepFunctionsPlugin) saveActivityNames(goCtx context.Context, accountID
 	return p.state.Put(goCtx, statesNamespace, p.activityNamesKey(accountID, region), data)
 }
 
-// --- ARN helpers ---
+// --- ARN-addressed loads ---
+//
+// Three helpers, one per resource kind, and every operation that takes an ARN goes through one of
+// them (#912). They replaced extractSMNameFromARN and extractSMNameFromExecARN, which returned an
+// ARN's last colon-separated segment and left each of eleven call sites to supply the account and
+// Region from its own request context — see stepfunctions_arn.go for what that cost. Deleting the
+// two functions rather than leaving them unused is deliberate: leaving them is how a twelfth call
+// site acquires the defect.
+//
+// The not-found code differs by resource kind and not by operation, so one helper per kind is the
+// right granularity: every operation naming a state machine publishes StateMachineDoesNotExist,
+// every one naming an execution publishes ExecutionDoesNotExist, and each is published at HTTP 400.
 
-// extractSMNameFromARN returns the state machine name from its ARN.
-// Format: arn:aws:states:{region}:{acct}:stateMachine:{name}.
-func extractSMNameFromARN(arn string) string {
-	if idx := strings.LastIndexByte(arn, ':'); idx >= 0 {
-		return arn[idx+1:]
+// requireStateMachine parses a state-machine ARN and loads the state machine it names.
+//
+// The returned error is an [AWSError] — InvalidArn/400 for an ARN that is malformed, names another
+// service, or names an activity or an execution, and StateMachineDoesNotExist/400 for a well-formed
+// one naming nothing — or a wrapped state error. Every caller returns it unexamined.
+func (p *StepFunctionsPlugin) requireStateMachine(goCtx context.Context, arn string) (*StateMachineState, sfnARNTarget, error) {
+	target, arnErr := sfnParseStateMachineARN(arn)
+	if arnErr != nil {
+		return nil, sfnARNTarget{}, arnErr
 	}
-	return arn
+	sm, err := p.loadStateMachine(goCtx, target.AccountID, target.Region, target.Name)
+	if err != nil {
+		return nil, target, err
+	}
+	if sm == nil {
+		return nil, target, sfnStateMachineDoesNotExist(arn)
+	}
+	return sm, target, nil
 }
 
-// extractSMNameFromExecARN returns the state machine name embedded in an
-// execution ARN. Format: arn:aws:states:{region}:{acct}:execution:{smName}:{execName}.
-func extractSMNameFromExecARN(execArn string) string {
-	// Strip the last segment (execName) then extract the smName.
-	if idx := strings.LastIndexByte(execArn, ':'); idx >= 0 {
-		rest := execArn[:idx]
-		return extractSMNameFromARN(rest)
+// requireActivity parses an activity ARN and loads the activity it names. See
+// [StepFunctionsPlugin.requireStateMachine] for the error contract.
+func (p *StepFunctionsPlugin) requireActivity(goCtx context.Context, arn string) (*ActivityState, sfnARNTarget, error) {
+	target, arnErr := sfnParseActivityARN(arn)
+	if arnErr != nil {
+		return nil, sfnARNTarget{}, arnErr
 	}
-	return ""
+	act, err := p.loadActivity(goCtx, target.AccountID, target.Region, target.Name)
+	if err != nil {
+		return nil, target, err
+	}
+	if act == nil {
+		return nil, target, sfnActivityDoesNotExist(arn)
+	}
+	return act, target, nil
+}
+
+// requireExecution parses an execution ARN and loads the execution it names. See
+// [StepFunctionsPlugin.requireStateMachine] for the error contract.
+//
+// The execution's state key nests the execution's name under its state machine's, and both names
+// come out of the ARN — the pair extractSMNameFromExecARN reconstructed by stripping one segment,
+// which was right only for an ARN of exactly that arity.
+func (p *StepFunctionsPlugin) requireExecution(goCtx context.Context, arn string) (*ExecutionState, sfnARNTarget, error) {
+	target, arnErr := sfnParseExecutionARN(arn)
+	if arnErr != nil {
+		return nil, sfnARNTarget{}, arnErr
+	}
+	exec, err := p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, target.ExecName)
+	if err != nil {
+		return nil, target, err
+	}
+	if exec == nil {
+		return nil, target, sfnExecutionDoesNotExist(arn)
+	}
+	return exec, target, nil
 }
 
 // --- Operations ---
@@ -365,7 +419,7 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) describeStateMachine(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) describeStateMachine(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
 	}
@@ -373,20 +427,15 @@ func (p *StepFunctionsPlugin) describeStateMachine(ctx *RequestContext, req *AWS
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := extractSMNameFromARN(input.StateMachineArn)
-	goCtx := context.Background()
-	sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, name)
+	sm, _, err := p.requireStateMachine(context.Background(), input.StateMachineArn)
 	if err != nil {
 		return nil, err
-	}
-	if sm == nil {
-		return nil, &AWSError{Code: "StateMachineDoesNotExist", Message: "State machine does not exist: " + input.StateMachineArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	return statesJSONResponse(http.StatusOK, smToMap(sm))
 }
 
-func (p *StepFunctionsPlugin) updateStateMachine(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
 		Definition      string `json:"definition"`
@@ -396,14 +445,10 @@ func (p *StepFunctionsPlugin) updateStateMachine(ctx *RequestContext, req *AWSRe
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := extractSMNameFromARN(input.StateMachineArn)
 	goCtx := context.Background()
-	sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, name)
+	sm, _, err := p.requireStateMachine(goCtx, input.StateMachineArn)
 	if err != nil {
 		return nil, err
-	}
-	if sm == nil {
-		return nil, &AWSError{Code: "StateMachineDoesNotExist", Message: "State machine does not exist: " + input.StateMachineArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	if input.Definition != "" {
@@ -423,7 +468,7 @@ func (p *StepFunctionsPlugin) updateStateMachine(ctx *RequestContext, req *AWSRe
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) deleteStateMachine(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) deleteStateMachine(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
 	}
@@ -431,31 +476,31 @@ func (p *StepFunctionsPlugin) deleteStateMachine(ctx *RequestContext, req *AWSRe
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := extractSMNameFromARN(input.StateMachineArn)
 	goCtx := context.Background()
-	sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, name)
+	_, target, err := p.requireStateMachine(goCtx, input.StateMachineArn)
 	if err != nil {
 		return nil, err
 	}
-	if sm == nil {
-		return nil, &AWSError{Code: "StateMachineDoesNotExist", Message: "State machine does not exist: " + input.StateMachineArn, HTTPStatus: http.StatusNotFound}
-	}
 
-	if delErr := p.state.Delete(goCtx, statesNamespace, p.smKey(ctx.AccountID, ctx.Region, name)); delErr != nil {
+	// The record and the name index are both removed under the ARN's own account and Region, not the
+	// caller's. Reading the caller's here is what let a us-east-1 caller delete its own state machine
+	// by presenting an eu-west-1 ARN, and — the worse half — leave the *real* target's name in its
+	// index while removing a record that was never asked about.
+	if delErr := p.state.Delete(goCtx, statesNamespace, p.smKey(target.AccountID, target.Region, target.Name)); delErr != nil {
 		return nil, fmt.Errorf("stepfunctions deleteStateMachine state.Delete: %w", delErr)
 	}
 
-	names, err := p.loadSMNames(goCtx, ctx.AccountID, ctx.Region)
+	names, err := p.loadSMNames(goCtx, target.AccountID, target.Region)
 	if err != nil {
 		return nil, err
 	}
 	newNames := make([]string, 0, len(names))
 	for _, n := range names {
-		if n != name {
+		if n != target.Name {
 			newNames = append(newNames, n)
 		}
 	}
-	if err := p.saveSMNames(goCtx, ctx.AccountID, ctx.Region, newNames); err != nil {
+	if err := p.saveSMNames(goCtx, target.AccountID, target.Region, newNames); err != nil {
 		return nil, fmt.Errorf("stepfunctions deleteStateMachine saveSMNames: %w", err)
 	}
 
@@ -538,14 +583,10 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	smName := extractSMNameFromARN(input.StateMachineArn)
 	goCtx := context.Background()
-	sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, smName)
+	sm, target, err := p.requireStateMachine(goCtx, input.StateMachineArn)
 	if err != nil {
 		return nil, err
-	}
-	if sm == nil {
-		return nil, &AWSError{Code: "StateMachineDoesNotExist", Message: "State machine does not exist: " + input.StateMachineArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	execName := input.Name
@@ -553,7 +594,11 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 		execName = "exec-" + generateLambdaRevisionID()[:8]
 	}
 
-	execArn := fmt.Sprintf("arn:aws:states:%s:%s:execution:%s:%s", ctx.Region, ctx.AccountID, smName, execName)
+	// The execution belongs to the state machine, so its ARN, its record and its index entry are all
+	// scoped to the state machine's account and Region. They were scoped to the caller's, which meant a
+	// cross-Region StartExecution minted an ARN in the caller's Region naming a state machine that is
+	// not there — an ARN DescribeExecution would then resolve to nothing.
+	execArn := fmt.Sprintf("arn:aws:states:%s:%s:execution:%s:%s", target.Region, target.AccountID, target.Name, execName)
 	now := p.tc.Now()
 	exec := &ExecutionState{
 		ExecutionArn:    execArn,
@@ -562,8 +607,8 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 		Status:          "RUNNING",
 		Input:           input.Input,
 		StartDate:       now,
-		AccountID:       ctx.AccountID,
-		Region:          ctx.Region,
+		AccountID:       target.AccountID,
+		Region:          target.Region,
 		History:         []HistoryEvent{},
 	}
 
@@ -577,16 +622,16 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 		_, _ = p.executeASL(&def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 	}
 
-	if err := p.saveExecution(goCtx, exec); err != nil {
+	if err := p.saveExecution(goCtx, target.Name, exec); err != nil {
 		return nil, fmt.Errorf("stepfunctions startExecution saveExecution: %w", err)
 	}
 
-	ids, err := p.loadExecIDs(goCtx, ctx.AccountID, ctx.Region, smName)
+	ids, err := p.loadExecIDs(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	ids = append(ids, execName)
-	if err := p.saveExecIDs(goCtx, ctx.AccountID, ctx.Region, smName, ids); err != nil {
+	if err := p.saveExecIDs(goCtx, target.AccountID, target.Region, target.Name, ids); err != nil {
 		return nil, fmt.Errorf("stepfunctions startExecution saveExecIDs: %w", err)
 	}
 
@@ -607,14 +652,9 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	smName := extractSMNameFromARN(input.StateMachineArn)
-	goCtx := context.Background()
-	sm, err := p.loadStateMachine(goCtx, ctx.AccountID, ctx.Region, smName)
+	sm, target, err := p.requireStateMachine(context.Background(), input.StateMachineArn)
 	if err != nil {
 		return nil, err
-	}
-	if sm == nil {
-		return nil, &AWSError{Code: "StateMachineDoesNotExist", Message: "State machine does not exist: " + input.StateMachineArn, HTTPStatus: http.StatusNotFound}
 	}
 	if sm.Type != "EXPRESS" {
 		return nil, &AWSError{
@@ -634,7 +674,7 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 		execName = "sync-" + generateLambdaRevisionID()[:8]
 	}
 
-	execArn := fmt.Sprintf("arn:aws:states:%s:%s:express:%s:%s", ctx.Region, ctx.AccountID, smName, execName)
+	execArn := fmt.Sprintf("arn:aws:states:%s:%s:express:%s:%s", target.Region, target.AccountID, target.Name, execName)
 	now := p.tc.Now()
 	exec := &ExecutionState{
 		ExecutionArn:    execArn,
@@ -643,8 +683,8 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 		Status:          "RUNNING",
 		Input:           input.Input,
 		StartDate:       now,
-		AccountID:       ctx.AccountID,
-		Region:          ctx.Region,
+		AccountID:       target.AccountID,
+		Region:          target.Region,
 		History:         []HistoryEvent{},
 	}
 
@@ -662,7 +702,7 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) stopExecution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) stopExecution(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ExecutionArn string `json:"executionArn"`
 		Cause        string `json:"cause"`
@@ -672,22 +712,17 @@ func (p *StepFunctionsPlugin) stopExecution(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	smName := extractSMNameFromExecARN(input.ExecutionArn)
-	execName := extractSMNameFromARN(input.ExecutionArn)
 	goCtx := context.Background()
-	exec, err := p.loadExecution(goCtx, ctx.AccountID, ctx.Region, smName, execName)
+	exec, target, err := p.requireExecution(goCtx, input.ExecutionArn)
 	if err != nil {
 		return nil, err
-	}
-	if exec == nil {
-		return nil, &AWSError{Code: "ExecutionDoesNotExist", Message: "Execution does not exist: " + input.ExecutionArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	now := p.tc.Now()
 	exec.Status = "ABORTED"
 	exec.StopDate = now
 
-	if err := p.saveExecution(goCtx, exec); err != nil {
+	if err := p.saveExecution(goCtx, target.Name, exec); err != nil {
 		return nil, fmt.Errorf("stepfunctions stopExecution saveExecution: %w", err)
 	}
 
@@ -697,7 +732,7 @@ func (p *StepFunctionsPlugin) stopExecution(ctx *RequestContext, req *AWSRequest
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) describeExecution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) describeExecution(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ExecutionArn string `json:"executionArn"`
 	}
@@ -705,23 +740,18 @@ func (p *StepFunctionsPlugin) describeExecution(ctx *RequestContext, req *AWSReq
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	smName := extractSMNameFromExecARN(input.ExecutionArn)
-	execName := extractSMNameFromARN(input.ExecutionArn)
-	goCtx := context.Background()
-	exec, err := p.loadExecution(goCtx, ctx.AccountID, ctx.Region, smName, execName)
+	exec, _, err := p.requireExecution(context.Background(), input.ExecutionArn)
 	if err != nil {
 		return nil, err
-	}
-	if exec == nil {
-		return nil, &AWSError{Code: "ExecutionDoesNotExist", Message: "Execution does not exist: " + input.ExecutionArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	return statesJSONResponse(http.StatusOK, execToMap(exec))
 }
 
-func (p *StepFunctionsPlugin) listExecutions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
+		MapRunArn       string `json:"mapRunArn"`
 		StatusFilter    string `json:"statusFilter"`
 		MaxResults      int    `json:"maxResults"`
 		NextToken       string `json:"nextToken"`
@@ -733,9 +763,43 @@ func (p *StepFunctionsPlugin) listExecutions(ctx *RequestContext, req *AWSReques
 		input.MaxResults = 100
 	}
 
-	smName := extractSMNameFromARN(input.StateMachineArn)
+	// API_ListExecutions is the one operation in this set whose stateMachineArn is "Required: No":
+	// "You can specify either a mapRunArn or a stateMachineArn, but not both." Both halves of that
+	// sentence are answered — neither supplied and both supplied are each a ValidationException —
+	// because reading an absent stateMachineArn is what produced the old empty-name key, and an empty
+	// execution list is the one answer a caller cannot tell a refusal from.
+	//
+	// A Map Run is not modeled at all: nothing in the plugin mints a mapRun ARN and no distributed-map
+	// state exists to produce one, so a supplied mapRunArn names a resource substrate has no record of
+	// and answers ResourceNotFound — which this page publishes — rather than being silently ignored,
+	// which is how it read before.
+	switch {
+	case input.StateMachineArn == "" && input.MapRunArn == "":
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    "Either stateMachineArn or mapRunArn must be specified",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	case input.StateMachineArn != "" && input.MapRunArn != "":
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    "You can specify either a mapRunArn or a stateMachineArn, but not both",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	case input.MapRunArn != "":
+		return nil, sfnResourceNotFoundError(input.MapRunArn)
+	}
+
 	goCtx := context.Background()
-	ids, err := p.loadExecIDs(goCtx, ctx.AccountID, ctx.Region, smName)
+	// The existence check is new. This was the one operation in the set with no check at all, so an ARN
+	// naming nothing — another account's state machine, a deleted one, an activity — answered 200 with
+	// an empty executions list, indistinguishable from a state machine that has never been started.
+	_, target, err := p.requireStateMachine(goCtx, input.StateMachineArn)
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := p.loadExecIDs(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +833,7 @@ func (p *StepFunctionsPlugin) listExecutions(ctx *RequestContext, req *AWSReques
 	}
 	entries := make([]execEntry, 0, len(page))
 	for _, execName := range page {
-		exec, loadErr := p.loadExecution(goCtx, ctx.AccountID, ctx.Region, smName, execName)
+		exec, loadErr := p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
 		if loadErr != nil || exec == nil {
 			continue
 		}
@@ -798,7 +862,7 @@ func (p *StepFunctionsPlugin) listExecutions(ctx *RequestContext, req *AWSReques
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) getExecutionHistory(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) getExecutionHistory(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ExecutionArn string `json:"executionArn"`
 	}
@@ -806,15 +870,9 @@ func (p *StepFunctionsPlugin) getExecutionHistory(ctx *RequestContext, req *AWSR
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	smName := extractSMNameFromExecARN(input.ExecutionArn)
-	execName := extractSMNameFromARN(input.ExecutionArn)
-	goCtx := context.Background()
-	exec, err := p.loadExecution(goCtx, ctx.AccountID, ctx.Region, smName, execName)
+	exec, _, err := p.requireExecution(context.Background(), input.ExecutionArn)
 	if err != nil {
 		return nil, err
-	}
-	if exec == nil {
-		return nil, &AWSError{Code: "ExecutionDoesNotExist", Message: "Execution does not exist: " + input.ExecutionArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	history := exec.History
@@ -886,7 +944,7 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) describeActivity(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) describeActivity(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ActivityArn string `json:"activityArn"`
 	}
@@ -894,14 +952,9 @@ func (p *StepFunctionsPlugin) describeActivity(ctx *RequestContext, req *AWSRequ
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := extractSMNameFromARN(input.ActivityArn)
-	goCtx := context.Background()
-	act, err := p.loadActivity(goCtx, ctx.AccountID, ctx.Region, name)
+	act, _, err := p.requireActivity(context.Background(), input.ActivityArn)
 	if err != nil {
 		return nil, err
-	}
-	if act == nil {
-		return nil, &AWSError{Code: "ActivityDoesNotExist", Message: "Activity does not exist: " + input.ActivityArn, HTTPStatus: http.StatusNotFound}
 	}
 
 	out := map[string]interface{}{
@@ -976,7 +1029,7 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 	return statesJSONResponse(http.StatusOK, out)
 }
 
-func (p *StepFunctionsPlugin) deleteActivity(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) deleteActivity(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ActivityArn string `json:"activityArn"`
 	}
@@ -984,31 +1037,29 @@ func (p *StepFunctionsPlugin) deleteActivity(ctx *RequestContext, req *AWSReques
 		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	name := extractSMNameFromARN(input.ActivityArn)
 	goCtx := context.Background()
-	act, err := p.loadActivity(goCtx, ctx.AccountID, ctx.Region, name)
+	_, target, err := p.requireActivity(goCtx, input.ActivityArn)
 	if err != nil {
 		return nil, err
 	}
-	if act == nil {
-		return nil, &AWSError{Code: "ActivityDoesNotExist", Message: "Activity does not exist: " + input.ActivityArn, HTTPStatus: http.StatusNotFound}
-	}
 
-	if delErr := p.state.Delete(goCtx, statesNamespace, p.activityKey(ctx.AccountID, ctx.Region, name)); delErr != nil {
+	// See deleteStateMachine: the record and the name index come off under the ARN's account and
+	// Region, so a foreign ARN can no longer delete the caller's own same-named activity.
+	if delErr := p.state.Delete(goCtx, statesNamespace, p.activityKey(target.AccountID, target.Region, target.Name)); delErr != nil {
 		return nil, fmt.Errorf("stepfunctions deleteActivity state.Delete: %w", delErr)
 	}
 
-	names, err := p.loadActivityNames(goCtx, ctx.AccountID, ctx.Region)
+	names, err := p.loadActivityNames(goCtx, target.AccountID, target.Region)
 	if err != nil {
 		return nil, err
 	}
 	newNames := make([]string, 0, len(names))
 	for _, n := range names {
-		if n != name {
+		if n != target.Name {
 			newNames = append(newNames, n)
 		}
 	}
-	if err := p.saveActivityNames(goCtx, ctx.AccountID, ctx.Region, newNames); err != nil {
+	if err := p.saveActivityNames(goCtx, target.AccountID, target.Region, newNames); err != nil {
 		return nil, fmt.Errorf("stepfunctions deleteActivity saveActivityNames: %w", err)
 	}
 

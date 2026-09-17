@@ -67,52 +67,32 @@ func sfnActivityKey(accountID, region, name string) string {
 	return sfnActivityKeyPrefix + accountID + "/" + region + "/" + name
 }
 
-// sfnResolveARN parses a Step Functions ARN and returns the namespace and state key it addresses.
+// sfnResolveARN parses a Step Functions ARN and returns the namespace and state key it addresses,
+// for the Resource Groups Tagging API and for these three operations.
 //
 // The account and Region come from the ARN, never from the caller's request context — the rule
 // #826 established — so an ARN naming another account's state machine cannot resolve the
-// caller's own same-named one. The function takes no *RequestContext at all, which is what makes
-// that structural rather than a thing each of the three call sites has to remember.
+// caller's own same-named one. The parse lives in [sfnParseARN], which takes no *RequestContext at
+// all, and is shared with the plugin's other eleven ARN-taking operations since #912: it exists as
+// a wrapper rather than a second parser because this caller needs a plain error, which
+// [TaggingPlugin.resolveARN] renders into a FailedResourcesMap entry, while the operations need an
+// [AWSError] carrying a published code.
+//
+// An execution ARN is refused here even though [sfnParseARN] resolves one, because these three
+// operations do not accept the type: see this file's preamble.
 func sfnResolveARN(arn string) (ns, key string, err error) {
-	// arn:aws:states:{region}:{acct}:{type}:{name}
-	parts := strings.SplitN(arn, ":", 7)
-	if len(parts) < 7 || parts[0] != "arn" || parts[2] != "states" {
+	target, arnErr := sfnParseARN(arn)
+	if arnErr != nil {
 		return "", "", fmt.Errorf("invalid Step Functions ARN: %q", arn)
 	}
-	region := parts[3]
-	acct := parts[4]
-	resType := parts[5]
-	name := parts[6]
-	if name == "" {
-		return "", "", fmt.Errorf("states ARN names no resource: %q", arn)
-	}
-
-	// The type comparison is case-sensitive on purpose. AWS distinguishes the two taggable
-	// resources by the literal segment alone — stateMachine with a capital M against activity —
-	// so a case-folding match would let "statemachine:orders" address the same record as
-	// "stateMachine:orders" while AWS refuses the first outright.
-	var keyFn func(accountID, region, name string) string
-	switch resType {
-	case "stateMachine":
-		keyFn = sfnStateMachineKey
-	case "activity":
-		keyFn = sfnActivityKey
+	switch target.Type {
+	case sfnTypeStateMachine:
+		return statesNamespace, sfnStateMachineKey(target.AccountID, target.Region, target.Name), nil
+	case sfnTypeActivity:
+		return statesNamespace, sfnActivityKey(target.AccountID, target.Region, target.Name), nil
 	default:
-		// "execution" lands here, deliberately: see this file's preamble.
-		return "", "", fmt.Errorf("unsupported Step Functions ARN resource type: %q", resType)
+		return "", "", fmt.Errorf("unsupported Step Functions ARN resource type: %q", target.Type)
 	}
-
-	// A state machine or activity name is letters, digits and a few punctuation characters —
-	// AWS's Name pattern excludes ":" and "/". Without the check, an execution ARN's trailing
-	// {smName}:{execName} pair or any other extra segment built a state key with a colon in the
-	// name, which addresses nothing and so reported the resource absent rather than the ARN
-	// malformed: the wrong error to hand a caller and the wrong one to see in a log. It is also
-	// what made the previous strings.Contains(arn, ":stateMachine:") test unsound, since a name
-	// carrying that substring satisfied it as readily as a type segment did.
-	if strings.ContainsAny(name, "/:") {
-		return "", "", fmt.Errorf("invalid Step Functions resource name: %q", name)
-	}
-	return statesNamespace, keyFn(acct, region, name), nil
 }
 
 // sfnKeyIsTaggable reports whether a states-namespace state key names a record substrate stores

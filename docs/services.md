@@ -10833,81 +10833,171 @@ routes both.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStateMachine | `tags` is an array of `{key, value}` objects |
-| DescribeStateMachine | |
-| UpdateStateMachine | |
-| DeleteStateMachine | |
-| ListStateMachines | |
-| StartExecution | Returns RUNNING status immediately |
-| StartSyncExecution | |
-| DescribeExecution | Transitions to SUCCEEDED on describe |
-| StopExecution | |
-| ListExecutions | |
-| GetExecutionHistory | |
-| CreateActivity | `tags` is an array of `{key, value}` objects |
-| DescribeActivity | |
-| ListActivities | |
-| DeleteActivity | |
+| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region |
+| DescribeStateMachine | Addressed by ARN — see below |
+| UpdateStateMachine | Addressed by ARN — see below |
+| DeleteStateMachine | Addressed by ARN; synchronous, so no `DELETING` status is observable (#995) |
+| ListStateMachines | Scoped to the caller's own account and Region |
+| StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
+| StartSyncExecution | EXPRESS only; the express execution ARN is minted in the state machine's account and Region, and no record is stored for it |
+| DescribeExecution | Transitions to SUCCEEDED on describe; addressed by ARN |
+| StopExecution | Addressed by ARN |
+| ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below |
+| GetExecutionHistory | Addressed by ARN |
+| CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region |
+| DescribeActivity | Addressed by ARN — see below |
+| ListActivities | Scoped to the caller's own account and Region |
+| DeleteActivity | Addressed by ARN; refuses an absent activity (#995) |
 | TagResource | State machine or activity — see below |
 | UntagResource | State machine or activity — see below |
 | ListTagsForResource | `tags` sorted by key — see below |
 
-### A tagging ARN addresses the resource it names
+### An ARN addresses the resource it names, at every operation
 
-`TagResource`, `UntagResource` and `ListTagsForResource` each describe
-`resourceArn` as "the Amazon Resource Name (ARN) for the Step Functions state
-machine or activity", so those two are the whole taggable set:
+**The account, the Region, the resource type and the name all come from the ARN,
+never from the calling request.** Every operation that takes an ARN resolves it
+through one parser, which takes no request context at all — so the guarantee is
+structural rather than something each of the fourteen call sites has to remember.
+That is the arrangement ECS has had since #826, and it is the rule #826
+established for SQS and DynamoDB and #845 carried across the tagging API's
+resolver.
 
 | Resource | ARN | State key |
 |----------|-----|-----------|
 | State machine | `arn:aws:states:{region}:{account}:stateMachine:{name}` | `statemachine:{account}/{region}/{name}` |
 | Activity | `arn:aws:states:{region}:{account}:activity:{name}` | `activity:{account}/{region}/{name}` |
+| Execution | `arn:aws:states:{region}:{account}:execution:{stateMachine}:{execution}` | `execution:{account}/{region}/{stateMachine}/{execution}` |
+| Express execution | `arn:aws:states:{region}:{account}:express:{stateMachine}:{execution}` | none — no record is kept |
 
-**The account and Region come from the ARN, not from the calling request.** All
-three operations previously took the resource *name* from the ARN's last
-colon-separated segment and the account and Region from the caller's own request
-context, so an ARN naming another account's state machine reached the caller's
-same-named one — `UntagResource` being the damaging direction, since stripping a
-tag can turn an `aws:ResourceTag` `Deny` into an allow. A cross-Region ARN did
-the same. That is the rule #826 established for SQS and DynamoDB and #845 carried
-across the tagging API's resolver; these three operations were never audited
-against it until #910.
+The tagging operations were audited against the rule in #910 and the other eleven
+in #912. `TagResource`, `UntagResource` and `ListTagsForResource` each describe
+`resourceArn` as "the Amazon Resource Name (ARN) for the Step Functions state
+machine or activity", so those two are the whole **taggable** set; the execution
+rows above are addressable by the execution operations only.
 
-One function builds the key for all four readers — Step Functions' own three
-operations and the Resource Groups Tagging API's `states` arm — and it takes no
-request context at all, so the guarantee is structural rather than something each
-call site has to remember. That is the arrangement ECS has had since #826.
+Before #910 and #912 every one of the fourteen took the resource *name* from the
+ARN's last colon-separated segment and the account and Region from the caller's
+own request context. Three separate things followed:
 
-**The resource type is compared against the resource segment, not searched for in
-the ARN.** The previous check was `strings.Contains(arn, ":stateMachine:")`, a
-substring test over the whole ARN, so a *name* carrying that text satisfied it as
-readily as a type segment did: `arn:aws:states:{region}:{account}:activity:x:stateMachine:y`
-took the state-machine branch. The comparison is also case-sensitive, because AWS
-distinguishes the two taggable resources by the literal segment alone —
-`stateMachine` with a capital M against `activity` — so `statemachine:orders` is
-refused rather than treated as the same resource.
+1. **An ARN naming another account's or another Region's resource reached the
+   caller's own same-named one.** `DescribeStateMachine` disclosed it,
+   `UpdateStateMachine` rewrote it, `DeleteStateMachine` and `DeleteActivity`
+   removed it, `StopExecution` aborted it, `UntagResource` stripped its tags —
+   every one answering `200`. `UntagResource` and `StopExecution` are the
+   damaging directions: stripping a tag can turn an `aws:ResourceTag` `Deny` into
+   an allow, and aborting the wrong execution destroys work.
+2. **The resource-type segment was never read.** The tagging check was
+   `strings.Contains(arn, ":stateMachine:")`, a substring test over the whole ARN,
+   so a *name* carrying that text satisfied it as readily as a type segment did:
+   `arn:aws:states:{region}:{account}:activity:x:stateMachine:y` took the
+   state-machine branch. The other eleven did not check the type at all, so an
+   activity ARN at `DescribeStateMachine` looked for a state machine named after
+   the activity, and an execution ARN there looked for one named after the
+   *execution*.
+3. **An execution ARN's two names were reconstructed by stripping one segment**,
+   which is right only for an ARN of exactly that arity.
 
-An **execution** ARN — `arn:aws:states:{region}:{account}:execution:{sm}:{exec}`
-— is well-formed and names a resource these operations do not accept, so it
-answers `InvalidArn`: the resource may well exist, and it is the ARN that does not
-belong at this operation. It answered `InvalidArn` before #910 too, but by falling
+The type comparison is exact and **case-sensitive**, because AWS distinguishes
+these resources by the literal segment alone — `stateMachine` with a capital M
+against `activity` — so `statemachine:orders` is refused rather than treated as
+the same resource.
+
+**A well-formed ARN of the wrong type answers `InvalidArn`.** An execution ARN at
+a tagging or state-machine operation, an activity ARN at a state-machine
+operation, a state-machine ARN at an execution operation: the resource may well
+exist, and it is the ARN that does not belong at this operation. An execution ARN
+answered `InvalidArn` at the tagging operations before #910 too, but by falling
 off the end of the `strings.Contains` chain rather than by a decision.
 
-### A missing resource answers ResourceNotFound at 400
+**A version or alias ARN is refused.** `arn:aws:states:{region}:{account}:stateMachine:orders:1`
+and `…:stateMachine:orders:live` are both well-formed at AWS and both name
+something substrate keeps no record of — state machine versions and aliases are
+not modelled. Resolving either to the unqualified state machine would hand a
+caller a different resource from the one it asked for, which is the whole defect
+this rule exists to end, so both answer `InvalidArn`. This is substrate's
+reading: AWS refuses neither shape.
+
+**An express execution ARN resolves to nothing rather than being refused for its
+shape.** `StartSyncExecution` mints one and stores no record, since an express
+execution completes within the call, so such an ARN answers
+`ExecutionDoesNotExist` at the execution operations. Refusing it for its shape
+would claim AWS rejects an ARN it mints. A trailing extra segment is tolerated in
+an express ARN for the same reason.
+
+**A Task state's `Resource` is not a Step Functions ARN and is not parsed as
+one.** It is Lambda's ARN, and the segment wanted is the one after `function:`,
+which is a different job — so it has its own reader (#912). The same
+last-segment extraction used to run here: a qualified ARN such as
+`arn:aws:lambda:{region}:{account}:function:score:PROD` invoked a function named
+after the *alias*, and `arn:aws:states:::lambda:invoke` — the optimized
+integration, which also contains `:lambda:` and so passed the old dispatch test —
+invoked one named `invoke`. A qualifier is now dropped rather than honoured,
+because the executor invokes through Lambda's unqualified path; invoking a
+specific version or alias from a Task state is not modelled. An optimized
+integration is not dispatched to Lambda at all and returns the empty-object stub.
+
+### A missing resource answers its own code at 400
 
 | Code | Status | When |
 |------|--------|------|
-| InvalidArn | 400 | The ARN is malformed, names another service, or names a type these operations do not accept |
-| ResourceNotFound | 400 | The ARN is well-formed and addresses a state machine or activity that does not exist |
+| InvalidArn | 400 | The ARN is malformed, names another service, names a type the operation does not accept, or carries a version or alias qualifier |
+| StateMachineDoesNotExist | 400 | A well-formed state-machine ARN names a state machine that does not exist |
+| ActivityDoesNotExist | 400 | A well-formed activity ARN names an activity that does not exist |
+| ExecutionDoesNotExist | 400 | A well-formed execution ARN names an execution that does not exist, including any express execution ARN |
+| ResourceNotFound | 400 | The tagging operations' code for a state machine or activity that does not exist, and `ListExecutions`' answer for a `mapRunArn` |
 
-**The status is 400, not 404.** All three operations publish `ResourceNotFound`
-with "HTTP Status Code: 400" — unusual enough to be worth stating, because
-substrate answered 404 before #910, which no Step Functions endpoint returns.
+**Every one of these is 400, not 404.** All eleven Step Functions API reference
+pages consulted for #910 and #912 publish every error at "HTTP Status Code: 400",
+including the three `*DoesNotExist` codes — unusual enough to be worth stating,
+because substrate answered 404 for all four before #910 and #912, which no Step
+Functions endpoint returns. A consumer branching on the status rather than the
+code saw something AWS never sends.
+
+The code a resource's absence carries is the one **its own operation's page
+publishes**, which is why there are four rather than one:
+`StateMachineDoesNotExist` at `DescribeStateMachine`, `UpdateStateMachine`,
+`StartExecution`, `StartSyncExecution` and `ListExecutions`;
+`ActivityDoesNotExist` at `DescribeActivity`; `ExecutionDoesNotExist` at
+`DescribeExecution`, `StopExecution` and `GetExecutionHistory`; and
+`ResourceNotFound` at the three tagging operations. Two operations answer a code
+their own pages do **not** publish — `DeleteStateMachine` and `DeleteActivity`,
+whose error lists are `InvalidArn`/`ValidationException` and `InvalidArn` alone.
+Whether an absent resource makes those two a refusal or an idempotent `200` is
+#995; #912 moved their status to 400 with the rest but deliberately left the
+question open, because the evidence is an *absence* from an error list rather
+than a published idempotence sentence. `StartSyncExecution`'s refusal of a
+`STANDARD` state machine is likewise an unpublished code today, and is #996.
 
 `ListTagsForResource` returns `tags` sorted by key. AWS documents no order for
 it; lexicographic is substrate's reading, justified by the replay promise — a
 member order that followed Go's map iteration would differ between two identical
 calls in one run and could not replay from the event log (#862).
+
+### ListExecutions takes exactly one of its two ARNs
+
+`stateMachineArn` is "Required: No" at `ListExecutions`, and the page states:
+"You can specify either a `mapRunArn` or a `stateMachineArn`, but not both."
+Substrate answers all four cases:
+
+| Input | Answer |
+|-------|--------|
+| `stateMachineArn` alone | The state machine's executions |
+| `mapRunArn` alone | `ResourceNotFound` / 400 |
+| Both | `ValidationException` / 400 |
+| Neither | `ValidationException` / 400 |
+
+The `mapRunArn` row is **substrate's reading**: a Map Run is not modelled — no
+operation mints one — so the ARN names a resource substrate keeps no record of,
+and `ResourceNotFound` is published on this page. The alternative, refusing it as
+unsupported, would need a code the page does not carry.
+
+**An absent state machine is a refusal, not an empty list.** `ListExecutions` had
+no existence check before #912, so a `stateMachineArn` naming nothing answered
+`200` with `executions: []` — indistinguishable from a state machine that exists
+and has never run, which is the one pair a consumer polling for executions cannot
+tell apart. It now answers `StateMachineDoesNotExist` / 400, which the page
+publishes. A state machine that exists with no executions still answers `200`
+with an empty list.
 
 ### Tags are an array of objects, not an object
 
