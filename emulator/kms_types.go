@@ -2,10 +2,8 @@ package emulator
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -255,29 +253,4 @@ func kmsKeyMaterialID(arn string) string {
 // kmsKeyARN constructs a KMS key ARN.
 func kmsKeyARN(region, accountID, keyID string) string {
 	return fmt.Sprintf("arn:aws:kms:%s:%s:key/%s", region, accountID, keyID)
-}
-
-// kmsEncryptStub produces a deterministic stub ciphertext for testing.
-// Format: base64(kms:{keyID}:{base64(plaintext)}).
-func kmsEncryptStub(keyID string, plaintext []byte) []byte {
-	inner := base64.StdEncoding.EncodeToString(plaintext)
-	raw := fmt.Sprintf("kms:%s:%s", keyID, inner)
-	return []byte(base64.StdEncoding.EncodeToString([]byte(raw)))
-}
-
-// kmsDecryptStub reverses kmsEncryptStub.
-func kmsDecryptStub(ciphertext []byte) (keyID string, plaintext []byte, err error) {
-	outer, err := base64.StdEncoding.DecodeString(string(ciphertext))
-	if err != nil {
-		return "", nil, fmt.Errorf("kms decrypt stub: decode outer: %w", err)
-	}
-	parts := strings.SplitN(string(outer), ":", 3)
-	if len(parts) != 3 || parts[0] != "kms" {
-		return "", nil, fmt.Errorf("kms decrypt stub: invalid format")
-	}
-	pt, err := base64.StdEncoding.DecodeString(parts[2])
-	if err != nil {
-		return "", nil, fmt.Errorf("kms decrypt stub: decode inner: %w", err)
-	}
-	return parts[1], pt, nil
 }

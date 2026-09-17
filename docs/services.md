@@ -10059,14 +10059,15 @@ bare key ID would satisfy the weaker assertion while diverging from the sample.
 The source key is loaded from the **caller's** account and Region, for the reason
 `Decrypt` records: the key ID came out of the ciphertext, so there is no ARN to take
 an account from. AWS permits a cross-account source here and substrate cannot address
-one, because its stub ciphertext carries a bare key ID and nothing more. That is a
-limitation of the stub cipher, not of the resolver.
+one, because its stub ciphertext carries no account and no Region — #979's envelope
+records what a *refusal* needs, not what a lookup needs. That is a limitation of the
+stub cipher, not of the resolver.
 
-Four of `ReEncrypt`'s nine request members and two of its seven response members are
-still unmodelled: `DestinationEncryptionContext` and `SourceEncryptionContext` (#979),
-`DryRun`, `GrantTokens`, and the two `*KeyMaterialId` members (#978). `SourceKeyId` as a
-*request* parameter, and both encryption-algorithm members at both ends, arrived with
-#969 — see the two sections below.
+Two of `ReEncrypt`'s nine request members are still unmodelled: `DryRun` and
+`GrantTokens`. `SourceKeyId` as a *request* parameter, and both encryption-algorithm
+members at both ends, arrived with #969; the two `*KeyMaterialId` response members
+with #978; and the source and destination `EncryptionContext` pair with #979 — see the
+sections below.
 
 ### A named key that is not the ciphertext's is refused
 
@@ -10172,6 +10173,103 @@ The first bullet of `InvalidKeyUsageException`'s gloss — a `KeyUsage` incompat
 operation, such as an `ENCRYPT_DECRYPT` call against a `SIGN_VERIFY` key — is the next
 section's subject, along with `CreateKey`'s former acceptance of any string as a `KeySpec`
 ([#977](https://github.com/scttfrdmn/substrate/issues/977)).
+
+### An encryption context is authenticated data, so the ciphertext has to carry it
+
+`Encrypt`, `Decrypt`, both `GenerateDataKey*` operations and both ends of `ReEncrypt`
+take an encryption context. Substrate decoded **none** of the six members
+([#979](https://github.com/scttfrdmn/substrate/issues/979)), so a context sent on the
+way in was accepted and lost, and the refusal AWS publishes for a mismatch on the way
+out was unreachable. `API_Encrypt` states the rule as a consequence rather than a
+footnote:
+
+> If you specify an `EncryptionContext` when encrypting data, you must specify the same
+> encryption context (a case-sensitive exact match) when decrypting the data. Otherwise,
+> the request to decrypt fails with an `InvalidCiphertextException`.
+
+That is the whole reason the member is worth modelling. An application that encrypts
+under `{"tenant": "acme"}` and decrypts without it is broken in production and passed
+here, which is exactly the class of defect an emulator exists to catch before AWS does.
+
+**The stub ciphertext changed format to carry it,** and that is a compatibility break: a
+blob written by an earlier release no longer decodes, and `Decrypt` answers
+`InvalidCiphertextException`/400 for it rather than reading its fields under the new
+meanings. The old format was a delimited string; the new one is a base64-wrapped JSON
+envelope recording the key ID, the encryption algorithm, the encryption context and the
+plaintext. **JSON rather than a delimiter is a correctness requirement, not a
+preference** — an encryption context is caller-supplied text, so a key or a value may
+contain any delimiter, and an escaping bug would produce a ciphertext that decrypts to
+the *wrong* context, which is the failure the feature exists to detect. `json.Marshal`
+sorts map keys, so one input produces one blob however the caller ordered its context; a
+test asserts that two `Encrypt` calls whose contexts differ only in JSON key order return
+byte-identical ciphertext, because a blob that varied with the caller's ordering could not
+be replayed.
+
+Two refusals become reachable, and they are ordered:
+
+| Request | Substrate answers | Provenance |
+|---------|-------------------|------------|
+| The context matches exactly | 200, and the plaintext round-trips | Published: *"an exact case-sensitive match"* |
+| No context recorded, none supplied | 200 | Both members are `Required: No` |
+| An empty context against an absent one, either direction | 200 | **Substrate's reading** — AWS documents no way to tell `{}` from an omitted member |
+| The recorded and supplied contexts differ in any key, value or case | `InvalidCiphertextException`/400, naming both | Published end to end: the code by `API_Encrypt`'s sentence above, the condition by the code's own gloss — *"the specified ciphertext, or additional authenticated data incorporated into the ciphertext, such as the encryption context, is corrupted, missing, or otherwise invalid"* |
+| The encryption algorithm is not the one that encrypted the data | `InvalidCiphertextException`/400, naming both | The *behaviour* is published — *"if you specify a different algorithm, the `Decrypt` operation fails"* — the **code is substrate's reading**, resting on that gloss's *"or otherwise invalid"* |
+| The blob is not a substrate ciphertext at all | `InvalidCiphertextException`/400 | The envelope carries a format marker, so a foreign, truncated or previous-format blob is refused rather than misread |
+
+**The algorithm is checked before the context.** AWS orders the two nowhere, so this is
+recorded rather than matched: the algorithm is what a real implementation needs in order
+to attempt a decryption at all, where the context is authenticated once the decryption has
+happened, so a caller wrong about both hears about the one that would have stopped it
+first. Both checks run *after* the named-key, key-usage, key-state and key-spec checks — an
+algorithm the key does not admit is a fact about the key, knowable without holding the
+ciphertext, where a mismatch is a fact about these particular bytes.
+
+`InvalidCiphertextException` rather than `IncorrectKeyException` for both, and the
+distinction is the point: `IncorrectKeyException` is about the key the caller *named*,
+which the section above answers, while these are about the request disagreeing with the
+blob. Both messages render both contexts, which is licensed rather than assumed —
+`API_GenerateDataKey` says *"do not include confidential or sensitive information in this
+field. This field may be displayed in plaintext in CloudTrail logs and other output"*, and
+a refusal a caller cannot act on is not worth answering.
+
+**A context is recorded only under a symmetric encryption key, and that split is AWS's
+own.** `API_ReEncrypt` is decisive: *"a destination encryption context is valid only when
+the destination KMS key is a symmetric encryption KMS key. The standard ciphertext format
+for asymmetric KMS keys does not include fields for metadata."* So an asymmetric
+ciphertext has nowhere to hold a context, and AWS publishes no code for sending one —
+recording it would invent a refusal AWS cannot produce. Substrate accepts the member and
+ignores it, and a test asserts the *opposite* shape from everything above: two different
+contexts across an `Encrypt` and a `Decrypt` under an RSA key must **succeed**.
+
+The encryption *algorithm* is recorded for every key regardless, although AWS's asymmetric
+format holds no metadata either. AWS reaches the same **observable** answer
+cryptographically — decrypting RSA ciphertext with the wrong OAEP hash fails — and
+substrate models the observation rather than the mechanism. The divergence is confined to
+bytes inside the blob, which no caller is entitled to read; the answer, which every caller
+is, agrees.
+
+**`ReEncrypt` is where the two members are visibly different things.**
+`SourceEncryptionContext` is *matched* against the incoming blob — *"enter the same
+encryption context that was used to encrypt the ciphertext"* — while
+`DestinationEncryptionContext` is *written* into the outgoing one. So a `ReEncrypt` is the
+call that **changes** a ciphertext's context, and one consequence is worth stating because
+nothing in AWS's text suggests otherwise: re-encrypting with no destination context
+**strips** the context rather than inheriting the source's. A caller relying on inheritance
+would find its data readable without the context it believed it had set, so a test pins it.
+
+Both `GenerateDataKey*` operations record the context and neither publishes
+`InvalidCiphertextException`, which is consistent — the recording happens there and the
+refusal happens at `Decrypt`. `API_GenerateDataKey` states the round trip in its own words
+and substrate's tests assert it through the only thing a caller can observe: the wrapped
+data key decrypts under the recorded context and is refused without it.
+
+**Still unmodelled, and recorded here rather than left to be discovered.** The two IAM
+condition keys built on this member — `kms:EncryptionContext:<key>` and
+`kms:EncryptionContextKeys` — are not evaluated, so a key policy or grant constraining a
+context is accepted and has no effect on whether a request is authorized. AWS also
+publishes limits substrate does not enforce: the total size of an encryption context, and
+the reserved `aws:` key prefix. Neither is observable through a response substrate
+produces today.
 
 ### A key spec and a key usage must pair
 

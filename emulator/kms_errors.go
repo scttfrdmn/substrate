@@ -406,6 +406,66 @@ func kmsIncorrectKey(namedARN, ciphertextARN string) *AWSError {
 	}
 }
 
+// kmsCiphertextAlgorithmMismatch reports a decrypt request naming an encryption algorithm other than the
+// one that produced the ciphertext.
+//
+// InvalidCiphertextException at 400, published on API_Decrypt and API_ReEncrypt. The behavior is
+// published on both pages — "specify the same algorithm that was used to encrypt the data. If you specify
+// a different algorithm, the Decrypt operation fails" — and the *code* for it is not, so this is the
+// published rule with substrate's reading of which code carries it. The gloss's "or otherwise invalid" is
+// what it rests on: the two conditions it does name, a corrupted ciphertext and a mismatched encryption
+// context, are both "this blob and this request disagree", and so is this.
+//
+// [kmsIncompatibleEncryptionAlgorithm] is the near miss and is wrong here. That one is about an algorithm
+// the *key* does not admit, which is a fact about the key and knowable without any ciphertext; this is
+// about an algorithm the key admits perfectly well but which did not encrypt these bytes.
+// [kmsIncorrectKey] is the other near miss and is wrong for the mirrored reason — it is about the key the
+// caller named, not about the algorithm.
+//
+// Both algorithms are named, following [kmsIncorrectKey]: the whole content of the refusal is that two
+// values differ, and a caller handed a ciphertext it did not create has no other way to learn which
+// algorithm it needs. Naming the recorded one leaks nothing — API_ReEncrypt tells a caller to record it
+// alongside the key ID, so it is a value AWS expects the caller to hold already.
+func kmsCiphertextAlgorithmMismatch(member, recorded, supplied string) *AWSError {
+	return &AWSError{
+		Code: "InvalidCiphertextException",
+		Message: fmt.Sprintf(
+			"%s is %q, but this ciphertext was encrypted with %q",
+			member, supplied, recorded),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsCiphertextContextMismatch reports a decrypt request whose encryption context is not the exact
+// case-sensitive match of the one the ciphertext was encrypted under.
+//
+// InvalidCiphertextException at 400, and unlike [kmsCiphertextAlgorithmMismatch] this one is published
+// end to end. API_Encrypt states the consequence and names the code: "if you specify an EncryptionContext
+// when encrypting data, you must specify the same encryption context (a case-sensitive exact match) when
+// decrypting the data. Otherwise, the request to decrypt fails with an InvalidCiphertextException." The
+// gloss then names the condition outright — "the specified ciphertext, or additional authenticated data
+// incorporated into the ciphertext, such as the encryption context, is corrupted, missing, or otherwise
+// invalid".
+//
+// Both contexts are rendered, which needs saying because an encryption context is caller data. AWS
+// settles it: the member's own gloss is "an encryption context is a collection of non-secret key-value
+// pairs", and API_GenerateDataKey adds "do not include confidential or sensitive information in this
+// field. This field may be displayed in plaintext in CloudTrail logs and other output." A refusal message
+// is exactly that other output, and a caller whose context differs in one character cannot act on a
+// refusal that will not say which.
+//
+// The two absent cases render as "none" via [kmsFormatEncryptionContext] rather than as an empty string,
+// so a message about a context that was never sent reads as a sentence rather than as a missing value.
+func kmsCiphertextContextMismatch(member string, recorded, supplied map[string]string) *AWSError {
+	return &AWSError{
+		Code: "InvalidCiphertextException",
+		Message: fmt.Sprintf(
+			"%s is %s, but this ciphertext was encrypted with %s",
+			member, kmsFormatEncryptionContext(supplied), kmsFormatEncryptionContext(recorded)),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsUnknownEncryptionAlgorithm reports an encryption algorithm outside the published set.
 //
 // ValidationError at 400, the same reading [kmsInvalidPendingWindow] records and reached the same way:
