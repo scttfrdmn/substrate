@@ -149,6 +149,12 @@ type FaultController struct {
 	// and a fixed seed reproduced a run only while request ordering was
 	// unchanged (#510).
 	rngs []*rand.Rand
+
+	// armed is the configuration as it was handed in, kept so [rewindForReplay] can
+	// put the controller back into it. config diverges from it as rules fire, and a
+	// fired count is the difference: it is the one piece of a controller's state that
+	// a run mutates and a start-of-run value it must be restorable to (#833).
+	armed FaultConfig
 }
 
 // NewFaultController creates a FaultController with the given configuration.
@@ -160,7 +166,28 @@ func NewFaultController(cfg FaultConfig, seed int64) *FaultController {
 		config: owned,
 		seed:   seed,
 		rngs:   ruleRNGs(seed, len(owned.Rules)),
+		armed:  cfg.withOwnedRules(),
 	}
+}
+
+// rewindForReplay returns the controller to the state it was armed in: every rule's
+// fired count back to the value it was armed with, and every per-rule PRNG back to the
+// start of its stream.
+//
+// It is called at the start of a replay, beside [PluginRegistry.ResetPlugins], and for
+// the same reason (#886, #902, #903): a controller's fired counts and PRNG positions
+// are mutable state a run advances, so a second run in one process starts where the
+// first one stopped. Without it a rule that fired during the recording has spent its
+// [FaultRule.Times] bound, and the replay of the request it failed takes the *unfaulted*
+// path — the exact divergence #833 exists to remove, arriving through the fix for it.
+//
+// The armed counts are restored rather than zeroed, because a rule may be armed with a
+// non-zero count; see [FaultRule.Fired].
+func (f *FaultController) rewindForReplay() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.config = f.armed.withOwnedRules()
+	f.rngs = ruleRNGs(f.seed, len(f.config.Rules))
 }
 
 // ruleRNGs returns n PRNGs, one per rule, each seeded from the controller's seed
@@ -295,6 +322,9 @@ func (f *FaultController) UpdateConfig(cfg FaultConfig) {
 	defer f.mu.Unlock()
 	f.config = cfg.withOwnedRules()
 	f.rngs = ruleRNGs(f.seed, len(f.config.Rules))
+	// The incoming config is the armed one from here on, so a replay rewinds to the
+	// rules a run was actually served with rather than to whatever was armed first.
+	f.armed = cfg.withOwnedRules()
 }
 
 // GetConfig returns a snapshot of the current fault injection configuration,

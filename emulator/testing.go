@@ -45,6 +45,26 @@ func (ts *TestServer) TimeController() *TimeController { return ts.tc }
 // Registry returns the [PluginRegistry] of registered service plugins.
 func (ts *TestServer) Registry() *PluginRegistry { return ts.registry }
 
+// AuthController returns the [AuthController] the server authorizes requests
+// against, so a replay of the server's own stream can be given the same one.
+//
+// A replay re-decides authorization ([ReplayPipeline]), and it can only reach the
+// recorded answer if it is handed the controller the recording used — the
+// controller reads policies out of the [StateManager], and pointing it at a
+// different one is what would make a replay disagree with its recording for a
+// reason that is not a divergence (#833).
+func (ts *TestServer) AuthController() *AuthController { return ts.srv.opts.Auth }
+
+// FaultController returns the [FaultController] wired into the server, which is
+// disabled until a rule is armed through POST /v1/fault/rules or
+// [FaultController.UpdateConfig].
+//
+// It is exposed both for [FaultController.FaultsFired] — a rule that matched
+// nothing looks exactly like a consumer's retry working — and so that a replay of
+// the server's stream can be given the same controller, which rewinds itself to
+// its armed state at the start of a replay (#833).
+func (ts *TestServer) FaultController() *FaultController { return ts.srv.opts.Fault }
+
 // TestServerOption configures a server started by [StartTestServer].
 type TestServerOption func(*testServerConfig)
 

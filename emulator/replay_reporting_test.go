@@ -115,8 +115,12 @@ func replayHeadBucketStatus(t *testing.T, ts *emulator.TestServer, bucket string
 }
 
 // replaySetFault installs a single always-firing error rule, or clears every rule
-// when rule is nil. Faults are evaluated in the server pipeline, which a replay
-// does not enter — which is what makes a fault-refused event replay as a success.
+// when rule is nil.
+//
+// Faults are evaluated in the server pipeline, and a replay re-enters it only when it
+// is handed a [emulator.ReplayPipeline] carrying the controller (#833). The engines in
+// this file are handed none, which is what makes a fault-refused event replay as a
+// success here — see replay_pipeline_test.go for the gated arrangement.
 func replaySetFault(t *testing.T, ts *emulator.TestServer, rule *emulator.FaultRule) {
 	t.Helper()
 	cfg := emulator.FaultConfig{Enabled: rule != nil}
@@ -208,8 +212,8 @@ func TestReplayReporting_RecordedBodiesAreActuallyReExecuted(t *testing.T) {
 // succeeds. It returns the stream's server.
 //
 // Fault injection is the cheapest way to record a *pre-plugin* refusal: the fault
-// check is step 4.5 of the server pipeline and a replay enters at step 5, so the
-// refusal cannot happen again. Every such refusal records with a nil response
+// check is step 4.5 of the server pipeline, and a replay given no ReplayPipeline
+// enters at step 5, so the refusal cannot happen again. Every such refusal records with a nil response
 // (server.go:849), which is exactly the shape the old status comparison could not
 // see.
 func recordRefusedGetObject(t *testing.T, opts ...emulator.TestServerOption) *emulator.TestServer {
@@ -232,9 +236,9 @@ func recordRefusedGetObject(t *testing.T, opts ...emulator.TestServerOption) *em
 	require.Equal(t, http.StatusServiceUnavailable, replayGetObjectStatus(t, ts, bucket, "a.txt"),
 		"the seeded fault must refuse the read, or the recording is not of a refusal")
 
-	// Clear the rules so the *live* server would allow the read too. The replay
-	// bypasses fault injection either way; clearing keeps the test honest about why
-	// the replay succeeds.
+	// Clear the rules so the *live* server would allow the read too. An ungated
+	// replay bypasses fault injection either way, and clearing keeps the test honest
+	// about why the replay succeeds: it is the missing gate, not a spent Times bound.
 	replaySetFault(t, ts, nil)
 	require.Equal(t, http.StatusOK, replayGetObjectStatus(t, ts, bucket, "a.txt"))
 

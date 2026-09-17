@@ -297,6 +297,73 @@ So two assertions are safe and one is not:
 A stream recorded before the event carried a request id replays with the event id in
 that field, since the original value was never written down and nothing can recover it.
 
+### What a replay re-executes
+
+A live request passes through nine pipeline steps before its response is written, and a
+replay does not re-run all of them. Four are re-decided, four are skipped, and one is
+replaced — each for a reason about what the recording settled and what it did not
+(#833):
+
+| Step | On replay |
+|---|---|
+| Authorization (`AuthController.CheckAccess`) | **re-decided**, against the principal the event records |
+| Quota (`QuotaController.CheckQuota`) | **consulted, and exempts a replay** |
+| Consistency (`ConsistencyController.CheckRead`) | **consulted, and exempts a replay** |
+| Fault injection | **re-decided**, with the controller rewound to its armed state |
+| Credential resolution | replaced by principal restoration — the recorded access key resolves to nothing |
+| SigV4 verification | skipped: the canonical request cannot be rebuilt, and the signature was checked once already |
+| Presigned-URL expiry | skipped: a statement about the wall-clock moment the URL was signed |
+| Protocol conflict, region allow-list | skipped: properties of the HTTP request and of the replay's own config, not of the recorded run |
+
+A refusal at any re-decided step stops the request before it reaches a plugin, exactly
+as it did live, so the replay applies no state change the recording does not contain. It
+is compared against the recorded error, counts in `FailedEvents` — which means
+"returned an error", not "diverged" — and is reported as an `EventDifference` only when
+it disagrees with the recording.
+
+Authorization is re-decided from `Event.Principal`, which is the caller's **ARN**. That
+is what makes it work at all: an access key is re-minted differently on replay, but
+nothing in the authorization path reads the key, and an IAM user's or assumed role's ARN
+is derived from names the recorded requests themselves carried. The one condition key a
+replayed principal cannot publish is `aws:userid` — an `AIDA…` or `<role-id>:<session>`
+is minted and unrecoverable from the ARN — so it is absent rather than wrong, which is
+the same choice substrate makes live for a caller it has no ID for. A policy
+conditioning on it replays as though the key were unset. An event with no principal (an
+unsigned request, which is most of them) replays unenforced, exactly as it was served.
+
+Quota and consistency are consulted rather than skipped so that the exemption lives in
+the controllers, where it was always written. Consistency has the stronger reason:
+`RecordWrite` is exempt on replay too, so no propagation window ever opens and a
+`CheckRead` that enforced would be refusing against a window that does not exist.
+
+Fault injection needs one thing from the caller. A rule's `times` bound and its
+per-rule random stream are state a run *spends*, so the engine rewinds the controller to
+the configuration it was armed with at the start of each replay; without that, a rule
+that fired during the recording is spent and the replay of the request it failed takes
+the unfaulted path. A latency rule's delay is reported to the replay and **not** slept:
+the recorded `Duration` is what the live run took, and no replay may consume wall-clock
+time. One consequence is worth stating: a probabilistic rule's draw sequence depends on
+the requests it sees, so a stream that skipped events for want of `include_bodies`
+shifts every later draw. Reproducing a probabilistic fault takes a fully-bodied stream.
+
+In Go, the controllers reach the engine through one option, and a caller that supplies
+none gets an ungated replay — the recorded refusal is then reported as a critical
+difference:
+
+```go
+engine := substrate.NewReplayEngine(store, state, tc, registry, cfg, logger,
+    substrate.WithReplayPipeline(substrate.ReplayPipeline{
+        Auth:  ts.AuthController(),
+        Fault: ts.FaultController(),
+    }))
+```
+
+`substrate replay` builds all four itself: the `quotas:`, `consistency:` and `fault:`
+sections `substrate server` reads, and an authorization controller over the same state
+manager the replay rebuilds IAM into. A replay
+therefore reproduces a recorded refusal only when it is configured as the recording
+was; a configuration difference surfaces as a divergence rather than being hidden.
+
 ### Replaying from the command line
 
 `substrate replay <stream>` replays a recorded stream outside a Go test. It needs a

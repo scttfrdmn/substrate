@@ -21,6 +21,12 @@ type ReplayEngine struct {
 	config         ReplayConfig
 	logger         Logger
 
+	// pipeline holds the pre-plugin controllers a replayed request passes through.
+	// Zero-valued unless [WithReplayPipeline] was given, in which case a replay
+	// reaches step 5 directly — which is how a recorded 403 replayed as a 200
+	// (#833).
+	pipeline ReplayPipeline
+
 	// currentReplay is the in-progress replay session, if any.
 	currentReplay *ActiveReplay
 
@@ -148,6 +154,46 @@ type EventDifference struct {
 	Significance string
 }
 
+// ReplayPipeline carries the pre-plugin controllers a replayed request passes
+// through, mirroring the four [ServerOptions] fields of the same names so that one
+// wiring can hand both a server and a replay of that server's recording the same
+// controllers.
+//
+// Which of the four re-decides a replayed request and which is merely consulted is
+// documented on [ReplayEngine.replayEvent]. Any field may be nil, in which case that
+// step is skipped — but a nil is a decision to skip, not an absence of one: a replay
+// given no auth controller cannot reproduce a recorded 403 through the pipeline, and
+// a replay given no fault controller re-executes the request an injected fault failed.
+type ReplayPipeline struct {
+	// Auth authorizes a replayed request against the principal the event records.
+	Auth *AuthController
+
+	// Quota is consulted and exempts every replayed request; see
+	// [QuotaController.CheckQuota].
+	Quota *QuotaController
+
+	// Consistency is consulted and exempts every replayed request; see
+	// [ConsistencyController.CheckRead].
+	Consistency *ConsistencyController
+
+	// Fault re-injects from the armed rules, with the controller rewound to its
+	// armed state at the start of the replay.
+	Fault *FaultController
+}
+
+// ReplayEngineOption configures a [ReplayEngine] at construction.
+type ReplayEngineOption func(*ReplayEngine)
+
+// WithReplayPipeline gives the engine the controllers a replayed request passes
+// through before it reaches a plugin.
+//
+// It is an option rather than a seventh positional parameter for the same reason
+// [NewEventStore] takes options: four controllers, all of them optional, none of them
+// meaningful to a caller replaying a stream recorded without them.
+func WithReplayPipeline(pipeline ReplayPipeline) ReplayEngineOption {
+	return func(r *ReplayEngine) { r.pipeline = pipeline }
+}
+
 // NewReplayEngine creates a ReplayEngine wired to the given dependencies.
 func NewReplayEngine(
 	eventStore *EventStore,
@@ -156,8 +202,9 @@ func NewReplayEngine(
 	registry *PluginRegistry,
 	config ReplayConfig,
 	logger Logger,
+	opts ...ReplayEngineOption,
 ) *ReplayEngine {
-	return &ReplayEngine{
+	r := &ReplayEngine{
 		eventStore:     eventStore,
 		stateManager:   stateManager,
 		timeController: timeController,
@@ -165,6 +212,10 @@ func NewReplayEngine(
 		config:         config,
 		logger:         logger,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Replay replays all events in streamID and returns an outcome report.
@@ -283,14 +334,56 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 	return replay.Results, nil
 }
 
-// replayEvent re-executes a single event through the plugin registry and
-// compares the result against the original.
+// replayEvent re-executes a single event through the pre-plugin pipeline and the
+// plugin registry, and compares the result against the original.
 //
 // The bool reports whether the event was actually re-executed. It is separate
 // from the error because a skip is neither a success nor a failure, and a caller
 // that reads only the error cannot tell the two apart: both return nil. That is
 // how a stream recorded without request bodies reported every event as a
 // successful replay while executing none of them (#833).
+//
+// # What a replay re-executes, and what it does not
+//
+// A refusal before plugin dispatch is part of what a recorded run means, so four of
+// [Server.handleAWSRequest]'s steps run here too, through the same [prePluginGates]
+// the live path uses. The other five read the live *http.Request or the replay's own
+// configuration and are skipped. Each decision, in pipeline order:
+//
+//   - **Step 1.1, the rpc-v2-cbor/target conflict** — skipped. It is a property of the
+//     HTTP request's headers and path, and no event carries either.
+//   - **Step 1.4, the region allow-list** — skipped. It is a property of the
+//     configuration the *replay* was started with rather than of the recorded run, so
+//     refusing here would report a divergence caused by a config file.
+//   - **Step 1.5, credential resolution** — replaced. The recorded access key resolves
+//     to nothing after a replay, because [IAMPlugin] mints a different one; see
+//     [replayPrincipal] for why the recorded principal ARN is the input instead, and
+//     what that leaves for #856.
+//   - **Step 1.6, SigV4 verification** — skipped, and not implementable. The canonical
+//     request cannot be reconstructed from an event: the raw query string is never
+//     recorded, and the body is replaced with a re-encoding of the parsed form for
+//     iam/sts/sqs/sns (see [Server.handleAWSRequest] step 1). A replay also
+//     re-executes a request whose signature was verified once already.
+//   - **Step 1.65, presigned-URL expiry** — skipped, same class: it is a statement
+//     about the wall-clock moment a URL was signed, which the recording settled.
+//   - **Step 2, authorization** — re-decided, against the principal restored from
+//     [Event.Principal].
+//   - **Step 3, quota** — consulted, and exempt: [QuotaController.CheckQuota] returns
+//     early for a replaying request. Reaching that exemption through the pipeline is
+//     the point — the guard was written for this path and was unreachable from it.
+//   - **Step 4, consistency** — consulted, and exempt for a stronger reason than its
+//     guard: [ConsistencyController.RecordWrite] is guarded on the same flag, so no
+//     propagation window ever opens during a replay and a CheckRead that enforced
+//     would be refusing against a window that does not exist.
+//   - **Step 4.5, fault injection** — re-decided from the armed rules, with the
+//     controller rewound at the start of the replay; see
+//     [FaultController.rewindForReplay]. A latency rule's delay is *not* slept: the
+//     recorded [Event.Duration] is what the live run took, and no replay may consume
+//     wall-clock time.
+//
+// A replay writes no events, so a refusal here is compared against the recording
+// rather than recorded, and it counts in [ReplayResults.FailedEvents] — which means
+// "returned an error", not "diverged", exactly as it does for a recorded plugin error.
 func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *ActiveReplay) (bool, error) {
 	if event.Request == nil {
 		replay.Results.SkippedEvents++
@@ -306,6 +399,11 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		AccountID: event.AccountID,
 		Region:    event.Region,
 		Timestamp: event.Timestamp,
+		// The caller the recording was served for. Without it every authorization
+		// door — the pipeline's step 2 and each plugin's own p.authorize — sees a nil
+		// principal and leaves the request unenforced, so a replay authorized nothing
+		// at all (#833).
+		Principal: replayPrincipal(ctx, r.stateManager, event),
 		Metadata: map[string]interface{}{
 			"stream_id": event.StreamID,
 			"replay_id": replay.ID,
@@ -329,27 +427,18 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		}
 	}
 
+	// Steps 2 through 4.5, through the same gates the live server runs. A refusal
+	// stops here: the request must not reach the plugin, because the recorded run's
+	// plugin never saw it either and routing it would apply a state change the
+	// recording does not contain.
+	if gate := r.pipeline.gates().check(reqCtx, event.Request); gate.err != nil {
+		r.recordErrorDifference(replay, event, gate.err)
+		return true, gate.err
+	}
+
 	resp, err := r.registry.RouteRequest(reqCtx, event.Request)
 	if err != nil {
-		if event.Error == "" {
-			replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
-				EventID:      event.ID,
-				Sequence:     event.Sequence,
-				Field:        "error",
-				Expected:     nil,
-				Actual:       err.Error(),
-				Significance: "critical",
-			})
-		} else if err.Error() != event.Error {
-			replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
-				EventID:      event.ID,
-				Sequence:     event.Sequence,
-				Field:        "error_message",
-				Expected:     event.Error,
-				Actual:       err.Error(),
-				Significance: "major",
-			})
-		}
+		r.recordErrorDifference(replay, event, err)
 		return true, err
 	}
 
@@ -404,6 +493,85 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	}
 
 	return true, nil
+}
+
+// recordErrorDifference compares an error a replay produced against the one the
+// recording carries, and records the divergence when they disagree.
+//
+// One helper for both errors a replay can produce — a pre-plugin refusal and a
+// plugin's own error — because the comparison is the same question in both cases and
+// two copies of it could answer differently for one stream.
+func (r *ReplayEngine) recordErrorDifference(replay *ActiveReplay, event *Event, err error) {
+	if event.Error == "" {
+		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
+			EventID:      event.ID,
+			Sequence:     event.Sequence,
+			Field:        "error",
+			Expected:     nil,
+			Actual:       err.Error(),
+			Significance: "critical",
+		})
+		return
+	}
+	if err.Error() != event.Error {
+		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
+			EventID:      event.ID,
+			Sequence:     event.Sequence,
+			Field:        "error_message",
+			Expected:     event.Error,
+			Actual:       err.Error(),
+			Significance: "major",
+		})
+	}
+}
+
+// replayPrincipal rebuilds the principal a recorded request was served for, or nil
+// when the event names none — an unsigned request, which most recorded requests are,
+// and which was unenforced live for the same reason it is unenforced here.
+//
+// The input is the recorded caller ARN rather than the recorded access key, and that
+// is what makes replaying an authorization decision possible at all. Every consumer of
+// a principal in the authorization path resolves the *ARN*
+// ([AuthController.CheckAccess] and each plugin's own door both call
+// [resolveIAMEntity]), and an ARN survives a replay where a key does not: an IAM user
+// ARN carries the name and path CreateUser was given, and an assumed-role ARN carries
+// the role name and session name AssumeRole was given, while both access key IDs are
+// minted. Re-resolving the recorded key would find nothing in replayed state and
+// leave the request unenforced, which is why this was recorded twice on #833 as
+// blocked on #856 and is not.
+//
+// UserName is derived only for a user ARN whose record exists in replayed state. A
+// registry hit with no IAM entity behind it synthesizes …:user/<access-key-id> (see
+// [Server.handleAWSRequest] step 1.5), and deriving a name from that ARN would publish
+// a credential ID as aws:username in a policy comparison (#745).
+//
+// UserID is deliberately left empty, so a replayed request publishes no aws:userid at
+// all. An IAM user's AIDA… and an assumed role's <role-id>:<session-name> are minted,
+// are not recoverable from the ARN, and the replay's own value would be a *different*
+// identifier rather than the recorded one — absent is the shape [Principal.UserID]
+// documents for a caller substrate has no ID for, and the answer #745 chose over a
+// substituted-but-wrong one. It is the only part of authorization that #856 still owes.
+func replayPrincipal(ctx context.Context, state StateManager, event *Event) *Principal {
+	if state == nil || event.Principal == "" {
+		return nil
+	}
+	principal := &Principal{
+		ARN: event.Principal,
+		// Derived rather than recorded, following [cfnPrincipalType]: nothing
+		// evaluates Type, and a stored one could disagree with the ARN beside it.
+		Type: cfnPrincipalType(event.Principal),
+		// Read from the replayed entity's own record, which is where the live path
+		// reads them from too — so a TagUser the stream replays is reflected here.
+		Tags: iamPrincipalTags(ctx, state, event.Principal),
+	}
+	if entityType, nameWithPath := parsePrincipalARN(event.Principal); entityType == "user" {
+		if name := iamFriendlyName(nameWithPath); name != "" {
+			if _, exists, err := resolveIAMEntity(ctx, state, event.Principal); err == nil && exists {
+				principal.UserName = name
+			}
+		}
+	}
+	return principal
 }
 
 // stateHashError describes one state hash mismatch for [ReplayResults.StateErrors].
@@ -686,6 +854,10 @@ func generateReplayID() string {
 // this one recreates, and a container left over holds the docker name the next
 // CreateDBInstance needs.
 //
+// The [FaultController] is rewound here too, for the same reason and with the same
+// consequence if it is not: its per-rule fired counts and PRNG positions are state a
+// run advances, and a rule that has spent its bound refuses nothing (#833).
+//
 // The state manager is cleared first and the plugins second, because
 // [ResettablePlugin.ResetForRun] is allowed to write a plugin's start-of-run state
 // into the state manager; wiping the store afterwards would erase exactly what the
@@ -702,6 +874,13 @@ func (r *ReplayEngine) resetState(ctx context.Context) error {
 				return fmt.Errorf("reset state manager: %w", err)
 			}
 		}
+	}
+	// A controller's own mutable state, for the same reason the plugins' is reset
+	// below: a rule that fired during the recording has spent its Times bound, and a
+	// replay that started from those counts would take the unfaulted path through
+	// every request the recording failed (#833).
+	if r.pipeline.Fault != nil {
+		r.pipeline.Fault.rewindForReplay()
 	}
 	if r.registry == nil {
 		return nil

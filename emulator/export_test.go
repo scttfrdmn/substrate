@@ -1387,3 +1387,24 @@ func RDSActiveContainerCountForTest(e *RDSExecutor) int {
 	defer e.mu.Unlock()
 	return len(e.active)
 }
+
+// CheckReplayGatesForTest runs the four pre-plugin gates a [ReplayPipeline] holds and
+// reports the step that refused ("" when none did), the refusal, and any latency a
+// fault rule asked for.
+//
+// Exported because the gate is what #833 added and what it decides is otherwise only
+// observable through a whole replay: a quota or consistency refusal is *expected to be
+// absent* on replay, and a test that asserted its absence by replaying could not tell
+// "the controller was consulted and exempted the request" from "the controller was
+// never reached" — which is the exact confusion that left three isReplaying guards
+// unreachable for as long as they existed.
+func CheckReplayGatesForTest(p ReplayPipeline, reqCtx *RequestContext, req *AWSRequest) (string, time.Duration, error) {
+	out := p.gates().check(reqCtx, req)
+	return string(out.step), out.latency, out.err
+}
+
+// RewindFaultsForTest returns the controller to its armed state, as a replay does at
+// its start. It is exported so a test can assert the rewind's effect on
+// [FaultController.GetConfig] directly, rather than only through the replay that calls
+// it (#833).
+func RewindFaultsForTest(f *FaultController) { f.rewindForReplay() }
