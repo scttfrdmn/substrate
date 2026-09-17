@@ -390,19 +390,40 @@ func (p *StepFunctionsPlugin) aslRunMap(
 	return results, state.Next, nil
 }
 
+// aslLambdaFunctionName returns the function name a Lambda ARN names, or "" if the ARN does not name
+// a Lambda function.
+//
+// This is a different job from the ARN parsing in stepfunctions_arn.go and deliberately does not share
+// it: the ARN here belongs to Lambda, and what is wanted is the segment after "function:" rather than
+// a Step Functions account, Region and name. It replaced a call to extractSMNameFromARN (#912), which
+// returned the ARN's *last* segment — so a qualified ARN such as
+// arn:aws:lambda:us-west-2:123456789012:function:score:PROD invoked a function named after the alias,
+// "PROD", and arn:aws:states:::lambda:invoke — the optimized-integration resource, which also contains
+// ":lambda:" and so passed the old dispatch test — invoked one named "invoke".
+//
+// A qualifier is dropped rather than honored because the executor invokes through Lambda's
+// unqualified path; invoking a specific version or alias from a Task state is not modeled.
+func aslLambdaFunctionName(resource string) string {
+	// arn:{partition}:lambda:{region}:{account}:function:{name}[:{qualifier}]
+	parts := strings.Split(resource, ":")
+	if len(parts) < 7 || parts[0] != "arn" || parts[2] != "lambda" || parts[5] != "function" {
+		return ""
+	}
+	return parts[6]
+}
+
 // aslInvokeResource invokes a Task resource and returns its output.
-// Lambda ARNs are dispatched via the plugin registry; all other resources
-// return a stub empty object.
+// A Lambda function ARN is dispatched via the plugin registry; every other
+// resource returns a stub empty object.
 func (p *StepFunctionsPlugin) aslInvokeResource(resource string, input interface{}, reqCtx *RequestContext) (interface{}, error) {
-	if strings.Contains(resource, ":lambda:") && p.registry != nil {
-		return p.aslInvokeLambda(resource, input, reqCtx)
+	if funcName := aslLambdaFunctionName(resource); funcName != "" && p.registry != nil {
+		return p.aslInvokeLambda(funcName, input, reqCtx)
 	}
 	return map[string]interface{}{}, nil
 }
 
-// aslInvokeLambda invokes a Lambda function via the plugin registry.
-func (p *StepFunctionsPlugin) aslInvokeLambda(resource string, input interface{}, reqCtx *RequestContext) (interface{}, error) {
-	funcName := extractSMNameFromARN(resource)
+// aslInvokeLambda invokes the named Lambda function via the plugin registry.
+func (p *StepFunctionsPlugin) aslInvokeLambda(funcName string, input interface{}, reqCtx *RequestContext) (interface{}, error) {
 	payloadBytes, err := json.Marshal(input)
 	if err != nil {
 		payloadBytes = []byte("{}")

@@ -493,6 +493,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Eleven Step Functions operations resolved an ARN to the caller's own resource instead of the one the
+  ARN named** (#912). `DescribeStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`,
+  `StartExecution`, `StartSyncExecution`, `ListExecutions`, `DescribeActivity`, `DeleteActivity`,
+  `DescribeExecution`, `StopExecution` and `GetExecutionHistory` each took the resource *name* from the
+  last colon-separated segment of the ARN they were handed and the account and Region from the caller's
+  own request context. #910 fixed the three tagging operations and left these eleven, which had never
+  been audited against the rule #826 established for SQS and DynamoDB. Three separate defects followed
+  from the one extraction.
+
+  **An ARN naming another account's or another Region's resource reached the caller's own same-named
+  one.** `DescribeStateMachine` disclosed it, `UpdateStateMachine` rewrote it, `DeleteStateMachine` and
+  `DeleteActivity` removed it, `StopExecution` aborted it — every one answering `200`. `StopExecution` is
+  the damaging direction here, as `UntagResource` was in #910: aborting the wrong execution destroys
+  work, and the caller is told it succeeded. `StartExecution` and `StartSyncExecution` compounded it by
+  minting the execution ARN from the *caller's* account and Region rather than the state machine's, so
+  the ARN they reported named an execution that could not be found at the key it had been written to.
+
+  **The resource-type segment was never read.** An activity ARN at `DescribeStateMachine` looked for a
+  state machine named after the activity; an execution ARN there looked for one named after the
+  *execution*. All three now answer `InvalidArn`/400 — the resource may well exist, and it is the ARN
+  that does not belong at this operation, which is the decision #910 recorded for an execution ARN at a
+  tagging operation.
+
+  **An execution ARN's two names were reconstructed by stripping one segment**, which is right only for
+  an ARN of exactly that arity. Both names now come out of a parse.
+
+  One parser serves all fourteen operations and the tagging resolver, and it takes no request context at
+  all, so the guarantee is structural rather than something each call site has to remember — the
+  arrangement ECS has had since #826. Nine of the eleven handlers now take `_ *RequestContext`, which is
+  the compiler-enforced form of the same statement: there is no request context in scope to locate a
+  resource with.
+
+  Two boundaries are recorded rather than resolved. A **version or alias** ARN
+  (`…:stateMachine:orders:1`, `…:stateMachine:orders:live`) is refused with `InvalidArn`, substrate's
+  reading: both are well-formed at AWS and neither names anything substrate keeps a record of, so
+  resolving either to the unqualified state machine would hand a caller a different resource from the one
+  it asked for. An **express** execution ARN resolves to nothing instead, answering
+  `ExecutionDoesNotExist`, because `StartSyncExecution` mints that shape itself and refusing it would
+  claim AWS rejects an ARN it issues.
+
+  **The three `*DoesNotExist` codes move from HTTP 404 to 400.** Every error on all eleven API reference
+  pages consulted is published at "HTTP Status Code: 400", including `StateMachineDoesNotExist`,
+  `ActivityDoesNotExist` and `ExecutionDoesNotExist`. A consumer branching on the status rather than the
+  code saw something no Step Functions endpoint sends. Each operation answers the code **its own page
+  publishes**, which is why there are four rather than one. Two operations still answer a code their pages
+  do not publish — `DeleteStateMachine` and `DeleteActivity`, whose error lists are
+  `InvalidArn`/`ValidationException` and `InvalidArn` alone — and whether an absent resource makes those
+  a refusal or an idempotent `200` is #995, left open here because the evidence is an *absence* from an
+  error list rather than a published idempotence sentence. `StartSyncExecution`'s `InvalidDefinition`
+  refusal of a `STANDARD` state machine, where AWS names `StateMachineTypeNotSupported`, is #996.
+
+  **`ListExecutions` gained the checks it had none of.** `stateMachineArn` is "Required: No" there, and
+  the page states "You can specify either a `mapRunArn` or a `stateMachineArn`, but not both" — so
+  neither supplied and both supplied now answer `ValidationException`/400. A `mapRunArn` alone answers
+  `ResourceNotFound`/400, substrate's reading: a Map Run is not modelled, no operation mints one, and
+  that code is published on this page. And an absent state machine is now
+  `StateMachineDoesNotExist`/400 rather than `200` with an empty list — previously indistinguishable
+  from a state machine that exists and has never run, which is the one pair a consumer polling for
+  executions cannot tell apart.
+
+  **A Task state's `Resource` went through the same extraction and is now read as the Lambda ARN it is.**
+  A qualified ARN such as `arn:aws:lambda:{region}:{account}:function:score:PROD` invoked a function
+  named after the *alias*, and `arn:aws:states:::lambda:invoke` — the optimized integration, which
+  contains `:lambda:` and so passed the old substring dispatch test — invoked one named `invoke`. Both
+  failed the execution. The qualifier is now dropped, since the executor invokes through Lambda's
+  unqualified path, and an optimized-integration resource is no longer dispatched to Lambda at all.
+
 - **Four SNS operations published to, subscribed to and listed a topic that does not exist** (#926).
   `Subscribe`, `Publish`, `PublishBatch` and `ListSubscriptionsByTopic` parsed the `TopicArn`, derived a
   state key from it, and then read only the **subscription index** — so an absent topic was
