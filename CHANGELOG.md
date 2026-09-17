@@ -804,6 +804,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A state reset released what a plugin had minted but not what it had *started*: S3's object bytes,
+  Lambda's event-source-mapping pollers and warm containers, and RDS's Postgres containers all
+  outlived it** (#902, #903). #886 gave the registry a `ResetForRun` hook and three plugins used it for
+  a counter or a random source. The same hook was owed a second class of state — a goroutine, a
+  container, a buffer of bytes the `StateManager` only holds metadata for — and in each case the reset
+  deleted the record that was the *only* way to reach the thing, so after it nothing short of
+  `Shutdown` could stop what was left running. All three reset paths inherit the fix:
+  `POST /v1/state/reset`, `TestServer.ResetState`, and `ReplayEngine.resetState`.
+
+  **S3's object payloads** live in an `afero` filesystem on the plugin, and every read of them is
+  gated on object metadata a reset deletes — so the bytes were simultaneously unreachable and never
+  freed, growing for the life of the process. `S3Plugin.ResetForRun` now empties the filesystem, by
+  removing each root entry rather than calling `RemoveAll("/")`: on a `MemMapFs` that call reports
+  success, leaves **every file beneath the root still readable**, and destroys the root entry so
+  nothing can be enumerated afterwards — a silent no-op on the payloads that also breaks the
+  filesystem. Two candidate wire-visible consequences of the surviving bytes were tested and neither
+  reproduces (a `PutObject` truncates, and a `MemMapFs` lets a file replace a directory without
+  error), so this is a leak and a latent trap rather than a wrong response — which is why asserting it
+  needs a test-only accessor.
+
+  **The exception is a filesystem the caller injected.** `Options["filesystem"]` may be backed by a
+  directory holding fixtures the caller means to keep, and the caller holds the only reference that
+  knows what is safe to remove, so a reset leaves it alone and says so. Nothing can inject one over
+  HTTP, so every server-hosted plugin — including the `TestServer` the issue is about — is covered.
+
+  **A Lambda event-source-mapping poller** is a goroutine that polls SQS on a one-second wall-clock
+  tick and invokes the mapping's function with what it receives. `DeleteEventSourceMapping` is the only
+  call that closes its stop channel, and it answers `ResourceNotFoundException` once the record is
+  gone — so a reset left a poller that no API call could stop. Both the queue URL and the function ARN
+  are derived from names, so the next test case to use the same names had its messages received and
+  deleted, and its function invoked, by a poller it never created. That is a timing-dependent
+  cross-case interference, which is the whole reason `ResetState` exists.
+
+  **Lambda's warm container pool** is keyed by function ARN alone, so a function recreated under the
+  same name after a reset would have run the previous run's code. A reset now drains the pool through a
+  new `LambdaExecutor.DrainPool`, **not** `StopAll`: `StopAll` closes the channel the idle-eviction
+  goroutine selects on, so calling it here would leave every container started after a reset warm
+  until `Shutdown`, however long it sat idle. `Shutdown` still calls `StopAll`, which is now layered on
+  `DrainPool`, and it stops the pollers too — it did not before.
+
+  **An RDS Postgres container's** handle is read back out of the `StateManager`, so a reset made the
+  container unstoppable through the API while it still held the `substrate-rds-<id>` Docker name the
+  next `CreateDBInstance` needs — which fails `docker run` and falls back silently to a synthetic
+  endpoint. `RDSExecutor.StopContainer` now also `docker rm`s the container, which its doc comment
+  already claimed it did, and drops the `active` entry: nothing did, so the map grew for the life of
+  the process and `StopAll` re-stopped containers it had already stopped.
+
+  The tests assert a payload path set and a live-poller count through `export_test.go` accessors rather
+  than through a request, because neither is observable through the wire by construction — and a
+  count, not an absence of polls, because a poll happens on a wall-clock tick and no test here may
+  depend on real elapsed time. `docs/contributing.md` now states the reachability test a new plugin
+  should apply, the three cases, and the injected-state exception.
 - **Fifteen of the sixty-seven default plugin registrations left the simulated clock out, so eleven
   services stamped their timestamps from the wall clock inside an emulator whose whole claim is a
   controlled clock** (#904). Every plugin that keeps a clock reads it from

@@ -57,17 +57,53 @@ func (p *LambdaPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 
 // Shutdown stops all ESM pollers and the Docker executor (if active).
 func (p *LambdaPlugin) Shutdown(_ context.Context) error {
-	p.esmMu.Lock()
-	for _, ch := range p.esmStop {
-		close(ch)
-	}
-	p.esmStop = make(map[string]chan struct{})
-	p.esmMu.Unlock()
+	p.stopAllPollers()
 
 	if p.executor != nil {
 		p.executor.StopAll()
 	}
 	return nil
+}
+
+// ResetForRun stops every event-source-mapping poller and drops the executor's warm
+// containers — the two pieces of state Lambda keeps outside the [StateManager]. It
+// implements [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay
+// needs it, and #903 for the decision.
+//
+// A poller has to stop because the reset has just deleted the mapping record that
+// owned it. DeleteEventSourceMapping is the only call that closes a stop channel,
+// and it answers ResourceNotFoundException once the record is gone, so the
+// goroutine becomes unreachable through the API: it keeps polling on a one-second
+// wall-clock ticker for the life of the process. Both the queue URL it polls and
+// the function ARN it invokes are derived from names, so a later test case that
+// reuses those names has its messages received and deleted, and its function
+// invoked, by a poller it never created — a cross-case leak whose timing depends on
+// real elapsed time.
+//
+// The warm pool has to be dropped because it is keyed by function ARN alone. A
+// function recreated under the same name after a reset would be invoked in the
+// previous run's container, running the previous run's code. Dropping a warm
+// container is always safe: the next invocation starts a fresh one.
+func (p *LambdaPlugin) ResetForRun(_ context.Context) error {
+	p.stopAllPollers()
+
+	if p.executor != nil {
+		p.executor.DrainPool()
+	}
+	return nil
+}
+
+// stopAllPollers closes every event-source-mapping stop channel and forgets it,
+// ending the poller goroutine each one owns. It is safe on a plugin that has never
+// handled a request: ranging a nil map yields nothing.
+func (p *LambdaPlugin) stopAllPollers() {
+	p.esmMu.Lock()
+	defer p.esmMu.Unlock()
+
+	for _, ch := range p.esmStop {
+		close(ch)
+	}
+	p.esmStop = make(map[string]chan struct{})
 }
 
 // HandleRequest dispatches a Lambda REST API request to the appropriate handler.

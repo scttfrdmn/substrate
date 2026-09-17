@@ -48,6 +48,28 @@ func (p *RDSPlugin) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// ResetForRun stops the Postgres containers the executor is holding — the only state
+// RDS keeps outside the [StateManager]. It implements [ResettablePlugin]; see
+// [ReplayEngine.resetState] for why a replay needs it, and #903 for the decision.
+//
+// A container has to be stopped because the reset has just deleted the handle that
+// owned it: DeleteDBInstance stops a container by reading
+// "dbinstance_container:<scope>/<id>" back out of the state manager, so once that key
+// is gone nothing short of Shutdown can reach the container. It also still holds the
+// docker name substrate-rds-<id>, so a later run that creates the same instance
+// identifier fails to start its own container and falls back to a synthetic endpoint
+// — one request answering differently because of what ran before it, which is what a
+// reset exists to rule out.
+func (p *RDSPlugin) ResetForRun(ctx context.Context) error {
+	if p.executor == nil {
+		return nil
+	}
+	if err := p.executor.StopAll(ctx); err != nil {
+		return fmt.Errorf("stop rds containers: %w", err)
+	}
+	return nil
+}
+
 // HandleRequest dispatches an RDS query-protocol request to the appropriate handler.
 func (p *RDSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	action := req.Operation

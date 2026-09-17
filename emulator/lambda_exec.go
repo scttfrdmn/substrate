@@ -299,8 +299,10 @@ func (e *LambdaExecutor) evictStale() {
 	}
 }
 
-// StopAll stops all running containers and cleans up temp directories.
-// It is safe to call multiple times.
+// StopAll stops all running containers and cleans up temp directories, and ends the
+// idle-eviction goroutine. It is safe to call multiple times, and the executor is
+// not reusable afterwards — call it when the executor is being discarded, and
+// [LambdaExecutor.DrainPool] when it is not.
 func (e *LambdaExecutor) StopAll() {
 	// Signal the evict loop to exit.
 	select {
@@ -309,6 +311,18 @@ func (e *LambdaExecutor) StopAll() {
 		close(e.stopCh)
 	}
 
+	e.DrainPool()
+}
+
+// DrainPool stops every warm container and empties the pool, leaving the executor
+// usable: the idle-eviction goroutine keeps running and the next invocation starts a
+// fresh container.
+//
+// It is what a state reset calls (#903), where [LambdaExecutor.StopAll] would be
+// wrong — StopAll closes the channel the eviction loop selects on, so every
+// container started after a reset would stay warm however long it sat idle, until
+// Shutdown.
+func (e *LambdaExecutor) DrainPool() {
 	e.mu.Lock()
 	handles := make([]*containerHandle, 0, len(e.pool))
 	for _, h := range e.pool {

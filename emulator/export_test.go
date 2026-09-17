@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/spf13/afero"
 )
 
 // This file exports internal symbols for use in external test packages.
@@ -1310,4 +1313,77 @@ func IAMAuthzOperationResourceRowsForTest() []IAMAuthzResourceRowForTest {
 		})
 	}
 	return rows
+}
+
+// PayloadPathsForTest returns every file path in the S3 plugin's payload filesystem,
+// sorted. It reports the paths rather than the bytes, which is all an assertion about
+// a reset needs.
+//
+// Exported because the payloads are unobservable through the wire by construction:
+// every read of the filesystem is gated on object metadata the state manager holds,
+// so after a reset no request can tell an emptied filesystem from one still holding
+// the previous run's bytes. That is why the leak in #902 went unnoticed, and it is
+// why asserting on it needs a way in from outside. The payloads a test asserts on are
+// still written by a real PutObject, so #765's rule — that a helper writing state
+// directly cannot prove anything about the owning service — is not in play.
+func (p *S3Plugin) PayloadPathsForTest() ([]string, error) {
+	var paths []string
+	err := afero.Walk(p.fs, "/", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk s3 payload filesystem: %w", err)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// OwnsFilesystemForTest reports whether the S3 plugin created its own payload
+// filesystem rather than being handed one as Options["filesystem"] — the condition
+// [S3Plugin.ResetForRun] empties it on.
+func (p *S3Plugin) OwnsFilesystemForTest() bool { return p.ownsFS }
+
+// ESMPollerCountForTest returns the number of event-source-mapping pollers the Lambda
+// plugin is holding a stop channel for.
+//
+// Exported because a poller is otherwise unobservable: it acts only on a one-second
+// wall-clock ticker, so asserting that a stopped poller stops polling would make the
+// test depend on real elapsed time, which the house rules forbid. The count is the
+// deterministic form of the same assertion — the channel is closed and forgotten, and
+// [LambdaPlugin.sqsPollerLoop] returns on that channel unconditionally.
+func (p *LambdaPlugin) ESMPollerCountForTest() int {
+	p.esmMu.Lock()
+	defer p.esmMu.Unlock()
+	return len(p.esmStop)
+}
+
+// EvictionStoppedForTest reports whether the executor's idle-eviction goroutine has
+// been told to exit — the one difference between [LambdaExecutor.StopAll] and
+// [LambdaExecutor.DrainPool], and the reason a state reset calls the second (#903).
+//
+// The read is non-blocking, so it reports the channel's state rather than waiting on
+// it, and it does not depend on whether the goroutine has noticed yet.
+func (e *LambdaExecutor) EvictionStoppedForTest() bool {
+	select {
+	case <-e.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// RDSActiveContainerCountForTest returns the number of Postgres containers the
+// executor still believes it is holding. Until #903 nothing ever dropped an entry, so
+// the map grew for the life of the process and StopAll re-stopped containers it had
+// already stopped.
+func RDSActiveContainerCountForTest(e *RDSExecutor) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.active)
 }

@@ -521,8 +521,15 @@ func (s *Server) handleLocalStackHealth(w http.ResponseWriter, _ *http.Request) 
 //
 // The plugin half is the same reset a replay performs (#886) and is here for the
 // same reason: a minting counter that survived the reset made the identifiers a
-// test case observes depend on how many test cases ran before it. Object payloads
-// held in the S3 plugin's filesystem are the known exception (#902).
+// test case observes depend on how many test cases ran before it. It now also
+// releases what a plugin holds outside its own struct — S3's object payloads
+// (#902), Lambda's event-source-mapping pollers and warm containers, and RDS's
+// Postgres containers (#903).
+//
+// The one exception is a filesystem a caller injected into the S3 plugin as
+// Options["filesystem"], which substrate does not own and leaves alone; it cannot
+// be injected through this server at all, only by an in-process embedder that
+// builds the registry itself.
 func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	sm, ok := s.state.(SnapshotableStateManager)
 	if !ok {

@@ -120,6 +120,39 @@ twice produced different values from identical events, which is the property the
 event log exists to rule out (#886). `ResetForRun` must be safe to call on a plugin
 that has never handled a request, and safe to call while requests are in flight.
 
+The hook also owes whatever the plugin **started**, not only what it minted — a
+goroutine, a container, a buffer of bytes the `StateManager` only holds metadata for.
+The test is whether a reset leaves the thing unreachable: if the only call that stops
+it looks up a record the reset just deleted, then after the reset nothing short of
+`Shutdown` can reach it, and it keeps acting on the next run (#902, #903). Three
+in-tree cases, each with the consequence that made it a defect:
+
+- **S3's object payloads.** The bytes live in an `afero` filesystem on the plugin and
+  every read of them is gated on metadata the reset deletes, so they were unreachable
+  and unreleased for the life of the process. `ResetForRun` empties the filesystem —
+  by removing each root entry, because `RemoveAll("/")` on a `MemMapFs` reports
+  success, leaves every file beneath readable and destroys the root entry.
+- **Lambda's event-source-mapping pollers.** `DeleteEventSourceMapping` is the only
+  call that closes a poller's stop channel, and it answers `ResourceNotFoundException`
+  once the record is gone. The goroutine polls on a wall-clock ticker, and both the
+  queue URL and the function ARN are name-derived, so the poller consumed the *next*
+  run's messages and invoked its function.
+- **RDS's Postgres containers.** The container handle is read back out of the
+  `StateManager`, so a reset made the container unstoppable through the API while it
+  still held the `substrate-rds-<id>` Docker name the next `CreateDBInstance` needs.
+
+One exception, and it is about ownership rather than reachability: state the **caller**
+handed the plugin is the caller's to clear. S3 empties its filesystem only when it
+created it, because an injected `Options["filesystem"]` may be backed by a directory
+holding fixtures the caller means to keep, and only the caller knows that. Nothing can
+inject one over HTTP, so this is reachable only by an in-process embedder.
+
+Where the state is invisible through the wire — payload bytes, a live goroutine — the
+assertion needs a test-only accessor in `export_test.go` rather than a request, and its
+doc comment should say why no request can see it. Prefer a deterministic form: assert
+the poller *count*, not that polling stopped, because a poll happens on a wall-clock
+tick and no test may depend on real elapsed time.
+
 ### Errors
 
 Return `*AWSError` with the exact AWS `Code` and HTTP status for API-level
