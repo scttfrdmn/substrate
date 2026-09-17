@@ -11163,20 +11163,98 @@ Cognito Identity operations are free.
 
 ### Supported operations
 
+All seventeen operations accept `StreamARN`, `StreamName` or both, except the three noted below — see
+[Naming a stream: by name or by ARN](#naming-a-stream-by-name-or-by-arn).
+
 | Operation | Notes |
 |-----------|-------|
-| CreateStream | |
+| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one |
 | DescribeStream | |
 | DescribeStreamSummary | |
 | DeleteStream | |
-| ListStreams | |
+| ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region |
+| UpdateShardCount | `ScalingType` and `TargetShardCount` both required; `UNIFORM_SCALING` is the only published `ScalingType` |
+| MergeShards | |
+| SplitShard | |
 | PutRecord | |
 | PutRecords | Batch put |
 | GetShardIterator | Returns base64-encoded cursor |
-| GetRecords | Ring buffer of last 10,000 records per shard |
+| GetRecords | Names its stream by `ShardIterator`; a `StreamARN` is optional and is checked against it. This is the one page publishing `StreamARN` and **no** `StreamName` |
+| EnableEnhancedMonitoring | |
+| DisableEnhancedMonitoring | |
 | AddTagsToStream | `Tags` is a JSON object of key/value pairs, not a list |
 | RemoveTagsFromStream | |
-| ListTagsForStream | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) — and pages them with `Limit` and `ExclusiveStartTagKey`; see [Paging the tags on a stream](#paging-the-tags-on-a-stream). `StreamARN` is not accepted, so a stream must be named |
+| ListTagsForStream | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) — and pages them with `Limit` and `ExclusiveStartTagKey`; see [Paging the tags on a stream](#paging-the-tags-on-a-stream) |
+
+### Naming a stream: by name or by ARN
+
+Fifteen of the seventeen operations publish `StreamARN` beside `StreamName`, both `Required: No`, under
+a Note that is byte-identical on every one of their pages: *"you must use either the `StreamARN` or the
+`StreamName` parameter, or both. It is recommended that you use the `StreamARN` input parameter when you
+invoke this API."* Until [#966](https://github.com/scttfrdmn/substrate/issues/966) substrate decoded
+only `StreamName`, so the **recommended** form was the one form that could not work — a caller sending
+only an ARN, which is what an SDK client built from one sends, and what a CloudFormation `Ref`, a Lambda
+event-source mapping and an IAM policy all carry, reached an empty-`StreamName` guard and was refused.
+
+| Request | Answer |
+|---------|--------|
+| `StreamARN` only | The stream the ARN names, in the ARN's own account and Region |
+| `StreamName` only | The stream of that name in the **caller's** account and Region — the only reading available, since a name carries neither |
+| Both, naming one stream | Accepted, per *"or both"* |
+| Both, naming different streams | `InvalidArgumentException`/400 — **substrate's reading**, below |
+| Neither | `InvalidArgumentException`/400, since the Note makes such a request invalid |
+| A `StreamARN` not matching the published pattern | `InvalidArgumentException`/400, whose description — *"a specified parameter exceeds its restrictions, is not supported, or can't be used"* — is this case |
+| `StreamId` | Not decoded, and naming a stream by it alone names it not at all: AWS publishes it as *"Not Implemented. Reserved for future use."* on all fifteen pages |
+
+**The account and Region come from the ARN, not from the request context.** An ARN naming another
+account's or another Region's stream addresses *that* stream, and one naming nothing there reports the
+stream absent rather than quietly serving the caller's own same-named one. Every key a request touches —
+the stream record, its records, and its entry in the `ListStreams` index — is derived from that one
+resolution, so a cross-account `UpdateShardCount`, `MergeShards` or `AddTagsToStream` writes to the
+target and a cross-account `DeleteStream` removes the target's index entry rather than the caller's. The
+parse takes no request context at all, which is what makes the rule structural rather than a thing
+fifteen call sites have to remember, following
+[#826](https://github.com/scttfrdmn/substrate/issues/826) for SQS and DynamoDB and
+[#912](https://github.com/scttfrdmn/substrate/issues/912) for Step Functions. The Resource Groups
+Tagging API resolves a stream ARN through the same parser, so the two cannot disagree about which stream
+an ARN names or where its tags live.
+
+**What enforcement the pattern states, and no more.** The published pattern is
+`arn:aws.*:kinesis:.*:\d{12}:stream/\S+`. The partition must begin `aws`, the service segment must be
+`kinesis`, and the account must be exactly twelve digits. A remaining `/` in the resource portion means
+the ARN names a **consumer** — `stream/{name}/consumer/{name}:{timestamp}` — which substrate does not
+model, so it is refused. `StreamName`'s own `[a-zA-Z0-9_.-]+` class is deliberately **not** applied to
+the name inside an ARN, because nothing applies it on `CreateStream` either: applying it only here
+would make a stream substrate itself lets a caller create unaddressable by its own ARN.
+
+**A `StreamARN` with an empty Region resolves rather than being refused.** The pattern's Region segment
+is `.*`, which matches the empty string, so such an ARN is well-formed; it resolves to a key nothing is
+written at and reports the stream absent. Refusing it for its shape would claim AWS rejects an ARN its
+own pattern accepts — the decision [#912](https://github.com/scttfrdmn/substrate/issues/912) recorded
+for an express execution ARN.
+
+**Two members that disagree are refused, and that is substrate's reading**: no Kinesis page says what
+happens when `StreamARN` and `StreamName` name different streams. Serving either of them is how a
+caller's bug stays hidden, so the request is refused instead. Only the **name** segments are compared —
+an ARN whose account or Region differ from the caller's is not a disagreement but the whole point of the
+change, and it wins.
+
+**Two error statuses were corrected in the same pass.** Every error on every one of the seventeen
+Kinesis reference pages is published at HTTP **400** — the only 500 in the service is
+`InternalFailureException`, which substrate does not raise — and substrate answered
+`ResourceNotFoundException` at 404 and `ResourceInUseException` at 409. Both are now 400, as
+[#910](https://github.com/scttfrdmn/substrate/issues/910) and
+[#912](https://github.com/scttfrdmn/substrate/issues/912) established for Step Functions. The
+`InvalidParameterException` still answered by each handler's body-decode guard is published by Kinesis
+nowhere at all; that mismatch is [#950](https://github.com/scttfrdmn/substrate/issues/950)'s.
+
+**`GetRecords`' page contradicts itself, and the contradiction is recorded rather than resolved.** It
+publishes `StreamARN` and no `StreamName`, because its stream is implied by the required
+`ShardIterator` — and it carries the same boilerplate Note anyway, naming a parameter the same page does
+not document. Substrate follows the shape: an iterator already carries the account and Region its stream
+was resolved in, so a supplied `StreamARN` is redundant and is checked against it. One naming a
+different stream is `InvalidArgumentException`/400 rather than ignored, since ignoring it would serve
+records from a stream the request did not name.
 
 ### Paging the tags on a stream
 

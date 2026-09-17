@@ -1598,15 +1598,16 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		return cognitoIDPNamespace, "userpool:" + acct + "/" + region + "/" + poolID, nil
 
 	case "kinesis":
-		// arn:aws:kinesis:{region}:{acct}:stream/{name} — a consumer ARN nests under the same
-		// prefix as stream/{name}/consumer/{name}:{timestamp}, so a remaining "/" is not a stream.
-		name, ok := strings.CutPrefix(resource, "stream/")
-		if !ok || strings.Contains(name, "/") {
+		// Through [kinesisParseStreamARN] and [kinesisStreamKey] rather than a parse and a key built
+		// here, so Kinesis's own fifteen ARN-accepting operations and this one cannot disagree about
+		// which stream an ARN names or where its tags live — the arrangement #826 warns about and the
+		// one the ecs and rds arms already follow. Before #966 the shared parser did not exist,
+		// because Kinesis decoded no StreamARN anywhere.
+		target, arnErr := kinesisParseStreamARN(arn)
+		if arnErr != nil {
 			return "", "", unsupportedTagResource("Kinesis %q is not a stream ARN", resource)
 		}
-		region := parts[3]
-		acct := parts[4]
-		return kinesisNamespace, "stream:" + acct + "/" + region + "/" + name, nil
+		return kinesisNamespace, kinesisStreamKey(target.AccountID, target.Region, target.Name), nil
 
 	case "rds":
 		// Through [rdsResolveARN] rather than a key built here, so RDS's own three tag
