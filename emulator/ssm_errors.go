@@ -70,6 +70,24 @@ func ssmInvalidBody() *AWSError {
 	}
 }
 
+// ssmInvalidNextToken reports that a pagination token is not one substrate issued.
+//
+// The code and the message are both published, and identically on both paginated parameter
+// operations: API_DescribeParameters and API_GetParametersByPath each list InvalidNextToken —
+// "The specified token isn't valid." HTTP Status Code: 400. One helper is what keeps the two from
+// drifting apart, which is this file's whole reason for existing; the message differs from
+// CloudWatch's for the same code, so the two services cannot share one (see [cwInvalidNextToken]).
+//
+// Substrate answers this rather than serving page one, for the reason offset_pagination_token.go
+// gives: a caller cannot detect a well-formed wrong page (#915).
+func ssmInvalidNextToken() *AWSError {
+	return &AWSError{
+		Code:       "InvalidNextToken",
+		Message:    "The specified token isn't valid.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // ssmInvalidResourceID reports that an identifier names no Systems Manager resource, naming the
 // reason so a caller can tell a wrong service from a wrong resource type from an absent resource.
 //

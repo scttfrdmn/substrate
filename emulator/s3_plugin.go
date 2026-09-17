@@ -1644,12 +1644,23 @@ func (p *S3Plugin) listObjectsV2(_ *RequestContext, req *AWSRequest, bucket stri
 		}
 	}
 
-	// Continuation token is a base64-encoded "last seen key".
+	// The continuation token is a base64-encoded "last seen key", decoded by the helper
+	// ListBuckets shares, so a token substrate could not have issued is refused here as it is
+	// there — and refused *before the object listing is read*, rather than silently treated as
+	// "no cursor", which restarts a paging caller at page one: the loop #884 describes (#915).
+	// See s3DecodeContinuationToken for the code's provenance, which is substrate's reading.
+	// No length bound is applied here, unlike ListBuckets: API_ListObjectsV2 publishes no
+	// Length Constraints on the parameter.
+	//
+	// The bucket-existence 404 above keeps precedence over this refusal. AWS publishes nothing
+	// about which of the two wins, and the bucket is the resource the request addresses.
 	afterKey := startAfter
 	if contToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(contToken); decErr == nil {
-			afterKey = string(decoded)
+		after, refusal := s3DecodeContinuationToken(contToken)
+		if refusal != nil {
+			return refusal, nil
 		}
+		afterKey = after
 	}
 
 	objectKeys, err := p.listSortedObjectKeys(ctx, bucket)

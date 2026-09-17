@@ -279,17 +279,40 @@ func parseS3ListBucketsParams(req *AWSRequest) (*s3ListBucketsParams, *AWSRespon
 				fmt.Sprintf("continuation-token must be at most %d characters.", s3ContinuationTokenMaxLength),
 				http.StatusBadRequest)
 		}
-		// The token is base64, matching what ListObjectsV2 already emits, which
-		// satisfies AWS's only statement about its content: "ContinuationToken is
-		// obfuscated and is not a real key."
-		decoded, err := base64.StdEncoding.DecodeString(contToken)
-		if err != nil {
-			return nil, s3ErrorResponse("InvalidArgument",
-				"The continuation token provided is incorrect.",
-				http.StatusBadRequest)
+		after, refusal := s3DecodeContinuationToken(contToken)
+		if refusal != nil {
+			return nil, refusal
 		}
-		params.afterBucket = string(decoded)
+		params.afterBucket = after
 	}
 
 	return params, nil
+}
+
+// s3DecodeContinuationToken decodes the cursor ListBuckets and ListObjectsV2 share, returning
+// either the key or bucket name the next page starts after or the error response to send.
+//
+// The token is base64, which satisfies AWS's only statement about its content —
+// "ContinuationToken is obfuscated and is not a real key" — and is what makes a token substrate
+// never issued detectable at all. One helper is what makes the two operations refuse alike
+// structurally rather than by two call sites agreeing (#915); the 1024-character ceiling stays at
+// the ListBuckets call site, because that is the one of the two whose page publishes a Length
+// Constraint on the parameter.
+//
+// **The error code is unverified**, for the reason [parseS3ListBucketsParams] gives, and it is no
+// better sourced on the other side: API_ListObjectsV2 publishes exactly one error, NoSuchBucket at
+// 404, and nothing on the page says what an unusable continuation-token answers.
+//
+// A token that decodes to something other than a real key is not refused — it simply selects the
+// keys sorting after that value, which may be none. Resuming after an object that has since been
+// deleted is precisely what a value-based cursor is for, the same reading [parseQueryMarker]
+// records for the RDS and ElastiCache marker.
+func s3DecodeContinuationToken(token string) (string, *AWSResponse) {
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		return "", s3ErrorResponse("InvalidArgument",
+			"The continuation token provided is incorrect.",
+			http.StatusBadRequest)
+	}
+	return string(decoded), nil
 }

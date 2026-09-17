@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -157,7 +156,10 @@ func (p *CloudWatchPlugin) describeAlarms(ctx *RequestContext, req *AWSRequest) 
 	if maxRecords <= 0 {
 		maxRecords = 100
 	}
-	nextToken := req.Params["NextToken"]
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params["NextToken"])
+	if !tokenOK {
+		return nil, cwInvalidNextToken()
+	}
 
 	goCtx := context.Background()
 	idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
@@ -182,15 +184,10 @@ func (p *CloudWatchPlugin) describeAlarms(ctx *RequestContext, req *AWSRequest) 
 		names = filtered
 	}
 
-	// Pagination.
-	offset := 0
-	if nextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(nextToken); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
+	// Pagination. The token was validated above, before the alarm index was read, so a
+	// token substrate could not have issued is refused rather than answered with page one
+	// (#915). An offset past the end is a token substrate did issue over a listing that
+	// has since shrunk, and clamps to a final empty page.
 	if offset > len(names) {
 		offset = len(names)
 	}
@@ -198,7 +195,7 @@ func (p *CloudWatchPlugin) describeAlarms(ctx *RequestContext, req *AWSRequest) 
 	end := offset + maxRecords
 	var outNextToken string
 	if end < len(names) {
-		outNextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
+		outNextToken = encodeOffsetPaginationToken(end)
 	} else {
 		end = len(names)
 	}

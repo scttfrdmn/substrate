@@ -815,6 +815,64 @@ value outside the documented 20–100 range and silently rewrites an unusable on
 [#913](https://github.com/scttfrdmn/substrate/issues/913). Folding a page-*size* change into a
 page-*contents* change would have made the two indistinguishable in one diff.
 
+### A pagination token substrate never issued is refused, not answered with page one
+
+[#915](https://github.com/scttfrdmn/substrate/issues/915) is the second half of the tier-2 defect
+above, at the four operations the RDS and ElastiCache fix did not reach. Each decoded its token and
+discarded the error:
+
+```go
+if decoded, decErr := base64.StdEncoding.DecodeString(nextToken); decErr == nil {
+	if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
+		offset = n
+	}
+}
+```
+
+So a token substrate could not have issued — one from another operation, a truncated copy, a
+hand-written string, an offset left over from an older recording — left the offset at zero and the
+operation answered a well-formed **page one**. That is the one wrong answer a paginating caller
+cannot detect: a loop that runs until the token comes back empty is handed the first page again, so
+it either spins or processes the same records twice, and the response says nothing.
+
+The code and the message are per operation, and their provenance differs:
+
+| Operation | Code | Message | Provenance |
+|---|---|---|---|
+| CloudWatch `DescribeAlarms` | `InvalidNextToken` / 400 | The next token specified is invalid. | **Published.** It is the only error `API_DescribeAlarms` lists, and the same code appears in CloudWatch's Smithy model, which is where the JSON and CBOR protocols get the shape name. |
+| SSM `DescribeParameters` | `InvalidNextToken` / 400 | The specified token isn't valid. | **Published**, on the operation's own page. |
+| SSM `GetParametersByPath` | `InvalidNextToken` / 400 | The specified token isn't valid. | **Published**, identically. |
+| S3 `ListObjectsV2` | `InvalidArgument` / 400 | The continuation token provided is incorrect. | **Substrate's reading.** `API_ListObjectsV2` publishes exactly one error, `NoSuchBucket` at 404, and says nothing about an unusable `continuation-token`; the S3 `ErrorResponses` page returns an empty body to automated fetches. It follows the choice already recorded for `ListBuckets`, and the two operations taking this cursor now decode it through one helper, so they cannot refuse it differently. |
+
+Two rules decide what counts as issuable, and both are stated once, in
+`emulator/offset_pagination_token.go`, rather than agreed on at each site:
+
+- **A token is issuable if the encoder could have produced it.** For the three offset cursors that
+  means base64 whose decoded text is exactly what `strconv.Itoa` renders for the offset it names, so
+  `+5`, `05` and a trailing space are refused as well as a negative offset and a non-integer — forms
+  `strconv.Atoi` accepts but nothing ever emitted. For `ListObjectsV2` the cursor is a *key*, so any
+  base64 is issuable and only an undecodable token is refused: a token naming an object that has
+  since been deleted resumes after it, which is the same reading the RDS and ElastiCache marker
+  records.
+- **An offset past the end of the listing is not refused.** That token *was* issued, over a listing
+  that has since shrunk, and it clamps to a final empty page. Refusing it would break a legitimate
+  walk whose records were deleted mid-loop.
+
+**The token is validated before any state is read.** Three of the four read first — CloudWatch
+loaded its alarm index and Systems Manager its parameter paths — so a refusal could depend on how
+much state happened to exist. This is the ordering rule `ec2_describetags.go` records for
+`DescribeTags`, and it is asserted by sealing the state store against reads and requiring the
+refusal to arrive anyway. `ListObjectsV2` is the one exception, deliberately: its
+bucket-existence `404` keeps its precedence over the token refusal, because the bucket is the
+resource the request addresses and AWS publishes nothing about which of the two wins. Only the
+object listing is guaranteed unread.
+
+**What this does not fix.** CloudWatch `DescribeAlarms` and both Systems Manager listings still page
+by *offset*, so a record added or removed behind the cursor still shifts every later page — the
+other half of the tier-2 defect, and the reason the RDS and ElastiCache describes were converted to
+a value-based cursor. Refusing an unissued token and choosing a stable cursor basis are independent
+defects, and only the first is #915.
+
 ### A tag set read back out of a map
 
 [#946](https://github.com/scttfrdmn/substrate/issues/946) is the same defect one layer down, at
@@ -3474,7 +3532,7 @@ STS operations are free.
 | DeleteObject | Fires S3 notifications if configured |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
 | ListObjects | Emits `<StorageClass>` per object |
-| ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; emits `<StorageClass>` per object |
+| ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; refuses an undecodable `continuation-token` with `400 InvalidArgument` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one); emits `<StorageClass>` per object |
 | CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
 | UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
@@ -9634,11 +9692,11 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 | PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/` |
 | GetParameter | Supports WithDecryption; reports the parameter's ARN |
 | GetParameters | Batch get |
-| GetParametersByPath | Recursive path traversal |
+| GetParametersByPath | Recursive path traversal; paginates on `MaxResults`/`NextToken` and refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
 | GetParameterHistory | |
 | DeleteParameter | |
 | DeleteParameters | |
-| DescribeParameters | |
+| DescribeParameters | Paginates on `MaxResults`/`NextToken`; refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
 | AddTagsToResource | `ResourceType` is required and is resolved — see below |
 | RemoveTagsFromResource | Removes only the named keys |
 | ListTagsForResource | Reports `TagList` sorted by key; an empty list, never `null` |
@@ -11083,7 +11141,7 @@ is a documented divergence from the reference writer's output and conformant eit
 | ListMetrics | Filters on `Namespace` and `MetricName`; `Dimensions` is always empty |
 | GetMetricData | Always empty `MetricDataResults` — no time series is modeled |
 | PutMetricAlarm | Preserves an existing alarm's state on re-put |
-| DescribeAlarms | Filters on `AlarmNames` and `StateValue`; paginates on `MaxRecords`/`NextToken` |
+| DescribeAlarms | Filters on `AlarmNames` and `StateValue`; paginates on `MaxRecords`/`NextToken`; refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
 | DescribeAlarmsForMetric | Filters on `MetricName` and `Namespace`; does not paginate |
 | DeleteAlarms | |
 | SetAlarmState | `ResourceNotFoundException` for an unknown alarm |

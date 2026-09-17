@@ -36,6 +36,8 @@ package emulator
 // The API reference is not a substitute for the model here: it documents the Query
 // codes and nothing about shape names, member casing, or fault type.
 
+import "net/http"
+
 // cwErrorNamespace is the Smithy namespace CloudWatch's shapes live in, which prefixes
 // every shape ID in a "__type" member.
 const cwErrorNamespace = "com.amazonaws.cloudwatch"
@@ -102,6 +104,25 @@ var cloudWatchErrorShapes = map[string]modeledError{
 	"KmsAccessDeniedException": {Shape: "KmsAccessDeniedException", MessageMember: "Message", HTTPStatus: 400},
 	"KmsKeyDisabledException":  {Shape: "KmsKeyDisabledException", MessageMember: "Message", HTTPStatus: 400},
 	"KmsKeyNotFoundException":  {Shape: "KmsKeyNotFoundException", MessageMember: "Message", HTTPStatus: 400},
+}
+
+// cwInvalidNextToken reports that a pagination token is not one substrate issued.
+//
+// Both the code and the message are published: API_DescribeAlarms' Errors section lists
+// InvalidNextToken — "The next token specified is invalid." HTTP Status Code: 400 — and it
+// is the **only** error that page publishes, so there is nothing else the operation could
+// answer for a token it cannot use. The row in [cloudWatchErrorShapes] above is the same
+// code read off the Smithy model, which is where the JSON and CBOR protocols get the
+// shape name and the lowercase "message" member; the two sources agree on 400.
+//
+// Substrate answers this rather than serving page one, for the reason
+// offset_pagination_token.go gives: a caller cannot detect a well-formed wrong page (#915).
+func cwInvalidNextToken() *AWSError {
+	return &AWSError{
+		Code:       "InvalidNextToken",
+		Message:    "The next token specified is invalid.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // serviceErrorModel is one service's error shapes and the namespace they live in. The

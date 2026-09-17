@@ -530,6 +530,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A pagination token substrate never issued was answered with page one, at four operations** (#915).
+  CloudWatch `DescribeAlarms`, Systems Manager `DescribeParameters` and `GetParametersByPath`, and S3
+  `ListObjectsV2` each decoded their token inside an `if err == nil` and discarded the failure, so a
+  token from another operation, a truncated copy, a hand-written string, or an offset left over from an
+  older recording selected the start of the listing and the operation answered a well-formed **page
+  one**. That is the one wrong answer a paginating caller cannot detect: a loop that runs until the
+  token comes back empty is handed the first page again, so it either spins or processes the same
+  records twice, and nothing in the response says so. #884 named the shape and #887 fixed it for the RDS
+  and ElastiCache markers; these four are the rest of it.
+
+  Each refuses with the code its own page publishes. CloudWatch answers `InvalidNextToken` / 400 with
+  "The next token specified is invalid." — the only error `API_DescribeAlarms` lists, and the same code
+  CloudWatch's Smithy model carries, which is where the JSON and CBOR protocols get the shape name.
+  Both Systems Manager operations answer `InvalidNextToken` / 400 with their own published message,
+  "The specified token isn't valid." S3's code is **substrate's reading**: `API_ListObjectsV2` publishes
+  exactly one error, `NoSuchBucket` at 404, and says nothing about an unusable `continuation-token`, so
+  it follows the `InvalidArgument` / 400 and the message already recorded for `ListBuckets`. The two
+  operations that take that cursor now decode it through one helper, `s3DecodeContinuationToken`, so
+  they refuse it alike structurally rather than by two call sites agreeing; the 1024-character ceiling
+  stays at the `ListBuckets` site, because that is the one of the two whose page publishes a Length
+  Constraint on the parameter.
+
+  What counts as a token substrate could have issued is decided once, in
+  `emulator/offset_pagination_token.go`, rather than agreed on at each site: for the three offset
+  cursors the decoded text must be exactly what the encoder renders for the offset it names, so `+5`,
+  `05` and a trailing space are refused along with a negative offset and a non-integer — forms
+  `strconv.Atoi` accepts but nothing ever emitted. An offset *past the end* of the listing is not
+  refused: that token was issued, over a listing that has since shrunk, and it clamps to a final empty
+  page, because refusing it would break a legitimate walk whose records were deleted mid-loop.
+  `ListObjectsV2`'s cursor is a key rather than an offset, so any base64 is issuable there and a token
+  naming a deleted object resumes after it.
+
+  **The token is validated before any state is read**, the ordering rule #887 established: three of the
+  four read first — CloudWatch loaded its alarm index, Systems Manager its parameter paths — so a
+  refusal could depend on how much state happened to exist. The new tests assert it by sealing the state
+  store against reads and requiring the refusal to arrive anyway, which a handler that read first
+  answers with a 500. `ListObjectsV2` is the deliberate exception: its bucket-existence 404 keeps its
+  precedence, because the bucket is the resource the request addresses and AWS publishes nothing about
+  which of the two refusals wins, so only the object listing is guaranteed unread.
+
+  Not fixed, and recorded so it is not read as fixed: all three offset cursors are still offsets, so a
+  record added or removed behind the cursor still shifts every later page. That is the other half of the
+  tier-2 defect and the reason the RDS and ElastiCache describes were converted to a value-based cursor;
+  refusing an unissued token and choosing a stable cursor basis are independent defects.
+
 - **A DynamoDB table's state record was handed straight to a caller, so two of substrate's own fields
   were `TableDescription` members** (#1013). `CreateTable` with a tag answered
   `"Tags":{"env":"test"}` inside its `TableDescription`, and `DescribeTable` on a table with TTL enabled
