@@ -212,6 +212,9 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeInstanceTypeOfferings(ctx, req)
 	case "DescribeSpotPriceHistory":
 		return p.describeSpotPriceHistory(ctx, req)
+	// Spot placement score operations
+	case "GetSpotPlacementScores":
+		return p.getSpotPlacementScores(ctx, req)
 	// Launch template operations
 	case "CreateLaunchTemplate":
 		return p.createLaunchTemplate(ctx, req)

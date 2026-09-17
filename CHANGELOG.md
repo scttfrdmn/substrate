@@ -8,6 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **EC2 `GetSpotPlacementScores`, with the score itself seedable** (#892). The action reached the
+  dispatcher's default arm and answered `InvalidAction`, so a consumer that samples a placement score
+  alongside each on-demand probe — the free signal it correlates against paid fulfillment — could not
+  run that pairing against substrate at all. It now scores the three seeded regions, or their nine
+  zones under `SingleAvailabilityZone=true`, reporting the AZ **ID** (`use1-az1`) that
+  `DescribeAvailabilityZones` reports, since a score for a zone a caller cannot then look up is not a
+  usable signal.
+
+  Three wire facts a plausible implementation gets wrong are pinned by tests. The list parameters are
+  **`InstanceType.N` and `RegionName.N`, singular**, although the CLI flags are `--instance-types` and
+  `--region-names`; the plural is therefore not a list, because tolerating it would let a consumer's
+  wrong request pass here and fail against AWS — and since `RegionName.N` publishes a minimum of 0
+  items, a parser keyed on the plural fails *silently* rather than refusing. `MaxResults` publishes
+  `Minimum value of 10`, a floor no other EC2 operation in the tree has, so the shared helper is passed
+  this operation's own range rather than the usual floor of one. And `SpotPlacementScore` carries
+  exactly three members — `availabilityZoneId`, `region`, `score` — with no `capacityAvailable`, ARN or
+  metadata, so there is nothing further to model.
+
+  `TargetCapacity` is required (`MissingParameter` when absent) and range-checked against its
+  published 1–2000000000; it is then unused, because substrate models no capacity broker and how much
+  capacity a request asks for cannot move a score not computed from capacity. `TargetCapacityUnitType`
+  is checked against its published `vcpu | memory-mib | units` and is likewise inert.
+  `InstanceRequirementsWithMetadata` alongside `InstanceType.N` answers
+  `InvalidParameterCombination`, which the page states outright. `RegionName.N` **narrows** rather than
+  asserts — its own text is "the Regions used to narrow down the list of Regions to be scored" — so an
+  unseeded region contributes nothing instead of erroring, keeping the answer consistent with
+  `DescribeRegions`.
+
+  A new control-plane pair, `POST`/`DELETE /v1/ec2/spot-placement-scores`, seeds the score for one
+  Availability Zone, one region, or every region, optionally narrowed to one instance type. The most
+  specific scope carrying a seed decides — zone, then region, then wildcard — so seeding one bad zone
+  inside an otherwise-seeded region works rather than being overwritten by the coarser seed; naming
+  both a `region` and an `availabilityZoneId` is refused rather than resolved by precedence, since an
+  AZ ID already fixes its region. Within one scope, a request naming several instance types takes the
+  **lowest** seeded score and unseeded types are not considered: including them at their default would
+  let the default mask a seed, and taking the maximum would let a nominal sibling mask the scarce type
+  a test seeded. `score` is refused outside 1–10 at the endpoint rather than asserted as a response
+  invariant, because that scale is published as prose on the operation and **not** as a `Valid Range:`
+  line on the member.
+
+  Absent a seed the answer follows the one relationship AWS publishes between a request and its score
+  — "if you specify one or two instance types … the returned placement score will always be low" — so
+  one or two types score 3 and everything else scores 7. Those two numbers are substrate's reading,
+  chosen inside the published scale and far enough apart for a test to distinguish; a 1 would claim
+  there is no capacity anywhere and a 10 that fulfillment is certain, and substrate models nothing that
+  could know either. A request naming *no* types scores nominally, because naming none is legal and has
+  not met the documented condition. Ordering is score descending then region and zone ID ascending: AWS
+  fixes the primary key by describing "the top 10", and the tie-break is substrate's, needed because
+  the page itself says different scopes may share a score — without it an assertion on the first
+  element would be a coin toss.
+
+  Two consequences are recorded rather than left implicit. **No `nextToken` is reachable**: the floor of
+  10 meets a largest-possible answer of nine items, so no legal page size can truncate it, and a caller
+  looking for a pagination loop here will not find one. And the `item`-wrapper nesting rests on
+  substrate's existing EC2 query-protocol rendering rather than on a citation, because neither
+  `API_GetSpotPlacementScores` nor `API_SpotPlacementScore` publishes an Examples section or any sample
+  XML. `DryRun` is accepted and inert, as at every EC2 operation substrate routes.
 - **Eleven complete accelerated-computing instance-type families in the EC2 catalog, retiring the one
   place its completeness invariant did not hold** (#896). `ec2InstanceTypeFamilies` documents that the
   catalog is deliberately not exhaustive *but complete per family*, because

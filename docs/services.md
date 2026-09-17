@@ -5366,6 +5366,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Five of fifty-seven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
 | DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters |
+| GetSpotPlacementScores | Scores the three seeded regions, or their nine zones under `SingleAvailabilityZone=true`, by AZ **ID**. `TargetCapacity` is required and range-checked; `InstanceType.N` and `RegionName.N` are **singular**; `MaxResults` floors at **10**, which is this operation's own published range. The score itself is [seeded, not computed](#seeding-a-spot-placement-score) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
@@ -8474,6 +8475,10 @@ not be harmonised — 5–100 at two of them where a sibling publishes 5–1000 
 publish none inherit the same treatment as the four already-converted operations that publish
 none, namely a floor of one as substrate's reading and no ceiling at all.
 
+`GetSpotPlacementScores` is the sharpest illustration of the first point and sits outside the table
+because it reads both parameters: its published floor is **10**, higher than any `Describe*` in the
+service. A shared floor would accept `MaxResults=1` there, which AWS refuses.
+
 Seven further routed `Describe*` operations publish **neither** parameter and so are not part of
 that count: `DescribeKeyPairs`, `DescribePlacementGroups`, `DescribeAvailabilityZones`,
 `DescribeAddresses`, `DescribeRegions`, and the two single-attribute reads
@@ -8605,6 +8610,75 @@ against it is untouched. Seeds live in the state manager, so they replay like an
 There is no Python helper for this endpoint: `pytest_substrate`'s seeding helpers are hardcoded
 to the Athena, Redshift Data and Timestream result endpoints, so drive this one with raw HTTP,
 as the fleet seed above is driven.
+
+### Seeding a Spot placement score
+
+`GetSpotPlacementScores` answers a recommendation AWS computes from live Spot capacity, and
+substrate models no capacity broker — so the observations a consumer actually branches on cannot be
+derived from anything substrate knows. Its usual shape is "sample the free score, and only pay for a
+fulfillment probe where it looks promising", which makes the *low*-score branch the one most worth
+testing and the one that is unreachable without a seed.
+
+```bash
+# One region scores badly; the others stay nominal.
+curl -X POST http://localhost:4566/v1/ec2/spot-placement-scores \
+  -d '{"region":"us-east-1","score":2}'
+
+# One zone scores lower than its siblings. Observable only under
+# SingleAvailabilityZone=true, since a region-scored answer names no zone.
+curl -X POST http://localhost:4566/v1/ec2/spot-placement-scores \
+  -d '{"availabilityZoneId":"use1-az2","score":1}'
+
+# One instance type is scarce everywhere.
+curl -X POST http://localhost:4566/v1/ec2/spot-placement-scores \
+  -d '{"instanceType":"inf2.48xlarge","score":1}'
+
+# Clear one scope, or all of them.
+curl -X DELETE 'http://localhost:4566/v1/ec2/spot-placement-scores?region=us-east-1'
+curl -X DELETE http://localhost:4566/v1/ec2/spot-placement-scores
+```
+
+A seed is scoped to one Availability Zone, one region, or every region, and to one instance type or
+every instance type. **The most specific scope carrying a seed decides** — zone, then region, then
+the wildcard — so seeding one bad zone inside an otherwise-seeded region works rather than being
+overwritten by the coarser seed. Naming both a `region` and an `availabilityZoneId` is refused
+rather than resolved by precedence: an AZ ID already fixes its region, which is why AWS reports the
+ID here, so a seed naming a zone in a different region has no reading that is not a guess.
+
+Within one scope, a request naming several instance types takes the **lowest** seeded score, and
+only types that carry a seed are considered at all. Both halves follow from what a seed is for:
+including unseeded types at their default would let the default mask a seed, and taking the maximum
+would let a nominal sibling mask the scarce type a test seeded. It is also the reading closest to
+AWS's own, whose score describes fulfilling the whole request rather than its easiest member.
+
+`score` is required and refused outside **1 to 10**. That range is published as prose on the
+operation — "scored on a scale from 1 to 10" — and **not** as a `Valid Range:` line on
+`SpotPlacementScore.score`, so it is enforced here, where substrate owns the refusal, rather than
+being asserted as a response invariant AWS guarantees.
+
+Absent a seed, the answer follows the one relationship between a request and its score that AWS
+publishes: "if you specify one or two instance types … the returned placement score will always be
+low." So a request naming one or two types scores **3** and everything else scores **7**. Those two
+numbers are substrate's reading, chosen inside the published scale and far enough apart for a test
+to tell them apart — a 1 would claim there is no capacity anywhere and a 10 that fulfillment is
+certain, and substrate models nothing that could know either. A request naming **no** instance types
+scores nominally rather than low: naming none is legal (`InstanceType.N` publishes a minimum of 0
+items) and has not met the documented condition, which is about specifying one or two rather than
+about specifying few.
+
+The answer is ordered by score descending, then by region and zone ID ascending. AWS describes it as
+"the top 10 Regions or Availability Zones", which fixes the primary key; the tie-break is
+substrate's, and it is what makes the answer reproducible when several scopes share a score — which
+the page says they may. Without it, two runs of one request could order the same scores differently
+and an assertion on the first element would be a coin toss.
+
+**No `nextToken` is reachable here**, and that is a consequence of two AWS facts meeting rather than
+a gap: `MaxResults` floors at 10, and substrate seeds three regions of three zones each, so the
+largest answer it can build is nine items and no legal page size can truncate it. A caller looking
+for a pagination loop to exercise will not find one; `NextToken` is still parsed and refused when
+malformed, as at every other paginated EC2 describe.
+
+`DryRun` is accepted and inert, as it is at every EC2 operation substrate routes.
 
 ### CloudFormation resource types
 
