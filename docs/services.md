@@ -471,10 +471,20 @@ the assertion that matters is that no site was missed.
 Two of the 66 needed a resource to exist first, which is worth recording because it is the one
 way a guard can be present, correct and still untested. Lambda's `AddPermission` and
 `TagResource` look up the function **before** they parse the body, so on an empty emulator both
-answer `ResourceNotFoundException`/404 and never reach the guard at all. That ordering is
-right — a caller naming a function that does not exist should be told that, not that their
-JSON is malformed — but it means the two sites are only reachable with a function in place, and
-a test that did not create one would have reported success while asserting nothing.
+answer `ResourceNotFoundException`/404 and never reach the guard at all. The two sites are
+therefore only reachable with a function in place, and a test that did not create one would
+have reported success while asserting nothing.
+
+**Which of the two answers AWS gives is unverified**, and the ordering is left as it stands
+rather than changed on a guess. A case is available either way: a caller naming a function that
+does not exist arguably wants to hear that rather than that their JSON is malformed, while a
+REST-JSON frontend that deserializes a request before dispatching it would refuse the body
+first and never reach the lookup. No Lambda page states the precedence, and it is not
+observable from the published Errors sections, both of which list the two codes without
+ordering them. Filed as [#1006](https://github.com/scttfrdmn/substrate/issues/1006) rather
+than settled here, because #950's rule is about *which code* a guard answers, not about which
+guard runs first — and if the body is refused first the pattern is not Lambda's alone, so it is
+an inventory rather than two moved lines.
 
 **One service is outside this rule by design.** CloudWatch speaks Smithy RPC v2 CBOR, and
 its refusal names the modelled shape rather than a code from a common-errors page; neither

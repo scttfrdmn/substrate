@@ -276,10 +276,13 @@ func TestInvalidBodyAnswersThePublishedCode(t *testing.T) {
 //
 // AddPermission calls loadFunction and TagResource calls findFunctionByARN before either reaches
 // json.Unmarshal, so on an empty server both answer ResourceNotFoundException at 404 and the guard is
-// unreachable. That ordering is correct — a caller naming a function that does not exist should be told
-// so rather than told their body is malformed — but it means these two sites can only be reached with a
-// function in place, and a site that cannot be reached is a site whose code goes unchecked. Both
-// answered ValidationException before #950, a code Lambda publishes on neither page.
+// unreachable — and a site that cannot be reached is a site whose code goes unchecked. Both answered
+// ValidationException before #950, a code Lambda publishes on neither page.
+//
+// Which answer AWS gives for a malformed body naming a function that does not exist is unverified: no
+// Lambda page states the precedence, and it is not observable from the published Errors sections, which
+// list both codes without ordering them. This test asserts the code the guard answers once reached, not
+// that the guard runs first, so it holds whichever way that question is later settled.
 func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 	const host = "lambda.us-east-1.amazonaws.com"
 	ts := emulator.StartTestServer(t)
