@@ -3918,6 +3918,17 @@ func (d *StackDeployer) deployRoute53RecordSetGroup(
 }
 
 // deployKMSKey creates a KMS key for the given CFN resource.
+//
+// The two defaults below are CloudFormation's own, not substrate's: AWS::KMS::Key documents KeySpec's
+// default as SYMMETRIC_DEFAULT and KeyUsage's as ENCRYPT_DECRYPT, so sending both unconditionally is
+// what the resource type does. #977 made that visible rather than changing it — CreateKey now refuses a
+// key spec that does not admit the usage it is paired with, so a template naming an asymmetric or HMAC
+// KeySpec without a KeyUsage is refused here where it previously created a key AWS would not have.
+//
+// That refusal is correct for the same reason: KeyUsage "is required for asymmetric KMS keys and HMAC
+// KMS keys", so such a template is invalid at AWS too and fails its own stack. Defaulting is therefore
+// kept — the resource type's default is a fact about the resource type, and a template that relies on it
+// for a symmetric key is unaffected.
 func (d *StackDeployer) deployKMSKey(
 	ctx context.Context,
 	logicalID string,

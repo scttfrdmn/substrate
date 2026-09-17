@@ -104,6 +104,66 @@ func TestCFN_KMSKey(t *testing.T) {
 	assert.Contains(t, result.Outputs["KeyArn"], "arn:aws:kms:")
 }
 
+// TestCFN_KMSKeyAsymmetricSpecNeedsItsKeyUsage records what #977's CreateKey validation does to a
+// CloudFormation template, which is the one place substrate builds a CreateKey request for a caller.
+//
+// [StackDeployer.deployKMSKey] sends AWS::KMS::Key's own two defaults — SYMMETRIC_DEFAULT and
+// ENCRYPT_DECRYPT — unconditionally, so a template naming an asymmetric or HMAC KeySpec and no KeyUsage
+// now produces a pair CreateKey refuses. That is the same answer AWS gives, because the property "is
+// required for asymmetric KMS keys and HMAC KMS keys"; the template is invalid rather than the deploy
+// being wrong, so the defaults stay and this test pins the consequence.
+//
+// The first row is the case that used to succeed and now does not. The second and third exist so the
+// first cannot pass by refusing every asymmetric key: a spec paired with a usage it admits deploys, and
+// the two ends of the pairing table (an RSA key that encrypts, an HMAC key that MACs) are both covered.
+func TestCFN_KMSKeyAsymmetricSpecNeedsItsKeyUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		props     string
+		refusedBy string
+	}{
+		{
+			name:      "an ECC spec with no KeyUsage inherits ENCRYPT_DECRYPT and is refused",
+			props:     `"KeySpec": "ECC_NIST_P384"`,
+			refusedBy: "UnsupportedOperationException",
+		},
+		{
+			name:  "an RSA spec with a usage it admits deploys",
+			props: `"KeySpec": "RSA_3072", "KeyUsage": "SIGN_VERIFY"`,
+		},
+		{
+			name:  "an HMAC spec with its only usage deploys",
+			props: `"KeySpec": "HMAC_384", "KeyUsage": "GENERATE_VERIFY_MAC"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newV016Deployer(t)
+			tmpl := `{
+				"AWSTemplateFormatVersion": "2010-09-09",
+				"Resources": {
+					"MyKey": {
+						"Type": "AWS::KMS::Key",
+						"Properties": {` + tc.props + `}
+					}
+				}
+			}`
+
+			result, err := d.Deploy(context.Background(), tmpl, "kms-pair-stack", nil)
+			require.NoError(t, err, "the deploy reports a resource failure rather than an error")
+			require.Len(t, result.Resources, 1)
+
+			if tc.refusedBy != "" {
+				assert.Contains(t, result.Resources[0].Error, tc.refusedBy,
+					"the resource carries the refusal CreateKey answered")
+				assert.Empty(t, result.Resources[0].ARN, "a refused key has no ARN")
+				return
+			}
+			assert.Empty(t, result.Resources[0].Error, "the pair is admissible")
+			assert.Contains(t, result.Resources[0].ARN, "arn:aws:kms:", "the key was created")
+		})
+	}
+}
+
 func TestCFN_KMSAlias(t *testing.T) {
 	d := newV016Deployer(t)
 	tmpl := `{

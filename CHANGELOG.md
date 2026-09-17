@@ -160,6 +160,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page is exactly when someone working from the struct would put #971's member back.
 
 ### Changed
+- **KMS `CreateKey` validates `KeySpec` and `KeyUsage`, and pairs them** (#977). The operation accepted
+  any string for either member and paired them however a caller asked, so substrate could hold an ECC key
+  with `KeyUsage` `ENCRYPT_DECRYPT`, or a key whose spec was `rsa2048`. Both members are immutable —
+  "you can't change the `KeySpec` after the KMS key is created", and the same sentence for `KeyUsage` — so
+  an unvalidated value is not something a later call can correct; it is a key that will never behave as
+  its own metadata says, and every operation reading either member reports a value AWS would never have
+  stored. Three refusals now exist. A value outside its published enum (17 key specs, 4 key usages)
+  answers `ValidationError`/400 listing the enum, and an absent `KeyUsage` for any spec but
+  `SYMMETRIC_DEFAULT` answers the same code naming what the spec admits — both readings, because
+  `API_CreateKey` publishes 13 errors and `ValidationException` is not among them, so a malformed enum
+  member comes from `CommonErrors.html` exactly as it does for #969's encryption algorithm. A well-formed
+  pair the spec does not admit answers `UnsupportedOperationException`/400, which `CreateKey` does
+  publish, glossed "a specified parameter is not supported or a specified resource is not valid for this
+  operation". The two codes are load-bearing together rather than one code twice: the first says *that is
+  not a key spec*, the second says *that is a key spec, and not with that usage*, and a caller that
+  misspelled a value hears the first even when the pair would also have failed.
+
+  The default fires for exactly one spec, which AWS's HMAC guidance settles: "you must set the key usage
+  even though `GENERATE_VERIFY_MAC` is the only valid key usage value for HMAC KMS keys." So `KeyUsage`
+  is not defaulted to the single admissible value wherever there is one — only for `SYMMETRIC_DEFAULT`.
+
+  The pairing table is **derived, not written**. A spec admits a usage exactly when its algorithm list for
+  that usage is non-empty, read from the four maps #974 already built for `DescribeKey`, and the metadata
+  builder now reads them through the same accessor as the validator — so a key cannot be accepted for a
+  usage whose algorithm list it would then not carry, and there is no second copy of AWS's seven pairing
+  bullets to drift from the first. The test transcribes those bullets by hand across all 17 specs × 4
+  usages, so the derivation and the page disagree unless both match.
+
+  Also implemented here is the *first* bullet of `InvalidKeyUsageException`'s gloss, "the `KeyUsage` value
+  of the KMS key is incompatible with the API operation", where #969 implemented the second: `Encrypt`,
+  `Decrypt`, `GenerateDataKey`, `GenerateDataKeyWithoutPlaintext` and both ends of `ReEncrypt` refuse a
+  key whose usage is not `ENCRYPT_DECRYPT`, per "for encrypting, decrypting, re-encrypting, and generating
+  data keys, the `KeyUsage` must be `ENCRYPT_DECRYPT`". That check runs before the key-state check, because
+  a key usage is permanent where a state is not and telling a caller to enable a `SIGN_VERIFY` key sends it
+  round a loop that cannot terminate; and before the algorithm check, so one condition yields one message.
+  #974's empty-algorithm-list branch is consequently unreachable through substrate's own API and is kept as
+  the guard on a fifth algorithm member arriving without its pairing being thought through.
+
+  One consequence for CloudFormation, which is where substrate builds a `CreateKey` for a caller:
+  `AWS::KMS::Key` documents `KeySpec`'s default as `SYMMETRIC_DEFAULT` and `KeyUsage`'s as
+  `ENCRYPT_DECRYPT` and the deployer sends both unconditionally, so a template naming an asymmetric or
+  HMAC `KeySpec` without a `KeyUsage` is now refused where it previously created a key AWS would not have.
+  The defaults stay: they are the resource type's own, and that template is invalid at AWS too, where the
+  property "is required for asymmetric KMS keys and HMAC KMS keys".
+
 - **Kinesis's `ListTagsForStream` pages its tags** (#954). The operation publishes both halves of a
   cursor over the tag key and substrate read neither: `Limit` and `ExclusiveStartTagKey` were decoded by
   nothing and `HasMoreTags` was the literal `false` on every call, so a caller's paging loop was told
