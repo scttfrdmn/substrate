@@ -947,14 +947,16 @@ func TestKMSPlugin_ScheduleAndCancelKeyDeletion(t *testing.T) {
 	body := readKMSBody(t, resp)
 	assert.Equal(t, "PendingDeletion", body["KeyState"])
 
-	// Cancel deletion.
+	// Cancel deletion. The key comes back Disabled, not Enabled — API_CancelKeyDeletion: "when this
+	// operation succeeds, the key state of the KMS key is Disabled. To enable the KMS key, use
+	// EnableKey." This assertion read Enabled until #963, which is the defect it was recording.
 	resp2 := kmsRequest(t, srv, "CancelKeyDeletion", map[string]interface{}{"KeyId": keyID})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 
 	desc := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{"KeyId": keyID})
 	body2 := readKMSBody(t, desc)
 	km := body2["KeyMetadata"].(map[string]interface{})
-	assert.Equal(t, "Enabled", km["KeyState"])
+	assert.Equal(t, "Disabled", km["KeyState"])
 }
 
 func TestKMSPlugin_TagAndUntagResource(t *testing.T) {

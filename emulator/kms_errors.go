@@ -98,10 +98,59 @@ func kmsKeyDisabled(keyID string) *AWSError {
 // PendingDeletion is the only state substrate can be in here: ScheduleKeyDeletion is the sole writer
 // of anything but Enabled or Disabled, so PendingImport, Unavailable, Creating and Updating — which
 // the table also refuses — are unreachable and are recorded as such rather than guarded against.
+//
+// For the inverse refusal — an operation that requires PendingDeletion and did not find it — see
+// [kmsKeyNotPendingDeletion], which carries the same code and a different message because AWS's
+// footnote for it is a negation.
 func kmsInvalidKeyState(keyID, state string) *AWSError {
 	return &AWSError{
 		Code:       "KMSInvalidStateException",
 		Message:    fmt.Sprintf("the KMS key %q is in state %q, which this operation does not permit", keyID, state),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsKeyNotPendingDeletion reports that CancelKeyDeletion named a key that is not scheduled for
+// deletion, so there is no deletion to cancel.
+//
+// The code is KMSInvalidStateException at 400, the same as [kmsInvalidKeyState], and this is a
+// separate helper only because of the message. CancelKeyDeletion is the one operation in the
+// developer guide's key-state table whose permitted set is a single state: every row but
+// PendingDeletion is footnote [4], and that footnote is phrased as a negation —
+// "KMSInvalidStateException: <key ARN> is not pending deletion" — where every other footnote names
+// the offending state. Naming the state here would read as though some other state were the problem,
+// when the problem is the absence of the one state the operation needs.
+//
+// Answering this at all is the point of #963: before it, CancelKeyDeletion on a key that had never
+// been scheduled answered 200 and enabled the key, which is EnableKey reached through an operation a
+// caller may hold no iam:EnableKey permission for.
+func kmsKeyNotPendingDeletion(keyID string) *AWSError {
+	return &AWSError{
+		Code:       "KMSInvalidStateException",
+		Message:    fmt.Sprintf("the KMS key %q is not pending deletion, so there is no deletion to cancel", keyID),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsInvalidPendingWindow reports a ScheduleKeyDeletion waiting period outside the published range.
+//
+// API_ScheduleKeyDeletion gives PendingWindowInDays a Valid Range of 7 to 30 and states it twice —
+// "you can specify a waiting period of 7-30 days" in the prose and "if you include a value, it must
+// be between 7 and 30, inclusive" on the parameter — but publishes no error code for violating it:
+// its list is DependencyTimeoutException, InvalidArnException, KMSInternalException,
+// KMSInvalidStateException and NotFoundException, none of which describes a bad parameter value. So
+// the code here is substrate's reading, taken from CommonErrors.html for the same reason
+// [kmsInvalidBody] takes it: a failure that belongs to no operation-specific code has to come from
+// the common set, and ValidationError at 400 is the one that fits a value out of range.
+//
+// The bound is stated in the message rather than left implicit, because a caller that sent 1 or 365
+// has no way to discover 7-30 from a bare refusal.
+func kmsInvalidPendingWindow(days int) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"PendingWindowInDays is %d, which is outside the valid range of %d to %d",
+			days, kmsMinPendingWindowInDays, kmsMaxPendingWindowInDays),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

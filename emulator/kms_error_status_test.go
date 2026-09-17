@@ -265,21 +265,29 @@ func TestKMSErrorStatus_AnUnparseableBodyIsAValidationError(t *testing.T) {
 // Every operation whose status changed is exercised against a key CreateKey minted, in an order that
 // leaves the deletion last. Without this, a resolver that refused every identifier would satisfy
 // each assertion above.
+//
+// The tail sequence is the lifecycle, not an arbitrary order: DisableKey, then ScheduleKeyDeletion,
+// then CancelKeyDeletion, each of which needs the state the one before it left. #963 moved
+// CancelKeyDeletion out of the loop and into that tail, because it now requires a key pending deletion
+// and no longer succeeds against an enabled one — the whole point of that change being that it is not
+// EnableKey.
 func TestKMSErrorStatus_TheNominalPathsStillSucceed(t *testing.T) {
 	ts := arnGuardServer(t)
 	_, keyID := createKMSKey(t, ts)
 
 	for _, op := range kmsKeyIDOperations {
-		if op.name == "ScheduleKeyDeletion" || op.name == "DisableKey" {
-			continue // both leave the key unusable for the operations after them.
+		switch op.name {
+		case "DisableKey", "ScheduleKeyDeletion", "CancelKeyDeletion":
+			continue // each needs the state the one before it leaves; run below, in order.
 		}
 		status, code := kmsCall(t, ts, op.name, op.body(keyID))
 		assert.Empty(t, code, "%s on a key that exists", op.name)
 		assert.Equal(t, http.StatusOK, status, "%s on a key that exists", op.name)
 	}
 
-	// Last, because they take the key out of service.
-	for _, op := range []string{"DisableKey", "ScheduleKeyDeletion"} {
+	// Last, because they take the key out of service — and in this order, because each is the
+	// precondition of the next.
+	for _, op := range []string{"DisableKey", "ScheduleKeyDeletion", "CancelKeyDeletion"} {
 		status, code := kmsCall(t, ts, op, map[string]any{"KeyId": keyID})
 		assert.Empty(t, code, "%s on a key that exists", op)
 		assert.Equal(t, http.StatusOK, status, "%s on a key that exists", op)
