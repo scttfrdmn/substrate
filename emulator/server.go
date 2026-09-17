@@ -656,7 +656,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //     1.7. stateBefore := recordedStateHash() (only when the store records hashes)
 //  2. auth.CheckAccess()        → 403 AccessDenied / AccessDeniedException
 //     (per the service's wire protocol; see accessDeniedCodeFor)
-//  3. quota.CheckQuota()        → 429 ThrottlingException
+//  3. quota.CheckQuota()        → 429 ThrottlingException, or 503 SlowDown for S3
 //  4. consistency.CheckRead()   → 409 InconsistentStateException
 //     4.5. fault injection      → the armed rule's own code, or a latency delay
 //  5. registry.RouteRequest()   (plugin dispatch)
@@ -870,10 +870,14 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			switch gate.step {
 			case stepQuota:
 				s.opts.Metrics.RecordQuotaHit(req.Service, req.Operation)
-				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, "ThrottlingException")
+				// The code comes from the refusal rather than being spelled here,
+				// because it is not one code: S3 answers SlowDown where every other
+				// service answers ThrottlingException (#818), and a metric naming a
+				// code the caller never saw is worse than one naming none.
+				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, refusalErrorCode(gate.err))
 			case stepConsistency:
 				s.opts.Metrics.RecordConsistencyDelay(req.Service)
-				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, "InconsistentStateException")
+				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, refusalErrorCode(gate.err))
 			case stepAuth, stepFault:
 			}
 		}

@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -16,6 +17,13 @@ type QuotaConfig struct {
 	// Rules maps a service key (e.g. "iam") or operation key (e.g.
 	// "iam/CreateUser") to a rate rule. Operation-specific rules take
 	// precedence over service-level rules.
+	//
+	// S3 adds two keys between those two levels, "s3/read" and "s3/write", which
+	// carry its published per-prefix ceilings; a rule under either governs one
+	// token bucket per accounting prefix rather than one for the whole service. A
+	// rule under any other S3 key governs a single bucket, like every other
+	// service's. See [s3RateRuleKey], [s3IsRateClassRuleKey] and
+	// [QuotaController.resolveKey].
 	Rules map[string]RateRule
 }
 
@@ -77,9 +85,19 @@ func NewQuotaController(cfg QuotaConfig, tc *TimeController) *QuotaController {
 
 // CheckQuota enforces the rate limit for the request's service/operation.
 // It returns nil when the request is allowed or quota is disabled.
-// When throttled it returns an [*AWSError] with code ThrottlingException and
-// HTTP 429. Requests with reqCtx.Metadata["replaying"]=true are always
+// When throttled it returns an [*AWSError]: ThrottlingException and HTTP 429 for
+// every service but S3, and S3's own SlowDown and HTTP 503 for S3 (see
+// [s3SlowDownError]). Requests with reqCtx.Metadata["replaying"]=true are always
 // allowed.
+//
+// One rule can govern many token buckets. For nearly every rule the rule and the
+// bucket are one and the same, so a rule's rate is the rate of whatever it names.
+// S3's two rate-class rules are the exception: they carry ceilings AWS publishes
+// per prefix, so each governs one token bucket per (S3 bucket, accounting prefix)
+// pair (#818) — [s3PrefixBucketKey] composes the identity and
+// [s3IsRateClassRuleKey] is the test. An S3 rule a caller wrote against an
+// operation or against the service is not one of those ceilings and governs a
+// single bucket like any other.
 func (q *QuotaController) CheckQuota(reqCtx *RequestContext, req *AWSRequest) error {
 	if !q.cfg.Enabled {
 		return nil
@@ -89,16 +107,27 @@ func (q *QuotaController) CheckQuota(reqCtx *RequestContext, req *AWSRequest) er
 	}
 
 	now := q.tc.Now()
-	key := q.resolveKey(req.Service, req.Operation)
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// Resolved under the lock, because UpdateConfig replaces the whole rule map
+	// and a read outside it is a data race against that write.
+	key := q.resolveKey(req)
 	if key == "" {
 		// No rule configured for this service — allow.
 		return nil
 	}
 
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	// A class rule carries a ceiling AWS states per prefix, so it governs one token
+	// bucket per prefix; every other rule, S3's included, governs one.
+	perPrefix := req.Service == "s3" && s3IsRateClassRuleKey(key)
+	bucketKey := key
+	if perPrefix {
+		bucketKey = s3PrefixBucketKey(key, req)
+	}
 
-	b, ok := q.buckets[key]
+	b, ok := q.buckets[bucketKey]
 	if !ok {
 		rule := q.cfg.Rules[key]
 		b = &tokenBucket{
@@ -107,11 +136,19 @@ func (q *QuotaController) CheckQuota(reqCtx *RequestContext, req *AWSRequest) er
 			rate:     rule.Rate,
 			burst:    rule.Burst,
 		}
-		q.buckets[key] = b
+		q.buckets[bucketKey] = b
 	}
 
 	if b.take(now) {
 		return nil
+	}
+
+	if req.Service == "s3" {
+		if perPrefix {
+			bucket, prefix := s3AccountingPrefix(req)
+			return s3SlowDownError(s3PrefixExceededDetail(bucket, prefix))
+		}
+		return s3SlowDownError(s3RuleExceededDetail(key))
 	}
 
 	return &AWSError{
@@ -132,23 +169,47 @@ func (q *QuotaController) UpdateConfig(cfg QuotaConfig) {
 	q.buckets = make(map[string]*tokenBucket)
 }
 
-// resolveKey returns the most-specific quota key for the given service and
-// operation. Operation-specific keys ("service/operation") take precedence
-// over service-level keys ("service"). An empty string is returned when no
-// rule matches.
-func (q *QuotaController) resolveKey(service, operation string) string {
-	opKey := service + "/" + operation
-	if _, ok := q.cfg.Rules[opKey]; ok {
+// resolveKey returns the most-specific quota key configured for the request, and
+// an empty string when no rule matches.
+//
+// Most specific first: an operation key ("service/operation"), then — for S3 only
+// — the request's rate class ("s3/read", "s3/write"), then the service key
+// ("service"). The class sits between the two because AWS publishes S3's ceilings
+// per class of HTTP method (#818), while a caller who wants to rate-limit one S3
+// operation must still be able to say so and have it win.
+//
+// Callers must hold q.mu: the rule map is read here and replaced wholesale by
+// [QuotaController.UpdateConfig].
+func (q *QuotaController) resolveKey(req *AWSRequest) string {
+	if opKey := req.Service + "/" + req.Operation; ruleExists(q.cfg.Rules, opKey) {
 		return opKey
 	}
-	if _, ok := q.cfg.Rules[service]; ok {
-		return service
+	if req.Service == "s3" {
+		if classKey := s3RateRuleKey(s3RateClassOf(req)); ruleExists(q.cfg.Rules, classKey) {
+			return classKey
+		}
+	}
+	if ruleExists(q.cfg.Rules, req.Service) {
+		return req.Service
 	}
 	return ""
 }
 
+// ruleExists reports whether rules configures key.
+func ruleExists(rules map[string]RateRule, key string) bool {
+	_, ok := rules[key]
+	return ok
+}
+
 // defaultQuotaRules returns the built-in rate limits that mirror AWS service
-// quotas. S3 prefix-level limits are deferred to TODO(#818).
+// quotas.
+//
+// The two S3 rules are the published per-prefix ceilings, keyed by rate class
+// rather than by service or operation, and each governs one token bucket per
+// accounting prefix — see [s3RateRuleKey] and this file's S3 companion for both
+// derivations and for the figures' source (#818). They replace a single
+// bucket-wide "s3" rule of 3500/5500 that accounted every prefix together, which
+// is the accounting AWS's own guidance tells a caller to work around.
 func defaultQuotaRules() map[string]RateRule {
 	return map[string]RateRule{
 		"iam":            {Rate: 100, Burst: 100},
@@ -158,9 +219,27 @@ func defaultQuotaRules() map[string]RateRule {
 		"iam/DeleteRole": {Rate: 20, Burst: 20},
 		"sts":            {Rate: 100, Burst: 100},
 		"sts/AssumeRole": {Rate: 50, Burst: 50},
-		"s3":             {Rate: 3500, Burst: 5500},
-		"s3/GetObject":   {Rate: 5500, Burst: 5500},
+		s3RateRuleKey(s3RateWrite): {
+			Rate:  s3PrefixWriteRequestsPerSecond,
+			Burst: s3PrefixWriteRequestsPerSecond,
+		},
+		s3RateRuleKey(s3RateRead): {
+			Rate:  s3PrefixReadRequestsPerSecond,
+			Burst: s3PrefixReadRequestsPerSecond,
+		},
 	}
+}
+
+// refusalErrorCode returns the AWS error code a pre-plugin gate refused with, for
+// naming a metric after the code the caller actually saw. A refusal that is not
+// an [*AWSError] has no code to report, and answers "InternalFailure" — the code
+// [Server.writeError] serves such an error under, so the label and the wire agree.
+func refusalErrorCode(err error) string {
+	var awsErr *AWSError
+	if errors.As(err, &awsErr) {
+		return awsErr.Code
+	}
+	return "InternalFailure"
 }
 
 // isReplaying reports whether the request context carries a replaying flag.

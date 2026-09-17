@@ -285,6 +285,13 @@ type QuotaCfg struct {
 
 	// Rules maps service or service/operation keys to rate rules.
 	// When empty the built-in defaults from [defaultQuotaRules] are used.
+	//
+	// S3 also accepts "s3/read" and "s3/write", the two classes AWS publishes its
+	// per-prefix request-rate ceilings for; a rule under either is enforced per
+	// prefix within a bucket rather than across the whole bucket (#818). Lowering
+	// one of them is how a fixture reaches a 503 SlowDown without issuing
+	// thousands of requests: `s3/write: {rate: 3, burst: 3}` throttles the fourth
+	// write to one prefix and leaves every other prefix untouched.
 	Rules map[string]RateRuleCfg `mapstructure:"rules"`
 }
 

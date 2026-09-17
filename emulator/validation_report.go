@@ -40,6 +40,10 @@ type QuotaCheck struct {
 	Service string `json:"service"`
 
 	// Operation is the API operation name, or empty for a service-level check.
+	//
+	// For S3 it is instead the rate class, "read" or "write", because that is how
+	// AWS publishes S3's request-rate ceilings and how the rules that carry them
+	// are keyed (#818).
 	Operation string `json:"operation,omitempty"`
 
 	// LimitRPS is the configured rate limit in requests per second.
@@ -161,6 +165,22 @@ func ValidateRecording(ctx context.Context, store *EventStore, streamID string, 
 
 		svcTimes[ev.Service] = append(svcTimes[ev.Service], ev.Timestamp)
 		svcTimes[opKey] = append(svcTimes[opKey], ev.Timestamp)
+
+		// S3's two default rules are keyed by rate class rather than by operation
+		// (#818), so an S3 event has to be counted under its class or the report
+		// silently drops every S3 quota check. The class comes from the operation
+		// name because an event does not record the HTTP method; see
+		// [s3RateClassOfOperation].
+		//
+		// The peak this yields is bucket-wide while the ceiling it is compared
+		// against is per prefix, because an event records no object key unless the
+		// store was recording bodies. The check therefore errs towards warning
+		// early, which is the safe direction for a report whose whole purpose is to
+		// flag a workload that would be throttled on AWS.
+		if ev.Service == "s3" {
+			classKey := s3RateRuleKey(s3RateClassOfOperation(ev.Operation))
+			svcTimes[classKey] = append(svcTimes[classKey], ev.Timestamp)
+		}
 
 		if firstTime.IsZero() || ev.Timestamp.Before(firstTime) {
 			firstTime = ev.Timestamp

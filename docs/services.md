@@ -4698,6 +4698,63 @@ refusal a body with the wrong element names is indistinguishable from a delibera
 disable, which is how a configuration could be accepted with a `200` and silently
 never fire (#542).
 
+### Request-rate limits are enforced per prefix
+
+AWS states S3's request-rate ceilings **per prefix within a bucket**, not per bucket:
+"your application can achieve at least 3,500 PUT/COPY/POST/DELETE or 5,500 GET/HEAD
+requests per second per partitioned Amazon S3 prefix. There are no limits to the number
+of prefixes in a bucket." Substrate's quota gate accounts them that way (#818), so
+spreading writes across prefixes raises the ceiling the way AWS's own guidance says it
+does — "if you create 10 prefixes in an Amazon S3 bucket to parallelize reads, you could
+scale your read performance to 55,000 read requests per second". Accounting per bucket,
+which is what substrate did before, got both directions wrong: it throttled a caller who
+had parallelised across prefixes and did not throttle one hammering a single prefix.
+
+A request over its prefix's ceiling gets **`SlowDown`** with HTTP **503** — the pair the
+performance guide names ("you may see some 503 (Slow Down) errors"), rendered as S3's
+bare `<Error>` document. It is not `ThrottlingException`/429, which is what every other
+service's quota refusal is; S3 has no such code. The message names the prefix, but it is
+substrate's own wording — AWS documents no message string for `SlowDown` — so assert on
+the code and the status.
+
+**Which prefix a request counts against is substrate's choice, and this is it:** the
+object key up to and including its **first `/`**, and the bucket's root for a key with no
+`/` and for any operation that names no key. AWS cannot be copied here. It defines a
+prefix as "a string of characters at the beginning of the object key name" of any length
+and is explicit that prefixes are not directories, so a key belongs to arbitrarily many
+prefixes at once; which of them is a *partition* boundary is S3's own decision, and AWS
+publishes neither where a partition splits nor when it repartitions — only that the
+scaling "happens gradually and is not instantaneous". Two reasons for that boundary
+rather than a deeper one: it is the boundary AWS's own 10-prefix parallelisation example
+uses, and it is the coarsest choice short of the bucket, so substrate never reports
+headroom from a split S3 might not have made. The error is towards throttling sooner,
+which is the safe direction for a test whose subject is a retry loop.
+
+The two ceilings are configurable under the rule keys **`s3/read`** and **`s3/write`**,
+which is how a fixture reaches a 503 without issuing thousands of requests:
+
+```yaml
+quotas:
+  enabled: true
+  rules:
+    s3/write: {rate: 3, burst: 3}
+```
+
+That throttles the fourth write to one prefix and leaves every other prefix untouched.
+An `s3/read` rule is independent of `s3/write`, because AWS publishes two figures rather
+than one. A rule written against an operation (`s3/PutObject`) or against the service
+(`s3`) still wins over the class rule it overlaps, but it is **not** accounted per prefix
+— it is substrate's own throttle rather than one of AWS's published ceilings, so it
+governs a single bucket like every other service's rules, and its refusal message names
+the rule instead of a prefix.
+
+Two limits to know. The quota gate is **exempt during replay**, so a recorded `SlowDown`
+replays as a success and is reported as a response difference (#833) — a rate refusal is
+reproducible from a seeded rule, not from the event log. And
+`ValidationReport.QuotaChecks` compares a **bucket-wide** peak against the per-prefix
+ceiling, because a recorded event carries no object key unless bodies were recorded; it
+therefore warns earlier than the gate would refuse.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

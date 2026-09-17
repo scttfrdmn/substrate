@@ -400,7 +400,12 @@ func TestReplayPipeline_QuotaAndConsistencyAreConsultedAndExempt(t *testing.T) {
 		wantStep string
 		wantCode string
 	}{
-		{"quota", emulator.ReplayPipeline{Quota: quota}, "quota", "ThrottlingException"},
+		// S3 answers SlowDown rather than ThrottlingException, whichever rule
+		// refused — it has no ThrottlingException (#818). The rule here is the
+		// service-level one, so the refusal is not accounted per prefix, which is
+		// beside the point of this test: what it asserts is that the gate is
+		// consulted live and exempt on replay.
+		{"quota", emulator.ReplayPipeline{Quota: quota}, "quota", "SlowDown"},
 		{"consistency", emulator.ReplayPipeline{Consistency: consistency}, "consistency", "InconsistentStateException"},
 	}
 	for _, tt := range tests {
