@@ -121,34 +121,17 @@ func observeS3VersionIDs(t *testing.T, ts *emulator.TestServer, bucket string) [
 	return ids
 }
 
-// wireSESv2ToTheServerClock replaces the default SES v2 plugin with one holding the
-// server's simulated clock, and must be called before anything is recorded.
-//
-// RegisterDefaultPlugins registers SESv2Plugin without Options["time_controller"],
-// so it falls back to a private real-time clock and its MessageId — minted as
-// "msg-<clock>-<counter>" — carries a wall-clock half that no reset can make
-// reproducible. That wiring gap is #904 and is not #886's to fix; this makes the
-// clock half constant so the assertion is about the counter half, which is what a
-// reset governs. Delete this helper when #904 lands.
-//
-// Registering by name replaces the plugin the server started with, so every
-// recording and every replay below reaches this instance.
-func wireSESv2ToTheServerClock(t *testing.T, ts *emulator.TestServer) {
-	t.Helper()
-	p := &emulator.SESv2Plugin{}
-	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{
-		State:   ts.StateManager(),
-		Logger:  emulator.NewDefaultLogger(slog.LevelError, false),
-		Options: map[string]any{"time_controller": ts.TimeController()},
-	}))
-	ts.Registry().Register(p)
-}
-
 // resetSendEmails sends count emails over the wire and returns the MessageIds the
 // recording minted, in order.
+//
+// The clock half of a MessageId is the server's simulated clock, which
+// [startFrozenServer] has frozen, so the counter half is the only thing that can
+// differ between two replays — which is what a reset governs. Until #904 this file
+// re-registered SES v2 by hand with the server's clock, because
+// RegisterDefaultPlugins left it on a private wall-clock one; every registration now
+// carries the clock, so the recording needs no help.
 func resetSendEmails(t *testing.T, ts *emulator.TestServer, count int) []string {
 	t.Helper()
-	wireSESv2ToTheServerClock(t, ts)
 
 	minted := make([]string, 0, count)
 	for i := 0; i < count; i++ {

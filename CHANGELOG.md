@@ -530,6 +530,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Fifteen of the sixty-seven default plugin registrations left the simulated clock out, so eleven
+  services stamped their timestamps from the wall clock inside an emulator whose whole claim is a
+  controlled clock** (#904). Every plugin that keeps a clock reads it from
+  `Options["time_controller"]` and falls back to a private `NewTimeController(time.Now())` when the key
+  is absent, and the fallback is silent by design — so a registration that forgot the key looked exactly
+  like one that supplied it. `RegisterDefaultPlugins` now builds the `PluginConfig` in exactly one
+  place, a `pluginWiring.register` method that supplies the clock and copies whatever extra options a
+  particular plugin needs, and the sixty-seven registrations became a table. A registration can no
+  longer spell its own config out, which is what made the omission invisible at each individual call
+  site.
+
+  **Eleven services change what they report**: ACM, API Gateway (both generations), ECR, ECS, both
+  Cognito plugins, Kinesis, CloudFront, SES v2 and Firehose. A `POST /v1/control/time` or
+  `/v1/control/scale` now moves their clocks, and a replay — which sets the controller to each recorded
+  event's own timestamp — now reaches them, where before each stamped the replay with the wall time it
+  happened to run at. The remaining four of the fifteen — Tagging, Health, Price List and the API
+  Gateway proxy — **have no clock at all**, so supplying the option to them is a deliberate no-op that
+  makes the wiring uniform and changes nothing observable.
+
+  **Kinesis needed a second fix, because wiring alone would not have reached it.**
+  `generateKinesisSeqNo` called `time.Now()` from a function with no receiver, so it could not reach any
+  plugin's clock however that clock was supplied — and a `SequenceNumber` is observable, reported by
+  `PutRecord` and `PutRecords` and echoed back by `GetRecords`. It now takes the instant as a parameter
+  and both call sites pass the plugin's clock. Its random half is still `crypto/rand` and is not this
+  issue's.
+
+  A **nil** `*TimeController` is left out of the options map rather than stored, because every plugin
+  reads the value with a type assertion that *succeeds* for a typed nil and would hand the plugin a
+  clock that panics on first use, where an absent key takes the documented fallback instead. One
+  consequence to know about: the debug UI's `stateAtSequence` registers a fresh plugin set against
+  `NewTimeController(time.Time{})`, so the eleven move from the wall clock to year 1 there — the same
+  clock the other fifty-two already had, and in practice masked because a replay sets the clock per
+  event.
+
 - **The two cursors outside EC2 that published both halves and read neither** (#917, part three of
   three). Lambda's `ListEventSourceMappings` publishes `Marker` and `MaxItems` on its URI and API
   Gateway's `GetBasePathMappings` publishes `position` and `limit` on its; both answered the entire
