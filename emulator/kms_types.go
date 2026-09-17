@@ -46,6 +46,36 @@ const (
 // on: AWS could widen the range without moving the default.
 const kmsDefaultPendingWindowInDays = 30
 
+// kmsMinRotationPeriodInDays and kmsMaxRotationPeriodInDays bound EnableKeyRotation's rotation period.
+//
+// API_EnableKeyRotation publishes RotationPeriodInDays with a Valid Range of 90 to 2560 inclusive, and
+// API_GetKeyRotationStatus republishes the identical range on the response element that reports it — which
+// is the fact #964 turned on, because a range stated on both ends of a round trip is a value AWS expects a
+// caller to write and read back rather than one it merely accepts.
+//
+// Named for the reason the pending-window pair above is named: the guard, the message
+// [kmsInvalidRotationPeriod] builds, and the default below must all use one pair of numbers.
+const (
+	kmsMinRotationPeriodInDays = 90
+	kmsMaxRotationPeriodInDays = 2560
+)
+
+// kmsDefaultRotationPeriodInDays is the rotation period EnableKeyRotation applies when the caller sends
+// none.
+//
+// API_EnableKeyRotation: "If no value is specified, the default value is 365 days", repeated on
+// API_GetKeyRotationStatus's response element as "The default value is 365 days". Unlike
+// [kmsDefaultPendingWindowInDays] this does not coincide with either bound, so it cannot be confused for
+// one.
+//
+// The default applies on *every* successful EnableKeyRotation that omits the member, not only the first.
+// AWS states the rule unconditionally and also documents the parameter as able to "modify the rotation
+// period of a key that you previously enabled automatic key rotation on", so a second call omitting it
+// resets the period to 365 rather than preserving the value the first call set. That reading is recorded
+// in [KMSPlugin.enableKeyRotation] and pinned by a test, because the opposite reading is the more
+// intuitive one and would otherwise be an easy "fix".
+const kmsDefaultRotationPeriodInDays = 365
+
 // KMSKey represents a KMS customer master key.
 type KMSKey struct {
 	// KeyID is the unique identifier for the key.
@@ -90,7 +120,24 @@ type KMSKey struct {
 	MultiRegion bool `json:"MultiRegion"`
 
 	// RotationEnabled indicates whether automatic rotation is enabled.
+	//
+	// Reported by GetKeyRotationStatus as KeyRotationEnabled, and deliberately *not* by DescribeKey:
+	// API_KeyMetadata publishes no RotationEnabled member, so #971 removed the one substrate used to
+	// render there. Rotation state is observable through GetKeyRotationStatus alone.
 	RotationEnabled bool `json:"RotationEnabled"`
+
+	// RotationPeriodInDays is the number of days between automatic rotations, as set by
+	// EnableKeyRotation and reported by GetKeyRotationStatus.
+	//
+	// Zero means the key has never had rotation enabled. It is not a legal period — the range is
+	// [kmsMinRotationPeriodInDays] to [kmsMaxRotationPeriodInDays] — so the zero value is unambiguous
+	// and needs no separate "was it ever set" flag. Every successful EnableKeyRotation writes a value in
+	// range, so a non-zero reading here is always one AWS would have accepted.
+	//
+	// DisableKeyRotation leaves it alone. AWS documents no clearing, and keeping it means a caller that
+	// disables and re-enables with an explicit period never sees a stale one; a re-enable that omits the
+	// period overwrites it with [kmsDefaultRotationPeriodInDays] regardless, per that constant's note.
+	RotationPeriodInDays int `json:"RotationPeriodInDays,omitempty"`
 
 	// Tags holds resource tags.
 	Tags []KMSTag `json:"Tags,omitempty"`

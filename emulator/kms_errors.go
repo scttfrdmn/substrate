@@ -166,6 +166,33 @@ func kmsInvalidPendingWindow(days int) *AWSError {
 	}
 }
 
+// kmsInvalidRotationPeriod reports an EnableKeyRotation rotation period outside the published range.
+//
+// The code is the same reading [kmsInvalidPendingWindow] records, reached the same way and deliberately
+// reused rather than re-argued: API_EnableKeyRotation gives RotationPeriodInDays a Valid Range of 90 to
+// 2560 and publishes no code for violating it — its seven errors are DependencyTimeoutException,
+// DisabledException, InvalidArnException, KMSInternalException, KMSInvalidStateException,
+// NotFoundException and UnsupportedOperationException — so ValidationError at 400, from
+// CommonErrors.html, is where a bad parameter value has to land. Two range violations in one plugin
+// answering two different codes would be the divergence #923 exists to prevent.
+//
+// UnsupportedOperationException is the near miss on that list and is not chosen. Its published gloss is
+// "a specified parameter is not supported or a specified resource is not valid for this operation",
+// which describes a parameter or resource that is inadmissible — an asymmetric key, say, which is #972 —
+// not an admissible parameter carrying a number out of range.
+//
+// The bound is named in the message for [kmsInvalidPendingWindow]'s reason: a caller that sent 30,
+// reasoning by analogy from the deletion window, cannot discover 90-2560 from a bare refusal.
+func kmsInvalidRotationPeriod(days int) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"RotationPeriodInDays is %d, which is outside the valid range of %d to %d",
+			days, kmsMinRotationPeriodInDays, kmsMaxRotationPeriodInDays),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsInvalidBody reports that a request body could not be parsed as JSON.
 //
 // The code is ValidationError at 400, from CommonErrors.html, which is where a failure that belongs

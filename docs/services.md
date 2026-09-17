@@ -9198,7 +9198,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | Operation | Notes |
 |-----------|-------|
 | CreateKey | |
-| DescribeKey | Accepts all four `KeyId` forms; reports `DeletionDate` while a key is pending deletion — see below |
+| DescribeKey | Accepts all four `KeyId` forms; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
 | ListKeys | |
 | EnableKey | |
 | DisableKey | |
@@ -9206,9 +9206,9 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | CancelKeyDeletion | Requires a key pending deletion, and leaves it `Disabled` — see below |
 | GetKeyPolicy | |
 | PutKeyPolicy | |
-| GetKeyRotationStatus | Answers in every key state substrate can produce — see below |
-| EnableKeyRotation | Refuses a disabled key and a key pending deletion, with a different code for each — see below |
-| DisableKeyRotation | Same refusals as `EnableKeyRotation` |
+| GetKeyRotationStatus | Reports the bare key ID and, while rotation is on, `RotationPeriodInDays`; answers in every key state substrate can produce — see below |
+| EnableKeyRotation | Range-checks `RotationPeriodInDays` at 90–2560 and stores it; refuses a disabled key and a key pending deletion, with a different code for each — see below |
+| DisableKeyRotation | Same refusals as `EnableKeyRotation`; leaves the stored rotation period alone |
 | TagResource | Tags are keyed `TagKey`/`TagValue`, not `Key`/`Value` |
 | UntagResource | |
 | ListResourceTags | |
@@ -9354,11 +9354,23 @@ cancel the deletion and retry — so collapsing them leaves a caller's error han
 unable to tell which. `PendingDeletion` is therefore checked first.
 
 **`GetKeyRotationStatus` is deliberately not guarded.** Its row in the same table
-permits `Enabled`, `Disabled` and `PendingDeletion` alike, and
-`API_GetKeyRotationStatus` publishes neither code, so reading whether rotation is
-on succeeds in every state substrate can produce. A test pins that, so a later
-sweep guarding "every key-state-sensitive operation" cannot quietly introduce a
+permits `Enabled`, `Disabled` and `PendingDeletion` alike, so reading whether
+rotation is on succeeds in every state substrate can produce. A test pins that, so a
+later sweep guarding "every key-state-sensitive operation" cannot quietly introduce a
 refusal AWS does not have.
+
+The reason first recorded here was that the page published neither code. That was
+wrong about half of it and is corrected rather than left standing:
+`API_GetKeyRotationStatus` publishes no `DisabledException`, but it does publish
+`KMSInvalidStateException`/400 among its six errors. The decision survives the
+correction on better grounds — the page documents an *answer* for a pending-deletion
+key, *"while a KMS key is pending deletion, its key rotation status is `false` … If
+you cancel the deletion, the original key rotation status returns to `true`"*, and an
+operation that documents an answer for a state cannot also be refusing that state. So
+the published code belongs to the states substrate never writes, the same four the
+table's last row names. What substrate does not yet model is that documented `false`;
+that is [#973](https://github.com/scttfrdmn/substrate/issues/973), and it is a wrong
+value rather than a missing refusal.
 
 The refusal is checked **before** the write, so a refused call leaves
 `RotationEnabled` exactly as it was — asserted by reading it back through
@@ -9374,6 +9386,100 @@ that proves nothing about the wire.
 The same guard now serves the five cryptographic operations, which reached it by a
 different route and with one code chosen rather than published — see *The five
 cryptographic operations refuse the same two key states* below.
+
+### The rotation period is a value AWS expects a caller to read back
+
+`EnableKeyRotation` decoded `KeyId` and nothing else, so `RotationPeriodInDays` was
+accepted and discarded ([#964](https://github.com/scttfrdmn/substrate/issues/964)).
+Discarding it would have been defensible if the value were write-only — a plugin has
+no rotation to schedule and no key material to replace — but it is not:
+`API_GetKeyRotationStatus` publishes `RotationPeriodInDays` as a **response** element
+with the identical Valid Range of **90 to 2560**. A range stated at both ends of a
+round trip is a value AWS expects a caller to write and read back, so substrate now
+stores it and reports it.
+
+The published members, and what substrate answers on each:
+
+| Member | Answered | Provenance |
+|--------|----------|------------|
+| `KeyId` | The **bare key ID**, whichever of the four forms the caller addressed the key by | Glossed only *"identifies the specified symmetric encryption KMS key"* — none of the *"Amazon Resource Name (key ARN)"* wording `ScheduleKeyDeletion` and `ReEncrypt` use for theirs — and the page's sample renders `1234abcd-…`. Echoing the request would therefore be wrong for an alias or an ARN, not merely lazy |
+| `KeyRotationEnabled` | Always, from the stored flag | Published unconditionally |
+| `RotationPeriodInDays` | Only while rotation is on | See below |
+| `NextRotationDate` | Not answered | Needs the date rotation was enabled, which nothing stores — [#973](https://github.com/scttfrdmn/substrate/issues/973) |
+| `OnDemandRotationStartDate` | Not answered | *"Identifies the date and time that an in progress on-demand rotation was initiated"*; `RotateKeyOnDemand` is not implemented, so nothing can start one. AWS's own sample response omits it too |
+
+Three decisions here are substrate's rather than AWS's.
+
+**The refusal for an out-of-range period is `ValidationError`/400**, reached exactly as
+the waiting-period range check reaches it and deliberately reused rather than
+re-argued: `API_EnableKeyRotation`'s seven errors — `DependencyTimeoutException`,
+`DisabledException`, `InvalidArnException`, `KMSInternalException`,
+`KMSInvalidStateException`, `NotFoundException` and `UnsupportedOperationException` —
+contain none for a parameter value out of range, so it comes from `CommonErrors`. Two
+range violations in one plugin answering two different codes would be the divergence
+#923 exists to prevent. `UnsupportedOperationException` is the near miss and is
+declined: its gloss is *"a specified parameter is not supported or a specified resource
+is not valid for this operation"*, which describes an inadmissible parameter or
+resource — an asymmetric key, which is
+[#972](https://github.com/scttfrdmn/substrate/issues/972) — not an admissible
+parameter carrying a number out of range. The message names 90 and 2560, because a
+caller that sent 30 by analogy from the deletion window cannot discover the range from
+a bare refusal. As with the waiting period, the range is checked **before** the key is
+resolved, so a bad period against an absent key answers the value that is wrong on the
+face of the request.
+
+**The period decodes into a `*int`, where `PendingWindowInDays` deliberately stays an
+`int`.** The asymmetry is the point rather than an inconsistency: 0 is a value a caller
+can send, it is far below the published minimum of 90, and a plain `int` would make it
+indistinguishable from an absent member and silently accept it as 365 — #964's defect
+reintroduced one level down. The waiting period's note below explains why it does not
+need the same treatment.
+
+**An omitted period resets to 365 on every call, not only the first.**
+`API_EnableKeyRotation` states *"if no value is specified, the default value is 365
+days"* unconditionally, and documents the parameter as able to *"modify the rotation
+period of a key that you previously enabled automatic key rotation on"* — so a second
+call is a legitimate change rather than a conflict to refuse, and a second call that
+omits the member takes the default rather than preserving the value the first one set.
+AWS does not address the interaction directly, so the reading is recorded and pinned by
+a test: the intuitive opposite reading would otherwise be an easy "fix". A caller that
+wants to keep 180 has to send 180 again.
+
+`DisableKeyRotation` leaves the stored period alone — AWS documents no clearing — but
+`GetKeyRotationStatus` stops reporting it, which is the honest-empty behaviour #827
+established: a key that is not rotating has no rotation period to report. A re-enable
+with an explicit period therefore never surfaces a stale one, and a re-enable without
+one reports 365 per the rule above.
+
+Two restrictions the page publishes and substrate does not yet enforce, recorded so
+they are not mistaken for decisions: automatic rotation is *"supported only on
+symmetric encryption KMS keys"*, and *"you cannot enable or disable automatic rotation
+of AWS managed KMS keys"* — both `UnsupportedOperationException`/400, and both #972.
+`EnableKeyRotation` is also documented **Cross-account use: No** while
+`GetKeyRotationStatus` is **Yes**, an asymmetry substrate does not model.
+
+### `DescribeKey` never published a rotation flag
+
+Substrate rendered `RotationEnabled` inside `DescribeKey`'s `KeyMetadata`.
+`API_KeyMetadata` publishes **26** members and that is not one of them; the string does
+not occur on the page at all ([#971](https://github.com/scttfrdmn/substrate/issues/971)).
+
+That is the failure mode #765 exists to catch, aimed at a response member rather than
+at state: a consumer could branch on
+`DescribeKey().KeyMetadata.RotationEnabled` against the emulator, pass, and get an
+absent field from AWS. The member is removed, and the test asserts its absence against
+**raw JSON** both before and after enabling rotation — a decoded struct cannot tell an
+omitted member from a `false` one, which is the whole distinction — and then asserts
+that rotation state is still readable through `GetKeyRotationStatus`, so the removal is
+shown to have removed a duplicate route rather than the only one.
+
+Restoring it under another name would be worse than the original defect, because the
+rules the real operation carries — the symmetric-only restriction, the key-state
+refusals, the documented `false` while a key is pending deletion — belong to
+`GetKeyRotationStatus` and would all be bypassed. The opposite direction, the sixteen
+`KeyMetadata` members substrate does **not** answer, is
+[#974](https://github.com/scttfrdmn/substrate/issues/974); five of them would be
+present on every real `DescribeKey` call for a plain customer symmetric key.
 
 ### Cancelling a deletion leaves the key disabled, not enabled
 
@@ -9484,6 +9590,12 @@ a body that omits the member and a body sending an explicit `0` are indistinguis
 AWS refuses `0` and defaults an absent value. Substrate defaults both, because
 telling them apart needs a `*int` and defaulting is by far the commoner intent — worth
 changing only if a caller is ever shown to send an explicit zero.
+
+`RotationPeriodInDays` **is** decoded into a `*int`, and the difference is not an
+inconsistency. Here the two readings agree on the sensible answer, since AWS's default
+of 30 coincides with the maximum a caller could plausibly have meant; there the default
+of 365 sits in the middle of the range, so collapsing an explicit `0` into it would
+accept a value AWS refuses and report a period the caller never asked for.
 
 ### The five cryptographic operations refuse the same two key states
 
