@@ -356,6 +356,7 @@ func TestCFN_SecretRotationSchedule(t *testing.T) {
 				"Type": "AWS::SecretsManager::RotationSchedule",
 				"Properties": {
 					"SecretId": {"Ref": "MySecret"},
+					"RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
 					"RotationRules": {
 						"AutomaticallyAfterDays": 30
 					}
@@ -367,6 +368,15 @@ func TestCFN_SecretRotationSchedule(t *testing.T) {
 	result, err := d.Deploy(context.Background(), tmpl, "secret-rotation-stack", nil)
 	require.NoError(t, err)
 	assert.Len(t, result.Resources, 2)
+
+	// The template gained a RotationLambdaARN in #952 and this assertion came with it. RotateSecret now
+	// refuses a secret with no rotation function, and deploySecretRotationSchedule reports a routing
+	// refusal by setting DeployedResource.Error and returning a nil error — so without the assertion the
+	// test would have kept passing on a resource that had failed, which is the whole reason the
+	// pass-through is part of #952 rather than a follow-up.
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "%s deployed without error", r.LogicalID)
+	}
 }
 
 // newV016FullDeployer creates a StackDeployer with all plugins (including ELB and Route53).

@@ -369,9 +369,16 @@ func (p *SecretsManagerPlugin) describeSecret(ctx *RequestContext, req *AWSReque
 // Note the asymmetry in AWS's own naming, which substrate follows rather than tidies: DeleteSecret
 // answers the stamp as DeletionDate and DescribeSecret reports the same stamp as DeletedDate.
 //
+// RotationLambdaARN and RotationRules are answered since #952, and they fall in different tiers, which
+// is why they are emitted by different conditions. RotationRules is one of the four members AWS itself
+// documents an omission for — "if the secret never had rotation turned on, this field is omitted" — so
+// its absence is AWS's own contract and [SecretState.RotationRules] is a pointer to keep a
+// never-configured schedule distinguishable from an empty one. RotationLambdaARN carries no per-member
+// statement, so omitting an empty one rests on the blanket sentence, which puts it in substrate's tier.
+//
 // The members substrate does not model stay absent, which the same sentence makes correct rather than
-// a gap: LastRotatedDate and NextRotationDate (nothing records a rotation time),
-// LastAccessedDate, OwningService, PrimaryRegion, ReplicationStatus, RotationLambdaARN, RotationRules,
+// a gap: LastRotatedDate and NextRotationDate (no rotation function runs here, so nothing records a
+// rotation time), LastAccessedDate, OwningService, PrimaryRegion, ReplicationStatus,
 // VersionIdsToStages, and the three managed-external-secret members AWS publishes — Type,
 // ExternalSecretRotationRoleArn and ExternalSecretRotationMetadata — which belong to a partner
 // integration substrate models nothing of.
@@ -401,6 +408,12 @@ func smDescribeSecretBody(secret *SecretState) map[string]interface{} {
 		out["RotationEnabled"] = true
 	} else {
 		out["RotationEnabled"] = nil
+	}
+	if secret.RotationLambdaARN != "" {
+		out["RotationLambdaARN"] = secret.RotationLambdaARN
+	}
+	if secret.RotationRules != nil {
+		out["RotationRules"] = secret.RotationRules
 	}
 	// This is the operation a caller reads a secret's tags back through, Secrets Manager publishing no
 	// ListTagsForResource at all (#929). An untagged secret emitted "Tags": null before #928, which is
@@ -654,38 +667,10 @@ func (p *SecretsManagerPlugin) untagResource(ctx *RequestContext, req *AWSReques
 	return smJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-func (p *SecretsManagerPlugin) rotateSecret(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		SecretID string `json:"SecretId"`
-	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
-	if idErr != nil {
-		return nil, idErr
-	}
-	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
-	if err != nil {
-		return nil, err
-	}
-	if secret == nil {
-		return nil, smSecretNotFound(input.SecretID)
-	}
-
-	secret.RotationEnabled = true
-	if err := p.saveSecret(goCtx, secret); err != nil {
-		return nil, fmt.Errorf("sm rotateSecret saveSecret: %w", err)
-	}
-
-	out := map[string]interface{}{
-		"ARN":  secret.ARN,
-		"Name": secret.Name,
-	}
-	return smJSONResponse(http.StatusOK, out)
-}
+// rotateSecret lives in secretsmanager_rotation.go, beside the schedule it configures and the two
+// InvalidRequestException causes it refuses — see that file's preamble (#952). It read one of its seven
+// parameters here and enabled rotation on any secret it could load, including one with no rotation
+// function at all.
 
 // --- Response helper ---
 
