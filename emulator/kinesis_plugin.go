@@ -676,9 +676,21 @@ func (p *KinesisPlugin) addTagsToStream(ctx *RequestContext, req *AWSRequest) (*
 		return nil, refErr
 	}
 
+	// The request's own shape is checked before the stream is loaded, matching listTagsForStream's
+	// ordering: a parameter refusal does not depend on the stream existing.
+	if tagErr := kinesisValidateTagMap(body.Tags); tagErr != nil {
+		return nil, tagErr
+	}
+
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
+	}
+
+	// The quota is a property of the stream, so it needs the stored set and is checked here rather than
+	// above — and before the merge, so a refused request writes nothing (#965).
+	if quotaErr := kinesisCheckTagQuota(target, stream.Tags, body.Tags); quotaErr != nil {
+		return nil, quotaErr
 	}
 
 	if stream.Tags == nil {
@@ -727,13 +739,14 @@ func (p *KinesisPlugin) removeTagsFromStream(ctx *RequestContext, req *AWSReques
 // kinesisMinListTagsLimit and kinesisMaxListTagsLimit bound ListTagsForStream's Limit, whose published
 // Valid Range is "Minimum value of 1. Maximum value of 50".
 //
-// AWS's own numbers do not agree about how large the set being paged can get, and the disagreement is
-// recorded rather than resolved: the response's Tags array publishes "Maximum number of 200 items" and
-// AddTagsToStream's Tags map publishes the same 200, while both operations' prose caps a stream at 50
-// tags ("you can assign up to 50 tags to a data stream", "you can add up to 50 tags per resource") —
-// exactly Limit's maximum. Read by the prose a single maximum-Limit page holds every tag a stream may
-// legally carry, and the 200 is a shape number nothing else supports; substrate enforces no tag quota
-// on AddTagsToStream, so a caller can exceed 50 here and the cursor pages whatever is stored.
+// AWS's own numbers do not agree about how large the set being paged can get: the response's Tags array
+// publishes "Maximum number of 200 items" and AddTagsToStream's Tags map publishes the same 200, while
+// both operations' prose caps a stream at 50 tags ("you can assign up to 50 tags to a data stream",
+// "you can add up to 50 tags per resource") — exactly Limit's maximum. Both figures are enforced, at
+// different codes and against different things, which is what makes them consistent rather than
+// contradictory; see [kinesisMaxTagsPerStream] and its file's preamble. A stream's tag set therefore
+// cannot exceed 50 through this service's own operations, so one maximum-Limit page holds all of it and
+// the cursor matters only for a smaller Limit.
 const (
 	kinesisMinListTagsLimit = 1
 	kinesisMaxListTagsLimit = 50

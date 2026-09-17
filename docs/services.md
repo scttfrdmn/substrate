@@ -11289,13 +11289,46 @@ terminate. `HasMoreTags`' own description is the coherent one, *"if set to true,
 available"*, so substrate reports whether anything remains **after this page**. A `Limit` equal to or
 larger than the remaining set is therefore not a truncation.
 
-**AWS's own numbers disagree about how large the set being paged can get, and substrate enforces
-neither.** The response's `Tags` array publishes *"Maximum number of 200 items"* and
-`AddTagsToStream`'s `Tags` map publishes the same 200, while both operations' prose caps a stream at 50
-tags — exactly `Limit`'s maximum. Read by the prose, one maximum-`Limit` page holds every tag a stream
-may legally carry and the cursor is a formality; read by the shape, it is not. Substrate enforces no
-tag quota on `AddTagsToStream`, so a caller can store more than 50 and the cursor pages whatever is
-there.
+**AWS publishes two different limits on how large a stream's tag set can get, and both are now
+enforced** — see [How many tags a stream may carry](#how-many-tags-a-stream-may-carry). Because 50 is
+the one that binds, a single maximum-`Limit` page holds every tag a stream may legally hold through
+Kinesis's own operations, and the cursor matters only for a smaller `Limit`.
+
+### How many tags a stream may carry
+
+`API_AddTagsToStream` states both numbers **inside one parameter entry**. The `Tags` member's
+description reads *"A set of up to 50 key-value pairs to use to create the tags. A tag consists of a
+required key and an optional value. You can add up to 50 tags per resource."*, and the constraint lines
+directly beneath it read *"Map Entries: Maximum number of 200 items."* The operation's lede says 50
+again, and `ListTagsForStream`'s response `Tags` array publishes 0–200 while its `Limit` maxes out at
+exactly 50. Until [#965](https://github.com/scttfrdmn/substrate/issues/965) substrate enforced neither,
+so a stream could hold 300 tags and `ListTagsForStream` would answer an array longer than its own
+published maximum — substrate emitting a response its own reference says cannot exist.
+
+**Both figures are real, they are limits on different things, and both are enforced under different
+codes.** 200 bounds one request's shape; 50 is the resource's quota.
+
+| Request | Answer |
+|---------|--------|
+| More than 200 entries in one `Tags` map | `InvalidArgumentException`/400, whose description is *"a specified parameter exceeds its restrictions"*. Checked **first**, against the request alone: a request that does not satisfy its own shape is not evaluated against account state |
+| A merged tag set of more than 50 | `LimitExceededException`/400 — *"The requested resource exceeds the maximum number allowed"* |
+| A tag key outside 1–128 characters, or a value longer than 256 | `InvalidArgumentException`/400. An **empty value** is valid where an empty key is not, per *"a tag consists of a required key and an optional value"* and the published minimums of 0 and 1 |
+| An absent `Tags` member | `InvalidArgumentException`/400 — it is the operation's one `Required: Yes` member besides the stream reference |
+| An empty `Tags` map | Accepted as a no-op. **Substrate's reading**: the map publishes a maximum entry count and no minimum, where `RemoveTagsFromStream`'s `TagKeys` array publishes *"Minimum number of 1 item"* — AWS states a minimum where it means one |
+
+**The quota is a property of the stream, so it is counted against the merged result**, not against the
+incoming map: two accepted requests of thirty tags each are refused on the second. A key already on the
+stream does not count twice, because *"`AddTagsToStream` overwrites any existing tags that correspond to
+the specified tag keys"* — so re-tagging a stream that is already at the quota with a key it already
+carries is a rewrite and succeeds, and `RemoveTagsFromStream` frees slots for a later add. A refused
+request writes **nothing**, not even the tags that would have fit.
+
+**The Resource Groups Tagging API does not enforce this quota.** `TagResources` merges tags for sixteen
+services through one helper, and refusing there needs the per-resource `FailedResourcesMap` semantics
+that operation publishes; substrate models no tag quota for any other service either. So a caller can
+still push a stream past fifty tags through `TagResources` —
+[#1000](https://github.com/scttfrdmn/substrate/issues/1000) — after which `AddTagsToStream` refuses
+every further add, which is the right answer for a stream over quota however it got there.
 
 ### CloudFormation resource types
 
