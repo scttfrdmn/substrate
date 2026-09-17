@@ -401,3 +401,107 @@ func TestSMDeletion_ASecretIsStillReportedAfterItsWindowHasPassed(t *testing.T) 
 	_, _, restoreCode := smRestoreMembers(t, ts, arn)
 	assert.Empty(t, restoreCode)
 }
+
+// TestSMDeletion_AnUnresolvableIdentifierIsRefusedBeforeAnyLookup pins the order the two new handlers
+// do their work in, which is not a detail: both resolve the identifier before they read state, so an
+// identifier that names no secret at all is refused with InvalidParameterException rather than with
+// ResourceNotFoundException.
+//
+// The forced case is the one worth having. AWS suspends ResourceNotFoundException for a forced delete
+// of "an already deleted or nonexistent secret" — a statement about a *secret* that does not exist,
+// not about an identifier that names none — so a forced delete of an unparseable identifier is still
+// refused, and the suspension does not swallow a caller's typo into a 200.
+func TestSMDeletion_AnUnresolvableIdentifierIsRefusedBeforeAnyLookup(t *testing.T) {
+	ts := smTagServer(t)
+
+	// An ARN belonging to another service parses as an ARN and then fails to be a secret's.
+	const foreign = "arn:aws:s3:::not-a-secret"
+
+	for _, tc := range []struct {
+		name     string
+		body     map[string]any
+		wantCode string
+	}{
+		{"delete, empty identifier", map[string]any{"SecretId": ""}, "InvalidParameterException"},
+		{"delete, foreign ARN", map[string]any{"SecretId": foreign}, "InvalidParameterException"},
+		{
+			"forced delete, empty identifier",
+			map[string]any{"SecretId": "", "ForceDeleteWithoutRecovery": true},
+			"InvalidParameterException",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, code := smDeleteSecret(t, ts, tc.body)
+			assert.Equal(t, tc.wantCode, code)
+			assert.Equal(t, http.StatusBadRequest, status)
+		})
+	}
+
+	// RestoreSecret resolves in the same order, and its only parameter is the identifier.
+	for _, tc := range []struct {
+		name     string
+		secretID string
+	}{
+		{"restore, empty identifier", ""},
+		{"restore, foreign ARN", foreign},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, code := smRawCall(t, ts, smTarget, "RestoreSecret", map[string]any{"SecretId": tc.secretID})
+			assert.Equal(t, "InvalidParameterException", code)
+			assert.Equal(t, http.StatusBadRequest, status)
+		})
+	}
+}
+
+// TestSMDeletion_AForcedDeleteLeavesItsSiblingsAlone asserts the index rebuild a forced delete does:
+// the account's list of secret names is written back without the deleted name and with every other
+// name still on it.
+//
+// #928's test covers *which Region's* index entry a removal takes out. This covers the complementary
+// half — that the removal is of one entry rather than of the index — which a single-secret test
+// cannot distinguish, because a rebuild that dropped everything and a rebuild that dropped one name
+// produce the same empty list.
+func TestSMDeletion_AForcedDeleteLeavesItsSiblingsAlone(t *testing.T) {
+	ts := smTagServer(t)
+	doomed := smCreateSecret(t, ts, "doomed", nil)
+	survivor := smCreateSecret(t, ts, "survivor", nil)
+
+	_, _, code := smDeleteSecret(t, ts, map[string]any{
+		"SecretId":                   doomed,
+		"ForceDeleteWithoutRecovery": true,
+	})
+	require.Empty(t, code)
+
+	names := smListSecretNames(t, ts, smTarget)
+	assert.NotContains(t, names, "doomed", "the forced delete removed its own index entry")
+	assert.Contains(t, names, "survivor", "and left the other one on the index")
+
+	// Still readable, which is what proves the sibling's record and version payload survived too —
+	// purgeSecret deletes a version key built from the deleted secret's own CurrentVersionID.
+	assert.Equal(t, "value-of-survivor", smSecretValue(t, ts, smTarget, survivor))
+}
+
+// TestSMDeletion_ABodyThatIsNotAnObjectIsRefused pins the two new handlers' body-parse guard, which is
+// the code every Secrets Manager handler already answers for an unparseable body rather than a code
+// chosen here.
+//
+// **Whether InvalidRequestException is the right code is under audit in #950**, which is walking the
+// tree's body-parse guards; this asserts what the service answers today so that a change there shows
+// up as a test change rather than as a silent one. It is recorded rather than pre-empted because
+// diverging in one file would leave Secrets Manager answering two codes for one condition.
+func TestSMDeletion_ABodyThatIsNotAnObjectIsRefused(t *testing.T) {
+	ts := smTagServer(t)
+
+	// Marshaled, each of these is valid JSON and none of them is an object, so the handler's
+	// json.Unmarshal into its parameter struct is what fails — not the transport.
+	for _, op := range []string{"DeleteSecret", "RestoreSecret"} {
+		for _, body := range []any{[]any{}, "SecretId", 7} {
+			t.Run(fmt.Sprintf("%s/%T", op, body), func(t *testing.T) {
+				resp := signedRequest(t, ts, smTarget, taggingTestAccount, op, body)
+				status, code := decodeAWSResponse(t, resp, nil)
+				assert.Equal(t, "InvalidRequestException", code)
+				assert.Equal(t, http.StatusBadRequest, status)
+			})
+		}
+	}
+}
