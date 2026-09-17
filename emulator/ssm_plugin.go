@@ -3,12 +3,10 @@ package emulator
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -465,6 +463,10 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 	if input.MaxResults <= 0 {
 		input.MaxResults = 10
 	}
+	offset, tokenOK := decodeOffsetPaginationToken(input.NextToken)
+	if !tokenOK {
+		return nil, ssmInvalidNextToken()
+	}
 	path := input.Path
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
@@ -497,15 +499,10 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 	}
 	sort.Strings(matched)
 
-	// Pagination.
-	offset := 0
-	if input.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(input.NextToken); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
+	// Pagination. The token was validated before the parameter paths were read, so a token
+	// substrate could not have issued is refused rather than answered with page one (#915).
+	// An offset past the end is a token substrate did issue over a listing that has since
+	// shrunk, and clamps to a final empty page.
 	if offset > len(matched) {
 		offset = len(matched)
 	}
@@ -513,8 +510,7 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 	var nextToken string
 	if len(page) > input.MaxResults {
 		page = page[:input.MaxResults]
-		nextOffset := offset + input.MaxResults
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
+		nextToken = encodeOffsetPaginationToken(offset + input.MaxResults)
 	}
 
 	type paramItem struct {
@@ -559,6 +555,10 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 	if input.MaxResults <= 0 {
 		input.MaxResults = 10
 	}
+	offset, tokenOK := decodeOffsetPaginationToken(input.NextToken)
+	if !tokenOK {
+		return nil, ssmInvalidNextToken()
+	}
 
 	goCtx := context.Background()
 	paths, err := p.loadPaths(goCtx, ctx.AccountID, ctx.Region)
@@ -567,14 +567,8 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	sort.Strings(paths)
 
-	offset := 0
-	if input.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(input.NextToken); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
+	// See getParametersByPath: the token is validated before any state is read, and an
+	// offset past the end clamps to a final empty page rather than being refused (#915).
 	if offset > len(paths) {
 		offset = len(paths)
 	}
@@ -582,8 +576,7 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 	var nextToken string
 	if len(page) > input.MaxResults {
 		page = page[:input.MaxResults]
-		nextOffset := offset + input.MaxResults
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
+		nextToken = encodeOffsetPaginationToken(offset + input.MaxResults)
 	}
 
 	type paramMeta struct {
