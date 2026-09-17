@@ -7,14 +7,22 @@ import (
 	"strings"
 )
 
-// Marker pagination for the RDS and ElastiCache describes (#887).
+// Marker pagination for the RDS and ElastiCache describes (#887, #916, #913).
+//
+// These helpers are the whole pagination contract for nine operations. #887 fixed the
+// three that had a cursor — DescribeDBInstances, DescribeDBClusters and
+// DescribeCacheClusters — and #916 brought the six that published Marker and MaxRecords
+// and implemented neither: DescribeDBSnapshots, DescribeDBSubnetGroups,
+// DescribeDBParameterGroups, DescribeReplicationGroups, DescribeCacheSubnetGroups and
+// DescribeCacheParameterGroups. Those six answered the entire listing, emitted no Marker,
+// and ignored a MaxRecords the caller sent, so a consumer's paging loop was dead code
+// that first executed against real AWS and a Marker obtained elsewhere restarted the
+// listing rather than being refused.
 //
 // Both families publish the same contract for their pagination token, and it is a
-// contract about *records*, not about positions in a response array.
-// API_DescribeDBInstances, API_DescribeDBClusters, API_DescribeCacheClusters,
-// API_DescribeReplicationGroups and API_DescribeCacheSubnetGroups all say of Marker:
-// "If this parameter is specified, the response includes only records beyond the
-// marker, up to the value specified by MaxRecords."
+// contract about *records*, not about positions in a response array. Every one of the
+// nine pages says of Marker: "If this parameter is specified, the response includes only
+// records beyond the marker, up to the value specified by MaxRecords."
 //
 // Substrate read "beyond the marker" as an array index: the three paginated describes
 // each did `offset, _ := strconv.Atoi(marker)` and then sliced `items[offset:]`. Two
@@ -42,21 +50,23 @@ import (
 // the records are rendered in are the same order by construction, not by agreement
 // between two pieces of code.
 //
-// AWS documents nothing about the order these describes return records in — none of the
-// five pages above contains an ordering statement — so lexicographic remains
-// *substrate's* reading, as it is for ListBuckets. Pagination is why that reading has to
-// be a guarantee rather than a tidiness: the cursor is only well defined over a stable
-// order.
+// AWS documents nothing about the order these describes return records in — not one of
+// the nine pages contains an ordering statement — so lexicographic remains *substrate's*
+// reading, as it is for ListBuckets. Pagination is why that reading has to be a guarantee
+// rather than a tidiness: the cursor is only well defined over a stable order.
 
 // queryMaxRecordsDefault is the page size an RDS or ElastiCache describe applies when
 // the caller names no MaxRecords, and queryMaxRecordsMin and queryMaxRecordsMax are the
 // range a named one must fall in.
 //
-// All three are published on the parameter by both families, in the same words up to
-// capitalisation: "Default: 100" and "Constraints: Minimum 20, maximum 100."
-// (API_DescribeDBInstances, API_DescribeDBClusters) or "Constraints: minimum 20;
-// maximum 100." (API_DescribeCacheClusters, API_DescribeReplicationGroups,
-// API_DescribeCacheSubnetGroups).
+// All three are published on the parameter by every one of the nine pages, in the same
+// words up to capitalisation and punctuation: "Default: 100" with "Constraints: Minimum
+// 20, maximum 100." on the RDS pages (API_DescribeDBInstances, API_DescribeDBClusters,
+// API_DescribeDBSnapshots, API_DescribeDBSubnetGroups, API_DescribeDBParameterGroups) and
+// "Constraints: minimum 20; maximum 100." on the ElastiCache ones
+// (API_DescribeCacheClusters, API_DescribeReplicationGroups,
+// API_DescribeCacheSubnetGroups, API_DescribeCacheParameterGroups). The numbers are
+// identical everywhere, which is what makes one range serve all nine.
 //
 // The default applies only to an *absent* MaxRecords. A value outside the range is
 // refused by [queryMaxRecords] rather than defaulted or clamped, which is #913.
@@ -84,13 +94,17 @@ type queryMarkerCursor struct {
 // or an offset left over from an older recording fails to decode and is refused rather
 // than silently restarting the listing.
 //
-// **The error code is substrate's reading for RDS.** API_DescribeCacheClusters and
-// API_DescribeReplicationGroups both publish InvalidParameterValue with HTTP 400, so
-// ElastiCache is sourced; API_DescribeDBInstances and API_DescribeDBClusters publish
-// only their NotFound faults, and nothing on either page says what an unusable Marker
-// answers. InvalidParameterValue/400 is used for both families so one helper serves
-// them, and it is already the code substrate's RDS handlers answer for a malformed
-// parameter value.
+// **The error code is published for three of the nine operations and is substrate's
+// reading for the other six, and the split is not the family boundary.** Three
+// ElastiCache pages publish InvalidParameterValue with HTTP 400 —
+// API_DescribeCacheClusters, API_DescribeReplicationGroups and
+// API_DescribeCacheParameterGroups — so those three are sourced. The remaining six
+// publish only their NotFound faults and say nothing about what an unusable Marker
+// answers: the five RDS pages, and API_DescribeCacheSubnetGroups, which is ElastiCache
+// yet publishes CacheSubnetGroupNotFoundFault/400 alone (#916 corrected its own body on
+// this point). InvalidParameterValue/400 is used for all nine so one helper serves them,
+// and it is already the code substrate's RDS handlers answer for a malformed parameter
+// value.
 //
 // A base64 string that happens to decode to something other than a real identifier is
 // not refused — it simply selects the records sorting after that value, which may be
@@ -143,13 +157,14 @@ func encodeQueryMarker(id string) string {
 // coercion was corrected on, and the message names the range as parseSimulateRequest and
 // parseS3ListBucketsParams already do.
 //
-// **The code is substrate's reading for RDS.** API_DescribeCacheClusters and
-// API_DescribeReplicationGroups both publish InvalidParameterValue with HTTP 400 ("The
-// value for a parameter is invalid."), so ElastiCache is sourced; API_DescribeDBInstances
-// publishes only DBInstanceNotFound/404 and API_DescribeDBClusters only its own NotFound
-// fault, so nothing on either page says what an out-of-range MaxRecords answers. One code
-// serves both families, matching [parseQueryMarker], so the two parameters of one cursor
-// cannot be refused under different codes.
+// **The code's provenance is the same three-of-nine split [parseQueryMarker] records, and
+// for the same reason.** API_DescribeCacheClusters, API_DescribeReplicationGroups and
+// API_DescribeCacheParameterGroups publish InvalidParameterValue with HTTP 400 ("The
+// value for a parameter is invalid."); the five RDS pages and
+// API_DescribeCacheSubnetGroups publish only their NotFound faults, so nothing on them
+// says what an out-of-range MaxRecords answers. One code serves all nine, matching
+// [parseQueryMarker], so the two parameters of one cursor cannot be refused under
+// different codes.
 func queryMaxRecords(raw string) (int, *AWSError) {
 	if raw == "" {
 		return queryMaxRecordsDefault, nil

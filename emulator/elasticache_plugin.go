@@ -368,28 +368,45 @@ func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, re
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["ReplicationGroupId"]
 
-	keys, err := p.state.List(context.Background(), elasticacheNamespace, "replgroup:"+scope+"/")
+	// Both pagination parameters are validated before any state is read, so a request
+	// substrate cannot serve is refused rather than answered with page one (#916).
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
+	}
+
+	prefix := "replgroup:" + scope + "/"
+	keys, err := p.state.List(context.Background(), elasticacheNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("elasticache describeReplicationGroups list: %w", err)
 	}
 
-	var items []xmlReplicationGroupItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), elasticacheNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var rg ElastiCacheReplicationGroup
-		if json.Unmarshal(data, &rg) != nil {
-			continue
-		}
-		if filterID != "" && rg.ReplicationGroupID != filterID {
-			continue
-		}
-		items = append(items, replicationGroupToXML(rg))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
+		func(key, _ string) (xmlReplicationGroupItem, bool) {
+			data, getErr := p.state.Get(context.Background(), elasticacheNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlReplicationGroupItem{}, false
+			}
+			var rg ElastiCacheReplicationGroup
+			if json.Unmarshal(data, &rg) != nil {
+				return xmlReplicationGroupItem{}, false
+			}
+			if filterID != "" && rg.ReplicationGroupID != filterID {
+				return xmlReplicationGroupItem{}, false
+			}
+			return replicationGroupToXML(rg), true
+		})
 
-	if filterID != "" && len(items) == 0 {
+	// The NotFound fault is decided on the *page*, and pagination cannot make it fire for a
+	// group that exists: the filter runs inside the record callback, so a non-matching record
+	// answers ok=false and consumes no page slot. A single-ID filter therefore always lands on
+	// page one however far into the listing the record sorts, which is the ordering trap #916
+	// names — it is closed by construction rather than by the two checks being ordered.
+	if filterID != "" && len(page) == 0 {
 		return nil, &AWSError{
 			Code:       "ReplicationGroupNotFoundFault",
 			Message:    "ReplicationGroup " + filterID + " not found.",
@@ -399,6 +416,7 @@ func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, re
 
 	type result struct {
 		ReplicationGroups []xmlReplicationGroupItem `xml:"ReplicationGroups>ReplicationGroup"`
+		Marker            string                    `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeReplicationGroupsResponse"`
@@ -406,8 +424,11 @@ func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, re
 		Result  result   `xml:"DescribeReplicationGroupsResult"`
 	}
 	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{ReplicationGroups: items},
+		XMLNS: elasticacheXMLNS,
+		Result: result{
+			ReplicationGroups: page,
+			Marker:            nextMarker,
+		},
 	})
 }
 
@@ -548,29 +569,40 @@ func (p *ElastiCachePlugin) describeCacheSubnetGroups(reqCtx *RequestContext, re
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterName := req.Params["CacheSubnetGroupName"]
 
-	keys, err := p.state.List(context.Background(), elasticacheNamespace, "cachesubnetgroup:"+scope+"/")
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
+	}
+
+	prefix := "cachesubnetgroup:" + scope + "/"
+	keys, err := p.state.List(context.Background(), elasticacheNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("elasticache describeCacheSubnetGroups list: %w", err)
 	}
 
-	var items []xmlCacheSubnetGroupItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), elasticacheNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var sg ElastiCacheCacheSubnetGroup
-		if json.Unmarshal(data, &sg) != nil {
-			continue
-		}
-		if filterName != "" && sg.CacheSubnetGroupName != filterName {
-			continue
-		}
-		items = append(items, cacheSubnetGroupToXML(sg))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
+		func(key, _ string) (xmlCacheSubnetGroupItem, bool) {
+			data, getErr := p.state.Get(context.Background(), elasticacheNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlCacheSubnetGroupItem{}, false
+			}
+			var sg ElastiCacheCacheSubnetGroup
+			if json.Unmarshal(data, &sg) != nil {
+				return xmlCacheSubnetGroupItem{}, false
+			}
+			if filterName != "" && sg.CacheSubnetGroupName != filterName {
+				return xmlCacheSubnetGroupItem{}, false
+			}
+			return cacheSubnetGroupToXML(sg), true
+		})
 
 	type result struct {
 		CacheSubnetGroups []xmlCacheSubnetGroupItem `xml:"CacheSubnetGroups>CacheSubnetGroup"`
+		Marker            string                    `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeCacheSubnetGroupsResponse"`
@@ -578,8 +610,11 @@ func (p *ElastiCachePlugin) describeCacheSubnetGroups(reqCtx *RequestContext, re
 		Result  result   `xml:"DescribeCacheSubnetGroupsResult"`
 	}
 	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheSubnetGroups: items},
+		XMLNS: elasticacheXMLNS,
+		Result: result{
+			CacheSubnetGroups: page,
+			Marker:            nextMarker,
+		},
 	})
 }
 
@@ -647,29 +682,40 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterName := req.Params["CacheParameterGroupName"]
 
-	keys, err := p.state.List(context.Background(), elasticacheNamespace, "cacheparamgroup:"+scope+"/")
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
+	}
+
+	prefix := "cacheparamgroup:" + scope + "/"
+	keys, err := p.state.List(context.Background(), elasticacheNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("elasticache describeCacheParameterGroups list: %w", err)
 	}
 
-	var items []xmlCacheParamGroupItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), elasticacheNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var pg ElastiCacheCacheParameterGroup
-		if json.Unmarshal(data, &pg) != nil {
-			continue
-		}
-		if filterName != "" && pg.CacheParameterGroupName != filterName {
-			continue
-		}
-		items = append(items, cacheParamGroupToXML(pg))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
+		func(key, _ string) (xmlCacheParamGroupItem, bool) {
+			data, getErr := p.state.Get(context.Background(), elasticacheNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlCacheParamGroupItem{}, false
+			}
+			var pg ElastiCacheCacheParameterGroup
+			if json.Unmarshal(data, &pg) != nil {
+				return xmlCacheParamGroupItem{}, false
+			}
+			if filterName != "" && pg.CacheParameterGroupName != filterName {
+				return xmlCacheParamGroupItem{}, false
+			}
+			return cacheParamGroupToXML(pg), true
+		})
 
 	type result struct {
 		CacheParameterGroups []xmlCacheParamGroupItem `xml:"CacheParameterGroups>CacheParameterGroup"`
+		Marker               string                   `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeCacheParameterGroupsResponse"`
@@ -677,8 +723,11 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 		Result  result   `xml:"DescribeCacheParameterGroupsResult"`
 	}
 	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheParameterGroups: items},
+		XMLNS: elasticacheXMLNS,
+		Result: result{
+			CacheParameterGroups: page,
+			Marker:               nextMarker,
+		},
 	})
 }
 

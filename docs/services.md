@@ -908,6 +908,84 @@ other half of the tier-2 defect, and the reason the RDS and ElastiCache describe
 a value-based cursor. Refusing an unissued token and choosing a stable cursor basis are independent
 defects, and only the first is #915.
 
+### Six describes published a cursor and implemented none of it
+
+[#916](https://github.com/scttfrdmn/substrate/issues/916). The RDS and ElastiCache work above
+fixed the three describes that *had* a cursor. Six more publish `Marker` and `MaxRecords` and
+implemented neither: RDS `DescribeDBSnapshots`, `DescribeDBSubnetGroups` and
+`DescribeDBParameterGroups`, and ElastiCache `DescribeReplicationGroups`,
+`DescribeCacheSubnetGroups` and `DescribeCacheParameterGroups`. Each answered its entire listing,
+emitted no `Marker`, and discarded a `MaxRecords` the caller sent.
+
+Of the three states a published parameter can be in — implemented, absent and refused, or
+accepted and ignored — the third is the worst, and it is the one all six were in:
+
+- **A paging loop is dead code until it runs against AWS.** A consumer that walks until the
+  `Marker` comes back empty completes on the first response here, so the loop is never exercised;
+  the first time it executes is against real AWS, over a listing long enough to page, with no test
+  covering it.
+- **A `Marker` from anywhere else restarted the listing.** With nothing decoding the parameter, a
+  token persisted across a restart, copied from another operation, or left over from a recording
+  was answered with the whole listing again rather than refused.
+
+All six now go through the same three helpers as the first three — `parseQueryMarker`,
+`queryMaxRecords` and `queryMarkerPage` — so nine operations share one cursor, and the semantics
+cannot diverge between them by construction rather than by nine sites agreeing.
+
+**The refusal code is published for three of the nine, and the split is not the family
+boundary.** This is a correction to #916's own acceptance criteria, which claimed the code was
+published for ElastiCache and unpublished for RDS:
+
+| Page | `InvalidParameterValue` / 400 | Published errors |
+|---|---|---|
+| `API_DescribeCacheClusters` | **published** | ElastiCache's cluster faults, plus `InvalidParameterValue` and `InvalidParameterCombination` |
+| `API_DescribeReplicationGroups` | **published** | `ReplicationGroupNotFoundFault` / 404, `InvalidParameterValue` / 400, `InvalidParameterCombination` / 400 |
+| `API_DescribeCacheParameterGroups` | **published** | `CacheParameterGroupNotFound` / 404, `InvalidParameterValue` / 400, `InvalidParameterCombination` / 400 |
+| `API_DescribeCacheSubnetGroups` | **absent** | `CacheSubnetGroupNotFoundFault` / 400 only |
+| `API_DescribeDBInstances` | **absent** | `DBInstanceNotFound` / 404 only |
+| `API_DescribeDBClusters` | **absent** | its own NotFound fault only |
+| `API_DescribeDBSnapshots` | **absent** | `DBSnapshotNotFound` / 404 only |
+| `API_DescribeDBSubnetGroups` | **absent** | `DBSubnetGroupNotFoundFault` / 404 only |
+| `API_DescribeDBParameterGroups` | **absent** | `DBParameterGroupNotFound` / 404 only |
+
+`API_DescribeCacheSubnetGroups` is the case that matters: it is an ElastiCache page that publishes
+no `InvalidParameterValue`, so "ElastiCache publishes it, RDS does not" is not a rule the
+provenance can rest on. Three of nine are **published** and six are **substrate's reading**, and
+which is which has to be stated per page.
+
+The `MaxRecords` range is published identically on all nine — `Default: 100` with a minimum of 20
+and a maximum of 100 — though not in identical words: the RDS pages write
+`Constraints: Minimum 20, maximum 100.` and the ElastiCache pages
+`Constraints: minimum 20; maximum 100.` The numbers are what one shared range depends on, and they
+agree. Both parameters are validated before any state is read, so a request substrate cannot serve
+is refused rather than answered with page one.
+
+**A single-resource filter that lands past page one still answers its record.** Every one of the
+six publishes one — `DBSnapshotIdentifier`, `DBSubnetGroupName`, `DBParameterGroupName`,
+`ReplicationGroupId`, `CacheSubnetGroupName`, `CacheParameterGroupName` — and filtering plus
+paging is the ordering trap the issue names: a filter applied *after* a page is cut would answer
+an empty page, or a `NotFound` fault, for a record that exists and merely sorts late. It cannot
+happen here, because the filter runs inside `queryMarkerPage`'s record callback and a non-matching
+record consumes no page slot: a filtered listing is one record long however deep into the
+unfiltered listing the record sits. `DescribeReplicationGroups` is the one of the six that answers
+a `NotFound` fault today, and its fault is therefore decided on a page that cannot be empty for a
+group that exists. Both properties are asserted rather than left to the reasoning.
+
+`DescribeDBSnapshots` is the one of the six with more than one filter to order against — it also
+publishes `DBInstanceIdentifier`, `DbiResourceId`, `SnapshotType`, `IncludePublic`,
+`IncludeShared` and `Filters.Filter.N` — and both of its sibling RDS group describes publish
+`Filters.Filter.N` as **"Not currently supported"**, a parameter AWS declares and refuses to
+honour, so substrate ignoring it matches the page rather than diverging from it.
+
+**What this does not fix.** Five of the six publish a NotFound fault their handler does not
+answer: a filtered request naming a resource that does not exist gets an empty `200` instead of
+`DBSnapshotNotFound` / 404, `DBSubnetGroupNotFoundFault` / 404, `DBParameterGroupNotFound` / 404,
+`CacheSubnetGroupNotFoundFault` / 400 or `CacheParameterGroupNotFound` / 404. That is a defect
+about a request's *result*, not about how a listing is cut into pages, so it is
+[#1020](https://github.com/scttfrdmn/substrate/issues/1020) rather than part of this change — the
+same reason `MaxRecords` was kept out of the cursor fix above. Note the ElastiCache subnet-group
+fault is 400 where the other four are 404, which its page states explicitly.
+
 ### A tag set read back out of a map
 
 [#946](https://github.com/scttfrdmn/substrate/issues/946) is the same defect one layer down, at
@@ -12026,17 +12104,17 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | StopDBInstance | |
 | RebootDBInstance | |
 | CreateDBSnapshot | |
-| DescribeDBSnapshots | |
+| DescribeDBSnapshots | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
 | DeleteDBSnapshot | |
 | RestoreDBInstanceFromDBSnapshot | |
 | CreateDBCluster | |
 | DescribeDBClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
 | DeleteDBCluster | |
 | CreateDBSubnetGroup | |
-| DescribeDBSubnetGroups | |
+| DescribeDBSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
 | DeleteDBSubnetGroup | |
 | CreateDBParameterGroup | |
-| DescribeDBParameterGroups | |
+| DescribeDBParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
 | DeleteDBParameterGroup | |
 | ListTagsForResource | `TagList` sorted by key — see below |
 | AddTagsToResource | |
@@ -12136,10 +12214,21 @@ RDS db.t3.micro on-demand: $0.017 per hour (approximate for testing purposes).
 |-----------|-------|
 | CreateCacheCluster | |
 | DescribeCacheClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue`, which this service's page publishes — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
+| ModifyCacheCluster | |
 | DeleteCacheCluster | |
 | CreateReplicationGroup | |
-| DescribeReplicationGroups | |
+| DescribeReplicationGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| ModifyReplicationGroup | |
 | DeleteReplicationGroup | |
+| CreateCacheSubnetGroup | |
+| DescribeCacheSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does **not** publish although its two ElastiCache siblings do — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DeleteCacheSubnetGroup | |
+| CreateCacheParameterGroup | |
+| DescribeCacheParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DeleteCacheParameterGroup | |
+| ListTagsForResource | |
+| AddTagsToResource | |
+| RemoveTagsFromResource | |
 
 ### CloudFormation resource types
 
