@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -277,6 +278,90 @@ func TestCFN_AnUnreachableConfigResourceIsSkippedNotFailed(t *testing.T) {
 	keys, err := state.List(context.Background(), "config", "tags:")
 	require.NoError(t, err)
 	assert.Empty(t, keys, "neither arm wrote a side-car for a resource it could not reach")
+}
+
+// cfnConfigFailingState is a StateManager whose reads or whose writes fail once armed, so the other
+// half of each Config arm's early exit is reachable: a resource that could not be *read* rather than
+// one that is not there.
+type cfnConfigFailingState struct {
+	emulator.StateManager
+	failGet bool
+	failPut bool
+	err     error
+}
+
+func (m *cfnConfigFailingState) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	if m.failGet {
+		return nil, m.err
+	}
+	return m.StateManager.Get(ctx, namespace, key)
+}
+
+func (m *cfnConfigFailingState) Put(ctx context.Context, namespace, key string, value []byte) error {
+	if m.failPut && namespace == "config" {
+		return m.err
+	}
+	return m.StateManager.Put(ctx, namespace, key, value)
+}
+
+// TestCFN_AConfigStoreFailureIsReportedNotSkipped is the distinction the two guards above exist
+// against, and the reason neither of them may report a store problem.
+//
+// A resource that is not there and a resource that could not be read are two different answers, and
+// both arms have to give them differently: an absent one is `(false, nil)`, which the deployer renders
+// as a silent skip, while a store failure is `(true, err)`, which it logs as a failure to stamp. Were
+// the second collapsed into the first, a Config resource would go untagged and nothing anywhere would
+// say so — the tag would simply be missing, on a stack that deployed clean.
+//
+// Both directions are covered because they fail in different places: the read is the resolution, and
+// the write is the side-car save that happens after a resource has been found.
+func TestCFN_AConfigStoreFailureIsReportedNotSkipped(t *testing.T) {
+	f := newCFNStampFixture(t, nil)
+	tmpl := `{
+		"Resources": {
+			"Recorder": {"Type": "AWS::Config::ConfigurationRecorder", "Properties": {
+				"Name": "default",
+				"RoleARN": "arn:aws:iam::123456789012:role/config-role"}}
+		}
+	}`
+	result, err := f.deployer.Deploy(context.Background(), tmpl, "config-store-failure-stack", nil)
+	require.NoError(t, err)
+	arn := arnsByLogicalID(t, result)["Recorder"]
+	require.NotEmpty(t, arn)
+
+	dr := emulator.DeployedResource{
+		Type: "AWS::Config::ConfigurationRecorder", LogicalID: "Recorder",
+		PhysicalID: "default", ARN: arn,
+	}
+	stamp := []emulator.EC2Tag{{Key: "aws:cloudformation:stack-name", Value: "s"}}
+	next := map[string]string{"team": "platform"}
+	boom := errors.New("store unavailable")
+
+	for _, tc := range []struct {
+		name  string
+		state emulator.StateManager
+	}{
+		{
+			name:  "the resource could not be read",
+			state: &cfnConfigFailingState{StateManager: f.state, failGet: true, err: boom},
+		},
+		{
+			name:  "the side-car could not be written",
+			state: &cfnConfigFailingState{StateManager: f.state, failPut: true, err: boom},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stamped, err := emulator.CFNStampConfigResourceForTest(tc.state, cfnStampReqCtx(), dr, stamp)
+			require.ErrorIs(t, err, boom, "a store failure is not an absent resource")
+			assert.True(t, stamped, "and is reported as reached, so the caller logs it")
+
+			reconciled, err := emulator.CFNPropagateConfigStackTagsForTest(
+				tc.state, cfnStampReqCtx(), dr, nil, next,
+			)
+			require.ErrorIs(t, err, boom)
+			assert.True(t, reconciled)
+		})
+	}
 }
 
 // configResourceTagsFor reads one Config resource's tags through Config's own
