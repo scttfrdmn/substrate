@@ -9206,9 +9206,9 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | CancelKeyDeletion | Requires a key pending deletion, and leaves it `Disabled` — see below |
 | GetKeyPolicy | |
 | PutKeyPolicy | |
-| GetKeyRotationStatus | Reports the bare key ID and, while rotation is on, `RotationPeriodInDays`; answers in every key state substrate can produce — see below |
-| EnableKeyRotation | Range-checks `RotationPeriodInDays` at 90–2560 and stores it; refuses a disabled key and a key pending deletion, with a different code for each — see below |
-| DisableKeyRotation | Same refusals as `EnableKeyRotation`; leaves the stored rotation period alone |
+| GetKeyRotationStatus | Reports the bare key ID and, while rotation is on, `RotationPeriodInDays` and `NextRotationDate`; answers `false` for a key pending deletion and answers in every key state substrate can produce — see below |
+| EnableKeyRotation | Range-checks `RotationPeriodInDays` at 90–2560 and stores it with the date it ran; refuses a key whose spec is not `SYMMETRIC_DEFAULT`, and refuses a disabled key and a key pending deletion with a different code for each — see below |
+| DisableKeyRotation | Same refusals as `EnableKeyRotation`; leaves the stored rotation period and enable date alone |
 | TagResource | Tags are keyed `TagKey`/`TagValue`, not `Key`/`Value` |
 | UntagResource | |
 | ListResourceTags | |
@@ -9368,14 +9368,17 @@ key, *"while a KMS key is pending deletion, its key rotation status is `false` �
 you cancel the deletion, the original key rotation status returns to `true`"*, and an
 operation that documents an answer for a state cannot also be refusing that state. So
 the published code belongs to the states substrate never writes, the same four the
-table's last row names. What substrate does not yet model is that documented `false`;
-that is [#973](https://github.com/scttfrdmn/substrate/issues/973), and it is a wrong
-value rather than a missing refusal.
+table's last row names. That documented `false` was itself a wrong value rather than a
+missing refusal, and it is now answered — see *A pending deletion suspends the rotation
+schedule without forgetting it* below.
 
 The refusal is checked **before** the write, so a refused call leaves
 `RotationEnabled` exactly as it was — asserted by reading it back through
 `GetKeyRotationStatus` rather than by inspecting state, since a guard placed after
-the assignment would answer the right code while having already changed the value.
+the assignment would answer the right code while having already changed the value. For
+a key pending deletion that read-back now reports a derived `false` whatever was stored,
+so the test leaves the state before reading a second time; otherwise the strongest half
+of the assertion would be invisible in exactly the state where the guard is newest.
 
 The four unreachable states are recorded rather than implemented because
 `ScheduleKeyDeletion` is substrate's only writer of a state other than `Enabled` or
@@ -9403,9 +9406,9 @@ The published members, and what substrate answers on each:
 | Member | Answered | Provenance |
 |--------|----------|------------|
 | `KeyId` | The **bare key ID**, whichever of the four forms the caller addressed the key by | Glossed only *"identifies the specified symmetric encryption KMS key"* — none of the *"Amazon Resource Name (key ARN)"* wording `ScheduleKeyDeletion` and `ReEncrypt` use for theirs — and the page's sample renders `1234abcd-…`. Echoing the request would therefore be wrong for an alias or an ARN, not merely lazy |
-| `KeyRotationEnabled` | Always, from the stored flag | Published unconditionally |
-| `RotationPeriodInDays` | Only while rotation is on | See below |
-| `NextRotationDate` | Not answered | Needs the date rotation was enabled, which nothing stores — [#973](https://github.com/scttfrdmn/substrate/issues/973) |
+| `KeyRotationEnabled` | Always; the stored flag in every state but `PendingDeletion`, which answers `false` | Published unconditionally, with the pending-deletion `false` published separately — see below |
+| `RotationPeriodInDays` | Only while the *reported* rotation status is on | See below |
+| `NextRotationDate` | Only while the *reported* rotation status is on: the enable date plus the period, as Unix seconds | See below |
 | `OnDemandRotationStartDate` | Not answered | *"Identifies the date and time that an in progress on-demand rotation was initiated"*; `RotateKeyOnDemand` is not implemented, so nothing can start one. AWS's own sample response omits it too |
 
 Three decisions here are substrate's rather than AWS's.
@@ -9420,8 +9423,8 @@ range violations in one plugin answering two different codes would be the diverg
 #923 exists to prevent. `UnsupportedOperationException` is the near miss and is
 declined: its gloss is *"a specified parameter is not supported or a specified resource
 is not valid for this operation"*, which describes an inadmissible parameter or
-resource — an asymmetric key, which is
-[#972](https://github.com/scttfrdmn/substrate/issues/972) — not an admissible
+resource — an asymmetric key, which is where that code *is* answered, two sections
+below — not an admissible
 parameter carrying a number out of range. The message names 90 and 2560, because a
 caller that sent 30 by analogy from the deletion window cannot discover the range from
 a bare refusal. As with the waiting period, the range is checked **before** the key is
@@ -9451,12 +9454,117 @@ established: a key that is not rotating has no rotation period to report. A re-e
 with an explicit period therefore never surfaces a stale one, and a re-enable without
 one reports 365 per the rule above.
 
-Two restrictions the page publishes and substrate does not yet enforce, recorded so
-they are not mistaken for decisions: automatic rotation is *"supported only on
-symmetric encryption KMS keys"*, and *"you cannot enable or disable automatic rotation
-of AWS managed KMS keys"* — both `UnsupportedOperationException`/400, and both #972.
-`EnableKeyRotation` is also documented **Cross-account use: No** while
-`GetKeyRotationStatus` is **Yes**, an asymmetry substrate does not model.
+The first of the two restrictions the page publishes — automatic rotation is
+*"supported only on symmetric encryption KMS keys"* — is now enforced; see the next
+section. The second, *"you cannot enable or disable automatic rotation of AWS managed
+KMS keys"*, is unreachable rather than unenforced: substrate mints no AWS managed key,
+so no request can name one. `EnableKeyRotation` is also documented **Cross-account use:
+No** while `GetKeyRotationStatus` is **Yes**, an asymmetry substrate does not model.
+
+### A key type can forbid rotation permanently, and that is answered before the key state
+
+`EnableKeyRotation` and `DisableKeyRotation` checked the period's range
+([#964](https://github.com/scttfrdmn/substrate/issues/964)) and the key state
+([#949](https://github.com/scttfrdmn/substrate/issues/949)) and never checked what kind
+of key they were pointed at
+([#972](https://github.com/scttfrdmn/substrate/issues/972)). AWS states the restriction
+twice on `API_EnableKeyRotation` — once in the prose and once on the `KeyId` parameter —
+and repeats it verbatim on `API_DisableKeyRotation` and `API_GetKeyRotationStatus`:
+*"automatic key rotation is supported only on symmetric encryption KMS keys. You cannot
+enable automatic rotation of asymmetric KMS keys, HMAC KMS keys, KMS keys with imported
+key material, or KMS keys in a custom key store."* `EnableKeyRotation` on an RSA key
+answered 200 and wrote the flag, so `GetKeyRotationStatus` then reported a rotation
+schedule for a key AWS will never rotate.
+
+Both operations now refuse it with `UnsupportedOperationException`/400, whose gloss —
+*"a specified parameter is not supported or a specified resource is not valid for this
+operation"* — is the inadmissible-resource case the out-of-range period above declined
+to borrow. `DisableKeyRotation` refuses it too, although turning rotation *off* on a key
+that will never rotate looks harmless; the same argument was rejected for the key state
+and it is rejected again here, because AWS publishes the identical seven-error list and
+the identical sentence on both pages.
+
+**The discriminator is `KeySpec`, not `KeyUsage`.** A single equality test against
+`SYMMETRIC_DEFAULT` covers every family AWS names and the two it implies — asymmetric
+encryption, asymmetric signing, `SM2`, HMAC and ML-DSA — where a `KeyUsage` test would
+let an `ENCRYPT_DECRYPT` RSA key through. The refusal message names the spec it found,
+because `UnsupportedOperationException`/400 is otherwise indistinguishable from the
+AWS-managed-key refusal a caller might expect. Tests cover one spec per family rather
+than all fifteen: the plugin's check is one comparison, so a second RSA size exercises
+no new code, while five families guard against the check being rewritten as the
+family test the sentence's own wording invites.
+
+**The key type is answered before the key state**, which AWS does not publish a
+precedence for. It is substrate's reading, and the argument is the remedy: a key state
+has one — `EnableKey`, or `CancelKeyDeletion` and then `EnableKey` — and a key type has
+none, so telling a caller with a disabled RSA key to enable the key sends it round a
+loop that cannot terminate. It is the same request-before-resource principle #964 used
+to check the period's range before resolving the key.
+
+**`GetKeyRotationStatus` is deliberately not refused for such a key**, and a test pins
+that. The sentence forbids *enabling* rotation on the key, not asking whether it
+rotates; the operation's own key-state row permits the read; and `false` for a key that
+will never rotate is a true answer. A sweep that guarded "every rotation operation" for
+consistency would introduce a refusal AWS does not publish.
+
+Three of AWS's five restrictions stay unenforced because they are unreachable rather
+than unguarded: imported key material, a custom key store and an AWS managed key each
+need a `KMSKey` member substrate does not model, so no request can produce one. Every
+non-symmetric key in the tests is created through the gap
+[#977](https://github.com/scttfrdmn/substrate/issues/977) records — `CreateKey`
+validates `KeySpec` against nothing — which is the route the encryption-algorithm tests
+already take, and the reason #977 has to re-verify them when it closes it.
+
+### A pending deletion suspends the rotation schedule without forgetting it
+
+`GetKeyRotationStatus` answered two of its five published members, and one of the two
+answers was wrong ([#973](https://github.com/scttfrdmn/substrate/issues/973)).
+
+**`NextRotationDate` was missing entirely**, and it is the member rotation-monitoring
+code reads — the reason to ask for a rotation status is usually to find out when the
+next rotation is. AWS defines it on `API_EnableKeyRotation` rather than where it is
+reported: *"the rotation period defines the number of days after you enable automatic
+key rotation that AWS KMS will rotate your key material, and the number of days between
+each automatic rotation thereafter."* So it is the enable date plus the period, and
+substrate held only the period — `KMSKey` gained the enable date for this and nothing
+else. It is reported as **Unix seconds**, matching what `DescribeKey` does with
+`DeletionDate`. AWS's own page disagrees with itself here: its Response Syntax types the
+member `number` while its sample response renders
+`"2024-02-14T18:14:33.587000+00:00"`. Substrate keeps one KMS timestamp convention.
+
+**A second `EnableKeyRotation` moves the date**, because it overwrites the enable date
+rather than keeping the first one. AWS documents no answer — the parameter is described
+as able to *"modify the rotation period"*, with nothing said about the date it counts
+from — so this is substrate's reading, and the alternative is what argues for it: a key
+enabled with 2560 days and re-enabled with 90 would otherwise report a next rotation
+date roughly six years in the past. `DisableKeyRotation` leaves both the period and the
+enable date alone, so nothing is lost by turning rotation off.
+
+**A key pending deletion reports `false`**, whatever the stored flag says.
+`API_GetKeyRotationStatus` publishes the state's answer in full: *"while a KMS key is
+pending deletion, its key rotation status is `false` and AWS KMS does not rotate the key
+material. If you cancel the deletion, the original key rotation status returns to
+`true`."* Substrate reported the stored flag, so a caller polling a key it had scheduled
+for deletion was told rotation was still on. That was a wrong value rather than a
+missing refusal — the distinction that kept it out of #949, which read the same two
+sentences as a reason **not** to guard the operation and stopped there.
+
+The second sentence is what forces the shape of the fix. The reported status is
+**derived** — the stored flag and the key state, combined at read time — rather than
+written by `ScheduleKeyDeletion`, because there has to be something left for
+`CancelKeyDeletion` to restore. An implementation that cleared the flag on the way in
+would satisfy the first sentence and make the second unimplementable, and no state
+inspection would tell the two apart; the test walks enable → schedule → cancel and
+asserts the original date comes back, not a fresh one counted from the cancel.
+
+The period and the date follow the **reported** status rather than the stored flag, so a
+key pending deletion reports neither. Answering a period beside a `false` status would
+describe a rotation AWS has just said will not happen, and the honest-empty reading #827
+established says a key with no rotation schedule has no schedule to report. Every read
+in the test file also asserts `OnDemandRotationStartDate`'s absence, so the one member
+substrate still does not answer cannot appear by accident: it reports an in-progress
+`RotateKeyOnDemand`, which is not implemented, so a zero timestamp there would report a
+rotation nobody started.
 
 ### `DescribeKey` never published a rotation flag
 

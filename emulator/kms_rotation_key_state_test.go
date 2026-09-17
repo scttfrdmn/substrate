@@ -39,6 +39,12 @@ import (
 //     states substrate never writes; an earlier version of this comment said it published neither code,
 //     which was wrong about that one.)
 //
+//     The *value* those two sentences require is #973's, not #949's, and this file was asserting the
+//     wrong one of the two: it read the stored flag back in both states and required it unchanged in
+//     both, which is right for Disabled and wrong for pending deletion, where AWS publishes a false.
+//     The assertions below now follow the sentence for each state, and the read-back in assertion 2
+//     goes one step further where the state suppresses the flag — see [kmsLeaveState].
+//
 // Every call goes over the wire and every state is reached through the operation a consumer would use
 // — DisableKey and ScheduleKeyDeletion — rather than by writing a key record, per #765.
 
@@ -61,6 +67,21 @@ func kmsRotationStatus(t *testing.T, ts *emulator.TestServer, keyID string) bool
 	return out.KeyRotationEnabled
 }
 
+// kmsLeaveState takes a key back out of the state [kmsRotationStates] put it into, so the stored
+// rotation flag can be read even where the state suppresses it.
+//
+// It exists because #973 makes GetKeyRotationStatus's answer a *derivation* for one of the two states:
+// a key pending deletion reports false whatever the stored flag says, so the read-back assertion 2
+// relies on cannot see a write there. Leaving the state restores the flag to view — which is the same
+// sentence's second half, "if you cancel the deletion, the original key rotation status returns to
+// true", so the step is not scaffolding invented for the test but the behavior AWS publishes.
+func kmsLeaveState(t *testing.T, ts *emulator.TestServer, keyID, op string) {
+	t.Helper()
+	status, code := kmsCall(t, ts, op, map[string]any{"KeyId": keyID})
+	require.Empty(t, code, "%s to leave the state", op)
+	require.Equal(t, http.StatusOK, status, "%s to leave the state", op)
+}
+
 // kmsRotationStates is the two key states substrate can put a key into that both rotation operations
 // must refuse, each with the code the key-state table gives it.
 //
@@ -73,9 +94,24 @@ var kmsRotationStates = []struct {
 	// reach puts an existing, enabled key into the state, through the operation a consumer would use.
 	reach string
 	code  string
+	// reportsStoredFlag is whether GetKeyRotationStatus in this state reports the stored
+	// [emulator.KMSKey] rotation flag or the false #973 derives. The two states differ, and each
+	// value is a sentence on API_GetKeyRotationStatus rather than a convenience: "the key rotation
+	// status does not change when you disable a KMS key" against "while a KMS key is pending
+	// deletion, its key rotation status is false".
+	reportsStoredFlag bool
+	// leave takes the key back out of the state, so the stored flag is observable again where
+	// reportsStoredFlag is false. See [kmsLeaveState].
+	leave string
 }{
-	{"a disabled key", "DisableKey", "DisabledException"},
-	{"a key pending deletion", "ScheduleKeyDeletion", "KMSInvalidStateException"},
+	{
+		name: "a disabled key", reach: "DisableKey", code: "DisabledException",
+		reportsStoredFlag: true, leave: "EnableKey",
+	},
+	{
+		name: "a key pending deletion", reach: "ScheduleKeyDeletion", code: "KMSInvalidStateException",
+		reportsStoredFlag: false, leave: "CancelKeyDeletion",
+	},
 }
 
 // TestKMSKeyRotation_AStateThatForbidsRotationIsRefused is the issue's first two criteria, plus the
@@ -133,6 +169,15 @@ func TestKMSKeyRotation_ARefusalLeavesTheRotationFlagAlone(t *testing.T) {
 
 				assert.False(t, kmsRotationStatus(t, ts, keyID),
 					"the refused EnableKeyRotation must not have written RotationEnabled")
+
+				// Read again out of the state. For a key pending deletion the reading above is #973's
+				// derived false, which a handler that wrote true and *then* refused would satisfy — so
+				// without this step the strongest half of the assertion is invisible in exactly the
+				// state where the guard is newest.
+				kmsLeaveState(t, ts, keyID, state.leave)
+				assert.False(t, kmsRotationStatus(t, ts, keyID),
+					"the refused EnableKeyRotation must not have written RotationEnabled, "+
+						"which %s makes observable", state.leave)
 			})
 
 			t.Run("DisableKeyRotation does not turn rotation off", func(t *testing.T) {
@@ -152,8 +197,13 @@ func TestKMSKeyRotation_ARefusalLeavesTheRotationFlagAlone(t *testing.T) {
 				_, code = kmsCall(t, ts, "DisableKeyRotation", map[string]any{"KeyId": keyID})
 				require.Equal(t, state.code, code, "DisableKeyRotation against %s", state.name)
 
+				assert.Equal(t, state.reportsStoredFlag, kmsRotationStatus(t, ts, keyID),
+					"%s reports the stored flag: %v", state.name, state.reportsStoredFlag)
+
+				kmsLeaveState(t, ts, keyID, state.leave)
 				assert.True(t, kmsRotationStatus(t, ts, keyID),
-					"the refused DisableKeyRotation must not have cleared RotationEnabled")
+					"the refused DisableKeyRotation must not have cleared RotationEnabled, "+
+						"which %s makes observable", state.leave)
 			})
 		})
 	}
@@ -161,7 +211,7 @@ func TestKMSKeyRotation_ARefusalLeavesTheRotationFlagAlone(t *testing.T) {
 
 // TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey pins the operation that must
 // *not* gain a guard, which is the criterion #949 adds for the benefit of a later change rather than
-// for this one.
+// for this one — and, since #973, the two different answers it owes.
 //
 // API_GetKeyRotationStatus publishes DependencyTimeoutException, InvalidArnException,
 // KMSInternalException, KMSInvalidStateException, NotFoundException and UnsupportedOperationException
@@ -169,6 +219,15 @@ func TestKMSKeyRotation_ARefusalLeavesTheRotationFlagAlone(t *testing.T) {
 // only PendingImport, Unavailable, Creating and Updating as refused. None of those four is reachable
 // in substrate, so every state substrate can produce answers 200 here, and a sweep that guarded this
 // operation "for consistency" with its two siblings would introduce a refusal AWS does not have.
+//
+// Answering 200 is not the whole obligation, which is where #949's version of this test was wrong: the
+// page also says *what* each state answers, and the two states answer differently. A disabled key
+// reports the stored flag ("the key rotation status does not change when you disable a KMS key") and a
+// key pending deletion reports false whatever was stored ("while a KMS key is pending deletion, its key
+// rotation status is false"). Asserting the stored flag in both, as this test did, made the second
+// sentence unimplementable — which is exactly what it was: substrate reported true there until #973.
+// The restoration half of that sentence is
+// [TestKMSGetKeyRotationStatus_APendingDeletionKeyReportsFalseUntilTheDeletionIsCancelled].
 func TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey(t *testing.T) {
 	t.Parallel()
 
@@ -197,8 +256,9 @@ func TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey(t *te
 					map[string]any{"KeyId": keyID}), &out)
 			assert.Empty(t, code, "GetKeyRotationStatus against %s", state.name)
 			assert.Equal(t, http.StatusOK, status, "GetKeyRotationStatus against %s", state.name)
-			assert.True(t, out.KeyRotationEnabled,
-				"the value set before the key changed state is still reported")
+			assert.Equal(t, state.reportsStoredFlag, out.KeyRotationEnabled,
+				"%s reports %v, per its own sentence on API_GetKeyRotationStatus",
+				state.name, state.reportsStoredFlag)
 		})
 	}
 }

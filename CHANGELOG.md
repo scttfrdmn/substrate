@@ -88,6 +88,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidKeyUsageException`'s *first* gloss bullet, a `KeyUsage` incompatible with the operation, is
   not modelled, and is tracked with `CreateKey`'s acceptance of any string as a `KeySpec` in #977.
 
+- **KMS's `NextRotationDate`, and the enable date it is derived from** (#973). `GetKeyRotationStatus`
+  answered two of its five published members, and the missing one a caller actually reads is the date of
+  the next rotation — the usual reason to ask for a rotation status at all. AWS defines it on
+  `API_EnableKeyRotation` rather than where it is reported ("the rotation period defines the number of
+  days after you enable automatic key rotation that AWS KMS will rotate your key material, and the
+  number of days between each automatic rotation thereafter"), so it is the enable date plus the period,
+  and substrate held only the period. `KMSKey` gained the enable date for this and nothing else. It is
+  reported as Unix seconds, matching what `DescribeKey` does with `DeletionDate`; AWS's page disagrees
+  with itself, typing the member `number` in its Response Syntax and rendering it as an ISO-8601 string
+  in its sample, so keeping one KMS timestamp convention is substrate's reading.
+
+  A second `EnableKeyRotation` overwrites the enable date, which AWS does not address — the parameter is
+  described only as able to "modify the rotation period". The alternative is what argues for it: a key
+  enabled with 2560 days and re-enabled with 90 would otherwise report a next rotation date roughly six
+  years in the past. `DisableKeyRotation` leaves both the period and the date alone, but neither is
+  reported while the *reported* rotation status is off, which is the honest-empty reading #827
+  established — answering a period beside a `false` status would describe a rotation that will not
+  happen. `OnDemandRotationStartDate` stays absent, and every read in the tests asserts that: it reports
+  an in-progress `RotateKeyOnDemand`, which substrate does not implement, so a zero timestamp there would
+  report a rotation nobody started. The operation's other half, the answer for a key pending deletion, is
+  under **Fixed**.
+
 ### Changed
 - **Kinesis's `ListTagsForStream` pages its tags** (#954). The operation publishes both halves of a
   cursor over the tag key and substrate read neither: `Limit` and `ExclusiveStartTagKey` were decoded by
@@ -252,6 +274,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **KMS enabled automatic rotation on keys AWS will never rotate** (#972). `EnableKeyRotation` and
+  `DisableKeyRotation` checked the period's range (#964) and the key state (#949) and never checked what
+  kind of key they were pointed at, so `EnableKeyRotation` on an RSA key answered `200` and wrote the
+  flag — after which `GetKeyRotationStatus` reported a rotation schedule for a key that cannot rotate.
+  AWS states the restriction twice on `API_EnableKeyRotation` and repeats it verbatim on the other two
+  rotation pages: "automatic key rotation is supported only on symmetric encryption KMS keys. You cannot
+  enable automatic rotation of asymmetric KMS keys, HMAC KMS keys, KMS keys with imported key material,
+  or KMS keys in a custom key store." Both operations now answer
+  `UnsupportedOperationException`/400 — the inadmissible-resource case whose gloss #964 declined to
+  borrow for an out-of-range number — and `DisableKeyRotation` refuses it too, on the same argument #949
+  rejected for the key state: the pages carry the identical sentence and the identical seven-error list.
+
+  The discriminator is `KeySpec`, not `KeyUsage`, so one equality test against `SYMMETRIC_DEFAULT` covers
+  every family AWS names and the two it implies, where a `KeyUsage` test would let an `ENCRYPT_DECRYPT`
+  RSA key through; the message names the spec it found, because the code is otherwise indistinguishable
+  from the AWS-managed-key refusal. The key type is answered **before** the key state, which AWS
+  publishes no precedence for — substrate's reading, argued from the remedy: a key state has one and a
+  key type has none, so answering the state first would send a caller with a disabled RSA key round a
+  loop that cannot terminate. `GetKeyRotationStatus` is deliberately **not** refused for such a key and a
+  test pins that, since the sentence forbids enabling rotation rather than asking about it and `false` is
+  a true answer for a key that will never rotate. Three of AWS's five restrictions stay unenforced
+  because they are unreachable rather than unguarded — imported key material, a custom key store and an
+  AWS managed key each need a member substrate does not model.
+
+- **KMS reported rotation as still on for a key pending deletion** (#973). `GetKeyRotationStatus`
+  reported the stored flag in every state, where `API_GetKeyRotationStatus` publishes the state's answer
+  in full: "while a KMS key is pending deletion, its key rotation status is `false` and AWS KMS does not
+  rotate the key material. If you cancel the deletion, the original key rotation status returns to
+  `true`." So a caller polling a key it had scheduled for deletion was told rotation was still on. This
+  was a wrong value rather than a missing refusal, which is the distinction that kept it out of #949 —
+  that issue read the same two sentences as a reason *not* to guard the operation and stopped there.
+
+  The second sentence forces the shape of the fix: the reported status is **derived** from the stored
+  flag and the key state at read time rather than written by `ScheduleKeyDeletion`, because there has to
+  be something left for `CancelKeyDeletion` to restore. An implementation that cleared the flag on the
+  way in would satisfy the first sentence and make the second unimplementable, and no state inspection
+  would tell the two apart — so the test walks enable, schedule, cancel and asserts the original date
+  comes back rather than a fresh one counted from the cancel. The rotation period and `NextRotationDate`
+  follow the reported status, so a key pending deletion reports neither. The member added by the same
+  issue is under **Added**.
+
 - **KMS `EnableKey` revived a key pending deletion in one call** (#968). Both operations delegated to a
   helper that resolved the key, refused only a missing one, and then assigned whatever state it was
   handed, so `EnableKey` against a key in `PendingDeletion` answered `200` and wrote `Enabled`. AWS
