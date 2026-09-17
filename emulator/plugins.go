@@ -40,6 +40,53 @@ func WithPluginAuth(auth *AuthController) RegisterPluginsOption {
 	}
 }
 
+// pluginWiring is the dependency set every plugin registration shares.
+//
+// It exists so that [RegisterDefaultPlugins] builds a [PluginConfig] in exactly one
+// place. Before it, each registration spelled its own config out, and fifteen of the
+// sixty-seven left "time_controller" out of the options map — so those plugins fell
+// back to a private wall-clock controller and ignored both the time control endpoints
+// and the clock a replay sets per event, inside an emulator whose whole claim is a
+// controlled clock (#904). The omission was invisible at each individual call site,
+// because the fallback is silent by design; routing every registration through one
+// method is what makes a new plugin unable to repeat it.
+type pluginWiring struct {
+	registry *PluginRegistry
+	state    StateManager
+	logger   Logger
+	tc       *TimeController
+}
+
+// register initializes plugin with the shared wiring plus extra, and adds it to the
+// registry. name appears in the error a failed initialization is wrapped with.
+//
+// extra is not mutated: its entries are copied into a fresh options map, so a caller
+// may reuse one map across registrations, and "time_controller" cannot be shadowed by
+// a stale entry from a previous plugin.
+func (w pluginWiring) register(ctx context.Context, plugin Plugin, name string, extra map[string]any) error {
+	options := make(map[string]any, len(extra)+1)
+	for k, v := range extra {
+		options[k] = v
+	}
+	// A nil controller is left out rather than stored. Every plugin reads the value
+	// with a type assertion to *TimeController, which *succeeds* for a typed nil and
+	// hands the plugin a clock that panics on its first call — where an absent key
+	// takes the documented fallback instead. The Cost Explorer registration guarded
+	// this individually before the wiring was shared.
+	if w.tc != nil {
+		options["time_controller"] = w.tc
+	}
+	if err := plugin.Initialize(ctx, PluginConfig{
+		State:   w.state,
+		Logger:  w.logger,
+		Options: options,
+	}); err != nil {
+		return fmt.Errorf("initialize %s plugin: %w", name, err)
+	}
+	w.registry.Register(plugin)
+	return nil
+}
+
 // RegisterDefaultPlugins initializes and registers all built-in service plugins
 // into registry. This function is called by both the server binary and
 // [StartTestServer] so the same plugin set is always available.
@@ -49,6 +96,9 @@ func WithPluginAuth(auth *AuthController) RegisterPluginsOption {
 // Docker execution, RDS container engine).
 // Adding a plugin here also requires a metadata entry in cmd/gen-service-reference
 // (enforced by `make docs-reference-check` in CI).
+//
+// Every registration goes through [pluginWiring.register], which supplies the
+// simulated clock; a plugin needing more than that passes it as extra options.
 //
 // opts carry the dependencies only some callers have; see [WithPluginAuth].
 func RegisterDefaultPlugins(
@@ -81,711 +131,126 @@ func RegisterDefaultPlugins(
 	if cfg != nil && cfg.RDS.Engine == "container" {
 		rdsExec = NewRDSExecutor(logger)
 	}
-	iamPlugin := &IAMPlugin{}
-	if err := iamPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize iam plugin: %w", err)
-	}
-	registry.Register(iamPlugin)
 
-	stsPlugin := &STSPlugin{}
-	if err := stsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize sts plugin: %w", err)
-	}
-	registry.Register(stsPlugin)
+	w := pluginWiring{registry: registry, state: state, logger: logger, tc: tc}
 
-	lambdaPlugin := &LambdaPlugin{}
-	lambdaOpts := map[string]any{
-		"time_controller": tc,
-		"registry":        registry,
-	}
+	// registryOpt is the options map for a plugin that dispatches into the registry
+	// rather than only serving its own requests.
+	registryOpt := map[string]any{"registry": registry}
+
+	lambdaOpts := map[string]any{"registry": registry}
 	if lambdaExec != nil {
 		lambdaOpts["lambda_exec"] = lambdaExec
 	}
-	if err := lambdaPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: lambdaOpts,
-	}); err != nil {
-		return fmt.Errorf("initialize lambda plugin: %w", err)
-	}
-	registry.Register(lambdaPlugin)
 
-	sqsPlugin := &SQSPlugin{}
-	if err := sqsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize sqs plugin: %w", err)
-	}
-	registry.Register(sqsPlugin)
-
-	dynamodbPlugin := &DynamoDBPlugin{}
-	if err := dynamodbPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize dynamodb plugin: %w", err)
-	}
-	registry.Register(dynamodbPlugin)
-
-	ec2Plugin := &EC2Plugin{}
-	ec2Opts := map[string]any{"time_controller": tc}
+	ec2Opts := map[string]any{}
 	if settings.auth != nil {
 		// CreateFleet launches through EC2's own RunInstances path rather than through
 		// the server, so the fleet's launches are authorized by the plugin itself.
 		ec2Opts["auth_controller"] = settings.auth
 	}
-	if err := ec2Plugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: ec2Opts,
-	}); err != nil {
-		return fmt.Errorf("initialize ec2 plugin: %w", err)
-	}
-	registry.Register(ec2Plugin)
-
-	s3Plugin := &S3Plugin{}
-	if err := s3Plugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-		Options: map[string]any{
-			"time_controller": tc,
-			"registry":        registry,
-		},
-	}); err != nil {
-		return fmt.Errorf("initialize s3 plugin: %w", err)
-	}
-	registry.Register(s3Plugin)
 
 	// The CloudFormation plugin adapts the StackDeployer that [Client] already
 	// drives in process, so it needs the registry to deploy each template resource
 	// into. It is registered after S3/IAM/Lambda only for readability: the registry
 	// is captured as a pointer and read at request time, so ordering does not
 	// affect which resource types a template can create.
-	cfnPlugin := &CloudFormationPlugin{}
-	cfnOpts := map[string]any{
-		"time_controller": tc,
-		"registry":        registry,
-	}
+	cfnOpts := map[string]any{"registry": registry}
 	if store != nil {
 		cfnOpts["event_store"] = store
 	}
 	if settings.auth != nil {
 		cfnOpts["auth_controller"] = settings.auth
 	}
-	if err := cfnPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: cfnOpts,
-	}); err != nil {
-		return fmt.Errorf("initialize cloudformation plugin: %w", err)
-	}
-	registry.Register(cfnPlugin)
 
-	elbPlugin := &ELBPlugin{}
-	if err := elbPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize elb plugin: %w", err)
-	}
-	registry.Register(elbPlugin)
-
-	r53Plugin := &Route53Plugin{}
-	if err := r53Plugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize route53 plugin: %w", err)
-	}
-	registry.Register(r53Plugin)
-
-	taggingPlugin := &TaggingPlugin{}
-	if err := taggingPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize tagging plugin: %w", err)
-	}
-	registry.Register(taggingPlugin)
-
-	snsPlugin := &SNSPlugin{}
-	if err := snsPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-		Options: map[string]any{
-			"time_controller": tc,
-			"registry":        registry,
-		},
-	}); err != nil {
-		return fmt.Errorf("initialize sns plugin: %w", err)
-	}
-	registry.Register(snsPlugin)
-
-	smPlugin := &SecretsManagerPlugin{}
-	if err := smPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize secretsmanager plugin: %w", err)
-	}
-	registry.Register(smPlugin)
-
-	ssmPlugin := &SSMPlugin{}
-	if err := ssmPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize ssm plugin: %w", err)
-	}
-	registry.Register(ssmPlugin)
-
-	kmsPlugin := &KMSPlugin{}
-	if err := kmsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize kms plugin: %w", err)
-	}
-	registry.Register(kmsPlugin)
-
-	cwLogsPlugin := &CloudWatchLogsPlugin{}
-	if err := cwLogsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize cloudwatchlogs plugin: %w", err)
-	}
-	registry.Register(cwLogsPlugin)
-
-	ebPlugin := &EventBridgePlugin{}
-	if err := ebPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize eventbridge plugin: %w", err)
-	}
-	registry.Register(ebPlugin)
-
-	accountPlugin := &AccountPlugin{}
-	if err := accountPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize account plugin: %w", err)
-	}
-	registry.Register(accountPlugin)
-
-	configServicePlugin := &ConfigServicePlugin{}
-	if err := configServicePlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize config plugin: %w", err)
-	}
-	registry.Register(configServicePlugin)
-
-	schedulerPlugin := &SchedulerPlugin{}
-	if err := schedulerPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize scheduler plugin: %w", err)
-	}
-	registry.Register(schedulerPlugin)
-
-	cwPlugin := &CloudWatchPlugin{}
-	if err := cwPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize cloudwatch plugin: %w", err)
-	}
-	registry.Register(cwPlugin)
-
-	acmPlugin := &ACMPlugin{}
-	if err := acmPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize acm plugin: %w", err)
-	}
-	registry.Register(acmPlugin)
-
-	apigwPlugin := &APIGatewayPlugin{}
-	if err := apigwPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize apigateway plugin: %w", err)
-	}
-	registry.Register(apigwPlugin)
-
-	apigwv2Plugin := &APIGatewayV2Plugin{}
-	if err := apigwv2Plugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize apigatewayv2 plugin: %w", err)
-	}
-	registry.Register(apigwv2Plugin)
-
-	proxyPlugin := &APIGatewayProxyPlugin{}
-	if err := proxyPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-		Options: map[string]any{
-			"registry": registry,
-		},
-	}); err != nil {
-		return fmt.Errorf("initialize apigateway-proxy plugin: %w", err)
-	}
-	registry.Register(proxyPlugin)
-
-	sfnPlugin := &StepFunctionsPlugin{}
-	if err := sfnPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-		Options: map[string]any{
-			"time_controller": tc,
-			"registry":        registry,
-		},
-	}); err != nil {
-		return fmt.Errorf("initialize stepfunctions plugin: %w", err)
-	}
-	registry.Register(sfnPlugin)
-
-	ecrPlugin := &ECRPlugin{}
-	if err := ecrPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize ecr plugin: %w", err)
-	}
-	registry.Register(ecrPlugin)
-
-	ecsPlugin := &ECSPlugin{}
-	if err := ecsPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize ecs plugin: %w", err)
-	}
-	registry.Register(ecsPlugin)
-
-	cognitoIDPPlugin := &CognitoIDPPlugin{}
-	if err := cognitoIDPPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize cognito-idp plugin: %w", err)
-	}
-	registry.Register(cognitoIDPPlugin)
-
-	cognitoIdentityPlugin := &CognitoIdentityPlugin{}
-	if err := cognitoIdentityPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize cognito-identity plugin: %w", err)
-	}
-	registry.Register(cognitoIdentityPlugin)
-
-	kinesisPlugin := &KinesisPlugin{}
-	if err := kinesisPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize kinesis plugin: %w", err)
-	}
-	registry.Register(kinesisPlugin)
-
-	cfPlugin := &CloudFrontPlugin{}
-	if err := cfPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize cloudfront plugin: %w", err)
-	}
-	registry.Register(cfPlugin)
-
-	rdsPlugin := &RDSPlugin{}
-	rdsOpts := map[string]any{"time_controller": tc}
+	rdsOpts := map[string]any{}
 	if rdsExec != nil {
 		rdsOpts["rds_executor"] = rdsExec
 	}
-	if err := rdsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: rdsOpts,
-	}); err != nil {
-		return fmt.Errorf("initialize rds plugin: %w", err)
-	}
-	registry.Register(rdsPlugin)
 
-	elasticachePlugin := &ElastiCachePlugin{}
-	if err := elasticachePlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize elasticache plugin: %w", err)
-	}
-	registry.Register(elasticachePlugin)
-
-	efsPlugin := &EFSPlugin{}
-	if err := efsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize efs plugin: %w", err)
-	}
-	registry.Register(efsPlugin)
-
-	gluePlugin := &GluePlugin{}
-	if err := gluePlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize glue plugin: %w", err)
-	}
-	registry.Register(gluePlugin)
-
-	cePlugin := &CEPlugin{}
 	ceOpts := map[string]any{}
 	if store != nil {
 		ceOpts["event_store"] = store
 	}
-	if tc != nil {
-		ceOpts["time_controller"] = tc
-	}
-	if err := cePlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: ceOpts,
-	}); err != nil {
-		return fmt.Errorf("initialize ce plugin: %w", err)
-	}
-	registry.Register(cePlugin)
 
-	budgetsPlugin := &BudgetsPlugin{}
-	if err := budgetsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize budgets plugin: %w", err)
+	registrations := []struct {
+		plugin Plugin
+		name   string
+		extra  map[string]any
+	}{
+		{&IAMPlugin{}, "iam", nil},
+		{&STSPlugin{}, "sts", nil},
+		{&LambdaPlugin{}, "lambda", lambdaOpts},
+		{&SQSPlugin{}, "sqs", nil},
+		{&DynamoDBPlugin{}, "dynamodb", nil},
+		{&EC2Plugin{}, "ec2", ec2Opts},
+		{&S3Plugin{}, "s3", registryOpt},
+		{&CloudFormationPlugin{}, "cloudformation", cfnOpts},
+		{&ELBPlugin{}, "elb", nil},
+		{&Route53Plugin{}, "route53", nil},
+		{&TaggingPlugin{}, "tagging", nil},
+		{&SNSPlugin{}, "sns", registryOpt},
+		{&SecretsManagerPlugin{}, "secretsmanager", nil},
+		{&SSMPlugin{}, "ssm", nil},
+		{&KMSPlugin{}, "kms", nil},
+		{&CloudWatchLogsPlugin{}, "cloudwatchlogs", nil},
+		{&EventBridgePlugin{}, "eventbridge", nil},
+		{&AccountPlugin{}, "account", nil},
+		{&ConfigServicePlugin{}, "config", nil},
+		{&SchedulerPlugin{}, "scheduler", nil},
+		{&CloudWatchPlugin{}, "cloudwatch", nil},
+		{&ACMPlugin{}, "acm", nil},
+		{&APIGatewayPlugin{}, "apigateway", nil},
+		{&APIGatewayV2Plugin{}, "apigatewayv2", nil},
+		{&APIGatewayProxyPlugin{}, "apigateway-proxy", registryOpt},
+		{&StepFunctionsPlugin{}, "stepfunctions", registryOpt},
+		{&ECRPlugin{}, "ecr", nil},
+		{&ECSPlugin{}, "ecs", nil},
+		{&CognitoIDPPlugin{}, "cognito-idp", nil},
+		{&CognitoIdentityPlugin{}, "cognito-identity", nil},
+		{&KinesisPlugin{}, "kinesis", nil},
+		{&CloudFrontPlugin{}, "cloudfront", nil},
+		{&RDSPlugin{}, "rds", rdsOpts},
+		{&ElastiCachePlugin{}, "elasticache", nil},
+		{&EFSPlugin{}, "efs", nil},
+		{&GluePlugin{}, "glue", nil},
+		{&CEPlugin{}, "ce", ceOpts},
+		{&BudgetsPlugin{}, "budgets", nil},
+		{&HealthPlugin{}, "health", nil},
+		{&PriceListPlugin{}, "pricing", nil},
+		{&OrganizationsPlugin{}, "organizations", nil},
+		{&SESv2Plugin{}, "sesv2", nil},
+		{&FirehosePlugin{}, "firehose", nil},
+		{&ServiceQuotasPlugin{}, "servicequotas", nil},
+		{&AppSyncPlugin{}, "appsync", nil},
+		{&MSKPlugin{}, "msk", nil},
+		{&FSxPlugin{}, "fsx", nil},
+		{&BatchPlugin{}, "batch", nil},
+		{&SageMakerPlugin{}, "sagemaker", nil},
+		{&EMRServerlessPlugin{}, "emrserverless", nil},
+		{&OmicsPlugin{}, "omics", nil},
+		{&QuickSightPlugin{}, "quicksight", nil},
+		{&BedrockRuntimePlugin{}, "bedrock-runtime", nil},
+		{&AthenaPlugin{}, "athena", nil},
+		{&OpenSearchPlugin{}, "opensearch", nil},
+		{&WAFv2Plugin{}, "wafv2", nil},
+		{&CloudTrailPlugin{}, "cloudtrail", nil},
+		{&CodeBuildPlugin{}, "codebuild", nil},
+		{&CodePipelinePlugin{}, "codepipeline", nil},
+		{&CodeDeployPlugin{}, "codedeploy", nil},
+		{&BackupPlugin{}, "backup", nil},
+		{&TransferPlugin{}, "transfer", nil},
+		{&SSOPlugin{}, "sso", nil},
+		{&RAMPlugin{}, "ram", nil},
+		{&RedshiftPlugin{}, "redshift", nil},
+		{&RedshiftDataPlugin{}, "redshift-data", nil},
+		{&TimestreamPlugin{}, "timestream", nil},
 	}
-	registry.Register(budgetsPlugin)
-
-	healthPlugin := &HealthPlugin{}
-	if err := healthPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize health plugin: %w", err)
+	for _, r := range registrations {
+		if err := w.register(ctx, r.plugin, r.name, r.extra); err != nil {
+			return err
+		}
 	}
-	registry.Register(healthPlugin)
-
-	priceListPlugin := &PriceListPlugin{}
-	if err := priceListPlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize pricing plugin: %w", err)
-	}
-	registry.Register(priceListPlugin)
-
-	orgsPlugin := &OrganizationsPlugin{}
-	if err := orgsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize organizations plugin: %w", err)
-	}
-	registry.Register(orgsPlugin)
-
-	sesv2Plugin := &SESv2Plugin{}
-	if err := sesv2Plugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize sesv2 plugin: %w", err)
-	}
-	registry.Register(sesv2Plugin)
-
-	firehosePlugin := &FirehosePlugin{}
-	if err := firehosePlugin.Initialize(ctx, PluginConfig{
-		State:  state,
-		Logger: logger,
-	}); err != nil {
-		return fmt.Errorf("initialize firehose plugin: %w", err)
-	}
-	registry.Register(firehosePlugin)
-
-	sqPlugin := &ServiceQuotasPlugin{}
-	if err := sqPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize servicequotas plugin: %w", err)
-	}
-	registry.Register(sqPlugin)
-
-	appSyncPlugin := &AppSyncPlugin{}
-	if err := appSyncPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize appsync plugin: %w", err)
-	}
-	registry.Register(appSyncPlugin)
-
-	mskPlugin := &MSKPlugin{}
-	if err := mskPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize msk plugin: %w", err)
-	}
-	registry.Register(mskPlugin)
-
-	fsxPlugin := &FSxPlugin{}
-	if err := fsxPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize fsx plugin: %w", err)
-	}
-	registry.Register(fsxPlugin)
-
-	batchPlugin := &BatchPlugin{}
-	if err := batchPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize batch plugin: %w", err)
-	}
-	registry.Register(batchPlugin)
-
-	sageMakerPlugin := &SageMakerPlugin{}
-	if err := sageMakerPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize sagemaker plugin: %w", err)
-	}
-	registry.Register(sageMakerPlugin)
-
-	emrServerlessPlugin := &EMRServerlessPlugin{}
-	if err := emrServerlessPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize emrserverless plugin: %w", err)
-	}
-	registry.Register(emrServerlessPlugin)
-
-	omicsPlugin := &OmicsPlugin{}
-	if err := omicsPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize omics plugin: %w", err)
-	}
-	registry.Register(omicsPlugin)
-
-	quickSightPlugin := &QuickSightPlugin{}
-	if err := quickSightPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize quicksight plugin: %w", err)
-	}
-	registry.Register(quickSightPlugin)
-
-	bedrockRuntimePlugin := &BedrockRuntimePlugin{}
-	if err := bedrockRuntimePlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize bedrock-runtime plugin: %w", err)
-	}
-	registry.Register(bedrockRuntimePlugin)
-
-	athenaPlugin := &AthenaPlugin{}
-	if err := athenaPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize athena plugin: %w", err)
-	}
-	registry.Register(athenaPlugin)
-
-	openSearchPlugin := &OpenSearchPlugin{}
-	if err := openSearchPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize opensearch plugin: %w", err)
-	}
-	registry.Register(openSearchPlugin)
-
-	wafv2Plugin := &WAFv2Plugin{}
-	if err := wafv2Plugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize wafv2 plugin: %w", err)
-	}
-	registry.Register(wafv2Plugin)
-
-	cloudTrailPlugin := &CloudTrailPlugin{}
-	if err := cloudTrailPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize cloudtrail plugin: %w", err)
-	}
-	registry.Register(cloudTrailPlugin)
-
-	codebuildPlugin := &CodeBuildPlugin{}
-	if err := codebuildPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize codebuild plugin: %w", err)
-	}
-	registry.Register(codebuildPlugin)
-
-	codepipelinePlugin := &CodePipelinePlugin{}
-	if err := codepipelinePlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize codepipeline plugin: %w", err)
-	}
-	registry.Register(codepipelinePlugin)
-
-	codedeployPlugin := &CodeDeployPlugin{}
-	if err := codedeployPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize codedeploy plugin: %w", err)
-	}
-	registry.Register(codedeployPlugin)
-
-	backupPlugin := &BackupPlugin{}
-	if err := backupPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize backup plugin: %w", err)
-	}
-	registry.Register(backupPlugin)
-
-	transferPlugin := &TransferPlugin{}
-	if err := transferPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize transfer plugin: %w", err)
-	}
-	registry.Register(transferPlugin)
-
-	ssoPlugin := &SSOPlugin{}
-	if err := ssoPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize sso plugin: %w", err)
-	}
-	registry.Register(ssoPlugin)
-
-	ramPlugin := &RAMPlugin{}
-	if err := ramPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize ram plugin: %w", err)
-	}
-	registry.Register(ramPlugin)
-
-	redshiftPlugin := &RedshiftPlugin{}
-	if err := redshiftPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize redshift plugin: %w", err)
-	}
-	registry.Register(redshiftPlugin)
-
-	redshiftDataPlugin := &RedshiftDataPlugin{}
-	if err := redshiftDataPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize redshift-data plugin: %w", err)
-	}
-	registry.Register(redshiftDataPlugin)
-
-	timestreamPlugin := &TimestreamPlugin{}
-	if err := timestreamPlugin.Initialize(ctx, PluginConfig{
-		State:   state,
-		Logger:  logger,
-		Options: map[string]any{"time_controller": tc},
-	}); err != nil {
-		return fmt.Errorf("initialize timestream plugin: %w", err)
-	}
-	registry.Register(timestreamPlugin)
 
 	return nil
 }

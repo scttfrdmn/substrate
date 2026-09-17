@@ -324,7 +324,7 @@ func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		shardID = stream.Shards[0].ShardID
 	}
 
-	seqNo, err := generateKinesisSeqNo()
+	seqNo, err := generateKinesisSeqNo(p.tc.Now())
 	if err != nil {
 		return nil, fmt.Errorf("kinesis putRecord generateSeqNo: %w", err)
 	}
@@ -385,7 +385,7 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			shardID = stream.Shards[shardIdx].ShardID
 		}
 
-		seqNo, seqErr := generateKinesisSeqNo()
+		seqNo, seqErr := generateKinesisSeqNo(p.tc.Now())
 		if seqErr != nil {
 			return nil, fmt.Errorf("kinesis putRecords generateSeqNo: %w", seqErr)
 		}
@@ -1053,13 +1053,23 @@ func generateKinesisShards(n int) []KinesisShard {
 	return shards
 }
 
-// generateKinesisSeqNo generates a unique Kinesis sequence number.
-func generateKinesisSeqNo() (string, error) {
+// generateKinesisSeqNo generates a unique Kinesis sequence number as of now.
+//
+// The clock half is a parameter rather than a time.Now() call because the function has
+// no receiver and so could not reach the plugin's simulated clock — and a
+// SequenceNumber is observable, reported by PutRecord and PutRecords and echoed by
+// GetRecords, so it ignored both the time-control endpoints and the per-event clock a
+// replay sets (#904). Wiring the controller into the plugin does not reach a
+// package-level function, which is why this one takes the time it stamps.
+//
+// The random half is still crypto/rand, so the identifier as a whole is not yet
+// reproducible across two runs of one input; that half is #856's.
+func generateKinesisSeqNo(now time.Time) (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(99999999))
 	if err != nil {
 		return "", fmt.Errorf("generateKinesisSeqNo rand: %w", err)
 	}
-	return fmt.Sprintf("%d-%08d", time.Now().UnixNano(), n.Int64()), nil
+	return fmt.Sprintf("%d-%08d", now.UnixNano(), n.Int64()), nil
 }
 
 // kinesisIterator is the internal structure encoded into a shard iterator token.
