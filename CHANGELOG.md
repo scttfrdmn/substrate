@@ -58,6 +58,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why it ships here rather than as a follow-up.
 
 ### Changed
+- **Kinesis's `ListTagsForStream` pages its tags** (#954). The operation publishes both halves of a
+  cursor over the tag key and substrate read neither: `Limit` and `ExclusiveStartTagKey` were decoded by
+  nothing and `HasMoreTags` was the literal `false` on every call, so a caller's paging loop was told
+  there was nothing more by a response that had never looked — the tag-cursor member of the same class as
+  a token substrate never issued (#915). `Limit` now caps a page and a value outside the published 1–50
+  range answers `InvalidArgumentException`/400, the operation's own published error, whose description is
+  "a specified parameter exceeds its restrictions"; `ExclusiveStartTagKey` selects the tags whose keys
+  sort *strictly* after it, so a caller passing back the last key it received advances rather than
+  repeating it, and a value longer than the published 128-character maximum is refused under the same
+  code. #946's sort was the prerequisite rather than a separate nicety: a cursor paged over Go's map
+  order skips and repeats. The walk order is still substrate's reading — AWS names none and its own
+  sample response is unsorted — and the surrounding handlers' `InvalidParameterException`, which Kinesis
+  does not publish at all, is left alone as #950's.
+
+  `HasMoreTags` is `true` exactly when tags were withheld, which resolves two AWS sentences that do not
+  agree. `Limit`'s says `HasMoreTags` is set "if this number is less than the total number of tags
+  associated with the stream"; read literally, a walk at `Limit` 2 over six tags would report `true` on
+  the last page too, and the loop AWS itself describes — "to list additional tags, set
+  `ExclusiveStartTagKey` to the last key in the response" — would never terminate. `HasMoreTags`' own
+  description, "if set to true, more tags are available", is the coherent one, so it reports whether
+  anything remains after this page. Recorded and not enforced: the response's `Tags` array publishes a
+  maximum of 200 items and `AddTagsToStream`'s map the same 200, while both operations' prose caps a
+  stream at 50 tags, exactly `Limit`'s maximum — substrate enforces no tag quota, so the cursor pages
+  whatever is stored.
+
+  **Compatibility:** a caller that received every tag regardless of `Limit` now receives at most `Limit`
+  of them, and `HasMoreTags` can now be `true`. A caller that sent a `Limit` outside 1–50, or an
+  `ExclusiveStartTagKey` longer than 128 characters, is now refused where it used to get every tag. A
+  caller sending neither parameter sees no change.
+
 - **`PutSecretValue`, `UpdateSecret`, `TagResource` and `UntagResource` refuse a secret scheduled for
   deletion** (#956). Each of the four pages publishes `InvalidRequestException`/400 with "The secret is
   scheduled for deletion." as the first of its three possible causes, and all four accepted such a secret:
