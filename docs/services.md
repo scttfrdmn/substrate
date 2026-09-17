@@ -12885,11 +12885,18 @@ which consumes the public offer index to cost simulated usage (the
 `/v1/pricing/refresh`, `/v1/pricing/lookup`, `/v1/pricing/discounts` and
 `/v1/pricing/credits` control endpoints, and the `substrate pricing` command).
 
-The offer corpus is seven Amazon S3 SKUs copied verbatim from the live
-`AmazonS3/current/us-east-1/index.json` offer file (version `20260728131000`).
-It is small on purpose: each SKU exists to reproduce a response shape that
-callers get wrong, so a consumer's parser is tested against real awkwardness
-rather than a tidied-up fixture.
+The offer corpus is 39 SKUs copied verbatim from the live offer files: seven
+Amazon S3 SKUs from `AmazonS3/current/us-east-1/index.json` (version
+`20260728131000`) and 32 Amazon EC2 SKUs from
+`AmazonEC2/current/{us-east-1,us-west-2,eu-west-1}/index.json` (version
+`20260910195514`). It is small on purpose: each SKU exists to reproduce a
+response shape that callers get wrong, so a consumer's parser is tested against
+real awkwardness rather than a tidied-up fixture.
+
+Each document reports **its own service's** offer-file revision in `version` and
+`publicationDate`, so an EC2 document and an S3 document from one Substrate build
+disagree on both — as the real API's do, because the two services publish on
+their own schedules.
 
 ### Supported operations
 
@@ -12920,7 +12927,9 @@ the live offer file.
 - **`productFamily` is absent from most products** — 315 of the 381 in the real
   S3 offer file omit it. A filter on `productFamily` therefore misses the
   majority of SKUs. `usagetype` is the attribute that is reliably present and
-  1:1 with a SKU.
+  1:1 with a SKU **in the S3 offer file**; it is neither in EC2's, where four of
+  the corpus SKUs share `BoxUsage:m5.xlarge`. Keying on `usagetype` relies on an
+  S3 accident rather than a Price List rule.
 - **`TimedStorage-ByteHrs` carries three `priceDimensions`**, the last with
   `"endRange": "Inf"`. Reading only the first reports the first-50 TB rate as if
   it were the only rate.
@@ -12937,6 +12946,68 @@ the live offer file.
 An unknown `ServiceCode` is a `NotFoundException` rather than an empty
 `PriceList`. Substrate's corpus is far smaller than AWS's catalog, and a loud
 error is better than an empty result that reads as "AWS has no such price".
+
+### The AmazonEC2 corpus
+
+Nine instance types (`t3.micro`, `m5.xlarge`, `g4dn.xlarge`, `g5.2xlarge`,
+`g6.xlarge`, `inf2.xlarge`, `p4d.24xlarge`, `p5.48xlarge`, `trn1.32xlarge`) in
+three regions, plus seven `m5.xlarge` variants that differ from the nominal row in
+exactly one attribute, plus the free-tier pseudo-product. Every rate, SKU, rate
+code, description and attribute value is the offer file's own; none is derived
+from another rate, because a plausible-looking rate is worse than no rate — a
+consumer computing a cost from it would be wrong with no way to notice.
+
+The traps, each measured in the live files rather than reasoned about:
+
+- **The documented seven-filter recipe does not isolate one rate.** Filtering
+  `regionCode`, `instanceType`, `operatingSystem`, `tenancy`, `preInstalledSw`,
+  `capacitystatus` and `marketoption` returns **three** SKUs for a Windows
+  `m5.xlarge` in `us-east-1`. All three share one `usagetype` and differ only in
+  `licenseModel` and `operation`: $0.376 with a license, $0.192 without one and
+  $0.192 BYOL. A caller that takes `PriceList[0]` picks one of the three
+  arbitrarily. `licenseModel` is the eighth discriminator.
+- **`marketoption` matters at a single instance type.** `p5.48xlarge` publishes an
+  on-demand rate of $55.04 and a Capacity Block rate of **$0.00**. Omitting
+  `marketoption` can report a free p5.
+- **`capacitystatus` and `tenancy` change the `usagetype` token, not only the
+  price**: `UnusedBox:`, `DedicatedUsage:`. A caller matching on the prefix
+  `BoxUsage:` silently misses both.
+- **The `usagetype` Region prefix is not derivable from the Region code.**
+  `us-east-1` has none, `us-west-2` uses `USW2-`, and `eu-west-1` uses the legacy
+  `EU-`, not `EUW1-`.
+- **Two Regions can agree on nine rates and disagree on the tenth.** `us-west-2`
+  is byte-identical to `us-east-1` for every type here except `p4d.24xlarge`,
+  which is `21.9576420000` in one and `21.9576400000` in the other.
+- **`eu-west-1` is a per-*family* premium, not one Region multiplier**:
+  `p4d` ≈1.080×, `inf2` exactly 1.250×, `m5` ≈1.115×, `t3` ≈1.096×. Deriving one
+  Region's price from another's would be wrong by up to 15%.
+- **A Region can publish no rate at all.** `eu-west-1` publishes no `g6`, `p5` or
+  `trn1` compute product, so an empty `PriceList` there is a real observation
+  about the Region.
+- **The free-tier pseudo-product falsifies five invariants.** It carries no
+  `instanceType`, its `endRange` is `"750"` rather than `"Inf"`, its
+  `offerTermCode` is `A429C66SYZ` rather than the global on-demand code, its
+  `termAttributes` is non-empty (`"Restriction": "Limited SKU Usage"`) and its
+  `appliesTo` lists 170 SKUs where every other on-demand dimension's is empty. Its
+  `location` is `"Any"` and its `regionCode` is the **empty string**, so a
+  `regionCode` filter never selects it.
+- **`Compute Instance` excludes bare metal.** Bare-metal instances are a separate
+  `productFamily`, `Compute Instance (bare metal)`, so a `productFamily=Compute
+  Instance` filter does not see a `.metal` type.
+
+Two things the corpus is deliberately not:
+
+- **It is not EC2's catalog.** `GetProducts` serves this corpus; EC2's
+  `DescribeInstanceTypes` serves its own instance-type data (#896). A type present
+  in one is not thereby present in the other, and the two are not generated from a
+  shared source — so a rate here is not a claim that the type can be launched.
+- **It is not exhaustive, and an absence is not a statement.** `us-east-1` alone
+  publishes 107,022 compute-instance products. An instance type absent from the
+  corpus returns an empty `PriceList`, which reads the same as a Region that
+  genuinely does not publish it. Where the absence *is* the observation — the three
+  `eu-west-1` types above — it is because the real file omits them too. `trn2`
+  appears nowhere at any rate for the same reason: a real query returns nothing for
+  it in all three Regions.
 
 ### Endpoint regions — a deliberate divergence
 

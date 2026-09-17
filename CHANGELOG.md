@@ -8,6 +8,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Price List `GetProducts` serves an AmazonEC2 offer corpus — 32 SKUs copied verbatim from three
+  real offer files** (#894). `AmazonEC2` was not in the corpus at all, so a consumer that prices its
+  own instance usage at runtime got `NotFoundException` from substrate and had to be tested against a
+  hand-maintained table instead — which is exactly the failure mode that filed the Price List issue in
+  the first place, where the reporter's table was 10× wrong on one S3 rate and 21× wrong on another.
+
+  Nine instance types (`t3.micro`, `m5.xlarge`, `g4dn.xlarge`, `g5.2xlarge`, `g6.xlarge`,
+  `inf2.xlarge`, `p4d.24xlarge`, `p5.48xlarge`, `trn1.32xlarge`) in `us-east-1`, `us-west-2` and
+  `eu-west-1`, plus seven `m5.xlarge` variants each differing from the nominal row in exactly one
+  attribute, plus the free-tier pseudo-product. Every SKU, rate code, description, attribute value and
+  ten-decimal price string is the offer file's own; **no rate is derived from another rate**, because a
+  plausible-looking rate is worse than no rate — a consumer computing a cost from it would be wrong
+  and have no way to notice. The extraction was streamed out of the three files (480 MB each) and every
+  rate independently reproduces the measured notes.
+
+  **Three of the traps the corpus now reproduces were discovered in the data rather than assumed.**
+  First, the seven-filter recipe for "one on-demand rate" (`regionCode`, `instanceType`,
+  `operatingSystem`, `tenancy`, `preInstalledSw`, `capacitystatus`, `marketoption`) returns **three**
+  SKUs for a Windows `m5.xlarge`: they share one `usagetype` and differ only in `licenseModel` and
+  `operation` — $0.376 with a license, $0.192 without one, $0.192 BYOL — so a caller taking
+  `PriceList[0]` picks one arbitrarily. Second, **`usagetype` is not 1:1 with a SKU in EC2's file**,
+  where four corpus SKUs share `BoxUsage:m5.xlarge`; the S3 corpus's own preamble called it "reliably
+  present and 1:1", a claim that is true of S3 and not of the Price List API, and it is now scoped to
+  S3 in both the fixture and `docs/services.md`. Third, **`marketoption` alone separates a $55.04
+  `p5.48xlarge` from a $0.00 Capacity Block one**, so a query that omits it can report a free p5.
+
+  Also reproduced, each verified in the files: `capacitystatus` and `tenancy` change the `usagetype`
+  token (`UnusedBox:`, `DedicatedUsage:`) rather than only the price, so a caller keyed on the
+  `BoxUsage:` prefix misses them; the `usagetype` Region prefix is not derivable from the Region code
+  (`us-east-1` none, `us-west-2` `USW2-`, `eu-west-1` the legacy `EU-`); `us-west-2` is byte-identical
+  to `us-east-1` on every rate here **except** `p4d.24xlarge`, `21.9576420000` against
+  `21.9576400000`; `eu-west-1` is a per-*family* premium rather than one Region multiplier (`p4d`
+  ≈1.080×, `inf2` exactly 1.250×, `m5` ≈1.115×, `t3` ≈1.096×), so deriving one Region's price from
+  another's would be wrong by up to 15%; and `eu-west-1` publishes no `g6`, `p5` or `trn1` compute
+  product at all, so an empty `PriceList` there is a real observation about the Region. `trn2` appears
+  at no rate in any Region for the same reason.
+
+  The free-tier pseudo-product is carried because it falsifies five invariants a parser written against
+  the nominal rows would assume: no `instanceType` on a `Compute Instance` product, `endRange` `"750"`
+  rather than `"Inf"`, an `offerTermCode` that is not the global on-demand code, a non-empty
+  `termAttributes`, and an `appliesTo` listing 170 SKUs where every other on-demand dimension's is
+  empty. Its `regionCode` is the empty string, so a Region-scoped query never selects it — which is
+  why a caller filtering by Region never sees its $0.00 rate.
+
+  A `PriceList` document now reports **its own service's** offer-file revision in `version` and
+  `publicationDate` rather than one global pair, so an EC2 document and an S3 document from one build
+  disagree on both, as the real API's do. `pricingCorpusEntry` gained `offerTermCode` and
+  `termAttributes` to carry the free-tier term, both defaulting to what AWS emits everywhere else.
+
+  Two boundaries are stated rather than blurred: the corpus is **not** EC2's instance-type catalog
+  (`DescribeInstanceTypes` has its own data, #896 — a rate here is not a claim the type can be
+  launched), and it is **not** exhaustive, so an absent type's empty `PriceList` reads the same as a
+  Region that genuinely does not publish it. `DescribeServices` now reports `AmazonEC2` ahead of
+  `AmazonS3`, with 41 attribute names that are exactly the union of what the corpus SKUs carry, so the
+  documented discovery path (`DescribeServices` → `GetAttributeValues` → a `GetProducts` filter) never
+  reaches an attribute that filters to nothing.
 - **EC2 On-Demand Capacity Reservations — `CreateCapacityReservation`,
   `DescribeCapacityReservations` and `CancelCapacityReservation`, with the outcome seedable**
   (#891). All three reached the dispatcher's default arm and answered `InvalidAction`, so a consumer

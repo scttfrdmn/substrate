@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -713,34 +714,45 @@ func TestPricingDescribeServices(t *testing.T) {
 	if !ok || len(services) == 0 {
 		t.Fatalf("Services = %v, want a non-empty list", out["Services"])
 	}
-	svc, ok := services[0].(map[string]any)
-	if !ok {
-		t.Fatalf("Services[0] is %T, want object", services[0])
-	}
-	if got := svc["ServiceCode"]; got != "AmazonS3" {
-		t.Errorf("ServiceCode = %v, want AmazonS3", got)
-	}
-	names, ok := svc["AttributeNames"].([]any)
-	if !ok || len(names) == 0 {
-		t.Fatalf("AttributeNames = %v, want a non-empty list", svc["AttributeNames"])
-	}
-	// Every attribute DescribeServices advertises must be usable as a filter
-	// field, otherwise a caller following the documented discovery path
-	// (DescribeServices → GetAttributeValues → GetProducts) hits a dead end.
-	for _, raw := range names {
-		name, isStr := raw.(string)
+	// The list is ordered by service code, so AmazonEC2 precedes AmazonS3.
+	var codes []string
+	for i, raw := range services {
+		svc, isObj := raw.(map[string]any)
+		if !isObj {
+			t.Fatalf("Services[%d] is %T, want object", i, raw)
+		}
+		code, isStr := svc["ServiceCode"].(string)
 		if !isStr {
-			t.Fatalf("AttributeNames element is %T, want string", raw)
+			t.Fatalf("Services[%d].ServiceCode is %T, want string", i, svc["ServiceCode"])
 		}
-		vals := pricingCall(t, ts, "us-east-1", "GetAttributeValues", map[string]any{
-			"ServiceCode": "AmazonS3", "AttributeName": name,
-		})
-		if vals.StatusCode != http.StatusOK {
-			t.Errorf("GetAttributeValues(%s) status = %d, want 200 (body %s)",
-				name, vals.StatusCode, mustReadAll(t, vals))
-			continue
+		codes = append(codes, code)
+
+		names, hasNames := svc["AttributeNames"].([]any)
+		if !hasNames || len(names) == 0 {
+			t.Fatalf("%s AttributeNames = %v, want a non-empty list", code, svc["AttributeNames"])
 		}
-		_ = mustReadAll(t, vals)
+		// Every attribute DescribeServices advertises must be usable as a filter
+		// field for the service that advertised it, otherwise a caller following
+		// the documented discovery path (DescribeServices → GetAttributeValues →
+		// GetProducts) hits a dead end.
+		for _, rawName := range names {
+			name, isStr := rawName.(string)
+			if !isStr {
+				t.Fatalf("%s AttributeNames element is %T, want string", code, rawName)
+			}
+			vals := pricingCall(t, ts, "us-east-1", "GetAttributeValues", map[string]any{
+				"ServiceCode": code, "AttributeName": name,
+			})
+			if vals.StatusCode != http.StatusOK {
+				t.Errorf("GetAttributeValues(%s, %s) status = %d, want 200 (body %s)",
+					code, name, vals.StatusCode, mustReadAll(t, vals))
+				continue
+			}
+			_ = mustReadAll(t, vals)
+		}
+	}
+	if want := []string{"AmazonEC2", "AmazonS3"}; !slices.Equal(codes, want) {
+		t.Errorf("ServiceCodes = %v, want %v", codes, want)
 	}
 }
 
