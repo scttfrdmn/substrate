@@ -8,8 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/scttfrdmn/substrate/emulator"
 )
 
 // #969: the encryption algorithm members on Encrypt, Decrypt and both ends of ReEncrypt.
@@ -38,34 +36,16 @@ import (
 //     checked one algorithm against one key would pass every assertion above.
 //
 // The first bullet of InvalidKeyUsageException's gloss — a KeyUsage incompatible with the operation — is
-// deliberately **not** covered, because it is not implemented: that is #977, which also fixes CreateKey
-// accepting any string as a KeySpec. Every non-symmetric key below is created through that gap, which is
-// why #977 must re-verify these tests when it closes it.
+// deliberately **not** covered here. It was unimplemented when this file was written, and #977 implemented
+// it: see kms_key_spec_usage_test.go, which owns that bullet and the ordering between the two.
+//
+// #977 re-verified every case below, which was the condition this file recorded when it was written: each
+// non-symmetric key here was created through a CreateKey that validated nothing, so closing that gap could
+// have made any of them unreachable. One case moved as a result — the ECC key addressed with an RSA
+// algorithm, which now hears about its key usage before its key spec is considered, and is asserted in
+// #977's file. [createKMSKeySpec] moved there too, since it now has to name a key usage.
 //
 // Every call goes over the wire and every assertion pairs the code with the status, per #765 and #923.
-
-// createKMSKeySpec creates a key with an explicit KeySpec.
-//
-// [createKMSKey] sends an empty body and gets SYMMETRIC_DEFAULT, which is the right default for almost
-// every KMS test and useless for this file: a symmetric key admits exactly one algorithm, so nothing
-// about the per-key-spec table is observable through one.
-func createKMSKeySpec(t *testing.T, ts *emulator.TestServer, keySpec string) (arn, keyID string) {
-	t.Helper()
-	var out struct {
-		KeyMetadata struct {
-			KeyID   string `json:"KeyId"`
-			Arn     string `json:"Arn"`
-			KeySpec string `json:"KeySpec"`
-		} `json:"KeyMetadata"`
-	}
-	status, code := decodeAWSResponse(t,
-		signedRequest(t, ts, kmsTarget, taggingTestAccount, "CreateKey",
-			map[string]any{"KeySpec": keySpec}), &out)
-	require.Empty(t, code, "CreateKey with KeySpec %s", keySpec)
-	require.Equal(t, http.StatusOK, status, "CreateKey with KeySpec %s", keySpec)
-	require.Equal(t, keySpec, out.KeyMetadata.KeySpec, "CreateKey records the KeySpec it was given")
-	return out.KeyMetadata.Arn, out.KeyMetadata.KeyID
-}
 
 // kmsAlgorithmMember reads one algorithm member out of a successful response.
 func kmsAlgorithmMember(t *testing.T, body map[string]json.RawMessage, member string) string {
@@ -215,12 +195,16 @@ func TestKMSEncryptionAlgorithm_TheEnumIsCheckedBeforeTheKey(t *testing.T) {
 // TestKMSEncryptionAlgorithm_AKeySpecThatDoesNotAdmitItIsRefused is assertion 4, and it is what makes
 // the members mean something rather than being echoed back unexamined.
 //
-// The three rows are the three shapes the per-key-spec table has. A symmetric key admits only
-// SYMMETRIC_DEFAULT, so an RSA algorithm against one is refused. An RSA key does **not** admit
-// SYMMETRIC_DEFAULT, which is how AWS's separate rule that the member "is required only for asymmetric
-// KMS keys" falls out for free: the default is a value RSA cannot use, so omitting the member on an RSA
-// key is refused with no required-ness branch anywhere. And an ECC key admits **nothing** — the message
-// has to say so, because listing an empty set would leave a caller retrying algorithms forever.
+// The two rows are the two shapes the per-key-spec table has for a key that can encrypt at all. A
+// symmetric key admits only SYMMETRIC_DEFAULT, so an RSA algorithm against one is refused. An RSA key does
+// **not** admit SYMMETRIC_DEFAULT, which is how AWS's separate rule that the member "is required only for
+// asymmetric KMS keys" falls out for free: the default is a value RSA cannot use, so omitting the member on
+// an RSA key is refused with no required-ness branch anywhere.
+//
+// A third row was here and #977 took it: an ECC key admits no encryption algorithm at all, and such a key
+// can no longer carry ENCRYPT_DECRYPT, so the refusal it earns is now about its key usage and is asserted
+// in kms_key_spec_usage_test.go. The empty-set message that row pinned is unreachable rather than removed —
+// see [kmsIncompatibleEncryptionAlgorithm], which keeps it as a guard.
 func TestKMSEncryptionAlgorithm_AKeySpecThatDoesNotAdmitItIsRefused(t *testing.T) {
 	t.Parallel()
 
@@ -232,7 +216,6 @@ func TestKMSEncryptionAlgorithm_AKeySpecThatDoesNotAdmitItIsRefused(t *testing.T
 	}{
 		{"an RSA algorithm against a symmetric key", "SYMMETRIC_DEFAULT", "RSAES_OAEP_SHA_256", "SYMMETRIC_DEFAULT"},
 		{"the default against an RSA key", "RSA_2048", "", "RSAES_OAEP_SHA_1"},
-		{"any algorithm against an ECC key", "ECC_NIST_P256", "RSAES_OAEP_SHA_256", "no encryption algorithm"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

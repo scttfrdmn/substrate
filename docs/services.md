@@ -9510,10 +9510,10 @@ consistency would introduce a refusal AWS does not publish.
 Three of AWS's five restrictions stay unenforced because they are unreachable rather
 than unguarded: imported key material, a custom key store and an AWS managed key each
 need a `KMSKey` member substrate does not model, so no request can produce one. Every
-non-symmetric key in the tests is created through the gap
-[#977](https://github.com/scttfrdmn/substrate/issues/977) records — `CreateKey`
-validates `KeySpec` against nothing — which is the route the encryption-algorithm tests
-already take, and the reason #977 has to re-verify them when it closes it.
+non-symmetric key in the tests is now created with a key usage its spec admits, because
+[#977](https://github.com/scttfrdmn/substrate/issues/977) closed the gap they used to
+rely on — `CreateKey` validated `KeySpec` against nothing — and that refusal leaves this
+one unchanged: it fires on the key spec of a key that exists, not on a request member.
 
 ### A pending deletion suspends the rotation schedule without forgetting it
 
@@ -9657,14 +9657,18 @@ do state a condition is the narrowest available reading. The alternative — rep
 `DeriveSharedSecret` was available on a key AWS reserves for `Sign`. A test pins exactly
 that case.
 
-**An empty list is omitted rather than sent as `[]`.** `CreateKey` validates neither
-`KeySpec` nor `KeyUsage` ([#977](https://github.com/scttfrdmn/substrate/issues/977)), so
-a caller can create an ECC key with `KeyUsage` `ENCRYPT_DECRYPT` — a pair AWS would
-refuse — and that key admits no encryption algorithm. An empty array would say *"this
-key supports no encryption algorithms"*, a claim AWS never makes about a key it
-accepted; the absent member says nothing, which is the honest-empty reading #827
-established. The two are indistinguishable in a decoded struct, so that assertion is on
-raw JSON like the rest of this file's.
+**An empty list is omitted rather than sent as `[]`.** When this was written `CreateKey`
+validated neither `KeySpec` nor `KeyUsage`, so a caller could create an ECC key with
+`KeyUsage` `ENCRYPT_DECRYPT` — a pair AWS would refuse — and that key admitted no
+encryption algorithm. An empty array would say *"this key supports no encryption
+algorithms"*, a claim AWS never makes about a key it accepted; the absent member says
+nothing, which is the honest-empty reading #827 established.
+
+[#977](https://github.com/scttfrdmn/substrate/issues/977) removed the premise by refusing
+the pair, so no key substrate creates now reaches that branch. The branch stays, and so
+does the reading behind it: it is the guard on a fifth algorithm member being added
+without its pairing being thought through. The four maps it reads are also now the
+**source** of the pairing rule — see *A key spec and a key usage must pair* below.
 
 #### `CustomerMasterKeySpec` is answered, and omitted outside its own enum
 
@@ -10064,9 +10068,71 @@ key specs and then swaps each end for the other's value, because an implementati
 validated both members against one key would pass every other assertion here.
 
 The first bullet of `InvalidKeyUsageException`'s gloss — a `KeyUsage` incompatible with the
-operation, such as an `ENCRYPT_DECRYPT` call against a `SIGN_VERIFY` key — is **not**
-modelled, and is tracked with `CreateKey`'s acceptance of any string as a `KeySpec` in
-#977.
+operation, such as an `ENCRYPT_DECRYPT` call against a `SIGN_VERIFY` key — is the next
+section's subject, along with `CreateKey`'s former acceptance of any string as a `KeySpec`
+([#977](https://github.com/scttfrdmn/substrate/issues/977)).
+
+### A key spec and a key usage must pair
+
+`CreateKey` accepted **any string** for `KeySpec` and `KeyUsage` and paired them however a
+caller asked ([#977](https://github.com/scttfrdmn/substrate/issues/977)). Both members are
+immutable — *"you can't change the `KeySpec` after the KMS key is created"*, and the same
+sentence for `KeyUsage` — so an unvalidated value is not a member a later call can correct.
+It is a key that will never behave as its metadata says, and every operation reading either
+member reads a value AWS would never have stored: `KeySpec` `"rsa2048"` reports an algorithm
+list for no spec at all, and `KeyUsage` `"ENCRYPT"` reports none.
+
+Three defects, three answers:
+
+| Request | Substrate answers | Provenance |
+|---------|-------------------|------------|
+| A `KeySpec` or `KeyUsage` outside its published enum | `ValidationError`/400, listing the enum | **Substrate's reading**: `API_CreateKey` publishes 13 errors and `ValidationException` is not among them, so a malformed enum member comes from `CommonErrors.html`, as it does for the encryption algorithm above |
+| `KeyUsage` absent for any spec but `SYMMETRIC_DEFAULT` | `ValidationError`/400, naming the spec and what it admits | Published as a requirement: *"this parameter is optional when you are creating a symmetric encryption KMS key; otherwise, it is required"* — the code is substrate's reading, for the same reason |
+| A well-formed pair the spec does not admit | `UnsupportedOperationException`/400, naming both and what the spec admits | Published for `CreateKey`, glossed *"a specified parameter is not supported or a specified resource is not valid for this operation"* |
+
+**The two codes say different things, which is why they are not one.** `ValidationError`
+says *that is not a key spec*; `UnsupportedOperationException` says *that is a key spec, and
+not with that usage*. A caller that misspelled a value and one that chose an impossible
+combination have different fixes, and the first is refused before the second is considered —
+a `KeySpec` of `"ECC_NIST_P25"` with a `KeyUsage` of `ENCRYPT_DECRYPT` hears about the spec.
+
+**The default fires for exactly one spec.** AWS's HMAC guidance settles it: *"you must set
+the key usage even though `GENERATE_VERIFY_MAC` is the only valid key usage value for HMAC
+KMS keys."* So `KeyUsage` is not defaulted to the single admissible value wherever there is
+one — it is defaulted only for `SYMMETRIC_DEFAULT`, and required everywhere else.
+
+**The pairing table is derived, not written.** A spec admits a usage exactly when its
+algorithm list for that usage is non-empty, read from the four maps
+[#974](https://github.com/scttfrdmn/substrate/issues/974) already built for `DescribeKey`'s
+algorithm members. Writing AWS's seven pairing bullets out a second time would create the
+drift class this file records elsewhere: two tables that must agree, with nothing making
+them. Here there is one table, and the metadata builder and the validator read it through
+the same accessor — so a key cannot be accepted for a usage whose algorithm list it would
+then not carry. The **test** transcribes AWS's bullets by hand, all 17 specs × 4 usages, so
+the derivation and the page disagree unless both match.
+
+**A key usage is also checked at the five cryptographic operations**, which is
+`InvalidKeyUsageException`'s *first* gloss bullet — *"the `KeyUsage` value of the KMS key is
+incompatible with the API operation"* — where the encryption-algorithm section above
+implements the second. AWS states the requirement: *"for encrypting, decrypting,
+re-encrypting, and generating data keys, the `KeyUsage` must be `ENCRYPT_DECRYPT`."* So
+`Encrypt`, `Decrypt`, `GenerateDataKey`, `GenerateDataKeyWithoutPlaintext` and both ends of
+`ReEncrypt` refuse a key whose usage is anything else.
+
+That check runs **before** the key-state check and before the encryption-algorithm check.
+Before the state check because a key usage is permanent and a key state is not — telling a
+caller to enable a `SIGN_VERIFY` key sends it round a loop that cannot terminate, which is
+the same argument the rotation section above makes for refusing a non-symmetric key spec
+ahead of that key's state. Before the algorithm
+check so that one condition yields one message: a `SIGN_VERIFY` RSA key addressed by
+`Encrypt` hears about its usage, not about `SYMMETRIC_DEFAULT` being inadmissible for RSA.
+
+**What this changes for a CloudFormation template.** `AWS::KMS::Key` documents `KeySpec`'s
+default as `SYMMETRIC_DEFAULT` and `KeyUsage`'s as `ENCRYPT_DECRYPT`, and substrate's
+deployer sends both unconditionally — so a template naming an asymmetric or HMAC `KeySpec`
+without a `KeyUsage` is now refused where it previously created a key AWS would not have.
+The defaults stay, because they are the resource type's own and because that template is
+invalid at AWS too: the property *"is required for asymmetric KMS keys and HMAC KMS keys"*.
 
 ### A key is reachable through the tagging API
 

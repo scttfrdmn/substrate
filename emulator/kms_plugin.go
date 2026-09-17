@@ -297,17 +297,24 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		MultiRegion bool     `json:"MultiRegion"`
 		Tags        []KMSTag `json:"Tags"`
 	}
+	// The body stays optional — CreateKey has no required parameter, and an empty request creates the
+	// symmetric encryption key the operation's first guidance section describes — but a body that is present
+	// and unparseable is now refused rather than discarded. It was discarded until #977, which is what made
+	// it worth changing: with the two members validated below, silently zeroing them on a parse error would
+	// answer 200 with a symmetric key for `{"KeySpec": 4096}`, defeating the validation one line later. The
+	// code is [kmsInvalidBody]'s, the same one the plugin's other twenty-one parse sites answer.
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // optional body
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, kmsInvalidBody()
+		}
 	}
-	// Both defaults are AWS's, and both are now named rather than spelled: the usage decides which
-	// algorithm list the key's metadata carries and the spec decides its contents, so the two literals
-	// that used to sit here were load-bearing in a way nothing at this line said.
-	if input.KeyUsage == "" {
-		input.KeyUsage = kmsKeyUsageEncryptDecrypt
-	}
-	if input.KeySpec == "" {
-		input.KeySpec = kmsSymmetricDefaultKeySpec
+	// The defaults and the validation are both AWS's and both live in one place, because the rules are
+	// entangled: whether KeyUsage may be omitted depends on which KeySpec was resolved, and whether the pair
+	// is admissible depends on both. See [kmsResolveKeySpecAndUsage], which also records why this runs before
+	// anything is written — a key spec and a key usage are permanent once the key exists.
+	keySpec, keyUsage, awsErr := kmsResolveKeySpecAndUsage(input.KeySpec, input.KeyUsage)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	keyID := generateKMSKeyID()
@@ -316,8 +323,8 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		KeyID:        keyID,
 		ARN:          arn,
 		Description:  input.Description,
-		KeyUsage:     input.KeyUsage,
-		KeySpec:      input.KeySpec,
+		KeyUsage:     keyUsage,
+		KeySpec:      keySpec,
 		KeyState:     "Enabled",
 		Enabled:      true,
 		MultiRegion:  input.MultiRegion,
@@ -1305,6 +1312,12 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	// Ahead of both checks below, added by #977. [kmsKeyUsageError] argues the ordering: a key usage is
+	// permanent where a key state has a remedy, and putting it before the algorithm check is what makes one
+	// condition — this is not an encryption key — produce one message whatever the key's spec is.
+	if usageErr := kmsKeyUsageError(key); usageErr != nil {
+		return nil, usageErr
+	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
 	// different codes, and until #961 both answered DisabledException.
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
@@ -1387,6 +1400,14 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if incorrectErr := p.checkNamedKeyMatches(goCtx, ctx, input.KeyID, "KeyId", key); incorrectErr != nil {
 		return nil, incorrectErr
 	}
+	// After the wrong-key check and before the rest, which keeps the request defect first and then answers
+	// about the key the ciphertext actually names — see [kmsKeyUsageError] for the ordering against the two
+	// checks that follow. Unreachable through substrate's own API, since nothing but Encrypt, GenerateDataKey
+	// and ReEncrypt mints a ciphertext and all three now refuse a non-encryption key; it is here because a
+	// stub ciphertext is constructible by hand and because AWS publishes the code on this operation.
+	if usageErr := kmsKeyUsageError(key); usageErr != nil {
+		return nil, usageErr
+	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
 	// different codes, and until #961 both answered DisabledException.
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
@@ -1462,6 +1483,12 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	// Ahead of the key-state check, added by #977 — [kmsKeyUsageError] argues why the permanent property is
+	// answered before the transient one. This operation takes no EncryptionAlgorithm, so unlike Encrypt and
+	// Decrypt it is the only refusal that tells a caller its signing key cannot wrap a data key.
+	if usageErr := kmsKeyUsageError(key); usageErr != nil {
+		return nil, usageErr
+	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
 	// different codes, and until #961 both answered DisabledException.
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
@@ -1504,6 +1531,12 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	}
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
+	}
+	// Ahead of the key-state check, for the reason [kmsKeyUsageError] gives. This operation is why that
+	// helper is shared rather than written per site: #961 found it refusing *nothing* while its four
+	// siblings each refused something, which is what a per-site check invites.
+	if usageErr := kmsKeyUsageError(key); usageErr != nil {
+		return nil, usageErr
 	}
 	// Added by #961, where the other four cryptographic operations only had the wrong code for one of
 	// two states: this one refused *nothing*, so a disabled key and a key pending deletion both minted a
@@ -1605,6 +1638,14 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if incorrectErr := p.checkNamedKeyMatches(goCtx, ctx, input.SourceKeyID, "SourceKeyId", sourceKey); incorrectErr != nil {
 		return nil, incorrectErr
 	}
+	// Both keys are checked for their usage, each ahead of its own state and algorithm checks — see
+	// [kmsKeyUsageError]. The source is checked first for the reason the two enums are resolved first: this
+	// operation reads one key and writes under another, and answering about the source before the destination
+	// is resolved keeps the two halves of the request from being reported out of order. The source's is as
+	// unreachable as Decrypt's, and there for the same reasons.
+	if usageErr := kmsKeyUsageError(sourceKey); usageErr != nil {
+		return nil, usageErr
+	}
 	if stateErr := kmsKeyStateError(sourceKey); stateErr != nil {
 		return nil, stateErr
 	}
@@ -1623,6 +1664,11 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 	if destKey == nil {
 		return nil, kmsNotFound("Destination key not found")
+	}
+	// The reachable half of the pair: a caller can name any key it holds as the destination, so this is
+	// where a ReEncrypt into a signing key is refused.
+	if usageErr := kmsKeyUsageError(destKey); usageErr != nil {
+		return nil, usageErr
 	}
 	if stateErr := kmsKeyStateError(destKey); stateErr != nil {
 		return nil, stateErr

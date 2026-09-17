@@ -28,15 +28,21 @@ import (
 //   - An algorithm list appears only for the KeyUsage that names it as its condition, and the other three
 //     members are asserted **absent** in the same call. Asserting only the expected member would pass
 //     against a builder that emitted all four.
-//   - A key whose usage and spec AWS would never pair reports no algorithm member at all, rather than an
-//     empty array. That is a claim-nothing answer against a claim-something one, and only raw JSON
-//     separates them.
+//   - A key whose usage and spec AWS would never pair cannot be created at all, so the question of what
+//     it reports does not arise. It did when this file was written, and the answer chosen then — no
+//     algorithm member rather than an empty array, a claim-nothing answer against a claim-something one —
+//     is preserved as the builder's guard while the pair itself is now refused.
 //   - The members that stay absent are asserted absent, so a later change that starts reporting one has
 //     to argue for it here rather than acquire it silently.
 //
-// Every non-symmetric key below is created through the gap #977 records — CreateKey validates KeySpec and
-// KeyUsage against nothing — which is why #977 must re-verify this file when it closes it. Every call
-// goes over the wire, per #765.
+// #977 re-verified every case below, which is the condition this file recorded when it was written: every
+// non-symmetric key here was created through a CreateKey that validated neither KeySpec nor KeyUsage, so
+// closing that gap could have made any of them unreachable. Two changes followed. Every row that names a
+// non-symmetric spec now also names an admissible key usage, because CreateKey requires one for every spec
+// but SYMMETRIC_DEFAULT — the member each of those tests examines is a function of the key spec alone, so
+// the usage is a precondition rather than part of the subject. And the impossible-pair test became a
+// refusal test, since its five pairs are exactly the five CreateKey now rejects. Every call goes over the
+// wire, per #765.
 
 // kmsCreateKeyMetadata posts CreateKey and returns its KeyMetadata member, undecoded.
 //
@@ -321,25 +327,32 @@ func TestKMSKeyMetadata_KeyAgreementIsNotReportedForASigningKey(t *testing.T) {
 func TestKMSKeyMetadata_CustomerMasterKeySpecIsOmittedOutsideItsOwnEnum(t *testing.T) {
 	t.Parallel()
 
+	// Each row names a key usage, which #977 made necessary: CreateKey requires one for every spec but
+	// SYMMETRIC_DEFAULT, and eight of these nine rows sent none. The usage chosen is the spec's own — the
+	// member under test is a function of the key spec alone, so any admissible usage would do, and taking
+	// the spec's first published one keeps the rows readable against AWS's bullets.
 	for _, tc := range []struct {
-		keySpec string
-		present bool
+		keySpec  string
+		keyUsage string
+		present  bool
 	}{
-		{keySpec: "SYMMETRIC_DEFAULT", present: true},
-		{keySpec: "RSA_4096", present: true},
-		{keySpec: "ECC_SECG_P256K1", present: true},
-		{keySpec: "HMAC_512", present: true},
-		{keySpec: "SM2", present: true},
-		{keySpec: "ML_DSA_44", present: false},
-		{keySpec: "ML_DSA_65", present: false},
-		{keySpec: "ML_DSA_87", present: false},
-		{keySpec: "ECC_NIST_EDWARDS25519", present: false},
+		{keySpec: "SYMMETRIC_DEFAULT", keyUsage: "ENCRYPT_DECRYPT", present: true},
+		{keySpec: "RSA_4096", keyUsage: "ENCRYPT_DECRYPT", present: true},
+		{keySpec: "ECC_SECG_P256K1", keyUsage: "SIGN_VERIFY", present: true},
+		{keySpec: "HMAC_512", keyUsage: "GENERATE_VERIFY_MAC", present: true},
+		{keySpec: "SM2", keyUsage: "ENCRYPT_DECRYPT", present: true},
+		{keySpec: "ML_DSA_44", keyUsage: "SIGN_VERIFY", present: false},
+		{keySpec: "ML_DSA_65", keyUsage: "SIGN_VERIFY", present: false},
+		{keySpec: "ML_DSA_87", keyUsage: "SIGN_VERIFY", present: false},
+		{keySpec: "ECC_NIST_EDWARDS25519", keyUsage: "SIGN_VERIFY", present: false},
 	} {
 		t.Run(tc.keySpec, func(t *testing.T) {
 			t.Parallel()
 			ts := arnGuardServer(t)
 
-			meta := kmsCreateKeyMetadata(t, ts, map[string]any{"KeySpec": tc.keySpec})
+			meta := kmsCreateKeyMetadata(t, ts, map[string]any{
+				"KeySpec": tc.keySpec, "KeyUsage": tc.keyUsage,
+			})
 			if tc.present {
 				assert.Equal(t, tc.keySpec, kmsMetadataString(t, meta, "CustomerMasterKeySpec"),
 					"%s is one of the deprecated member's own valid values", tc.keySpec)
@@ -353,43 +366,48 @@ func TestKMSKeyMetadata_CustomerMasterKeySpecIsOmittedOutsideItsOwnEnum(t *testi
 	}
 }
 
-// TestKMSKeyMetadata_AnImpossiblePairReportsNoAlgorithmListAtAll is the honest-empty case #827
-// established, reached through #977's gap.
+// TestKMSKeyMetadata_AnImpossiblePairIsRefusedRatherThanReported is the case #974 could only answer for a
+// key AWS would never have created, re-pointed by #977 at the refusal that now prevents one.
 //
-// CreateKey validates neither KeySpec nor KeyUsage, so a caller can create an ECC key with KeyUsage
-// ENCRYPT_DECRYPT — a pair AWS would refuse. That key admits no encryption algorithm, and the two
-// available answers are an empty array and no member. An empty array says "this key supports no
-// encryption algorithms", a claim AWS never makes about a key it accepted; the absent member says
-// nothing, which is the only honest answer available for a key AWS would not have created.
+// It was the honest-empty case #827 established: CreateKey validated neither member, so a caller could
+// create an ECC key with KeyUsage ENCRYPT_DECRYPT, and the two available answers for its algorithm list were
+// an empty array and no member. #974 chose the absent member, because an empty array claims a key supports
+// no encryption algorithms and AWS makes no such claim about a key it accepted.
 //
-// Asserted on raw JSON because that is the only place the two answers differ: both decode to a nil slice.
-func TestKMSKeyMetadata_AnImpossiblePairReportsNoAlgorithmListAtAll(t *testing.T) {
+// #977 removed the premise. Every row below is now refused at CreateKey, so the question of what such a key
+// reports no longer arises through substrate's own API — and the choice #974 made is not thereby undone,
+// which is why this test asserts the refusal rather than being deleted. The empty-list branch in the builder
+// survives as a guard on a fifth algorithm member being added without its pairing being thought through, and
+// the reading that an absent member is the honest answer survives with it.
+//
+// The fifth row is why the two codes are both asserted: a key usage AWS does not publish is a malformed
+// member and answers ValidationError, where the four inadmissible pairs answer
+// UnsupportedOperationException. kms_key_spec_usage_test.go covers both exhaustively; these five rows are
+// here because they are the five this file used to create.
+func TestKMSKeyMetadata_AnImpossiblePairIsRefusedRatherThanReported(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		name     string
 		keySpec  string
 		keyUsage string
+		code     string
 	}{
-		{name: "ECC key asked to encrypt", keySpec: "ECC_NIST_P256", keyUsage: "ENCRYPT_DECRYPT"},
-		{name: "symmetric key asked to sign", keySpec: "SYMMETRIC_DEFAULT", keyUsage: "SIGN_VERIFY"},
-		{name: "symmetric key asked to MAC", keySpec: "SYMMETRIC_DEFAULT", keyUsage: "GENERATE_VERIFY_MAC"},
-		{name: "HMAC key asked to derive a shared secret", keySpec: "HMAC_256", keyUsage: "KEY_AGREEMENT"},
-		{name: "a key usage AWS does not publish", keySpec: "SYMMETRIC_DEFAULT", keyUsage: "TRANSMOGRIFY"},
+		{"ECC key asked to encrypt", "ECC_NIST_P256", "ENCRYPT_DECRYPT", "UnsupportedOperationException"},
+		{"symmetric key asked to sign", "SYMMETRIC_DEFAULT", "SIGN_VERIFY", "UnsupportedOperationException"},
+		{"symmetric key asked to MAC", "SYMMETRIC_DEFAULT", "GENERATE_VERIFY_MAC", "UnsupportedOperationException"},
+		{"HMAC key asked to derive a shared secret", "HMAC_256", "KEY_AGREEMENT", "UnsupportedOperationException"},
+		{"a key usage AWS does not publish", "SYMMETRIC_DEFAULT", "TRANSMOGRIFY", "ValidationError"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ts := arnGuardServer(t)
 
-			meta := kmsCreateKeyMetadata(t, ts, map[string]any{
+			status, code, _ := kmsRefusal(t, ts, "CreateKey", map[string]any{
 				"KeySpec": tc.keySpec, "KeyUsage": tc.keyUsage,
 			})
-			for _, member := range kmsAlgorithmMembers {
-				assert.NotContains(t, meta, member,
-					"%s with KeyUsage %s reports no %s", tc.keySpec, tc.keyUsage, member)
-			}
-			assert.Equal(t, tc.keyUsage, kmsMetadataString(t, meta, "KeyUsage"),
-				"the usage the key was created with is still reported")
+			assert.Equal(t, tc.code, code, "%s with KeyUsage %s", tc.keySpec, tc.keyUsage)
+			assert.Equal(t, http.StatusBadRequest, status, "%s with KeyUsage %s", tc.keySpec, tc.keyUsage)
 		})
 	}
 }

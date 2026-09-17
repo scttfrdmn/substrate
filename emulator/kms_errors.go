@@ -212,8 +212,10 @@ func kmsInvalidRotationPeriod(days int) *AWSError {
 // The discriminator is KeySpec, not KeyUsage. SYMMETRIC_DEFAULT is the only spec that rotates, so one
 // equality test covers all three unsupported families at once — the asymmetric specs, the HMAC specs and
 // the ML-DSA specs — where KeyUsage would separate the HMAC case from the asymmetric one and still need
-// the spec to tell RSA from symmetric. That CreateKey today accepts a KeySpec and KeyUsage that cannot
-// occur together is #977; this refusal reads the member AWS's own sentence is about.
+// the spec to tell RSA from symmetric. That CreateKey once accepted a KeySpec and KeyUsage that cannot
+// occur together was #977, closed by [kmsResolveKeySpecAndUsage]; this refusal reads the member AWS's own
+// sentence is about, and is unchanged by it — a rotation call reaches a key that already exists, so it
+// answers for the key's stored spec whatever CreateKey validated.
 //
 // The spec is named in the message so a caller can tell this refusal from a key-state one, which is the
 // other reason an EnableKeyRotation gets a 400.
@@ -223,6 +225,111 @@ func kmsRotationUnsupportedKeySpec(key *KMSKey) *AWSError {
 		Message: fmt.Sprintf(
 			"the KMS key %q has key spec %q, and automatic rotation is supported only on %s keys",
 			key.KeyID, key.KeySpec, kmsSymmetricDefaultKeySpec),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsUnknownKeySpec reports a CreateKey KeySpec outside the published set.
+//
+// ValidationError at 400, the reading [kmsInvalidPendingWindow] records and [kmsUnknownEncryptionAlgorithm]
+// applies to the same class of failure — a member carrying a value its enum does not contain. It has to
+// come from CommonErrors.html because API_CreateKey publishes thirteen errors and not one of them
+// describes a malformed member: the four custom-key-store and external-key codes are about a store or an
+// XKS key, InvalidArnException about an ARN, MalformedPolicyDocumentException about the Policy,
+// TagException about the Tags, LimitExceededException about a quota, and the two 500s about KMS itself.
+//
+// UnsupportedOperationException is the near miss and is deliberately left to [kmsInadmissibleKeyUsage],
+// which is the same decision [kmsUnknownEncryptionAlgorithm] made against InvalidKeyUsageException and for
+// the same reason: that code presupposes a value AWS recognizes and says something about how it fits the
+// key, while a misspelling fits no key and says nothing. Keeping the two apart is what lets a caller tell
+// a typo from a misunderstanding.
+//
+// The set is listed for [kmsUnknownEncryptionAlgorithm]'s reason — a caller that sent RSA_2049 or a spec
+// from an API version newer than its SDK can then see what it should have sent. Seventeen values is a long
+// message, and the alternative is a caller reading the documentation to learn something the refusal
+// already knows.
+func kmsUnknownKeySpec(keySpec string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"KeySpec is %q, which is not one of %s",
+			keySpec, strings.Join(kmsKeySpecs, ", ")),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsUnknownKeyUsage reports a CreateKey KeyUsage outside the published set.
+//
+// ValidationError at 400, for [kmsUnknownKeySpec]'s reasons exactly — the same operation, the same
+// thirteen published errors, and the same class of failure. The two are separate helpers only so the
+// message names the member the caller got wrong, which is the whole content of the refusal when a request
+// carries one bad member and one good one.
+//
+// The four are listed rather than the ones this key spec admits, because the spec is not what is wrong: a
+// caller that sent ENCRYPT_DECRYPTT wants to know the spelling, and one that sent a usage admissible
+// nowhere is answered by [kmsInadmissibleKeyUsage] instead, which does name the spec's own set.
+func kmsUnknownKeyUsage(keyUsage string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"KeyUsage is %q, which is not one of %s",
+			keyUsage, strings.Join(kmsKeyUsages, ", ")),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsKeyUsageRequired reports a CreateKey that omitted KeyUsage for a key spec that requires it.
+//
+// ValidationError at 400. A required parameter that is absent is a defect of the request in the same way a
+// value outside an enum is, so it lands where [kmsUnknownKeySpec] lands and by the same argument about
+// API_CreateKey's thirteen errors. It is not UnsupportedOperationException: nothing about the request is
+// unsupported, and the caller has not asked for a pairing AWS declines — it has not said what it wants.
+//
+// AWS's rule is on the KeyUsage parameter, verbatim: "this parameter is optional when you are creating a
+// symmetric encryption KMS key; otherwise, it is required". The reading that matters is what "symmetric
+// encryption KMS key" excludes, and AWS settles it in the operation's own HMAC guidance rather than
+// leaving it to inference: "you must set the key usage even though GENERATE_VERIFY_MAC is the only valid
+// key usage value for HMAC KMS keys". An HMAC key is symmetric and is not a symmetric *encryption* key, so
+// the default fires for SYMMETRIC_DEFAULT alone — see [kmsResolveKeySpecAndUsage].
+//
+// The admissible set is named because it is what the caller has to supply next, and for HMAC and ML-DSA it
+// is a single value: the refusal then tells them the whole answer rather than that a member is missing.
+func kmsKeyUsageRequired(keySpec string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"KeyUsage is required for a key with key spec %q, which supports %s",
+			keySpec, kmsAdmissibleKeyUsageList(keySpec)),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsInadmissibleKeyUsage reports a CreateKey whose KeySpec and KeyUsage are each published and cannot be
+// paired.
+//
+// UnsupportedOperationException at 400, published on API_CreateKey and glossed "the request was rejected
+// because a specified parameter is not supported or a specified resource is not valid for this operation".
+// A well-formed parameter that this operation will not accept is the first half of that gloss, and it is
+// the reading [kmsRotationUnsupportedKeySpec] already took for the same code — so the two agree about what
+// the code means, which is the consistency #923 exists to hold.
+//
+// It is not ValidationError, and the distinction is the point rather than a nicety. Both members satisfy
+// their own constraints; what fails is the combination, which is a fact about KMS rather than about the
+// request's format. A caller reading ValidationError looks for a typo and finds none. The two codes are
+// therefore load-bearing together: this one says *that is a key spec, and not with that usage*, where
+// [kmsUnknownKeySpec] says *that is not a key spec*.
+//
+// AWS publishes the pairing rules as seven bullets under KeyUsage and attaches no code to them, so the
+// code is substrate's reading; [kmsKeySpecAdmitsKeyUsage] records why the rules are derived from the
+// algorithm tables rather than transcribed. The admissible set is named for
+// [kmsIncompatibleEncryptionAlgorithm]'s reason: a caller that sent GENERATE_VERIFY_MAC to an RSA spec
+// needs to be told what that spec does support, not merely that this is not it.
+func kmsInadmissibleKeyUsage(keySpec, keyUsage string) *AWSError {
+	return &AWSError{
+		Code: "UnsupportedOperationException",
+		Message: fmt.Sprintf(
+			"KeyUsage %q is not valid for a key with key spec %q, which supports %s",
+			keyUsage, keySpec, kmsAdmissibleKeyUsageList(keySpec)),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
@@ -284,14 +391,20 @@ func kmsUnknownEncryptionAlgorithm(member, algorithm string) *AWSError {
 // The code is published rather than substrate's reading, and the mapping is exact.
 //
 // The first bullet — "the KeyUsage value of the KMS key is incompatible with the API operation" — is
-// **not** answered anywhere in this package, and is #977. The two are one error code with two causes,
-// so a caller matching on the code alone cannot tell them apart; the message names the key spec, which
-// is the half this one is about.
+// [kmsInvalidKeyUsageForOperation], added by #977. The two are one error code with two causes, so a caller
+// matching on the code alone cannot tell them apart; the message names the key spec, which is the half this
+// one is about, where the other names the key usage.
 //
 // The key spec and the admissible set are both in the message because the refusal is otherwise
-// unactionable: a caller that sent SYMMETRIC_DEFAULT to an RSA key needs to be told the key is RSA, and
-// one that sent RSAES_OAEP_SHA_256 to an ECC key needs to be told that no encryption algorithm is
-// admissible at all — which is what an empty set here means.
+// unactionable: a caller that sent SYMMETRIC_DEFAULT to an RSA key needs to be told the key is RSA.
+//
+// The empty set — "no encryption algorithm" — is now unreachable, and the branch is kept rather than
+// removed. It was the answer for a key whose spec admits no encryption at all, an ECC key say, and #977
+// made that key unreachable twice over: CreateKey will not pair such a spec with ENCRYPT_DECRYPT, and
+// [kmsKeyUsageError] runs ahead of this check at all five call sites, so such a key is refused for its
+// usage before its algorithm is considered. That ordering is deliberate — see [kmsKeyUsageError] for why
+// one condition producing one message was worth choosing — and the branch stays because it is a claim
+// about what an empty list means, which remains true whether or not a caller can provoke it.
 func kmsIncompatibleEncryptionAlgorithm(key *KMSKey, member, algorithm string) *AWSError {
 	permitted := "no encryption algorithm"
 	if admissible := kmsEncryptionAlgorithmsByKeySpec[key.KeySpec]; len(admissible) > 0 {
@@ -302,6 +415,35 @@ func kmsIncompatibleEncryptionAlgorithm(key *KMSKey, member, algorithm string) *
 		Message: fmt.Sprintf(
 			"%s is %q, which the KMS key %q does not support: its key spec %q supports %s",
 			member, algorithm, key.KeyID, key.KeySpec, permitted),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsInvalidKeyUsageForOperation reports that a cryptographic operation named a key whose KeyUsage is not
+// ENCRYPT_DECRYPT.
+//
+// InvalidKeyUsageException at 400, published on all five operations that call it — API_Encrypt, API_Decrypt,
+// API_ReEncrypt, API_GenerateDataKey and API_GenerateDataKeyWithoutPlaintext. This is the **first** bullet
+// of its gloss, verbatim: "the KeyUsage value of the KMS key is incompatible with the API operation". The
+// requirement the bullet is about is stated on each operation's own page — "for encrypting, decrypting,
+// re-encrypting, and generating data keys, the KeyUsage must be ENCRYPT_DECRYPT" — so both the code and the
+// rule are published, and only the message is substrate's.
+//
+// [kmsIncompatibleEncryptionAlgorithm] is the second bullet, and the two sharing one code is AWS's design
+// rather than a collision: a caller cannot distinguish them by code, which is why one message leads with
+// the key usage and the other with the key spec. #969 shipped the second and this is the first, and they
+// are genuinely independent — RSA_2048 admits RSAES_OAEP_SHA_256 whatever the key's usage is, so an Encrypt
+// against an RSA signing key satisfied every check substrate had before #977.
+//
+// The usage is named and the required one spelled out, because the remedy is not to retry: KeyUsage cannot
+// be changed after creation — "you can't change the KeyUsage value after the KMS key is created" — so the
+// caller needs a different key, and the message has to say what kind.
+func kmsInvalidKeyUsageForOperation(key *KMSKey) *AWSError {
+	return &AWSError{
+		Code: "InvalidKeyUsageException",
+		Message: fmt.Sprintf(
+			"the KMS key %q has key usage %q, and this operation requires %s",
+			key.KeyID, key.KeyUsage, kmsKeyUsageEncryptDecrypt),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

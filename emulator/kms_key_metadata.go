@@ -51,9 +51,9 @@ const kmsKeyOriginAWSKMS = "AWS_KMS"
 // because the condition is what makes the members mutually exclusive: a key has one usage, so it carries
 // exactly one algorithm list, and the four are not four independent branches.
 //
-// CreateKey accepts any string as a KeyUsage (#977), so a key can carry a value outside this set. Such a
-// key reports no algorithm list at all, which is the honest answer — substrate cannot say which
-// algorithms a usage AWS does not publish would admit.
+// Since #977 no key can carry a value outside this set: CreateKey refuses one, and it refuses a spec and
+// usage AWS would never pair, so every stored key has exactly one non-empty algorithm list.
+// [kmsKeyUsages] is the same four as an ordered slice, for the refusals that have to name them.
 const (
 	kmsKeyUsageEncryptDecrypt    = "ENCRYPT_DECRYPT"
 	kmsKeyUsageSignVerify        = "SIGN_VERIFY"
@@ -74,7 +74,11 @@ const (
 // SYMMETRIC_DEFAULT and the four HMAC specs are absent deliberately: neither signs. As with
 // [kmsEncryptionAlgorithmsByKeySpec], a missing entry and an empty one mean the same thing, so the
 // lookup needs no is-this-spec-known branch and a spec substrate has never heard of lands in the same
-// place — reachable only through #977.
+// place — which since #977 no stored key can be, because CreateKey refuses an unpublished spec.
+//
+// Absence carries a second meaning since #977, and it is why these four maps are now read for more than
+// rendering: a spec absent here does not admit SIGN_VERIFY at all. [kmsKeySpecAdmitsKeyUsage] derives
+// AWS's pairing rules from that, so the rules cannot drift from the algorithm lists that imply them.
 var kmsSigningAlgorithmsByKeySpec = map[string][]string{
 	"RSA_2048": kmsRSASigningAlgorithms,
 	"RSA_3072": kmsRSASigningAlgorithms,
@@ -145,6 +149,35 @@ var kmsKeyAgreementAlgorithmsByKeySpec = map[string][]string{
 	"SM2":           {"ECDH"},
 }
 
+// kmsKeyUsageAlgorithmList is the KeyMetadata member a key usage reports, and the algorithms it reports
+// there for each key spec.
+type kmsKeyUsageAlgorithmList struct {
+	// member is the KeyMetadata member name — one of the four algorithm members, each of which names
+	// this usage as its own condition.
+	member string
+	// byKeySpec is the algorithms the usage admits per key spec. An absent or empty entry means the spec
+	// does not admit the usage at all, which is what [kmsKeySpecAdmitsKeyUsage] reads.
+	byKeySpec map[string][]string
+}
+
+// kmsKeyUsageAlgorithms joins each published key usage to the algorithm member it reports and the specs
+// that admit it.
+//
+// It replaced a four-arm switch in [kmsKeyMetadata], and the reason is that #977 needed the same
+// correspondence for something else: which usages a key spec admits, in order to refuse a pair AWS would
+// not create. Two structures over one published fact are the drift #952 records and #974 hit inside this
+// plugin, so there is one — the renderer and the validator now read the same table, and a spec added to an
+// algorithm map becomes admissible for that usage in the same commit.
+//
+// Nothing outside this map decides which usages exist. [kmsKeyUsages] is the ordered slice of the same
+// four keys, kept separate only because a map has no order and a refusal message needs one.
+var kmsKeyUsageAlgorithms = map[string]kmsKeyUsageAlgorithmList{
+	kmsKeyUsageEncryptDecrypt:    {member: "EncryptionAlgorithms", byKeySpec: kmsEncryptionAlgorithmsByKeySpec},
+	kmsKeyUsageSignVerify:        {member: "SigningAlgorithms", byKeySpec: kmsSigningAlgorithmsByKeySpec},
+	kmsKeyUsageGenerateVerifyMAC: {member: "MacAlgorithms", byKeySpec: kmsMACAlgorithmsByKeySpec},
+	kmsKeyUsageKeyAgreement:      {member: "KeyAgreementAlgorithms", byKeySpec: kmsKeyAgreementAlgorithmsByKeySpec},
+}
+
 // kmsCustomerMasterKeySpecs is the key specs the deprecated CustomerMasterKeySpec member can carry.
 //
 // AWS still sends the member — "the KeySpec and CustomerMasterKeySpec fields have the same value. We
@@ -212,23 +245,21 @@ func kmsKeyMetadata(key *KMSKey) map[string]interface{} {
 		metadata["CustomerMasterKeySpec"] = key.KeySpec
 	}
 	// One algorithm list at most, selected by the key usage each member names as its own condition. The
-	// switch is what enforces mutual exclusivity: a key has exactly one usage, so reporting two lists
-	// would describe a key AWS cannot create.
+	// single lookup is what enforces mutual exclusivity: a key has exactly one usage, so reporting two
+	// lists would describe a key AWS cannot create.
 	//
-	// A list is emitted only when it is non-empty, which matters because #977 lets a key carry a usage and
-	// a spec AWS would never pair — an ECC key with KeyUsage ENCRYPT_DECRYPT admits no encryption
-	// algorithm at all. An empty array there would say "this key supports no encryption algorithms", a
-	// claim AWS never makes about a key it accepted; omitting says nothing, which is the honest-empty
-	// reading #827 established.
-	switch key.KeyUsage {
-	case kmsKeyUsageEncryptDecrypt:
-		kmsPutAlgorithms(metadata, "EncryptionAlgorithms", kmsEncryptionAlgorithmsByKeySpec[key.KeySpec])
-	case kmsKeyUsageSignVerify:
-		kmsPutAlgorithms(metadata, "SigningAlgorithms", kmsSigningAlgorithmsByKeySpec[key.KeySpec])
-	case kmsKeyUsageGenerateVerifyMAC:
-		kmsPutAlgorithms(metadata, "MacAlgorithms", kmsMACAlgorithmsByKeySpec[key.KeySpec])
-	case kmsKeyUsageKeyAgreement:
-		kmsPutAlgorithms(metadata, "KeyAgreementAlgorithms", kmsKeyAgreementAlgorithmsByKeySpec[key.KeySpec])
+	// This was four switch arms until #977, which needed the same usage-to-spec correspondence to validate
+	// CreateKey's arguments; [kmsKeyUsageAlgorithms] records why the two now read one table. The behavior
+	// is unchanged, including for a usage the map does not carry — no member, rather than an invented one.
+	//
+	// A list is emitted only when it is non-empty. That mattered before #977, when a key could carry a
+	// usage and a spec AWS would never pair — an ECC key with KeyUsage ENCRYPT_DECRYPT admits no encryption
+	// algorithm at all — and an empty array would have said "this key supports no encryption algorithms", a
+	// claim AWS never makes about a key it accepted. CreateKey now refuses that pair, so the branch is
+	// unreachable through substrate's own API and kept as a guard: it is what keeps a spec added to one
+	// algorithm map, without the pairing being thought through, from putting an empty array on the wire.
+	if algorithms, ok := kmsKeyUsageAlgorithms[key.KeyUsage]; ok {
+		kmsPutAlgorithms(metadata, algorithms.member, algorithms.byKeySpec[key.KeySpec])
 	}
 	// Emitted on the key state rather than on the field being non-zero, because that is the condition
 	// API_KeyMetadata publishes: "this value is present only when the KMS key is scheduled for deletion,
@@ -258,9 +289,10 @@ func kmsKeyMetadata(key *KMSKey) map[string]interface{} {
 
 // kmsPutAlgorithms sets an algorithm-list member, or leaves it absent when the list is empty.
 //
-// A one-line helper so the four arms above read as four conditions rather than four copies of the same
-// emptiness check — and so the check cannot be forgotten on a fifth arm, which is the failure that would
-// put an empty array on the wire.
+// A one-line helper, kept after #977 folded the four switch arms above into one lookup, because the
+// emptiness check is a rule about the wire rather than a detail of the branching: an empty array claims a
+// key admits no algorithm for its own usage, which is a claim AWS never makes about a key it accepted.
+// Omitting says nothing instead, the honest-empty reading #827 established.
 func kmsPutAlgorithms(metadata map[string]interface{}, member string, algorithms []string) {
 	if len(algorithms) == 0 {
 		return
