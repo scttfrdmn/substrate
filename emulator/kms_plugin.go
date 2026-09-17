@@ -522,7 +522,7 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 		days = 30
 	}
 	deletionDate := p.tc.Now().AddDate(0, 0, days)
-	key.KeyState = "PendingDeletion"
+	key.KeyState = kmsKeyStatePendingDeletion
 	key.Enabled = false
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms scheduleKeyDeletion saveKey: %w", err)
@@ -616,10 +616,47 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	// No key-state guard, deliberately: see [kmsRotationKeyStateError], which its two callers use and
+	// this one must not. Reading whether rotation is on is permitted in every state substrate can
+	// produce, and API_GetKeyRotationStatus publishes neither DisabledException nor
+	// KMSInvalidStateException.
 	out := map[string]interface{}{
 		"KeyRotationEnabled": key.RotationEnabled,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
+}
+
+// kmsRotationKeyStateError reports the refusal EnableKeyRotation and DisableKeyRotation owe a key
+// whose key state does not permit them, or nil when the state permits the call.
+//
+// Both operations carry the sentence "the KMS key that you use for this operation must be in a
+// compatible key state", and the developer guide's "Key states of AWS KMS keys" table gives them one
+// row each with identical contents: Enabled is permitted, Disabled is refused with footnote [1]
+// (DisabledException) and pending deletion is refused with footnote [3]
+// (KMSInvalidStateException). The order below follows from that split rather than from convenience —
+// ScheduleKeyDeletion writes KeyState and clears Enabled together (see [KMSPlugin.scheduleKeyDeletion]),
+// so a lone !key.Enabled test would answer DisabledException for a key pending deletion, which is the
+// wrong one of the two codes AWS publishes and points a caller at the wrong remedy.
+//
+// GetKeyRotationStatus deliberately does not call this. Its row in the same table permits Enabled,
+// Disabled *and* pending deletion alike, and API_GetKeyRotationStatus publishes neither code — so a
+// later sweep that guarded every key-state-sensitive operation "for consistency" would introduce a
+// refusal AWS does not have. [TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey]
+// pins that.
+//
+// The three cryptographic operations that already answer DisabledException — Encrypt, Decrypt and
+// GenerateDataKey — have the same pending-deletion gap, since their table rows are footnote [3] too
+// and API_Encrypt publishes KMSInvalidStateException at 400 beside DisabledException. That is #961
+// and is left alone here, because widening #949 to three cryptographic operations would put a
+// separate wire change in the same diff.
+func kmsRotationKeyStateError(key *KMSKey) *AWSError {
+	if key.KeyState == kmsKeyStatePendingDeletion {
+		return kmsInvalidKeyState(key.KeyID, key.KeyState)
+	}
+	if !key.Enabled {
+		return kmsKeyDisabled(key.KeyID)
+	}
+	return nil
 }
 
 func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -641,6 +678,11 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
+	}
+	// Before the write, so a refusal leaves RotationEnabled as it was rather than half-applying the
+	// call it declined — the property #949 asks to be asserted by reading GetKeyRotationStatus back.
+	if stateErr := kmsRotationKeyStateError(key); stateErr != nil {
+		return nil, stateErr
 	}
 	key.RotationEnabled = true
 	if err := p.saveKey(goCtx, key); err != nil {
@@ -668,6 +710,12 @@ func (p *KMSPlugin) disableKeyRotation(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
+	}
+	// Refused on the same key states as its sibling: API_DisableKeyRotation publishes the identical
+	// seven-error list, so "rotation is already off, so turning it off cannot hurt" is not a reading
+	// AWS's table supports.
+	if stateErr := kmsRotationKeyStateError(key); stateErr != nil {
+		return nil, stateErr
 	}
 	key.RotationEnabled = false
 	if err := p.saveKey(goCtx, key); err != nil {
