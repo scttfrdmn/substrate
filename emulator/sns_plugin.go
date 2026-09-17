@@ -137,6 +137,44 @@ func (p *SNSPlugin) loadTopic(ctx context.Context, accountID, region, name strin
 	return &t, nil
 }
 
+// requireTopic parses a topic ARN and loads the topic it names, refusing a well-formed ARN that names
+// no topic.
+//
+// One helper for six operations, on the #961/#969 precedent: those issues each found one operation
+// refusing nothing that its siblings refused, which is what a per-handler existence check invites.
+// Before #926, Subscribe, Publish, PublishBatch and ListSubscriptionsByTopic read only the
+// subscription index, so an absent topic was indistinguishable from a real topic with no subscribers
+// and all four answered 200 — GetTopicAttributes and SetTopicAttributes were the two that checked, and
+// they are routed through here so the six cannot drift apart again.
+//
+// The load is keyed by the ARN's own account and Region, never the caller's, which is the rule #925
+// made structural: [snsParseTopicARN] takes no *RequestContext, so a cross-account or cross-Region ARN
+// builds a state key nothing is stored at and the topic reads as absent. That is also why Subscribe
+// and Publish now refuse a topic in another Region rather than serving a same-named local one, which
+// API_Publish independently requires: "You can publish messages only to topics and endpoints in the
+// same AWS Region."
+//
+// DeleteTopic is deliberately not a caller (#992): API_DeleteTopic's description states that "this
+// action is idempotent, so deleting a topic that does not exist does not result in an error", so it
+// keeps its own load and treats an absent topic as a no-op.
+//
+// The returned error is an [AWSError] for a malformed ARN or an absent topic, and a wrapped state
+// error otherwise; every caller returns it unexamined.
+func (p *SNSPlugin) requireTopic(ctx context.Context, arn string) (*SNSTopic, snsTopicTarget, error) {
+	target, arnErr := snsParseTopicARN(arn)
+	if arnErr != nil {
+		return nil, snsTopicTarget{}, arnErr
+	}
+	t, err := p.loadTopic(ctx, target.AccountID, target.Region, target.Name)
+	if err != nil {
+		return nil, target, err
+	}
+	if t == nil {
+		return nil, target, snsNoSuchTopic(arn)
+	}
+	return t, target, nil
+}
+
 func (p *SNSPlugin) saveTopic(ctx context.Context, t *SNSTopic) error {
 	data, err := json.Marshal(t)
 	if err != nil {
@@ -294,6 +332,19 @@ func (p *SNSPlugin) createTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	})
 }
 
+// deleteTopic removes a topic and its index entry, and succeeds when there is nothing to remove.
+//
+// The absent topic answers 200 rather than NotFound, because API_DeleteTopic's description says so in
+// as many words (#992): "This action is idempotent, so deleting a topic that does not exist does not
+// result in an error." The same page's Errors list *does* publish NotFound/404, alongside
+// ConcurrentAccess, InvalidState, StaleTag and TagPolicy — codes plainly about the tag and
+// event-source paths. Where a page contradicts itself the more specific statement governs: the
+// sentence names this condition and this outcome, and the error-list entry names no condition at all.
+// API_Unsubscribe corroborates by contrast — it publishes the same NotFound and carries no idempotence
+// sentence, so AWS states the property where it holds rather than leaving it to be inferred.
+//
+// A malformed ARN is still InvalidParameter/400. The sentence licenses a topic that does not exist,
+// not a string that is not an ARN.
 func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
 	if arnErr != nil {
@@ -305,27 +356,30 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
-	if t == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Topic not found", HTTPStatus: http.StatusNotFound}
-	}
 
 	// The record and its index entry are removed from the account and Region the ARN names, which
 	// after #925 is where the load found it. Keying the delete by the caller instead removed an entry
-	// from their own index while leaving the record the load had just read in place.
-	_ = p.state.Delete(goCtx, snsNamespace, snsTopicStateKey(target.AccountID, target.Region, target.Name))
-
-	names, err := p.loadTopicNames(goCtx, target.AccountID, target.Region)
-	if err != nil {
-		return nil, err
-	}
-	newNames := make([]string, 0, len(names))
-	for _, n := range names {
-		if n != target.Name {
-			newNames = append(newNames, n)
+	// from their own index while leaving the record the load had just read in place. Both are skipped
+	// when the load found nothing, so the idempotent path writes no state at all rather than rewriting
+	// the owning Region's index to itself.
+	if t != nil {
+		if delErr := p.state.Delete(goCtx, snsNamespace, snsTopicStateKey(target.AccountID, target.Region, target.Name)); delErr != nil {
+			return nil, fmt.Errorf("sns deleteTopic state.Delete: %w", delErr)
 		}
-	}
-	if err := p.saveTopicNames(goCtx, target.AccountID, target.Region, newNames); err != nil {
-		return nil, fmt.Errorf("sns deleteTopic saveTopicNames: %w", err)
+
+		names, loadErr := p.loadTopicNames(goCtx, target.AccountID, target.Region)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		newNames := make([]string, 0, len(names))
+		for _, n := range names {
+			if n != target.Name {
+				newNames = append(newNames, n)
+			}
+		}
+		if saveErr := p.saveTopicNames(goCtx, target.AccountID, target.Region, newNames); saveErr != nil {
+			return nil, fmt.Errorf("sns deleteTopic saveTopicNames: %w", saveErr)
+		}
 	}
 
 	type response struct {
@@ -340,17 +394,9 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
-	if arnErr != nil {
-		return nil, arnErr
-	}
-
-	t, err := p.loadTopic(context.Background(), target.AccountID, target.Region, target.Name)
+	t, _, err := p.requireTopic(context.Background(), req.Params["TopicArn"])
 	if err != nil {
 		return nil, err
-	}
-	if t == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Topic not found", HTTPStatus: http.StatusNotFound}
 	}
 
 	attrs := map[string]string{
@@ -387,20 +433,13 @@ func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SNSPlugin) setTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
-	if arnErr != nil {
-		return nil, arnErr
-	}
 	attrName := req.Params["AttributeName"]
 	attrValue := req.Params["AttributeValue"]
 
 	goCtx := context.Background()
-	t, err := p.loadTopic(goCtx, target.AccountID, target.Region, target.Name)
+	t, _, err := p.requireTopic(goCtx, req.Params["TopicArn"])
 	if err != nil {
 		return nil, err
-	}
-	if t == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Topic not found", HTTPStatus: http.StatusNotFound}
 	}
 	if t.Attributes == nil {
 		t.Attributes = make(map[string]string)
@@ -488,9 +527,14 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, &AWSError{Code: "InvalidParameter", Message: "TopicArn and Protocol are required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	target, arnErr := snsParseTopicARN(topicARN)
-	if arnErr != nil {
-		return nil, arnErr
+	// The topic has to exist before anything is written. Subscribe is the one of the four #926
+	// operations that *writes*, so a missing check left a subscription record and two index entries
+	// under a topic that was never created — reported by ListSubscriptions ever after, and delivered to
+	// if a topic of that name was later created.
+	goCtx := context.Background()
+	_, target, err := p.requireTopic(goCtx, topicARN)
+	if err != nil {
+		return nil, err
 	}
 	topicName := target.Name
 	subID := generateSNSSubID()
@@ -510,7 +554,6 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		Region:    ctx.Region,
 	}
 
-	goCtx := context.Background()
 	if err := p.saveSub(goCtx, sub); err != nil {
 		return nil, fmt.Errorf("sns subscribe saveSub: %w", err)
 	}
@@ -550,6 +593,18 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	})
 }
 
+// unsubscribe deletes a subscription, refusing an ARN that names none.
+//
+// The absent subscription answers NotFound/404 rather than succeeding silently, which is the half of
+// #926 that is about a subscription rather than a topic. It had been an unsourced "idempotent" comment,
+// and API_Unsubscribe does not support it: the page publishes NotFound/404 ("Indicates that the
+// requested resource does not exist") and states no idempotence.
+//
+// The condition is not left to inference either. SubscriptionArn is the operation's only request
+// parameter and the only resource it names — "The ARN of the subscription to be deleted" — so the
+// resource a published NotFound can be about is the subscription and nothing else. The contrast with
+// API_DeleteTopic (#992) is what makes the absence of an idempotence sentence here meaningful rather
+// than an omission: AWS writes one where it means one.
 func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	subARN := req.Params["SubscriptionArn"]
 
@@ -559,19 +614,16 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	if sub == nil {
-		// Idempotent — silently succeed.
-		type response struct {
-			XMLName          xml.Name         `xml:"UnsubscribeResponse"`
-			Xmlns            string           `xml:"xmlns,attr"`
-			ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
+		return nil, &AWSError{
+			Code:       "NotFound",
+			Message:    fmt.Sprintf("no subscription found for the ARN %q", subARN),
+			HTTPStatus: http.StatusNotFound,
 		}
-		return snsXMLResponse(http.StatusOK, response{
-			Xmlns:            snsXMLNS,
-			ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-		})
 	}
 
-	_ = p.state.Delete(goCtx, snsNamespace, snsSubStateKey(ctx.AccountID, ctx.Region, subARN))
+	if err := p.state.Delete(goCtx, snsNamespace, snsSubStateKey(ctx.AccountID, ctx.Region, subARN)); err != nil {
+		return nil, fmt.Errorf("sns unsubscribe state.Delete: %w", err)
+	}
 
 	// Remove from global list.
 	allIDs, err := p.loadSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region))
@@ -627,12 +679,14 @@ func (p *SNSPlugin) listSubscriptions(ctx *RequestContext, req *AWSRequest) (*AW
 }
 
 func (p *SNSPlugin) listSubscriptionsByTopic(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
-	if arnErr != nil {
-		return nil, arnErr
+	// An empty list and an absent topic were the same answer here, and API_ListSubscriptionsByTopic
+	// publishes NotFound/404 to distinguish them (#926).
+	goCtx := context.Background()
+	_, target, err := p.requireTopic(goCtx, req.Params["TopicArn"])
+	if err != nil {
+		return nil, err
 	}
 
-	goCtx := context.Background()
 	topicIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, target.Name))
 	if err != nil {
 		return nil, err
@@ -763,9 +817,13 @@ func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	message := req.Params["Message"]
 	subject := req.Params["Subject"]
 
-	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
-	if arnErr != nil {
-		return nil, arnErr
+	// The topic has to exist before a MessageId is minted. Reading only the subscription index made a
+	// deleted or misnamed topic indistinguishable from a live one with no subscribers, so a consumer's
+	// error path for a torn-down topic was unreachable (#926).
+	goCtx := context.Background()
+	_, target, err := p.requireTopic(goCtx, req.Params["TopicArn"])
+	if err != nil {
+		return nil, err
 	}
 	topicName := target.Name
 
@@ -773,7 +831,6 @@ func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	msgAttrs := parseSNSMessageAttributes(req.Params)
 
 	// Fan out to subscriptions.
-	goCtx := context.Background()
 	subIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName))
 	if err != nil {
 		return nil, err
@@ -946,13 +1003,23 @@ func matchesSNSFilterPolicy(policy map[string]interface{}, msgAttrs map[string]s
 	return true
 }
 
+// publishBatch publishes up to a batch of messages to one topic, refusing an ARN that names no topic.
+//
+// The absent topic is a **top-level** NotFound/404 rather than a per-entry BatchResultErrorEntry, which
+// #926 flagged as needing sourcing because API_PublishBatch has both shapes. The page settles it by
+// structure: TopicArn is a request-level parameter, one per call, so every entry in a batch addresses
+// the same topic and a per-entry rendering would report the identical failure on all of them while
+// still answering 200. The page's own framing agrees — "the result of publishing each message is
+// reported individually in the response", and the batch codes it publishes (BatchEntryIdsNotDistinct,
+// InvalidBatchEntryId, ParameterValueInvalid glossed "the parameter of an entry in a request") are
+// about the individual messages. NotFound appears in the operation's top-level Errors list.
 func (p *SNSPlugin) publishBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	target, arnErr := snsParseTopicARN(req.Params["TopicArn"])
-	if arnErr != nil {
-		return nil, arnErr
+	goCtx := context.Background()
+	_, target, err := p.requireTopic(goCtx, req.Params["TopicArn"])
+	if err != nil {
+		return nil, err
 	}
 
-	goCtx := context.Background()
 	subIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, target.Name))
 	if err != nil {
 		return nil, err
