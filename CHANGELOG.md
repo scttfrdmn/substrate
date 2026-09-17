@@ -530,6 +530,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Six describes published a cursor and implemented none of it** (#916). RDS `DescribeDBSnapshots`,
+  `DescribeDBSubnetGroups` and `DescribeDBParameterGroups`, and ElastiCache `DescribeReplicationGroups`,
+  `DescribeCacheSubnetGroups` and `DescribeCacheParameterGroups` each publish `Marker` and `MaxRecords`
+  and honoured neither: every request answered the entire listing, emitted no `Marker`, and discarded the
+  page size the caller asked for. Of the three states a published parameter can be in — implemented,
+  absent and refused, or accepted and ignored — this is the worst. A consumer's paging loop terminates on
+  the first response here, so it is dead code that first executes against real AWS over a listing long
+  enough to page; and with nothing decoding the parameter, a `Marker` persisted across a restart or
+  copied from another operation restarted the listing instead of being refused.
+
+  All six now page through the same three helpers as the three operations #887 fixed — `parseQueryMarker`,
+  `queryMaxRecords` and `queryMarkerPage` — so **nine operations share one cursor** and cannot diverge on
+  its semantics by construction rather than by nine sites agreeing. A `Marker` substrate did not issue is
+  refused, a full last page carries no `Marker`, and #913's 20–100 range applies here too, so the nine do
+  not disagree about what a page size is. Both parameters are validated before any state is read.
+
+  **The refusal code is published for three of the nine, and the split is not the family boundary** —
+  which reverses this issue's own acceptance criteria, corrected on the record before the work started.
+  `API_DescribeCacheClusters`, `API_DescribeReplicationGroups` and `API_DescribeCacheParameterGroups`
+  publish `InvalidParameterValue` / 400; the five RDS pages publish only their NotFound faults, and so
+  does `API_DescribeCacheSubnetGroups`, whose Errors section lists `CacheSubnetGroupNotFoundFault` / 400
+  alone. That last page is the case that matters: it is ElastiCache and it does not publish the code, so
+  "ElastiCache publishes it, RDS does not" is not a rule the provenance can rest on, and each page's
+  status is now stated individually in `docs/services.md` and in the helpers' doc comments. The
+  `MaxRecords` range is published identically on all nine, though the RDS pages write
+  "Constraints: Minimum 20, maximum 100." and the ElastiCache pages "Constraints: minimum 20; maximum
+  100."
+
+  **The filter-plus-page ordering trap is closed by construction, and asserted anyway.** Every one of the
+  six publishes a single-resource filter parameter, and a filter applied *after* a page is cut would
+  answer an empty page — or a NotFound fault — for a record that exists and merely sorts late. It cannot
+  happen here, because the filter runs inside `queryMarkerPage`'s record callback and a non-matching
+  record consumes no page slot, so a filtered listing is one record long however deep into the unfiltered
+  listing the record sits. `DescribeReplicationGroups` is the one of the six that answers a NotFound fault
+  today, and its fault is therefore decided on a page that cannot be empty for a group that exists. A
+  test filters for a record sorting past position twenty at all six, so a later refactor that hoists a
+  filter out of the callback fails rather than starts answering NotFound for records that exist.
+
+  The six are asserted through **one depth-based XML decoder rather than six near-identical structs**.
+  All six responses nest as `Response > Result > Wrapper > Item > Identifier`, so an identifier is at
+  depth five and the result's own `Marker` at depth three; matching on the element name alone would be a
+  weaker assertion than the structs it replaces, since a record rendered into the wrong wrapper would
+  still be picked up. Six structs would instead be six sets of tags free to drift apart, which is the
+  divergence a shared cursor exists to prevent. No test in the new file pages at `MaxRecords=2`, the
+  page size #913 recorded eleven pre-existing sites for: the small-listing cases fit inside the
+  documented minimum of twenty and the paging cases create twenty-one, twenty-five or forty records.
+
+  **What this does not fix, on the record.** Five of the six publish a NotFound fault their handler does
+  not answer — a filtered request naming a resource that does not exist gets an empty `200` instead of
+  `DBSnapshotNotFound` / 404, `DBSubnetGroupNotFoundFault` / 404, `DBParameterGroupNotFound` / 404,
+  `CacheSubnetGroupNotFoundFault` / 400 or `CacheParameterGroupNotFound` / 404. That is a defect about a
+  request's *result* rather than about how a listing is cut into pages, and it is filed as #1020 for the
+  reason #887 kept `MaxRecords` out of its own diff. Separately, `docs/services.md`'s ElastiCache
+  operation table was missing eight implemented operations, including both of the group describes this
+  change paginates; the rows are added in the same pass.
+
 - **A page size the service refuses was honoured, and one it cannot read was silently rewritten** (#913).
   RDS `DescribeDBInstances` and `DescribeDBClusters` and ElastiCache `DescribeCacheClusters` read
   `MaxRecords` with `if n, err := strconv.Atoi(raw); err == nil && n > 0`, so the parameter failed in two

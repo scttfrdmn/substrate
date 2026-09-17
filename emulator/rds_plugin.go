@@ -785,32 +785,45 @@ func (p *RDSPlugin) describeDBSnapshots(reqCtx *RequestContext, req *AWSRequest)
 	filterSnap := req.Params["DBSnapshotIdentifier"]
 	filterInst := req.Params["DBInstanceIdentifier"]
 
-	keys, err := p.state.List(context.Background(), rdsNamespace, "dbsnapshot:"+scope+"/")
+	// Both pagination parameters are validated before any state is read, so a request
+	// substrate cannot serve is refused rather than answered with page one (#916).
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
+	}
+
+	prefix := "dbsnapshot:" + scope + "/"
+	keys, err := p.state.List(context.Background(), rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("rds describeDBSnapshots list: %w", err)
 	}
 
-	var items []xmlDBSnapshotItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), rdsNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var snap RDSDBSnapshot
-		if json.Unmarshal(data, &snap) != nil {
-			continue
-		}
-		if filterSnap != "" && snap.DBSnapshotIdentifier != filterSnap {
-			continue
-		}
-		if filterInst != "" && snap.DBInstanceIdentifier != filterInst {
-			continue
-		}
-		items = append(items, dbSnapshotToXML(snap))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
+		func(key, _ string) (xmlDBSnapshotItem, bool) {
+			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlDBSnapshotItem{}, false
+			}
+			var snap RDSDBSnapshot
+			if json.Unmarshal(data, &snap) != nil {
+				return xmlDBSnapshotItem{}, false
+			}
+			if filterSnap != "" && snap.DBSnapshotIdentifier != filterSnap {
+				return xmlDBSnapshotItem{}, false
+			}
+			if filterInst != "" && snap.DBInstanceIdentifier != filterInst {
+				return xmlDBSnapshotItem{}, false
+			}
+			return dbSnapshotToXML(snap), true
+		})
 
 	type result struct {
 		DBSnapshots []xmlDBSnapshotItem `xml:"DBSnapshots>DBSnapshot"`
+		Marker      string              `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeDBSnapshotsResponse"`
@@ -818,8 +831,11 @@ func (p *RDSPlugin) describeDBSnapshots(reqCtx *RequestContext, req *AWSRequest)
 		Result  result   `xml:"DescribeDBSnapshotsResult"`
 	}
 	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBSnapshots: items},
+		XMLNS: rdsXMLNS,
+		Result: result{
+			DBSnapshots: page,
+			Marker:      nextMarker,
+		},
 	})
 }
 
@@ -906,29 +922,40 @@ func (p *RDSPlugin) describeDBSubnetGroups(reqCtx *RequestContext, req *AWSReque
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterName := req.Params["DBSubnetGroupName"]
 
-	keys, err := p.state.List(context.Background(), rdsNamespace, "dbsubnetgroup:"+scope+"/")
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
+	}
+
+	prefix := "dbsubnetgroup:" + scope + "/"
+	keys, err := p.state.List(context.Background(), rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("rds describeDBSubnetGroups list: %w", err)
 	}
 
-	var items []xmlDBSubnetGroupItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), rdsNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var sg RDSDBSubnetGroup
-		if json.Unmarshal(data, &sg) != nil {
-			continue
-		}
-		if filterName != "" && sg.DBSubnetGroupName != filterName {
-			continue
-		}
-		items = append(items, dbSubnetGroupToXML(sg))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
+		func(key, _ string) (xmlDBSubnetGroupItem, bool) {
+			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlDBSubnetGroupItem{}, false
+			}
+			var sg RDSDBSubnetGroup
+			if json.Unmarshal(data, &sg) != nil {
+				return xmlDBSubnetGroupItem{}, false
+			}
+			if filterName != "" && sg.DBSubnetGroupName != filterName {
+				return xmlDBSubnetGroupItem{}, false
+			}
+			return dbSubnetGroupToXML(sg), true
+		})
 
 	type result struct {
 		DBSubnetGroups []xmlDBSubnetGroupItem `xml:"DBSubnetGroups>DBSubnetGroup"`
+		Marker         string                 `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeDBSubnetGroupsResponse"`
@@ -936,8 +963,11 @@ func (p *RDSPlugin) describeDBSubnetGroups(reqCtx *RequestContext, req *AWSReque
 		Result  result   `xml:"DescribeDBSubnetGroupsResult"`
 	}
 	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBSubnetGroups: items},
+		XMLNS: rdsXMLNS,
+		Result: result{
+			DBSubnetGroups: page,
+			Marker:         nextMarker,
+		},
 	})
 }
 
@@ -1005,29 +1035,40 @@ func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRe
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterName := req.Params["DBParameterGroupName"]
 
-	keys, err := p.state.List(context.Background(), rdsNamespace, "dbparamgroup:"+scope+"/")
+	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
+	if cursorErr != nil {
+		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
+	}
+
+	prefix := "dbparamgroup:" + scope + "/"
+	keys, err := p.state.List(context.Background(), rdsNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("rds describeDBParameterGroups list: %w", err)
 	}
 
-	var items []xmlDBParamGroupItem
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), rdsNamespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var pg RDSDBParameterGroup
-		if json.Unmarshal(data, &pg) != nil {
-			continue
-		}
-		if filterName != "" && pg.DBParameterGroupName != filterName {
-			continue
-		}
-		items = append(items, dbParamGroupToXML(pg))
-	}
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
+		func(key, _ string) (xmlDBParamGroupItem, bool) {
+			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
+			if getErr != nil || data == nil {
+				return xmlDBParamGroupItem{}, false
+			}
+			var pg RDSDBParameterGroup
+			if json.Unmarshal(data, &pg) != nil {
+				return xmlDBParamGroupItem{}, false
+			}
+			if filterName != "" && pg.DBParameterGroupName != filterName {
+				return xmlDBParamGroupItem{}, false
+			}
+			return dbParamGroupToXML(pg), true
+		})
 
 	type result struct {
 		DBParameterGroups []xmlDBParamGroupItem `xml:"DBParameterGroups>DBParameterGroup"`
+		Marker            string                `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeDBParameterGroupsResponse"`
@@ -1035,8 +1076,11 @@ func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRe
 		Result  result   `xml:"DescribeDBParameterGroupsResult"`
 	}
 	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBParameterGroups: items},
+		XMLNS: rdsXMLNS,
+		Result: result{
+			DBParameterGroups: page,
+			Marker:            nextMarker,
+		},
 	})
 }
 
