@@ -31,9 +31,13 @@ import (
 //     while leaving RotationEnabled changed, and only the read-back distinguishes the two.
 //
 //  3. **That GetKeyRotationStatus itself is not guarded.** Its row in the same table permits Enabled,
-//     Disabled and pending deletion alike, and its page publishes neither code — so this is the one
-//     of the three rotation operations that must keep answering 200, and a sweep that guarded "every
-//     key-state-sensitive operation" would break it silently.
+//     Disabled and pending deletion alike, and its page describes both as answers rather than
+//     refusals — "the key rotation status does not change when you disable a KMS key", "while a KMS key
+//     is pending deletion, its key rotation status is false". So this is the one of the three rotation
+//     operations that must keep answering 200, and a sweep that guarded "every key-state-sensitive
+//     operation" would break it silently. (The page does publish KMSInvalidStateException, for the key
+//     states substrate never writes; an earlier version of this comment said it published neither code,
+//     which was wrong about that one.)
 //
 // Every call goes over the wire and every state is reached through the operation a consumer would use
 // — DisableKey and ScheduleKeyDeletion — rather than by writing a key record, per #765.

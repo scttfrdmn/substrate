@@ -9216,11 +9216,11 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | DeleteAlias | |
 | UpdateAlias | Same refusal as `CreateAlias` |
 | ListAliases | |
-| Encrypt | Returns ciphertext blob (base64-encoded stub); refuses a disabled key and a key pending deletion, with a different code for each — see below |
-| Decrypt | Returns plaintext (stub pass-through); same refusals as `Encrypt` |
-| GenerateDataKey | Same refusals as `Encrypt` |
-| GenerateDataKeyWithoutPlaintext | Same refusals as `Encrypt` |
-| ReEncrypt | Checks the key state of **both** keys, and reports the source key's ARN — see below |
+| Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each — see below |
+| Decrypt | Returns plaintext (stub pass-through); same algorithm handling and same refusals as `Encrypt`, and refuses a `KeyId` naming a key other than the ciphertext's — see below |
+| GenerateDataKey | Same refusals as `Encrypt`, minus the algorithm members |
+| GenerateDataKeyWithoutPlaintext | Same refusals as `GenerateDataKey` |
+| ReEncrypt | Checks the key state, the named key and the encryption algorithm of **both** keys independently, and reports the source key's ARN and both algorithms — see below |
 
 ### A `KeyId` is resolved from its own ARN, not from the caller
 
@@ -9739,10 +9739,116 @@ an account from. AWS permits a cross-account source here and substrate cannot ad
 one, because its stub ciphertext carries a bare key ID and nothing more. That is a
 limitation of the stub cipher, not of the resolver.
 
-Seven of `ReEncrypt`'s nine request members and four of its seven response members
-are still unmodelled — including `SourceKeyId` as a *request* parameter, whose absence
-makes the `IncorrectKeyException` AWS publishes for a mismatched source unreachable.
-Those are tracked in #969; this change fixes the member's value, not its enforcement.
+Four of `ReEncrypt`'s nine request members and two of its seven response members are
+still unmodelled: `DestinationEncryptionContext` and `SourceEncryptionContext` (#979),
+`DryRun`, `GrantTokens`, and the two `*KeyMaterialId` members (#978). `SourceKeyId` as a
+*request* parameter, and both encryption-algorithm members at both ends, arrived with
+#969 — see the two sections below.
+
+### A named key that is not the ciphertext's is refused
+
+`Decrypt` takes a `KeyId` and `ReEncrypt` takes a `SourceKeyId`, and neither names the
+key the operation will use — substrate finds that inside its own stub ciphertext. Both
+members are a *constraint* on which key the ciphertext may belong to, and both were
+decoded and then dropped, so naming the wrong key was indistinguishable from naming the
+right one: the operation used the ciphertext's key and answered `200`
+([#969](https://github.com/scttfrdmn/substrate/issues/969)).
+
+AWS glosses the two members with one sentence and gives them one code, which is why one
+check now serves both:
+
+> Enter a key ID of the KMS key that was used to encrypt the ciphertext. If you identify
+> a different KMS key, the `Decrypt` operation throws an `IncorrectKeyException`.
+
+| Request | Substrate answers | Provenance |
+|---------|-------------------|------------|
+| The member is absent | 200, on the ciphertext's own key | Both members are published `Required: No` |
+| The member names the ciphertext's key | 200 | The constraint is satisfied |
+| The member names a different key KMS holds | `IncorrectKeyException`/400 | Published by `API_Decrypt` and by `API_ReEncrypt`, in the gloss above |
+| The member names no key at all | `NotFoundException`/400 | Published; which of the two codes wins is **substrate's reading**, below |
+
+**The comparison is between key ARNs, not between strings.** The member accepts all four
+forms a `KeyId` accepts — a bare key ID, a key ARN, an alias name and an alias ARN — so it
+is resolved to a key record first and the two records' ARNs are compared. Comparing the
+member against the bare key ID inside the ciphertext would have refused three of those
+four correct requests, and it would also have been wrong across accounts, where two keys
+can share neither ARN nor much else. A test sends all four forms plus the absent case.
+
+**A member naming nothing answers `NotFoundException`, not `IncorrectKeyException`.**
+AWS publishes both codes for both operations and orders neither. Substrate reports the
+absence, because the two codes ask the caller for different things: `IncorrectKeyException`
+says *go find the right key*, which is useless advice when the identifier names no key —
+there is a typo to fix instead.
+
+**The wrong key is reported before the key state.** A request whose member names another
+key *and* whose ciphertext key is disabled has two candidate answers, and substrate gives
+the wrong-key one. AWS publishes no ordering, so this is recorded rather than matched; it
+follows the direction #964 took, that a defect in the request precedes a condition of a
+resource, and it avoids sending a caller after the state of a key it did not ask about. A
+test pins it with the two answers visibly different.
+
+`Encrypt`, `GenerateDataKey` and `GenerateDataKeyWithoutPlaintext` have no such member:
+their `KeyId` *is* the key they use, and an absent or unresolvable one is already
+`NotFoundException`.
+
+### An encryption algorithm belongs to the key spec, not to the key
+
+`Encrypt`, `Decrypt` and both ends of `ReEncrypt` take an encryption algorithm and report
+one back. Substrate decoded none of the four members and reported none of them
+([#969](https://github.com/scttfrdmn/substrate/issues/969)), so a caller could not say
+which algorithm it wanted and could not read which one was used.
+
+The absence was defensible while it lasted, because substrate performs no cryptography and
+echoing `SYMMETRIC_DEFAULT` unconditionally would have reported a value derived from
+nothing. What makes the value derivable is that **AWS does not let a key choose its
+algorithm.** The developer guide's key spec reference is explicit — *"you cannot configure a
+KMS key to use a particular encryption algorithm"* — and fixes the admissible set per key
+spec instead, so the algorithm a request may use is a function of the key it names and the
+member it sent, both of which substrate holds:
+
+| Key spec | Admissible encryption algorithms |
+|----------|----------------------------------|
+| `SYMMETRIC_DEFAULT` | `SYMMETRIC_DEFAULT` — *"the only supported algorithm that is valid for symmetric encryption KMS keys"* |
+| `RSA_2048`, `RSA_3072`, `RSA_4096` | `RSAES_OAEP_SHA_1`, `RSAES_OAEP_SHA_256` |
+| `SM2` | `SM2PKE` |
+| The ECC, HMAC and ML-DSA specs | **None.** They sign, generate MACs or derive shared secrets; no encryption algorithm applies |
+
+Substrate still encrypts nothing. What it models is the **refusal**, which is the
+observation a consumer's error path is written against, and it comes in two codes:
+
+| Request | Substrate answers | Provenance |
+|---------|-------------------|------------|
+| The member is absent | 200, reporting `SYMMETRIC_DEFAULT` | Published: *"the default value, `SYMMETRIC_DEFAULT`, is the algorithm used for symmetric encryption KMS keys"* |
+| The member is one of the published four and the key spec admits it | 200, reporting the caller's own value | The four are `SYMMETRIC_DEFAULT`, `RSAES_OAEP_SHA_1`, `RSAES_OAEP_SHA_256`, `SM2PKE` — one `Valid Values` line shared by all four members |
+| The member is outside the published four | `ValidationError`/400, naming the member and listing the set | **Substrate's reading**: no operation page gives a code for a malformed enum member, so it comes from `CommonErrors.html` |
+| The key spec does not admit the algorithm | `InvalidKeyUsageException`/400, naming the member, the key spec and what that spec does admit | Published — it is that code's own second gloss bullet, *"the encryption algorithm or signing algorithm specified for the operation is incompatible with the type of key material in the KMS key (`KeySpec`)"* |
+
+**The two codes are ordered, and they are checked at different points.** A value outside
+the published four says nothing about any key, so it is refused *before* the key is
+resolved — a caller that misspells `RSAES_OAEP_SHA_256` and names a nonexistent key hears
+about the misspelling, which is the ordering #964 established for a number out of range.
+The key-spec check necessarily runs after the key is loaded, and after the key-state check,
+so a caller holding a key pending deletion hears about the deletion rather than about an
+algorithm it would not get to use.
+
+**AWS's separate rule that the member is *"required only for asymmetric KMS keys"* falls
+out of this with no branch of its own.** The default is `SYMMETRIC_DEFAULT`
+unconditionally, and an RSA key does not admit it — so omitting the member on an RSA key is
+refused for the ordinary reason, and the member is required exactly where AWS says it is.
+A test asserts that, because the alternative implementation — a required-ness check keyed on
+the key spec — is a second thing to keep in step with the table above.
+
+**`ReEncrypt`'s two ends are independent.** The operation exists to move data between
+keys, so the two algorithms need not agree: a symmetric source can re-encrypt to an RSA
+destination, and each member is checked against its own key. The source is checked first,
+matching the order #961 established for the two key states. A test re-encrypts across two
+key specs and then swaps each end for the other's value, because an implementation that
+validated both members against one key would pass every other assertion here.
+
+The first bullet of `InvalidKeyUsageException`'s gloss — a `KeyUsage` incompatible with the
+operation, such as an `ENCRYPT_DECRYPT` call against a `SIGN_VERIFY` key — is **not**
+modelled, and is tracked with `CreateKey`'s acceptance of any string as a `KeySpec` in
+#977.
 
 ### A key is reachable through the tagging API
 

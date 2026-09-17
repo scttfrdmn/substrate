@@ -57,6 +57,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the pass-through every rotation-schedule resource would have failed under the refusal below, which is
   why it ships here rather than as a follow-up.
 
+- **KMS's encryption-algorithm members, on `Encrypt`, `Decrypt` and both ends of `ReEncrypt`** (#969).
+  Four request members were decoded by nobody and four response members were answered by nobody, so a
+  caller could not say which algorithm it wanted and could not read which one was used. The absence was
+  defensible while it lasted — substrate performs no cryptography, and echoing `SYMMETRIC_DEFAULT`
+  unconditionally would have reported a value derived from nothing, which is the defect class the last
+  several releases were spent on. What makes the value derivable is that AWS does not let a key choose:
+  the developer guide's key spec reference states "you cannot configure a KMS key to use a particular
+  encryption algorithm" and fixes the admissible set per key spec instead, so the reported value is a
+  function of the request and of the key. Substrate still encrypts nothing; what it now models is the
+  refusal.
+
+  Two codes, on different evidence. A value outside the published four — `SYMMETRIC_DEFAULT`,
+  `RSAES_OAEP_SHA_1`, `RSAES_OAEP_SHA_256`, `SM2PKE`, one `Valid Values` line shared by all four
+  members — answers `ValidationError`/400, which is **substrate's reading**: no operation page gives a
+  code for a malformed enum member, so it comes from `CommonErrors.html`. A published value the key's
+  spec does not admit answers `InvalidKeyUsageException`/400, which is published — it is that code's own
+  second gloss bullet, "the encryption algorithm or signing algorithm specified for the operation is
+  incompatible with the type of key material in the KMS key (`KeySpec`)". The two are checked at
+  different points: the enum before the key is resolved, following #964's ordering for a number out of
+  range, and the key-spec compatibility after the key-state check, so a caller holding a key pending
+  deletion hears about the deletion.
+
+  AWS's separate rule that the member is "required only for asymmetric KMS keys" falls out with no
+  branch of its own: the default is `SYMMETRIC_DEFAULT` unconditionally and an RSA key does not admit
+  it, so omitting the member on an RSA key is refused for the ordinary reason. `ReEncrypt`'s two ends
+  are independent and each is checked against its own key, source first, matching the order #961
+  established for the two key states — a symmetric source re-encrypting to an RSA destination is the
+  case that fails against an implementation validating both members against one key.
+  `InvalidKeyUsageException`'s *first* gloss bullet, a `KeyUsage` incompatible with the operation, is
+  not modelled, and is tracked with `CreateKey`'s acceptance of any string as a `KeySpec` in #977.
+
 ### Changed
 - **Kinesis's `ListTagsForStream` pages its tags** (#954). The operation publishes both halves of a
   cursor over the tag key and substrate read neither: `Limit` and `ExclusiveStartTagKey` were decoded by
@@ -679,6 +710,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SecretId`-taking operations, and `DescribeSecret` no longer emits a member it has no value for, so
   an assertion that a member is present-and-empty now sees it absent — except `RotationEnabled`, which
   is present as `null` where it previously read `false`.
+
+- **KMS `Decrypt`'s `KeyId` and `ReEncrypt`'s `SourceKeyId` are constraints again, not decoration**
+  (#969). Neither member names the key the operation uses — substrate finds that inside its own stub
+  ciphertext — and both were decoded and then discarded, so naming a *different* key was
+  indistinguishable from naming the right one: the operation used the ciphertext's key and answered
+  `200`. AWS glosses the two members with one sentence and gives them one code, which is why one check
+  now serves both: "enter a key ID of the KMS key that was used to encrypt the ciphertext. If you
+  identify a different KMS key, the `Decrypt` operation throws an `IncorrectKeyException`."
+
+  The comparison is between key **ARNs**, not between strings. The member accepts all four forms a
+  `KeyId` accepts, so it is resolved to a key record first and the two records' ARNs are compared;
+  comparing the member against the bare key ID inside the ciphertext would have refused three of those
+  four correct requests, and would have been wrong across accounts besides. A member naming nothing at
+  all answers `NotFoundException`/400 rather than `IncorrectKeyException` — both are published for both
+  operations and AWS orders neither, so this is substrate's reading, on the grounds that "go find the
+  right key" is useless advice when the identifier names no key. And the wrong key is reported **before**
+  the key state, following the direction #964 took, so a caller that named another key is not sent after
+  the state of a key it did not ask about.
+
+  One code comment corrected on the record: the note explaining why `GetKeyRotationStatus` is
+  deliberately unguarded said the page publishes neither key-state code, and it publishes
+  `KMSInvalidStateException`/400. The conclusion is unchanged and better sourced — the page's own prose
+  documents both states as *successful* ("the key rotation status does not change when you disable a KMS
+  key", "while a KMS key is pending deletion, its key rotation status is `false`") — so the comment now
+  cites that rather than an absence that is not there. The equivalent sentence in #971's shipped
+  changelog section is left as written, since a released section is not rewritten.
+
+  Compatibility: three refusals are new where a `200` used to be. A `Decrypt` or `ReEncrypt` whose
+  `KeyId`/`SourceKeyId` names a key other than the ciphertext's now answers
+  `IncorrectKeyException`/400; one naming no key answers `NotFoundException`/400; and an encryption
+  algorithm outside the published four, or one the key's spec does not admit, answers
+  `ValidationError`/400 or `InvalidKeyUsageException`/400 respectively — which includes **omitting** the
+  member on an asymmetric key, since the default is symmetric-only. Three response members are new:
+  `Encrypt` and `Decrypt` carry `EncryptionAlgorithm`, and `ReEncrypt` carries
+  `SourceEncryptionAlgorithm` and `DestinationEncryptionAlgorithm`.
 
 ## [v0.117.0] - 2026-09-15
 

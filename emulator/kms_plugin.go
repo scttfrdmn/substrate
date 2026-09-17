@@ -820,15 +820,20 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 //     state one code across the plugin. The message names the state either way, so the two remain
 //     distinguishable even for a caller that matches on the code alone.
 //
-// GetKeyRotationStatus deliberately does not call this. Its row in the same table permits Enabled,
-// Disabled *and* pending deletion alike, and API_GetKeyRotationStatus publishes neither code — so a
-// later sweep that guarded every key-state-sensitive operation "for consistency" would introduce a
-// refusal AWS does not have. [TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey]
-// pins that.
+// GetKeyRotationStatus deliberately does not call this, and the reason is stronger than the table. Its
+// page describes both states as *successful* observations rather than refusals — "the key rotation
+// status does not change when you disable a KMS key" and "while a KMS key is pending deletion, its key
+// rotation status is false" — so a refusal there would suppress an answer AWS publishes. (The page does
+// list KMSInvalidStateException among its six errors, as every key-reading KMS operation does; that
+// covers the key states substrate never writes, not these two. An earlier version of this comment said
+// the page published neither code, which is wrong about that one, and #973 is where the pending-deletion
+// `false` itself is owed.) [TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey] pins
+// the behavior.
 //
 // EnableKey and DisableKey must not call this either, and for a different reason: their rows permit a
 // Disabled key, so the !key.Enabled arm here would refuse a call AWS accepts. They need the
-// PendingDeletion arm alone, which is #968.
+// PendingDeletion arm alone, which is what #968 gave them — see [KMSPlugin.setKeyState], whose guard is
+// this function's first branch and nothing else.
 func kmsKeyStateError(key *KMSKey) *AWSError {
 	if key.KeyState == kmsKeyStatePendingDeletion {
 		return kmsInvalidKeyState(key.KeyID, key.KeyState)
@@ -1212,13 +1217,38 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// encrypt encrypts a plaintext under a KMS key.
+//
+// #969 added EncryptionAlgorithm, on both the request and the response. Encrypt is not named in that
+// issue's title — it is about ReEncrypt — but is fixed with it, because Decrypt reports the algorithm
+// that was used and an Encrypt that neither accepts nor reports one leaves a caller unable to learn
+// what to send back. The value is traceable: it is the caller's own, or the default AWS documents.
+//
+// Three request members remain unmodelled and each is recorded rather than silently absent. DryRun and
+// GrantTokens are seedable-outcome and authorization surface substrate has no equivalent of.
+// EncryptionContext is decoded by nobody, which is #979 — and it is the load-bearing one, because a
+// context supplied here must be supplied again on Decrypt or AWS answers
+// InvalidCiphertextException, a refusal substrate cannot reach while a stub ciphertext carries only a
+// key ID. Plaintext's published length range, 1-4096, is likewise unenforced.
+//
+// The response is complete at three members: CiphertextBlob, EncryptionAlgorithm and KeyId. Note that
+// API_Encrypt publishes no KeyMaterialId, unlike Decrypt and ReEncrypt — so #978, which adds that
+// member elsewhere, must leave this operation alone.
 func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		KeyID     string `json:"KeyId"`
-		Plaintext string `json:"Plaintext"` // base64-encoded
+		KeyID               string `json:"KeyId"`
+		Plaintext           string `json:"Plaintext"` // base64-encoded
+		EncryptionAlgorithm string `json:"EncryptionAlgorithm"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
+	}
+
+	// Before the key is resolved, for the reason [kmsResolveEncryptionAlgorithm] records: a value
+	// outside the published enum is a malformed member rather than a statement about any key.
+	algorithm, algErr := kmsResolveEncryptionAlgorithm("EncryptionAlgorithm", input.EncryptionAlgorithm)
+	if algErr != nil {
+		return nil, algErr
 	}
 
 	goCtx := context.Background()
@@ -1239,6 +1269,9 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
+	if algErr := kmsCheckEncryptionAlgorithmForKey(key, "EncryptionAlgorithm", algorithm); algErr != nil {
+		return nil, algErr
+	}
 
 	plaintext, err := base64.StdEncoding.DecodeString(input.Plaintext)
 	if err != nil {
@@ -1247,19 +1280,47 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 
 	ciphertext := kmsEncryptStub(keyID, plaintext)
 	out := map[string]interface{}{
-		"KeyId":          key.ARN,
-		"CiphertextBlob": string(ciphertext),
+		"KeyId":               key.ARN,
+		"CiphertextBlob":      string(ciphertext),
+		"EncryptionAlgorithm": algorithm,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// decrypt decrypts a ciphertext under the key that produced it.
+//
+// #969 made KeyId do its published job. The member had been decoded and then ignored, so a caller that
+// named the wrong key was quietly handed the right one — the opposite of what the member is for. AWS
+// states it as a constraint rather than a selector: "enter a key ID of the KMS key that was used to
+// encrypt the ciphertext. If you identify a different KMS key, the Decrypt operation throws an
+// IncorrectKeyException." The key that decrypts still comes from the ciphertext; KeyId only says which
+// key the caller believes that is. See [kmsIncorrectKey].
+//
+// The comparison is between **key ARNs**, not bare key IDs, and that matters at exactly one boundary: a
+// key ID is unique within an account and Region, so two accounts can each hold one that compares equal
+// by ID while being different keys. Resolving the caller's KeyId to a key and comparing ARNs is the
+// only form of the check that is right cross-account, which is a case AWS explicitly supports here
+// ("Cross-account use: Yes").
+//
+// Three members are still unmodelled and are recorded rather than absent: Recipient (an Nitro enclave
+// attestation document, which has no substrate counterpart and drives CiphertextForRecipient),
+// GrantTokens, and the DryRun/DryRunModifiers pair — the last of which is why CiphertextBlob is
+// published as Required: No, since it "is required in all cases except when DryRun is true and
+// DryRunModifiers is set to IGNORE_CIPHERTEXT". Substrate requires it always, which is correct for
+// every request it can answer. EncryptionContext is #979 and KeyMaterialId is #978.
 func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		CiphertextBlob string `json:"CiphertextBlob"`
-		KeyID          string `json:"KeyId"`
+		CiphertextBlob      string `json:"CiphertextBlob"`
+		KeyID               string `json:"KeyId"`
+		EncryptionAlgorithm string `json:"EncryptionAlgorithm"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
+	}
+
+	algorithm, algErr := kmsResolveEncryptionAlgorithm("EncryptionAlgorithm", input.EncryptionAlgorithm)
+	if algErr != nil {
+		return nil, algErr
 	}
 
 	keyID, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
@@ -1279,17 +1340,62 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	// Before the key-state check, so a caller that named the wrong key hears about the key it named
+	// rather than about the state of a key it did not ask for. A request defect precedes a resource
+	// condition, which is the order #964 took for a range check.
+	if incorrectErr := p.checkNamedKeyMatches(goCtx, ctx, input.KeyID, "KeyId", key); incorrectErr != nil {
+		return nil, incorrectErr
+	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
 	// different codes, and until #961 both answered DisabledException.
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
+	if algErr := kmsCheckEncryptionAlgorithmForKey(key, "EncryptionAlgorithm", algorithm); algErr != nil {
+		return nil, algErr
+	}
 
 	out := map[string]interface{}{
-		"KeyId":     key.ARN,
-		"Plaintext": base64.StdEncoding.EncodeToString(plaintext),
+		"KeyId":               key.ARN,
+		"Plaintext":           base64.StdEncoding.EncodeToString(plaintext),
+		"EncryptionAlgorithm": algorithm,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
+}
+
+// checkNamedKeyMatches refuses a request whose KeyId or SourceKeyId does not name the key that
+// encrypted the ciphertext.
+//
+// Shared by Decrypt's KeyId and ReEncrypt's SourceKeyId, which AWS glosses with the same sentence and
+// gives the same code, so one helper is what keeps the two from diverging. An absent member is not a
+// refusal — both are published Required: No, and the operation then uses the ciphertext's key without
+// comment.
+//
+// The named key is resolved and loaded rather than string-compared, which is what separates the two
+// refusals a caller can earn here: a KeyId naming nothing answers NotFoundException, because that is
+// the truth about it, while a KeyId naming a real key that is not this ciphertext's answers
+// IncorrectKeyException. Comparing the raw member against an ARN would collapse both into one, and
+// would also make an alias — which resolveKeyTarget follows and AWS accepts — compare unequal to the
+// key it points at.
+func (p *KMSPlugin) checkNamedKeyMatches(goCtx context.Context, ctx *RequestContext, named, member string, key *KMSKey) error {
+	if named == "" {
+		return nil
+	}
+	target, err := p.resolveKeyTarget(goCtx, ctx, named)
+	if err != nil {
+		return err
+	}
+	namedKey, loadErr := p.loadKey(goCtx, target.AccountID, target.Region, target.KeyID)
+	if loadErr != nil {
+		return loadErr
+	}
+	if namedKey == nil {
+		return kmsNotFound(fmt.Sprintf("%s does not name a key KMS holds: %s", member, named))
+	}
+	if namedKey.ARN != key.ARN {
+		return kmsIncorrectKey(namedKey.ARN, key.ARN)
+	}
+	return nil
 }
 
 func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1402,16 +1508,42 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 // permits a cross-account source here; substrate cannot address one until a ciphertext carries more
 // than a bare key ID, which is the stub's shape (see [kmsEncryptStub]).
 //
-// Seven request members and four response members are still unmodelled, SourceKeyId's *request* form
-// among them — so the IncorrectKeyException AWS publishes when it names the wrong key is unreachable.
-// That is #969; this handler fixes SourceKeyId's value, not its enforcement.
+// #969 added the three members this operation was missing that substrate can derive: SourceKeyId's
+// *request* form, which had gone undecoded so that the IncorrectKeyException AWS publishes was
+// unreachable, and both algorithm members, on the request and echoed on the response. AWS splits the
+// algorithm across the two ends deliberately — a ReEncrypt exists to move data between keys, so the
+// source and destination algorithms are independent — and each is checked against its own key.
+//
+// The two ends are checked in AWS's own order, source before destination, so a request wrong at both
+// ends reports the source. That means the source's algorithm compatibility is settled before the
+// destination key is loaded at all, which is the same "half that fails first" rule #961 applied to the
+// key-state checks.
+//
+// Four request members remain unmodelled and are recorded rather than absent: DryRun, GrantTokens and
+// the source and destination EncryptionContext pair, the last of which is #979 — and it is what makes
+// this operation's context handling non-trivial, since it *reads* one context and *writes* the other.
+// Two response members remain: SourceKeyMaterialId and DestinationKeyMaterialId, which are #978.
 func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		CiphertextBlob   string `json:"CiphertextBlob"`
-		DestinationKeyID string `json:"DestinationKeyId"`
+		CiphertextBlob                 string `json:"CiphertextBlob"`
+		DestinationKeyID               string `json:"DestinationKeyId"`
+		SourceKeyID                    string `json:"SourceKeyId"`
+		SourceEncryptionAlgorithm      string `json:"SourceEncryptionAlgorithm"`
+		DestinationEncryptionAlgorithm string `json:"DestinationEncryptionAlgorithm"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
+	}
+
+	// Both enums first, before either key is resolved, so a caller that misspelled the destination
+	// algorithm is not told instead about a source key it addressed correctly.
+	sourceAlgorithm, algErr := kmsResolveEncryptionAlgorithm("SourceEncryptionAlgorithm", input.SourceEncryptionAlgorithm)
+	if algErr != nil {
+		return nil, algErr
+	}
+	destAlgorithm, algErr := kmsResolveEncryptionAlgorithm("DestinationEncryptionAlgorithm", input.DestinationEncryptionAlgorithm)
+	if algErr != nil {
+		return nil, algErr
 	}
 
 	sourceKeyID, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
@@ -1427,8 +1559,16 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if sourceKey == nil {
 		return nil, kmsNotFound("Source key not found")
 	}
+	// Shared with Decrypt's KeyId, which AWS glosses with the same sentence: see
+	// [KMSPlugin.checkNamedKeyMatches].
+	if incorrectErr := p.checkNamedKeyMatches(goCtx, ctx, input.SourceKeyID, "SourceKeyId", sourceKey); incorrectErr != nil {
+		return nil, incorrectErr
+	}
 	if stateErr := kmsKeyStateError(sourceKey); stateErr != nil {
 		return nil, stateErr
+	}
+	if algErr := kmsCheckEncryptionAlgorithmForKey(sourceKey, "SourceEncryptionAlgorithm", sourceAlgorithm); algErr != nil {
+		return nil, algErr
 	}
 
 	dest, resolveErr := p.resolveKeyTarget(goCtx, ctx, input.DestinationKeyID)
@@ -1446,6 +1586,9 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if stateErr := kmsKeyStateError(destKey); stateErr != nil {
 		return nil, stateErr
 	}
+	if algErr := kmsCheckEncryptionAlgorithmForKey(destKey, "DestinationEncryptionAlgorithm", destAlgorithm); algErr != nil {
+		return nil, algErr
+	}
 
 	newCiphertext := kmsEncryptStub(destKeyID, plaintext)
 	// SourceKeyId is the source key's ARN, matching the sample response on API_ReEncrypt and the
@@ -1453,9 +1596,11 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	// held input.CiphertextBlob until #961 — a value that is not an identifier of anything, and one a
 	// caller round-tripping it into a DescribeKey could only ever get NotFoundException from.
 	out := map[string]interface{}{
-		"KeyId":          destKey.ARN,
-		"CiphertextBlob": string(newCiphertext),
-		"SourceKeyId":    sourceKey.ARN,
+		"KeyId":                          destKey.ARN,
+		"CiphertextBlob":                 string(newCiphertext),
+		"SourceKeyId":                    sourceKey.ARN,
+		"SourceEncryptionAlgorithm":      sourceAlgorithm,
+		"DestinationEncryptionAlgorithm": destAlgorithm,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }
