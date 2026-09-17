@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **CloudFormation's `aws:cloudformation:*` stamp reaches twelve more resource types, and stack-tag
+  propagation reaches them with it** (#819, unblocked by #835). A KMS key and replica key, a Secrets
+  Manager secret, an SNS topic, an SSM parameter, an ACM certificate, a CloudFront distribution, a
+  Step Functions activity, an ECS service and task definition, and an RDS DB cluster and DB subnet
+  group now carry the three stack keys, taking the stamp to **38 CFN resource types across 20
+  services**. Because the same resolver drives #764's propagation, a `CreateStack` tag reaches all
+  twelve as well.
+
+  These twelve were held out by one condition, not by a judgement about which service matters:
+  substrate's shared tag writer had no arm reaching their namespace and key prefix, so there was
+  nowhere for a stamp to land that the owning service would ever read. #835 supplied all seven of
+  those arms. Each type is asserted by reading the tag back through the **owning service's own** tag
+  call — `ListResourceTags` for KMS, `ListTagsForCertificate` for ACM, and `DescribeSecret` for
+  Secrets Manager, which publishes no tag-reading operation of its own (#929) — because a stamp
+  written to a key the service does not read satisfies a state assertion and no caller. That is the
+  defect #826 found for SQS, #845 for DynamoDB and #943 for Lambda, three times in three services.
+
+  **Seven of the twelve could not be table entries, and each failure is a distinct way the two
+  identifiers diverge.** A KMS key's, a secret's and a topic's physical ID is an **ARN** where the
+  record's key holds a bare ID or name, so each resolves through its own service's ARN resolver rather
+  than through a second parser that could disagree with it. A distribution's key carries **no Region**,
+  CloudFront being global. A parameter's key carries the leading `/` that `PutParameter` adds and the
+  physical ID does not. And an ECS service's and task definition's key has **four** segments, one of
+  which — the cluster, and the revision — appears only in the ARN. That last pair corrects a prediction
+  #819 itself carried, that ECS needed a table line rather than a writer: a table line is exactly what
+  it cannot have.
+
+  **`AWS::Config::ConfigRule` remains unstamped and is the one genuine writer gap left**, so #819 stays
+  open. Config keeps a rule's tags in a side-car record whose whole document *is* the tag map, which
+  neither merge helper fits — both look for a tag member inside a record — and the side-car is deleted
+  when it empties, so there is often no record to merge into at all.
 - **Price List `GetProducts` serves an AmazonEC2 offer corpus — 32 SKUs copied verbatim from three
   real offer files** (#894). `AmazonEC2` was not in the corpus at all, so a consumer that prices its
   own instance usage at runtime got `NotFoundException` from substrate and had to be tested against a
@@ -847,6 +878,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A stack-tag reconciliation read a KMS key's stored tags as `nil`, so it clobbered a caller's own
+  tag and left a removed stack tag in place** (#819). `cfnRecordTags` decoded a record's tag member as
+  either a map, an ECS-style `key`/`value` list or an EFS-style `Key`/`Value` list — but KMS spells its
+  members `TagKey`/`TagValue`, which is AWS's own naming for the KMS `Tag` shape and unique in the tree.
+  A record whose tags read back as `nil` is indistinguishable from a resource carrying none, and the
+  reconciliation's two safeguards both hinge on the existing set: a value the caller set directly is
+  preserved only by comparing it against what the stack previously propagated, and a stack tag is
+  removed only when the stored value still matches. So both fail together, silently and only on the
+  *second* deployment — a first deploy writes the propagated tag either way. Found while widening the
+  stamp, and fixed with one six-member struct rather than a third decode attempt.
 - **Replay verification did not compare response bodies, so two runs that agreed on `200` and differed
   on every value inside the document were reported as matching** (#817). `ReplayEngine.replayEvent`
   compared a recorded outcome at the granularity of the status code and the error string, and carried

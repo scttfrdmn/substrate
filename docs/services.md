@@ -6814,7 +6814,7 @@ stamp cannot push a caller's own tags over it.
 
 #### What the stamp reaches
 
-Twenty-six CFN resource types are stamped, across fourteen services, and each tag is readable
+Thirty-eight CFN resource types are stamped, across twenty services, and each tag is readable
 through that service's **own** tag call rather than only out of state:
 
 | Service | CFN types stamped | Read back with |
@@ -6825,23 +6825,46 @@ through that service's **own** tag call rather than only out of state:
 | SQS | `AWS::SQS::Queue` | `ListQueueTags` |
 | DynamoDB | `AWS::DynamoDB::Table` | `ListTagsOfResource` |
 | ELBv2 | LoadBalancer, TargetGroup, Listener, ListenerRule | `DescribeTags` |
-| Step Functions | `AWS::StepFunctions::StateMachine` | `ListTagsForResource` |
+| Step Functions | `AWS::StepFunctions::StateMachine`, `AWS::StepFunctions::Activity` | `ListTagsForResource` |
 | ECR | `AWS::ECR::Repository` | `ListTagsForResource` |
-| ECS | `AWS::ECS::Cluster` | `ListTagsForResource` |
+| ECS | `AWS::ECS::Cluster`, `AWS::ECS::Service`, `AWS::ECS::TaskDefinition` | `ListTagsForResource` |
 | EFS | `AWS::EFS::FileSystem`, `AWS::EFS::AccessPoint` | `ListTagsForResource` |
 | ElastiCache | `AWS::ElastiCache::CacheCluster` | `ListTagsForResource` |
-| RDS | `AWS::RDS::DBInstance` | `ListTagsForResource` |
+| RDS | `AWS::RDS::DBInstance`, `AWS::RDS::DBCluster`, `AWS::RDS::DBSubnetGroup` | `ListTagsForResource` |
 | Kinesis | `AWS::Kinesis::Stream` | `ListTagsForStream` |
 | Glue | `AWS::Glue::Database` | `GetTags` |
+| KMS | `AWS::KMS::Key`, `AWS::KMS::ReplicaKey` | `ListResourceTags` |
+| Secrets Manager | `AWS::SecretsManager::Secret` | `DescribeSecret` |
+| SNS | `AWS::SNS::Topic` | `ListTagsForResource` |
+| SSM | `AWS::SSM::Parameter` | `ListTagsForResource` |
+| ACM | `AWS::CertificateManager::Certificate` | `ListTagsForCertificate` |
+| CloudFront | `AWS::CloudFront::Distribution` | `ListTagsForResource` |
 
-The last eight services are
-[#819](https://github.com/scttfrdmn/substrate/issues/819)'s nine types. Two conditions decided
-that cut, both checked against the owning plugin rather than assumed: the service's tag record has
-a merge arm behind substrate's one tag writer — the same writer the Resource Groups Tagging API
-uses, so a stamp and a `TagResources` call cannot merge differently — and the physical ID
-CloudFormation records is already exactly the identifier that plugin keys its record by. A service
-that fails the second condition would need the key re-derived, which is where a stamp lands
+The last fourteen services carry
+[#819](https://github.com/scttfrdmn/substrate/issues/819)'s twenty-one types, added in two halves.
+Two conditions decided that cut, both checked against the owning plugin rather than assumed: the
+service's tag record has a merge arm behind substrate's one tag writer — the same writer the Resource
+Groups Tagging API uses, so a stamp and a `TagResources` call cannot merge differently — and the
+physical ID CloudFormation records is already exactly the identifier that plugin keys its record by.
+A service that fails the second condition needs the key re-derived, which is where a stamp lands
 somewhere nothing reads.
+
+Twelve of the twenty-one waited on the first condition — their services kept tag state no merge arm
+reached, so there was nowhere for a stamp to land that the owning service would read, and
+`TagResources` could not reach them either: one defect with two symptoms, closed as
+[#835](https://github.com/scttfrdmn/substrate/issues/835). Seven of those twelve then failed the
+*second* condition and are resolved individually rather than from the type table, and the reasons are
+worth naming because each is a way the two identifiers can silently differ: a KMS key's, a secret's
+and a topic's physical ID is an **ARN** where the record's key holds a bare ID or name, so each is
+resolved through its own service's ARN resolver; a distribution's key carries **no Region**, because
+CloudFront is global and its ARN's Region field is empty; a parameter's key carries the leading `/`
+that `PutParameter` adds and the physical ID does not; and an ECS service's and task definition's key
+has **four** segments, one of which — the cluster, and the revision — appears only in the ARN.
+
+Read-back is through whatever the owning service calls its tag-reading operation, which is not always
+`ListTagsForResource`: ACM publishes `ListTagsForCertificate`, and Secrets Manager publishes no
+tag-reading operation at all, so a secret's tags are read where a caller reads them — off
+`DescribeSecret`.
 
 Two resolvers sit behind the one writer. EC2's keys on the physical ID's prefix, because an EC2
 ID carries its type; every other service's keys on the **CloudFormation resource type**, because
@@ -6880,29 +6903,26 @@ resource type", so a partial cut is what AWS itself describes rather than a shor
 published list. [#819](https://github.com/scttfrdmn/substrate/issues/819) keeps the list in one
 place; it is split per service when one is picked up.
 
-**A tagging surface but no stamp: filed as
-[#835](https://github.com/scttfrdmn/substrate/issues/835).** Eleven more types — a KMS key, a
-Secrets Manager secret, an SNS topic, a Step Functions activity, an ECS service and task
-definition, an RDS DB cluster and DB subnet group, an ACM certificate, a CloudFront distribution
-and an SSM parameter — have both tag state and a tagging call, and are still unstamped.
+**A tagging surface but no stamp: one type left, and the reason is a writer rather than a
+resolver.** `AWS::Config::ConfigRule` has both tag state and a tagging call and is still unstamped,
+because Config keeps a rule's tags in a **side-car** state record whose whole document *is* the tag
+map, rather than on the rule. Substrate's shared tag writer has no arm for that layout — both of its
+merge helpers look for a tag member inside a record — and the side-car is deleted outright when it
+empties, so there is usually no record to merge into at all.
 
-For each of the eleven the missing piece was not a resolver arm alone but an arm in substrate's
-shared tag *writer*, so the same gap also meant the Resource Groups Tagging API could not tag
-them: one defect with two symptoms, tracked there rather than folded in here. **All eleven have
-since had the tagging-API half delivered**, a row at a time — ECS's service and task definition,
-an RDS DB cluster and DB subnet group, a Step Functions activity, an ACM certificate, a CloudFront
-distribution, a KMS key, an SNS topic, a Secrets Manager secret and an SSM parameter — each keying
-through the one state-key builder the owning service's own tag operation uses, and each merging its
-record as raw JSON so a member the writer does not model is preserved rather than dropped. The last
-piece was the ECS namespace's **scanner** half: `GetResources` enumerated ECS clusters only, so a tag
-`TagResources` had written to a service, a task or a task definition was readable through ECS's own
-`ListTagsForResource` and invisible to the tagging API's own inventory call
-([#935](https://github.com/scttfrdmn/substrate/issues/935)).
-
-The CloudFormation stamp is a separate half again: none of the eleven has an entry in the deployer's
-own type table yet, which is why all eleven are still listed here as unstamped. Config is unstamped
-for a different reason again: it keeps a rule's tags in a side-car state record rather than on the
-rule, so reaching them needs a writer that knows that layout.
+Every other type that had a tagging surface and no stamp now has both. The missing piece for those
+was never a resolver arm alone but an arm in that shared *writer*, so the same gap also meant the
+Resource Groups Tagging API could not tag them: one defect with two symptoms, closed as
+[#835](https://github.com/scttfrdmn/substrate/issues/835) a row at a time — ECS's service and task
+definition, an RDS DB cluster and DB subnet group, a Step Functions activity, an ACM certificate, a
+CloudFront distribution, a KMS key, an SNS topic, a Secrets Manager secret and an SSM parameter —
+each keying through the one state-key builder the owning service's own tag operation uses, and each
+merging its record as raw JSON so a member the writer does not model is preserved rather than
+dropped. The last piece of that was the ECS namespace's **scanner** half: `GetResources` enumerated
+ECS clusters only, so a tag `TagResources` had written to a service, a task or a task definition was
+readable through ECS's own `ListTagsForResource` and invisible to the tagging API's own inventory
+call ([#935](https://github.com/scttfrdmn/substrate/issues/935)). With the writer in place, the
+CloudFormation half followed: all twelve are in the table above.
 
 Three further limits, each named because a policy or an assertion written against the stamp will
 otherwise assume more:

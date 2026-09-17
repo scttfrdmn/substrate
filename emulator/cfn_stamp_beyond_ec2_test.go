@@ -208,8 +208,8 @@ func (f *cfnStampFixture) elbTagsFor(t *testing.T, arn string) []string {
 	return cfnSortedTagStrings(pairs)
 }
 
-// The nine readers below are #819's group 3a, each going through that service's own
-// tag-reading call for the reason the file header gives: a stamp written to a state key the
+// The nine readers below are the first nine types #819 added, each going through that service's
+// own tag-reading call for the reason the file header gives: a stamp written to a state key the
 // service does not read satisfies a state assertion and no caller.
 //
 // They are nine functions rather than one table because the calls genuinely differ — Step
@@ -217,40 +217,22 @@ func (f *cfnStampFixture) elbTagsFor(t *testing.T, arn string) []string {
 // ARN, RDS and ElastiCache take a query parameter named `ResourceName` and answer in XML, and
 // EFS puts the resource ID in the URL path — and flattening that into one helper would hide the
 // very differences a caller trips over.
+//
+// Three of the nine do share a call with a reader in `cfn_stamp_group3b_test.go`, because #819's
+// second half gave Step Functions, ECS and RDS a second and third resource type each: those
+// services' one operation decides from the ARN which kind it names, so the readers go through one
+// `*TagsForARN` helper apiece rather than differing in anything but the ARN they build.
 
 // stateMachineTagsFor reads one state machine's tags through Step Functions'
 // ListTagsForResource.
+//
+// Through [cfnStampFixture.sfnTagsForARN], which an activity's reader also goes through: the two
+// kinds differ only in the ARN keyword, and one call site is what proves the plugin decides from
+// the ARN rather than from which reader asked.
 func (f *cfnStampFixture) stateMachineTagsFor(t *testing.T, name string) []string {
 	t.Helper()
-	arn := "arn:aws:states:" + cfnStampRegion + ":" + cfnStampAccount + ":stateMachine:" + name
-	body, err := json.Marshal(map[string]string{"resourceArn": arn})
-	require.NoError(t, err)
-
-	resp, err := f.states.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
-		Service:   "states",
-		Operation: "ListTagsForResource",
-		Body:      body,
-		Params:    map[string]string{},
-		Headers:   map[string]string{"x-amz-target": "AWSStepFunctions.ListTagsForResource"},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-
-	// Step Functions renders tags as AWS's array of {key, value} objects, unlike ECR's and
-	// ECS's object form in the same test file — the shape difference #910 corrected, since this
-	// operation previously answered an object no SDK could decode into its tags field.
-	var doc struct {
-		Tags []struct {
-			Key   string `json:"key"`
-			Value string `json:"value"`
-		} `json:"tags"`
-	}
-	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
-	tags := make(map[string]string, len(doc.Tags))
-	for _, t := range doc.Tags {
-		tags[t.Key] = t.Value
-	}
-	return cfnSortedTagStrings(tags)
+	return f.sfnTagsForARN(t,
+		"arn:aws:states:"+cfnStampRegion+":"+cfnStampAccount+":stateMachine:"+name)
 }
 
 // repositoryTagsFor reads one ECR repository's tags through ECR's ListTagsForResource.
@@ -281,35 +263,13 @@ func (f *cfnStampFixture) repositoryTagsFor(t *testing.T, name string) []string 
 //
 // ECS keeps a `[]ECSTag` rather than a map, spelled `key`/`value` in the record — the shape the
 // stamp's merge has to produce for this call to see it.
+// Through [cfnStampFixture.ecsTagsForARN], shared with a service's and a task definition's
+// readers, because ECS's one call decides from the ARN which of the four kinds in its namespace
+// is named — the decision the stamp's own resolver has to agree with.
 func (f *cfnStampFixture) clusterTagsFor(t *testing.T, name string) []string {
 	t.Helper()
-	arn := "arn:aws:ecs:" + cfnStampRegion + ":" + cfnStampAccount + ":cluster/" + name
-	body, err := json.Marshal(map[string]string{"resourceArn": arn})
-	require.NoError(t, err)
-
-	resp, err := f.ecs.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
-		Service:   "ecs",
-		Operation: "ListTagsForResource",
-		Body:      body,
-		Params:    map[string]string{},
-		Headers:   map[string]string{},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-
-	var doc struct {
-		Tags []struct {
-			Key   string `json:"key"`
-			Value string `json:"value"`
-		} `json:"tags"`
-	}
-	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
-
-	pairs := make(map[string]string, len(doc.Tags))
-	for _, tag := range doc.Tags {
-		pairs[tag.Key] = tag.Value
-	}
-	return cfnSortedTagStrings(pairs)
+	return f.ecsTagsForARN(t,
+		"arn:aws:ecs:"+cfnStampRegion+":"+cfnStampAccount+":cluster/"+name)
 }
 
 // efsTagsFor reads one EFS file system's or access point's tags through EFS's
@@ -366,21 +326,14 @@ func (f *cfnStampFixture) cacheClusterTagsFor(t *testing.T, id string) []string 
 }
 
 // dbInstanceTagsFor reads one RDS instance's tags through RDS's ListTagsForResource.
+//
+// Through [cfnStampFixture.rdsTagsForARN], shared with a cluster's and a subnet group's readers:
+// the three differ only in the ARN's resource-type keyword, and `rdsResolveARN` is what turns
+// that keyword into one of the three key prefixes the stamp has to have used.
 func (f *cfnStampFixture) dbInstanceTagsFor(t *testing.T, id string) []string {
 	t.Helper()
-	arn := "arn:aws:rds:" + cfnStampRegion + ":" + cfnStampAccount + ":db:" + id
-	resp, err := f.rds.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
-		Service:   "rds",
-		Operation: "ListTagsForResource",
-		Params: map[string]string{
-			"Action":       "ListTagsForResource",
-			"ResourceName": arn,
-		},
-		Headers: map[string]string{},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	return cfnTagListXMLStrings(t, resp.Body)
+	return f.rdsTagsForARN(t,
+		"arn:aws:rds:"+cfnStampRegion+":"+cfnStampAccount+":db:"+id)
 }
 
 // cfnTagListXMLStrings reads the `TagList` both RDS's and ElastiCache's ListTagsForResource
