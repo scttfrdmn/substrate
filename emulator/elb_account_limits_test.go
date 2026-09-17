@@ -70,7 +70,7 @@ func elbDescribeAccountLimits(t *testing.T, ts *httptest.Server, extra map[strin
 	for k, v := range extra {
 		params[k] = v
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, ts.URL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	raw, err := io.ReadAll(resp.Body)
@@ -518,7 +518,7 @@ func TestELB_DescribeAccountLimits_StateFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := newELBTestServerWithState(t, tt.state)
-			resp := elbRequest(t, ts, map[string]string{"Action": "DescribeAccountLimits"})
+			resp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeAccountLimits"})
 			defer resp.Body.Close() //nolint:errcheck
 			raw, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)

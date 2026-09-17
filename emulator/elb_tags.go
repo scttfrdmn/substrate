@@ -170,45 +170,173 @@ func elbNotFoundError(kind, arn string) *AWSError {
 // elbResourceKindFromARN reports which of the four taggable kinds an ARN names, or ""
 // when it names none.
 //
-// Both shapes are recognized, and the order is what makes that safe. The nested tests —
-// `…:loadbalancer/app/<name>/<id>/listener/<suffix>` and that plus `/rule/<suffix>`, the shape
-// substrate minted before #774 — come first, because the load-balancer test their prefix also
-// satisfies would otherwise claim them. The flat `…:listener/…` and `…:listener-rule/…` that
-// #774 mints are AWS's own and are matched on the resource type.
+// # Arity, not substring
+//
+// The classification is on how many `/`-separated segments follow the resource type, because that
+// is the only thing distinguishing the two ELB generations: the vendored reference
+// (`authzref/elasticloadbalancing.json`) publishes a classic load balancer as
+// `…:loadbalancer/${LoadBalancerName}` — one segment — and an ELBv2 one as
+// `…:loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}` — three. A `strings.Contains(arn,
+// ":loadbalancer/")` test, which is what this did before #863, matches both, so a classic ARN was
+// classified as an ELBv2 load balancer and scanned against the `lb:` prefix where only ELBv2
+// records live. Nothing writes a classic record today, so that resolved to nothing rather than to
+// the wrong record — but it answered `LoadBalancerNotFound`, which tells a caller a load balancer
+// of that ARN could exist, and it is the shape a classic writer would turn into a genuine
+// collision. This is [elbChildARN]'s `wantSegments` check applied to the read side.
+//
+// A classic ARN is therefore *unclassified* rather than mapped to a kind, and every caller here
+// refuses one: [elbResolveTaggedResource] answers `ValidationError`, which is what an ELBv2
+// operation can honestly say about an ARN no ELBv2 resource type has. **That code is substrate's
+// reading** — AddTags, RemoveTags and DescribeTags publish four `*NotFound` codes and no code for
+// an ARN of the wrong generation — chosen because the alternative asserts the resource merely does
+// not exist yet.
+//
+// # Both nested and flat, and why the order is the arity
+//
+// The nested shapes substrate minted before #774 —
+// `…:loadbalancer/app/<name>/<id>/listener/<suffix>` and that plus `/rule/<suffix>` — carry the
+// `loadbalancer` resource type and five and seven segments respectively, so counting segments
+// separates them from an ELBv2 load balancer's three without needing an ordered chain of
+// `strings.Contains` tests to run first. The flat `…:listener/…` and `…:listener-rule/…` that #774
+// mints are AWS's own and are matched on the resource type with their own arity.
 //
 // Keeping the nested form resolvable is deliberate: an event log recorded by an earlier version,
 // or a fixture exported from one, holds listener and rule ARNs of that shape, and a replay whose
 // tagging calls suddenly named nothing would be a regression in the one property the event store
 // exists to provide. New ARNs are never minted in it — see [elbRuleARN].
 func elbResourceKindFromARN(arn string) string {
-	switch {
-	case strings.Contains(arn, "/rule/") || strings.Contains(arn, ":listener-rule/"):
-		return elbKindRule
-	case strings.Contains(arn, "/listener/") || strings.Contains(arn, ":listener/"):
-		return elbKindListener
-	case strings.Contains(arn, ":loadbalancer/"):
-		return elbKindLoadBalancer
-	case strings.Contains(arn, ":targetgroup/"):
-		return elbKindTargetGroup
+	_, resource, ok := elbARNResource(arn)
+	if !ok {
+		return ""
+	}
+	resourceType, rest, ok := strings.Cut(resource, "/")
+	if !ok {
+		return ""
+	}
+	segments := strings.Count(rest, "/") + 1
+	switch resourceType {
+	case elbKindLoadBalancer:
+		switch segments {
+		case 3: // app/<name>/<id> — an ELBv2 load balancer. A classic one has 1 and is refused.
+			return elbKindLoadBalancer
+		case 5: // …/<id>/listener/<suffix> — the pre-#774 nested listener.
+			return elbKindListener
+		case 7: // …/listener/<suffix>/rule/<suffix> — the pre-#774 nested rule.
+			return elbKindRule
+		}
+	case elbKindTargetGroup:
+		if segments == 2 { // <name>/<id>
+			return elbKindTargetGroup
+		}
+	case elbKindListener:
+		if segments == 4 { // app/<name>/<id>/<listenerid>
+			return elbKindListener
+		}
+	case elbKindRule:
+		if segments == 5 { // app/<name>/<id>/<listenerid>/<ruleid>
+			return elbKindRule
+		}
+	}
+	return ""
+}
+
+// The state-key prefixes the four taggable ELBv2 records are stored under.
+//
+// They are constants rather than literals at each site because three readers outside ELB's own
+// plugin now depend on them: [elbStateKeyPrefix] builds a scan prefix from one,
+// [elbKeyIsTaggable] tests a key against all four, and the Resource Groups Tagging API's four ELB
+// scanners narrow their `List` by one each (#863). A namespace whose prefixes are spelled in one
+// place cannot have a scanner and a writer disagree about where a record lives, which is the
+// failure #935 records for ECS.
+//
+// Each ends in a colon, which is load-bearing for the same reason it is in six other namespaces:
+// this one also holds `lb_names:`, `tg_names:`, `listener_ids:` and `rule_ids:` index keys whose
+// values are JSON arrays of names, and a bare `lb` or `listener` prefix would list them.
+const (
+	elbLBKeyPrefix       = "lb:"
+	elbTGKeyPrefix       = "tg:"
+	elbListenerKeyPrefix = "listener:"
+	elbRuleKeyPrefix     = "rule:"
+)
+
+// elbKindKeyPrefix returns the bare state-key prefix records of a kind are stored under, or ""
+// for a kind that names nothing substrate stores.
+func elbKindKeyPrefix(kind string) string {
+	switch kind {
+	case elbKindLoadBalancer:
+		return elbLBKeyPrefix
+	case elbKindTargetGroup:
+		return elbTGKeyPrefix
+	case elbKindListener:
+		return elbListenerKeyPrefix
+	case elbKindRule:
+		return elbRuleKeyPrefix
 	default:
 		return ""
 	}
 }
 
-// elbStateKeyPrefix returns the state-key prefix records of a kind are stored under.
+// elbStateKeyPrefix returns the state-key prefix records of a kind are stored under, narrowed to
+// one account and Region.
 func elbStateKeyPrefix(kind, scope string) string {
-	switch kind {
-	case elbKindLoadBalancer:
-		return "lb:" + scope + "/"
-	case elbKindTargetGroup:
-		return "tg:" + scope + "/"
-	case elbKindListener:
-		return "listener:" + scope + "/"
-	case elbKindRule:
-		return "rule:" + scope + "/"
-	default:
+	prefix := elbKindKeyPrefix(kind)
+	if prefix == "" {
 		return ""
 	}
+	return prefix + scope + "/"
+}
+
+// elbTagsJSONMember is the JSON member all four taggable ELBv2 records store their tags in.
+//
+// [ELBLoadBalancer], [ELBTargetGroup], [ELBListener] and [ELBRule] all declare
+// `json:"Tags,omitempty"` (elb_types.go), which is why one raw-JSON merge serves the whole
+// namespace where rds, states and ecs each needed a per-kind decode. It is named rather than
+// written inline because [mergeRecordTagListTags] writes whichever member it is given, and a
+// misspelling would add a second tags member while leaving the real one untouched — a tag call that
+// answers 200 and stores nothing.
+const elbTagsJSONMember = "Tags"
+
+// elbTagKeyField and elbTagValueField are the member names one element of that array uses, from
+// [ELBTag]'s own `json:"Key"` and `json:"Value"`. ELB spells them the ordinary way, as SNS,
+// Secrets Manager and Systems Manager do and unlike KMS's TagKey/TagValue.
+const (
+	elbTagKeyField   = "Key"
+	elbTagValueField = "Value"
+)
+
+// elbKeyIsTaggable reports whether a state key in the elb namespace names a record that stores
+// tags.
+//
+// It guards [mergeResourceTags]' elb arm, which edits whatever record it is handed as raw JSON.
+// The namespace also holds four index keys whose values are JSON arrays of names, and a merge
+// against one of those would leave an array looking like a record — the failure the same guard
+// prevents for kms, sns, secretsmanager, ssm, rds and acm. Every one of the four taggable kinds
+// spells its tags member the same way, so unlike those six namespaces the guard is the only
+// per-kind discrimination this arm needs.
+func elbKeyIsTaggable(key string) bool {
+	for _, prefix := range []string{
+		elbLBKeyPrefix, elbTGKeyPrefix, elbListenerKeyPrefix, elbRuleKeyPrefix,
+	} {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// elbARNScope returns the `{account}/{region}` scope an ELB ARN's own segments name, and reports
+// whether the ARN carried the six fields an ARN has.
+//
+// It exists so the Resource Groups Tagging API's ELB arm reads the scope from the ARN rather than
+// from the caller's request context, which is #826's rule and the one every resolver arm follows:
+// an ARN naming another account's load balancer must resolve that account's record or none.
+func elbARNScope(arn string) (string, bool) {
+	const arnFields = 6
+	parts := strings.SplitN(arn, ":", arnFields)
+	if len(parts) < arnFields || parts[0] != "arn" {
+		return "", false
+	}
+	return parts[4] + "/" + parts[3], true
 }
 
 // elbTaggedResource is one ELB resource a tagging call names, resolved from state.
@@ -224,10 +352,28 @@ type elbTaggedResource struct {
 	// tags are the tags currently on the resource.
 	tags []ELBTag
 
-	// withTags re-marshals the record carrying a new tag set. It closes over the
-	// decoded record, which is what keeps every other member intact: rebuilding the
-	// record from the ARN would drop whatever the caller set at create time.
-	withTags func(tags []ELBTag) ([]byte, error)
+	// everTagged is the record's previously-tagged flag as stored; see [taggingEverTagged].
+	everTagged bool
+
+	// withTags re-marshals the record carrying a new tag set and a new previously-tagged
+	// flag. It closes over the decoded record, which is what keeps every other member
+	// intact: rebuilding the record from the ARN would drop whatever the caller set at
+	// create time. Callers go through [elbTaggedResource.encode] rather than calling this
+	// directly, so the flag is computed in one place.
+	withTags func(tags []ELBTag, everTagged bool) ([]byte, error)
+}
+
+// encode re-marshals the record with a new tag set, stamping the previously-tagged flag from the
+// set it replaces.
+//
+// One method rather than the rule at each of the three writers — ELBv2's own AddTags/RemoveTags,
+// the CloudFormation stamp and the stack-tag reconciliation — because [taggingEverTagged] needs the
+// count from *before* the merge, and a writer holding only the merged set cannot recover it. The
+// count after the merge stands in for "tags added": a removal that empties the set is already
+// covered by the count before it, and no ELB path writes an empty set without having read one
+// (#938, #863).
+func (r *elbTaggedResource) encode(tags []ELBTag) ([]byte, error) {
+	return r.withTags(tags, taggingEverTagged(r.everTagged, len(r.tags), len(tags)))
 }
 
 // elbDecodeTaggedResource decodes one state record of the given kind, or returns nil
@@ -240,8 +386,10 @@ func elbDecodeTaggedResource(kind, stateKey string, data []byte) *elbTaggedResou
 			return nil
 		}
 		return &elbTaggedResource{arn: lb.ARN, stateKey: stateKey, tags: lb.Tags,
-			withTags: func(tags []ELBTag) ([]byte, error) {
+			everTagged: lb.EverTagged,
+			withTags: func(tags []ELBTag, everTagged bool) ([]byte, error) {
 				lb.Tags = tags
+				lb.EverTagged = everTagged
 				return json.Marshal(lb)
 			}}
 	case elbKindTargetGroup:
@@ -250,8 +398,10 @@ func elbDecodeTaggedResource(kind, stateKey string, data []byte) *elbTaggedResou
 			return nil
 		}
 		return &elbTaggedResource{arn: tg.ARN, stateKey: stateKey, tags: tg.Tags,
-			withTags: func(tags []ELBTag) ([]byte, error) {
+			everTagged: tg.EverTagged,
+			withTags: func(tags []ELBTag, everTagged bool) ([]byte, error) {
 				tg.Tags = tags
+				tg.EverTagged = everTagged
 				return json.Marshal(tg)
 			}}
 	case elbKindListener:
@@ -260,8 +410,10 @@ func elbDecodeTaggedResource(kind, stateKey string, data []byte) *elbTaggedResou
 			return nil
 		}
 		return &elbTaggedResource{arn: l.ARN, stateKey: stateKey, tags: l.Tags,
-			withTags: func(tags []ELBTag) ([]byte, error) {
+			everTagged: l.EverTagged,
+			withTags: func(tags []ELBTag, everTagged bool) ([]byte, error) {
 				l.Tags = tags
+				l.EverTagged = everTagged
 				return json.Marshal(l)
 			}}
 	case elbKindRule:
@@ -270,8 +422,10 @@ func elbDecodeTaggedResource(kind, stateKey string, data []byte) *elbTaggedResou
 			return nil
 		}
 		return &elbTaggedResource{arn: r.ARN, stateKey: stateKey, tags: r.Tags,
-			withTags: func(tags []ELBTag) ([]byte, error) {
+			everTagged: r.EverTagged,
+			withTags: func(tags []ELBTag, everTagged bool) ([]byte, error) {
 				r.Tags = tags
+				r.EverTagged = everTagged
 				return json.Marshal(r)
 			}}
 	default:
@@ -486,7 +640,7 @@ func elbRemoveTagKeys(existing []ELBTag, keys []string) []ELBTag {
 
 // elbWriteTags persists a resolved resource's new tag set.
 func (p *ELBPlugin) elbWriteTags(res *elbTaggedResource, tags []ELBTag) error {
-	data, err := res.withTags(tags)
+	data, err := res.encode(tags)
 	if err != nil {
 		return fmt.Errorf("elb marshal %s: %w", res.arn, err)
 	}

@@ -66,6 +66,9 @@ type ELBLoadBalancer struct {
 
 	// Suffix is the unique suffix used in the ARN and DNS name.
 	Suffix string `json:"Suffix"`
+
+	// EverTagged records that this load balancer has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ELBAction represents an action taken by a listener or rule.
@@ -108,6 +111,9 @@ type ELBListener struct {
 
 	// Suffix is the unique suffix used in the ARN.
 	Suffix string `json:"Suffix"`
+
+	// EverTagged records that this listener has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ELBTarget represents a registered target in a target group.
@@ -162,6 +168,9 @@ type ELBTargetGroup struct {
 
 	// Suffix is the unique suffix used in the ARN.
 	Suffix string `json:"Suffix"`
+
+	// EverTagged records that this target group has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ELBCondition represents a rule condition for an ELBv2 listener rule.
@@ -204,6 +213,9 @@ type ELBRule struct {
 
 	// Suffix is the unique suffix used in the ARN.
 	Suffix string `json:"Suffix"`
+
+	// EverTagged records that this rule has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // generateELBSuffix generates a unique 17-character ELB resource suffix.

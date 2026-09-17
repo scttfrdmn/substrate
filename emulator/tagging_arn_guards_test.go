@@ -117,7 +117,9 @@ func awsErrorCode(t string) string {
 // while guarding nothing, and a regression that mis-keyed any of the three would have kept them
 // green, because a mis-keyed ARN is exactly as absent from state as a correctly-keyed one (#939).
 // Those three now live in TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter, which asserts
-// what they actually exercise.
+// what they actually exercise. An ELBv2 load balancer was the fourth, moved there by #863 for the
+// same reason: it was the row standing for "a service with no arm at all", and ELB was the last
+// such service.
 func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T) {
 	t.Parallel()
 
@@ -195,10 +197,12 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 			"identities or invalidations\", and substrate stores all three in one namespace, so the " +
 			"type segment is the whole of the boundary",
 	}, {
-		name: "service with no arm at all",
-		arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-lb/50dc6c495c0c9188",
-		why: "a service the resolver has no arm for takes the same answer as a wrong type within a " +
-			"service; ELB is the one left after #835, and giving it an arm is #863's work",
+		name: "classic load balancer",
+		arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/my-classic-lb",
+		why: "one segment after \"loadbalancer/\" is AWS's *classic* shape, where ELBv2's is three " +
+			"(app/<name>/<id>); substrate models no classic load balancer, so there is nothing to read " +
+			"a tag back from, and the arity is what tells the two apart (#863). This row replaced an " +
+			"ELBv2 ARN that went stale the moment #863 gave the service an arm",
 	}}
 
 	for _, tc := range cases {
@@ -208,7 +212,10 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 
 			// The resolver refuses it, not the merge. Asserted before the wire calls, because
 			// the wire cannot tell the two apart and this is the property the row claims.
-			if ns, key, err := emulator.TaggingResolveARNForTest(tc.arn); err == nil {
+			//
+			// A nil state manager is enough here for the reason [emulator.TaggingResolveARNForTest]
+			// gives: the one arm that reads state refuses every row in this table before the read.
+			if ns, key, err := emulator.TaggingResolveARNForTest(nil, tc.arn); err == nil {
 				t.Fatalf("resolveARN(%q) = %q/%q with no error, so this row is asserting the merge "+
 					"rather than the resolver — %s", tc.arn, ns, key, tc.why)
 			}
@@ -288,12 +295,25 @@ func TestTaggingResolveARN_AMalformedARNIsInvalidParameter(t *testing.T) {
 // TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed once #910, #918 and #922 gave
 // their types a resolver arm. Each is asserted to *resolve*, which is what makes this the right
 // table for them — and the property whose absence made them the wrong rows there.
+//
+// The four ELBv2 rows are the fifth such move, and they are the exception to that assertion rather
+// than a case of it: ELB's arm resolves an ARN by *finding* the record it names rather than by
+// building a key, because a listener's and a rule's key carries a minted suffix that no ARN
+// component yields (#863). So "not there" is discovered by the resolver, and the row asserts a
+// refusal from it instead — which is the same staleness guard pointing the other way, since a row
+// that silently started resolving would mean ELB had grown a key-building arm nobody wrote. What
+// the wire sees is identical either way, and that is the point: [TaggingPlugin.tagResolveFailure]
+// delegates this one refusal to the merge's mapping so a caller cannot tell which stage found it.
 func TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name string
 		arn  string
+
+		// refusedByResolver marks a row whose arm finds its record rather than building a key, so
+		// the absence surfaces from resolveARN instead of from the merge.
+		refusedByResolver bool
 	}{{
 		name: "step functions activity",
 		arn:  "arn:aws:states:us-east-1:" + taggingTestAccount + ":activity:no-such-activity",
@@ -306,6 +326,26 @@ func TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter(t *testing.T) {
 	}, {
 		name: "dynamodb table",
 		arn:  "arn:aws:dynamodb:us-east-1:" + taggingTestAccount + ":table/no-such-table",
+	}, {
+		name: "elbv2 load balancer",
+		arn: "arn:aws:elasticloadbalancing:us-east-1:" + taggingTestAccount +
+			":loadbalancer/app/no-such-lb/50dc6c495c0c9188",
+		refusedByResolver: true,
+	}, {
+		name: "elbv2 target group",
+		arn: "arn:aws:elasticloadbalancing:us-east-1:" + taggingTestAccount +
+			":targetgroup/no-such-tg/73e2d6bc24d8a067",
+		refusedByResolver: true,
+	}, {
+		name: "elbv2 listener",
+		arn: "arn:aws:elasticloadbalancing:us-east-1:" + taggingTestAccount +
+			":listener/app/no-such-lb/50dc6c495c0c9188/0aaaaaaaaaaaaaaa",
+		refusedByResolver: true,
+	}, {
+		name: "elbv2 listener rule",
+		arn: "arn:aws:elasticloadbalancing:us-east-1:" + taggingTestAccount +
+			":listener-rule/app/no-such-lb/50dc6c495c0c9188/0aaaaaaaaaaaaaaa/0bbbbbbbbbbbbbbb",
+		refusedByResolver: true,
 	}}
 
 	for _, tc := range cases {
@@ -313,7 +353,15 @@ func TestTaggingResolveARN_AnAbsentResourceIsInvalidParameter(t *testing.T) {
 			t.Parallel()
 			ts := arnGuardServer(t)
 
-			if _, _, err := emulator.TaggingResolveARNForTest(tc.arn); err != nil {
+			// An empty store rather than the server's own: every row names a resource nothing
+			// created, so the two are indistinguishable here, and a nil manager would panic in the
+			// one arm that reads.
+			_, _, err := emulator.TaggingResolveARNForTest(emulator.NewMemoryStateManager(), tc.arn)
+			switch {
+			case tc.refusedByResolver && err == nil:
+				t.Fatalf("resolveARN(%q) succeeded, so this row no longer asserts the lookup it was "+
+					"written for", tc.arn)
+			case !tc.refusedByResolver && err != nil:
 				t.Fatalf("resolveARN(%q) = %v, so this row asserts the resolver rather than the "+
 					"merge and belongs in the wrong-type table", tc.arn, err)
 			}

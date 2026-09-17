@@ -288,7 +288,7 @@ func cfnPropagateELBStackTags(
 	for _, tag := range cfnSortedEC2Tags(write) {
 		incoming = append(incoming, ELBTag(tag))
 	}
-	updated, err := res.withTags(elbRemoveTagKeys(elbMergeTags(res.tags, incoming), remove))
+	updated, err := res.encode(elbRemoveTagKeys(elbMergeTags(res.tags, incoming), remove))
 	if err != nil {
 		return true, fmt.Errorf("stack tags %s %s: marshal: %w", dr.Type, dr.ARN, err)
 	}

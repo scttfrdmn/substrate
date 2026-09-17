@@ -70,10 +70,10 @@ func TestELB_AListenerAndRuleARNMatchTheFormatAWSPublishes(t *testing.T) {
 	t.Parallel()
 
 	ts := newELBTestServer(t)
-	lbARN := elbCreateLB(t, ts, "web", nil)
-	tgARN := elbCreateTG(t, ts, "web-tg", nil)
-	listenerARN := elbCreateListener(t, ts, lbARN, tgARN, nil)
-	ruleARN := elbCreateRule(t, ts, listenerARN, tgARN, nil)
+	lbARN := elbCreateLB(t, ts.URL, "web", nil)
+	tgARN := elbCreateTG(t, ts.URL, "web-tg", nil)
+	listenerARN := elbCreateListener(t, ts.URL, lbARN, tgARN, nil)
+	ruleARN := elbCreateRule(t, ts.URL, listenerARN, tgARN, nil)
 
 	lbType, lbSegments := elbARNSegments(t, lbARN)
 	require.Equal(t, "loadbalancer", lbType)
@@ -145,7 +145,7 @@ func TestELB_AnARNCarriesAWSsTypeAbbreviation(t *testing.T) {
 			require.True(t, ok, "AWS publishes loadbalancer/%s/ as a resource type", tc.subtype)
 
 			ts := newELBTestServer(t)
-			lbARN := elbCreateLB(t, ts, "web", map[string]string{"Type": tc.lbType})
+			lbARN := elbCreateLB(t, ts.URL, "web", map[string]string{"Type": tc.lbType})
 			_, segments := elbARNSegments(t, lbARN)
 			assert.Equal(t, tc.subtype, segments[0],
 				"a %s load balancer's ARN carries %q, not %q", tc.lbType, tc.subtype, tc.lbType)
@@ -160,9 +160,9 @@ func TestELB_AMalformedParentARNIsRefusedRatherThanMintingAMalformedChild(t *tes
 	t.Parallel()
 
 	ts := newELBTestServer(t)
-	tgARN := elbCreateTG(t, ts, "web-tg", nil)
+	tgARN := elbCreateTG(t, ts.URL, "web-tg", nil)
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":          "CreateListener",
 		"LoadBalancerArn": "not-an-arn",
 		"Protocol":        "HTTP",
@@ -175,7 +175,7 @@ func TestELB_AMalformedParentARNIsRefusedRatherThanMintingAMalformedChild(t *tes
 	// The classic-ELB form AWS also publishes — `loadbalancer/<name>`, with no subtype — carries
 	// too few segments to build an ELBv2 listener from, and must not be padded out into one.
 	classic := "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/web"
-	resp2 := elbRequest(t, ts, map[string]string{
+	resp2 := elbRequest(t, ts.URL, map[string]string{
 		"Action":                                 "CreateListener",
 		"LoadBalancerArn":                        classic,
 		"Protocol":                               "HTTP",
@@ -266,13 +266,13 @@ func TestELB_TheDescribeFiltersDoNotDependOnARNNesting(t *testing.T) {
 	t.Parallel()
 
 	ts := newELBTestServer(t)
-	tgARN := elbCreateTG(t, ts, "web-tg", nil)
-	lbA := elbCreateLB(t, ts, "web-a", nil)
-	lbB := elbCreateLB(t, ts, "web-b", nil)
-	listenerA := elbCreateListener(t, ts, lbA, tgARN, nil)
-	listenerB := elbCreateListener(t, ts, lbB, tgARN, nil)
-	ruleA := elbCreateRule(t, ts, listenerA, tgARN, nil)
-	elbCreateRule(t, ts, listenerB, tgARN, map[string]string{"Priority": "20"})
+	tgARN := elbCreateTG(t, ts.URL, "web-tg", nil)
+	lbA := elbCreateLB(t, ts.URL, "web-a", nil)
+	lbB := elbCreateLB(t, ts.URL, "web-b", nil)
+	listenerA := elbCreateListener(t, ts.URL, lbA, tgARN, nil)
+	listenerB := elbCreateListener(t, ts.URL, lbB, tgARN, nil)
+	ruleA := elbCreateRule(t, ts.URL, listenerA, tgARN, nil)
+	elbCreateRule(t, ts.URL, listenerB, tgARN, map[string]string{"Priority": "20"})
 
 	assert.Equal(t, []string{listenerA}, elbDescribeListenerARNs(t, ts, lbA))
 	assert.Equal(t, []string{listenerB}, elbDescribeListenerARNs(t, ts, lbB))
@@ -287,12 +287,12 @@ func TestELB_TaggingResolvesTheNewShapeAndStillResolvesTheOld(t *testing.T) {
 	t.Parallel()
 
 	ts := newELBTestServer(t)
-	tgARN := elbCreateTG(t, ts, "web-tg", nil)
-	lbARN := elbCreateLB(t, ts, "web", nil)
-	listenerARN := elbCreateListener(t, ts, lbARN, tgARN, nil)
-	ruleARN := elbCreateRule(t, ts, listenerARN, tgARN, nil)
+	tgARN := elbCreateTG(t, ts.URL, "web-tg", nil)
+	lbARN := elbCreateLB(t, ts.URL, "web", nil)
+	listenerARN := elbCreateListener(t, ts.URL, lbARN, tgARN, nil)
+	ruleARN := elbCreateRule(t, ts.URL, listenerARN, tgARN, nil)
 
-	addResp := elbRequest(t, ts, map[string]string{
+	addResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "AddTags",
 		"ResourceArns.member.1": listenerARN,
 		"ResourceArns.member.2": ruleARN,
@@ -302,7 +302,7 @@ func TestELB_TaggingResolvesTheNewShapeAndStillResolvesTheOld(t *testing.T) {
 	require.Equal(t, http.StatusOK, addResp.StatusCode)
 	require.NoError(t, addResp.Body.Close())
 
-	tags := elbDescribeTags(t, ts, listenerARN, ruleARN)
+	tags := elbDescribeTags(t, ts.URL, listenerARN, ruleARN)
 	assert.Equal(t, map[string]string{"team": "platform"}, tags[listenerARN])
 	assert.Equal(t, map[string]string{"team": "platform"}, tags[ruleARN])
 
@@ -322,7 +322,7 @@ func TestELB_TaggingResolvesTheNewShapeAndStillResolvesTheOld(t *testing.T) {
 // balancer, in the order it reports them.
 func elbDescribeListenerARNs(t *testing.T, ts *httptest.Server, lbARN string) []string {
 	t.Helper()
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":          "DescribeListeners",
 		"LoadBalancerArn": lbARN,
 	})
@@ -347,7 +347,7 @@ func elbDescribeListenerARNs(t *testing.T, ts *httptest.Server, lbARN string) []
 // elbDescribeRuleARNs returns the rule ARNs DescribeRules reports for one listener.
 func elbDescribeRuleARNs(t *testing.T, ts *httptest.Server, listenerARN string) []string {
 	t.Helper()
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":      "DescribeRules",
 		"ListenerArn": listenerARN,
 	})

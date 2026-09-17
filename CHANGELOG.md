@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The Resource Groups Tagging API reaches all four ELBv2 taggable types** (#863). `resolveARN` had
+  no `elasticloadbalancing` arm of any kind, so `TagResources` and `UntagResources` failed at the
+  resolver for a load balancer, target group, listener or listener rule, and `GetResources` reported
+  none of the four. ELBv2 has kept its own tag store since #748, so the rule every tagging arm is held
+  to — a tag written through one API must be readable through the other — was unmet for a service
+  substrate models fully. It is now asserted in both directions over the wire: a `TagResources` tag
+  comes back from ELBv2's `DescribeTags`, and an `AddTags` tag is reported by `GetResources`.
+
+  **This is the first arm that *finds* its state key instead of building one.** A load balancer's and
+  a target group's record is keyed by name, but a listener's and a rule's is keyed by a suffix
+  substrate mints at create time and which appears nowhere in the ARN — so no amount of parsing
+  produces the key, and the arm delegates to the same resolver ELBv2's own `AddTags` uses. That is the
+  #935 rule taken to its conclusion: a key rebuilt beside the owning service's can drift from it,
+  which is precisely how SQS (#826), DynamoDB (#845) and Lambda (#943) each came to write a record
+  their own service never read. One consequence is observable and deliberate: an ARN naming no such
+  resource is discovered by the resolver rather than by the write, and it answers the same
+  `InvalidParameterException`/400 that every other type's absent resource does (#939), because a
+  caller must not be able to tell which stage found it.
+
+  Each of the four records also gains the persisted `ever_tagged` flag (#938), since the moment a type
+  becomes scannable it inherits the rule that `GetResources` reports what *has been* tagged: a
+  resource whose tags have all since been removed is reported with `"Tags": []`, and one never tagged
+  is not reported at all. `ResourceTypeFilters` needs no ELB-specific handling — `loadbalancer`,
+  `targetgroup`, `listener` and `listener-rule` each fall out of #936's anchored type-segment match.
 - **CloudFormation's `aws:cloudformation:*` stamp reaches twelve more resource types, and stack-tag
   propagation reaches them with it** (#819, unblocked by #835). A KMS key and replica key, a Secrets
   Manager secret, an SNS topic, an SSM parameter, an ACM certificate, a CloudFront distribution, a
@@ -878,6 +902,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A classic load-balancer ARN was classified as an ELBv2 load balancer, so its refusal asserted that
+  a v2 load balancer of that ARN could exist** (#863). `elbResourceKindFromARN` decided a resource's
+  type by testing for the `:loadbalancer/` substring, which AWS's *classic* format matches too — one
+  segment after the type where ELBv2's carries three (`app/<name>/<id>`). So a classic ARN was looked
+  for among v2 load balancers and answered `LoadBalancerNotFound`/400.
+
+  Classification is now on the segment count the vendored `authzref/elasticloadbalancing.json` (v1.4)
+  format strings publish, so a classic ARN is a type substrate does not tag: `ValidationError`/400,
+  which is what ELB's own `AddTags` already answered for an ARN of no ELB type. Nothing writes a
+  classic record and nothing ever did, so no tag was mis-keyed in practice — #863's premise that the
+  two collide in state was corrected on the issue before this landed. What changes is that the refusal
+  is now principled rather than incidental, which matters the moment #844 lets a classic load balancer
+  exist. The pre-#774 nested listener and rule ARNs stay resolvable, by arity rather than by substring,
+  for the reason they always were: a recorded event log or exported fixture carries them.
 - **A stack-tag reconciliation read a KMS key's stored tags as `nil`, so it clobbered a caller's own
   tag and left a removed stack tag in place** (#819). `cfnRecordTags` decoded a record's tag member as
   either a map, an ECS-style `key`/`value` list or an EFS-style `Key`/`Value` list — but KMS spells its

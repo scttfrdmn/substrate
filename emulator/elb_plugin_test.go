@@ -38,14 +38,21 @@ func newELBTestServer(t *testing.T) *httptest.Server {
 	return ts
 }
 
-// elbRequest sends an ELBv2 query-protocol request and returns the response.
-func elbRequest(t *testing.T, ts *httptest.Server, params map[string]string) *http.Response {
+// elbRequest sends an ELBv2 query-protocol request to the server at baseURL and returns the
+// response.
+//
+// A base URL rather than a `*httptest.Server`, because a cross-readability test needs one server
+// carrying *both* ELBv2 and the Resource Groups Tagging API, and that one comes from
+// [emulator.StartTestServer] rather than from [newELBTestServer]'s single-plugin registry (#863).
+// The two share no type — `URL` is a field on each, and a field satisfies no interface — so the
+// string both of them already expose is what the helper takes.
+func elbRequest(t *testing.T, baseURL string, params map[string]string) *http.Response {
 	t.Helper()
 	form := url.Values{}
 	for k, v := range params {
 		form.Set(k, v)
 	}
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/", strings.NewReader(form.Encode()))
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatalf("build elb request: %v", err)
 	}
@@ -60,7 +67,7 @@ func elbRequest(t *testing.T, ts *httptest.Server, params map[string]string) *ht
 
 func TestELB_CreateLoadBalancer(t *testing.T) {
 	ts := newELBTestServer(t)
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                  "CreateLoadBalancer",
 		"Name":                    "my-alb",
 		"Type":                    "application",
@@ -107,7 +114,7 @@ func TestELB_CreateLoadBalancer(t *testing.T) {
 
 func TestELB_DescribeLoadBalancers_Empty(t *testing.T) {
 	ts := newELBTestServer(t)
-	resp := elbRequest(t, ts, map[string]string{"Action": "DescribeLoadBalancers"})
+	resp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeLoadBalancers"})
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("DescribeLoadBalancers empty: expected 200, got %d", resp.StatusCode)
@@ -130,10 +137,10 @@ func TestELB_DescribeLoadBalancers_Empty(t *testing.T) {
 
 func TestELB_DescribeLoadBalancers_ByName(t *testing.T) {
 	ts := newELBTestServer(t)
-	elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-a", "Type": "application"})
-	elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-b", "Type": "network"})
+	elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-a", "Type": "application"})
+	elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-b", "Type": "network"})
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":         "DescribeLoadBalancers",
 		"Names.member.1": "alb-a",
 	})
@@ -161,7 +168,7 @@ func TestELB_DescribeLoadBalancers_ByName(t *testing.T) {
 
 func TestELB_DeleteLoadBalancer(t *testing.T) {
 	ts := newELBTestServer(t)
-	createResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "to-delete", "Type": "application"})
+	createResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "to-delete", "Type": "application"})
 	defer createResp.Body.Close() //nolint:errcheck
 
 	var createResult struct {
@@ -176,14 +183,14 @@ func TestELB_DeleteLoadBalancer(t *testing.T) {
 	}
 	arn := createResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	delResp := elbRequest(t, ts, map[string]string{"Action": "DeleteLoadBalancer", "LoadBalancerArn": arn})
+	delResp := elbRequest(t, ts.URL, map[string]string{"Action": "DeleteLoadBalancer", "LoadBalancerArn": arn})
 	defer delResp.Body.Close() //nolint:errcheck
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteLoadBalancer: expected 200, got %d", delResp.StatusCode)
 	}
 
 	// Verify gone.
-	descResp := elbRequest(t, ts, map[string]string{"Action": "DescribeLoadBalancers"})
+	descResp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeLoadBalancers"})
 	defer descResp.Body.Close() //nolint:errcheck
 	var descResult struct {
 		Result struct {
@@ -200,7 +207,7 @@ func TestELB_DeleteLoadBalancer(t *testing.T) {
 
 func TestELB_CreateTargetGroup(t *testing.T) {
 	ts := newELBTestServer(t)
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":     "CreateTargetGroup",
 		"Name":       "my-tg",
 		"Protocol":   "HTTP",
@@ -241,10 +248,10 @@ func TestELB_CreateTargetGroup(t *testing.T) {
 
 func TestELB_DescribeTargetGroups(t *testing.T) {
 	ts := newELBTestServer(t)
-	elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-1", "Protocol": "HTTP", "Port": "80"})
-	elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-2", "Protocol": "HTTPS", "Port": "443"})
+	elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-1", "Protocol": "HTTP", "Port": "80"})
+	elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-2", "Protocol": "HTTPS", "Port": "443"})
 
-	resp := elbRequest(t, ts, map[string]string{"Action": "DescribeTargetGroups"})
+	resp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeTargetGroups"})
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -266,7 +273,7 @@ func TestELB_DescribeTargetGroups(t *testing.T) {
 
 func TestELB_DeleteTargetGroup(t *testing.T) {
 	ts := newELBTestServer(t)
-	cr := elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-del", "Protocol": "HTTP", "Port": "8080"})
+	cr := elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-del", "Protocol": "HTTP", "Port": "8080"})
 	defer cr.Body.Close() //nolint:errcheck
 	var crResult struct {
 		Result struct {
@@ -280,7 +287,7 @@ func TestELB_DeleteTargetGroup(t *testing.T) {
 	}
 	tgARN := crResult.Result.TargetGroups[0].TargetGroupArn
 
-	delResp := elbRequest(t, ts, map[string]string{"Action": "DeleteTargetGroup", "TargetGroupArn": tgARN})
+	delResp := elbRequest(t, ts.URL, map[string]string{"Action": "DeleteTargetGroup", "TargetGroupArn": tgARN})
 	defer delResp.Body.Close() //nolint:errcheck
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteTargetGroup: expected 200, got %d", delResp.StatusCode)
@@ -289,7 +296,7 @@ func TestELB_DeleteTargetGroup(t *testing.T) {
 
 func TestELB_RegisterTargets_DescribeTargetHealth(t *testing.T) {
 	ts := newELBTestServer(t)
-	cr := elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-health", "Protocol": "HTTP", "Port": "80"})
+	cr := elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-health", "Protocol": "HTTP", "Port": "80"})
 	defer cr.Body.Close() //nolint:errcheck
 	var crResult struct {
 		Result struct {
@@ -303,7 +310,7 @@ func TestELB_RegisterTargets_DescribeTargetHealth(t *testing.T) {
 	}
 	tgARN := crResult.Result.TargetGroups[0].TargetGroupArn
 
-	regResp := elbRequest(t, ts, map[string]string{
+	regResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "RegisterTargets",
 		"TargetGroupArn":        tgARN,
 		"Targets.member.1.Id":   "i-0123456789abcdef0",
@@ -315,7 +322,7 @@ func TestELB_RegisterTargets_DescribeTargetHealth(t *testing.T) {
 		t.Fatalf("RegisterTargets: expected 200, got %d", regResp.StatusCode)
 	}
 
-	healthResp := elbRequest(t, ts, map[string]string{
+	healthResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":         "DescribeTargetHealth",
 		"TargetGroupArn": tgARN,
 	})
@@ -350,7 +357,7 @@ func TestELB_RegisterTargets_DescribeTargetHealth(t *testing.T) {
 
 func TestELB_DeregisterTargets(t *testing.T) {
 	ts := newELBTestServer(t)
-	cr := elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-dereg", "Protocol": "HTTP", "Port": "80"})
+	cr := elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-dereg", "Protocol": "HTTP", "Port": "80"})
 	defer cr.Body.Close() //nolint:errcheck
 	var crResult struct {
 		Result struct {
@@ -364,13 +371,13 @@ func TestELB_DeregisterTargets(t *testing.T) {
 	}
 	tgARN := crResult.Result.TargetGroups[0].TargetGroupArn
 
-	regResp := elbRequest(t, ts, map[string]string{
+	regResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "RegisterTargets", "TargetGroupArn": tgARN,
 		"Targets.member.1.Id": "i-aaa",
 	})
 	regResp.Body.Close() //nolint:errcheck
 
-	deregResp := elbRequest(t, ts, map[string]string{
+	deregResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "DeregisterTargets", "TargetGroupArn": tgARN,
 		"Targets.member.1.Id": "i-aaa",
 	})
@@ -379,7 +386,7 @@ func TestELB_DeregisterTargets(t *testing.T) {
 		t.Fatalf("DeregisterTargets: expected 200, got %d", deregResp.StatusCode)
 	}
 
-	healthResp := elbRequest(t, ts, map[string]string{"Action": "DescribeTargetHealth", "TargetGroupArn": tgARN})
+	healthResp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeTargetHealth", "TargetGroupArn": tgARN})
 	defer healthResp.Body.Close() //nolint:errcheck
 	var healthResult struct {
 		Result struct {
@@ -396,7 +403,7 @@ func TestELB_DeregisterTargets(t *testing.T) {
 
 func TestELB_CreateListener(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-listener", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-listener", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -410,7 +417,7 @@ func TestELB_CreateListener(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	tgResp := elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-listener", "Protocol": "HTTP", "Port": "80"})
+	tgResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-listener", "Protocol": "HTTP", "Port": "80"})
 	defer tgResp.Body.Close() //nolint:errcheck
 	var tgResult struct {
 		Result struct {
@@ -424,7 +431,7 @@ func TestELB_CreateListener(t *testing.T) {
 	}
 	tgARN := tgResult.Result.TargetGroups[0].TargetGroupArn
 
-	lResp := elbRequest(t, ts, map[string]string{
+	lResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                                 "CreateListener",
 		"LoadBalancerArn":                        lbARN,
 		"Protocol":                               "HTTP",
@@ -466,7 +473,7 @@ func TestELB_CreateListener(t *testing.T) {
 
 func TestELB_DescribeListeners(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-desc-l", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-desc-l", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -481,14 +488,14 @@ func TestELB_DescribeListeners(t *testing.T) {
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
 	for _, port := range []string{"80", "443"} {
-		r := elbRequest(t, ts, map[string]string{
+		r := elbRequest(t, ts.URL, map[string]string{
 			"Action": "CreateListener", "LoadBalancerArn": lbARN,
 			"Protocol": "HTTP", "Port": port,
 		})
 		r.Body.Close() //nolint:errcheck
 	}
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":          "DescribeListeners",
 		"LoadBalancerArn": lbARN,
 	})
@@ -511,7 +518,7 @@ func TestELB_DescribeListeners(t *testing.T) {
 
 func TestELB_DeleteListener(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-del-l", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-del-l", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -525,7 +532,7 @@ func TestELB_DeleteListener(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	lResp := elbRequest(t, ts, map[string]string{
+	lResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "CreateListener", "LoadBalancerArn": lbARN,
 		"Protocol": "HTTP", "Port": "80",
 	})
@@ -542,7 +549,7 @@ func TestELB_DeleteListener(t *testing.T) {
 	}
 	listenerARN := lResult.Result.Listeners[0].ListenerArn
 
-	delResp := elbRequest(t, ts, map[string]string{"Action": "DeleteListener", "ListenerArn": listenerARN})
+	delResp := elbRequest(t, ts.URL, map[string]string{"Action": "DeleteListener", "ListenerArn": listenerARN})
 	defer delResp.Body.Close() //nolint:errcheck
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteListener: expected 200, got %d", delResp.StatusCode)
@@ -551,7 +558,7 @@ func TestELB_DeleteListener(t *testing.T) {
 
 func TestELB_ModifyListener(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-mod-l", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-mod-l", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -565,7 +572,7 @@ func TestELB_ModifyListener(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	lResp := elbRequest(t, ts, map[string]string{
+	lResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "CreateListener", "LoadBalancerArn": lbARN,
 		"Protocol": "HTTP", "Port": "80",
 	})
@@ -582,7 +589,7 @@ func TestELB_ModifyListener(t *testing.T) {
 	}
 	listenerARN := lResult.Result.Listeners[0].ListenerArn
 
-	modResp := elbRequest(t, ts, map[string]string{
+	modResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":      "ModifyListener",
 		"ListenerArn": listenerARN,
 		"Port":        "8080",
@@ -608,7 +615,7 @@ func TestELB_ModifyListener(t *testing.T) {
 
 func TestELB_CreateRule(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-rule", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-rule", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -622,7 +629,7 @@ func TestELB_CreateRule(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	lResp := elbRequest(t, ts, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
+	lResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
 	defer lResp.Body.Close() //nolint:errcheck
 	var lResult struct {
 		Result struct {
@@ -636,7 +643,7 @@ func TestELB_CreateRule(t *testing.T) {
 	}
 	listenerARN := lResult.Result.Listeners[0].ListenerArn
 
-	tgResp := elbRequest(t, ts, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-rule", "Protocol": "HTTP", "Port": "80"})
+	tgResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateTargetGroup", "Name": "tg-rule", "Protocol": "HTTP", "Port": "80"})
 	defer tgResp.Body.Close() //nolint:errcheck
 	var tgResult struct {
 		Result struct {
@@ -650,7 +657,7 @@ func TestELB_CreateRule(t *testing.T) {
 	}
 	tgARN := tgResult.Result.TargetGroups[0].TargetGroupArn
 
-	rResp := elbRequest(t, ts, map[string]string{
+	rResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                              "CreateRule",
 		"ListenerArn":                         listenerARN,
 		"Priority":                            "10",
@@ -684,7 +691,7 @@ func TestELB_CreateRule(t *testing.T) {
 
 func TestELB_DescribeRules(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-desc-rules", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-desc-rules", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -698,7 +705,7 @@ func TestELB_DescribeRules(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	lResp := elbRequest(t, ts, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
+	lResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
 	defer lResp.Body.Close() //nolint:errcheck
 	var lResult struct {
 		Result struct {
@@ -713,7 +720,7 @@ func TestELB_DescribeRules(t *testing.T) {
 	listenerARN := lResult.Result.Listeners[0].ListenerArn
 
 	for _, p := range []string{"5", "10"} {
-		r := elbRequest(t, ts, map[string]string{
+		r := elbRequest(t, ts.URL, map[string]string{
 			"Action": "CreateRule", "ListenerArn": listenerARN, "Priority": p,
 			"Conditions.member.1.Field": "path-pattern",
 			"Actions.member.1.Type":     "forward",
@@ -721,7 +728,7 @@ func TestELB_DescribeRules(t *testing.T) {
 		r.Body.Close() //nolint:errcheck
 	}
 
-	resp := elbRequest(t, ts, map[string]string{"Action": "DescribeRules", "ListenerArn": listenerARN})
+	resp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeRules", "ListenerArn": listenerARN})
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -741,7 +748,7 @@ func TestELB_DescribeRules(t *testing.T) {
 
 func TestELB_DeleteRule(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-del-rule", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-del-rule", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -755,7 +762,7 @@ func TestELB_DeleteRule(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	lResp := elbRequest(t, ts, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
+	lResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
 	defer lResp.Body.Close() //nolint:errcheck
 	var lResult struct {
 		Result struct {
@@ -769,7 +776,7 @@ func TestELB_DeleteRule(t *testing.T) {
 	}
 	listenerARN := lResult.Result.Listeners[0].ListenerArn
 
-	rResp := elbRequest(t, ts, map[string]string{
+	rResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "CreateRule", "ListenerArn": listenerARN, "Priority": "1",
 		"Actions.member.1.Type": "forward",
 	})
@@ -786,7 +793,7 @@ func TestELB_DeleteRule(t *testing.T) {
 	}
 	ruleARN := rResult.Result.Rules[0].RuleArn
 
-	delResp := elbRequest(t, ts, map[string]string{"Action": "DeleteRule", "RuleArn": ruleARN})
+	delResp := elbRequest(t, ts.URL, map[string]string{"Action": "DeleteRule", "RuleArn": ruleARN})
 	defer delResp.Body.Close() //nolint:errcheck
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteRule: expected 200, got %d", delResp.StatusCode)
@@ -795,7 +802,7 @@ func TestELB_DeleteRule(t *testing.T) {
 
 func TestELB_SetRulePriorities(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbResp := elbRequest(t, ts, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-prio", "Type": "application"})
+	lbResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateLoadBalancer", "Name": "alb-prio", "Type": "application"})
 	defer lbResp.Body.Close() //nolint:errcheck
 	var lbResult struct {
 		Result struct {
@@ -809,7 +816,7 @@ func TestELB_SetRulePriorities(t *testing.T) {
 	}
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
-	lResp := elbRequest(t, ts, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
+	lResp := elbRequest(t, ts.URL, map[string]string{"Action": "CreateListener", "LoadBalancerArn": lbARN, "Protocol": "HTTP", "Port": "80"})
 	defer lResp.Body.Close() //nolint:errcheck
 	var lResult struct {
 		Result struct {
@@ -823,7 +830,7 @@ func TestELB_SetRulePriorities(t *testing.T) {
 	}
 	listenerARN := lResult.Result.Listeners[0].ListenerArn
 
-	rResp := elbRequest(t, ts, map[string]string{
+	rResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "CreateRule", "ListenerArn": listenerARN, "Priority": "5",
 		"Actions.member.1.Type": "forward",
 	})
@@ -840,7 +847,7 @@ func TestELB_SetRulePriorities(t *testing.T) {
 	}
 	ruleARN := rResult.Result.Rules[0].RuleArn
 
-	prioResp := elbRequest(t, ts, map[string]string{
+	prioResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                           "SetRulePriorities",
 		"RulePriorities.member.1.RuleArn":  ruleARN,
 		"RulePriorities.member.1.Priority": "100",
@@ -853,7 +860,7 @@ func TestELB_SetRulePriorities(t *testing.T) {
 
 func TestELB_UnknownAction(t *testing.T) {
 	ts := newELBTestServer(t)
-	resp := elbRequest(t, ts, map[string]string{"Action": "SomethingUnknown"})
+	resp := elbRequest(t, ts.URL, map[string]string{"Action": "SomethingUnknown"})
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unknown action: expected 400, got %d", resp.StatusCode)
@@ -862,7 +869,7 @@ func TestELB_UnknownAction(t *testing.T) {
 
 func TestELB_DescribeLoadBalancerAttributes(t *testing.T) {
 	ts := newELBTestServer(t)
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":          "DescribeLoadBalancerAttributes",
 		"LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/test/abc",
 	})
@@ -875,7 +882,7 @@ func TestELB_DescribeLoadBalancerAttributes(t *testing.T) {
 func TestELB_ModifyLoadBalancerAttributes(t *testing.T) {
 	ts := newELBTestServer(t)
 	// Create a load balancer first.
-	lbResp := elbRequest(t, ts, map[string]string{
+	lbResp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "CreateLoadBalancer",
 		"Name":   "test-lb-modify",
 		"Type":   "application",
@@ -898,7 +905,7 @@ func TestELB_ModifyLoadBalancerAttributes(t *testing.T) {
 	lbARN := lbResult.Result.LoadBalancers[0].LoadBalancerArn
 
 	// Modify load balancer attributes.
-	modResp := elbRequest(t, ts, map[string]string{
+	modResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                    "ModifyLoadBalancerAttributes",
 		"LoadBalancerArn":           lbARN,
 		"Attributes.member.1.Key":   "idle_timeout.timeout_seconds",
@@ -913,7 +920,7 @@ func TestELB_ModifyLoadBalancerAttributes(t *testing.T) {
 func TestELB_ModifyTargetGroup(t *testing.T) {
 	ts := newELBTestServer(t)
 	// Create a target group first.
-	tgResp := elbRequest(t, ts, map[string]string{
+	tgResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":   "CreateTargetGroup",
 		"Name":     "test-tg-modify",
 		"Protocol": "HTTP",
@@ -934,7 +941,7 @@ func TestELB_ModifyTargetGroup(t *testing.T) {
 	tgARN := tgResult.Result.TargetGroups[0].TargetGroupArn
 
 	// Modify the target group.
-	modResp := elbRequest(t, ts, map[string]string{
+	modResp := elbRequest(t, ts.URL, map[string]string{
 		"Action":              "ModifyTargetGroup",
 		"TargetGroupArn":      tgARN,
 		"HealthCheckPath":     "/health",

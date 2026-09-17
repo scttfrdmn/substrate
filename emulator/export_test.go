@@ -1123,10 +1123,15 @@ func ResourceTypeMatchesForTest(arn string, filters []string) bool {
 // finds no record at the key — answer a FailedResourcesMap entry over the wire, so a row that was
 // refused by the resolver and is now refused by the merge, because its type gained an arm, stays
 // green while no longer guarding the thing it is named for. That is #939, and three rows had gone
-// stale that way before it was caught by reading a log line. The resolver's body never touches its
-// receiver, so a zero-value plugin is enough to call it.
-func TaggingResolveARNForTest(arn string) (ns, key string, err error) {
-	return (&TaggingPlugin{}).resolveARN(arn)
+// stale that way before it was caught by reading a log line.
+//
+// The state manager is a parameter because one arm — elasticloadbalancing — resolves an ARN by
+// finding the record it names rather than by building a key, so a zero-value plugin is no longer
+// enough to call the resolver (#863). Passing nil is safe for every other arm and for an ELB ARN
+// refused before the lookup, which is what the guard table exercises; a row that needs the lookup
+// passes a real state manager.
+func TaggingResolveARNForTest(state StateManager, arn string) (ns, key string, err error) {
+	return (&TaggingPlugin{state: state}).resolveARN(arn)
 }
 
 // ELBResourceKindFromARNForTest wraps elbResourceKindFromARN, which classifies an ELBv2 ARN as
