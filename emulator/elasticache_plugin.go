@@ -724,6 +724,16 @@ func (p *ElastiCachePlugin) listTagsForResource(_ *RequestContext, req *AWSReque
 	for k, v := range tags {
 		xmlTags = append(xmlTags, xmlTag{Key: k, Value: v})
 	}
+	// Ranging the map put Go's map order into TagList, so two identical calls could report one
+	// cluster's tags in a different order (#1011). This is the site #946 missed when it swept the
+	// per-service tag listings: ElastiCache stores its tags as a map[string]string like Kinesis and
+	// S3 do, but it renders them through XML rather than JSON, so it fell outside that sweep's shape.
+	//
+	// API_ListTagsForResource describes TagList.Tag.N only as "A list of tags as key-value pairs" and
+	// publishes no cursor, so unlike Kinesis's ExclusiveStartTagKey there is nothing here implying an
+	// order. Lexicographic by key is substrate's reading, resting on the replay promise — see
+	// docs/services.md.
+	sortTagsByKey(xmlTags, func(t xmlTag) string { return t.Key })
 	return elasticacheXMLResponse(http.StatusOK, response{
 		XMLNS:  elasticacheXMLNS,
 		Result: result{TagList: xmlTags},

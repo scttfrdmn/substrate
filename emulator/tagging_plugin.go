@@ -2333,7 +2333,17 @@ func sortTagsByKey[T any](tags []T, keyOf func(T) string) {
 
 // ----- Helpers -------------------------------------------------------------
 
-// mapToTaggingTags converts a map[string]string to []taggingTag.
+// mapToTaggingTags converts a map[string]string to []taggingTag, ordered by key.
+//
+// The sort is what makes a GetResources body reproducible. Ranging the map without it returned a
+// different order on almost every call — twelve identical calls against one eight-tag queue produced
+// eight distinct bodies (#1011) — because Go randomizes where a map range begins. This is the single
+// most load-bearing of the four converters: it has most of the scanners as call sites, and it is the
+// only one that passes through a map at all, so the other three were order-preserving by luck and this
+// one could not be.
+//
+// AWS documents no order for Tags, on this operation or on the ResourceTagMapping shape, so
+// lexicographic is substrate's reading rather than a match — see docs/services.md.
 func mapToTaggingTags(m map[string]string) []taggingTag {
 	if len(m) == 0 {
 		return nil
@@ -2342,10 +2352,15 @@ func mapToTaggingTags(m map[string]string) []taggingTag {
 	for k, v := range m {
 		tags = append(tags, taggingTag{Key: k, Value: v})
 	}
+	sortTagsByKey(tags, func(t taggingTag) string { return t.Key })
 	return tags
 }
 
-// iamTagsToTaggingTags converts []IAMTag to []taggingTag.
+// iamTagsToTaggingTags converts []IAMTag to []taggingTag, ordered by key.
+//
+// The stored slice already arrives sorted from mergeIAMTags, so this sort is not what fixes an observed
+// disorder — it is what stops the guarantee from resting on every writer remembering to sort. A raw
+// writer that bypasses the merge helper cannot make the response non-deterministic through here.
 func iamTagsToTaggingTags(tags []IAMTag) []taggingTag {
 	if len(tags) == 0 {
 		return nil
@@ -2354,10 +2369,12 @@ func iamTagsToTaggingTags(tags []IAMTag) []taggingTag {
 	for i, t := range tags {
 		out[i] = taggingTag(t)
 	}
+	sortTagsByKey(out, func(t taggingTag) string { return t.Key })
 	return out
 }
 
-// ec2TagsToTaggingTags converts []EC2Tag to []taggingTag.
+// ec2TagsToTaggingTags converts []EC2Tag to []taggingTag, ordered by key, for the reason on
+// [iamTagsToTaggingTags].
 func ec2TagsToTaggingTags(tags []EC2Tag) []taggingTag {
 	if len(tags) == 0 {
 		return nil
@@ -2366,6 +2383,7 @@ func ec2TagsToTaggingTags(tags []EC2Tag) []taggingTag {
 	for i, t := range tags {
 		out[i] = taggingTag(t)
 	}
+	sortTagsByKey(out, func(t taggingTag) string { return t.Key })
 	return out
 }
 
@@ -2405,6 +2423,8 @@ func mergeECSTags(existing []ECSTag, add map[string]string, removeKeys []string)
 	return out
 }
 
+// efsTagsToTaggingTags converts []EFSTag to []taggingTag, ordered by key, for the reason on
+// [iamTagsToTaggingTags].
 func efsTagsToTaggingTags(tags []EFSTag) []taggingTag {
 	if len(tags) == 0 {
 		return nil
@@ -2413,6 +2433,7 @@ func efsTagsToTaggingTags(tags []EFSTag) []taggingTag {
 	for i, t := range tags {
 		out[i] = taggingTag(t)
 	}
+	sortTagsByKey(out, func(t taggingTag) string { return t.Key })
 	return out
 }
 
