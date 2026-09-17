@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -123,7 +124,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "CreateBasePathMapping":
 		return p.createBasePathMapping(ctx, req, params["name"])
 	case "GetBasePathMappings":
-		return p.getBasePathMappings(ctx, params["name"])
+		return p.getBasePathMappings(ctx, req, params["name"])
 	default:
 		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
@@ -1315,7 +1316,54 @@ func (p *APIGatewayPlugin) createBasePathMapping(ctx *RequestContext, req *AWSRe
 	return apigwJSONResponse(http.StatusCreated, basePathMappingWire(mapping))
 }
 
-func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, domainName string) (*AWSResponse, error) {
+// apigwDefaultLimit and apigwMaxLimit are the bounds GetBasePathMappings' "limit" publishes,
+// which it does inside the parameter's own description rather than on a Valid Range line: "The
+// maximum number of returned results per page. The default value is 25 and the maximum value is
+// 500."
+//
+// So unlike every EC2 describe, this operation has a published **default**: a request naming no
+// limit still pages, at 25. No minimum is published; refusing a limit below one is substrate's
+// reading, and it is the bound a paginated listing forces, since a page of zero elements
+// describes a walk that answers nothing and hands back a position forever.
+const (
+	apigwDefaultLimit = 25
+	apigwMaxLimit     = 500
+	apigwMinLimit     = 1
+)
+
+// getBasePathMappings reports one page of a domain name's base path mappings.
+//
+// It read neither of the two parameters AWS publishes on its URI — "GET
+// /domainnames/{domain_name}/basepathmappings?domainNameId={domainNameId}&limit={limit}&
+// position={position}" — and answered every mapping with no cursor, so a paging consumer's loop
+// terminated on the first response (#917). Both are read now, and because "limit" publishes
+// a default of 25 rather than "everything", a domain holding more than 25 mappings answers a
+// first page and a "position" where it used to answer the lot.
+//
+// A "position" substrate could not have issued is refused ([decodeOffsetPaginationToken]) with
+// the BadRequestException/400 this page publishes, rather than silently answering page one — the
+// defect #915 named elsewhere — and it is refused before any state is read, per #887. One past
+// the end of the collection clamps to an empty final page instead, because that token was
+// issuable over a collection that has since shrunk.
+//
+// The order is [StateManager.List]'s lexicographic one over the "basepath:" keys, which is by
+// base path within the domain. AWS publishes no order for this collection, so that is substrate's
+// reading; an offset cursor needs *some* stable order, and the alternative — the order mappings
+// happened to be created in — is not recoverable from state.
+func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, req *AWSRequest, domainName string) (*AWSResponse, error) {
+	pageSize, awsErr := apigwPageLimit(req.Params["limit"])
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params["position"])
+	if !tokenOK {
+		return nil, &AWSError{
+			Code:       "BadRequestException",
+			Message:    "Invalid position: " + req.Params["position"],
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
 	goCtx := context.Background()
 	prefix := "basepath:" + ctx.AccountID + "/" + ctx.Region + "/" + domainName + "/"
 	keys, err := p.state.List(goCtx, apigatewayNamespace, prefix)
@@ -1335,7 +1383,32 @@ func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, domainName s
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[basePathMappingOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[basePathMappingOut]{Item: page, Position: position})
+}
+
+// apigwPageLimit reads a v1 collection's "limit" and returns the number of elements one page may
+// carry.
+//
+// A value outside 1..500 is refused rather than clamped, with the BadRequestException the page
+// publishes — "the submitted request is not valid, for example, the input is incomplete or
+// incorrect" — because a caller asking for 1000 elements per page asked for something the
+// operation cannot do, and silently answering 500 hides it. A non-integer is refused for the same
+// reason. An absent limit is the published default of 25.
+func apigwPageLimit(raw string) (int, *AWSError) {
+	if raw == "" {
+		return apigwDefaultLimit, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < apigwMinLimit || n > apigwMaxLimit {
+		return 0, &AWSError{
+			Code: "BadRequestException",
+			Message: "limit must be between " + strconv.Itoa(apigwMinLimit) +
+				" and " + strconv.Itoa(apigwMaxLimit),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return n, nil
 }
 
 // --- ID generation -----------------------------------------------------------

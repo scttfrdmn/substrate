@@ -530,6 +530,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **The two cursors outside EC2 that published both halves and read neither** (#917, part three of
+  three). Lambda's `ListEventSourceMappings` publishes `Marker` and `MaxItems` on its URI and API
+  Gateway's `GetBasePathMappings` publishes `position` and `limit` on its; both answered the entire
+  listing with no token whatever a caller sent, so a paging loop terminated on its first response here
+  and first ran for real against an account or a domain holding more than one page. Both now cut their
+  page through one shared helper over the **base64** offset token the CloudWatch, Systems Manager and
+  S3 listings use, rather than EC2's decimal one — that shape was chosen for EC2 because its two
+  original paginators already issued it, and neither of these two had issued anything.
+
+  Both inherit the rules #915 established without adding any: a token substrate could not have issued
+  is refused rather than answered with a well-formed page one, and it is refused **before any state is
+  read**, so the answer to a malformed cursor does not depend on how many records exist; an offset past
+  the end clamps to an empty final page, because that token was issuable over a listing that has since
+  shrunk. A full final page carries no token, so a listing that is an exact multiple of the page size
+  costs no round trip to an empty page — Lambda's own wording is the reason, since `NextMarker` is
+  *"returned when the response doesn't contain all event source mappings"*.
+
+  **`MaxItems` publishes two bounds that are two different rules, and they are kept apart rather than
+  collapsed into one range.** `API_ListEventSourceMappings` states `Valid Range: Minimum value of 1.
+  Maximum value of 10000.` for the parameter and, in the parameter's own description, a cap on what any
+  response may carry: *"Note that `ListEventSourceMappings` returns a maximum of 100 items in each
+  response, even if you set the number higher."* So `MaxItems=5000` is a valid request that answers at
+  most 100 mappings with a `NextMarker`, while `MaxItems=10001` is refused with the
+  `InvalidParameterValueException`/400 the page publishes — refused rather than clamped, for the reason
+  #913 recorded: a rewritten page size cannot be noticed by the caller who asked for it. An **absent**
+  `MaxItems` is that same 100, which is substrate's reading, since the page publishes no default and
+  states the cap against every response.
+
+  **API Gateway is the opposite case, and the only paginated operation in the tree with a published
+  default.** `limit` is *"the maximum number of returned results per page. The default value is 25 and
+  the maximum value is 500."* — bounds published inside the parameter's description rather than on a
+  `Valid Range` line. A request naming no `limit` therefore still pages, at 25, where it previously
+  answered the whole collection, and a `limit` outside the range is refused with the
+  `BadRequestException`/400 the page publishes. No **minimum** is published; the floor of one is
+  substrate's reading, forced by the same argument as everywhere else in #917 — a page of zero elements
+  describes a walk that answers nothing and hands back a position forever.
+
+  **Neither operation gained an `InvalidParameterCombination`.** EC2's service-wide rule that an ID list
+  and `MaxResults` may not appear together has no counterpart on either page: nothing there makes
+  `FunctionName` or `EventSourceArn` exclusive with paging, so they narrow a page rather than forbidding
+  one, and importing the EC2 rule would be substrate inventing a refusal. A filter and a page size
+  together are asserted to be accepted, so the absence is a recorded decision rather than an omission.
+
+  **The order each cursor counts positions in is substrate's reading, because neither page publishes
+  one.** `GetBasePathMappings` walks the state keys' lexicographic order, which is by base path within
+  the domain. `ListEventSourceMappings` has two code paths — a scan of the mapping keys when no function
+  is named, and a per-function index when one is — and the index holds mappings in creation order, so it
+  is now sorted before the page is cut; without that the same `Marker` would name two different
+  positions depending on whether the caller passed `FunctionName`, which is asserted rather than
+  reasoned about.
+
+  A recorded decision was amended rather than deleted in the process: `apigwItemsOut` stated that **no**
+  v1 collection carries a `position`, which was true when nothing paged and is now true of every
+  collection but this one. The others still answer every element in one page and leave the member unset
+  so it is omitted, since a caller must not be handed a token for a page that does not exist. That
+  amendment's own count was then found wrong and corrected too — it said the other seven publish both
+  parameters, where six do (#1025); the seventh, `GetStages`, publishes neither and lists no `position`
+  response member, so its single page is what AWS describes rather than a gap.
+
+  **What is left is now counted rather than estimated, which is the part of this issue that closes it.**
+  `docs/services.md` said "roughly twenty other describes published both parameters and implemented
+  neither" — an estimate that invites a reader to assume the sweep was complete. Against EC2's dispatch
+  switch crossed with each operation's own API reference page the number is exact: sixteen published both
+  and read neither before #917, seven were converted by it, and **nine remain** — `DescribeInstanceStatus`,
+  `DescribeInternetGateways`, `DescribeRouteTables`, `DescribeNatGateways`, `DescribeInstanceTypes`,
+  `DescribeInstanceTypeOfferings`, `DescribeSpotPriceHistory`, `DescribeLaunchTemplates` and
+  `DescribeFleets` (#1024). Their published ranges differ per operation and are recorded with them, since
+  two publish 5–100 where a sibling publishes 5–1000, three publish no bound at all, and
+  `DescribeLaunchTemplates` is the only page in the whole set whose published floor is 1 rather than 5 —
+  facts that would otherwise be re-derived. Seven further routed describes publish **neither** parameter
+  and are named too, so the nine is not read as larger than it is.
+
 - **The five remaining EC2 describes that published a cursor and read neither half of it** (#917, part
   two of three). `DescribeInstances`, `DescribeImages`, `DescribeVpcs`, `DescribeSubnets` and
   `DescribeSecurityGroups` each publish `MaxResults` and `NextToken` and answered the whole listing with

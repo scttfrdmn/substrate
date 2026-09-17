@@ -277,10 +277,20 @@ func basePathMappingWire(m BasePathMappingState) basePathMappingOut {
 // locationName is "item" too. So on the wire all twenty collections agree, and
 // substrate emits "item" for every one of them. Emitting "items" parses to nothing.
 //
-// No collection carries a "position" token, because substrate returns every element
-// in one page and does not honor one; inventing a token would invite a caller to
-// page on nothing. GetUsage's member is a third spelling, "values", but substrate
-// does not route GetUsage.
+// One collection carries a "position" token: GetBasePathMappings, which reads the
+// published "limit" and "position" parameters (#917). Six of the other seven routed
+// collections publish both parameters and still answer every element in one page (#1025),
+// so they leave the member unset and it is omitted — a caller must not be handed a token
+// for a page that does not exist. That is the same rule stated the other way round from
+// before #917, when no collection paged and so none could honestly emit one. The seventh,
+// GetStages, publishes neither parameter and no "position" response member at all, so the
+// omission there is not a gap. GetUsage's member is a third spelling, "values", but
+// substrate does not route GetUsage.
 type apigwItemsOut[T any] struct {
 	Item []T `json:"item"`
+	// Position is the cursor a caller sends back as "position" to resume the collection.
+	// AWS names it identically in both directions — request parameter and response member
+	// — and describes it identically too: "The current pagination position in the paged
+	// result set."
+	Position string `json:"position,omitempty"`
 }
