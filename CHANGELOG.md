@@ -493,6 +493,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **A DynamoDB table's state record was handed straight to a caller, so two of substrate's own fields
+  were `TableDescription` members** (#1013). `CreateTable` with a tag answered
+  `"Tags":{"env":"test"}` inside its `TableDescription`, and `DescribeTable` on a table with TTL enabled
+  answered `"TTLAttribute":"expiresAt"`. `API_TableDescription` publishes neither: a table's tags are
+  published on `ListTagsOfResource` and its TTL attribute on `DescribeTimeToLive`, and both remain
+  readable there. `Tags` was additionally rendered as a JSON object, where AWS's `Tags` is everywhere a
+  list of `{Key, Value}` — so the invented member was also in a shape the API does not use anywhere.
+
+  `DynamoDBTable` is persisted state, and twelve of its fourteen fields are genuine `TableDescription`
+  members, which is what made the other two invisible. All four sites that render a description —
+  `CreateTable`, `UpdateTable`, `DeleteTable` and, under the name `Table`, `DescribeTable` — now project
+  through a wire type tagged from the model, following the pattern #529 established for API Gateway v1
+  after the opposite failure there made an AWS SDK parse a populated response to an empty result. The
+  projection is the point rather than the two names: a state record accumulates fields for the
+  emulator's own bookkeeping, and one marshalled onto the wire turns each of them into a response
+  member. `json:"-"` on the two fields would have fixed today's leak and left the next one to be
+  remembered rather than prevented — and it would have changed the format of every recorded run, because
+  state snapshots are those bytes.
+
+  Both fields are `,omitempty`, which is why nothing caught this: an untagged table with no TTL answers
+  a clean body, and the tests that do tag a table read the tags back through `ListTagsOfResource`, which
+  was always correct, and never looked at what `DescribeTable` said. The new tests assert on the decoded
+  **key set** rather than on a struct, because a struct cannot distinguish an absent member from an empty
+  one; all four sites were confirmed to fail with the projection reverted.
+
+  This surfaced while resolving #938, which needs to add exactly such a bookkeeping field: sweeping the
+  twenty-nine record types the Resource Groups Tagging API scans found that twenty-eight already had a
+  projection in front of them, and `DynamoDBTable` was the twenty-ninth. Members substrate does not model
+  stay absent rather than present and empty, per #827, so nothing reports `TableId`, `SSEDescription`,
+  `Replicas` or the twelve others AWS publishes as optional.
+
+  Compatibility: a caller reading a table's tags out of `CreateTable`'s or `DescribeTable`'s
+  `TableDescription` must call `ListTagsOfResource`, and one reading the TTL attribute out of it must
+  call `DescribeTimeToLive`.
 - **A tag set was reported in Go map iteration order at the two readers #946 could not see, so two
   identical calls disagreed** (#1011). Found by measuring rather than by reading: twelve identical
   `GetResources` calls against one eight-tag resource in one process produced **eight distinct bodies**,

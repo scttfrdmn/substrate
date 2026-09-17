@@ -5028,9 +5028,9 @@ SQS requests: $0.0000004 per request.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateTable | Supports GSI, LSI, billing mode |
-| DescribeTable | |
-| DeleteTable | |
+| CreateTable | Supports GSI, LSI, billing mode; [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
+| DescribeTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
+| DeleteTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | ListTables | |
 | PutItem | Supports ConditionExpression |
 | GetItem | Supports ProjectionExpression |
@@ -5059,6 +5059,33 @@ hold one table name once across every Region and the second create answered
 `ResourceInUseException`/400 — which is what a consumer deploying one stack to two Regions hit.
 The key is now `table:{account}/{region}/{name}`; see
 [A Lambda function and a DynamoDB table belong to one account in one Region](#a-lambda-function-and-a-dynamodb-table-belong-to-one-account-in-one-region).
+
+### A table description reports only its own members
+
+`CreateTable`, `UpdateTable`, `DeleteTable` and `DescribeTable` project the stored table onto
+`TableDescription` rather than handing back the record. Until #1013 they handed back the record,
+and it carries two fields substrate needs that `TableDescription` does not publish: a
+`CreateTable` with tags answered `"Tags":{"env":"test"}` inside its `TableDescription`, and a
+`DescribeTable` on a table with TTL enabled answered `"TTLAttribute":"expiresAt"`. `Tags` was
+additionally rendered as a JSON object, where AWS's `Tags` is everywhere a list of
+`{Key, Value}` — so the invented member was also in a shape the API does not use anywhere.
+
+Both values remain readable where AWS publishes them: a table's tags through
+`ListTagsOfResource`, and its TTL attribute through `DescribeTimeToLive`. Only the member
+`TableDescription` does not have is gone.
+
+The projection is the point rather than the two names: a state record accumulates fields for
+the emulator's own bookkeeping, and one marshalled straight onto the wire turns each of them
+into a response member. This is the pattern #529 established for API Gateway v1, where the
+opposite failure — the state struct's PascalCase members against a lowerCamel model — made an
+AWS SDK parse a populated response to an empty result. Twenty-eight of the twenty-nine record
+types the Resource Groups Tagging API scans already had such a projection; `DynamoDBTable` was
+the twenty-ninth, which is why `AccountID` and `Region` were never at risk of appearing but
+`Tags` was.
+
+Members substrate does not model are absent from the projection rather than present and empty,
+which is the honest-empty reading #827 established, applied to a shape: nothing reports
+`TableId`, `SSEDescription`, `Replicas` or the twelve others AWS publishes as optional.
 
 ### Cost
 

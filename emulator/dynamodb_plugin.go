@@ -399,7 +399,7 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-		"TableDescription": tbl,
+		"TableDescription": dynamodbTableDescriptionWire(*tbl),
 	})
 }
 
@@ -538,7 +538,7 @@ func (p *DynamoDBPlugin) deleteTable(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	tbl.TableStatus = "DELETING"
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-		"TableDescription": tbl,
+		"TableDescription": dynamodbTableDescriptionWire(*tbl),
 	})
 }
 
@@ -564,7 +564,7 @@ func (p *DynamoDBPlugin) describeTable(ctx *RequestContext, req *AWSRequest) (*A
 	tbl.TableSizeBytes = tbl.ItemCount * 100
 
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-		"Table": tbl,
+		"Table": dynamodbTableDescriptionWire(*tbl),
 	})
 }
 
@@ -644,7 +644,7 @@ func (p *DynamoDBPlugin) updateTable(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-		"TableDescription": tbl,
+		"TableDescription": dynamodbTableDescriptionWire(*tbl),
 	})
 }
 
