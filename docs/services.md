@@ -9200,8 +9200,8 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | CreateKey | |
 | DescribeKey | Accepts all four `KeyId` forms; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
 | ListKeys | |
-| EnableKey | |
-| DisableKey | |
+| EnableKey | Refuses a key pending deletion, so recovery stays two calls — see below |
+| DisableKey | Same refusal as `EnableKey` |
 | ScheduleKeyDeletion | Waiting period range-checked at 7–30; refuses a key already pending deletion — see below |
 | CancelKeyDeletion | Requires a key pending deletion, and leaves it `Disabled` — see below |
 | GetKeyPolicy | |
@@ -9648,8 +9648,53 @@ route: one code for both states, or two codes with one message.
 
 **`GetKeyRotationStatus` remains deliberately unguarded**, and `EnableKey` and
 `DisableKey` are guarded by neither this nor the rotation rule: their rows *permit* a
-disabled key, so the enabled-check would refuse a call AWS accepts. They need the
-pending-deletion arm alone, which is tracked separately.
+disabled key, so the enabled-check would refuse a call AWS accepts. They take the
+pending-deletion arm alone — see *`EnableKey` cannot skip the cancel* below, which
+completes the class.
+
+### `EnableKey` cannot skip the cancel
+
+`EnableKey` and `DisableKey` both went through one helper that resolved the key,
+refused only a missing one, and then assigned whatever state it was handed. So
+`EnableKey` against a key in `PendingDeletion` answered `200` and wrote `Enabled` — a
+**one-call path from pending deletion to usable**, which AWS does not have
+([#968](https://github.com/scttfrdmn/substrate/issues/968)).
+
+That is worse than a missing refusal usually is, because it defeated a guarantee
+another operation in the same file had just established: `CancelKeyDeletion` leaves a
+key `Disabled` precisely so recovery is two calls, and an unguarded `EnableKey` skipped
+the first one. It also abandoned the deletion silently, since the helper cleared the
+deletion date on its way through, leaving no record that one had ever been scheduled.
+
+Both operations have identical rows in the *Key states of AWS KMS keys* table:
+
+| Key state | Answered | Provenance |
+|-----------|----------|------------|
+| `Enabled` | 200 | Permitted — so neither operation refuses a redundant call |
+| `Disabled` | 200 | Permitted too, which is why the rotation rule cannot be reused here: an enabled-key check would refuse a call AWS accepts |
+| `PendingDeletion` | `KMSInvalidStateException`/400 | Footnote `[3]`, which names the state — so the existing helper serves, with no sibling needed as footnote `[4]`'s negation required for `CancelKeyDeletion` |
+| `Unavailable` | — | **Permitted, not refused.** Footnote `[12]`: *"the operation succeeds, but the key state of the KMS key does not change until it becomes available"* — a success with a deferred effect, unreachable in substrate and recorded so a later sweep does not read it as a refusal |
+| `PendingImport`, `Creating`, `Updating` | — | Refused by AWS, unreachable: `ScheduleKeyDeletion` remains substrate's only writer of a state other than `Enabled` or `Disabled` |
+
+**The guard lives in the shared helper**, and #963 is the counter-example that makes
+that worth stating. Both callers here refuse the same single state, so one condition
+serves both. `CancelKeyDeletion` was deliberately moved *off* that helper, because it
+requires the **opposite** state and nothing else, phrases the absence of it as a
+negation, and returns a body. Two callers wanting one refusal belong together; a third
+wanting the inverse does not.
+
+The refusal precedes the write, so a refused call leaves the key state, the enabled flag
+**and the deletion date** exactly as they were — assertable only because #963 stores the
+date and `DescribeKey` reports it. The date-clearing the helper used to do is gone
+rather than kept as a safety net: the only state that carries a date can no longer reach
+that line, and `CancelKeyDeletion` clears it on the one exit AWS documents, so keeping
+it would be code no request can run — which this package records in a comment rather
+than guards, the same disposition the unreachable states have.
+
+With this, every key-state-sensitive operation in the package is guarded: the rotation
+pair (#949), the five cryptographic operations (#961), the deletion pair (#963) and this
+one. `GetKeyRotationStatus` is the only deliberate exception, for the reason given
+above.
 
 ### `ReEncrypt` has two keys, and both are checked
 

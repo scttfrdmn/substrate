@@ -221,6 +221,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **KMS `EnableKey` revived a key pending deletion in one call** (#968). Both operations delegated to a
+  helper that resolved the key, refused only a missing one, and then assigned whatever state it was
+  handed, so `EnableKey` against a key in `PendingDeletion` answered `200` and wrote `Enabled`. AWS
+  refuses it — footnote `[3]` of the developer guide's key-state table, `KMSInvalidStateException`/400,
+  on rows that are identical for `EnableKey` and `DisableKey` — and the gap mattered more than a missing
+  refusal usually does: it defeated a guarantee #963 had just established. `API_CancelKeyDeletion` makes
+  recovery two calls (*"when this operation succeeds, the key state of the KMS key is `Disabled`. To
+  enable the KMS key, use `EnableKey`"*), and an unguarded `EnableKey` skipped the first one. It also
+  abandoned the deletion silently, because the helper cleared the deletion date on its way through.
+
+  The guard lives in the shared helper, and #963 is the counter-example that makes that a decision
+  rather than a default: both callers here refuse the same single state, whereas `CancelKeyDeletion` was
+  deliberately moved *off* that helper because it requires the opposite state, phrases the absence of it
+  as a negation, and returns a body. The refusal precedes the write, so a refused call leaves the state,
+  the enabled flag **and the deletion date** unchanged — assertable only because #963 stores the date and
+  `DescribeKey` reports it. The date-clearing is now removed rather than kept as a safety net, since the
+  only state carrying a date can no longer reach that line and `CancelKeyDeletion` clears it on the one
+  exit AWS documents.
+
+  Both operations' rows permit `Enabled` **and** `Disabled`, so the rotation rule could not be reused
+  here — an enabled-key check would refuse a call AWS accepts — and a test pins the redundant calls in
+  both directions. `Unavailable` is recorded as a permitted row with a deferred effect rather than a
+  refusal, per footnote `[12]`, so a later sweep does not mistake it for one; `PendingImport`, `Creating`
+  and `Updating` remain unreachable, `ScheduleKeyDeletion` being substrate's only writer of a state other
+  than `Enabled` or `Disabled`. With this, every key-state-sensitive KMS operation is guarded —
+  the rotation pair (#949), the five cryptographic operations (#961), the deletion pair (#963) and this
+  one — with `GetKeyRotationStatus` the single deliberate exception.
+
+  Compatibility: `EnableKey` and `DisableKey` against a key pending deletion now answer
+  `KMSInvalidStateException`/400 where they previously answered `200`. A caller recovering from a
+  scheduled deletion must call `CancelKeyDeletion` first, as AWS requires.
+
 - **KMS `EnableKeyRotation` discarded `RotationPeriodInDays`** (#964). The handler decoded `KeyId` and
   nothing else, so a caller could set a custom rotation period, receive `200`, and find no trace of it
   anywhere. Discarding the value would have been defensible if it were write-only — a plugin has no
