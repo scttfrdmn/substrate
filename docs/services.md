@@ -8760,12 +8760,72 @@ XML member order is not significant to any SDK's parser, so no test could assert
 difference a caller can act on. And the 10 TPS limit on SNS's tagging actions is not
 modeled, which is a seedable-throttle question rather than an ARN one.
 
-`Publish`, `PublishBatch` and `Subscribe` never load the topic, so they succeed
-against a topic that does not exist where AWS answers `NotFound` — recorded here
-rather than fixed alongside the resolution, and filed as #926. That is a different
-defect from this one: the resolution fix settles *which* topic an ARN addresses,
-while #926 is about whether the topic it addresses has to exist. `Subscribe` is the
-one that writes, so an orphan subscription record and two index entries survive it.
+### Whether the topic an ARN names has to exist
+
+The resolution rules above settle *which* topic an ARN addresses. Whether that topic
+has to exist was a separate question, and four operations did not ask it (#926).
+
+`Subscribe`, `Publish`, `PublishBatch` and `ListSubscriptionsByTopic` parsed the
+`TopicArn`, derived a state key from it, and then read only the **subscription
+index** — so an absent topic was indistinguishable from a real topic with no
+subscribers, and all four answered `200`. `Publish` and `PublishBatch` minted a
+`MessageId` for a message no topic had accepted, `Subscribe` handed back a
+subscription ARN, and `ListSubscriptionsByTopic` reported an empty list. All four
+pages publish `NotFound` at 404, glossed *"Indicates that the requested resource does
+not exist."*
+
+`Subscribe` is the worst of the four, because it is the one that **writes**: a
+subscription record and two index entries survived it, reported by
+`ListSubscriptions` ever after and delivered to had a topic of that name later been
+created.
+
+The consequence is not only a wrong code. A `CreateTopic` → `Publish` →
+`DeleteTopic` → `Publish` sequence — a producer's teardown, or a test asserting that
+one surfaces an error once its topic is gone — could not be written, because the
+second `Publish` succeeded. An empty subscription list and an absent topic are now
+different answers rather than the same one.
+
+All six operations that resolve a `TopicArn` to a topic record — the four above plus
+`GetTopicAttributes` and `SetTopicAttributes`, which already checked — go through one
+helper, on the #961/#969 precedent that a per-handler existence check drifts. The
+load is keyed by the ARN's own account and Region, so the check cannot reintroduce
+what #925 fixed: a same-named topic in the caller's own Region does not satisfy an
+ARN naming another, which `API_Publish` requires independently — *"You can publish
+messages only to topics and endpoints in the same AWS Region."* The account half
+needs no guard of its own, because the state key carries the ARN's account and a
+foreign one addresses nothing.
+
+The check runs **after** the parse, so a string that is not an ARN still answers
+`InvalidParameter`/400 rather than being reported as a topic that does not exist.
+
+`PublishBatch` answers at the **top level**, not as a per-entry
+`BatchResultErrorEntry` inside a `200`. `API_PublishBatch` has both shapes, and the
+page does not say which applies here; `TopicArn` is a request-level parameter, so
+every entry addresses the same topic and a per-entry rendering would report the
+identical failure on each of them behind a success status. `NotFound` is in the
+operation's top-level `Errors` list, and the batch-scoped codes it publishes —
+`BatchEntryIdsNotDistinct`, `InvalidBatchEntryId`, `ParameterValueInvalid` — are each
+about an individual message. That reading is **substrate's**.
+
+`Unsubscribe` answers `NotFound`/404 for a subscription ARN naming no subscription,
+where substrate answered `200` behind an unsourced *"idempotent"* comment.
+`API_Unsubscribe` publishes the code and states no idempotence, and
+`SubscriptionArn` is the operation's only request parameter and only named resource,
+so the published code can only be about the subscription.
+
+`DeleteTopic` is the one topic operation that goes the other way, and substrate had
+it backwards (#992). `API_DeleteTopic`'s description states that *"this action is
+idempotent, so deleting a topic that does not exist does not result in an error"*,
+and substrate answered `NotFound`/404 — so a teardown that deletes unconditionally,
+or a retried delete, failed here and succeeded in production. The same page **also**
+publishes `NotFound`/404 in its `Errors` list, alongside `ConcurrentAccess`,
+`InvalidState`, `StaleTag` and `TagPolicy`, so the page contradicts itself. The
+description sentence governs: it names the condition, names the outcome, and calls
+the property by name, while the error-list entry names no condition at all. Resolving
+it that way is **substrate's reading**, corroborated by `API_Unsubscribe` publishing
+the same code and carrying no such sentence — AWS states idempotence where it means
+it. A malformed ARN is still `InvalidParameter`/400: idempotence licenses a topic
+that does not exist, not a string that is not an ARN.
 
 ### CloudFormation resource types
 

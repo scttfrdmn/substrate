@@ -225,3 +225,19 @@ func snsTopicNotFound(arn string) *AWSError {
 		HTTPStatus: http.StatusNotFound,
 	}
 }
+
+// snsNoSuchTopic reports that a well-formed ARN names no topic, for the topic operations.
+//
+// The code is the plain NotFound that API_Subscribe, API_Publish, API_PublishBatch,
+// API_ListSubscriptionsByTopic, API_GetTopicAttributes and API_SetTopicAttributes each publish at HTTP
+// 404, glossed "Indicates that the requested resource does not exist." It is deliberately a different
+// code from [snsTopicNotFound]'s ResourceNotFound: only the three tagging pages publish that one, and
+// #925 found that answering one page's code from another page's operation shows a caller something no
+// SDK models. Two helpers rather than a parameter, so neither call site can pick the wrong code.
+func snsNoSuchTopic(arn string) *AWSError {
+	return &AWSError{
+		Code:       "NotFound",
+		Message:    fmt.Sprintf("no topic found for the ARN %q", arn),
+		HTTPStatus: http.StatusNotFound,
+	}
+}
