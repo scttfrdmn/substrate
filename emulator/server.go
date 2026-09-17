@@ -429,6 +429,10 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
 	r.Delete("/v1/ec2/spot-placement-scores", s.handleEC2ClearSpotPlacementScore)
 
+	// EC2 Capacity Reservation outcome control-plane endpoints (#891).
+	r.Post("/v1/ec2/capacity-reservation-outcomes", s.handleEC2SeedCapacityReservationOutcome)
+	r.Delete("/v1/ec2/capacity-reservation-outcomes", s.handleEC2ClearCapacityReservationOutcome)
+
 	// ELB account-limit control-plane endpoints (#885).
 	r.Post("/v1/elb/account-limits", s.handleELBSeedAccountLimit)
 	r.Delete("/v1/elb/account-limits", s.handleELBClearAccountLimit)

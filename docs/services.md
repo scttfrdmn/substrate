@@ -5386,9 +5386,12 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, [need an AMI that resolves](#runinstances-requires-a-resolvable-ami), and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter** |
 | DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all fifteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
-| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same fifteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
-| DescribeTags | Every tag in the region, across [the same fifteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken` (through the [shared paginator](#one-offset-paginator-shared)), and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
+| CreateCapacityReservation | Reserves capacity **immediately**, in `active` state, and returns the whole `capacityReservation` structure. `InstanceCount`, `InstancePlatform` and `InstanceType` are the only required parameters — `AvailabilityZone` is not one — and `InstanceCount` is range-checked 1–1000. Honours `TagSpecification.N`. `EndDateType` is inferred from `EndDate` rather than defaulted; a **future-dated** reservation is refused rather than answered falsely, and the outcome is [seedable](#seeding-a-capacity-reservation-outcome) — see [A Capacity Reservation is never consumed](#a-capacity-reservation-is-never-consumed) |
+| DescribeCapacityReservations | `CapacityReservationId.N` is **singular** and narrows rather than asserting, while a malformed ID is refused; **all twelve** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) — the page documents **no tag filter**, so use `DescribeTags`. `MaxResults` 1–1000 and `NextToken` through the [shared paginator](#one-offset-paginator-shared). A reservation past its `EndDate` reports `expired`, derived from the simulated clock |
+| CancelCapacityReservation | Sets the state to `cancelled` and releases the capacity, so `availableInstanceCount` becomes zero while `totalInstanceCount` keeps reporting what was reserved. A well-formed ID naming nothing answers `InvalidCapacityReservationId.NotFound`; a second cancel answers `IncorrectState`, which is [substrate's reading](#a-capacity-reservation-is-never-consumed) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all sixteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same sixteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DescribeTags | Every tag in the region, across [the same sixteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken` (through the [shared paginator](#one-offset-paginator-shared)), and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
 ### One rule for an unrecognized filter name
 
@@ -5460,6 +5463,7 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
 | DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
 | DescribeFleets | `activity-status`, `fleet-state`, `type` | `excess-capacity-termination-policy`, `replace-unhealthy-instances` |
+| DescribeCapacityReservations | `availability-zone`, `end-date`, `end-date-type`, `instance-match-criteria`, `instance-platform`, `instance-type`, `outpost-arn`, `owner-id`, `placement-group-arn`, `start-date`, `state`, `tenancy` — **all twelve** | — |
 | DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#wildcards-in-filter-values)) | — |
 | DescribeTags | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — all five AWS documents, all with [wildcards](#wildcards-in-filter-values) | — |
 | DescribeInstanceStatus | `availability-zone`, `instance-state-code`, `instance-state-name` | the other fifteen — the `event.*`, `system-status.*`, `instance-status.*` and `operator.*` families, plus `application-status.status`, `attached-ebs-status.status` and `availability-zone-id` |
@@ -5475,12 +5479,13 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeLaunchTemplates | `create-time`, `launch-template-name`, `tag-key`, `tag:<key>` — **all four** | — |
 | DescribeLaunchTemplateVersions | `create-time`, `image-id`, `instance-type`, `is-default-version` | `host-resource-group-arn`, `iam-instance-profile`, `kernel-id`, `license-configuration-arn`, `network-card-index`, `ram-disk-id`, and the four `ebs-optimized`/`http-*` metadata filters |
 
-`tag:<key>` is refused on **eight operations that document no tag filter at all** — neither
+`tag:<key>` is refused on **nine operations that document no tag filter at all** — neither
 `tag:<key>` nor `tag-key`: `DescribeFleets`, `DescribeInstanceTypeOfferings`,
 `DescribeInstanceStatus`, `DescribeAvailabilityZones`, `DescribeRegions`,
-`DescribeInstanceTypes`, `DescribeSpotPriceHistory` and `DescribeLaunchTemplateVersions`. Some
-of those describe resources that plainly carry tags — a fleet carries tags and
-`DescribeFleets` renders them, and `DescribeLaunchTemplates` documents both tag filters while
+`DescribeInstanceTypes`, `DescribeSpotPriceHistory`, `DescribeLaunchTemplateVersions` and
+`DescribeCapacityReservations`. Some
+of those describe resources that plainly carry tags — a fleet and a Capacity Reservation each
+carry tags and `DescribeFleets` and `DescribeCapacityReservations` render them, and `DescribeLaunchTemplates` documents both tag filters while
 `DescribeLaunchTemplateVersions`, next to it in the same family, documents neither. That is
 AWS's set, not an omission here; to find such a resource by tag, use `DescribeTags` or Resource
 Groups Tagging.
@@ -5669,10 +5674,11 @@ the template is resolved, so a typo answers `InvalidParameterValue` rather than
   exhaustive; see
   [RunInstances accepts a type DescribeInstanceTypes refuses](#runinstances-accepts-a-type-describeinstancetypes-refuses)
   for why and for what an instance's reported `instanceType` does and does not mean.
-- **Eight selector families answer an empty set where AWS answers `NotFound`.** `KeyName.N`
+- **Nine selector families answer an empty set where AWS answers `NotFound`.** `KeyName.N`
   and `KeyPairId.N` (AWS: `InvalidKeyPair.NotFound`), `GroupName.N` and `GroupId.N` on
   `DescribePlacementGroups` (`InvalidPlacementGroup.Unknown`), `ZoneName.N`/`ZoneId.N`,
   `PublicIp.N`, `DescribeLaunchTemplates`' selectors, `DescribeFleets`' `FleetId.N`,
+  `DescribeCapacityReservations`' `CapacityReservationId.N`,
   `DescribeRegions`' `RegionName.N` and `DescribeSecurityGroups`' `GroupName.N` (whose
   `GroupId.N` **does** assert) all select by membership rather than through an
   [ID assertion](#explicit-resource-ids) — so naming one that does not exist narrows the
@@ -7521,13 +7527,14 @@ because an error is visible and a superset reads as a successful narrowing.
 `DescribeInstanceTypes`' `InstanceType.N` also asserts existence, answering
 `InvalidInstanceType`.
 
-**Eight selector families deliberately do not**, and answer an empty set where AWS
-answers `NotFound`. Three have reasons that would not change if a kind were registered
+**Nine selector families deliberately do not**, and answer an empty set where AWS
+answers `NotFound`. Four have reasons that would not change if a kind were registered
 for them:
 
 | Selector | Why not |
 |---|---|
 | `DescribeFleets`' `FleetId.N` | AWS publishes **no** `InvalidFleetId.NotFound`. The only fleet-ID absence code in the reference is `InvalidSpotFleetRequestId.*`, which is a `sfr-` request, not a `fleet-` fleet. |
+| `DescribeCapacityReservations`' `CapacityReservationId.N` | AWS **does** publish `InvalidCapacityReservationId.NotFound`, and `CancelCapacityReservation` answers it — but nothing says whether a *describe* raises it, since the operation's Errors section is the common-types boilerplate. Narrowing is what keeps a sweep over a list of IDs from failing because one reservation had already been cancelled and swept. A **malformed** ID is refused here, because that is a mistake in the request rather than an absent resource. |
 | `DescribeRegions`' `RegionName.N` | The parameter explicitly permits naming any Region, enabled for the account or not, so "this Region is not in your answer" is not absence. |
 | `DescribeSecurityGroups`' `GroupName.N` | The kind **is** registered and its `GroupId.N` asserts, but the code is `InvalidGroup.NotFound` and both AWS's client-error table and substrate's message for it describe a missing security group *ID*. This operation's own Errors section is empty, so a name-shaped refusal would be invented wording. AWS also scopes the parameter to the default VPC where substrate matches account-wide, so absence here is not the absence AWS would be reporting. |
 
@@ -8245,7 +8252,8 @@ nothing. Every one of the five was well-formed and named a resource substrate st
 there was no way for a caller to tell — the answer a consumer's tag-everything step reads is
 the same answer it gets when the tags land.
 
-Fifteen prefixes now resolve, on `CreateTags` and `DeleteTags` alike:
+Sixteen prefixes now resolve, on `CreateTags` and `DeleteTags` alike — the fifteen the
+resolution below covers, and `cr-` with the Capacity Reservation operations (#891):
 
 | Prefix | Resource type | Prefix | Resource type |
 |---|---|---|---|
@@ -8256,7 +8264,7 @@ Fifteen prefixes now resolve, on `CreateTags` and `DeleteTags` alike:
 | `igw-` | `internet-gateway` | `pg-` | `placement-group` |
 | `rtb-` | `route-table` | `key-` | `key-pair` |
 | `eipalloc-` | `elastic-ip` | `vol-` | `volume` |
-| `nat-` | `natgateway` | | |
+| `nat-` | `natgateway` | `cr-` | `capacity-reservation` |
 
 **A prefix naming no taggable type is now refused** rather than ignored, before anything is
 written:
@@ -8274,7 +8282,7 @@ A **well-formed prefix naming nothing** stays a no-op at HTTP 200, and is not co
 the [50-tag limit](#the-50-tag-per-resource-limit): there is nothing to apply the tags to, so
 refusing would reject a request real EC2 accepts.
 
-Two of the fifteen are keyed by **name** rather than by ID in substrate's state, and by name
+Two of the sixteen are keyed by **name** rather than by ID in substrate's state, and by name
 in AWS's ARN as well — `arn:aws:ec2:${Region}:${Account}:placement-group/${PlacementGroupName}`
 and `…:key-pair/${KeyPairName}`. `CreateTags` takes the `pg-`/`key-` form and translates by
 scanning the namespace for the ID inside each record; `DescribeTags` reports the `resourceId`
@@ -8300,7 +8308,7 @@ Three things had to change alongside the resolution:
   and echo the result, and `DescribeKeyPairs`/`DescribePlacementGroups` render `tagSet`.
   `EC2KeyPair` had no tags field to write to.
 - **An `image` and a `snapshot` ARN have an empty account field** —
-  `arn:${Partition}:ec2:${Region}::image/${ImageId}` — where the other thirteen carry
+  `arn:${Partition}:ec2:${Region}::image/${ImageId}` — where the other fourteen carry
   `${Account}`. The authorizer stamped the account on unconditionally, which makes an
   ARN-scoped `Deny` naming an AMI inert and a least-privilege `Allow` unable to grant the
   call. The `snap-` arm shipped with that defect in
@@ -8337,7 +8345,7 @@ It reports every tag stored in the request's account and region. Every EC2 recor
 `<namespace>:<account>/<region>/<id>`, so the scan is regional by construction, which is also
 real EC2's scope for this operation.
 
-**The scan and what `CreateTags` can write are now the same fifteen types.** They were not:
+**The scan and what `CreateTags` can write are the same sixteen types.** They were not:
 `DescribeTags` read thirteen and `CreateTags` reached ten, so an `image`, `launch-template`
 or `fleet` tag could be *reported* and not *changed*, while a `placement-group` or `key-pair`
 tag could be neither — both were absent from the scan as well. See
@@ -8377,6 +8385,8 @@ implementations went down rather than up. The nine that page are `DescribeTags` 
 `DescribeInstances`. Wire behaviour for a caller that sends neither parameter is unchanged at
 every one of them. The other nine are listed at the end of this section: the count is exact and
 audited, rather than the "roughly twenty" this paragraph used to estimate.
+`DescribeCapacityReservations` joined the paginating set later (#891) rather than being converted,
+so it is a tenth: its published range is 1–1000, and it reads both parameters from the start.
 
 AWS publishes the mechanism **once for the whole service**, in the Query Requests page's
 *Pagination* section rather than per operation, and two of its sentences decide the design:
@@ -8679,6 +8689,128 @@ for a pagination loop to exercise will not find one; `NextToken` is still parsed
 malformed, as at every other paginated EC2 describe.
 
 `DryRun` is accepted and inert, as it is at every EC2 operation substrate routes.
+
+### A Capacity Reservation is never consumed
+
+`CreateCapacityReservation`, `DescribeCapacityReservations` and `CancelCapacityReservation`
+answer as of [#891](https://github.com/scttfrdmn/substrate/issues/891); before that all three
+reached the dispatcher's default arm and answered `InvalidAction`, so a consumer whose probe
+primitive *is* an immediate reservation — reserve, read the outcome, cancel — could not run at
+all.
+
+A reservation is created `active`, which is what AWS's own examples show and what the User Guide
+describes ("the reserved capacity becomes available for use immediately after you create it").
+`pending` is reachable by [seeding](#seeding-a-capacity-reservation-outcome) rather than as a
+stage every create passes through.
+
+**Nothing consumes a reservation.** `RunInstances` has no `CapacityReservationTarget` parameter
+here, so `availableInstanceCount` equals `totalInstanceCount` for as long as a reservation holds
+capacity and no instance ever occupies one — including a `targeted` reservation, whose
+`instanceMatchCriteria` is recorded and matches nothing. Only a **cancel** releases capacity, and
+it takes `availableInstanceCount` to zero while `totalInstanceCount` keeps reporting what was
+reserved; AWS publishes what neither becomes, and of the two readings this is the one that does not
+report remaining capacity on a reservation that has none. A consumer testing "did my launch land
+in the reservation I paid for" cannot ask that question here; what it *can* test is that the
+reservation exists, reports the capacity it asked for, is discoverable by filter and by tag, and
+reaches the state its outcome implies.
+
+**A future-dated reservation is refused rather than answered falsely.** `StartDate` and
+`CommitmentDuration` each answer `Unsupported` / 400. A future-dated reservation is a different
+observable thing from an immediate one — it is assessed, then scheduled, then delivered or
+delayed or unsupported — and eight of the `state` member's thirteen values exist only for one of
+those or for a Capacity Block: `assessing`, `scheduled`, `delayed`, `unsupported`, `cancelling`,
+`payment-pending`, `payment-failed`, and `unavailable`, which appears in the Valid Values line
+with no prose description anywhere on the page. Answering `active` to a request for capacity two
+days out would be a false observation with nothing in it to tell a caller the request was not
+modelled. The code is *substrate's reading*: the operation's Errors section is the common-types
+boilerplate, and `Unsupported` ("The specified request is unsupported") is the client-table code
+whose gloss covers the shape.
+
+Also absent, and answering `InvalidAction`: `ModifyCapacityReservation` — so a reservation's
+`InstanceCount` and `EndDate` cannot be changed after it is created — `GetCapacityReservationUsage`,
+`GetGroupsForCapacityReservation`, the four Capacity Reservation **fleet** operations, and
+`PurchaseCapacityBlock`/`DescribeCapacityBlockOfferings`. `reservationType` is therefore always
+`default`; no path here creates a `capacity-block`.
+
+| Behaviour | Answer |
+|---|---|
+| `EndDateType` | **Inferred**, not defaulted. AWS publishes no `Default:` line and forbids exactly two combinations — `limited` with no `EndDate`, and `unlimited` with one — so an `EndDate` alone infers `limited` and no `EndDate` infers `unlimited`. Defaulting an absent `EndDateType` to `unlimited` would turn a request naming only an `EndDate`, which nothing forbids, into the second refusal |
+| Expiry | Derived at observation time from the simulated clock, per `endDate`'s own sentence ("the Capacity Reservation's state changes to expired when it reaches its end date and time"), so it is assertable without depending on wall-clock time. Only an `active` reservation expires — a seeded `failed` one has already reached a terminal state, and reporting `expired` for it would lose the outcome the test seeded |
+| A zone | `AvailabilityZone` and `AvailabilityZoneId` are both `Required: No` and the page states no rule on the pair, so a request naming **neither** is accepted and reports neither element. A zone *name* is recorded as given and never validated; a zone *ID* must resolve, because it has to be translated. A pair naming two different zones is `InvalidParameterCombination` |
+| `ClientToken` | Accepted and inert. Two identical creates make two reservations, where AWS's token would make the second idempotent |
+| Cancelling twice | `IncorrectState` / 400, which is **substrate's reading**. AWS publishes no code for cancelling from a non-cancellable state: the operation's Errors section is boilerplate, the only state-shaped code in the reference is `InvalidCapacityReservationState.PendingActivation` (a Capacity Block that is not active yet), and AWS's own sample tooling pre-checks the state through a describe rather than catching an error. `IncorrectState` is the code substrate already answers for this shape on a volume and a snapshot |
+| Finding one by tag | Through `DescribeTags`, or `CreateTags`/`DeleteTags` on the `cr-` ID — **not** through a filter on the describe, which documents none, and **not** through Resource Groups Tagging, which has no scanner for the type |
+| Member order | Alphabetical, from the `CapacityReservation` type page. None of the four pages publishes a sample response, so there is no rendered order to copy; the seven members a request can leave unset are **absent** rather than empty, including `tagSet` |
+
+`InvalidCapacityReservationId.NotFound` and `InvalidCapacityReservationId.Malformed` are both in
+EC2's client-error table, and the casing is AWS's: `Id` with a lowercase `d`, where the sibling
+codes are `InvalidInstanceID.NotFound` and `InvalidAllocationID.NotFound`. The `NotFound`
+*message* wording follows an observed AWS response rather than the table, which only describes
+the condition — match on the code, not the string.
+
+### Seeding a Capacity Reservation outcome
+
+The reason a consumer reserves capacity at all is that capacity is finite, so the observations
+worth testing are the ones where the request does not succeed: not enough capacity in the cell,
+an On-Demand quota already spent, a Region or tenancy that cannot serve the instance type, a
+throttled caller. Substrate models no capacity broker and no quota ledger, so none of those can
+be derived from anything it knows.
+
+**A capacity failure has two documented observable shapes**, and that is what shapes the seed.
+Either the call fails outright with a code from EC2's error tables, or it succeeds and the
+reservation reports a non-nominal `state` — AWS's own prose for `failed` is "A request can fail
+due to request parameters that are not valid, capacity constraints, or instance limit
+constraints." Which of the two AWS produces for a given cell is not documented, so a seed selects
+one rather than substrate choosing on the caller's behalf, and a seed naming **both** is refused.
+
+```bash
+# One instance type is short everywhere.
+curl -X POST http://localhost:4566/v1/ec2/capacity-reservation-outcomes \
+  -d '{"instanceType":"p5.48xlarge","errorCode":"InsufficientInstanceCapacity"}'
+
+# One zone cannot serve anything, with the caller's own message.
+curl -X POST http://localhost:4566/v1/ec2/capacity-reservation-outcomes \
+  -d '{"availabilityZone":"us-east-1a","errorCode":"Unsupported",
+       "errorMessage":"that zone does not offer this configuration"}'
+
+# The other shape: the create succeeds and the reservation reports a state.
+curl -X POST http://localhost:4566/v1/ec2/capacity-reservation-outcomes \
+  -d '{"instanceType":"g6.xlarge","availabilityZone":"us-east-1b","state":"failed"}'
+
+# Clear one cell, or every seed.
+curl -X DELETE 'http://localhost:4566/v1/ec2/capacity-reservation-outcomes?instanceType=g6.xlarge&availabilityZone=us-east-1b'
+curl -X DELETE http://localhost:4566/v1/ec2/capacity-reservation-outcomes
+```
+
+A seed is scoped to an (instance type, Availability Zone) pair, because that pair is what a
+consumer treats as one capacity cell, and either half may be omitted to mean "every". **The most
+specific scope carrying a seed decides** — the exact cell, then the type in any zone, then any
+type in the zone, then the wildcard — so seeding one scarce type inside an otherwise-seeded zone
+works rather than being overwritten by the coarser seed. Type before zone is *substrate's
+ordering*: a seed naming an instance type is a statement about that type's scarcity, which is the
+narrower claim of the two.
+
+| Seedable | Values |
+|---|---|
+| `errorCode` | `InsufficientInstanceCapacity`, `RequestLimitExceeded`, `InstanceLimitExceeded`, `VcpuLimitExceeded`, `Unsupported`. A code outside the five is **refused** rather than defaulted, because the HTTP class is the half substrate cannot derive |
+| `state` | `active`, `pending`, `failed`, `expired`, `cancelled` — five of the thirteen. The other eight belong to a future-dated reservation or a Capacity Block, which substrate models neither of, so seeding one would publish an observation nothing else in the emulator is consistent with |
+| `errorMessage` | Optional; falls back to AWS's own words for the code |
+
+**Two of the five codes answer a 500-series status, and that is deliberate.** EC2's
+errors-overview page puts `InsufficientInstanceCapacity` and `RequestLimitExceeded` in its
+*server* error table, whose preamble says such errors "are accompanied by a 500-series HTTP
+response code", while the other three are in the client table. A consumer reads
+`InsufficientInstanceCapacity` as a capacity signal and would expect a 400; answering one would
+let retry logic pass here and fail in production. The exact number is **unverified** — neither
+page assigns one, only a class — so `500` and `400` are substrate's reading of "500-series" and
+"400-series". The same page contradicts itself once, writing the throttle code as
+`Client.RequestLimitExceeded` in prose while listing `RequestLimitExceeded` in the server table,
+and `CommonErrors` does not list it at all; the server table is followed because it is the one
+place the code appears in a table at all.
+
+A seeded state is a property of the reservation the create writes, so it survives into every
+later `DescribeCapacityReservations` — unlike a seeded error, which prevents the create from
+writing anything at all. Seeds live in the state manager, so they replay like any other state.
 
 ### CloudFormation resource types
 

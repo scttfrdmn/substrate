@@ -207,7 +207,7 @@ func cfnDecodeRecordTags(member json.RawMessage) map[string]string {
 // cfnPropagateEC2StackTags reconciles the tags on an EC2 resource.
 //
 // [ec2ResourceTags] and [ec2ApplyTagsToResource] are the same pair the stamp uses, so the
-// prefix switch over EC2's fifteen id shapes lives in one place. Two writes rather than one
+// prefix switch over EC2's sixteen id shapes lives in one place. Two writes rather than one
 // when a key is both written and removed, because the EC2 writer takes a direction rather than
 // a pair of sets; the alternative is a third mode on a function every `CreateTags` goes
 // through, for a case that only arises when a stack tag is replaced by a differently named one.

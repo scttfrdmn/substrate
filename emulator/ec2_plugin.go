@@ -237,6 +237,13 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.describeFleets(ctx, req)
 	case "DeleteFleets":
 		return p.deleteFleets(ctx, req)
+	// On-Demand Capacity Reservation operations
+	case "CreateCapacityReservation":
+		return p.createCapacityReservation(ctx, req)
+	case "DescribeCapacityReservations":
+		return p.describeCapacityReservations(ctx, req)
+	case "CancelCapacityReservation":
+		return p.cancelCapacityReservation(ctx, req)
 	// EBS volume operations
 	case "CreateVolume":
 		return p.createVolume(ctx, req)
@@ -2940,7 +2947,7 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 //     …:key-pair/${KeyPairName}). One state scan therefore answers both questions, which
 //     is why [ec2NameKeyedResource] runs inside the resolver rather than at either caller.
 //   - An image's and a snapshot's ARN formats have a **deliberately empty account field**
-//     (arn:${Partition}:ec2:${Region}::image/${ImageId}) where the other thirteen carry
+//     (arn:${Partition}:ec2:${Region}::image/${ImageId}) where the other fourteen carry
 //     ${Account} — see [ec2Taggable.arn].
 //
 // Keeping all of it in one place is what stops the tagging handler's list of taggable
@@ -3049,6 +3056,15 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 		// ("fleet-12a34b56-7cd8-...") — see [generateFleetID] — so it is matched by
 		// prefix and used whole. Nothing here may split an ID on "-".
 		return ec2Taggable{stateKey: ec2FleetStateKey(acct, region, id), arnType: "fleet", arnID: id}, true
+	case strings.HasPrefix(id, "cr-"):
+		// A Capacity Reservation, whose ARN type is capacity-reservation and which carries
+		// the account segment — AWS publishes
+		// arn:${Partition}:ec2:${Region}:${Account}:capacity-reservation/${CapacityReservationId},
+		// so it is not one of the two account-less types above.
+		return ec2Taggable{
+			stateKey: ec2CapacityReservationStateKey(acct, region, id),
+			arnType:  "capacity-reservation", arnID: id,
+		}, true
 	case strings.HasPrefix(id, "pg-"):
 		// AWS does not settle whether CreateTags takes a placement group by ID or by
 		// name: the ARN is by name and DescribePlacementGroups publishes no group-id

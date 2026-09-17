@@ -54,6 +54,14 @@ linters:
       # Correcting it here would make substrate's message differ from the service's.
       - text: "Resouce"
         linters: [misspell]
+      # EC2 spells two of the CapacityReservation state values "cancelled" and "cancelling".
+      # They are wire values, not prose: substrate must answer AWS's spelling, and the
+      # comments that explain the state machine have to name the values they describe.
+      # Scoped to the Capacity Reservation files so a genuine misspelling anywhere else is
+      # still caught.
+      - path: "ec2_capacity_reservation"
+        text: "cancell"
+        linters: [misspell]
 
 formatters:
   enable:
