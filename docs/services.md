@@ -8791,16 +8791,16 @@ SNS publish: $0.0000005 per message.
 |-----------|-------|
 | CreateSecret | Tags are stored key-ordered, so two identical runs report them alike |
 | GetSecretValue | Returns SecretString or SecretBinary; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
-| PutSecretValue | Creates new version |
-| UpdateSecret | |
+| PutSecretValue | Creates a new version; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| UpdateSecret | Rewrites `Description`, `KmsKeyId` and the value; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | DeleteSecret | Opens a 7-to-30-day recovery window, defaulting to 30, rather than removing the secret; `ForceDeleteWithoutRecovery` removes it — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RestoreSecret | Clears the `DeletionDate` and answers `ARN` and `Name` only |
 | ListSecrets | Base64 offset pagination; scoped to the caller's account and Region |
 | DescribeSecret | The read path for a secret's tags; reports only the members it has a value for, plus `DeletedDate` while a recovery window is open |
 | ListSecretVersionIds | Reports the current version only |
-| TagResource | Appends to the existing list rather than replacing it |
-| UntagResource | Idempotent — an absent key is not an error |
-| RotateSecret | Records the rotation function and schedule and echoes `ClientRequestToken` as `VersionId`; no rotation function is executed — see [A rotation is configured, not run](#a-rotation-is-configured-not-run) |
+| TagResource | Appends to the existing list rather than replacing it; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| UntagResource | Idempotent — an absent key is not an error — but a secret scheduled for deletion is refused even then, see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| RotateSecret | Records the rotation function and schedule and echoes `ClientRequestToken` as `VersionId`; no rotation function is executed, and a secret scheduled for deletion is refused — see [A rotation is configured, not run](#a-rotation-is-configured-not-run) |
 
 ### A `SecretId` addresses the secret its own ARN names
 
@@ -8942,8 +8942,13 @@ schedule-then-restore path is assertable with no dependence on wall-clock time.
 | `DeleteSecret` with `ForceDeleteWithoutRecovery: true` | `200`; record, current version payload and index entry all removed |
 | `DeleteSecret` forced, on an absent or already-deleted secret | `200` — see below |
 | `GetSecretValue` on a scheduled secret | `InvalidRequestException`/`400`, distinguishable from `ResourceNotFoundException` |
+| `PutSecretValue` on a scheduled secret | `InvalidRequestException`/`400`; no version is stored and `CurrentVersionID` does not move |
+| `UpdateSecret` on a scheduled secret | `InvalidRequestException`/`400`; `Description`, `KmsKeyId` and the value are all unchanged |
+| `TagResource` on a scheduled secret | `InvalidRequestException`/`400`; the tag list is unchanged |
+| `UntagResource` on a scheduled secret | `InvalidRequestException`/`400`, **even when no named key is attached**; the tag list is unchanged |
+| `RotateSecret` on a scheduled secret | `InvalidRequestException`/`400`; no rotation function or schedule is recorded |
 | `DescribeSecret` on a scheduled secret | `200` with `DeletedDate`; the member is absent otherwise |
-| `RestoreSecret` | `200` with `ARN` and `Name` only; the stamp is cleared and the value readable again |
+| `RestoreSecret` | `200` with `ARN` and `Name` only; the stamp is cleared and all seven refusals lift at once |
 
 Four points where the reasoning is not simply AWS's prose:
 
@@ -8986,9 +8991,25 @@ only the three conditions shared across the service, none of which is "not sched
 there is no published code to refuse with — and inventing one would make an idempotent
 restore fail here and succeed against AWS.
 
-Still unmodelled, and separate decisions rather than part of this: `PutSecretValue`,
-`UpdateSecret`, `TagResource` and `UntagResource` do not refuse a scheduled secret,
-although their pages publish the same cause ([#956](https://github.com/scttfrdmn/substrate/issues/956)).
+**Seven operations refuse the stamp, and one shared constructor builds all seven refusals.**
+`GetSecretValue` and the unforced `DeleteSecret` came with the recovery window itself,
+`RotateSecret` with #952, and `PutSecretValue`, `UpdateSecret`, `TagResource` and
+`UntagResource` with #956 — each of whose pages publishes "The secret is scheduled for
+deletion." as the first of `InvalidRequestException`'s three possible causes. Until then a
+secret inside its recovery window could take a new version, have its description, KMS key
+and value rewritten, and be retagged, so a consumer's "is this secret usable?" check got a
+`200` here and a `400` from AWS at four operations, and a `RestoreSecret` afterwards
+returned a secret carrying writes AWS would have refused. `RestoreSecret` is the one
+operation publishing the cause that does not refuse on it, for the obvious reason: it is
+what clears the stamp.
+
+One refusal reads two AWS sentences against each other, and the resolution is substrate's.
+`UntagResource` is documented idempotent — "if a requested tag is not attached to the
+secret, no error is returned and the secret metadata is unchanged" — but that sentence is
+about which *keys* are present, whereas `InvalidRequestException` reports "a parameter
+value is not valid for the current state of the resource", which the stamp decides. So the
+scheduled refusal outranks the idempotency, and an `UntagResource` naming no attached key
+is still refused on a scheduled secret.
 
 ### A rotation is configured, not run
 

@@ -58,6 +58,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why it ships here rather than as a follow-up.
 
 ### Changed
+- **`PutSecretValue`, `UpdateSecret`, `TagResource` and `UntagResource` refuse a secret scheduled for
+  deletion** (#956). Each of the four pages publishes `InvalidRequestException`/400 with "The secret is
+  scheduled for deletion." as the first of its three possible causes, and all four accepted such a secret:
+  `PutSecretValue` attached a new version and moved the current-version pointer onto it, `UpdateSecret`
+  rewrote the description, the KMS key and the value, and the two tag operations edited the tag list. So a
+  consumer's "is this secret usable?" check got a `200` from substrate and a `400` from AWS at four
+  operations, and a `RestoreSecret` afterwards returned a secret carrying writes AWS would have refused.
+  All four now refuse through the same constructor `GetSecretValue`, the unforced `DeleteSecret` and
+  `RotateSecret` use, so the seven cannot disagree about a state a caller can observe no other way, and
+  none of them writes anything on the refusal. `RestoreSecret` is the one operation publishing the cause
+  that does not refuse on it, since it is what clears the stamp; clearing it lifts all seven refusals at
+  once.
+
+  One of the four reads two AWS sentences against each other, and the resolution is substrate's.
+  `UntagResource` is documented idempotent — "if a requested tag is not attached to the secret, no error
+  is returned and the secret metadata is unchanged" — but that sentence is about which *keys* are
+  present, whereas `InvalidRequestException` reports "a parameter value is not valid for the current
+  state of the resource", which the stamp decides. So an `UntagResource` naming no attached key is still
+  refused on a scheduled secret.
+
+  **Compatibility:** four operations that answered `200` against a secret inside its recovery window now
+  answer `InvalidRequestException`/400. A caller that scheduled a deletion and then wrote to the secret
+  must call `RestoreSecret` first; the writes then land exactly as before.
+
 - **`RotateSecret` refuses a secret with no rotation function, and requires a `ClientRequestToken`**
   (#952). The old handler enabled rotation on any secret it could load, so `DescribeSecret` reported
   rotation configured for a secret with no rotation function — the one state AWS refuses to create — and

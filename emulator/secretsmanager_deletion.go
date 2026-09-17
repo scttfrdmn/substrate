@@ -48,9 +48,18 @@ const (
 // already scheduled.
 //
 // InvalidRequestException/400 is published identically on API_DeleteSecret, API_GetSecretValue,
-// API_RestoreSecret and API_RotateSecret, and the first of its three "Possible causes" is "The secret
-// is scheduled for deletion." The message names which cause applies, because one code covers three
-// unrelated conditions and a caller reading only the code cannot tell them apart.
+// API_PutSecretValue, API_RestoreSecret, API_RotateSecret, API_TagResource, API_UntagResource and
+// API_UpdateSecret, and the first of its three "Possible causes" is "The secret is scheduled for
+// deletion." The message names which cause applies, because one code covers three unrelated conditions
+// and a caller reading only the code cannot tell them apart.
+//
+// Seven of those eight operations refuse through this constructor: GetSecretValue and the unforced
+// DeleteSecret since #953, RotateSecret since #952, and PutSecretValue, UpdateSecret, TagResource and
+// UntagResource since #956. RestoreSecret is the exception, and not an omission — it is the operation
+// that clears the stamp, so refusing on the stamp would leave a scheduled secret with no way back.
+// One constructor for all of them is deliberate: a per-handler refusal would let two operations
+// disagree about a state the caller cannot observe any other way. The table over every caller lives in
+// secretsmanager_scheduled_test.go.
 //
 // Being distinguishable from [smSecretNotFound] is the point. A scheduled secret still exists and is
 // restorable, and substrate answered ResourceNotFoundException for it — the same answer as for a secret
