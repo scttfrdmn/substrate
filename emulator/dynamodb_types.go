@@ -43,6 +43,12 @@ type AttributeValue struct {
 }
 
 // DynamoDBTable represents an emulated DynamoDB table stored in state.
+//
+// It is a persisted record, not a response shape: a field added here is inert on the
+// wire, because every TableDescription is projected through
+// dynamodbTableDescriptionWire (dynamodb_wire.go). Two fields below are already
+// substrate's own and no AWS shape publishes them, which is what that projection
+// exists to hold back (#1013).
 type DynamoDBTable struct {
 	// TableName is the name of the table.
 	TableName string `json:"TableName"`
@@ -88,10 +94,15 @@ type DynamoDBTable struct {
 	// ItemCount is the number of items in the table.
 	ItemCount int64 `json:"ItemCount"`
 
-	// TTLAttribute is the name of the attribute used for TTL, if enabled.
+	// TTLAttribute is the name of the attribute used for TTL, if enabled. It is read
+	// back through DescribeTimeToLive, which is where AWS publishes it; TableDescription
+	// has no such member.
 	TTLAttribute string `json:"TTLAttribute,omitempty"`
 
-	// Tags holds optional user-defined key-value tags on the table.
+	// Tags holds optional user-defined key-value tags on the table. They are read back
+	// through ListTagsOfResource, which is the only operation AWS publishes them on;
+	// TableDescription has no Tags member, and AWS's Tags is a list of {Key, Value}
+	// rather than the map stored here.
 	Tags map[string]string `json:"Tags,omitempty"`
 }
 
