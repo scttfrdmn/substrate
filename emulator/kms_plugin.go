@@ -501,6 +501,27 @@ func (p *KMSPlugin) disableKey(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	return p.setKeyState(ctx, input.KeyID, kmsKeyStateDisabled, false)
 }
 
+// setKeyState is the shared body of EnableKey and DisableKey, and the one refusal it makes is #968's.
+//
+// A key in PendingDeletion is refused with KMSInvalidStateException, footnote [3] of the developer
+// guide's key-state table, which both operations' identical rows carry. Before #968 neither checked
+// anything, so EnableKey against a pending key answered 200 and wrote Enabled — a one-call path from
+// pending deletion to usable, which AWS does not have and which routes around the two-call recovery
+// #963 established from API_CancelKeyDeletion's own first sentence. It also abandoned the deletion
+// silently, because the clearing this function used to do left no record that one had been scheduled.
+//
+// The guard lives in the shared helper rather than in each handler because both callers refuse the
+// same single state, and #963's counter-example is what makes that worth stating: CancelKeyDeletion
+// was deliberately moved *off* this helper, since it requires the opposite state — PendingDeletion and
+// nothing else — answers a different message for the absence of it, and returns a body. Two callers
+// wanting one refusal belong together; a third wanting the inverse does not.
+//
+// The other four states the table refuses — PendingImport [5], Creating [14], Updating [15], and
+// PendingReplicaDeletion alongside PendingDeletion in [3] — are unreachable: ScheduleKeyDeletion is
+// substrate's only writer of a state other than Enabled or Disabled. Unavailable is the row that is
+// neither, and it is recorded here so a later sweep does not read it as a refusal: footnote [12] makes
+// it a *success* with a deferred effect, "the operation succeeds, but the key state of the KMS key does
+// not change until it becomes available".
 func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, enabled bool) (*AWSResponse, error) {
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, keyIDParam)
@@ -515,16 +536,19 @@ func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, e
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	// Before the write, so a refused call leaves the state, the enabled flag and the deletion date
+	// exactly as they were — the ordering rule #949 established and #963 restated.
+	if key.KeyState == kmsKeyStatePendingDeletion {
+		return nil, kmsInvalidKeyState(keyID, key.KeyState)
+	}
 	key.KeyState = state
 	key.Enabled = enabled
-	// Neither caller writes PendingDeletion, so leaving a deletion date behind here would be a stored
-	// contradiction: a key reported Enabled that still remembers when it is due to be deleted.
-	// DescribeKey renders the date only for a pending key, so the contradiction is not observable
-	// today — clearing it keeps that a consequence of the state being consistent rather than of one
-	// renderer's condition.
-	if state != kmsKeyStatePendingDeletion {
-		key.DeletionDate = time.Time{}
-	}
+	// No deletion date is cleared here any more, and nothing is lost by that. This function used to
+	// clear one, on the reasoning that a key reported Enabled must not still remember when it is due to
+	// be deleted; with the refusal above, the only state that carries a date cannot reach this line, and
+	// CancelKeyDeletion clears it on the one exit AWS documents. Clearing it anyway would be code no
+	// request can run, which this package records in a comment rather than guards — the disposition the
+	// four unreachable states above already have.
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms setKeyState saveKey: %w", err)
 	}
