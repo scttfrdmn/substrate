@@ -183,6 +183,51 @@ func kmsResolveKeySpecAndUsage(keySpec, keyUsage string) (string, string, *AWSEr
 	return keySpec, keyUsage, nil
 }
 
+// kmsResolveRequestKeySpec answers the key spec a CreateKey asked for, from either of the two members that
+// can carry it.
+//
+// CustomerMasterKeySpec is a deprecated *request* parameter as well as a response member, and substrate
+// decoded only the response half (#985). So a caller on an SDK old enough to still send the deprecated name
+// asked for RSA_4096 and got a symmetric key — the worst shape a failure can take, a 200 with a complete
+// KeyMetadata whose own CustomerMasterKeySpec read SYMMETRIC_DEFAULT, contradicting the value it was sent.
+// Reading it is not a courtesy: AWS still accepts it — "the KeySpec and CustomerMasterKeySpec fields have
+// the same value. We recommend that you use the KeySpec field in your code. However, to avoid breaking
+// changes, AWS KMS supports both fields" — so a caller sending it is doing nothing wrong.
+//
+// Its enum is the narrower one, [kmsCustomerMasterKeySpecs]' thirteen against [kmsKeySpecs]' seventeen, and
+// this is where that matters most. A request naming ML_DSA_44 under the deprecated member is refused rather
+// than accepted as a key spec, which is the request-side twin of the omission #974 chose on the response
+// side: neither direction puts a value outside the member's own published set on the wire. The list is
+// shared with the renderer for the reason this file's preamble gives about the pairing table — one
+// published fact, one structure.
+//
+// **Two different values are refused rather than reconciled.** AWS documents no answer for the conflict, so
+// this is substrate's reading, and it rests on what AWS does say: the two members "have the same value". A
+// request in which they do not is therefore not a request AWS describes, and the alternatives are worse. A
+// precedence rule — newer member wins — silently discards half of a contradictory request, which is the
+// same silent substitution #985 exists to remove; and resolving by JSON member order would make the answer
+// depend on something no caller controls meaningfully.
+//
+// Equal values are accepted, because that is a caller belting and bracing rather than contradicting itself,
+// and it is exactly what AWS's sentence describes. The code is ValidationError, the same one every other
+// malformed-member refusal on this operation answers — #977 settled that and this member joins it rather
+// than introducing a second code for one class of defect on one operation.
+func kmsResolveRequestKeySpec(keySpec, deprecated string) (string, *AWSError) {
+	if deprecated == "" {
+		return keySpec, nil
+	}
+	if !slices.Contains(kmsCustomerMasterKeySpecs, deprecated) {
+		return "", kmsUnknownCustomerMasterKeySpec(deprecated)
+	}
+	if keySpec == "" {
+		return deprecated, nil
+	}
+	if keySpec != deprecated {
+		return "", kmsConflictingKeySpecMembers(keySpec, deprecated)
+	}
+	return keySpec, nil
+}
+
 // kmsKeyUsageError reports the refusal a cryptographic operation owes a key that is not for encryption,
 // or nil when the key's usage permits the call.
 //

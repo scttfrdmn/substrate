@@ -278,6 +278,52 @@ func kmsUnknownKeyUsage(keyUsage string) *AWSError {
 	}
 }
 
+// kmsUnknownCustomerMasterKeySpec reports a CreateKey CustomerMasterKeySpec outside that member's own
+// published set.
+//
+// ValidationError at 400, for [kmsUnknownKeySpec]'s reasons, and a separate helper from it because the two
+// enums are not the same enum: this member publishes thirteen valid values where KeySpec publishes
+// seventeen. Listing the thirteen is the whole point of the refusal — a caller that sent ML_DSA_44 under the
+// deprecated name has a value that is a perfectly good key spec, and the message has to say that this
+// member does not carry it rather than implying the spec does not exist. That is why the message names the
+// member and quotes its own set instead of deferring to [kmsUnknownKeySpec]'s.
+//
+// The narrowing is AWS's, per [kmsCustomerMasterKeySpecs]; the refusal is substrate's reading, and it is the
+// request-side half of the omission #974 chose when reporting the member. Accepting the value as a key spec
+// would be the other reading, and it would let a request name a spec through a member AWS does not publish
+// it under — the same shape of defect as reporting one.
+func kmsUnknownCustomerMasterKeySpec(keySpec string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"CustomerMasterKeySpec is %q, which is not one of %s; use KeySpec for a newer key spec",
+			keySpec, strings.Join(kmsCustomerMasterKeySpecs, ", ")),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsConflictingKeySpecMembers reports a CreateKey that sent KeySpec and CustomerMasterKeySpec with
+// different values.
+//
+// ValidationError at 400, and both values are named because either could be the intended one — substrate
+// cannot tell, which is precisely why it refuses instead of choosing. AWS documents no answer for the
+// conflict; what it documents is that the two members "have the same value", so a request in which they
+// disagree is not a request the page describes. See [kmsResolveRequestKeySpec] for why a precedence rule was
+// rejected: it discards half of a contradictory request silently, which is the failure mode #985 exists to
+// remove rather than relocate.
+//
+// Equal values do not reach here, so a caller that sets both to RSA_4096 — as an SDK migrating between the
+// two names might — is not punished for redundancy.
+func kmsConflictingKeySpecMembers(keySpec, deprecated string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"KeySpec is %q and CustomerMasterKeySpec is %q; the two members must carry the same value",
+			keySpec, deprecated),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsKeyUsageRequired reports a CreateKey that omitted KeyUsage for a key spec that requires it.
 //
 // ValidationError at 400. A required parameter that is absent is a defect of the request in the same way a

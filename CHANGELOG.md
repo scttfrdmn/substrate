@@ -160,6 +160,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page is exactly when someone working from the struct would put #971's member back.
 
 ### Changed
+- **KMS `CreateKey` reads `CustomerMasterKeySpec`, the deprecated name for `KeySpec`** (#985). The member is
+  a request parameter as well as a response member and substrate decoded only the response half, so a caller
+  on an SDK old enough to still send the deprecated name asked for an `RSA_4096` key and silently got a
+  symmetric one. That is the quietest failure available — a `200` with a complete, well-formed `KeyMetadata`
+  — and #974 made it quieter still by adding the response member, so substrate echoed the deprecated name
+  back reading `SYMMETRIC_DEFAULT`, contradicting the value it had just been sent. Reading it is not a
+  courtesy: AWS still accepts it, per the same sentence #974 cites, so a caller sending it is doing nothing
+  wrong. Every rule #977 established applies to the spec it names, because those rules are keyed on the
+  resolved spec rather than on which member carried it — a test asserts the required-`KeyUsage`, inadmissible-pair
+  and unpublished-usage refusals all fire through the older name.
+
+  Two decisions AWS does not document, both refused rather than resolved and both recorded as substrate's
+  reading. A value outside the member's **own** 13 published values — `ML_DSA_44`, say, which `KeySpec`
+  carries and this member does not — answers `ValidationError`/400 naming the member, its set and the member
+  that does carry it; that is the request-side half of the omission #974 chose when reporting it, and neither
+  direction now puts a value outside the member's own published set on the wire. Both members sent with
+  **different** values answers the same code naming both, because AWS documents the two as having "the same
+  value", so a request in which they disagree is not one the page describes and substrate cannot tell which
+  was meant. The two rejected alternatives are worth naming: a precedence rule discards half of a
+  contradictory request silently, which is the failure mode this issue exists to remove rather than relocate,
+  and resolving by JSON member order makes the answer depend on something no caller controls meaningfully.
+  Equal values are accepted — an SDK migrating between the two names may send both. The code matches #977's
+  for the same class of defect rather than introducing a second one for one operation.
+
 - **KMS `CreateKey` validates `KeySpec` and `KeyUsage`, and pairs them** (#977). The operation accepted
   any string for either member and paired them however a caller asked, so substrate could hold an ECC key
   with `KeyUsage` `ENCRYPT_DECRYPT`, or a key whose spec was `rsa2048`. Both members are immutable —

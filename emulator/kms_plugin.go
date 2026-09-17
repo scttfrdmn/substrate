@@ -291,11 +291,14 @@ func (p *KMSPlugin) followAlias(ctx context.Context, accountID, region, aliasNam
 
 func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		Description string   `json:"Description"`
-		KeyUsage    string   `json:"KeyUsage"`
-		KeySpec     string   `json:"KeySpec"`
-		MultiRegion bool     `json:"MultiRegion"`
-		Tags        []KMSTag `json:"Tags"`
+		Description string `json:"Description"`
+		KeyUsage    string `json:"KeyUsage"`
+		KeySpec     string `json:"KeySpec"`
+		// The deprecated name for KeySpec, decoded because AWS still accepts it as a request parameter
+		// and #985 found that ignoring it silently handed an older-SDK caller a symmetric key.
+		CustomerMasterKeySpec string   `json:"CustomerMasterKeySpec"`
+		MultiRegion           bool     `json:"MultiRegion"`
+		Tags                  []KMSTag `json:"Tags"`
 	}
 	// The body stays optional — CreateKey has no required parameter, and an empty request creates the
 	// symmetric encryption key the operation's first guidance section describes — but a body that is present
@@ -308,11 +311,19 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			return nil, kmsInvalidBody()
 		}
 	}
+	// Which of the two members carries the key spec is settled first, because everything after it is keyed on
+	// the spec and neither the required-ness of KeyUsage nor the pairing rule cares which name it arrived
+	// under. The deprecated member's own enum is narrower, so this is also where a value valid under KeySpec
+	// and not under CustomerMasterKeySpec is refused — see [kmsResolveRequestKeySpec].
+	requestedKeySpec, awsErr := kmsResolveRequestKeySpec(input.KeySpec, input.CustomerMasterKeySpec)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	// The defaults and the validation are both AWS's and both live in one place, because the rules are
 	// entangled: whether KeyUsage may be omitted depends on which KeySpec was resolved, and whether the pair
 	// is admissible depends on both. See [kmsResolveKeySpecAndUsage], which also records why this runs before
 	// anything is written — a key spec and a key usage are permanent once the key exists.
-	keySpec, keyUsage, awsErr := kmsResolveKeySpecAndUsage(input.KeySpec, input.KeyUsage)
+	keySpec, keyUsage, awsErr := kmsResolveKeySpecAndUsage(requestedKeySpec, input.KeyUsage)
 	if awsErr != nil {
 		return nil, awsErr
 	}
