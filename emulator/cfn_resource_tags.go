@@ -328,7 +328,7 @@ func cfnStampELBResource(
 	for _, t := range tags {
 		incoming = append(incoming, ELBTag(t))
 	}
-	updated, err := res.withTags(elbMergeTags(res.tags, incoming))
+	updated, err := res.encode(elbMergeTags(res.tags, incoming))
 	if err != nil {
 		return true, fmt.Errorf("stamp %s %s: marshal: %w", dr.Type, dr.ARN, err)
 	}

@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,13 +33,13 @@ func elbErrorCode(t *testing.T, resp *http.Response) string {
 }
 
 // elbCreateLB creates a load balancer and returns its ARN.
-func elbCreateLB(t *testing.T, ts *httptest.Server, name string, extra map[string]string) string {
+func elbCreateLB(t *testing.T, baseURL string, name string, extra map[string]string) string {
 	t.Helper()
 	params := map[string]string{"Action": "CreateLoadBalancer", "Name": name, "Type": "application"}
 	for k, v := range extra {
 		params[k] = v
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, baseURL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateLoadBalancer %s", name)
 
@@ -57,13 +56,13 @@ func elbCreateLB(t *testing.T, ts *httptest.Server, name string, extra map[strin
 }
 
 // elbCreateTG creates a target group and returns its ARN.
-func elbCreateTG(t *testing.T, ts *httptest.Server, name string, extra map[string]string) string {
+func elbCreateTG(t *testing.T, baseURL string, name string, extra map[string]string) string {
 	t.Helper()
 	params := map[string]string{"Action": "CreateTargetGroup", "Name": name, "Protocol": "HTTP", "Port": "80"}
 	for k, v := range extra {
 		params[k] = v
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, baseURL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTargetGroup %s", name)
 
@@ -80,7 +79,7 @@ func elbCreateTG(t *testing.T, ts *httptest.Server, name string, extra map[strin
 }
 
 // elbCreateListener creates a listener on lbARN and returns its ARN.
-func elbCreateListener(t *testing.T, ts *httptest.Server, lbARN, tgARN string, extra map[string]string) string {
+func elbCreateListener(t *testing.T, baseURL string, lbARN, tgARN string, extra map[string]string) string {
 	t.Helper()
 	params := map[string]string{
 		"Action":                                 "CreateListener",
@@ -93,7 +92,7 @@ func elbCreateListener(t *testing.T, ts *httptest.Server, lbARN, tgARN string, e
 	for k, v := range extra {
 		params[k] = v
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, baseURL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateListener")
 
@@ -110,7 +109,7 @@ func elbCreateListener(t *testing.T, ts *httptest.Server, lbARN, tgARN string, e
 }
 
 // elbCreateRule creates a rule on listenerARN and returns its ARN.
-func elbCreateRule(t *testing.T, ts *httptest.Server, listenerARN, tgARN string, extra map[string]string) string {
+func elbCreateRule(t *testing.T, baseURL string, listenerARN, tgARN string, extra map[string]string) string {
 	t.Helper()
 	params := map[string]string{
 		"Action":                              "CreateRule",
@@ -124,7 +123,7 @@ func elbCreateRule(t *testing.T, ts *httptest.Server, listenerARN, tgARN string,
 	for k, v := range extra {
 		params[k] = v
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, baseURL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRule")
 
@@ -141,13 +140,13 @@ func elbCreateRule(t *testing.T, ts *httptest.Server, listenerARN, tgARN string,
 }
 
 // elbDescribeTags reads the tags on the named resources, keyed by ARN.
-func elbDescribeTags(t *testing.T, ts *httptest.Server, arns ...string) map[string]map[string]string {
+func elbDescribeTags(t *testing.T, baseURL string, arns ...string) map[string]map[string]string {
 	t.Helper()
 	params := map[string]string{"Action": "DescribeTags"}
 	for i, arn := range arns {
 		params["ResourceArns.member."+strconv.Itoa(i+1)] = arn
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, baseURL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeTags")
 
@@ -177,9 +176,9 @@ func elbDescribeTags(t *testing.T, ts *httptest.Server, arns ...string) map[stri
 
 func TestELB_AddTags_DescribeTags_RoundTrip(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "tagged-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "tagged-alb", nil)
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "AddTags",
 		"ResourceArns.member.1": arn,
 		"Tags.member.1.Key":     "env",
@@ -190,7 +189,7 @@ func TestELB_AddTags_DescribeTags_RoundTrip(t *testing.T) {
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	tags := elbDescribeTags(t, ts, arn)
+	tags := elbDescribeTags(t, ts.URL, arn)
 	// An empty value is a legal tag, not a terminator: Tag.Value has a documented minimum
 	// length of 0, so "team" must be present rather than having ended the walk.
 	assert.Equal(t, map[string]string{"env": "prod", "team": ""}, tags[arn])
@@ -198,12 +197,12 @@ func TestELB_AddTags_DescribeTags_RoundTrip(t *testing.T) {
 
 func TestELB_AddTags_UpdatesExistingValue(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "retag-alb", map[string]string{
+	arn := elbCreateLB(t, ts.URL, "retag-alb", map[string]string{
 		"Tags.member.1.Key":   "env",
 		"Tags.member.1.Value": "dev",
 	})
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "AddTags",
 		"ResourceArns.member.1": arn,
 		"Tags.member.1.Key":     "env",
@@ -214,15 +213,15 @@ func TestELB_AddTags_UpdatesExistingValue(t *testing.T) {
 
 	// AWS: "If a tag with the same key is already associated with the resource, AddTags
 	// updates its value" — one tag, not two.
-	assert.Equal(t, map[string]string{"env": "prod"}, elbDescribeTags(t, ts, arn)[arn])
+	assert.Equal(t, map[string]string{"env": "prod"}, elbDescribeTags(t, ts.URL, arn)[arn])
 }
 
 func TestELB_AddTags_AcrossSeveralResources(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbARN := elbCreateLB(t, ts, "multi-alb", nil)
-	tgARN := elbCreateTG(t, ts, "multi-tg", nil)
+	lbARN := elbCreateLB(t, ts.URL, "multi-alb", nil)
+	tgARN := elbCreateTG(t, ts.URL, "multi-tg", nil)
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "AddTags",
 		"ResourceArns.member.1": lbARN,
 		"ResourceArns.member.2": tgARN,
@@ -232,7 +231,7 @@ func TestELB_AddTags_AcrossSeveralResources(t *testing.T) {
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	tags := elbDescribeTags(t, ts, lbARN, tgARN)
+	tags := elbDescribeTags(t, ts.URL, lbARN, tgARN)
 	assert.Equal(t, map[string]string{"owner": "platform"}, tags[lbARN])
 	assert.Equal(t, map[string]string{"owner": "platform"}, tags[tgARN])
 }
@@ -241,9 +240,9 @@ func TestELB_AddTags_AcrossSeveralResources(t *testing.T) {
 // a request naming one good and one absent resource must leave the good one untouched.
 func TestELB_AddTags_AppliesNothingWhenOneARNIsUnknown(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "atomic-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "atomic-alb", nil)
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "AddTags",
 		"ResourceArns.member.1": arn,
 		"ResourceArns.member.2": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/ghost/0abcdef",
@@ -254,12 +253,12 @@ func TestELB_AddTags_AppliesNothingWhenOneARNIsUnknown(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "LoadBalancerNotFound", elbErrorCode(t, resp))
 
-	assert.Empty(t, elbDescribeTags(t, ts, arn)[arn], "the resolvable resource must be untouched")
+	assert.Empty(t, elbDescribeTags(t, ts.URL, arn)[arn], "the resolvable resource must be untouched")
 }
 
 func TestELB_AddTags_Errors(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbARN := elbCreateLB(t, ts, "err-alb", nil)
+	lbARN := elbCreateLB(t, ts.URL, "err-alb", nil)
 
 	longKey := strings.Repeat("k", 129)
 	longValue := strings.Repeat("v", 257)
@@ -384,7 +383,7 @@ func TestELB_AddTags_Errors(t *testing.T) {
 			for k, v := range tt.params {
 				params[k] = v
 			}
-			resp := elbRequest(t, ts, params)
+			resp := elbRequest(t, ts.URL, params)
 			defer resp.Body.Close() //nolint:errcheck
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			assert.Equal(t, tt.code, elbErrorCode(t, resp))
@@ -394,14 +393,14 @@ func TestELB_AddTags_Errors(t *testing.T) {
 
 func TestELB_AddTags_TooManyTags(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "limit-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "limit-alb", nil)
 
 	params := map[string]string{"Action": "AddTags", "ResourceArns.member.1": arn}
 	for i := 1; i <= 51; i++ {
 		params["Tags.member."+strconv.Itoa(i)+".Key"] = "k" + strconv.Itoa(i)
 		params["Tags.member."+strconv.Itoa(i)+".Value"] = "v"
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, ts.URL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "TooManyTags", elbErrorCode(t, resp))
@@ -412,7 +411,7 @@ func TestELB_AddTags_TooManyTags(t *testing.T) {
 // limit" — and the deliberate absence of a refusal for the prefix itself.
 func TestELB_AddTags_ReservedPrefixDoesNotCountAgainstTheLimit(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "reserved-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "reserved-alb", nil)
 
 	params := map[string]string{"Action": "AddTags", "ResourceArns.member.1": arn}
 	for i := 1; i <= 50; i++ {
@@ -422,11 +421,11 @@ func TestELB_AddTags_ReservedPrefixDoesNotCountAgainstTheLimit(t *testing.T) {
 	params["Tags.member.51.Key"] = "aws:cloudformation:stack-name"
 	params["Tags.member.51.Value"] = "my-stack"
 
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, ts.URL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, "50 user tags plus one aws: tag is within the limit")
 
-	tags := elbDescribeTags(t, ts, arn)[arn]
+	tags := elbDescribeTags(t, ts.URL, arn)[arn]
 	assert.Len(t, tags, 51)
 	assert.Equal(t, "my-stack", tags["aws:cloudformation:stack-name"])
 }
@@ -435,18 +434,18 @@ func TestELB_AddTags_ReservedPrefixDoesNotCountAgainstTheLimit(t *testing.T) {
 // set: a resource already holding 50 tags accepts a new value for one of them.
 func TestELB_AddTags_ReTaggingAtTheLimitSucceeds(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "full-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "full-alb", nil)
 
 	params := map[string]string{"Action": "AddTags", "ResourceArns.member.1": arn}
 	for i := 1; i <= 50; i++ {
 		params["Tags.member."+strconv.Itoa(i)+".Key"] = "k" + strconv.Itoa(i)
 		params["Tags.member."+strconv.Itoa(i)+".Value"] = "v"
 	}
-	first := elbRequest(t, ts, params)
+	first := elbRequest(t, ts.URL, params)
 	defer first.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, first.StatusCode)
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "AddTags",
 		"ResourceArns.member.1": arn,
 		"Tags.member.1.Key":     "k7",
@@ -454,17 +453,17 @@ func TestELB_AddTags_ReTaggingAtTheLimitSucceeds(t *testing.T) {
 	})
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "changed", elbDescribeTags(t, ts, arn)[arn]["k7"])
+	assert.Equal(t, "changed", elbDescribeTags(t, ts.URL, arn)[arn]["k7"])
 }
 
 func TestELB_RemoveTags(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "untag-alb", map[string]string{
+	arn := elbCreateLB(t, ts.URL, "untag-alb", map[string]string{
 		"Tags.member.1.Key": "env", "Tags.member.1.Value": "prod",
 		"Tags.member.2.Key": "team", "Tags.member.2.Value": "platform",
 	})
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "RemoveTags",
 		"ResourceArns.member.1": arn,
 		"TagKeys.member.1":      "env",
@@ -475,12 +474,12 @@ func TestELB_RemoveTags(t *testing.T) {
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	assert.Equal(t, map[string]string{"team": "platform"}, elbDescribeTags(t, ts, arn)[arn])
+	assert.Equal(t, map[string]string{"team": "platform"}, elbDescribeTags(t, ts.URL, arn)[arn])
 }
 
 func TestELB_RemoveTags_Errors(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "untag-err-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "untag-err-alb", nil)
 
 	tests := []struct {
 		name   string
@@ -521,7 +520,7 @@ func TestELB_RemoveTags_Errors(t *testing.T) {
 			for k, v := range tt.params {
 				params[k] = v
 			}
-			resp := elbRequest(t, ts, params)
+			resp := elbRequest(t, ts.URL, params)
 			defer resp.Body.Close() //nolint:errcheck
 			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 			assert.Equal(t, tt.code, elbErrorCode(t, resp))
@@ -533,13 +532,13 @@ func TestELB_RemoveTags_Errors(t *testing.T) {
 // which is a per-request cap and not the per-resource tag limit.
 func TestELB_RemoveTags_RefusesMoreThan128Keys(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "many-keys-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "many-keys-alb", nil)
 
 	params := map[string]string{"Action": "RemoveTags", "ResourceArns.member.1": arn}
 	for i := 1; i <= 129; i++ {
 		params["TagKeys.member."+strconv.Itoa(i)] = "k" + strconv.Itoa(i)
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, ts.URL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "ValidationError", elbErrorCode(t, resp))
@@ -550,11 +549,11 @@ func TestELB_RemoveTags_RefusesMoreThan128Keys(t *testing.T) {
 // removes it once rather than being refused.
 func TestELB_RemoveTags_DuplicateKeyIsNotRefused(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "dup-remove-alb", map[string]string{
+	arn := elbCreateLB(t, ts.URL, "dup-remove-alb", map[string]string{
 		"Tags.member.1.Key": "env", "Tags.member.1.Value": "prod",
 	})
 
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action":                "RemoveTags",
 		"ResourceArns.member.1": arn,
 		"TagKeys.member.1":      "env",
@@ -562,26 +561,26 @@ func TestELB_RemoveTags_DuplicateKeyIsNotRefused(t *testing.T) {
 	})
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Empty(t, elbDescribeTags(t, ts, arn)[arn])
+	assert.Empty(t, elbDescribeTags(t, ts.URL, arn)[arn])
 }
 
 // TestELB_DescribeTags_ReportsAnUntaggedResource pins that a resource with no tags is still
 // reported: omitting it would make "no tags" indistinguishable from "no such resource".
 func TestELB_DescribeTags_ReportsAnUntaggedResource(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "bare-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "bare-alb", nil)
 
-	tags := elbDescribeTags(t, ts, arn)
+	tags := elbDescribeTags(t, ts.URL, arn)
 	require.Contains(t, tags, arn)
 	assert.Empty(t, tags[arn])
 }
 
 func TestELB_DescribeTags_Errors(t *testing.T) {
 	ts := newELBTestServer(t)
-	arn := elbCreateLB(t, ts, "desc-tags-alb", nil)
+	arn := elbCreateLB(t, ts.URL, "desc-tags-alb", nil)
 
 	t.Run("no ResourceArns", func(t *testing.T) {
-		resp := elbRequest(t, ts, map[string]string{"Action": "DescribeTags"})
+		resp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeTags"})
 		defer resp.Body.Close() //nolint:errcheck
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Equal(t, "ValidationError", elbErrorCode(t, resp))
@@ -594,14 +593,14 @@ func TestELB_DescribeTags_Errors(t *testing.T) {
 		for i := 1; i <= 21; i++ {
 			params["ResourceArns.member."+strconv.Itoa(i)] = arn
 		}
-		resp := elbRequest(t, ts, params)
+		resp := elbRequest(t, ts.URL, params)
 		defer resp.Body.Close() //nolint:errcheck
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		assert.Equal(t, "ValidationError", elbErrorCode(t, resp))
 	})
 
 	t.Run("absent target group", func(t *testing.T) {
-		resp := elbRequest(t, ts, map[string]string{
+		resp := elbRequest(t, ts.URL, map[string]string{
 			"Action":                "DescribeTags",
 			"ResourceArns.member.1": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/nope/0aaaaaaa",
 		})
@@ -620,13 +619,13 @@ func TestELB_CreatesPersistTags(t *testing.T) {
 		"Tags.member.1.Key": "env", "Tags.member.1.Value": "prod",
 	}
 
-	lbARN := elbCreateLB(t, ts, "create-tags-alb", tagged)
-	tgARN := elbCreateTG(t, ts, "create-tags-tg", tagged)
-	listenerARN := elbCreateListener(t, ts, lbARN, tgARN, tagged)
-	ruleARN := elbCreateRule(t, ts, listenerARN, tgARN, tagged)
+	lbARN := elbCreateLB(t, ts.URL, "create-tags-alb", tagged)
+	tgARN := elbCreateTG(t, ts.URL, "create-tags-tg", tagged)
+	listenerARN := elbCreateListener(t, ts.URL, lbARN, tgARN, tagged)
+	ruleARN := elbCreateRule(t, ts.URL, listenerARN, tgARN, tagged)
 
 	for _, arn := range []string{lbARN, tgARN, listenerARN, ruleARN} {
-		assert.Equal(t, map[string]string{"env": "prod"}, elbDescribeTags(t, ts, arn)[arn], arn)
+		assert.Equal(t, map[string]string{"env": "prod"}, elbDescribeTags(t, ts.URL, arn)[arn], arn)
 	}
 }
 
@@ -634,7 +633,7 @@ func TestELB_CreatesPersistTags(t *testing.T) {
 // DuplicateTagKeys.
 func TestELB_CreateLoadBalancer_DuplicateTagKeys(t *testing.T) {
 	ts := newELBTestServer(t)
-	resp := elbRequest(t, ts, map[string]string{
+	resp := elbRequest(t, ts.URL, map[string]string{
 		"Action": "CreateLoadBalancer", "Name": "dup-alb", "Type": "application",
 		"Tags.member.1.Key": "env", "Tags.member.1.Value": "a",
 		"Tags.member.2.Key": "env", "Tags.member.2.Value": "b",
@@ -645,7 +644,7 @@ func TestELB_CreateLoadBalancer_DuplicateTagKeys(t *testing.T) {
 
 	// The refusal happens before the record is written, so no load balancer is left behind
 	// carrying a tag set the request was refused for.
-	descResp := elbRequest(t, ts, map[string]string{"Action": "DescribeLoadBalancers"})
+	descResp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeLoadBalancers"})
 	defer descResp.Body.Close() //nolint:errcheck
 	var result struct {
 		Result struct {
@@ -666,13 +665,13 @@ func TestELB_OtherCreates_DuplicateTagKeysResolvesLastWins(t *testing.T) {
 		"Tags.member.2.Key": "env", "Tags.member.2.Value": "second",
 	}
 
-	lbARN := elbCreateLB(t, ts, "lastwins-alb", nil)
-	tgARN := elbCreateTG(t, ts, "lastwins-tg", dup)
-	listenerARN := elbCreateListener(t, ts, lbARN, tgARN, dup)
-	ruleARN := elbCreateRule(t, ts, listenerARN, tgARN, dup)
+	lbARN := elbCreateLB(t, ts.URL, "lastwins-alb", nil)
+	tgARN := elbCreateTG(t, ts.URL, "lastwins-tg", dup)
+	listenerARN := elbCreateListener(t, ts.URL, lbARN, tgARN, dup)
+	ruleARN := elbCreateRule(t, ts.URL, listenerARN, tgARN, dup)
 
 	for _, arn := range []string{tgARN, listenerARN, ruleARN} {
-		assert.Equal(t, map[string]string{"env": "second"}, elbDescribeTags(t, ts, arn)[arn], arn)
+		assert.Equal(t, map[string]string{"env": "second"}, elbDescribeTags(t, ts.URL, arn)[arn], arn)
 	}
 }
 
@@ -687,12 +686,12 @@ func TestELB_CreateTargetGroup_TooManyTags(t *testing.T) {
 		params["Tags.member."+strconv.Itoa(i)+".Key"] = "k" + strconv.Itoa(i)
 		params["Tags.member."+strconv.Itoa(i)+".Value"] = "v"
 	}
-	resp := elbRequest(t, ts, params)
+	resp := elbRequest(t, ts.URL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "TooManyTags", elbErrorCode(t, resp))
 
-	descResp := elbRequest(t, ts, map[string]string{"Action": "DescribeTargetGroups"})
+	descResp := elbRequest(t, ts.URL, map[string]string{"Action": "DescribeTargetGroups"})
 	defer descResp.Body.Close() //nolint:errcheck
 	var result struct {
 		Result struct {
@@ -713,10 +712,10 @@ func TestELB_CreateTargetGroup_TooManyTags(t *testing.T) {
 // why the assertion is on the wire bytes rather than on a decoded struct.
 func TestELB_EmptyOutputOperationsCarryTheirResultElement(t *testing.T) {
 	ts := newELBTestServer(t)
-	lbARN := elbCreateLB(t, ts, "wrapper-lb", nil)
-	tgARN := elbCreateTG(t, ts, "wrapper-tg", nil)
-	listenerARN := elbCreateListener(t, ts, lbARN, tgARN, nil)
-	ruleARN := elbCreateRule(t, ts, listenerARN, tgARN, nil)
+	lbARN := elbCreateLB(t, ts.URL, "wrapper-lb", nil)
+	tgARN := elbCreateTG(t, ts.URL, "wrapper-tg", nil)
+	listenerARN := elbCreateListener(t, ts.URL, lbARN, tgARN, nil)
+	ruleARN := elbCreateRule(t, ts.URL, listenerARN, tgARN, nil)
 
 	tests := []struct {
 		name   string
@@ -746,7 +745,7 @@ func TestELB_EmptyOutputOperationsCarryTheirResultElement(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := elbRequest(t, ts, tt.params)
+			resp := elbRequest(t, ts.URL, tt.params)
 			defer resp.Body.Close() //nolint:errcheck
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			body, err := io.ReadAll(resp.Body)

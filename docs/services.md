@@ -9061,7 +9061,9 @@ Per-operation error sets are followed rather than unified, because AWS's are not
   `TargetGroupNotFound`, `ListenerNotFound` or `RuleNotFound` — each at **HTTP 400**, which
   is the ELB API's own choice and not the 404 a reader expects. `TrustStoreNotFound`, the
   fifth code those operations list, cannot occur: substrate models no trust store.
-- An ARN naming no ELB resource type at all answers `ValidationError`.
+- An ARN naming no ELB resource type at all answers `ValidationError`. So does a **classic**
+  load-balancer ARN, whose one segment after `loadbalancer/` is an arity no ELBv2 type has —
+  see [An ELBv2 resource is reachable through the tagging API](#an-elbv2-resource-is-reachable-through-the-tagging-api).
 
 Two readings are substrate's rather than AWS's published text, both recorded because a
 consumer can observe them:
@@ -9182,6 +9184,56 @@ or an exported fixture recorded before #774 carries those ARNs, and a replay who
 calls suddenly named no resource would defeat the property the event store exists to provide.
 Nothing mints that shape any more.
 
+### An ELBv2 resource is reachable through the tagging API
+
+All four types are reachable through the Resource Groups Tagging API as of
+[#863](https://github.com/scttfrdmn/substrate/issues/863): `TagResources` and
+`UntagResources` address one by ARN, and `GetResources` reports it. A tag written either way
+is readable through the other — a `TagResources` tag comes back from ELBv2's own
+`DescribeTags`, and an `AddTags` tag is reported by `GetResources` — which is the rule every
+tagging arm is held to, and which ELBv2 could not meet before: the tagging API had no arm for
+the service at all, so the tag store this section describes was reachable only through ELB's
+own three operations.
+
+`ResourceTypeFilters` needs no ELB-specific handling. A filter's type is matched against the
+ARN's own type segment, and the four segments the formats above publish —
+`loadbalancer`, `targetgroup`, `listener`, `listener-rule` — each fall out of that
+delimiting. The pre-#774 nested listener ARN is the case worth knowing about: its type
+segment is `loadbalancer`, because that is what its ARN says, so a filter and a resource
+*kind* are not the same question for a recorded ARN of that shape.
+
+**ELB's arm finds its state key rather than building one, and it is the only one that does.**
+A load balancer's and a target group's record is keyed by name, but a listener's and a rule's
+is keyed by a suffix substrate mints at create time, which appears nowhere in the ARN. So the
+arm delegates to the same resolver ELBv2's `AddTags` uses, rather than rebuilding a key
+beside it — the two cannot then disagree about which record an ARN names, which is the defect
+that reached SQS, DynamoDB and Lambda when a key was rebuilt
+([#826](https://github.com/scttfrdmn/substrate/issues/826),
+[#943](https://github.com/scttfrdmn/substrate/issues/943)). One consequence is observable: an
+ARN naming no such resource is discovered by the resolver rather than by the write, and it
+answers the same `InvalidParameterException`/400 that every other type's absent resource
+does, because a caller must not be able to tell which stage found it.
+
+**A classic load-balancer ARN is refused, and the refusal is now about arity.** ELB's tagging
+code classified a resource type by substring, so `…:loadbalancer/my-lb` — AWS's classic
+format, one segment after the type where ELBv2's carries three — was read as a load balancer
+and looked for in the store where ELBv2's live. Substrate models no classic load balancer, so
+nothing was ever found; but the code a caller got, `LoadBalancerNotFound`, asserted that an
+ELBv2 load balancer of that ARN could have existed. Classification is now on the segment
+count the vendored format strings publish, so a classic ARN is not a type substrate tags:
+ELBv2's own `AddTags` answers `ValidationError`/400, matching what it already answered for an
+ARN of no ELB type, and the tagging API answers its unsupported-type refusal. **The split is
+substrate's reading**, on the same `FailureInfo` page that can be read either way for any
+unsupported type — see [Resource Groups Tagging](#resource-groups-tagging). Nothing writes a
+classic record, so this is a refusal made principled rather than a collision repaired.
+
+`GetResources` reports an ELB resource that *has been* tagged, including one whose tags have
+since all been removed, which is the general rule
+[recorded there](#getresources-reports-what-has-been-tagged-not-what-is-tagged). Each of the
+four records therefore carries the same persisted `ever_tagged` flag every other scanned type
+does, written by whichever writer empties the set — ELB's own `RemoveTags` or the tagging
+API's `UntagResources`.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
@@ -9245,14 +9297,21 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans twenty-eight resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans thirty-three resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache
 clusters, EFS file systems, Glue databases, ACM certificates, CloudFront
-distributions, KMS keys, SNS topics, Secrets Manager secrets and Systems Manager
-parameters.
+distributions, KMS keys, SNS topics, Secrets Manager secrets, Systems Manager
+parameters, and ELBv2 load balancers, target groups, listeners and listener
+rules.
+
+ELBv2's four are the newest and the odd ones out, and the section on the ELB side
+([An ELBv2 resource is reachable through the tagging API](#an-elbv2-resource-is-reachable-through-the-tagging-api))
+says why: every other arm turns an ARN into a state key by building one, while ELB's has to
+*find* the record the ARN names, because a listener's and a rule's key carries a minted
+suffix that no ARN component yields.
 
 `TagResources` and `UntagResources` reach a slightly different set, because they
 address one named ARN rather than enumerating a namespace: they additionally

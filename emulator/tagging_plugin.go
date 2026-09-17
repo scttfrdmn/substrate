@@ -356,6 +356,10 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
 		{typePrefix: "ssm", scan: p.scanSSMParameters},
+		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindLoadBalancer)},
+		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindTargetGroup)},
+		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindListener)},
+		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindRule)},
 	}
 
 	var all []resourceTagMapping
@@ -1233,6 +1237,56 @@ func (p *TaggingPlugin) scanSSMParameters(_ context.Context, reqCtx *RequestCont
 	return out, nil
 }
 
+// scanELBKind returns the scanner for one of ELBv2's four taggable kinds.
+//
+// One parameterized scanner rather than four, because ELB is the one namespace whose kinds share a
+// decoder: [elbDecodeTaggedResource] already reads a load balancer, a target group, a listener or a
+// rule and reports the ARN, the tags and the previously-tagged flag from each. Reusing it is the
+// read-side half of what the resolver arm does by reusing [elbResolveTaggedResource] — the scan
+// reports a resource under exactly the ARN the resolver will accept for it, so #765's
+// cross-readability holds by construction rather than by two parsers agreeing.
+//
+// The prefix goes through [taggingScanPrefix] over [elbKindKeyPrefix], so the scan is narrowed by
+// the same account/Region-qualified prefix ELB's own writers build and every other scanner is
+// narrowed by (#937). A record whose stored ARN puts it elsewhere is still dropped by
+// [taggingResourceInScope].
+//
+// A record that does not decode is skipped rather than reported. The four kinds live under four
+// distinct prefixes, so the only way that happens is a corrupt record, and reporting a resource
+// with no ARN would put an empty string in the response (#863).
+func (p *TaggingPlugin) scanELBKind(kind string) func(context.Context, *RequestContext) ([]resourceTagMapping, error) {
+	return func(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+		goCtx := context.Background()
+		prefix := taggingScanPrefix(elbKindKeyPrefix(kind), reqCtx)
+		keys, err := p.state.List(goCtx, elbNamespace, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("list elb %s: %w", kind, err)
+		}
+		var out []resourceTagMapping
+		for _, k := range keys {
+			raw, getErr := p.state.Get(goCtx, elbNamespace, k)
+			if getErr != nil || raw == nil {
+				continue
+			}
+			res := elbDecodeTaggedResource(kind, k, raw)
+			if res == nil {
+				continue
+			}
+			tags := make([]taggingTag, 0, len(res.tags))
+			for _, t := range res.tags {
+				tags = append(tags, taggingTag(t))
+			}
+			sortTagsByKey(tags, func(t taggingTag) string { return t.Key })
+			out = append(out, resourceTagMapping{
+				ResourceARN: res.arn,
+				Tags:        tags,
+				everTagged:  res.everTagged,
+			})
+		}
+		return out, nil
+	}
+}
+
 func (p *TaggingPlugin) scanACMCertificates(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
 	prefix := taggingScanPrefix(acmCertKeyPrefix, reqCtx)
@@ -1432,6 +1486,13 @@ func unsupportedTagResource(format string, args ...any) error {
 // error's text: those carry substrate's internal state-key layout, which is not something an
 // API response should publish. The detail goes to the log instead.
 func (p *TaggingPlugin) tagResolveFailure(arn string, err error) failedResourcesInfo {
+	// An ELB ARN is resolved by finding the record it names rather than by building a key, so
+	// "no such resource" can surface from the resolver instead of from the merge (#863). It is the
+	// same failure and gets the same answer, which is why the mapping is delegated rather than
+	// duplicated: a caller must not be able to tell which stage discovered it.
+	if errors.Is(err, errTagResourceNotFound) {
+		return p.tagMergeFailure(arn, err)
+	}
 	var unsupported *unsupportedTagResourceError
 	if errors.As(err, &unsupported) {
 		p.logger.Warn("tagging API cannot resolve a resource type",
@@ -1493,6 +1554,11 @@ func (p *TaggingPlugin) tagMergeFailure(arn string, err error) failedResourcesIn
 // checking builds a well-formed key for the *wrong kind of resource* rather than failing —
 // which is how a tag landed on a state machine when an activity ARN was passed, and how a
 // layer ARN resolved to a function key (#845, and the resolver half of #835).
+//
+// Most arms build the state key from the ARN, and one — elasticloadbalancing — finds it, because
+// ELB's listener and rule keys are minted suffixes an ARN carries in one of its two shapes only.
+// That arm reads through [elbResolveTaggedResource] and so through p.state; every arm still takes
+// its account and Region from the ARN, which is the property below.
 //
 // The account and region come from the ARN, and the resolver deliberately takes no
 // [RequestContext] so that no arm can reach for the caller's account instead. An ARN naming
@@ -1820,6 +1886,49 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 			return ns, key, nil
 		}
 		return "", "", unsupportedTagResource("Systems Manager %q is not a taggable resource type", resource)
+
+	case "elasticloadbalancing":
+		// A load balancer, target group, listener or listener rule, found by scanning for the
+		// record whose stored ARN equals this one — through [elbResolveTaggedResource], the same
+		// function ELBv2's own AddTags, RemoveTags and DescribeTags resolve through.
+		//
+		// This is the one arm that reads state, and the reason is structural rather than a
+		// shortcut. Every other arm *builds* a key from the ARN; a listener's key is
+		// `listener:{acct}/{region}/{suffix}` and a rule's is `rule:{acct}/{region}/{suffix}`,
+		// where the suffix is minted at create time and appears in the ARN only as its last
+		// segment in the flat shape #774 mints — not in the nested shape an earlier version
+		// recorded and [elbResourceKindFromARN] still resolves. Deriving the key would therefore
+		// have to be shape-aware, and would be a second answer to a question ELB already answers
+		// once. Sharing the resolver is what the other arms get from sharing a key builder: the two
+		// sides cannot disagree about which record an ARN names, and they cannot disagree about the
+		// refusal either.
+		//
+		// The scope comes from the ARN's own account and Region, never from the caller, per #826
+		// and its successors ([elbARNScope]).
+		//
+		// The two refusals are deliberately different failures. An ARN that names no ELBv2
+		// resource *type* — a classic load balancer's, whose one segment after `loadbalancer/`
+		// [elbResourceKindFromARN] no longer mistakes for ELBv2's three — is unsupported, which is
+		// what the twenty-two other arms answer for a type they do not reach. A well-formed ARN of
+		// a kind substrate does model, naming nothing, is [errTagResourceNotFound], so it answers
+		// the same InvalidParameterException a resolved-but-absent resource answers from
+		// [TaggingPlugin.tagMergeFailure] — the ARN resolved as far as this arm can take it, and
+		// the resource is simply not there (#863).
+		scope, ok := elbARNScope(arn)
+		if !ok {
+			return "", "", unsupportedTagResource("ELB %q is not an ARN", arn)
+		}
+		if elbResourceKindFromARN(arn) == "" {
+			return "", "", unsupportedTagResource("ELB %q is not a taggable resource type", resource)
+		}
+		res, awsErr, readErr := elbResolveTaggedResource(p.state, scope, arn)
+		if readErr != nil {
+			return "", "", fmt.Errorf("resolve ELB %q: %w", arn, readErr)
+		}
+		if awsErr != nil {
+			return "", "", fmt.Errorf("%w: %s answers %s", errTagResourceNotFound, arn, awsErr.Code)
+		}
+		return elbNamespace, res.stateKey, nil
 
 	default:
 		return "", "", unsupportedTagResource("service %q has no tagging arm", svc)
@@ -2196,6 +2305,24 @@ func mergeResourceTags(
 			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported Glue resource key: %s", key)
+
+	case elbNamespace:
+		// Guarded on the prefix and merged through raw JSON, like the states, rds, acm, cloudfront,
+		// kms, sns, secretsmanager and ssm arms — but for only the first of the two reasons those
+		// have. The guard is needed because this namespace also holds four index keys
+		// (`lb_names:`, `tg_names:`, `listener_ids:`, `rule_ids:`) whose values are JSON arrays of
+		// names, and a merge against one would leave an array looking like a record. The per-kind
+		// decode is *not* needed: all four taggable records spell the member `Tags` and hold the
+		// same `Key`/`Value` pair, so one call covers a load balancer, a target group, a listener
+		// and a rule without any of them losing a member the others lack (#863).
+		if !elbKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported ELB resource key: %s", key)
+		}
+		updated, err := mergeRecordTagListTags(raw, elbTagsJSONMember, elbTagKeyField, elbTagValueField, addTags, removeKeys)
+		if err != nil {
+			return fmt.Errorf("merge ELB tags for %s: %w", key, err)
+		}
+		return state.Put(goCtx, ns, key, updated)
 
 	default:
 		return fmt.Errorf("unsupported namespace for tag merge: %s", ns)
