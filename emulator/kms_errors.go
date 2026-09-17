@@ -66,13 +66,17 @@ func kmsNotFound(detail string) *AWSError {
 // kmsKeyDisabled reports that an operation named a key that exists and is not enabled.
 //
 // The code is DisabledException at 400, published identically on API_Encrypt, API_Decrypt,
-// API_GenerateDataKey, API_EnableKeyRotation and API_DisableKeyRotation — the five operations
-// substrate refuses this way. The last two were added by #949; before it they wrote
-// RotationEnabled against a disabled key and answered 200, which #923 recorded as a missing
-// refusal rather than a wrong status.
+// API_GenerateDataKey, API_GenerateDataKeyWithoutPlaintext, API_ReEncrypt, API_EnableKeyRotation and
+// API_DisableKeyRotation — the seven operations substrate refuses this way, every one of which gives a
+// Disabled key footnote [1] in the developer guide's key-state table. The rotation pair was added by
+// #949; before it they wrote RotationEnabled against a disabled key and answered 200, which #923
+// recorded as a missing refusal rather than a wrong status. GenerateDataKeyWithoutPlaintext and
+// ReEncrypt were added by #961, which found they refused a disabled key nowhere at all.
 //
-// A caller reaching this helper must have ruled out PendingDeletion first, because the key-state
-// table gives that state its own code — see [kmsInvalidKeyState].
+// Every caller reaches this through [kmsKeyStateError], which is what rules out PendingDeletion first —
+// the key-state table gives that state a different code, and ScheduleKeyDeletion clears Enabled as it
+// writes the state, so a bare !key.Enabled test at a call site would answer this for a key pending
+// deletion. See [kmsInvalidKeyState].
 func kmsKeyDisabled(keyID string) *AWSError {
 	return &AWSError{
 		Code:       "DisabledException",
@@ -94,6 +98,13 @@ func kmsKeyDisabled(keyID string) *AWSError {
 // distinguishing "enable the key and retry" from "cancel the deletion and retry" reads the code, and
 // answering DisabledException for both would collapse two different remedies into one. The state is
 // named in the message for the same reason.
+//
+// For the five cryptographic operations #961 brought here the same table cell reads "[2] or [3]", and
+// footnote [2] is that same sentence under **DisabledException** — so AWS admits either code there and
+// the DisabledException substrate answered before #961 was not outside what the table publishes.
+// Choosing this one anyway is substrate's reading, argued in [kmsKeyStateError]: it is the only
+// choice under which one key state produces one code across the plugin, and the only one a caller can
+// branch on to tell the two remedies apart.
 //
 // PendingDeletion is the only state substrate can be in here: ScheduleKeyDeletion is the sole writer
 // of anything but Enabled or Disabled, so PendingImport, Unavailable, Creating and Updating — which
