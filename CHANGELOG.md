@@ -499,6 +499,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page is exactly when someone working from the struct would put #971's member back.
 
 ### Changed
+- **S3's request-rate quotas are enforced per prefix, and a refusal is `SlowDown`/503 rather than
+  `ThrottlingException`/429** (#818). AWS states the ceilings per prefix within a bucket — "your
+  application can achieve at least 3,500 PUT/COPY/POST/DELETE or 5,500 GET/HEAD requests per second
+  per partitioned Amazon S3 prefix. There are no limits to the number of prefixes in a bucket." —
+  and the whole point of that shape is that a caller can parallelise across prefixes to get more:
+  "if you create 10 prefixes in an Amazon S3 bucket to parallelize reads, you could scale your read
+  performance to 55,000 read requests per second". Substrate held one bucket-wide token bucket, which
+  got both directions wrong: a caller who had done exactly what that guidance says was throttled
+  anyway, and a caller hammering one prefix — whose real ceiling is the prefix's alone — was not.
+  Neither behaviour could be asserted, so the parallelisation a consumer's code exists to do was
+  untestable against substrate.
+
+  One `s3/read` or `s3/write` rule now governs one token bucket per (bucket, prefix) pair. The two
+  keys are new and replace the single `s3` rule in the built-in defaults; a rule written against an
+  operation or against the service still wins over the class rule it overlaps, but it is **not**
+  accounted per prefix, because it is substrate's own throttle rather than one of AWS's published
+  ceilings — `s3: {rate: 5}` means five requests per second, as it always did.
+
+  **Which prefix a request counts against is substrate's choice, stated as such** in
+  `docs/services.md` and at the constants: the object key up to and including its first `/`, and the
+  bucket's root for a key with no `/` or an operation naming no key. AWS cannot be copied here. A
+  prefix is "a string of characters at the beginning of the object key name" of any length and
+  explicitly not a directory, so a key belongs to arbitrarily many prefixes at once; which one is a
+  *partition* boundary is S3's own decision, and AWS publishes neither where a partition splits nor
+  when it repartitions — only that the scaling "happens gradually and is not instantaneous". The
+  boundary chosen is the one AWS's own 10-prefix example uses and the coarsest short of the bucket,
+  so substrate never reports headroom from a split S3 might not have made; the error is towards
+  throttling sooner, which is the safe direction for a test whose subject is a retry loop.
+
+  The refusal is `SlowDown` with HTTP 503, the pair the performance guide names ("you may see some
+  503 (Slow Down) errors") and the pair substrate's fault injection has served for S3 since #480,
+  rendered as S3's bare `<Error>` document. S3 has no `ThrottlingException`, so the previous 429 was
+  a code no S3 SDK looks for. The message names what was throttled and is substrate's own wording —
+  AWS documents no message string for `SlowDown` — so assert on the code and the status.
+
+  Reaching a 503 in a fixture needs a lowered rule, not thousands of requests: `s3/write: {rate: 3,
+  burst: 3}` throttles the fourth write to one prefix and leaves every other prefix untouched.
+  Recorded as limits rather than papered over: the quota gate is exempt during replay, so a recorded
+  `SlowDown` replays as a success and is now reported as a response difference (#833); and
+  `ValidationReport.QuotaChecks` compares a bucket-wide peak against the per-prefix ceiling, because
+  an event carries no object key unless bodies were recorded, so it warns earlier than the gate
+  refuses. Also fixed on the way past: `resolveKey` read the rule map outside the controller's mutex
+  while `UpdateConfig` replaces it wholesale, which was a data race.
 - **`RunInstances` accepting an instance type `DescribeInstanceTypes` refuses is recorded as a
   divergence rather than closed** (#896). `RunInstances` reads `InstanceType` and stores it verbatim;
   `ec2InstanceTypeIndex` has exactly one non-test reader. So a launch of `g6.xlarge` succeeded and

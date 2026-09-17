@@ -1455,3 +1455,29 @@ func ReplayBodyDiffTruncatedForTest() string { return replayBodyDiffTruncated }
 // ReplayBodyMemberAbsentForTest is the value reported for a side that has no member,
 // element or attribute at a path.
 func ReplayBodyMemberAbsentForTest() string { return bodyMemberAbsent }
+
+// S3AccountingPrefixForTest returns the S3 bucket and the accounting prefix a
+// request's request-rate counts against.
+//
+// Exported because the rule is substrate's own choice (#818) and worth asserting
+// directly: the key-to-prefix mapping is a claim about paths, and reaching every
+// case through the gate would take one server call per case to assert something the
+// derivation states in one line.
+func S3AccountingPrefixForTest(req *AWSRequest) (bucket, prefix string) {
+	return s3AccountingPrefix(req)
+}
+
+// S3PrefixRateRuleKeysForTest returns the two [QuotaConfig.Rules] keys that carry
+// S3's published per-prefix ceilings, read and write in that order.
+func S3PrefixRateRuleKeysForTest() (read, write string) {
+	return s3RateRuleKey(s3RateRead), s3RateRuleKey(s3RateWrite)
+}
+
+// S3PrefixRateDefaultsForTest returns the published per-prefix request-rate
+// ceilings, so a test asserting the built-in rules does not restate the figures.
+func S3PrefixRateDefaultsForTest() (read, write float64) {
+	return s3PrefixReadRequestsPerSecond, s3PrefixWriteRequestsPerSecond
+}
+
+// DefaultQuotaRulesForTest returns the built-in rate limits.
+func DefaultQuotaRulesForTest() map[string]RateRule { return defaultQuotaRules() }
