@@ -293,6 +293,14 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 	if secret == nil {
 		return nil, smSecretNotFound(input.SecretID)
 	}
+	// API_PutSecretValue's InvalidRequestException lists "The secret is scheduled for deletion." first
+	// among its three possible causes. The refusal sits ahead of both writes below, so a scheduled secret
+	// keeps the version payload and the CurrentVersionID it had — substrate used to attach a new version
+	// to a secret inside its recovery window and move the current pointer onto it, so a RestoreSecret
+	// afterwards handed back a value AWS would have refused to store (#956).
+	if !secret.DeletionDate.IsZero() {
+		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
+	}
 
 	versionID := generateVersionID()
 	value := input.SecretString
@@ -449,6 +457,14 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 		return nil, smSecretNotFound(input.SecretID)
 	}
 
+	// Same first cause on API_UpdateSecret, and this is the widest of the four refusals: the operation
+	// "modifies the details of a secret, including metadata and the secret value", so without it a secret
+	// inside its recovery window could have its Description, its KmsKeyId and its value all rewritten —
+	// which is what substrate did (#956).
+	if !secret.DeletionDate.IsZero() {
+		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
+	}
+
 	if input.Description != "" {
 		secret.Description = input.Description
 	}
@@ -602,6 +618,13 @@ func (p *SecretsManagerPlugin) tagResource(ctx *RequestContext, req *AWSRequest)
 		return nil, smSecretNotFound(input.SecretID)
 	}
 
+	// Same first cause on API_TagResource. Tags are "part of the secret's metadata", and the page warns
+	// that "adding or removing a tag can change permissions" — so retagging a secret whose recovery
+	// window is counting down is a permission change AWS refuses and substrate performed (#956).
+	if !secret.DeletionDate.IsZero() {
+		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
+	}
+
 	tagMap := make(map[string]string, len(secret.Tags))
 	for _, t := range secret.Tags {
 		tagMap[t.Key] = t.Value
@@ -647,6 +670,15 @@ func (p *SecretsManagerPlugin) untagResource(ctx *RequestContext, req *AWSReques
 	}
 	if secret == nil {
 		return nil, smSecretNotFound(input.SecretID)
+	}
+
+	// Same first cause on API_UntagResource, and the refusal outranks the operation's own idempotency:
+	// "if a requested tag is not attached to the secret, no error is returned" is about which *keys* are
+	// present, not about whether the secret may be modified at all. A caller naming no matching key still
+	// gets the refusal here, because the state of the resource is what InvalidRequestException reports
+	// ("a parameter value is not valid for the current state of the resource") (#956).
+	if !secret.DeletionDate.IsZero() {
+		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
 
 	removeSet := make(map[string]bool, len(input.TagKeys))
