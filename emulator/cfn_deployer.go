@@ -2176,8 +2176,8 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 		data, _ := d.state.Get(ctx, "s3", "bucket:"+physicalID)
 		return data != nil
 	},
-	"AWS::DynamoDB::Table": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
-		data, _ := d.state.Get(ctx, "dynamodb", "table:"+acct+"/"+physicalID)
+	"AWS::DynamoDB::Table": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
+		data, _ := d.state.Get(ctx, "dynamodb", "table:"+acct+"/"+region+"/"+physicalID)
 		return data != nil
 	},
 	"AWS::SQS::Queue": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
@@ -2190,9 +2190,10 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 		data, _ := d.state.Get(ctx, "sns", "topic:"+acct+"/"+region+"/"+snsTopicNameFromPhysicalID(physicalID))
 		return data != nil
 	},
-	"AWS::Lambda::Function": func(d *StackDeployer, ctx context.Context, _, _, physicalID string) bool {
-		// Lambda state key is the bare function name (no account/region).
-		data, _ := d.state.Get(ctx, "lambda", "function:"+physicalID)
+	"AWS::Lambda::Function": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
+		// A function name is unique per account per region, and since #943 the state key says
+		// so — a stack's drift check has to read its own region's record, not another's.
+		data, _ := d.state.Get(ctx, "lambda", "function:"+acct+"/"+region+"/"+physicalID)
 		return data != nil
 	},
 	"AWS::IAM::Role": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
@@ -2284,7 +2285,8 @@ func compareDynamoDBTableDrift(ctx context.Context, d *StackDeployer, stack *CFN
 	if !ok {
 		return nil
 	}
-	data, _ := d.state.Get(ctx, "dynamodb", "table:"+d.identity.accountID+"/"+dr.PhysicalID)
+	data, _ := d.state.Get(ctx, "dynamodb",
+		"table:"+d.identity.accountID+"/"+d.identity.region+"/"+dr.PhysicalID)
 	if data == nil {
 		return nil
 	}
@@ -2324,7 +2326,8 @@ func compareLambdaFunctionDrift(ctx context.Context, d *StackDeployer, stack *CF
 	if !ok {
 		return nil
 	}
-	data, _ := d.state.Get(ctx, "lambda", "function:"+dr.PhysicalID)
+	data, _ := d.state.Get(ctx, "lambda",
+		"function:"+d.identity.accountID+"/"+d.identity.region+"/"+dr.PhysicalID)
 	if data == nil {
 		return nil
 	}

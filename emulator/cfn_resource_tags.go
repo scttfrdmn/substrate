@@ -41,8 +41,9 @@ type cfnStampTarget struct {
 // false for a type substrate models no tags for.
 //
 // Each key is the one the *owning plugin* writes, verified against it rather than copied from
-// [TaggingPlugin.resolveARN], which computes a key for the same four services and got SQS wrong
-// until #826 and DynamoDB's account wrong until #845. That is the ordering rule when the two
+// [TaggingPlugin.resolveARN], which computes a key for the same services and got SQS wrong
+// until #826, DynamoDB's account wrong until #845, and both Lambda's and DynamoDB's region wrong
+// until #943. That is the ordering rule when the two
 // disagree: the record the service's own tag-reading call loads is the record the stamp has to
 // land in, because #765's criterion is that the tag is readable through that call. Reusing the
 // shape rather than the function is forced by the input anyway — `resolveARN` parses an ARN, and
@@ -63,8 +64,6 @@ func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnSt
 	case "AWS::S3::Bucket":
 		// A bucket name is globally unique, so the key carries no account or region.
 		return cfnStampTarget{namespace: s3Namespace, stateKey: "bucket:" + dr.PhysicalID}, true
-	case "AWS::Lambda::Function":
-		return cfnStampTarget{namespace: lambdaNamespace, stateKey: "function:" + dr.PhysicalID}, true
 	case "AWS::SQS::Queue":
 		// `sqsURLKey` (`sqs_plugin.go:98`) keys a queue by the last two components of its URL,
 		// so the record the SQS plugin reads is `queue:<account>/<name>` — the form the
@@ -74,11 +73,6 @@ func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnSt
 		return cfnStampTarget{
 			namespace: sqsNamespace,
 			stateKey:  "queue:" + accountID + "/" + dr.PhysicalID,
-		}, true
-	case "AWS::DynamoDB::Table":
-		return cfnStampTarget{
-			namespace: dynamodbNamespace,
-			stateKey:  "table:" + accountID + "/" + dr.PhysicalID,
 		}, true
 	default:
 		return cfnStampTarget{}, false
@@ -98,11 +92,14 @@ type cfnRegionalStampKind struct {
 // cfnRegionalStampKinds are the CFN resource types whose tag record is keyed
 // `<prefix>:<account>/<region>/<physical-id>` — #819's group 3a.
 //
-// They are one table rather than nine `switch` arms because they share one key shape: each
+// They are one table rather than eleven `switch` arms because they share one key shape: each
 // owning plugin builds its key from `reqCtx.AccountID + "/" + reqCtx.Region` and the same
-// identifier the deployer already records as the physical ID. The four services in
-// [cfnResolveStampTarget]'s switch cannot join them — a bucket key carries neither account nor
-// region, and a queue's and a table's carry the account but not the region.
+// identifier the deployer already records as the physical ID. Lambda and DynamoDB joined the
+// table with #943, which gave their keys the same shape — before it a function's key carried
+// neither account nor region and a table's carried the account but not the region, so each
+// needed its own arm. The two services left in [cfnResolveStampTarget]'s switch still cannot
+// join: a bucket name is globally unique so its key carries neither, and a queue's carries the
+// account but not the region.
 //
 // Both of #819's conditions were checked against the owning plugin for every entry, not
 // inferred. First, [mergeResourceTags] already has an arm for the namespace and key prefix, so
@@ -113,7 +110,9 @@ type cfnRegionalStampKind struct {
 // the template (falling back to the logical ID); an RDS instance and an ElastiCache cluster
 // carry their own identifier property; and an EFS file system and access point take the
 // `fs-`/`fsap-` ID out of the create response, which is what EFS's `ListTagsForResource` path
-// segment names them by.
+// segment names them by. A Lambda function and a DynamoDB table are named by the template's
+// `FunctionName`/`TableName` (falling back to the logical ID), which is what
+// [lambdaFunctionStateKey] and [DynamoDBPlugin.tableStateKey] key on.
 //
 // The first condition is what holds the rest of #819's group 3 out rather than a judgement about
 // which service matters: KMS, Secrets Manager, SNS, a Step Functions activity, an RDS cluster or
@@ -144,6 +143,8 @@ var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::RDS::DBInstance":             {namespace: rdsNamespace, prefix: "dbinstance"},
 	"AWS::Kinesis::Stream":             {namespace: kinesisNamespace, prefix: "stream"},
 	"AWS::Glue::Database":              {namespace: glueNamespace, prefix: "database"},
+	"AWS::Lambda::Function":            {namespace: lambdaNamespace, prefix: "function"},
+	"AWS::DynamoDB::Table":             {namespace: dynamodbNamespace, prefix: "table"},
 }
 
 // cfnELBStampableTypes are the ELBv2 CFN types whose records substrate keeps tags on.

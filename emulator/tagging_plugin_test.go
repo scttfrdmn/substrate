@@ -114,7 +114,8 @@ func putTestLambdaFunction(t *testing.T, state emulator.StateManager, name strin
 		Tags:         tags,
 	}
 	raw, _ := json.Marshal(fn)
-	require.NoError(t, state.Put(context.Background(), "lambda", "function:"+name, raw))
+	require.NoError(t, state.Put(context.Background(), "lambda",
+		"function:"+taggingTestAccountID+"/"+taggingTestRegion+"/"+name, raw))
 }
 
 // ---- Tests ----------------------------------------------------------------
@@ -342,6 +343,10 @@ func putTestSQSQueue(t *testing.T, state emulator.StateManager, name string, tag
 // server has no auth configured, ParseAWSRequest resolves to fallbackAccountID.
 const taggingTestAccountID = "123456789012"
 
+// taggingTestRegion is the Region every ARN in these tests names, and so the Region half of
+// every state key a pre-population helper writes under (#943).
+const taggingTestRegion = "us-east-1"
+
 // putTestDynamoDBTable pre-populates state with a DynamoDB table.
 func putTestDynamoDBTable(t *testing.T, state emulator.StateManager, name string, tags map[string]string) {
 	t.Helper()
@@ -352,7 +357,8 @@ func putTestDynamoDBTable(t *testing.T, state emulator.StateManager, name string
 		Tags:        tags,
 	}
 	raw, _ := json.Marshal(tbl)
-	require.NoError(t, state.Put(context.Background(), "dynamodb", "table:"+taggingTestAccountID+"/"+name, raw))
+	require.NoError(t, state.Put(context.Background(), "dynamodb",
+		"table:"+taggingTestAccountID+"/"+taggingTestRegion+"/"+name, raw))
 }
 
 // putTestEC2Instance pre-populates state with an EC2 instance.
@@ -439,7 +445,8 @@ func TestTagging_TagResources_Lambda(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Empty(t, out["FailedResourcesMap"])
 
-	raw, err := state.Get(context.Background(), "lambda", "function:my-func")
+	raw, err := state.Get(context.Background(), "lambda",
+		"function:"+taggingTestAccountID+"/"+taggingTestRegion+"/my-func")
 	require.NoError(t, err)
 	var fn emulator.LambdaFunction
 	require.NoError(t, json.Unmarshal(raw, &fn))
@@ -461,7 +468,8 @@ func TestTagging_TagResources_DynamoDB(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
 	assert.Empty(t, out["FailedResourcesMap"])
 
-	raw, err := state.Get(context.Background(), "dynamodb", "table:"+taggingTestAccountID+"/my-table")
+	raw, err := state.Get(context.Background(), "dynamodb",
+		"table:"+taggingTestAccountID+"/"+taggingTestRegion+"/my-table")
 	require.NoError(t, err)
 	var tbl emulator.DynamoDBTable
 	require.NoError(t, json.Unmarshal(raw, &tbl))
@@ -529,7 +537,8 @@ func TestTagging_UntagResources_Lambda(t *testing.T) {
 	defer resp.Body.Close() //nolint:errcheck
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	raw, err := state.Get(context.Background(), "lambda", "function:fn-untag")
+	raw, err := state.Get(context.Background(), "lambda",
+		"function:"+taggingTestAccountID+"/"+taggingTestRegion+"/fn-untag")
 	require.NoError(t, err)
 	var fn emulator.LambdaFunction
 	require.NoError(t, json.Unmarshal(raw, &fn))

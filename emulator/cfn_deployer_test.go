@@ -2521,7 +2521,7 @@ func TestCFN_DriftDetection_DynamoDB_Modified(t *testing.T) {
 	assert.Equal(t, "IN_SYNC", result.DriftStatus)
 
 	// Mutate read capacity directly in state (bypassing CloudFormation).
-	raw, err := state.Get(context.Background(), "dynamodb", "table:123456789012/drift-ddb")
+	raw, err := state.Get(context.Background(), "dynamodb", "table:123456789012/us-east-1/drift-ddb")
 	require.NoError(t, err)
 	require.NotNil(t, raw)
 	var tbl map[string]any
@@ -2529,7 +2529,7 @@ func TestCFN_DriftDetection_DynamoDB_Modified(t *testing.T) {
 	pt := tbl["ProvisionedThroughput"].(map[string]any)
 	pt["ReadCapacityUnits"] = 99
 	mutated, _ := json.Marshal(tbl)
-	require.NoError(t, state.Put(context.Background(), "dynamodb", "table:123456789012/drift-ddb", mutated))
+	require.NoError(t, state.Put(context.Background(), "dynamodb", "table:123456789012/us-east-1/drift-ddb", mutated))
 
 	result, err = d.DetectStackDrift(context.Background(), "drift-ddb-stack")
 	require.NoError(t, err)
@@ -2560,7 +2560,7 @@ func TestCFN_DriftDetection_Lambda_Modified(t *testing.T) {
 	assert.Equal(t, "IN_SYNC", result.DriftStatus)
 
 	// Change Timeout directly in state.
-	key := "function:drift-fn"
+	key := "function:123456789012/us-east-1/drift-fn"
 	raw, err := state.Get(context.Background(), "lambda", key)
 	require.NoError(t, err)
 	require.NotNil(t, raw)

@@ -1186,6 +1186,7 @@ func authzResourceTagPrefixes(service string) []string {
 func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest) map[string]string {
 	goCtx := context.Background()
 	acct := reqCtx.AccountID
+	region := reqCtx.Region
 	var tags map[string]string
 
 	switch req.Service {
@@ -1209,7 +1210,7 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		if name == "" {
 			return nil
 		}
-		raw, err := a.state.Get(goCtx, lambdaNamespace, "function:"+name)
+		raw, err := a.state.Get(goCtx, lambdaNamespace, lambdaFunctionStateKey(acct, region, name))
 		if err != nil || raw == nil {
 			return nil
 		}
@@ -1272,7 +1273,7 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		if tbl == "" {
 			return nil
 		}
-		raw, err := a.state.Get(goCtx, dynamodbNamespace, "table:"+acct+"/"+tbl)
+		raw, err := a.state.Get(goCtx, dynamodbNamespace, "table:"+acct+"/"+region+"/"+tbl)
 		if err != nil || raw == nil {
 			return nil
 		}

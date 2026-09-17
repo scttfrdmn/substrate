@@ -444,9 +444,12 @@ func TestCFNIdentity_PseudoParametersMatchTheStackARN(t *testing.T) {
 // difference — drift silently blind, which IN_SYNC alone cannot distinguish from
 // drift working. Both reads are separately hardcoded, so both are asserted.
 func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
-	// A non-default region throughout, because the SNS key embeds the region as
-	// well as the account: run in us-east-1 and a comparator that threaded only the
-	// account would still find the topic, since us-east-1 is substrate's default.
+	// A non-default region throughout, because the SNS, DynamoDB and Lambda keys embed
+	// the region as well as the account: run in us-east-1 and a comparator that threaded
+	// only the account would still find the resource, since us-east-1 is substrate's
+	// default. DynamoDB's and Lambda's keys gained the region with #943, and both
+	// comparators discarded it until then — the DynamoDB one took the account from
+	// `d.identity` and the Lambda one took neither.
 	const region = "eu-west-1"
 
 	cases := []struct {
@@ -468,7 +471,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 				"KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
 				"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}}}}`,
 			namespace: "dynamodb",
-			key:       "table:" + cfnOtherAccount + "/drift-table",
+			key:       "table:" + cfnOtherAccount + "/" + region + "/drift-table",
 			mutate: func(m map[string]any) {
 				m["BillingModeSummary"] = map[string]any{"BillingMode": "PROVISIONED"}
 			},

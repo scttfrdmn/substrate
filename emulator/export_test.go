@@ -264,8 +264,13 @@ func LambdaPluginSetExecutorForTest(p *LambdaPlugin, exec *LambdaExecutor) {
 
 // LambdaPluginCreateFunctionForTest writes a minimal LambdaFunction to state
 // so that invoke can load it without a real HTTP CreateFunction request.
+//
+// The account and Region the record is keyed under come from the function's own ARN, which is
+// the pair a caller's invoke has to present to load it back (#943), so a caller supplying a
+// consistent ARN needs no second parameter to say the same thing twice.
 func LambdaPluginCreateFunctionForTest(p *LambdaPlugin, fn LambdaFunction) {
-	_, _ = p.saveFunctionAndRespond(fn, 200)
+	acct, region := lambdaARNScope(fn.FunctionArn)
+	_, _ = p.saveFunctionAndRespond(acct, region, fn, 200)
 }
 
 // InvokeLambdaForTest calls the unexported invoke method directly.

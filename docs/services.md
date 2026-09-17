@@ -307,7 +307,7 @@ an account — which is what keeps `shardId-000000000000` and the like out of it
 **If a fixture asserts on `000000000000`, it now sees `123456789012`.** Two things
 follow. Every ARN returned to an unsigned or non-`AKIA` caller changes account. And
 because several plugins prefix their state keys with the account —
-`table:{account}/{name}`, `instance:{account}/{id}` — **persisted SQLite state written
+`table:{account}/{region}/{name}`, `instance:{account}/{id}` — **persisted SQLite state written
 under the old account is unreachable** after upgrading. Re-seed it, or set
 `account.default: "000000000000"` to read it back.
 
@@ -4257,6 +4257,15 @@ claim a caller can act on and be wrong about.
 | AWS::Lambda::Function | FunctionName | `Code` is deployed in every form; [inline `ZipFile` is zipped](#an-inline-zipfile-is-zipped-into-a-package) |
 | AWS::Lambda::EventSourceMapping | — | |
 
+### A function name is unique per account per Region
+
+Two accounts can each hold a function named `orders`, and one account can hold one in
+`us-east-1` and another in `us-west-2`. Until #943 the second create in either pair answered
+`ResourceConflictException`/409, because the function's state key carried only its name. See
+[A Lambda function and a DynamoDB table belong to one account in one Region](#a-lambda-function-and-a-dynamodb-table-belong-to-one-account-in-one-region)
+for what AWS does and does not publish about that scope, and for the three sibling keys — the
+resource policy, the stored zip and the event-invoke configuration — that moved with it.
+
 ### An inline ZipFile is zipped into a package
 
 The resource type's `Code.ZipFile` and the API's `Code.ZipFile` are not the same
@@ -4740,6 +4749,16 @@ SQS requests: $0.0000004 per request.
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::DynamoDB::Table | TableName | GSI, LSI, TTL supported |
+
+### A table name is unique per Region, not per account
+
+`CreateTable` states it outright: "In an AWS account, table names must be unique within each
+Region. That is, you can have two tables with same name if you create the tables in different
+Regions." Until #943 substrate keyed a table as `table:{account}/{name}`, so one account could
+hold one table name once across every Region and the second create answered
+`ResourceInUseException`/400 — which is what a consumer deploying one stack to two Regions hit.
+The key is now `table:{account}/{region}/{name}`; see
+[A Lambda function and a DynamoDB table belong to one account in one Region](#a-lambda-function-and-a-dynamodb-table-belong-to-one-account-in-one-region).
 
 ### Cost
 
@@ -8223,16 +8242,18 @@ was reported a `us-west-2` EC2 instance.
 
 Reading the scope from the reported ARN rather than from each scanner's state-key prefix
 is what makes it one rule instead of one per scanner. A scanner whose key carries no
-Region cannot express the scope in a prefix at all — DynamoDB's key carries no Region,
-and Lambda's and S3's carry neither — and a scanner that can express it has to remember
+Region cannot express the scope in a prefix at all — that was true of DynamoDB's key, and
+of Lambda's and S3's, when #937 landed — and a scanner that can express it has to remember
 to, which the ECS cluster scanner did not. The state-key prefixes still narrow wherever
 the key can carry the scope, through one shared helper, but that is a narrowing of what
 gets loaded rather than the guarantee. This is the read-side form of the rule #826
 through #932 established for the write side, where every resolver takes the account and
-Region from the ARN and never from the caller. Two of those keys are themselves wrong and
-are corrected separately as #943: a Lambda function name is unique per account per Region
-and a DynamoDB table name per Region, so neither key can hold two resources AWS would let
-a caller create. S3's is right as it stands, because a bucket name really is global.
+Region from the ARN and never from the caller. Two of those keys were themselves wrong,
+and #943 corrected both: a Lambda function name is unique per account per Region and a
+DynamoDB table name per Region, so neither key could hold two resources AWS would let a
+caller create. Both scanners now narrow by the whole scope, and S3's is the one that still
+cannot, because a bucket name really is global — see
+[A Lambda function and a DynamoDB table belong to one account in one Region](#a-lambda-function-and-a-dynamodb-table-belong-to-one-account-in-one-region).
 
 An empty account or Region segment means the ARN states no such scope, and such a
 resource is in scope everywhere. IAM depends on that: an IAM ARN carries no Region, so an
@@ -8593,6 +8614,69 @@ differently, which is the defect #862 fixed in the four merge helpers, re-verifi
 rather than assumed. `ListTagsForResource` also rendered an untagged parameter's `TagList`
 as `null` rather than as the empty array AWS publishes.
 
+### A Lambda function and a DynamoDB table belong to one account in one Region
+
+Every row above is about a *resolver* addressing the wrong record. This one is about the
+record itself: two of the keys the resolvers address were not qualified enough to hold the
+resources AWS lets a caller create. Before #943 a Lambda function was stored under
+`function:{name}` and a DynamoDB table under `table:{account}/{name}`. Both are now
+`{kind}:{account}/{region}/{name}` — `function:123456789012/us-east-1/orders` and
+`table:123456789012/us-east-1/orders` — which is the shape Glue, Timestream and AppSync
+already used and the shape CloudFormation's tag stamper keys on.
+
+What that changes is not a mis-addressed tag but a refusal. A key that cannot tell two
+resources apart makes the second one impossible to create:
+
+| Before #943 | Now |
+|---|---|
+| Two accounts each creating a function named `orders` — the second answered `ResourceConflictException`/409 | both succeed, and each `GetFunction` reports its own account's ARN |
+| One account creating a function named `orders` in `us-east-1` and in `us-west-2` — the second answered 409 | both succeed |
+| One account creating a table named `orders` in `us-east-1` and in `us-west-2` — the second answered `ResourceInUseException`/400 | both succeed, and each `DescribeTable` reports its own Region's ARN |
+| A `TagResources` naming another account's function ARN wrote to the caller's own function of that name | it writes to the function the ARN names, or to nothing |
+
+**The two halves rest on different provenance, and the difference is worth stating.**
+DynamoDB's is quoted: `CreateTable`'s own description says "In an AWS account, table names
+must be unique within each Region. That is, you can have two tables with same name if you
+create the tables in different Regions." Nothing needs inferring, and the code the old key
+produced — `ResourceInUseException`, whose first listed cause is "[y]ou attempted to
+recreate an existing table" — is on the same page at HTTP 400.
+
+Lambda's is **the weaker of the two, and it is an inference rather than a quotation**.
+`CreateFunction` states nothing at all about the scope a function name is unique within.
+The whole of the argument is the shape of the value it hands back: `FunctionArn`'s published
+pattern is
+`arn:(aws[a-zA-Z-]*)?:lambda:[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\d{1}:\d{12}:function:[a-zA-Z0-9-_\.]+`,
+so the identifier AWS mints for a function qualifies its name by a Region and an account —
+and an identifier that carries a scope is not an identifier of something outside it. That
+is substrate's reading, not AWS's sentence. It is the same reasoning the ARN-format
+argument gave for SQS in #826 and for DynamoDB in #845, and it points the same way in all
+three cases; recording it as an inference is what distinguishes it from the DynamoDB half
+rather than a reason to doubt it.
+
+**Three sibling keys moved with the function key, and not moving them would have been a new
+leak of its own.** A function's resource policy, its stored zip and its event-invoke
+configuration were keyed `function_policy:{name}`, `function_zip:{name}` and
+`function_invoke_config:{name}`. Qualifying only `function:` would have left two accounts'
+same-named functions holding one policy, one code payload and one invoke configuration
+between them — so `AddPermission` in one account would have granted access on the other's
+function. Every key family in both services carries the full scope.
+
+**One behaviour changed that no key required.** A Lambda event source mapping can name a
+queue in one account and a function in another, and the poller invoked the function using
+the *event source's* account and Region. That was already wrong and was invisible while the
+function key carried neither: the invoke now resolves the function in the account and Region
+its own `FunctionARN` names.
+
+**No stored state needs migrating, and that is a fact about substrate rather than a
+decision.** The only `StateManager` implementation in non-test code is
+`NewMemoryStateManager`, and the server constructs it unconditionally — a SQLite backend is
+deferred to #2 — so a key exists only for the lifetime of one process and there is nothing
+written under the old shape for a later run to fail to find. The rename is therefore
+same-process and needs no compatibility path, which is stated here rather than left implied.
+When a persistent backend does arrive, a key-shape change stops being free and this
+paragraph is the note that says so: a fixture recorded against the old key would then need
+re-seeding, exactly as the account default's does above.
+
 ### Which failure gets which error code
 
 A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
@@ -8621,11 +8705,11 @@ is "safe to retry" pointed at a request that could only fail again. Wherever the
 resolver builds an account- and Region-qualified state key from the ARN, a
 foreign-account or foreign-Region ARN takes this row rather than one of its own: it
 addresses a key nothing is stored at, so the refusal is emergent rather than a
-separate guard. One arm does not: Lambda's key is `function:{name}` with no account
-in it, so a foreign-account function ARN still reaches the caller's own function of
-that name. That is #937, not this row. An S3 bucket ARN — `arn:aws:s3:::{name}` —
-carries no account or Region to honour in the first place, so the question does not
-arise there.
+separate guard. Lambda's arm was the one exception until #943 — its key was
+`function:{name}` with no account in it, so a foreign-account function ARN reached the
+caller's own function of that name — and it now qualifies by both halves like the rest.
+An S3 bucket ARN — `arn:aws:s3:::{name}` — carries no account or Region to honour in the
+first place, so the question does not arise there.
 
 AWS publishes a contradiction about this field, recorded here rather than resolved:
 `FailureInfo.ErrorCode` carries "Valid Values: `InternalServiceException` |
