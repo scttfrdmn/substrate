@@ -710,8 +710,8 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	// No key-state guard, deliberately: see [kmsRotationKeyStateError], which its two callers use and
-	// this one must not. Reading whether rotation is on is permitted in every state substrate can
+	// No key-state guard, deliberately: see [kmsKeyStateError], which its seven callers use and this one
+	// must not. Reading whether rotation is on is permitted in every state substrate can
 	// produce, and API_GetKeyRotationStatus publishes neither DisabledException nor
 	// KMSInvalidStateException.
 	out := map[string]interface{}{
@@ -720,17 +720,36 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
-// kmsRotationKeyStateError reports the refusal EnableKeyRotation and DisableKeyRotation owe a key
-// whose key state does not permit them, or nil when the state permits the call.
+// kmsKeyStateError reports the refusal an operation owes a key whose key state does not permit it, or
+// nil when the state permits the call.
 //
-// Both operations carry the sentence "the KMS key that you use for this operation must be in a
-// compatible key state", and the developer guide's "Key states of AWS KMS keys" table gives them one
-// row each with identical contents: Enabled is permitted, Disabled is refused with footnote [1]
-// (DisabledException) and pending deletion is refused with footnote [3]
-// (KMSInvalidStateException). The order below follows from that split rather than from convenience —
-// ScheduleKeyDeletion writes KeyState and clears Enabled together (see [KMSPlugin.scheduleKeyDeletion]),
-// so a lone !key.Enabled test would answer DisabledException for a key pending deletion, which is the
-// wrong one of the two codes AWS publishes and points a caller at the wrong remedy.
+// Seven operations call this: EnableKeyRotation and DisableKeyRotation, which #949 brought here, and
+// the five cryptographic operations — Encrypt, Decrypt, GenerateDataKey,
+// GenerateDataKeyWithoutPlaintext and ReEncrypt — which #961 added. All seven carry the sentence "the
+// KMS key that you use for this operation must be in a compatible key state", and in the developer
+// guide's "Key states of AWS KMS keys" table all seven refuse a Disabled key with footnote [1],
+// "DisabledException: <key ARN> is disabled".
+//
+// The order below follows from that split rather than from convenience. ScheduleKeyDeletion writes
+// KeyState and clears Enabled together (see [KMSPlugin.scheduleKeyDeletion]), so a lone !key.Enabled
+// test would answer DisabledException for a key pending deletion, which points a caller at the wrong
+// remedy: EnableKey alone recovers a Disabled key, while a key pending deletion needs
+// CancelKeyDeletion and then EnableKey, which #963 made a genuinely two-step recovery.
+//
+// The pending-deletion code differs in provenance between the two groups, and the same value is
+// correct for both:
+//
+//   - For the rotation pair the table gives footnote [3] alone, "KMSInvalidStateException: <key ARN> is
+//     pending deletion (or pending replica deletion)". Answering anything else was simply wrong, which
+//     is what #949 fixed.
+//   - For the five cryptographic operations the cell reads "[2] or [3]", and footnote [2] is the *same
+//     sentence under DisabledException*. So AWS admits both codes there and substrate's earlier
+//     DisabledException was within what the table publishes. #961 chose KMSInvalidStateException
+//     anyway, and that choice is **substrate's reading, not a match to a single published code**: it is
+//     the only one of the two that lets a caller's error handler tell Disabled from PendingDeletion by
+//     code, which is the whole reason an emulator models the distinction at all. It also gives one key
+//     state one code across the plugin. The message names the state either way, so the two remain
+//     distinguishable even for a caller that matches on the code alone.
 //
 // GetKeyRotationStatus deliberately does not call this. Its row in the same table permits Enabled,
 // Disabled *and* pending deletion alike, and API_GetKeyRotationStatus publishes neither code — so a
@@ -738,12 +757,10 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 // refusal AWS does not have. [TestKMSGetKeyRotationStatus_AnswersForADisabledAndAPendingDeletionKey]
 // pins that.
 //
-// The three cryptographic operations that already answer DisabledException — Encrypt, Decrypt and
-// GenerateDataKey — have the same pending-deletion gap, since their table rows are footnote [3] too
-// and API_Encrypt publishes KMSInvalidStateException at 400 beside DisabledException. That is #961
-// and is left alone here, because widening #949 to three cryptographic operations would put a
-// separate wire change in the same diff.
-func kmsRotationKeyStateError(key *KMSKey) *AWSError {
+// EnableKey and DisableKey must not call this either, and for a different reason: their rows permit a
+// Disabled key, so the !key.Enabled arm here would refuse a call AWS accepts. They need the
+// PendingDeletion arm alone, which is #968.
+func kmsKeyStateError(key *KMSKey) *AWSError {
 	if key.KeyState == kmsKeyStatePendingDeletion {
 		return kmsInvalidKeyState(key.KeyID, key.KeyState)
 	}
@@ -775,7 +792,7 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 	// Before the write, so a refusal leaves RotationEnabled as it was rather than half-applying the
 	// call it declined — the property #949 asks to be asserted by reading GetKeyRotationStatus back.
-	if stateErr := kmsRotationKeyStateError(key); stateErr != nil {
+	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
 	key.RotationEnabled = true
@@ -808,7 +825,7 @@ func (p *KMSPlugin) disableKeyRotation(ctx *RequestContext, req *AWSRequest) (*A
 	// Refused on the same key states as its sibling: API_DisableKeyRotation publishes the identical
 	// seven-error list, so "rotation is already off, so turning it off cannot hurt" is not a reading
 	// AWS's table supports.
-	if stateErr := kmsRotationKeyStateError(key); stateErr != nil {
+	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
 	key.RotationEnabled = false
@@ -1123,8 +1140,10 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	if !key.Enabled {
-		return nil, kmsKeyDisabled(keyID)
+	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
+	// different codes, and until #961 both answered DisabledException.
+	if stateErr := kmsKeyStateError(key); stateErr != nil {
+		return nil, stateErr
 	}
 
 	plaintext, err := base64.StdEncoding.DecodeString(input.Plaintext)
@@ -1166,8 +1185,10 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	if !key.Enabled {
-		return nil, kmsKeyDisabled(keyID)
+	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
+	// different codes, and until #961 both answered DisabledException.
+	if stateErr := kmsKeyStateError(key); stateErr != nil {
+		return nil, stateErr
 	}
 
 	out := map[string]interface{}{
@@ -1200,8 +1221,10 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	if !key.Enabled {
-		return nil, kmsKeyDisabled(keyID)
+	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
+	// different codes, and until #961 both answered DisabledException.
+	if stateErr := kmsKeyStateError(key); stateErr != nil {
+		return nil, stateErr
 	}
 
 	// Generate a stub 32-byte data key.
@@ -1241,6 +1264,12 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
+	// Added by #961, where the other four cryptographic operations only had the wrong code for one of
+	// two states: this one refused *nothing*, so a disabled key and a key pending deletion both minted a
+	// data key and answered 200. Its row in the key-state table is identical to Encrypt's.
+	if stateErr := kmsKeyStateError(key); stateErr != nil {
+		return nil, stateErr
+	}
 
 	dataKeyHex := randomHex(16)
 	ciphertext := kmsEncryptStub(keyID, []byte(dataKeyHex))
@@ -1252,6 +1281,36 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// reEncrypt decrypts a ciphertext under the key that produced it and re-encrypts the plaintext under a
+// destination key.
+//
+// It is the one cryptographic operation with two keys, and #961 changed what that means here. Before
+// it, only the destination key was loaded: the source key ID came out of the ciphertext and was
+// discarded, so a source key that was disabled, pending deletion or deleted outright still
+// re-encrypted, and the SourceKeyId in the response was **the ciphertext blob** rather than any key
+// identifier at all.
+//
+// Both keys are now checked, and the table does not exempt either. API_ReEncrypt carries the same
+// "must be in a compatible key state" sentence as the other four, publishes DisabledException and
+// KMSInvalidStateException alike, and its "Required permissions" are split across the two keys —
+// kms:ReEncryptFrom on the source and kms:ReEncryptTo on the destination — so AWS treats the source as
+// a key the operation *uses*, not merely as a value inside the ciphertext. The one footnote that would
+// have exempted a pending-deletion source, [10] ("if the source KMS key is pending deletion, the
+// command succeeds"), belongs to UpdateAlias's row, not to this one; ReEncrypt's cell is a plain
+// "[2] or [3]". Refusing both is therefore substrate's reading of an unsplit row rather than a
+// published rule, and it is the conservative direction: it cannot let through a call AWS refuses.
+//
+// The source is checked first, following the operation's own description — "Decrypts ciphertext and
+// then reencrypts it" — so a caller with two unusable keys is told about the half that fails first.
+//
+// The source key is loaded from the *caller's* account and Region for the reason [KMSPlugin.decrypt]
+// records: the key ID came out of the ciphertext, so there is no ARN to take an account from. AWS
+// permits a cross-account source here; substrate cannot address one until a ciphertext carries more
+// than a bare key ID, which is the stub's shape (see [kmsEncryptStub]).
+//
+// Seven request members and four response members are still unmodelled, SourceKeyId's *request* form
+// among them — so the IncorrectKeyException AWS publishes when it names the wrong key is unreachable.
+// That is #969; this handler fixes SourceKeyId's value, not its enforcement.
 func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		CiphertextBlob   string `json:"CiphertextBlob"`
@@ -1261,12 +1320,23 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, kmsInvalidBody()
 	}
 
-	_, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
+	sourceKeyID, plaintext, err := kmsDecryptStub([]byte(input.CiphertextBlob))
 	if err != nil {
 		return nil, &AWSError{Code: "InvalidCiphertextException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
 	goCtx := context.Background()
+	sourceKey, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, sourceKeyID)
+	if err != nil {
+		return nil, err
+	}
+	if sourceKey == nil {
+		return nil, kmsNotFound("Source key not found")
+	}
+	if stateErr := kmsKeyStateError(sourceKey); stateErr != nil {
+		return nil, stateErr
+	}
+
 	dest, resolveErr := p.resolveKeyTarget(goCtx, ctx, input.DestinationKeyID)
 	if resolveErr != nil {
 		return nil, resolveErr
@@ -1279,12 +1349,19 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if destKey == nil {
 		return nil, kmsNotFound("Destination key not found")
 	}
+	if stateErr := kmsKeyStateError(destKey); stateErr != nil {
+		return nil, stateErr
+	}
 
 	newCiphertext := kmsEncryptStub(destKeyID, plaintext)
+	// SourceKeyId is the source key's ARN, matching the sample response on API_ReEncrypt and the
+	// element's own gloss, "unique identifier of the KMS key used to originally encrypt the data". It
+	// held input.CiphertextBlob until #961 — a value that is not an identifier of anything, and one a
+	// caller round-tripping it into a DescribeKey could only ever get NotFoundException from.
 	out := map[string]interface{}{
 		"KeyId":          destKey.ARN,
 		"CiphertextBlob": string(newCiphertext),
-		"SourceKeyId":    input.CiphertextBlob,
+		"SourceKeyId":    sourceKey.ARN,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }

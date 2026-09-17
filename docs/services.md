@@ -9216,11 +9216,11 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | DeleteAlias | |
 | UpdateAlias | Same refusal as `CreateAlias` |
 | ListAliases | |
-| Encrypt | Returns ciphertext blob (base64-encoded stub) |
-| Decrypt | Returns plaintext (stub pass-through) |
-| GenerateDataKey | |
-| GenerateDataKeyWithoutPlaintext | |
-| ReEncrypt | |
+| Encrypt | Returns ciphertext blob (base64-encoded stub); refuses a disabled key and a key pending deletion, with a different code for each — see below |
+| Decrypt | Returns plaintext (stub pass-through); same refusals as `Encrypt` |
+| GenerateDataKey | Same refusals as `Encrypt` |
+| GenerateDataKeyWithoutPlaintext | Same refusals as `Encrypt` |
+| ReEncrypt | Checks the key state of **both** keys, and reports the source key's ARN — see below |
 
 ### A `KeyId` is resolved from its own ARN, not from the caller
 
@@ -9371,6 +9371,10 @@ The four unreachable states are recorded rather than implemented because
 them could only be exercised by fabricating a key record, which is the kind of test
 that proves nothing about the wire.
 
+The same guard now serves the five cryptographic operations, which reached it by a
+different route and with one code chosen rather than published — see *The five
+cryptographic operations refuse the same two key states* below.
+
 ### Cancelling a deletion leaves the key disabled, not enabled
 
 `API_CancelKeyDeletion`'s first sentence is the whole of it: *"Cancels the deletion
@@ -9480,6 +9484,108 @@ a body that omits the member and a body sending an explicit `0` are indistinguis
 AWS refuses `0` and defaults an absent value. Substrate defaults both, because
 telling them apart needs a `*int` and defaulting is by far the commoner intent — worth
 changing only if a caller is ever shown to send an explicit zero.
+
+### The five cryptographic operations refuse the same two key states
+
+`Encrypt`, `Decrypt`, `GenerateDataKey`, `GenerateDataKeyWithoutPlaintext` and
+`ReEncrypt` share one row in the developer guide's *Key states of AWS KMS keys*
+table, and each of their reference pages carries the same *"the KMS key that you use
+for this operation must be in a compatible key state"* sentence. Substrate honoured
+that unevenly. Three of the five checked whether the key was enabled and answered
+`DisabledException`; **two checked nothing at all**, so a disabled key generated a
+data key or re-encrypted a ciphertext and answered `200`.
+
+| Key state | Substrate answers | Provenance |
+|-----------|-------------------|------------|
+| `Enabled` | 200 | Permitted |
+| `Disabled` | `DisabledException`/400 | Footnote `[1]` — *"DisabledException: `<key ARN>` is disabled"* |
+| `PendingDeletion` | `KMSInvalidStateException`/400 | Cell reads `[2] or [3]`; **substrate's reading**, below |
+| `PendingImport`, `Unavailable`, `Creating`, `Updating` | — | Refused by AWS, unreachable in substrate: nothing writes them |
+
+**The missing refusal was the larger half.**
+`GenerateDataKeyWithoutPlaintext` and `ReEncrypt` had no key check of any kind
+between loading the record and returning a ciphertext. A caller that disabled a key
+to stop it being used could still use it through either operation, which is the
+defect class #923 catalogued rather than a question of which code to answer.
+
+**The pending-deletion code is a decision, not a correction.** This is worth stating
+plainly, because the neighbouring rotation section looks like the same finding and is
+not. For the rotation pair the table's pending-deletion cell is footnote `[3]` alone,
+so `DisabledException` there was simply the wrong one of two published codes. For
+these five the cell reads **`[2] or [3]`**, and the two footnotes are the same
+sentence under two different codes:
+
+- `[2]` — *"DisabledException: `<key ARN>` is pending deletion (or pending replica deletion)"*
+- `[3]` — *"KMSInvalidStateException: `<key ARN>` is pending deletion (or pending replica deletion)"*
+
+So AWS admits either code here, and the `DisabledException` substrate answered before
+was **inside** what the table publishes. `KMSInvalidStateException` is chosen anyway,
+and the reason is what an emulator is for: it is the only one of the two choices under
+which a consumer's error handler can tell the two states apart by code, and the two
+states carry different remedies — `EnableKey` for a disabled key, `CancelKeyDeletion`
+*then* `EnableKey` for one pending deletion, which is a genuine two-step recovery. It
+also gives one key state one code across the whole plugin, matching what the rotation
+pair and the deletion pair already answer.
+
+**The message names the state either way**, so the distinction survives even for a
+caller that matches on the code alone. Before this, both states answered *"is not
+enabled"*, so neither the code nor the message told a caller which remedy applied — and
+that, rather than the code, was the observable defect. A test compares the two answers
+from one operation directly, so a later change cannot collapse them again by either
+route: one code for both states, or two codes with one message.
+
+**`GetKeyRotationStatus` remains deliberately unguarded**, and `EnableKey` and
+`DisableKey` are guarded by neither this nor the rotation rule: their rows *permit* a
+disabled key, so the enabled-check would refuse a call AWS accepts. They need the
+pending-deletion arm alone, which is tracked separately.
+
+### `ReEncrypt` has two keys, and both are checked
+
+`ReEncrypt` is the only cryptographic operation with two keys, and substrate loaded
+one. The source key's identifier came out of the ciphertext and was discarded, so a
+source key that was disabled, pending deletion, or absent from state entirely still
+re-encrypted successfully.
+
+Both keys are now resolved, loaded and state-checked. Nothing in AWS's table splits
+the two — `ReEncrypt` has a single row whose pending-deletion cell is a plain
+`[2] or [3]` — and three things point the same way: the page publishes
+`DisabledException` and `KMSInvalidStateException` without qualification, its
+*Required permissions* are split across the two keys (`kms:ReEncryptFrom` on the
+source, `kms:ReEncryptTo` on the destination), and cross-account use is documented
+for both. AWS therefore treats the source as a key the operation *uses*, not as a
+value inside a blob.
+
+One footnote would have exempted a pending-deletion source — `[10]`, *"if the source
+KMS key is pending deletion, the command succeeds. If the destination KMS key is
+pending deletion, the command fails"* — but it belongs to **`UpdateAlias`**'s row,
+not to this one. Refusing both keys is therefore substrate's reading of an unsplit
+row, and it is the conservative direction: it cannot admit a call AWS refuses.
+
+**The source is checked first**, following the operation's own description —
+*"Decrypts ciphertext and then reencrypts it entirely within AWS KMS"* — so a caller
+whose source and destination are both unusable hears about the decrypt half. AWS
+publishes no ordering, so this is recorded rather than matched, and a test pins it
+with a bad source and an absent destination, where the two candidate answers are
+visibly different.
+
+**`SourceKeyId` is the source key's ARN.** It held the **ciphertext blob** before
+#961 — a value that identifies nothing, and one a caller round-tripping it into
+`DescribeKey` could only get `NotFoundException` from. `API_ReEncrypt` glosses the
+element *"unique identifier of the KMS key used to originally encrypt the data"* and
+its sample response renders a key ARN, so that is what substrate reports; the test
+asserts the round trip through `DescribeKey` rather than string equality, because a
+bare key ID would satisfy the weaker assertion while diverging from the sample.
+
+The source key is loaded from the **caller's** account and Region, for the reason
+`Decrypt` records: the key ID came out of the ciphertext, so there is no ARN to take
+an account from. AWS permits a cross-account source here and substrate cannot address
+one, because its stub ciphertext carries a bare key ID and nothing more. That is a
+limitation of the stub cipher, not of the resolver.
+
+Seven of `ReEncrypt`'s nine request members and four of its seven response members
+are still unmodelled — including `SourceKeyId` as a *request* parameter, whose absence
+makes the `IncorrectKeyException` AWS publishes for a mismatched source unreachable.
+Those are tracked in #969; this change fixes the member's value, not its enforcement.
 
 ### A key is reachable through the tagging API
 
