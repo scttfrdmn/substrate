@@ -1,7 +1,6 @@
 package emulator_test
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -414,21 +413,23 @@ func TestRDSPlugin_UnknownAction(t *testing.T) {
 func TestRDSPlugin_Pagination(t *testing.T) {
 	ts := newRDSTestServer(t)
 
-	// Create multiple instances.
-	for i := 0; i < 3; i++ {
+	// Create enough instances to fill a page at the smallest MaxRecords AWS accepts.
+	for _, id := range markerTestIDs("pg-db-", 21) {
 		resp := rdsRequest(t, ts, map[string]string{
 			"Action":               "CreateDBInstance",
-			"DBInstanceIdentifier": fmt.Sprintf("pg-db-%d", i),
+			"DBInstanceIdentifier": id,
 			"DBInstanceClass":      "db.t3.micro",
 			"Engine":               "mysql",
 		})
 		rdsBody(t, resp)
 	}
 
-	// Describe with MaxRecords=2 to force pagination.
+	// Describe at the documented minimum page size to force pagination. This asked for
+	// two records until #913; both families publish "Constraints: Minimum 20, maximum
+	// 100", so a two-record page is one real RDS refuses.
 	resp := rdsRequest(t, ts, map[string]string{
 		"Action":     "DescribeDBInstances",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 	})
 	body := rdsBody(t, resp)
 	if resp.StatusCode != http.StatusOK {

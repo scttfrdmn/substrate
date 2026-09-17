@@ -1,7 +1,6 @@
 package emulator_test
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -745,23 +744,26 @@ func TestElastiCachePlugin_MissingParams(t *testing.T) {
 func TestElastiCachePlugin_CacheClusterPagination(t *testing.T) {
 	ts := newElastiCacheTestServer(t)
 
-	for i := range 5 {
+	// Twenty-two clusters, so that a page at the documented minimum of twenty leaves a
+	// second page of two. This test asked for two-record pages until #913, which is a page
+	// size real ElastiCache refuses ("Constraints: minimum 20; maximum 100").
+	for _, id := range markerTestIDs("pg-cluster-", 22) {
 		resp := ecRequest(t, ts, map[string]string{
 			"Action":         "CreateCacheCluster",
-			"CacheClusterId": fmt.Sprintf("pg-cluster-%d", i),
+			"CacheClusterId": id,
 			"CacheNodeType":  "cache.t3.micro",
 			"Engine":         "redis",
 			"NumCacheNodes":  "1",
 		})
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("CreateCacheCluster %d status %d", i, resp.StatusCode)
+			t.Fatalf("CreateCacheCluster %s status %d", id, resp.StatusCode)
 		}
 	}
 
-	// Page 1: max 2.
+	// Page 1: the first twenty.
 	resp := ecRequest(t, ts, map[string]string{
 		"Action":     "DescribeCacheClusters",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 	})
 	body := ecBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
@@ -778,7 +780,7 @@ func TestElastiCachePlugin_CacheClusterPagination(t *testing.T) {
 	// cursor was skipping records (#887). A marker the caller invents is now refused.
 	resp = ecRequest(t, ts, map[string]string{
 		"Action":     "DescribeCacheClusters",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 		"Marker":     page1.Marker,
 	})
 	body = ecBody(t, resp)

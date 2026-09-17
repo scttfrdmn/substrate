@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -100,23 +101,53 @@ func assertNoDuplicates(t *testing.T, want []string, got []string) {
 	}
 }
 
+// markerTestPageSize is the MaxRecords every paging test here asks for.
+//
+// It is the smallest page AWS accepts — both families publish "Constraints: Minimum 20,
+// maximum 100" — and every paging test in the tree used to ask for 2, at eleven request sites
+// across eight tests, which is a page size real RDS and ElastiCache refuse. Those tests passed
+// only because substrate honored it, which is the divergence #913 records; they now page at
+// the documented minimum, which is why each of them creates twenty-odd records to get a
+// second page.
+//
+// Identifiers are zero-padded (`mk-db-07`, not `mk-db-7`) because the cursor and the
+// listing order are lexicographic over the state key, so an unpadded `mk-db-10` would sort
+// before `mk-db-9` and the expected page contents would no longer be the numeric order.
+const markerTestPageSize = "20"
+
+// markerTestIDs renders n zero-padded identifiers under prefix, in the lexicographic order
+// the describes report them in.
+//
+// The padding is as wide as the largest index needs, so the numeric order and the
+// lexicographic order are the same one however many records a caller asks for: at a fixed
+// width of two, a set of 101 would sort `-100` before `-11`.
+func markerTestIDs(prefix string, n int) []string {
+	width := max(len(strconv.Itoa(n-1)), 2)
+	ids := make([]string, 0, n)
+	for i := range n {
+		ids = append(ids, fmt.Sprintf("%s%0*d", prefix, width, i))
+	}
+	return ids
+}
+
 func TestRDSDescribeDBInstancesMarkerNamesTheLastRecordOfThePage(t *testing.T) {
 	ts := newRDSTestServer(t)
-	for i := range 3 {
+	want := markerTestIDs("mk-db-", 21)
+	for _, id := range want {
 		resp := rdsRequest(t, ts, map[string]string{
 			"Action":               "CreateDBInstance",
-			"DBInstanceIdentifier": fmt.Sprintf("mk-db-%d", i),
+			"DBInstanceIdentifier": id,
 			"DBInstanceClass":      "db.t3.micro",
 			"Engine":               "mysql",
 		})
 		if body := rdsBody(t, resp); resp.StatusCode != http.StatusOK {
-			t.Fatalf("CreateDBInstance %d status %d, body: %s", i, resp.StatusCode, body)
+			t.Fatalf("CreateDBInstance %s status %d, body: %s", id, resp.StatusCode, body)
 		}
 	}
 
 	resp := rdsRequest(t, ts, map[string]string{
 		"Action":     "DescribeDBInstances",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 	})
 	body := rdsBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
@@ -124,19 +155,19 @@ func TestRDSDescribeDBInstancesMarkerNamesTheLastRecordOfThePage(t *testing.T) {
 	}
 	page := rdsInstancePage(t, body)
 
-	if got, want := page.IDs, []string{"mk-db-0", "mk-db-1"}; !slices.Equal(got, want) {
-		t.Errorf("page 1 = %v, want %v", got, want)
+	if got := page.IDs; !slices.Equal(got, want[:20]) {
+		t.Errorf("page 1 = %v, want %v", got, want[:20])
 	}
 	// The Marker is the last record of the page, not a count of the records before it.
 	// A caller cannot rely on the encoding, but substrate's own contract has to be
 	// pinned somewhere: an offset here would page correctly until the set changed.
-	if want := base64.StdEncoding.EncodeToString([]byte("mk-db-1")); page.Marker != want {
-		t.Errorf("page 1 Marker = %q, want %q", page.Marker, want)
+	if wantMarker := base64.StdEncoding.EncodeToString([]byte(want[19])); page.Marker != wantMarker {
+		t.Errorf("page 1 Marker = %q, want %q", page.Marker, wantMarker)
 	}
 
 	resp = rdsRequest(t, ts, map[string]string{
 		"Action":     "DescribeDBInstances",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 		"Marker":     page.Marker,
 	})
 	body = rdsBody(t, resp)
@@ -144,8 +175,8 @@ func TestRDSDescribeDBInstancesMarkerNamesTheLastRecordOfThePage(t *testing.T) {
 		t.Fatalf("page 2 status %d, body: %s", resp.StatusCode, body)
 	}
 	page2 := rdsInstancePage(t, body)
-	if got, want := page2.IDs, []string{"mk-db-2"}; !slices.Equal(got, want) {
-		t.Errorf("page 2 = %v, want %v", got, want)
+	if got := page2.IDs; !slices.Equal(got, want[20:]) {
+		t.Errorf("page 2 = %v, want %v", got, want[20:])
 	}
 	if page2.Marker != "" {
 		t.Errorf("the last page carries Marker %q, want none", page2.Marker)
@@ -155,21 +186,22 @@ func TestRDSDescribeDBInstancesMarkerNamesTheLastRecordOfThePage(t *testing.T) {
 // TestRDSDescribeDBInstancesMarkerSurvivesADeletionBetweenPages is the defect #887
 // records: an offset Marker skips a record when the listing shrinks behind the cursor.
 //
-// Five instances are paged two at a time and the first is deleted after page one. The
-// offset cursor answered page two as `items[2:]` of a now-four-record listing, so
-// mk-db-2 was never reported — the caller's loop terminated having seen four of the
-// five records with no indication anything was missing.
+// Twenty-one instances are paged at the documented minimum of twenty and the first is
+// deleted after page one. The offset cursor answered page two as `items[20:]` of a
+// now-twenty-record listing, so the last record was never reported — the caller's loop
+// terminated having seen twenty of the twenty-one with no indication anything was missing.
 func TestRDSDescribeDBInstancesMarkerSurvivesADeletionBetweenPages(t *testing.T) {
 	ts := newRDSTestServer(t)
-	for i := range 5 {
+	want := markerTestIDs("mk-db-", 21)
+	for _, id := range want {
 		resp := rdsRequest(t, ts, map[string]string{
 			"Action":               "CreateDBInstance",
-			"DBInstanceIdentifier": fmt.Sprintf("mk-db-%d", i),
+			"DBInstanceIdentifier": id,
 			"DBInstanceClass":      "db.t3.micro",
 			"Engine":               "mysql",
 		})
 		if body := rdsBody(t, resp); resp.StatusCode != http.StatusOK {
-			t.Fatalf("CreateDBInstance %d status %d, body: %s", i, resp.StatusCode, body)
+			t.Fatalf("CreateDBInstance %s status %d, body: %s", id, resp.StatusCode, body)
 		}
 	}
 
@@ -181,7 +213,7 @@ func TestRDSDescribeDBInstancesMarkerSurvivesADeletionBetweenPages(t *testing.T)
 	for page := 1; page <= 5; page++ {
 		params := map[string]string{
 			"Action":     "DescribeDBInstances",
-			"MaxRecords": "2",
+			"MaxRecords": markerTestPageSize,
 		}
 		if marker != "" {
 			params["Marker"] = marker
@@ -195,11 +227,11 @@ func TestRDSDescribeDBInstancesMarkerSurvivesADeletionBetweenPages(t *testing.T)
 		got = append(got, decoded.IDs...)
 
 		if !deleted {
-			// mk-db-0 has already been reported and sorts before the marker, so
+			// mk-db-00 has already been reported and sorts before the marker, so
 			// removing it must not move any later record.
 			resp = rdsRequest(t, ts, map[string]string{
 				"Action":               "DeleteDBInstance",
-				"DBInstanceIdentifier": "mk-db-0",
+				"DBInstanceIdentifier": want[0],
 			})
 			if b := rdsBody(t, resp); resp.StatusCode != http.StatusOK {
 				t.Fatalf("DeleteDBInstance status %d, body: %s", resp.StatusCode, b)
@@ -216,43 +248,45 @@ func TestRDSDescribeDBInstancesMarkerSurvivesADeletionBetweenPages(t *testing.T)
 	if marker != "" {
 		t.Fatalf("paging did not terminate; last Marker %q, got %v", marker, got)
 	}
-	assertNoDuplicates(t, []string{"mk-db-0", "mk-db-1", "mk-db-2", "mk-db-3", "mk-db-4"}, got)
+	assertNoDuplicates(t, want, got)
 }
 
 // TestRDSDescribeDBInstancesFullLastPageCarriesNoMarker pins the truncation rule: the
-// Marker is emitted when a further record exists, not when a page fills up. Four
-// records paged two at a time is the case that distinguishes them.
+// Marker is emitted when a further record exists, not when a page fills up. Forty records
+// paged at the documented minimum of twenty is the case that distinguishes them — page two
+// fills exactly and there is nothing after it.
 func TestRDSDescribeDBInstancesFullLastPageCarriesNoMarker(t *testing.T) {
 	ts := newRDSTestServer(t)
-	for i := range 4 {
+	want := markerTestIDs("mk-db-", 40)
+	for _, id := range want {
 		resp := rdsRequest(t, ts, map[string]string{
 			"Action":               "CreateDBInstance",
-			"DBInstanceIdentifier": fmt.Sprintf("mk-db-%d", i),
+			"DBInstanceIdentifier": id,
 			"DBInstanceClass":      "db.t3.micro",
 			"Engine":               "mysql",
 		})
 		if body := rdsBody(t, resp); resp.StatusCode != http.StatusOK {
-			t.Fatalf("CreateDBInstance %d status %d, body: %s", i, resp.StatusCode, body)
+			t.Fatalf("CreateDBInstance %s status %d, body: %s", id, resp.StatusCode, body)
 		}
 	}
 
 	resp := rdsRequest(t, ts, map[string]string{
 		"Action":     "DescribeDBInstances",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 	})
 	first := rdsInstancePage(t, rdsBody(t, resp))
 	if first.Marker == "" {
-		t.Fatal("page 1 of 4 records carries no Marker")
+		t.Fatalf("page 1 of %d records carries no Marker", len(want))
 	}
 
 	resp = rdsRequest(t, ts, map[string]string{
 		"Action":     "DescribeDBInstances",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 		"Marker":     first.Marker,
 	})
 	second := rdsInstancePage(t, rdsBody(t, resp))
-	if len(second.IDs) != 2 {
-		t.Errorf("page 2 = %v, want two records", second.IDs)
+	if len(second.IDs) != 20 {
+		t.Errorf("page 2 = %v, want twenty records", second.IDs)
 	}
 	if second.Marker != "" {
 		t.Errorf("a full last page carries Marker %q, want none — it costs the caller a round trip to an empty page", second.Marker)
@@ -290,7 +324,7 @@ func TestRDSDescribeMarkerItDidNotIssueIsRefused(t *testing.T) {
 
 func TestRDSDescribeDBClustersMarkerPagesEveryClusterOnce(t *testing.T) {
 	ts := newRDSTestServer(t)
-	want := []string{"mk-cl-0", "mk-cl-1", "mk-cl-2", "mk-cl-3", "mk-cl-4"}
+	want := markerTestIDs("mk-cl-", 21)
 	for _, id := range want {
 		resp := rdsRequest(t, ts, map[string]string{
 			"Action":              "CreateDBCluster",
@@ -306,7 +340,7 @@ func TestRDSDescribeDBClustersMarkerPagesEveryClusterOnce(t *testing.T) {
 	var got []string
 	marker := ""
 	for page := 1; page <= 6; page++ {
-		params := map[string]string{"Action": "DescribeDBClusters", "MaxRecords": "2"}
+		params := map[string]string{"Action": "DescribeDBClusters", "MaxRecords": markerTestPageSize}
 		if marker != "" {
 			params["Marker"] = marker
 		}
@@ -330,7 +364,7 @@ func TestRDSDescribeDBClustersMarkerPagesEveryClusterOnce(t *testing.T) {
 
 func TestElastiCacheDescribeCacheClustersMarkerSurvivesADeletionBetweenPages(t *testing.T) {
 	ts := newElastiCacheTestServer(t)
-	want := []string{"mk-ec-0", "mk-ec-1", "mk-ec-2", "mk-ec-3", "mk-ec-4"}
+	want := markerTestIDs("mk-ec-", 21)
 	for _, id := range want {
 		resp := ecRequest(t, ts, map[string]string{
 			"Action":         "CreateCacheCluster",
@@ -348,7 +382,7 @@ func TestElastiCacheDescribeCacheClustersMarkerSurvivesADeletionBetweenPages(t *
 	marker := ""
 	deleted := false
 	for page := 1; page <= 6; page++ {
-		params := map[string]string{"Action": "DescribeCacheClusters", "MaxRecords": "2"}
+		params := map[string]string{"Action": "DescribeCacheClusters", "MaxRecords": markerTestPageSize}
 		if marker != "" {
 			params["Marker"] = marker
 		}
@@ -363,7 +397,7 @@ func TestElastiCacheDescribeCacheClustersMarkerSurvivesADeletionBetweenPages(t *
 		if !deleted {
 			resp = ecRequest(t, ts, map[string]string{
 				"Action":         "DeleteCacheCluster",
-				"CacheClusterId": "mk-ec-0",
+				"CacheClusterId": want[0],
 			})
 			if b := ecBody(t, resp); resp.StatusCode != http.StatusOK {
 				t.Fatalf("DeleteCacheCluster status %d, body: %s", resp.StatusCode, b)
@@ -386,7 +420,7 @@ func TestElastiCacheDescribeCacheClustersRefusesAMarkerItDidNotIssue(t *testing.
 	ts := newElastiCacheTestServer(t)
 	resp := ecRequest(t, ts, map[string]string{
 		"Action":     "DescribeCacheClusters",
-		"MaxRecords": "2",
+		"MaxRecords": markerTestPageSize,
 		"Marker":     "2",
 	})
 	body := ecBody(t, resp)

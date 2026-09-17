@@ -205,11 +205,15 @@ func (p *RDSPlugin) describeDBInstances(reqCtx *RequestContext, req *AWSRequest)
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["DBInstanceIdentifier"]
 
-	// The marker is validated before any state is read, so a request substrate cannot
-	// serve is refused rather than answered with page one.
+	// Both pagination parameters are validated before any state is read, so a request
+	// substrate cannot serve is refused rather than answered with page one.
 	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
 	if cursorErr != nil {
 		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
 	}
 
 	prefix := "dbinstance:" + scope + "/"
@@ -218,7 +222,7 @@ func (p *RDSPlugin) describeDBInstances(reqCtx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("rds describeDBInstances list: %w", err)
 	}
 
-	page, nextMarker := queryMarkerPage(keys, prefix, cursor, queryMaxRecords(req.Params["MaxRecords"]),
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
 		func(key, _ string) (xmlDBInstanceItem, bool) {
 			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
 			if getErr != nil || data == nil {
@@ -518,11 +522,15 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterID := req.Params["DBClusterIdentifier"]
 
-	// The marker is validated before any state is read, so a request substrate cannot
-	// serve is refused rather than answered with page one.
+	// Both pagination parameters are validated before any state is read, so a request
+	// substrate cannot serve is refused rather than answered with page one.
 	cursor, cursorErr := parseQueryMarker(req.Params["Marker"])
 	if cursorErr != nil {
 		return nil, cursorErr
+	}
+	maxRecords, maxErr := queryMaxRecords(req.Params["MaxRecords"])
+	if maxErr != nil {
+		return nil, maxErr
 	}
 
 	prefix := "dbcluster:" + scope + "/"
@@ -545,7 +553,7 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 		DBClusterArn        string `xml:"DBClusterArn"`
 	}
 
-	page, nextMarker := queryMarkerPage(keys, prefix, cursor, queryMaxRecords(req.Params["MaxRecords"]),
+	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
 		func(key, _ string) (xmlClusterItem, bool) {
 			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
 			if getErr != nil || data == nil {

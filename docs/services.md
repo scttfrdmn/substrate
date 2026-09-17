@@ -810,10 +810,45 @@ publish only their NotFound faults, so for RDS it is **substrate's reading**. Tr
 decided on the next matching record rather than on the page filling up, so a full last page
 carries no `Marker` and costs the caller no round trip to an empty page.
 
-`MaxRecords` is a separate matter and deliberately untouched by that fix: substrate honours a
-value outside the documented 20–100 range and silently rewrites an unusable one, which is
-[#913](https://github.com/scttfrdmn/substrate/issues/913). Folding a page-*size* change into a
-page-*contents* change would have made the two indistinguishable in one diff.
+`MaxRecords` was a separate matter and deliberately untouched by that fix — folding a
+page-*size* change into a page-*contents* change would have made the two indistinguishable in
+one diff — and it is now corrected in its own right, below.
+
+### A page size outside the documented range is refused, not honoured or rewritten
+
+[#913](https://github.com/scttfrdmn/substrate/issues/913). Both families publish the same three
+facts on `MaxRecords`, and substrate honoured none of them:
+
+| Fact | Published as | Substrate before |
+|---|---|---|
+| Default | `Default: 100` | 100, but also applied to an unusable value |
+| Minimum | `Minimum 20` (RDS) / `minimum 20` (ElastiCache) | any positive integer honoured |
+| Maximum | `maximum 100` | any positive integer honoured |
+
+The two halves fail in different directions, and both matter:
+
+- **An honoured out-of-range value diverges towards the caller's disadvantage.**
+  `MaxRecords=5` produced a five-record page here and is refused by real RDS, so a consumer
+  written against substrate broke on AWS. That is the direction an emulator must not permit.
+- **A rewritten value cannot be noticed.** `MaxRecords=0`, `-1` and `abc` became 100. A caller
+  asking for a small page and receiving a hundred records sees the same well-formed shape as a
+  caller whose listing is short — the same argument the token refusal above rests on.
+
+An **absent** `MaxRecords` still defaults to 100, which is the case AWS publishes a default for.
+Anything else must be an integer within 20–100 inclusive; the ends are accepted, because
+narrowing a published range would be substrate inventing a contract. A refusal answers
+`InvalidParameterValue` / 400 with a message naming the range, following `parseSimulateRequest`
+and `parseS3ListBucketsParams`. That code is **published** for ElastiCache — `API_DescribeCacheClusters`
+and `API_DescribeReplicationGroups` both list `InvalidParameterValue` at 400, "The value for a
+parameter is invalid." — and is **substrate's reading** for RDS, whose pages publish only their
+NotFound faults (`API_DescribeDBInstances` lists `DBInstanceNotFound` / 404 and nothing else). One
+code serves both families, as it does for the `Marker`, so the two parameters of one cursor cannot
+be refused under different codes. Both parameters are validated before any state is read.
+
+**A finding recorded rather than quietly fixed.** Eleven request sites across eight tests paged at
+`MaxRecords=2` — a page size both real services refuse — and passed only because substrate was
+permissive. That is evidence of the divergence, not noise, so it is recorded here: those tests now
+page at the documented minimum of twenty and create twenty-odd records to reach a second page.
 
 ### A pagination token substrate never issued is refused, not answered with page one
 
@@ -11984,7 +12019,7 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | Operation | Notes |
 |-----------|-------|
 | CreateDBInstance | |
-| DescribeDBInstances | |
+| DescribeDBInstances | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
 | DeleteDBInstance | |
 | ModifyDBInstance | |
 | StartDBInstance | |
@@ -11995,7 +12030,7 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | DeleteDBSnapshot | |
 | RestoreDBInstanceFromDBSnapshot | |
 | CreateDBCluster | |
-| DescribeDBClusters | |
+| DescribeDBClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
 | DeleteDBCluster | |
 | CreateDBSubnetGroup | |
 | DescribeDBSubnetGroups | |
@@ -12100,7 +12135,7 @@ RDS db.t3.micro on-demand: $0.017 per hour (approximate for testing purposes).
 | Operation | Notes |
 |-----------|-------|
 | CreateCacheCluster | |
-| DescribeCacheClusters | |
+| DescribeCacheClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue`, which this service's page publishes — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
 | DeleteCacheCluster | |
 | CreateReplicationGroup | |
 | DescribeReplicationGroups | |
