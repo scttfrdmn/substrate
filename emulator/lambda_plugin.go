@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1272,9 +1273,63 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 	return lambdaJSONResponse(http.StatusCreated, esm)
 }
 
+// The three bounds ListEventSourceMappings' MaxItems publishes, which are three facts rather
+// than one range.
+//
+// API_ListEventSourceMappings publishes "Valid Range: Minimum value of 1. Maximum value of
+// 10000." for the parameter, and separately, in the parameter's own description, a cap on what a
+// response may carry whatever the parameter says: "Note that ListEventSourceMappings returns a
+// maximum of 100 items in each response, even if you set the number higher." A request for 5000
+// is therefore valid and answers 100 with a NextMarker, while a request for 10001 is refused —
+// the two rules do different things and are kept as separate constants so neither reads as the
+// other's ceiling.
+const (
+	lambdaESMMinMaxItems = 1
+	lambdaESMMaxMaxItems = 10000
+	lambdaESMMaxItemsCap = 100
+)
+
+// listEventSourceMappings reports the account's event source mappings, optionally narrowed to
+// one function or one event source, one page at a time.
+//
+// The two pagination parameters are read here rather than ignored (#917). Both are published
+// on the URI — "GET /2015-03-31/event-source-mappings?EventSourceArn={EventSourceArn}&
+// FunctionName={FunctionName}&Marker={Marker}&MaxItems={MaxItems}" — and substrate answered the
+// whole listing with no NextMarker whatever a caller sent, so a paging loop terminated on the
+// first response here and first ran for real against an account holding more mappings than one
+// page.
+//
+// MaxItems publishes "Valid Range: Minimum value of 1. Maximum value of 10000." **and** a cap
+// the range does not imply: "Note that ListEventSourceMappings returns a maximum of 100 items
+// in each response, even if you set the number higher." So 5000 is a valid request that answers
+// at most 100 items with a NextMarker — the cap is what AWS's own page states, not substrate's
+// page size — and a value outside 1..10000 is refused rather than clamped, with the
+// InvalidParameterValueException the page publishes for "one of the parameters in the request is
+// not valid". An absent MaxItems is the same 100, which is substrate's reading: no default is
+// published, and the cap applies to "each response" regardless of what was asked for.
+//
+// Marker is "a pagination token returned by a previous call", and NextMarker is "returned when
+// the response doesn't contain all event source mappings" — so the final page carries none, or a
+// caller looping until it comes back empty never stops. A Marker substrate could not have issued
+// is refused ([decodeOffsetPaginationToken]) rather than silently answering page one, which is
+// the defect #915 named at three other services, and it is refused **before** any state is read,
+// per #887: the answer to a malformed token must not depend on how many mappings exist.
+//
+// Unlike EC2's describes, nothing on this page makes the filters mutually exclusive with the
+// pagination parameters, so no InvalidParameterCombination is invented here; FunctionName and
+// EventSourceArn narrow a page rather than forbidding one.
 func (p *LambdaPlugin) listEventSourceMappings(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	functionName := req.Params["FunctionName"]
 	eventSourceArn := req.Params["EventSourceArn"]
+
+	pageSize, awsErr := lambdaESMPageSize(req.Params["MaxItems"])
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params["Marker"])
+	if !tokenOK {
+		return nil, lambdaInvalidParameterValue("the Marker '" + req.Params["Marker"] + "' is invalid")
+	}
 
 	bgCtx := context.Background()
 
@@ -1294,6 +1349,12 @@ func (p *LambdaPlugin) listEventSourceMappings(ctx *RequestContext, req *AWSRequ
 		if err != nil {
 			return nil, err
 		}
+		// Sorted, because an offset cursor names a position in a sequence and this one comes
+		// from a per-function index whose order is the order mappings were created, not a key
+		// scan. The other branch inherits [StateManager.List]'s lexicographic guarantee (#865)
+		// over "esm:<uuid>" keys, so sorting by UUID here makes the two branches agree about
+		// which mapping a given offset names.
+		sort.Strings(ids)
 		for _, id := range ids {
 			esm, err := p.loadESM(bgCtx, id)
 			if err != nil || esm == nil {
@@ -1330,13 +1391,44 @@ func (p *LambdaPlugin) listEventSourceMappings(ctx *RequestContext, req *AWSRequ
 		}
 	}
 
-	if esms == nil {
-		esms = []ESMConfig{}
+	// The page is cut after the whole answer is filtered, not during the scan, so which
+	// mappings EventSourceArn selects does not depend on the page a walk is on.
+	page, nextMarker := pageByOffsetToken(esms, offset, pageSize)
+	if page == nil {
+		page = []ESMConfig{}
 	}
 
-	return lambdaJSONResponse(http.StatusOK, map[string]interface{}{
-		"EventSourceMappings": esms,
-	})
+	type response struct {
+		EventSourceMappings []ESMConfig `json:"EventSourceMappings"`
+		NextMarker          string      `json:"NextMarker,omitempty"`
+	}
+	return lambdaJSONResponse(http.StatusOK, response{EventSourceMappings: page, NextMarker: nextMarker})
+}
+
+// lambdaESMPageSize reads ListEventSourceMappings' MaxItems and returns the number of mappings
+// one response may carry.
+//
+// The published range is 1 to 10000 and the published per-response cap is 100 — "Note that
+// ListEventSourceMappings returns a maximum of 100 items in each response, even if you set the
+// number higher" — so the two are separate rules: a value outside the range is refused, and a
+// value inside it is applied only up to the cap. An absent MaxItems is the cap, which is
+// substrate's reading, since the page publishes no default and states the cap against every
+// response.
+//
+// A non-integer is refused for the same reason a zero is: MaxItems is an Integer with a
+// published minimum, and coercing an unparseable value would answer a page size the caller did
+// not ask for. The code is the page's own InvalidParameterValueException; the message wording is
+// substrate's, since AWS publishes only "one of the parameters in the request is not valid".
+func lambdaESMPageSize(raw string) (int, *AWSError) {
+	if raw == "" {
+		return lambdaESMMaxItemsCap, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < lambdaESMMinMaxItems || n > lambdaESMMaxMaxItems {
+		return 0, lambdaInvalidParameterValue("MaxItems must be between " +
+			strconv.Itoa(lambdaESMMinMaxItems) + " and " + strconv.Itoa(lambdaESMMaxMaxItems))
+	}
+	return min(n, lambdaESMMaxItemsCap), nil
 }
 
 func (p *LambdaPlugin) getEventSourceMapping(_ *RequestContext, uuid string) (*AWSResponse, error) {

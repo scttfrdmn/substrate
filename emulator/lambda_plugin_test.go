@@ -19,9 +19,15 @@ import (
 
 func newLambdaTestServer(t *testing.T) *emulator.Server {
 	t.Helper()
+	return newLambdaTestServerWithState(t, emulator.NewMemoryStateManager())
+}
+
+// newLambdaTestServerWithState is [newLambdaTestServer] over a caller-supplied state manager, so a
+// test can wrap the store — a sealed one proves a handler validated its request before reading state.
+func newLambdaTestServerWithState(t *testing.T, state emulator.StateManager) *emulator.Server {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelInfo, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(time.Now())

@@ -986,6 +986,69 @@ about a request's *result*, not about how a listing is cut into pages, so it is
 same reason `MaxRecords` was kept out of the cursor fix above. Note the ElastiCache subnet-group
 fault is 400 where the other four are 404, which its page states explicitly.
 
+### Two more cursors published and unread, outside EC2
+
+[#917](https://github.com/scttfrdmn/substrate/issues/917) is mostly an EC2 change (see
+[One offset paginator, shared](#one-offset-paginator-shared)), but two operations in other services
+were in the same state — both halves of a cursor published on the URI, and neither read:
+
+- **Lambda `ListEventSourceMappings`**, whose URI publishes
+  `?EventSourceArn={EventSourceArn}&FunctionName={FunctionName}&Marker={Marker}&MaxItems={MaxItems}`.
+- **API Gateway `GetBasePathMappings`**, whose URI publishes
+  `?domainNameId={domainNameId}&limit={limit}&position={position}`.
+
+Each answered its whole listing with no token whatever the caller sent, so a paging loop terminated
+on its first response — the divergence a caller cannot see, described in full above.
+
+Both now cut their page through the same helper as each other, over the **base64** offset token the
+CloudWatch, Systems Manager and S3 listings use rather than EC2's decimal one. A token substrate
+could not have issued is refused rather than answered with page one, and refused **before any state
+is read**; an offset past the end clamps to an empty final page. Those are the rules already stated
+for [a token substrate never
+issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one), and this
+change adds no new ones.
+
+**The page-size rules are per operation, and neither resembles EC2's.**
+
+| Operation | Absent page size | Out of range | Refusal |
+|---|---|---|---|
+| Lambda `ListEventSourceMappings` | **100** | `MaxItems` outside 1–10000 is refused, never clamped | `InvalidParameterValueException` / 400, which the page publishes |
+| API Gateway `GetBasePathMappings` | **25**, the published default | `limit` outside 1–500 is refused | `BadRequestException` / 400, which the page publishes |
+
+`MaxItems` publishes **two bounds that are two different rules**, and substrate keeps them apart:
+`Valid Range: Minimum value of 1. Maximum value of 10000.` is what the parameter accepts, and "Note
+that `ListEventSourceMappings` returns a maximum of 100 items in each response, even if you set the
+number higher" is what a response may carry. So `MaxItems=5000` is a valid request that answers at
+most 100 mappings with a `NextMarker`, while `MaxItems=10001` is refused. An **absent** `MaxItems`
+is that same 100, which is *substrate's reading*: the page publishes no default and states the cap
+against every response.
+
+API Gateway is the opposite case and the only paginated operation in the tree with a published
+default: "The maximum number of returned results per page. The default value is 25 and the maximum
+value is 500." A request naming no `limit` therefore still pages, at 25, where it used to answer the
+whole collection. No **minimum** is published — the floor of one is *substrate's reading*, for the
+reason the EC2 section gives: a page of zero elements describes a walk that answers nothing and
+hands back a position forever.
+
+**Neither operation gained an `InvalidParameterCombination`.** EC2's service-wide rule that an ID
+list and `MaxResults` may not appear together has no counterpart on either page: Lambda's
+`FunctionName` and `EventSourceArn` narrow a page rather than forbidding one, and importing the EC2
+rule would be substrate inventing a refusal.
+
+**The order each cursor counts positions in is *substrate's reading*, since neither page publishes
+one.** `GetBasePathMappings` walks the state keys' lexicographic order, which is by base path within
+the domain. `ListEventSourceMappings` has two code paths — a scan of the mapping keys when no
+function is named, and a per-function index when one is — and the index holds mappings in creation
+order, so it is sorted by UUID before the page is cut. Without that the same `Marker` would name two
+different positions depending on whether the caller passed `FunctionName`.
+
+**What the same audit found still unconverted is counted, not estimated.** Nine routed EC2 describes
+publish `MaxResults` and `NextToken` and read neither (#1024, listed with their published ranges in
+[One offset paginator, shared](#one-offset-paginator-shared)), and six routed API Gateway v1
+collections publish `limit` and `position` and read neither (#1025). Lambda's `ListFunctions` is a
+third case of the narrower defect: it pages, but accepts a `Marker` it never issued and range-checks
+no `MaxItems`.
+
 ### A tag set read back out of a map
 
 [#946](https://github.com/scttfrdmn/substrate/issues/946) is the same defect one layer down, at
@@ -4666,7 +4729,7 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | InvokeFunction | Returns stub `{"statusCode":200,"body":"null"}` |
 | CreateEventSourceMapping | |
 | DeleteEventSourceMapping | |
-| ListEventSourceMappings | |
+| ListEventSourceMappings | Paginates on `MaxItems`/`Marker`; an absent `MaxItems` answers the published per-response cap of 100, a value outside 1–10000 is refused, and a `Marker` substrate did not issue is refused with `InvalidParameterValueException` — see [Two more cursors published and unread](#two-more-cursors-published-and-unread-outside-ec2) |
 | TagResource | |
 | UntagResource | |
 | ListTags | |
@@ -8219,15 +8282,17 @@ Authorization needs nothing special: the Service Authorization Reference gives
 #### One offset paginator, shared
 
 `DescribeTags` and `DescribeLaunchTemplateVersions` each carried their own copy of the same
-three rules — read `MaxResults`, decode `NextToken`, cut the page — while roughly twenty other
+three rules — read `MaxResults`, decode `NextToken`, cut the page — while sixteen other routed
 describes published both parameters and implemented neither. Those answered the **whole listing
 with no token**, which is the one divergence a paginating caller cannot see: the loop terminates
 on the first page against substrate and finds a second page in production. #917 replaced the two
-copies with one shared paginator and converted the unpaginated operations onto it, so the count
-of implementations went down rather than up. Converted so far: `DescribeVolumes` and
-`DescribeSnapshots`, then `DescribeImages`, `DescribeVpcs`, `DescribeSubnets`,
-`DescribeSecurityGroups` and `DescribeInstances`. Wire behaviour for a caller that sends neither
-parameter is unchanged at every one of them.
+copies with one shared paginator and converted seven of the sixteen onto it, so the count of
+implementations went down rather than up. The nine that page are `DescribeTags` and
+`DescribeLaunchTemplateVersions`, which already did, plus `DescribeVolumes`, `DescribeSnapshots`,
+`DescribeImages`, `DescribeVpcs`, `DescribeSubnets`, `DescribeSecurityGroups` and
+`DescribeInstances`. Wire behaviour for a caller that sends neither parameter is unchanged at
+every one of them. The other nine are listed at the end of this section: the count is exact and
+audited, rather than the "roughly twenty" this paragraph used to estimate.
 
 AWS publishes the mechanism **once for the whole service**, in the Query Requests page's
 *Pagination* section rather than per operation, and two of its sentences decide the design:
@@ -8303,6 +8368,34 @@ group name is not an ID; it is not what `InvalidGroup.NotFound` is about either 
 [Which selectors assert existence](#which-selectors-assert-existence)). AWS publishes nothing about
 the combination, so refusing the name form would mean extending a published rule to a parameter it
 does not name.
+
+**Nine routed describes still publish both parameters and read neither**, and the count is stated
+here because an estimate invites the reader to assume the sweep was complete. Each answers its
+whole listing with no `nextToken`, which is the same divergence the nine conversions above removed
+(#1024):
+
+| Operation | Published `MaxResults` range |
+|---|---|
+| `DescribeInstanceStatus` | none — type `Integer` only. Its page is the one of the nine that repeats the ID-list prohibition outright: "You cannot specify this parameter and the instance IDs parameter in the same request" |
+| `DescribeInternetGateways` | 5–1000 |
+| `DescribeRouteTables` | 5–100 |
+| `DescribeNatGateways` | 5–1000 |
+| `DescribeInstanceTypes` | 5–100 |
+| `DescribeInstanceTypeOfferings` | 5–1000 |
+| `DescribeSpotPriceHistory` | none — type `Integer` only |
+| `DescribeLaunchTemplates` | 1–200 — the only page in the whole set whose published floor is 1 rather than 5 |
+| `DescribeFleets` | none — type `Integer` only |
+
+Two things the ranges above settle before the work starts: the bound is **per operation** and must
+not be harmonised — 5–100 at two of them where a sibling publishes 5–1000 — and the three that
+publish none inherit the same treatment as the four already-converted operations that publish
+none, namely a floor of one as substrate's reading and no ceiling at all.
+
+Seven further routed `Describe*` operations publish **neither** parameter and so are not part of
+that count: `DescribeKeyPairs`, `DescribePlacementGroups`, `DescribeAvailabilityZones`,
+`DescribeAddresses`, `DescribeRegions`, and the two single-attribute reads
+`DescribeInstanceAttribute` and `DescribeSnapshotAttribute`. Answering everything in one page is
+what AWS describes at each, so there is nothing there to convert.
 
 ### Seeding EC2 Fleet partial fulfillment
 
@@ -11457,8 +11550,22 @@ ACM certificates are free.
 (`id`, `name`, `rootResourceId`, `resourceMethods`, `methodIntegration`, …), and
 collection responses nest their elements under **`item`** — singular, because that
 is the `locationName` of the `items` member. `GetUsage` uses a third spelling,
-`values`, and is not routed. Responses carry no pagination `position`: Substrate
-returns every element in one page and honours no token. Earlier releases sent
+`values`, and is not routed.
+
+**One collection carries a pagination `position`: `GetBasePathMappings`**, which
+reads the `limit` and `position` parameters its URI publishes — see [Two more
+cursors published and unread](#two-more-cursors-published-and-unread-outside-ec2).
+Every other collection returns all its elements in one page and leaves the member
+unset, so it is omitted rather than sent empty: a caller must not be handed a token
+for a page that does not exist. Of those seven, **six publish `limit` and `position`
+and read neither** — `GetRestApis`, `GetResources`, `GetDeployments`,
+`GetAuthorizers`, `GetApiKeys` and `GetUsagePlans`, all six carrying AWS's `limit`
+sentence byte-identically, so it is one rule six times rather than six rules (#1025).
+The seventh, `GetStages`, publishes neither parameter and lists no `position`
+response member, so its single page is what AWS describes rather than a gap. Seven of
+the eight handlers also cannot read a query parameter as written — their signatures
+take no request — which is why `GetBasePathMappings` converted without a signature
+change and the other six will not. Earlier releases sent
 PascalCase members under an `items` envelope, which an AWS SDK parsed to an empty
 result with no error (#529).
 

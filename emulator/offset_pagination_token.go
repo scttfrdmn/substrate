@@ -84,3 +84,37 @@ func decodeOffsetPaginationToken(raw string) (int, bool) {
 func encodeOffsetPaginationToken(offset int) string {
 	return base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
 }
+
+// pageByOffsetToken returns the items at offset, at most pageSize of them, and the token
+// that resumes the listing after them.
+//
+// The token is emitted only when a further item exists, so the last page carries none and a
+// listing that is an exact multiple of the page size costs no round trip to an empty page.
+// Every AWS page that publishes this style of cursor says the same thing about it — Lambda's
+// NextMarker is "returned when the response doesn't contain all event source mappings" — so a
+// token on a full final page would describe a page that does not exist. An offset past the
+// end clamps to an empty page rather than erroring, for the reason
+// [decodeOffsetPaginationToken] gives.
+//
+// A pageSize of zero or less means no limit: the whole remainder is returned with no token.
+// No caller passes one today, since both callers apply a published default, but the case is
+// defined rather than left to produce an empty page.
+//
+// The offset is only meaningful because the items are in a stable order, which each caller
+// establishes before cutting — [StateManager.List]'s lexicographic guarantee (#865), or an
+// explicit sort where the slice comes from an index rather than from a key scan. Nothing here
+// can check that, so it is the caller's obligation and is stated at each call site.
+//
+// EC2's [ec2Page] is the same cut over a **decimal** token, kept separate because that
+// service's two original paginators already issued that wire shape (#917); this one is for
+// the operations whose token is the base64 form above.
+func pageByOffsetToken[T any](items []T, offset, pageSize int) ([]T, string) {
+	if offset > len(items) {
+		offset = len(items)
+	}
+	page := items[offset:]
+	if pageSize > 0 && len(page) > pageSize {
+		return page[:pageSize], encodeOffsetPaginationToken(offset + pageSize)
+	}
+	return page, ""
+}
