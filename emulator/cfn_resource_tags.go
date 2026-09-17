@@ -222,13 +222,8 @@ type cfnRegionalStampKind struct {
 // carry, that they lacked "a table line, not a writer": a table line is exactly what they cannot
 // have.
 //
-// **`AWS::Config::ConfigRule` remains out, and it is the one genuine writer gap left.** Config's
-// tags are a side-car whose whole document *is* the tag map (`cfgsvcTagsKey`,
-// `configservice_types.go:221`), so neither [mergeRecordStringMapTags] nor
-// [mergeRecordTagListTags] fits — both look for a tag member inside a record — and
-// [mergeResourceTags] has no `configServiceNamespace` arm to hold one. `cfgsvcSaveTags` also
-// deletes the document when it empties, so there is usually no record to merge into at all. See
-// #819 for what a Config arm would have to be.
+// AWS Config is absent here for the same reason ELBv2 is — its tags are not on the record this
+// resolves to — and is handled by [cfnStampConfigResource].
 var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::StepFunctions::StateMachine": {namespace: statesNamespace, prefix: "statemachine"},
 	"AWS::ECR::Repository":             {namespace: ecrNamespace, prefix: "ecrrepo"},
@@ -260,23 +255,41 @@ var cfnELBStampableTypes = map[string]bool{
 	"AWS::ElasticLoadBalancingV2::ListenerRule": true,
 }
 
+// cfnConfigStampableTypes are the AWS Config CFN types whose tags substrate keeps.
+//
+// Both are taggable in AWS's own reckoning — `TagResource`'s `ResourceArn` documentation
+// enumerates the supported types and both a configuration recorder and a Config rule are among
+// them — and both record their ARN, which is what a Config tag is keyed by. The third type the
+// deployer creates, `AWS::Config::DeliveryChannel`, is deliberately absent: that same enumeration
+// **does not include a delivery channel**, so no `TagResource` call can name one, the
+// `DeliveryChannel` shape has no `arn` member to be named by, and substrate's deploy records none.
+// The Service Authorization Reference agrees — see `configservice_types.go`.
+var cfnConfigStampableTypes = map[string]bool{
+	"AWS::Config::ConfigRule":            true,
+	"AWS::Config::ConfigurationRecorder": true,
+}
+
 // cfnStampResourceTags writes the given tags onto a resource the deployer created, for a
 // service substrate models tags for but EC2's resolver does not reach. It reports whether it
 // found somewhere to write.
 //
-// The two arms differ because the two tag stores differ, not by choice: every service
+// The three arms differ because the three tag stores differ, not by choice: every service
 // [cfnResolveStampTarget] covers keeps tags in a record [mergeResourceTags] already knows how
-// to merge, while ELBv2 keeps an ordered `[]ELBTag` on a record found by scanning for its ARN.
-// Both upsert, as EC2's writer does, so re-deploying a stack rewrites the three values rather
-// than accumulating them.
+// to merge; ELBv2 keeps an ordered `[]ELBTag` on a record found by scanning for its ARN; and
+// AWS Config keeps a side-car record whose whole document *is* the tag map, under a key the
+// resource's own record does not contain. All three upsert, as EC2's writer does, so
+// re-deploying a stack rewrites the three values rather than accumulating them.
 //
-// A resource of a type neither arm knows reports false and is skipped by the caller in
+// A resource of a type no arm knows reports false and is skipped by the caller in
 // silence. That is the documented behavior, not an omission — see the header above.
 func cfnStampResourceTags(
 	state StateManager, reqCtx *RequestContext, dr DeployedResource, tags []EC2Tag,
 ) (bool, error) {
 	if cfnELBStampableTypes[dr.Type] {
 		return cfnStampELBResource(state, reqCtx, dr, tags)
+	}
+	if cfnConfigStampableTypes[dr.Type] {
+		return cfnStampConfigResource(state, reqCtx, dr, tags)
 	}
 
 	target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID, reqCtx.Region)
@@ -333,6 +346,57 @@ func cfnStampELBResource(
 		return true, fmt.Errorf("stamp %s %s: marshal: %w", dr.Type, dr.ARN, err)
 	}
 	if err := state.Put(context.Background(), elbNamespace, res.stateKey, updated); err != nil {
+		return true, fmt.Errorf("stamp %s %s: %w", dr.Type, dr.ARN, err)
+	}
+	return true, nil
+}
+
+// cfnStampConfigResource writes the stamp onto one AWS Config resource, found by its ARN.
+//
+// #819's last row, and the one that needed a **writer** rather than a resolver arm. Config keeps
+// a resource's tags in a side-car record keyed by ARN whose whole document is the tag map
+// (`cfgsvcTagsKey`), which is deliberate — neither AWS's `ConfigurationRecorder` shape nor its
+// `ConfigRule` shape has a `Tags` member, so a tag field on either struct would emit a member AWS
+// never emits (#836). Three consequences follow, and none of them fits [mergeResourceTags]:
+//
+//   - There is no tag member to merge *into*. [mergeRecordStringMapTags] and
+//     [mergeRecordTagListTags] both look for one inside a record.
+//   - The side-car is frequently absent, because a resource created with no tags has none written
+//     — so this arm has to **create** the record, where every other arm refuses a missing one
+//     through `errTagResourceNotFound`.
+//   - The record proving the resource exists is a different key from the one holding its tags, so
+//     the absent-record check has to be made against the resource. [cfgsvcResolveStampTags] makes
+//     it, through the same lookup `ListTagsForResource` uses rather than a second copy of it.
+//
+// The ARN rather than the physical ID, because that is what Config keys a tag by: a rule's
+// physical ID is its *name* while its ARN names it by a hashed `ConfigRuleId`, and a recorder's
+// ARN carries a minted `RecorderId` that no API member holds. Both are read back from the service
+// at deploy time (`cfn_resources_v101.go:399`, `:121`) rather than rebuilt here, so an unreadable
+// one leaves the ARN empty and this skips rather than guessing.
+//
+// A resolved-but-absent resource is "nothing to stamp" rather than an error, as ELBv2's arm has
+// it: for a resource the deployer just created it cannot happen, and a reconciliation replaying an
+// earlier run's resource must not fail a stack over one somebody has since deleted.
+func cfnStampConfigResource(
+	state StateManager, reqCtx *RequestContext, dr DeployedResource, tags []EC2Tag,
+) (bool, error) {
+	if dr.ARN == "" {
+		return false, nil
+	}
+	arn, existing, found, err := cfgsvcResolveStampTags(
+		state, reqCtx.AccountID, reqCtx.Region, dr.ARN,
+	)
+	if err != nil {
+		return true, fmt.Errorf("stamp %s %s: %w", dr.Type, dr.ARN, err)
+	}
+	if !found {
+		return false, nil
+	}
+
+	for _, tag := range tags {
+		existing[tag.Key] = tag.Value
+	}
+	if err := cfgsvcSaveStateTags(context.Background(), state, arn, existing); err != nil {
 		return true, fmt.Errorf("stamp %s %s: %w", dr.Type, dr.ARN, err)
 	}
 	return true, nil

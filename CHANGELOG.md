@@ -59,10 +59,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #819 itself carried, that ECS needed a table line rather than a writer: a table line is exactly what
   it cannot have.
 
-  **`AWS::Config::ConfigRule` remains unstamped and is the one genuine writer gap left**, so #819 stays
-  open. Config keeps a rule's tags in a side-car record whose whole document *is* the tag map, which
-  neither merge helper fits — both look for a tag member inside a record — and the side-car is deleted
-  when it empties, so there is often no record to merge into at all.
+  **AWS Config was the one genuine writer gap left**, and it closes in the entry below.
+- **The stamp reaches AWS Config, closing #819 at forty CFN resource types across twenty-one
+  services.** `AWS::Config::ConfigRule` and `AWS::Config::ConfigurationRecorder` now carry the three
+  `aws:cloudformation:*` keys, and a `CreateStack` tag propagates to both with them (#764). The
+  recorder is one type more than #819 predicted: the issue named the rule alone, but the recorder is
+  equally taggable in AWS's reckoning and equally reachable, and stamping one of a pair a template
+  declares together would have been the arbitrary choice.
+
+  **Config needed a writer of its own rather than an arm in the shared one**, which is why it outlasted
+  the other twelve. It keeps a resource's tags in a **side-car** record keyed by ARN whose whole
+  document *is* the tag map, rather than on the resource — deliberate, since neither AWS's
+  `ConfigurationRecorder` shape nor its `ConfigRule` shape has a `Tags` member and inventing one would
+  emit a member AWS never emits (#836). Both shared merge helpers look for a tag member *inside* a
+  record, and here there is none to merge into. Three consequences, each asserted: the stamp
+  **creates** the side-car where every other arm refuses an absent record; the existence check is made
+  against the **resource** rather than the side-car, through the same lookup `ListTagsForResource`
+  uses, because reading the side-car alone cannot tell "this rule has no tags" from "there is no such
+  rule"; and the key is the **ARN**, not the physical ID — a rule's physical ID is its name while its
+  ARN names it by a hashed `ConfigRuleId`, and a recorder's ARN carries a minted `RecorderId` no API
+  member holds.
+
+  **The reconciliation reads the side-car directly, and this is the one type in #819 where both of the
+  stack-tag safeguards can be shown to work.** Reading through the shared reader would find neither a
+  `tags` nor a `Tags` member and report the resource as untagged — the same KMS defect #819's second
+  half fixed, whose two failures arrive together: a caller's own tag of the same name is clobbered, and
+  a withdrawn stack tag is never removed. Ten of the previous twelve could not carry that assertion,
+  because an `UpdateStack` re-creates every resource and a type whose create mints a fresh identity is
+  never revisited at the record a caller could have tagged. Both Config types re-mint their ARN from
+  the *name*, and both Puts leave the side-car alone on an update — Config's own words, "Tags are added
+  at creation and cannot be updated with this operation" — so the identity survives and a directly-set
+  tag is still there to be preserved.
+
+  `AWS::Config::DeliveryChannel` is the one type the deployer creates that stays out, and it is
+  asserted as the negative case rather than left untested. `TagResource`'s `ResourceArn` enumerates the
+  nine resources Config can tag and a delivery channel is not among them, so no call can name one, the
+  `DeliveryChannel` shape has no `arn` member to be named by, and substrate's deploy records none: it
+  deploys clean and is skipped in silence, with no warning logged. One limit is recorded in
+  `docs/services.md` rather than tested, because CloudFormation cannot reach it — Config's writer
+  deletes the side-car when its last tag leaves, but the three stamp keys are written before the stack
+  tags are reconciled, so a resource a stack touched always carries at least three tags.
 - **Price List `GetProducts` serves an AmazonEC2 offer corpus — 32 SKUs copied verbatim from three
   real offer files** (#894). `AmazonEC2` was not in the corpus at all, so a consumer that prices its
   own instance usage at runtime got `NotFoundException` from substrate and had to be tested against a

@@ -6814,7 +6814,7 @@ stamp cannot push a caller's own tags over it.
 
 #### What the stamp reaches
 
-Thirty-eight CFN resource types are stamped, across twenty services, and each tag is readable
+Forty CFN resource types are stamped, across twenty-one services, and each tag is readable
 through that service's **own** tag call rather than only out of state:
 
 | Service | CFN types stamped | Read back with |
@@ -6839,9 +6839,10 @@ through that service's **own** tag call rather than only out of state:
 | SSM | `AWS::SSM::Parameter` | `ListTagsForResource` |
 | ACM | `AWS::CertificateManager::Certificate` | `ListTagsForCertificate` |
 | CloudFront | `AWS::CloudFront::Distribution` | `ListTagsForResource` |
+| AWS Config | `AWS::Config::ConfigRule`, `AWS::Config::ConfigurationRecorder` | `ListTagsForResource` |
 
-The last fourteen services carry
-[#819](https://github.com/scttfrdmn/substrate/issues/819)'s twenty-one types, added in two halves.
+The last fifteen services carry
+[#819](https://github.com/scttfrdmn/substrate/issues/819)'s twenty-three types, added in three parts.
 Two conditions decided that cut, both checked against the owning plugin rather than assumed: the
 service's tag record has a merge arm behind substrate's one tag writer — the same writer the Resource
 Groups Tagging API uses, so a stamp and a `TagResources` call cannot merge differently — and the
@@ -6849,7 +6850,7 @@ physical ID CloudFormation records is already exactly the identifier that plugin
 A service that fails the second condition needs the key re-derived, which is where a stamp lands
 somewhere nothing reads.
 
-Twelve of the twenty-one waited on the first condition — their services kept tag state no merge arm
+Twelve of the twenty-three waited on the first condition — their services kept tag state no merge arm
 reached, so there was nowhere for a stamp to land that the owning service would read, and
 `TagResources` could not reach them either: one defect with two symptoms, closed as
 [#835](https://github.com/scttfrdmn/substrate/issues/835). Seven of those twelve then failed the
@@ -6903,15 +6904,8 @@ resource type", so a partial cut is what AWS itself describes rather than a shor
 published list. [#819](https://github.com/scttfrdmn/substrate/issues/819) keeps the list in one
 place; it is split per service when one is picked up.
 
-**A tagging surface but no stamp: one type left, and the reason is a writer rather than a
-resolver.** `AWS::Config::ConfigRule` has both tag state and a tagging call and is still unstamped,
-because Config keeps a rule's tags in a **side-car** state record whose whole document *is* the tag
-map, rather than on the rule. Substrate's shared tag writer has no arm for that layout — both of its
-merge helpers look for a tag member inside a record — and the side-car is deleted outright when it
-empties, so there is usually no record to merge into at all.
-
-Every other type that had a tagging surface and no stamp now has both. The missing piece for those
-was never a resolver arm alone but an arm in that shared *writer*, so the same gap also meant the
+**Every type that had a tagging surface and no stamp now has both.** The missing piece for twelve of
+them was never a resolver arm alone but an arm in that shared *writer*, so the same gap also meant the
 Resource Groups Tagging API could not tag them: one defect with two symptoms, closed as
 [#835](https://github.com/scttfrdmn/substrate/issues/835) a row at a time — ECS's service and task
 definition, an RDS DB cluster and DB subnet group, a Step Functions activity, an ACM certificate, a
@@ -6923,6 +6917,40 @@ ECS clusters only, so a tag `TagResources` had written to a service, a task or a
 readable through ECS's own `ListTagsForResource` and invisible to the tagging API's own inventory
 call ([#935](https://github.com/scttfrdmn/substrate/issues/935)). With the writer in place, the
 CloudFormation half followed: all twelve are in the table above.
+
+**AWS Config was the thirteenth, and it needed a writer of its own rather than an arm in the shared
+one.** Config keeps a resource's tags in a **side-car** state record keyed by ARN whose whole document
+*is* the tag map, rather than on the resource — which is deliberate, since neither AWS's
+`ConfigurationRecorder` shape nor its `ConfigRule` shape has a `Tags` member and a tag field on either
+would emit a member AWS never emits. The shared writer's two merge helpers both look for a tag member
+*inside* a record, and here there is none to merge into. Three consequences shape the arm, and each is
+observable:
+
+- The stamp **creates** the side-car, where every other arm refuses a record that is absent — a
+  resource created with no tags has no side-car at all.
+- Because the record proving the resource exists is a different key from the one holding its tags,
+  the existence check is made against the **resource**, through the same lookup
+  `ListTagsForResource` uses rather than a second copy of it. Reading the side-car alone cannot
+  tell "this rule has no tags" from "there is no such rule".
+- The key is the **ARN**, not the physical ID. A rule's physical ID is its name while its ARN names
+  it by a hashed `ConfigRuleId`, and a recorder's ARN carries a minted `RecorderId` no API member
+  holds, so both are read back from the service at deploy time; an ARN that could not be read leaves
+  the resource unstamped rather than stamped under a guess.
+
+`AWS::Config::DeliveryChannel` is the one type the deployer creates that stays out, and not for want
+of a writer. `TagResource`'s `ResourceArn` enumerates the nine resources Config can tag — a
+configuration recorder, a Config rule, an organization Config rule, a conformance pack, an
+organization conformance pack, a configuration aggregator, an aggregation authorization, a stored
+query and a connector — and a delivery channel is **not among them**. So no `TagResource` call can
+name one, the `DeliveryChannel` shape has no `arn` member to be named by, and substrate's deploy
+records none. It deploys and is skipped in silence.
+
+One further limit, stated because the side-car makes it look like a gap. Config's writer deletes the
+side-car outright when the last tag leaves it, so an untagged resource stays distinguishable from one
+holding `{}`. A stack's tag reconciliation cannot reach that case: the three `aws:cloudformation:*`
+keys are stamped before the stack tags are reconciled, so a resource a stack touched always carries at
+least three tags. The rule therefore lives with Config's own `UntagResource`, which can reach it,
+rather than being restated at the CloudFormation caller where nothing could exercise it.
 
 Three further limits, each named because a policy or an assertion written against the stamp will
 otherwise assume more:
