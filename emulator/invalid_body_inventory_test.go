@@ -45,6 +45,9 @@ type invalidBodyCase struct {
 	// below a resource lookup is not reachable this way; the two Lambda operations that do sit below one
 	// have their own test.
 	path string
+	// No method field: every parse guard here is reachable on POST, because a guard only runs on a
+	// method that carries a body. The member-complaint table below needs GET, PUT and DELETE, and
+	// carries its own.
 }
 
 // invalidBodyService groups one service's guarded operations under the code they all answer.
@@ -317,6 +320,196 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 			assertNoDecoderText(t, tc.op, message)
 		})
 	}
+
+	// AddPermission's member complaint sits one line below its parse guard, so it needs the same
+	// created function to be reachable at all — which is why it cannot live in
+	// memberComplaintServices, where every service gets an empty server.
+	t.Run("AddPermission/memberComplaint", func(t *testing.T) {
+		status, code, message := rawUnsignedCall(t, ts, host, "",
+			"/2015-03-31/functions/guarded-fn/policy", []byte("{}"))
+		assert.Equal(t, "InvalidParameterValueException", code,
+			"a missing StatementId answers the same code as an unparseable body")
+		assert.Equal(t, http.StatusBadRequest, status, "AddPermission answers 400")
+		assert.Contains(t, message, "StatementId is required", "the message names the member")
+		assertNoDecoderText(t, "AddPermission/memberComplaint", message)
+	})
+}
+
+// memberCase is one complaint about a member or an identifier, as opposed to a body that will not parse.
+type memberCase struct {
+	// name is the subtest name, and is the handler's own name so a failure points at the source.
+	name string
+	// target, path and method reach the operation, as in [invalidBodyCase].
+	target string
+	path   string
+	method string
+	// body is sent verbatim. "{}" is the usual value: it parses, so the parse guard passes and the
+	// member check below it is what answers.
+	body string
+	// wantMessage is a substring of the message the site reports, which is what distinguishes these
+	// sites from each other once they all answer one code per service.
+	wantMessage string
+}
+
+// memberService is one service's non-parse-guard sites, under the code they all answer.
+type memberService struct {
+	name  string
+	host  string
+	code  string
+	cases []memberCase
+}
+
+// memberComplaintServices is every site whose code string #950 changed that is **not** a parse guard.
+//
+// These are the second half of the inventory in docs/services.md — the "+ N member" column. They matter
+// as much as the parse guards and are easier to miss: a parse guard is one literal per handler, while
+// these are scattered complaints about a missing member or a malformed identifier, and #950 corrected
+// them to the same per-service code precisely so that one plugin cannot answer two codes for one class
+// of caller error.
+//
+// The body is "{}" wherever a member is being checked. That is deliberate and is the whole reason these
+// cases cannot live in the parse-guard table: "{}" *parses*, so it travels past the parse guard and
+// reaches the member check underneath, where invalidBodyPayload would have stopped one line earlier.
+// Where the identifier comes from the path instead, the body is irrelevant and the path is what carries
+// the case.
+var memberComplaintServices = []memberService{
+	{
+		name: "eventbridge",
+		host: "events.us-east-1.amazonaws.com",
+		code: "ValidationError",
+		cases: []memberCase{
+			{name: "deleteRule", target: "AWSEvents.DeleteRule", body: "{}", wantMessage: "Name is required"},
+			{name: "describeRule", target: "AWSEvents.DescribeRule", body: "{}", wantMessage: "Name is required"},
+			{name: "putTargets", target: "AWSEvents.PutTargets", body: "{}", wantMessage: "Rule is required"},
+			{name: "removeTargets", target: "AWSEvents.RemoveTargets", body: "{}", wantMessage: "Rule is required"},
+			{name: "listTargetsByRule", target: "AWSEvents.ListTargetsByRule", body: "{}", wantMessage: "Rule is required"},
+		},
+	},
+	{
+		name: "firehose",
+		host: "firehose.us-east-1.amazonaws.com",
+		code: "ValidationError",
+		cases: []memberCase{
+			{name: "createDeliveryStream", target: "Firehose_20150804.CreateDeliveryStream", body: "{}", wantMessage: "DeliveryStreamName is required"},
+			{name: "describeDeliveryStream", target: "Firehose_20150804.DescribeDeliveryStream", body: "{}", wantMessage: "DeliveryStreamName is required"},
+			{name: "deleteDeliveryStream", target: "Firehose_20150804.DeleteDeliveryStream", body: "{}", wantMessage: "DeliveryStreamName is required"},
+		},
+	},
+	{
+		name: "sagemaker",
+		host: "api.sagemaker.us-east-1.amazonaws.com",
+		code: "ValidationError",
+		cases: []memberCase{
+			{name: "createApp", target: "SageMaker.CreateApp", body: "{}", wantMessage: "AppName is required"},
+			// The three training-job sites are three of the four #950 split out of an
+			// `if err != nil || body.X == ""` conflation. Sending "{}" is what proves the split
+			// happened: before it, this input and an unparseable one produced the same message.
+			{name: "createTrainingJob", target: "SageMaker.CreateTrainingJob", body: "{}", wantMessage: "TrainingJobName is required"},
+			{name: "describeTrainingJob", target: "SageMaker.DescribeTrainingJob", body: "{}", wantMessage: "TrainingJobName is required"},
+			{name: "stopTrainingJob", target: "SageMaker.StopTrainingJob", body: "{}", wantMessage: "TrainingJobName is required"},
+		},
+	},
+	{
+		name: "kinesis",
+		host: "kinesis.us-east-1.amazonaws.com",
+		code: "InvalidArgumentException",
+		cases: []memberCase{
+			// getShardIterator resolves the stream reference before it checks ShardId, so the body
+			// has to name a stream to reach the member check at all.
+			{name: "getShardIterator", target: "Kinesis_20131202.GetShardIterator", body: `{"StreamName":"a-stream"}`, wantMessage: "ShardId is required"},
+			{name: "getRecords", target: "Kinesis_20131202.GetRecords", body: "{}", wantMessage: "ShardIterator is required"},
+		},
+	},
+	{
+		name: "servicequotas",
+		host: "servicequotas.us-east-1.amazonaws.com",
+		code: "IllegalArgumentException",
+		cases: []memberCase{
+			{name: "requestServiceQuotaIncrease", target: "ServiceQuotasV20190624.RequestServiceQuotaIncrease", body: "{}", wantMessage: "ServiceCode and QuotaCode are required"},
+		},
+	},
+	{
+		name: "lambda",
+		host: "lambda.us-east-1.amazonaws.com",
+		code: "InvalidParameterValueException",
+		cases: []memberCase{
+			{name: "createFunction", path: "/2015-03-31/functions", body: "{}", wantMessage: "FunctionName is required"},
+			{name: "createEventSourceMapping", path: "/2015-03-31/event-source-mappings", body: "{}", wantMessage: "FunctionName and EventSourceArn are required"},
+		},
+	},
+	{
+		name: "sesv2",
+		host: "email.us-east-1.amazonaws.com",
+		code: "BadRequestException",
+		cases: []memberCase{
+			{name: "createEmailIdentity", path: "/v2/email/identities", body: "{}", wantMessage: "EmailIdentity is required"},
+		},
+	},
+	{
+		name: "msk",
+		host: "kafka.us-east-1.amazonaws.com",
+		code: "BadRequest",
+		cases: []memberCase{
+			{name: "createClusterV2", path: "/api/v2/clusters", body: "{}", wantMessage: "ClusterName is required"},
+			// An empty cluster ARN is only reachable where a literal segment follows it, because
+			// parseKafkaOperation trims a trailing slash — see the unreachable-guard note below.
+			{name: "getBootstrapBrokers", path: "/v1/clusters//bootstrap-brokers", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
+			{name: "listNodes", path: "/v1/clusters//nodes", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
+			{name: "loadClusterByARN/notAnARN", path: "/v1/clusters/notanarn", method: http.MethodGet, body: "{}", wantMessage: "invalid MSK cluster ARN"},
+			{name: "loadClusterByARN/badResource", path: "/v1/clusters/arn:aws:kafka:us-east-1:123456789012:cluster", method: http.MethodGet, body: "{}", wantMessage: "invalid MSK cluster ARN resource"},
+		},
+	},
+	{
+		name: "efs",
+		host: "elasticfilesystem.us-east-1.amazonaws.com",
+		code: "BadRequest",
+		cases: []memberCase{
+			{name: "createAccessPoint", path: "/2015-02-01/access-points", body: "{}", wantMessage: "FileSystemId is required"},
+			{name: "createMountTarget", path: "/2015-02-01/mount-targets", body: "{}", wantMessage: "FileSystemId is required"},
+			// parseEFSOperation does not trim a trailing slash, so unlike MSK's and SES v2's the
+			// empty-path-parameter guards here are all reachable.
+			{name: "updateFileSystem", path: "/2015-02-01/file-systems", method: http.MethodPut, body: "{}", wantMessage: "FileSystemId is required"},
+			{name: "deleteFileSystem", path: "/2015-02-01/file-systems", method: http.MethodDelete, body: "{}", wantMessage: "FileSystemId is required"},
+			{name: "deleteAccessPoint", path: "/2015-02-01/access-points", method: http.MethodDelete, body: "{}", wantMessage: "AccessPointId is required"},
+			{name: "deleteMountTarget", path: "/2015-02-01/mount-targets", method: http.MethodDelete, body: "{}", wantMessage: "MountTargetId is required"},
+			{name: "tagResource", path: "/2015-02-01/resource-tags/", body: "{}", wantMessage: "ResourceId is required"},
+			{name: "listTagsForResource", path: "/2015-02-01/resource-tags/", method: http.MethodGet, body: "{}", wantMessage: "ResourceId is required"},
+			{name: "untagResource", path: "/2015-02-01/resource-tags/", method: http.MethodDelete, body: "{}", wantMessage: "ResourceId is required"},
+			// EFS keys its tag store off the ID prefix, so an ID belonging to neither a file system
+			// nor an access point is refused rather than silently stored under a third kind.
+			{name: "mergeEFSTags", path: "/2015-02-01/resource-tags/xyz-12345678", body: `{"Tags":[{"Key":"k","Value":"v"}]}`, wantMessage: "Unknown resource ID prefix"},
+			{name: "loadEFSTags", path: "/2015-02-01/resource-tags/xyz-12345678", method: http.MethodGet, body: "{}", wantMessage: "Unknown resource ID prefix"},
+		},
+	},
+}
+
+// TestMemberComplaintAnswersThePublishedCode asserts the non-parse-guard half of the inventory answers
+// the same per-service code, with the message that tells the two apart.
+//
+// **Five guards in this class are unreachable and are deliberately absent**, which is worth stating
+// because an absent case otherwise reads as an oversight. `parseKafkaOperation` and
+// `parseSESv2Operation` both open with `strings.TrimRight(path, "/")`, so a request naming an empty path
+// parameter collapses onto the collection route: `GET /v1/clusters/` dispatches ListClusters, not
+// DescribeCluster with an empty ARN. That makes MSK's describeCluster, deleteCluster and
+// describeClusterV2 checks, and SES v2's getEmailIdentity and deleteEmailIdentity checks, dead code —
+// their codes are corrected for consistency but nothing can reach them. MSK's getBootstrapBrokers and
+// listNodes escape only because a literal segment follows the ARN, which is why those two are here.
+func TestMemberComplaintAnswersThePublishedCode(t *testing.T) {
+	for _, svc := range memberComplaintServices {
+		t.Run(svc.name, func(t *testing.T) {
+			ts := emulator.StartTestServer(t)
+			for _, tc := range svc.cases {
+				t.Run(tc.name, func(t *testing.T) {
+					status, code, message := rawUnsignedMethodCall(t, ts, svc.host, tc.target, tc.path,
+						tc.method, []byte(tc.body))
+					assert.Equalf(t, svc.code, code, "%s answers its service's one code", tc.name)
+					assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.name)
+					assert.Containsf(t, message, tc.wantMessage, "%s names what it wants", tc.name)
+					assertNoDecoderText(t, tc.name, message)
+				})
+			}
+		})
+	}
 }
 
 // lambdaFunctionARNFromCreate reads a function's ARN back off GetFunction.
@@ -362,9 +555,23 @@ func rawUnsignedCall(t *testing.T, ts *emulator.TestServer, host, target, path s
 	body []byte,
 ) (status int, code, message string) {
 	t.Helper()
+	return rawUnsignedMethodCall(t, ts, host, target, path, http.MethodPost, body)
+}
+
+// rawUnsignedMethodCall is [rawUnsignedCall] with the HTTP method spelled out.
+//
+// Only the member-complaint table needs it: several of those guards read a path parameter rather than a
+// body member, and the operation that carries them is a GET, a PUT or a DELETE.
+func rawUnsignedMethodCall(t *testing.T, ts *emulator.TestServer, host, target, path, method string,
+	body []byte,
+) (status int, code, message string) {
+	t.Helper()
 
 	if (target == "") == (path == "") {
 		t.Fatalf("exactly one of target and path must be set, got %q and %q", target, path)
+	}
+	if method == "" {
+		method = http.MethodPost
 	}
 
 	url := ts.URL + "/"
@@ -374,7 +581,7 @@ func rawUnsignedCall(t *testing.T, ts *emulator.TestServer, host, target, path s
 		contentType = "application/json"
 	}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("build the request for %s: %v", url, err)
 	}

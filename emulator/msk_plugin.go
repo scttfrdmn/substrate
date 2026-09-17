@@ -165,6 +165,8 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 }
 
 func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
+	// TODO(#1009): unreachable. parseKafkaOperation trims a trailing slash, so GET /v1/clusters/
+	// collapses onto the ListClusters arm and no request arrives here with an empty ARN.
 	if clusterARN == "" {
 		return nil, mskBadRequest("cluster ARN is required")
 	}
@@ -222,6 +224,8 @@ func (p *MSKPlugin) listClusters(reqCtx *RequestContext, _ *AWSRequest) (*AWSRes
 }
 
 func (p *MSKPlugin) deleteCluster(reqCtx *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
+	// TODO(#1009): unreachable. DELETE /v1/clusters/ trims to /v1/clusters, which matches no arm of
+	// parseKafkaOperation, so the request answers unknownRouteError before reaching this handler.
 	if clusterARN == "" {
 		return nil, mskBadRequest("cluster ARN is required")
 	}
@@ -332,6 +336,9 @@ func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*A
 
 // describeClusterV2 returns cluster details in the V2 ClusterInfo shape.
 func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
+	// TODO(#1009): unreachable, as in describeCluster — GET /api/v2/clusters/ collapses onto the
+	// ListClustersV2 arm. getBootstrapBrokers and listNodes escape this because a literal segment
+	// follows the ARN, which is why only their guards are covered by a wire test.
 	if clusterARN == "" {
 		return nil, mskBadRequest("cluster ARN is required")
 	}

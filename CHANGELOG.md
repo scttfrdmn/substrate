@@ -583,6 +583,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Quotas operation"*. The suite now sends bytes, one case per guarded operation, asserting the status and
   the code together and that the message names no Go type.
 
+  The **member-complaint half** of the inventory — every corrected site that is not a parse guard — is
+  covered the same way, at 35 sites in nine services. Those cases send `{}` rather than a truncated body,
+  because `{}` parses and so travels past the parse guard to the member check underneath, and they assert
+  the message alongside the code: once every site in a service answers one code, the message is the only
+  thing that distinguishes them. **Five of those guards cannot be reached by any request and are recorded
+  rather than tested.** `parseKafkaOperation` and `parseSESv2Operation` both trim a trailing slash, so a
+  request naming an empty path parameter collapses onto the collection route — `GET /v1/clusters/`
+  dispatches `ListClusters`, not `DescribeCluster` with an empty ARN — which makes MSK's
+  `describeCluster`, `deleteCluster` and `describeClusterV2` checks and SES v2's `getEmailIdentity` and
+  `deleteEmailIdentity` checks dead code. Their codes are corrected for consistency with their siblings,
+  but nothing can observe them, and each now says so at the line a reader would look. MSK's
+  `getBootstrapBrokers` and `listNodes` escape only because a literal segment follows the ARN;
+  `parseEFSOperation` does not trim at all, which is why all nine of EFS's equivalent guards are
+  reachable. Two routers answering differently on one input class is filed as #1009 rather than settled
+  here, since whether AWS answers a validation error, a 404 or the collection operation for a trailing
+  slash is unverified.
+
 - **Twenty-seven Step Functions and Systems Manager sites answered an error code their own service does
   not publish, for a request body that would not parse** (part of #950). Fifteen Step Functions handlers
   and ten Systems Manager ones answered `InvalidRequest`; the remaining two Systems Manager handlers —

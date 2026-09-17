@@ -465,8 +465,9 @@ code together**, since a decoded error struct carries only the code and a consum
 logic branches on the status. Each table names every operation that carries a guard rather
 than a representative sample, because the defect was per-site duplication of one literal and
 the assertion that matters is that no site was missed.
-`emulator/invalid_body_inventory_test.go` carries **66 operations in fourteen services** and
-`emulator/invalid_body_code_test.go` the Step Functions and Systems Manager sites #1003 fixed.
+`emulator/invalid_body_inventory_test.go` carries **66 guarded operations in fourteen services**,
+plus **35 member-complaint sites in nine** (below), and `emulator/invalid_body_code_test.go` the
+Step Functions and Systems Manager sites #1003 fixed.
 
 Two of the 66 needed a resource to exist first, which is worth recording because it is the one
 way a guard can be present, correct and still untested. Lambda's `AddPermission` and
@@ -485,6 +486,34 @@ ordering them. Filed as [#1006](https://github.com/scttfrdmn/substrate/issues/10
 than settled here, because #950's rule is about *which code* a guard answers, not about which
 guard runs first — and if the body is refused first the pattern is not Lambda's alone, so it is
 an inventory rather than two moved lines.
+
+**The member-complaint half of the inventory is covered the same way**, in
+`TestMemberComplaintAnswersThePublishedCode` — every site in the *"+ N member"* column above,
+which is to say every site whose code #950 corrected that is *not* a parse guard. These are the
+easier half to leave unverified: a parse guard is one literal per handler, while these are
+scattered complaints about a missing member or a malformed identifier, and the whole point of
+correcting them was that one plugin must not answer two codes for one class of caller error.
+They send `{}` rather than a truncated body, deliberately — `{}` *parses*, so it travels past
+the parse guard and reaches the member check underneath, where an unparseable body would have
+stopped one line earlier — and they assert the message alongside the code, because once every
+site in a service answers one code the message is the only thing distinguishing them.
+
+**Five of those guards cannot be reached by any request, and are recorded rather than tested.**
+`parseKafkaOperation` and `parseSESv2Operation` both open by trimming a trailing slash, so a
+request naming an empty path parameter collapses onto the collection route one case earlier in
+the same switch: `GET /v1/clusters/` dispatches `ListClusters`, not `DescribeCluster` with an
+empty ARN. That makes MSK's `describeCluster`, `deleteCluster` and `describeClusterV2` checks
+and SES v2's `getEmailIdentity` and `deleteEmailIdentity` checks dead code — their codes are
+corrected for consistency with their siblings, but nothing can observe them. MSK's
+`getBootstrapBrokers` and `listNodes` escape only because a literal segment follows the ARN, so
+the empty parameter is interior rather than trailing and `/v1/clusters//nodes` reaches them.
+`parseEFSOperation` does **not** trim, which is why all nine of EFS's equivalent guards are
+reachable and covered — two routers in one tree answering differently on the same input class,
+which is the part worth fixing and is filed as
+[#1009](https://github.com/scttfrdmn/substrate/issues/1009). Whether AWS itself answers a
+validation error, a 404, or the collection operation for a trailing slash is unverified, and
+MSK is the weakest service in the tree to settle that from documentation for the reasons given
+below.
 
 **One service is outside this rule by design.** CloudWatch speaks Smithy RPC v2 CBOR, and
 its refusal names the modelled shape rather than a code from a common-errors page; neither
