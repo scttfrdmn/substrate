@@ -7,19 +7,24 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 )
 
 // ec2MaxTagResults is the largest MaxResults DescribeTags accepts, and the page size a
 // request naming none receives.
+//
+// The paging itself moved to [ec2MaxResults], [ec2NextTokenOffset] and [ec2Page] in #917, which
+// the other paginated describes now share; the wire behavior did not change, and the two
+// constants stayed here because the range is this operation's and not the helper's.
 const ec2MaxTagResults = 1000
 
 // ec2MinTagResults is the smallest MaxResults DescribeTags accepts.
 //
 // AWS documents this operation's range as "between 5 and 1000", where
 // DescribeLaunchTemplateVersions' is 1 to 200 — the floor is per-operation, so it cannot be
-// shared with [ec2MaxLaunchTemplateVersionResults]' check even though the two read alike.
+// shared with [ec2MaxLaunchTemplateVersionResults]' check even though the two read alike. Four
+// of the pages #917 covers publish no range at all, which is why the helper takes the bounds as
+// arguments rather than owning them.
 const ec2MinTagResults = 5
 
 // ec2StatePrefix is the key prefix every EC2 record of one namespace in one account and
@@ -149,14 +154,28 @@ type ec2TagDescription struct {
 // served the third in full and the second on five operations.
 //
 // The answer is assembled in four steps, in this order: refuse an undocumented filter name,
-// validate MaxResults, scan and filter, then sort and page. Refusal comes first so that it
-// never depends on how many resources happen to be tagged, which is the ordering
-// [ec2FilterSpec.check] documents.
+// validate MaxResults and NextToken, scan and filter, then sort and page. Refusal comes first so
+// that it never depends on how many resources happen to be tagged, which is the ordering
+// [ec2FilterSpec.check] documents — and since #917 that covers the token too, which was decoded
+// after the scan when this operation carried its own paginator.
 func (p *EC2Plugin) describeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	if awsErr := ec2TagFilterSpec().check(req.Params); awsErr != nil {
 		return nil, awsErr
 	}
-	maxResults, awsErr := ec2TagMaxResults(req.Params)
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinTagResults, ec2MaxTagResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	// A request naming no MaxResults gets a page of [ec2MaxTagResults] rather than the whole
+	// listing, which is what [ec2MaxResults]' zero return means everywhere else (#917). The
+	// difference is kept rather than harmonized: this page publishes no unpaginated default —
+	// where API_DescribeSecurityGroups' says "If this parameter is not specified, then all items
+	// are returned" — and paging at the published maximum is the behavior this operation shipped
+	// with, so changing it would be a wire change to a caller that never asked for one.
+	if maxResults == 0 {
+		maxResults = ec2MaxTagResults
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -167,10 +186,7 @@ func (p *EC2Plugin) describeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	ec2SortTagDescriptions(items)
 
-	page, nextToken, awsErr := ec2PageTagDescriptions(items, req.Params["NextToken"], maxResults)
-	if awsErr != nil {
-		return nil, awsErr
-	}
+	page, nextToken := ec2Page(items, offset, maxResults)
 
 	type response struct {
 		XMLName   xml.Name            `xml:"DescribeTagsResponse"`
@@ -319,59 +335,4 @@ func ec2SortTagDescriptions(items []ec2TagDescription) {
 		}
 		return items[i].Key < items[j].Key
 	})
-}
-
-// ec2TagMaxResults reads DescribeTags' MaxResults, defaulting to [ec2MaxTagResults].
-//
-// A value outside 5–1000 is refused rather than clamped, which is what
-// DescribeLaunchTemplateVersions does with its own range: a caller who asked for 2000 items
-// asked for something the operation cannot do, and silently giving 1000 hides that.
-func ec2TagMaxResults(params map[string]string) (int, *AWSError) {
-	raw := params["MaxResults"]
-	if raw == "" {
-		return ec2MaxTagResults, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < ec2MinTagResults || n > ec2MaxTagResults {
-		return 0, &AWSError{
-			Code: "InvalidParameterValue",
-			Message: "MaxResults must be between " + strconv.Itoa(ec2MinTagResults) +
-				" and " + strconv.Itoa(ec2MaxTagResults),
-			HTTPStatus: http.StatusBadRequest,
-		}
-	}
-	return n, nil
-}
-
-// ec2PageTagDescriptions returns the page of items starting at token, and the token for the
-// page after it.
-//
-// The wire shape is DescribeLaunchTemplateVersions': a plain decimal offset, an
-// InvalidParameterValue for a token that is not one, an out-of-range offset clamped to the
-// end rather than refused — a caller resuming after a tag was deleted gets an empty last
-// page, not an error — and an omitted nextToken on the last page, since AWS documents the
-// member as null when there are no more items.
-//
-// The offset is only stable because [ec2SortTagDescriptions] ran first.
-func ec2PageTagDescriptions(items []ec2TagDescription, token string, maxResults int) ([]ec2TagDescription, string, *AWSError) {
-	start := 0
-	if token != "" {
-		n, err := strconv.Atoi(token)
-		if err != nil || n < 0 {
-			return nil, "", &AWSError{
-				Code:       "InvalidParameterValue",
-				Message:    "The token '" + token + "' is invalid",
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-		start = n
-	}
-	if start > len(items) {
-		start = len(items)
-	}
-	page := items[start:]
-	if len(page) > maxResults {
-		return page[:maxResults], strconv.Itoa(start + maxResults), nil
-	}
-	return page, "", nil
 }
