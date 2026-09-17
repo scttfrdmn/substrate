@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -94,15 +95,47 @@ func (e *RDSExecutor) waitPostgresReady(ctx context.Context, containerID, user s
 	return fmt.Errorf("postgres did not become ready within %s", timeout)
 }
 
-// StopContainer stops and removes the Docker container identified by containerID.
+// StopContainer stops and removes the Docker container identified by containerID, and
+// forgets the instance it was started for.
+//
+// The remove is not cosmetic and the forget is not bookkeeping (#903). "docker stop"
+// leaves the container present under the substrate-rds-<id> name it was started with,
+// so a CreateDBInstance reusing that identifier failed on the name and answered with a
+// synthetic endpoint instead; and nothing dropped the active entry, so it survived for
+// the life of the process and StopAll stopped containers it had already stopped.
 func (e *RDSExecutor) StopContainer(ctx context.Context, containerID string) error {
-	cmd := exec.CommandContext(ctx, "docker", "stop", containerID)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+	stopErr := e.docker(ctx, "stop", containerID)
+	rmErr := e.docker(ctx, "rm", containerID)
+	e.forget(containerID)
+	return errors.Join(stopErr, rmErr)
 }
 
-// StopAll stops all active Postgres containers.
+// docker runs a docker subcommand against containerID with its output discarded.
+func (e *RDSExecutor) docker(ctx context.Context, subcommand, containerID string) error {
+	cmd := exec.CommandContext(ctx, "docker", subcommand, containerID)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker %s %s: %w", subcommand, containerID, err)
+	}
+	return nil
+}
+
+// forget drops the active entry for containerID, if one is held.
+func (e *RDSExecutor) forget(containerID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for instanceID, h := range e.active {
+		if h.ContainerID == containerID {
+			delete(e.active, instanceID)
+		}
+	}
+}
+
+// StopAll stops all active Postgres containers. It is what both a shutdown and a
+// state reset call ([RDSPlugin.ResetForRun]): the executor holds no goroutine of its
+// own, so it is usable again immediately afterwards.
 func (e *RDSExecutor) StopAll(ctx context.Context) error {
 	e.mu.Lock()
 	handles := make(map[string]*RDSContainerHandle, len(e.active))

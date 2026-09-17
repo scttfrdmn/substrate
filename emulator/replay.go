@@ -679,6 +679,13 @@ func generateReplayID() string {
 // identifiers each time from identical recorded events, which is the property the
 // event log exists to rule out.
 //
+// It also releases what a plugin started rather than minted: S3's object payloads
+// (#902), and Lambda's event-source-mapping pollers, warm Lambda containers and RDS
+// Postgres containers (#903). A replay needs those gone for the same reason it needs
+// the counters rewound — a poller left over from the previous replay polls the queue
+// this one recreates, and a container left over holds the docker name the next
+// CreateDBInstance needs.
+//
 // The state manager is cleared first and the plugins second, because
 // [ResettablePlugin.ResetForRun] is allowed to write a plugin's start-of-run state
 // into the state manager; wiping the store afterwards would erase exactly what the

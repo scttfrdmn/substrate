@@ -42,6 +42,34 @@ func TestRDSExecutorStopAll_WithFakeHandle(t *testing.T) {
 	emulator.InjectRDSHandleForTest(exec, "fake-instance", "nonexistent-container-id-rds")
 	// StopAll will log an error for the fake container but must not panic.
 	_ = exec.StopAll(context.Background())
+
+	// And it empties the active set, so a second call — a shutdown after a state reset,
+	// say — does not stop the same containers again (#903).
+	if n := emulator.RDSActiveContainerCountForTest(exec); n != 0 {
+		t.Errorf("active containers after StopAll = %d; want 0", n)
+	}
+}
+
+// TestRDSStopContainer_ForgetsTheHandle asserts that stopping one container drops its
+// active entry. Until #903 nothing did, so the map grew for the life of the process and
+// a state reset left an entry pointing at a container it could no longer reach.
+// This test is skipped when Docker is not available.
+func TestRDSStopContainer_ForgetsTheHandle(t *testing.T) {
+	t.Parallel()
+	if !isDockerAvailable() {
+		t.Skip("Docker not available")
+	}
+	logger := emulator.NewDefaultLogger(-4, false)
+	exec := emulator.NewRDSExecutor(logger)
+	emulator.InjectRDSHandleForTest(exec, "forget-instance", "nonexistent-container-id-forget")
+
+	// The docker calls fail for a container that does not exist; the bookkeeping must
+	// happen regardless, or the entry outlives every way of reaching it.
+	_ = emulator.RDSStopContainerForTest(exec, context.Background(), "nonexistent-container-id-forget")
+
+	if n := emulator.RDSActiveContainerCountForTest(exec); n != 0 {
+		t.Errorf("active containers after StopContainer = %d; want 0", n)
+	}
 }
 
 // TestRDSStopContainer_NonExistent verifies that StopContainer returns an error

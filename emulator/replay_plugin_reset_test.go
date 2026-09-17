@@ -20,6 +20,12 @@ package emulator_test
 // assert a race rather than the counter; and a test must not depend on wall-clock
 // time at all. Freezing leaves the counter as the only thing that can differ,
 // which is exactly the defect under test.
+//
+// The hook then turned out to owe more than a counter (#902, #903). A plugin also
+// holds state it *started* rather than minted — S3's object payloads, Lambda's
+// event-source-mapping pollers and warm containers, RDS's Postgres containers — and
+// none of it was reachable from a reset either, so the tests from
+// TestPluginReset_StateResetEmptiesS3ObjectPayloads on cover that second class.
 
 import (
 	"bytes"
@@ -34,6 +40,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -385,7 +392,7 @@ func (p *resetCountingPlugin) ResetForRun(_ context.Context) error {
 }
 
 // resetInertPlugin is a [emulator.Plugin] that does not implement
-// [emulator.ResettablePlugin] — the shape 64 of the 67 registered plugins take,
+// [emulator.ResettablePlugin] — the shape 62 of the 67 registered plugins take,
 // which is why the hook is an optional interface rather than a method on Plugin.
 type resetInertPlugin struct{ name string }
 
@@ -495,7 +502,261 @@ func TestPluginReset_DefaultPluginsImplementingTheHook(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, []string{"omics", "s3", "sesv2"}, got,
-		"the plugins holding mutable state outside the StateManager: S3's version-ID counter, "+
-			"SES v2's message counter and HealthOmics' random source (#886)")
+	assert.Equal(t, []string{"lambda", "omics", "rds", "s3", "sesv2"}, got,
+		"the plugins holding mutable state outside the StateManager: S3's version-ID counter and "+
+			"object payloads (#886, #902), SES v2's message counter and HealthOmics' random source "+
+			"(#886), Lambda's event-source-mapping pollers and warm containers, and RDS's Postgres "+
+			"containers (#903)")
+}
+
+// resetS3PluginOf returns the S3 plugin ts serves from, so a test can look at the
+// object payloads (#902). They are not observable through any request: every read of
+// the filesystem is gated on metadata the state manager holds, which a reset deletes.
+func resetS3PluginOf(t *testing.T, ts *emulator.TestServer) *emulator.S3Plugin {
+	t.Helper()
+	p, ok := ts.Registry().Plugin("s3")
+	require.True(t, ok, "the test server registers no s3 plugin")
+	s3p, ok := p.(*emulator.S3Plugin)
+	require.True(t, ok, "the registered s3 plugin is a %T", p)
+	return s3p
+}
+
+// resetLambdaPluginOf returns the Lambda plugin ts serves from, for the same reason:
+// a running poller has no representation in any response (#903).
+func resetLambdaPluginOf(t *testing.T, ts *emulator.TestServer) *emulator.LambdaPlugin {
+	t.Helper()
+	p, ok := ts.Registry().Plugin("lambda")
+	require.True(t, ok, "the test server registers no lambda plugin")
+	lp, ok := p.(*emulator.LambdaPlugin)
+	require.True(t, ok, "the registered lambda plugin is a %T", p)
+	return lp
+}
+
+// TestPluginReset_StateResetEmptiesS3ObjectPayloads is the behavioral test for #902:
+// object bytes live in an afero filesystem on the plugin, not in the StateManager, so
+// a reset deleted every object's metadata and left every object's bytes behind. Nothing
+// else releases them for the life of the process.
+//
+// The final third of the test is the one that matters most. Emptying the filesystem
+// must leave it usable, and the obvious implementation — RemoveAll("/") — reports
+// success, leaves every file beneath the root readable, and destroys the root entry so
+// that nothing can be enumerated afterwards. A test that only asserted the paths are
+// gone would pass against a filesystem that had silently kept them all.
+func TestPluginReset_StateResetEmptiesS3ObjectPayloads(t *testing.T) {
+	ts := startFrozenServer(t)
+	s3 := resetS3PluginOf(t, ts)
+	require.True(t, s3.OwnsFilesystemForTest(),
+		"a server-hosted S3 plugin creates its own filesystem; nothing can inject one over HTTP")
+
+	versions := recordVersionedPutObjects(t, ts, "reset-bytes", 2)
+	require.Len(t, versions, 2)
+
+	want := []string{"/reset-bytes/obj"}
+	for _, v := range versions {
+		want = append(want, "/reset-bytes/.versions/obj/"+v)
+	}
+	sort.Strings(want)
+
+	before, err := s3.PayloadPathsForTest()
+	require.NoError(t, err)
+	require.Equal(t, want, before,
+		"each PutObject writes the object body and one copy per version")
+
+	ts.ResetState(t)
+
+	after, err := s3.PayloadPathsForTest()
+	require.NoError(t, err)
+	assert.Empty(t, after,
+		"the object bytes must not outlive the metadata that describes them: after a reset no "+
+			"request can reach them and nothing else ever frees them (#902)")
+
+	// Writing again over the wire has to work, and the bytes have to read back.
+	recordVersionedPutObjects(t, ts, "reset-bytes", 1)
+	status, _, body := resetDoRequest(t, http.MethodGet, ts.URL+"/reset-bytes/obj", resetS3Host, nil)
+	require.Equal(t, http.StatusOK, status, "GetObject after a reset: %s", body)
+	assert.Equal(t, "body-0", string(body),
+		"emptying the filesystem must leave it writable and readable, which RemoveAll(\"/\") does not")
+}
+
+// resetS3ServerOnFS starts a single-plugin S3 server over fs and returns both the
+// server and the plugin, so a test can write over the wire and then reset the very
+// plugin that served the write.
+//
+// The wiring mirrors newS3TestServerWithFS rather than sharing it, because a reset
+// assertion needs the plugin itself and that helper returns only the server.
+func resetS3ServerOnFS(t *testing.T, fs afero.Fs) (*emulator.Server, *emulator.S3Plugin) {
+	t.Helper()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	state := emulator.NewMemoryStateManager()
+	tc := emulator.NewTimeController(resetFrozenClock)
+
+	p := &emulator.S3Plugin{}
+	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+			"filesystem":      fs,
+		},
+	}))
+
+	registry := emulator.NewPluginRegistry()
+	registry.Register(p)
+
+	srv := emulator.NewServer(
+		*emulator.DefaultConfig(),
+		registry,
+		emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"}),
+		state,
+		tc,
+		logger,
+		emulator.ServerOptions{Costs: emulator.NewCostController(emulator.CostConfig{Enabled: true})},
+	)
+	return srv, p
+}
+
+// TestPluginReset_AnInjectedFilesystemIsNotEmptied pins the one exception to #902: a
+// filesystem handed to the plugin as Options["filesystem"] belongs to the caller, and
+// only the caller knows whether the files under it are safe to remove — it may be an
+// OsFs rooted at a directory holding fixtures the test means to reuse. Nothing can
+// inject one over HTTP, so this is reachable only by an in-process embedder.
+//
+// The bytes are read back through the caller's own afero reference on purpose: the
+// claim under test is that substrate did not touch a filesystem it does not own, which
+// is a statement about the filesystem rather than about S3's own read path.
+func TestPluginReset_AnInjectedFilesystemIsNotEmptied(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	srv, p := resetS3ServerOnFS(t, fs)
+	require.False(t, p.OwnsFilesystemForTest(),
+		"a plugin handed a filesystem does not own it")
+
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/injected", nil, nil).Code,
+		"CreateBucket")
+	require.Equal(t, http.StatusOK,
+		s3Request(t, srv, http.MethodPut, "/injected/obj", []byte("payload"), nil).Code, "PutObject")
+
+	before, err := p.PayloadPathsForTest()
+	require.NoError(t, err)
+	require.Equal(t, []string{"/injected/obj"}, before)
+
+	require.NoError(t, p.ResetForRun(t.Context()))
+
+	after, err := p.PayloadPathsForTest()
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a reset must not empty a filesystem the caller injected")
+
+	got, err := afero.ReadFile(fs, "/injected/obj")
+	require.NoError(t, err, "the caller's own reference must still read the file")
+	assert.Equal(t, "payload", string(got))
+}
+
+// resetLambdaHost is the Lambda endpoint the poller recording uses.
+const resetLambdaHost = "lambda.us-east-1.amazonaws.com"
+
+// TestPluginReset_StateResetStopsEventSourceMappingPollers is the behavioral test for
+// the first half of #903. CreateEventSourceMapping starts a goroutine that polls SQS
+// once a wall-clock second and invokes the mapping's function with whatever it
+// receives, and DeleteEventSourceMapping is the only call that closes its stop
+// channel.
+//
+// A reset deletes the mapping record, so that call then answers 404 — asserted below —
+// and the goroutine becomes unreachable through the API while still running. Both the
+// queue URL and the function ARN are derived from names, so the next test case to use
+// the same names has its messages received and deleted, and its function invoked, by a
+// poller it never created: exactly the cross-case interference ResetState exists to
+// remove.
+//
+// The assertion is a poller count rather than an absence of polls because a poll
+// happens only on a one-second wall-clock tick, and no test here may depend on real
+// elapsed time.
+func TestPluginReset_StateResetStopsEventSourceMappingPollers(t *testing.T) {
+	ts := startFrozenServer(t)
+	lambda := resetLambdaPluginOf(t, ts)
+	require.Zero(t, lambda.ESMPollerCountForTest(), "no poller runs before a mapping is created")
+
+	body, err := json.Marshal(map[string]any{
+		"FunctionName":   "reset-poller-fn",
+		"EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:reset-poller-queue",
+	})
+	require.NoError(t, err)
+
+	status, _, got := resetDoRequest(t, http.MethodPost,
+		ts.URL+"/2015-03-31/event-source-mappings", resetLambdaHost, body)
+	require.Equal(t, http.StatusCreated, status, "CreateEventSourceMapping: %s", got)
+
+	var created struct {
+		UUID string `json:"UUID"`
+	}
+	require.NoError(t, json.Unmarshal(got, &created))
+	require.NotEmpty(t, created.UUID)
+	require.Equal(t, 1, lambda.ESMPollerCountForTest(),
+		"an enabled SQS mapping starts a poller")
+
+	ts.ResetState(t)
+
+	assert.Zero(t, lambda.ESMPollerCountForTest(),
+		"a poller must not outlive the mapping record: it polls the queue the next run recreates "+
+			"under the same name and invokes that run's function (#903)")
+
+	status, _, got = resetDoRequest(t, http.MethodDelete,
+		ts.URL+"/2015-03-31/event-source-mappings/"+created.UUID, resetLambdaHost, nil)
+	assert.Equal(t, http.StatusNotFound, status,
+		"the record a reset deletes is the one DeleteEventSourceMapping looks up, so after a reset "+
+			"no API call could have stopped the poller: %s", got)
+}
+
+// TestPluginReset_DrainPoolLeavesTheExecutorUsable pins the second half of #903's
+// Lambda story: a reset drops every warm container, because the pool is keyed by
+// function ARN alone and a function recreated under the same name would otherwise run
+// the previous run's code — but it must not use StopAll, which closes the channel the
+// eviction loop selects on and so leaves every container started afterwards warm until
+// Shutdown however long it sits idle.
+//
+// No container is injected, so nothing here shells out to Docker; the docker-gated
+// tests in lambda_exec_docker_test.go cover the stop path itself.
+func TestPluginReset_DrainPoolLeavesTheExecutorUsable(t *testing.T) {
+	t.Parallel()
+	e := emulator.NewLambdaExecutor(
+		emulator.LambdaExecCfg{ReplayMode: "live", WarmPoolTTL: time.Hour},
+		emulator.NewDefaultLogger(slog.LevelError, false),
+	)
+	t.Cleanup(e.StopAll)
+
+	require.False(t, e.EvictionStoppedForTest(), "a fresh executor evicts idle containers")
+
+	e.DrainPool()
+	assert.False(t, e.EvictionStoppedForTest(),
+		"a state reset must leave idle eviction running; the executor is reused for the next run")
+
+	e.StopAll()
+	assert.True(t, e.EvictionStoppedForTest(),
+		"a shutdown ends it — which is why a reset cannot call StopAll")
+}
+
+// TestPluginReset_RDSResetIsSafeWithoutAContainer covers the RDS half of #903 at the
+// plugin boundary, in the two configurations reachable without Docker: the default,
+// where the plugin holds no executor at all, and an executor holding no container.
+//
+// The container path needs a Postgres container to stop, so it is asserted in
+// rds_exec_test.go, where the existing tests are skipped when Docker is absent.
+func TestPluginReset_RDSResetIsSafeWithoutAContainer(t *testing.T) {
+	t.Parallel()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+
+	stub := &emulator.RDSPlugin{}
+	require.NoError(t, stub.Initialize(t.Context(), emulator.PluginConfig{
+		State:  emulator.NewMemoryStateManager(),
+		Logger: logger,
+	}))
+	require.NoError(t, stub.ResetForRun(t.Context()),
+		"the default RDS plugin holds no executor, so a reset has nothing to stop")
+
+	withExec := &emulator.RDSPlugin{}
+	require.NoError(t, withExec.Initialize(t.Context(), emulator.PluginConfig{
+		State:   emulator.NewMemoryStateManager(),
+		Logger:  logger,
+		Options: map[string]any{"rds_executor": emulator.NewRDSExecutor(logger)},
+	}))
+	require.NoError(t, withExec.ResetForRun(t.Context()),
+		"an executor holding no container must reset cleanly too")
 }

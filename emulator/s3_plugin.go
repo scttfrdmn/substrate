@@ -54,6 +54,11 @@ type S3Plugin struct {
 	versionSeq int64           // monotonic counter for unique version IDs
 	keyLocks   s3KeyMutex      // serializes conditional writes per object key
 
+	// ownsFS records whether fs is the in-memory filesystem this plugin created
+	// rather than one the caller injected. Only a filesystem the plugin owns is
+	// emptied by a reset; see [S3Plugin.ResetForRun] for why (#902).
+	ownsFS bool
+
 	// seedMu serializes consumption of a seeded conditional conflict. It is
 	// deliberately not the per-key stripe set above; see
 	// [S3Plugin.consumeConditionalConflict] for why the wildcard seed needs a
@@ -79,8 +84,10 @@ func (p *S3Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 
 	if fs, ok := cfg.Options["filesystem"].(afero.Fs); ok {
 		p.fs = fs
+		p.ownsFS = false
 	} else {
 		p.fs = afero.NewMemMapFs()
+		p.ownsFS = true
 	}
 
 	p.registry, _ = cfg.Options["registry"].(*PluginRegistry)
@@ -91,16 +98,63 @@ func (p *S3Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 // Shutdown is a no-op for S3Plugin.
 func (p *S3Plugin) Shutdown(_ context.Context) error { return nil }
 
-// ResetForRun rewinds the version-ID counter, which is the only value S3 mints
-// from state it keeps outside the [StateManager]. It implements
+// ResetForRun rewinds the version-ID counter and empties the object payloads —
+// the two pieces of state S3 keeps outside the [StateManager]. It implements
 // [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay needs it.
 //
-// The counter is the whole of what is reset here. Object payloads live in p.fs,
-// which a state reset also leaves behind (#902), but a stale payload cannot change
-// a minted identifier: its bucket and key metadata are gone from the state
-// manager, so nothing can read it, and a replayed PutObject overwrites it.
+// The counter is rewound because it mints version IDs. The payloads are emptied
+// because nothing else ever releases them (#902): object metadata lives in the
+// state manager and object bytes live in p.fs, so a process that reset between
+// many test cases accumulated every payload it had been sent, with no way to free
+// them, and a stale payload sat under the exact path a later run would write.
+// That is invisible through the wire — every read of p.fs is gated on metadata the
+// reset has just deleted — which is why it went unnoticed rather than why it is
+// acceptable.
+//
+// Only a filesystem this plugin created is emptied. One the caller injected
+// through Options["filesystem"] may be backed by a directory the caller means to
+// keep, and the caller holds the only reference that knows what is safe to remove
+// from it, so substrate leaves it alone.
 func (p *S3Plugin) ResetForRun(_ context.Context) error {
 	atomic.StoreInt64(&p.versionSeq, 0)
+	if !p.ownsFS {
+		return nil
+	}
+	return p.emptyFilesystem()
+}
+
+// emptyFilesystem removes every entry in p.fs, which holds object bodies at
+// /<bucket>/<key>, versions at /<bucket>/.versions/<key>/<versionID> and multipart
+// parts at /.multipart/<uploadID>/<partNumber>.
+//
+// The root's entries are removed one at a time rather than by RemoveAll("/"),
+// which on an afero MemMapFs reports success, drops the root directory entry and
+// leaves every file beneath it readable — so the payloads would have survived the
+// call that claimed to have removed them, and the filesystem would no longer be
+// enumerable.
+//
+// p.fs is emptied rather than replaced. Handlers read the field without holding a
+// lock, so assigning a fresh filesystem here would race with a request in flight;
+// mutating the filesystem's contents touches only state it guards itself, which is
+// what [ResettablePlugin.ResetForRun]'s "safe to call while requests are in
+// flight" rule asks for.
+func (p *S3Plugin) emptyFilesystem() error {
+	root, err := p.fs.Open("/")
+	if err != nil {
+		return fmt.Errorf("open s3 payload filesystem: %w", err)
+	}
+	names, readErr := root.Readdirnames(-1)
+	if closeErr := root.Close(); closeErr != nil {
+		return fmt.Errorf("close s3 payload filesystem: %w", closeErr)
+	}
+	if readErr != nil {
+		return fmt.Errorf("read s3 payload filesystem: %w", readErr)
+	}
+	for _, name := range names {
+		if rmErr := p.fs.RemoveAll("/" + name); rmErr != nil {
+			return fmt.Errorf("remove s3 payloads under /%s: %w", name, rmErr)
+		}
+	}
 	return nil
 }
 
