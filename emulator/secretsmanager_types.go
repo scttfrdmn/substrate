@@ -42,6 +42,13 @@ type SecretState struct {
 
 	// RotationEnabled indicates whether rotation is enabled.
 	RotationEnabled bool `json:"RotationEnabled"`
+
+	// DeletionDate is the end of the recovery window a DeleteSecret call opened, and the zero time when
+	// no deletion is scheduled. A non-zero value is the whole of what makes a secret "scheduled for
+	// deletion": DeleteSecret answers it, DescribeSecret reports it as DeletedDate, GetSecretValue
+	// refuses while it is set, and RestoreSecret clears it (#953). It is never a wall-clock time — it is
+	// the simulated clock at the request plus RecoveryWindowInDays.
+	DeletionDate time.Time `json:"DeletionDate,omitempty"`
 }
 
 // SMTag is a key-value tag for Secrets Manager resources.
