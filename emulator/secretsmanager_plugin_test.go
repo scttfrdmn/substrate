@@ -140,8 +140,12 @@ func TestSMPlugin_DeleteSecret(t *testing.T) {
 		"SecretString": "temp",
 	})
 
+	// ForceDeleteWithoutRecovery is what removes the record. Until #953 every DeleteSecret behaved this
+	// way, including the plain one this case used to make; the default now opens a recovery window
+	// instead, which [TestSMDeletion_ADefaultDeleteSchedulesRatherThanRemoves] covers.
 	resp := smRequest(t, srv, "DeleteSecret", map[string]interface{}{
-		"SecretId": "delete-secret",
+		"SecretId":                   "delete-secret",
+		"ForceDeleteWithoutRecovery": true,
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 

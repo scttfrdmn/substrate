@@ -333,7 +333,13 @@ func TestSMResolution_DeleteSecretRemovesTheOwningRegionsIndexEntry(t *testing.T
 	smCreateSecretIn(t, ts, smTarget, "gone", "east-value", nil)
 	westARN := smCreateSecretIn(t, ts, smWest2Target, "gone", "west-value", nil)
 
-	status, _, code := smRawCall(t, ts, smTarget, "DeleteSecret", map[string]any{"SecretId": westARN})
+	// Forced, because #928's subject is which Region's index entry a *removal* takes out, and since #953
+	// only a forced delete removes anything — a plain DeleteSecret opens a recovery window and leaves
+	// both indexes as they were.
+	status, _, code := smRawCall(t, ts, smTarget, "DeleteSecret", map[string]any{
+		"SecretId":                   westARN,
+		"ForceDeleteWithoutRecovery": true,
+	})
 	require.Empty(t, code, "DeleteSecret on the west ARN")
 	require.Equal(t, http.StatusOK, status)
 

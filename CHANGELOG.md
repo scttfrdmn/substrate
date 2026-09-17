@@ -15,6 +15,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a path with no request context, and an empty value stays in scope rather than disappearing from
   the listing.
 
+- **Secrets Manager's `RestoreSecret`, and `DescribeSecret`'s `DeletedDate`** (#953). AWS describes
+  `RestoreSecret` as removing a stamp rather than reviving anything — "cancels the scheduled deletion of
+  a secret by removing the `DeletedDate` time stamp. You can access a secret again after it has been
+  restored" — and publishes a two-member response, `ARN` and `Name`, which is what substrate answers.
+  `DescribeSecret` now reports `DeletedDate` while a recovery window is open and omits it otherwise, the
+  omission being one of the four AWS documents per member. Note AWS's own asymmetry, which substrate
+  follows rather than tidies: `DeleteSecret` answers the stamp as `DeletionDate` and `DescribeSecret`
+  reports the same value as `DeletedDate`.
+
+  Restoring a secret that is *not* scheduled succeeds, which is substrate's reading:
+  `API_RestoreSecret` publishes `InvalidRequestException` but its cause list names only the three
+  conditions shared across the service, none of which is "not scheduled", so there is no published code
+  to refuse with — and inventing one would make an idempotent restore fail against substrate and succeed
+  against AWS.
+
+### Changed
+- **`DeleteSecret` opens a recovery window instead of deleting the secret** (#953). AWS's `DeleteSecret`
+  does not delete: it "attaches a `DeletionDate` stamp to the secret that specifies the end of the
+  recovery window", 7 to 30 days out and **defaulting to 30**, and only at the end of that window is the
+  secret removed. Substrate removed the record, the version payload and the index entry on every call —
+  the one behaviour AWS reserves for `ForceDeleteWithoutRecovery: true` — and decoded neither of the two
+  parameters that choose between them. So the destructive variant was the only variant, `RestoreSecret`
+  had nothing to restore, and a secret scheduled for deletion and a secret that never existed were the
+  **same observation**: both answered `ResourceNotFoundException`, so a caller's error handling could not
+  tell "restore this" from "this was never here". `GetSecretValue` now answers
+  `InvalidRequestException`/400 for the first, naming the scheduled-for-deletion cause, and
+  `ResourceNotFoundException`/400 for the second.
+
+  Both refusals AWS publishes are answered, and the second is substrate's reading of a sentence stated
+  over *use*: a window outside 7–30 is `InvalidParameterException`/400, and so is a call that names
+  `RecoveryWindowInDays` and `ForceDeleteWithoutRecovery` together — refused on the parameters'
+  **presence**, so an explicit `ForceDeleteWithoutRecovery: false` beside a window is refused too. The
+  alternative would silently open a 30-day window for a caller who asked for an immediate delete, which
+  is the more damaging direction to guess in. Neither refusal writes anything.
+
+  A forced delete of an absent or already-deleted secret answers `200`, per AWS's explicit sentence
+  suspending the code there; the *body* is substrate's reading, since AWS publishes the suspension
+  without publishing what is answered instead. That is the path a CloudFormation teardown takes:
+  substrate's own deleter has always sent `ForceDeleteWithoutRecovery: true` for
+  `AWS::SecretsManager::Secret`, citing CloudFormation's documented default — a parameter nothing
+  decoded until now, so that comment describes the tree's behaviour only as of this release.
+
+  The permanent deletion at the end of the window is **deliberately not modelled**, and that is a
+  decision rather than an omission: AWS publishes no guarantee to model — "there is no guarantee of a
+  specific time after the recovery window for the permanent delete to occur" — so a secret whose
+  `DeletionDate` has passed is still listed, still stamped, still withholding its value and still
+  restorable. Asserting it had vanished at some simulated instant would assert something AWS explicitly
+  declines to promise.
+
+  Compatibility: **a `DeleteSecret` that removed the secret now schedules it.** A caller who wants the
+  old behaviour must pass `ForceDeleteWithoutRecovery: true`. After a plain `DeleteSecret`, `ListSecrets`
+  still reports the secret, `DescribeSecret` still answers `200` (now carrying `DeletedDate`), and
+  `GetSecretValue` answers `InvalidRequestException` rather than `ResourceNotFoundException`.
+  `PutSecretValue`, `UpdateSecret`, `TagResource` and `UntagResource` do not yet refuse a scheduled
+  secret although their pages publish the same cause (#956).
+
 ### Removed
 - **Secrets Manager's `ListTagsForResource`, an operation AWS does not publish** (#929). The Secrets
   Manager API publishes twenty-three operations and that is not among them; a secret's tags are read

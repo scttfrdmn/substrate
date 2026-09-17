@@ -8790,12 +8790,13 @@ SNS publish: $0.0000005 per message.
 | Operation | Notes |
 |-----------|-------|
 | CreateSecret | Tags are stored key-ordered, so two identical runs report them alike |
-| GetSecretValue | Returns SecretString or SecretBinary |
+| GetSecretValue | Returns SecretString or SecretBinary; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | PutSecretValue | Creates new version |
 | UpdateSecret | |
-| DeleteSecret | Supports ForceDeleteWithoutRecovery |
+| DeleteSecret | Opens a 7-to-30-day recovery window, defaulting to 30, rather than removing the secret; `ForceDeleteWithoutRecovery` removes it — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| RestoreSecret | Clears the `DeletionDate` and answers `ARN` and `Name` only |
 | ListSecrets | Base64 offset pagination; scoped to the caller's account and Region |
-| DescribeSecret | The read path for a secret's tags; reports only the members it has a value for |
+| DescribeSecret | The read path for a secret's tags; reports only the members it has a value for, plus `DeletedDate` while a recovery window is open |
 | ListSecretVersionIds | Reports the current version only |
 | TagResource | Appends to the existing list rather than replacing it |
 | UntagResource | Idempotent — an absent key is not an error |
@@ -8871,7 +8872,7 @@ keeps them apart deliberately:
 
 | Tier | Members | Treatment |
 |------|---------|-----------|
-| AWS states "this field is omitted" | `DeletedDate`, `KmsKeyId`, `LastAccessedDate`, `RotationRules` | Absent |
+| AWS states "this field is omitted" | `DeletedDate`, `KmsKeyId`, `LastAccessedDate`, `RotationRules` | Absent — `DeletedDate` is emitted while a recovery window is open (#953) and absent otherwise |
 | AWS states "Secrets Manager returns null" | `LastRotatedDate`, `NextRotationDate`, `RotationEnabled` | Emitted as JSON `null` |
 | AWS states nothing per member | `ARN`, `CreatedDate`, `Description`, `LastChangedDate`, `Name`, `Tags`, and the rest | Absent when empty — **substrate's reading**, on the blanket sentence alone |
 
@@ -8890,9 +8891,11 @@ rotation is set by `RotateSecret` and by nothing else, and there is no
 
 Nine of the twenty-one published response members are absent because substrate models no
 value for them, which the same sentence makes correct rather than a gap:
-`DeletedDate`, `LastAccessedDate`, `LastRotatedDate`, `NextRotationDate`,
+`LastAccessedDate`, `LastRotatedDate`, `NextRotationDate`,
 `OwningService`, `PrimaryRegion`, `ReplicationStatus`, `RotationLambdaARN`,
-`RotationRules` and `VersionIdsToStages`. So are the three managed-external-secret
+`RotationRules` and `VersionIdsToStages`. `DeletedDate` was the tenth in that list until
+#953 — which is also what made the count of nine true, the list having named ten. So are
+the three managed-external-secret
 members — `Type`, `ExternalSecretRotationRoleArn` and
 `ExternalSecretRotationMetadata` — which belong to a partner integration substrate
 models nothing of.
@@ -8902,6 +8905,85 @@ models nothing of.
 twenty-three operations and that is not among them, so the name now falls to
 `UnknownOperationException`, which is what a caller reaching for it against real AWS
 gets. An untagged secret omits the `Tags` member entirely rather than sending `null`.
+
+### A deleted secret is scheduled, not removed
+
+`DeleteSecret` does not delete a secret. AWS "attaches a `DeletionDate` stamp to the
+secret that specifies the end of the recovery window", and only "at the end of the
+recovery window" is the secret deleted permanently; the window is 7 to 30 days and
+**defaults to 30**, and "at any time before recovery window ends, you can use
+`RestoreSecret` to remove the `DeletionDate` and cancel the deletion of the secret".
+
+Substrate removed the record, the version payload and the index entry on **every** call —
+the one behaviour AWS reserves for `ForceDeleteWithoutRecovery: true` — and decoded
+neither of the two parameters that choose between them. Three consequences followed
+(#953). The destructive variant was the only variant, so a consumer could not test the
+default path at all. `RestoreSecret` was not implemented, and had nothing to restore if it
+had been. And a secret scheduled for deletion and a secret that never existed were the
+**same observation**: both answered `ResourceNotFoundException`, so a caller's error
+handling could not tell "restore this" from "this was never here".
+
+A recovery window is in scope under the boundary in `doc.go`: it is a state transition
+observable through an API call, stamped off the simulated clock, so a
+schedule-then-restore path is assertable with no dependence on wall-clock time.
+
+| Call | Answer |
+|------|--------|
+| `DeleteSecret` with neither parameter | `200`, `DeletionDate` 30 days out; the secret is still listed and still described |
+| `DeleteSecret` with `RecoveryWindowInDays` 7–30 | `200`, `DeletionDate` that many days out |
+| `DeleteSecret` with a window outside 7–30 | `InvalidParameterException`/`400`, nothing written |
+| `DeleteSecret` with both parameters present | `InvalidParameterException`/`400`, nothing written |
+| `DeleteSecret` on an already-scheduled secret, unforced | `InvalidRequestException`/`400` naming the scheduled-for-deletion cause |
+| `DeleteSecret` with `ForceDeleteWithoutRecovery: true` | `200`; record, current version payload and index entry all removed |
+| `DeleteSecret` forced, on an absent or already-deleted secret | `200` — see below |
+| `GetSecretValue` on a scheduled secret | `InvalidRequestException`/`400`, distinguishable from `ResourceNotFoundException` |
+| `DescribeSecret` on a scheduled secret | `200` with `DeletedDate`; the member is absent otherwise |
+| `RestoreSecret` | `200` with `ARN` and `Name` only; the stamp is cleared and the value readable again |
+
+Four points where the reasoning is not simply AWS's prose:
+
+**Refusing both parameters turns on their presence, which is substrate's reading.** AWS
+states the exclusion twice, once under each parameter, and states it over *use*: "You
+can't use both this parameter and `ForceDeleteWithoutRecovery` in the same call." So
+`ForceDeleteWithoutRecovery: false` alongside a window is refused here too. The
+alternative — treating an explicit `false` as an omission — would silently open a
+30-day window for a caller who asked for an immediate delete, which is the more damaging
+direction to guess in.
+
+**A forced delete of a secret that is not there answers `200`, and the body is
+substrate's reading.** The sentence is explicit — "if you forcibly delete an already
+deleted or nonexistent secret, the operation does not return
+`ResourceNotFoundException`" — but AWS publishes the suspension of the code without
+publishing the body answered instead, so substrate reports the ARN the identifier names
+and a `DeletionDate` at the request. This is the path a CloudFormation stack teardown
+takes twice: substrate's own deleter has always sent `ForceDeleteWithoutRecovery: true`
+for `AWS::SecretsManager::Secret`, citing "the default behavior of CloudFormation is to
+delete the secret with the `ForceDeleteWithoutRecovery` flag" — a parameter nothing
+decoded until #953, so that comment describes what the tree does only now.
+
+**The stamp has two names, and substrate follows AWS rather than tidying.**
+`DeleteSecret` answers it as `DeletionDate`; `DescribeSecret` reports the same value as
+`DeletedDate`.
+
+**The permanent deletion at the end of the window is deliberately not modelled.** That is
+a decision, not a gap: AWS publishes no guarantee to model — "there is no guarantee of a
+specific time after the recovery window for the permanent delete to occur" — so a secret
+whose `DeletionDate` has passed is still reported, still stamped, still withholding its
+value, and still restorable. A test asserting it had vanished at some simulated instant
+would assert something AWS explicitly declines to promise. What is modelled is the stamp
+and the refusals it causes.
+
+`RestoreSecret` brings the `SecretId`-taking operations to ten, and it refuses an absent
+secret through the same `400` constructor as the other nine, so it cannot disagree with
+them. Restoring a secret that is **not** scheduled succeeds, which is substrate's
+reading: `API_RestoreSecret` publishes `InvalidRequestException` but its cause list names
+only the three conditions shared across the service, none of which is "not scheduled", so
+there is no published code to refuse with — and inventing one would make an idempotent
+restore fail here and succeed against AWS.
+
+Still unmodelled, and separate decisions rather than part of this: `PutSecretValue`,
+`UpdateSecret`, `TagResource` and `UntagResource` do not refuse a scheduled secret,
+although their pages publish the same cause ([#956](https://github.com/scttfrdmn/substrate/issues/956)).
 
 ### CloudFormation resource types
 

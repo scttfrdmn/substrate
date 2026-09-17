@@ -13,7 +13,7 @@ import (
 
 // SecretsManagerPlugin emulates the AWS Secrets Manager JSON-protocol API.
 // It handles CreateSecret, GetSecretValue, PutSecretValue, DescribeSecret,
-// UpdateSecret, DeleteSecret, ListSecrets, ListSecretVersionIds,
+// UpdateSecret, DeleteSecret, RestoreSecret, ListSecrets, ListSecretVersionIds,
 // TagResource, UntagResource, and RotateSecret.
 //
 // It deliberately does not handle ListTagsForResource, which the Secrets Manager API does not publish
@@ -58,6 +58,8 @@ func (p *SecretsManagerPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.updateSecret(ctx, req)
 	case "DeleteSecret":
 		return p.deleteSecret(ctx, req)
+	case "RestoreSecret":
+		return p.restoreSecret(ctx, req)
 	case "ListSecrets":
 		return p.listSecrets(ctx, req)
 	case "ListSecretVersionIds":
@@ -237,6 +239,13 @@ func (p *SecretsManagerPlugin) getSecretValue(ctx *RequestContext, req *AWSReque
 	if secret == nil {
 		return nil, smSecretNotFound(input.SecretID)
 	}
+	// "When a secret is scheduled for deletion, you cannot retrieve the secret value." The refusal is
+	// InvalidRequestException, whose first published cause on this page is "The secret is scheduled for
+	// deletion." — a different answer from the ResourceNotFoundException a secret that does not exist
+	// gets, which is the distinction #953 exists to make observable.
+	if !secret.DeletionDate.IsZero() {
+		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
+	}
 
 	versionID := input.VersionID
 	if versionID == "" {
@@ -354,8 +363,14 @@ func (p *SecretsManagerPlugin) describeSecret(ctx *RequestContext, req *AWSReque
 // AWS's "never been configured for rotation" and true is exactly "configured". A false value would
 // therefore be a claim AWS does not make, which is why it is emitted as null.
 //
+// DeletedDate is the one member of the omitted tier substrate does answer, since #953: it is emitted
+// exactly when a recovery window is open, which is the observation that distinguishes a secret
+// scheduled for deletion from a live one, and it is omitted otherwise — the omission AWS documents.
+// Note the asymmetry in AWS's own naming, which substrate follows rather than tidies: DeleteSecret
+// answers the stamp as DeletionDate and DescribeSecret reports the same stamp as DeletedDate.
+//
 // The members substrate does not model stay absent, which the same sentence makes correct rather than
-// a gap: LastRotatedDate and NextRotationDate (nothing records a rotation time), DeletedDate,
+// a gap: LastRotatedDate and NextRotationDate (nothing records a rotation time),
 // LastAccessedDate, OwningService, PrimaryRegion, ReplicationStatus, RotationLambdaARN, RotationRules,
 // VersionIdsToStages, and the three managed-external-secret members AWS publishes — Type,
 // ExternalSecretRotationRoleArn and ExternalSecretRotationMetadata — which belong to a partner
@@ -376,6 +391,9 @@ func smDescribeSecretBody(secret *SecretState) map[string]interface{} {
 	}
 	if !secret.LastChangedDate.IsZero() {
 		out["LastChangedDate"] = secret.LastChangedDate.Unix()
+	}
+	if !secret.DeletionDate.IsZero() {
+		out["DeletedDate"] = secret.DeletionDate.Unix()
 	}
 	// Emitted either way, because AWS documents a null rather than an omission — see above. A nil
 	// interface value is what renders the JSON null.
@@ -451,53 +469,10 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 	return smJSONResponse(http.StatusOK, out)
 }
 
-func (p *SecretsManagerPlugin) deleteSecret(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		SecretID string `json:"SecretId"`
-	}
-	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
-	if idErr != nil {
-		return nil, idErr
-	}
-	goCtx := context.Background()
-	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
-	if err != nil {
-		return nil, err
-	}
-	if secret == nil {
-		return nil, smSecretNotFound(input.SecretID)
-	}
-
-	_ = p.state.Delete(goCtx, secretsManagerNamespace, smSecretStateKey(target.AccountID, target.Region, target.Name))
-	_ = p.state.Delete(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, secret.CurrentVersionID))
-
-	// The index entry removed is the one in the account and Region that owns the secret, which is
-	// what the identifier named — not the caller's. Deleting the caller's left the owning account
-	// still listing a secret whose record had just been removed.
-	names, err := p.loadSecretNames(goCtx, target.AccountID, target.Region)
-	if err != nil {
-		return nil, err
-	}
-	newNames := make([]string, 0, len(names))
-	for _, n := range names {
-		if n != target.Name {
-			newNames = append(newNames, n)
-		}
-	}
-	if err := p.saveSecretNames(goCtx, target.AccountID, target.Region, newNames); err != nil {
-		return nil, fmt.Errorf("sm deleteSecret saveSecretNames: %w", err)
-	}
-
-	out := map[string]interface{}{
-		"ARN":  secret.ARN,
-		"Name": secret.Name,
-	}
-	return smJSONResponse(http.StatusOK, out)
-}
+// DeleteSecret, RestoreSecret and the recovery window they share live in
+// secretsmanager_deletion.go, whose file preamble carries the reasoning for scheduling rather than
+// removing (#953) — including why the permanent deletion at the end of the window is deliberately
+// unmodelled.
 
 func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
