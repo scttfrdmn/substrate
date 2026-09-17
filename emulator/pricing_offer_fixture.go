@@ -1,6 +1,10 @@
 package emulator
 
-// This file holds the offer corpus the Price List Query API serves (#401).
+import "slices"
+
+// This file holds the AmazonS3 half of the offer corpus the Price List Query API
+// serves (#401), and the types and assembly both halves share. The AmazonEC2 half
+// is in pricing_offer_fixture_ec2.go (#894).
 //
 // Every SKU, attribute value, rate code, offer-term code and price string below
 // is copied from the live AWS offer file
@@ -16,7 +20,10 @@ package emulator
 //     numbers.
 //   - productFamily is absent from most products — 315 of the 381 in the real S3
 //     offer file omit it — so a caller that filters on it will miss most SKUs.
-//     usagetype is the attribute that is reliably present and 1:1.
+//     usagetype is the attribute that is reliably present and 1:1 — in *this*
+//     offer file. It is neither in EC2's, where four of the SKUs in the corpus
+//     share one usagetype (#894), so a caller keying on it is relying on an S3
+//     accident rather than a Price List rule.
 //   - TimedStorage-ByteHrs carries three priceDimensions, the last with
 //     "endRange": "Inf". A parser that takes the first dimension silently reports
 //     the 50 TB tier rate as if it were the only one.
@@ -32,12 +39,38 @@ package emulator
 const pricingFormatVersion = "aws_v1"
 
 // pricingOfferVersion and pricingOfferPublicationDate identify the offer file
-// revision the corpus below was taken from. They are embedded in each PriceList
-// document exactly as the real API emits them.
+// revision the S3 corpus below was taken from. They are embedded in each
+// PriceList document exactly as the real API emits them.
 const (
 	pricingOfferVersion         = "20260728131000"
 	pricingOfferPublicationDate = "2026-07-28T13:10:00Z"
 )
+
+// pricingOfferRevision is the version and publication date of one service's offer
+// file. Each service publishes on its own schedule, so a PriceList document
+// carries its own service's revision rather than one global pair — a caller that
+// compares the two documents' version strings must see them differ, because the
+// real API's do.
+type pricingOfferRevision struct {
+	version         string
+	publicationDate string
+}
+
+// pricingOfferRevisions maps a Price List service code to the offer-file revision
+// its corpus entries were taken from. Every service code in pricingCorpus must
+// have an entry, which TestPricingOfferRevisionsCoverCorpus asserts.
+//
+//nolint:gochecknoglobals // Immutable reference data, read-only after init.
+var pricingOfferRevisions = map[string]pricingOfferRevision{
+	pricingServiceCodeS3: {
+		version:         pricingOfferVersion,
+		publicationDate: pricingOfferPublicationDate,
+	},
+	pricingServiceCodeEC2: {
+		version:         pricingEC2OfferVersion,
+		publicationDate: pricingEC2OfferPublicationDate,
+	},
+}
 
 // pricingOfferTermCode is the on-demand offer-term code. AWS uses the same
 // literal for every on-demand term across every service.
@@ -107,19 +140,47 @@ type pricingCorpusEntry struct {
 	productFamily string
 	attributes    map[string]string
 	effectiveDate string
-	dimensions    []pricingPriceDimension
+
+	// offerTermCode overrides pricingOfferTermCode for the entry's one term. It is
+	// empty on every on-demand product, which is nearly all of them; the free-tier
+	// pseudo-product in the EC2 corpus is the one term in either offer file that
+	// does not carry the global code.
+	offerTermCode string
+
+	// termAttributes is the term's own attribute map. AWS emits it empty on every
+	// on-demand term except the free-tier one, which carries
+	// "Restriction": "Limited SKU Usage" — so a nil map here means the empty map
+	// the API emits, not an absent member.
+	termAttributes map[string]string
+
+	dimensions []pricingPriceDimension
+}
+
+// termCode reports the offer-term code the entry's term carries, which is the
+// global on-demand code unless the entry names its own.
+func (e pricingCorpusEntry) termCode() string {
+	if e.offerTermCode != "" {
+		return e.offerTermCode
+	}
+	return pricingOfferTermCode
 }
 
 // pricingServiceCodeS3 is the Price List service code for Amazon S3. It is not
 // the same string as substrate's own "s3" service name.
 const pricingServiceCodeS3 = "AmazonS3"
 
-// pricingCorpus is the seven-SKU offer corpus substrate serves. It is
-// deliberately small: each entry exists to exhibit a specific shape a caller
-// must handle, and the set is ordered so that iteration is stable.
+// pricingCorpus is the offer corpus substrate serves, EC2's slice ahead of S3's
+// so that iteration — and therefore GetProducts' PriceList order and its
+// NextToken pages — is stable. It is deliberately small: each entry exists to
+// exhibit a specific shape a caller must handle.
 //
 //nolint:gochecknoglobals // Immutable reference data, read-only after init.
-var pricingCorpus = []pricingCorpusEntry{
+var pricingCorpus = slices.Concat(pricingCorpusEC2, pricingCorpusS3)
+
+// pricingCorpusS3 is the seven-SKU AmazonS3 slice of the corpus.
+//
+//nolint:gochecknoglobals // Immutable reference data, read-only after init.
+var pricingCorpusS3 = []pricingCorpusEntry{
 	{
 		// Tiered storage: three dimensions, final EndRange "Inf". A caller that
 		// reads only the first reports the 50 TB rate for a 600 TB bucket.
@@ -296,11 +357,17 @@ var pricingCorpus = []pricingCorpusEntry{
 
 // offerDoc assembles the entry into the document shape GetProducts serializes.
 func (e pricingCorpusEntry) offerDoc() pricingOfferDoc {
-	termKey := e.sku + "." + pricingOfferTermCode
+	termCode := e.termCode()
+	termKey := e.sku + "." + termCode
 	dims := make(map[string]pricingPriceDimension, len(e.dimensions))
 	for _, d := range e.dimensions {
 		dims[d.RateCode] = d
 	}
+	termAttrs := e.termAttributes
+	if termAttrs == nil {
+		termAttrs = map[string]string{}
+	}
+	rev := pricingOfferRevisions[e.serviceCode]
 	return pricingOfferDoc{
 		Product: pricingProduct{
 			SKU:           e.sku,
@@ -311,14 +378,14 @@ func (e pricingCorpusEntry) offerDoc() pricingOfferDoc {
 		Terms: map[string]map[string]pricingTerm{
 			"OnDemand": {termKey: {
 				SKU:             e.sku,
-				OfferTermCode:   pricingOfferTermCode,
+				OfferTermCode:   termCode,
 				EffectiveDate:   e.effectiveDate,
 				PriceDimensions: dims,
-				TermAttributes:  map[string]string{},
+				TermAttributes:  termAttrs,
 			}},
 		},
-		Version:         pricingOfferVersion,
-		PublicationDate: pricingOfferPublicationDate,
+		Version:         rev.version,
+		PublicationDate: rev.publicationDate,
 	}
 }
 
@@ -329,6 +396,7 @@ func (e pricingCorpusEntry) offerDoc() pricingOfferDoc {
 //
 //nolint:gochecknoglobals // Immutable reference data, read-only after init.
 var pricingServiceAttributes = map[string][]string{
+	pricingServiceCodeEC2: pricingEC2Attributes,
 	pricingServiceCodeS3: {
 		"availability",
 		"durability",
