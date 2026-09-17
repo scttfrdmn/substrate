@@ -4064,7 +4064,18 @@ func (d *StackDeployer) deploySecret(
 	return dr, cost, nil
 }
 
-// deploySecretRotationSchedule enables rotation on a Secrets Manager secret.
+// deploySecretRotationSchedule configures rotation on a Secrets Manager secret, passing through the
+// template's rotation function and schedule.
+//
+// It sent SecretId alone, discarding every other property the resource type publishes, which stopped
+// being merely thin once RotateSecret began refusing a secret with no rotation function (#952): a
+// template naming a RotationLambdaARN would have been refused for not naming one. So the pass-through
+// is a consequence of that refusal rather than an unrelated improvement.
+//
+// The ClientRequestToken is derived from (account, Region, stack, logical ID) via
+// [cfnDeterministicUUID], because RotateSecret requires one and a deploy has no caller to supply it —
+// and the same stack redeployed must send the same token rather than a fresh one, since the token
+// becomes the response's VersionId.
 func (d *StackDeployer) deploySecretRotationSchedule(
 	ctx context.Context,
 	logicalID string,
@@ -4073,7 +4084,21 @@ func (d *StackDeployer) deploySecretRotationSchedule(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	secretID := resolveStringProp(props, "SecretId", "", cctx)
-	body := map[string]string{"SecretId": secretID}
+	body := map[string]interface{}{
+		"SecretId":           secretID,
+		"ClientRequestToken": cfnDeterministicUUID(cctx.accountID, cctx.region, cctx.stackName, logicalID),
+	}
+	if arn := cfnRotationLambdaARN(props, cctx); arn != "" {
+		body["RotationLambdaARN"] = arn
+	}
+	if rules := cfnRotationRules(props, cctx); len(rules) > 0 {
+		body["RotationRules"] = rules
+	}
+	// "RotateImmediatelyOnUpdate: … Default: true" — the same default RotateSecret's own
+	// RotateImmediately carries, so an unset property is left out rather than sent as true.
+	if immediate, set := cfgsvcCFNBool(props, "RotateImmediatelyOnUpdate"); set {
+		body["RotateImmediately"] = immediate
+	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return DeployedResource{}, 0, fmt.Errorf("marshal rotation schedule body: %w", err)
@@ -4091,6 +4116,52 @@ func (d *StackDeployer) deploySecretRotationSchedule(
 		dr.Error = routeErr.Error()
 	}
 	return dr, cost, nil
+}
+
+// cfnRotationLambdaARN resolves the rotation function a RotationSchedule names, by either of the two
+// routes AWS publishes for it.
+//
+// "Choose one of the following options for the rotation function: Create a new rotation function using
+// HostedRotationLambda … Use an existing rotation function by specifying its ARN with
+// RotationLambdaARN." The first route names a function rather than an ARN, so the ARN is composed from
+// the deploying account and Region — **substrate's reading**, and the narrowest one available: a hosted
+// rotation lambda is a function CloudFormation would create through a nested stack, which substrate
+// does not do, so nothing here creates the function and no Lambda record exists at that ARN. What the
+// pass-through buys is that the secret records the function the template chose instead of being refused
+// for naming none, which is the difference between a deployable template and a failed resource.
+func cfnRotationLambdaARN(props map[string]interface{}, cctx *cfnContext) string {
+	if arn := resolveStringProp(props, "RotationLambdaARN", "", cctx); arn != "" {
+		return arn
+	}
+	if name := resolveNestedStringProp(props, "HostedRotationLambda", "RotationLambdaName", "", cctx); name != "" {
+		return lambdaFunctionARN(cctx.region, cctx.accountID, name)
+	}
+	return ""
+}
+
+// cfnRotationRules resolves a RotationSchedule's RotationRules into RotateSecret's parameter shape,
+// omitting the whole member when the template sets none of the three.
+//
+// AutomaticallyAfterDays is sent as a number rather than as the string resolveValue produces, because
+// AWS types it Long and RotateSecret decodes it as one; a value the template writes in a form that is
+// not an integer is dropped rather than passed through as a string, which would be refused as a
+// malformed body and report the wrong cause. cfgsvcCFNBool's reason for accepting two spellings applies
+// here too — a JSON template's 30 arrives as float64 and a YAML template's or an Fn::If's as a string,
+// and resolveValue normalizes both.
+func cfnRotationRules(props map[string]interface{}, cctx *cfnContext) map[string]interface{} {
+	rules := map[string]interface{}{}
+	if days := resolveNestedStringProp(props, "RotationRules", "AutomaticallyAfterDays", "", cctx); days != "" {
+		if parsed, err := strconv.ParseInt(days, 10, 64); err == nil {
+			rules["AutomaticallyAfterDays"] = parsed
+		}
+	}
+	if duration := resolveNestedStringProp(props, "RotationRules", "Duration", "", cctx); duration != "" {
+		rules["Duration"] = duration
+	}
+	if expr := resolveNestedStringProp(props, "RotationRules", "ScheduleExpression", "", cctx); expr != "" {
+		rules["ScheduleExpression"] = expr
+	}
+	return rules
 }
 
 // deploySecretTargetAttachment is a stub for SecretsManager::SecretTargetAttachment.

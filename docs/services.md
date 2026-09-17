@@ -8800,7 +8800,7 @@ SNS publish: $0.0000005 per message.
 | ListSecretVersionIds | Reports the current version only |
 | TagResource | Appends to the existing list rather than replacing it |
 | UntagResource | Idempotent — an absent key is not an error |
-| RotateSecret | Records the rotation request; no rotation function is executed |
+| RotateSecret | Records the rotation function and schedule and echoes `ClientRequestToken` as `VersionId`; no rotation function is executed — see [A rotation is configured, not run](#a-rotation-is-configured-not-run) |
 
 ### A `SecretId` addresses the secret its own ARN names
 
@@ -8872,7 +8872,7 @@ keeps them apart deliberately:
 
 | Tier | Members | Treatment |
 |------|---------|-----------|
-| AWS states "this field is omitted" | `DeletedDate`, `KmsKeyId`, `LastAccessedDate`, `RotationRules` | Absent — `DeletedDate` is emitted while a recovery window is open (#953) and absent otherwise |
+| AWS states "this field is omitted" | `DeletedDate`, `KmsKeyId`, `LastAccessedDate`, `RotationRules` | Absent — `DeletedDate` is emitted while a recovery window is open (#953), and `RotationRules` once `RotateSecret` has configured a schedule (#952) |
 | AWS states "Secrets Manager returns null" | `LastRotatedDate`, `NextRotationDate`, `RotationEnabled` | Emitted as JSON `null` |
 | AWS states nothing per member | `ARN`, `CreatedDate`, `Description`, `LastChangedDate`, `Name`, `Tags`, and the rest | Absent when empty — **substrate's reading**, on the blanket sentence alone |
 
@@ -8889,16 +8889,21 @@ a claim AWS does not make. Substrate needs no extra state to answer that correct
 rotation is set by `RotateSecret` and by nothing else, and there is no
 `CancelRotateSecret`, so "false" and "never configured" are the same condition.
 
-Nine of the twenty-one published response members are absent because substrate models no
+Seven of the twenty-one published response members are absent because substrate models no
 value for them, which the same sentence makes correct rather than a gap:
 `LastAccessedDate`, `LastRotatedDate`, `NextRotationDate`,
-`OwningService`, `PrimaryRegion`, `ReplicationStatus`, `RotationLambdaARN`,
-`RotationRules` and `VersionIdsToStages`. `DeletedDate` was the tenth in that list until
-#953 — which is also what made the count of nine true, the list having named ten. So are
-the three managed-external-secret
+`OwningService`, `PrimaryRegion`, `ReplicationStatus` and `VersionIdsToStages`.
+`DeletedDate` left that list in #953 and `RotationLambdaARN` and `RotationRules` in #952 —
+which is also what makes the count true, the list having named ten when it was nine. So
+are the three managed-external-secret
 members — `Type`, `ExternalSecretRotationRoleArn` and
 `ExternalSecretRotationMetadata` — which belong to a partner integration substrate
 models nothing of.
+
+`LastRotatedDate` and `NextRotationDate` stay absent even now that a schedule is
+recorded, and the reason is the boundary rather than the effort: both report when a
+rotation *happened*, and no rotation happens here. AWS documents them as nulled rather
+than omitted, so if either is ever modelled it belongs beside `RotationEnabled`.
 
 **Tags.** `DescribeSecret` is the read path, because Secrets Manager publishes no
 `ListTagsForResource`. Substrate answered one until #929 removed it: the API publishes
@@ -8985,11 +8990,91 @@ Still unmodelled, and separate decisions rather than part of this: `PutSecretVal
 `UpdateSecret`, `TagResource` and `UntagResource` do not refuse a scheduled secret,
 although their pages publish the same cause ([#956](https://github.com/scttfrdmn/substrate/issues/956)).
 
+### A rotation is configured, not run
+
+`RotateSecret` read one of its seven request parameters, omitted the response member all
+four of AWS's samples return, and refused nothing. That was worse than a thin response:
+the handler set rotation enabled on any secret it could load, so `DescribeSecret` reported
+rotation configured for a secret with **no rotation function** — the one state AWS refuses
+to create. A consumer's nominal path was substrate's nominal path, and its error path was
+unreachable.
+
+Substrate records which function a rotation would run and which schedule it would run on,
+and runs neither. That is the boundary: a rotation function's execution is workload-internal
+and out of scope, while *which* function and schedule a caller configured is observable
+through `DescribeSecret` and so belongs here.
+
+| Call | Answer |
+|---|---|
+| `RotateSecret` with a `ClientRequestToken` and a `RotationLambdaARN` | `200` with `ARN`, `Name` and `VersionId` |
+| `RotateSecret` with no `ClientRequestToken` | `InvalidParameterException`/400, nothing written |
+| `RotateSecret` on a secret with no rotation function, naming none | `InvalidRequestException`/400 naming the cause, nothing written |
+| `RotateSecret` naming no function on a secret that already has one | `200` — the stored function is used and is not cleared |
+| `RotationRules` with both `AutomaticallyAfterDays` and `ScheduleExpression` | `InvalidParameterException`/400, nothing written |
+| `AutomaticallyAfterDays` outside 1–1000 | `InvalidParameterException`/400, nothing written |
+| `RotateSecret` on a secret in its recovery window | `InvalidRequestException`/400 — distinguishable from `ResourceNotFoundException` |
+
+**`VersionId` is derived from the request, not minted.** All four of AWS's examples state
+it in the same words — "the `ClientRequestToken` field becomes the `VersionId` of the new
+version created during the rotation" — and all four sample responses return the token that
+was sent. So the value is reproducible on replay by construction rather than by a
+determinism mechanism. No version *payload* is written for it: producing the new secret
+value is the rotation function's job, and inventing one would be inventing a secret.
+
+**An omitted `ClientRequestToken` is refused, and that is substrate's reading.** The
+parameter is "Required: No" because "the CLI or SDK generates a random UUID for you", but
+the page is explicit about the caller substrate is: "if you generate a raw HTTP request to
+the Secrets Manager service endpoint, then you must generate a `ClientRequestToken` and
+include it in the request." Minting one would put a nondeterministic value in a response
+body, and echoing an empty one would answer a `VersionId` of `""` where AWS publishes a
+minimum length of 32.
+
+**Two of `InvalidRequestException`'s three published causes are refused.** The first, "the
+secret is scheduled for deletion", became decidable when #953 modelled the recovery window.
+The second, "you tried to enable rotation on a secret that doesn't already have a Lambda
+function ARN configured and you didn't include such an ARN as a parameter in this call", is
+decided from the record and the request together — which is why a bare call is refused on a
+fresh secret and succeeds on one already configured. Note `RotationLambdaARN`'s published
+length minimum of **0**: an explicit `""` is not naming an ARN, so it is refused too. The
+third cause, "the secret is managed by another service", needs `OwningService`, which
+substrate models nothing of, so it is not refused — recorded here rather than left silent.
+The same absence is why the refusal is unconditional: a secret using AWS's *managed*
+rotation legitimately has no ARN, but such a secret is an `OwningService` secret and none
+can exist here.
+
+The mutual exclusion inside `RotationRules` is AWS's rule — "in `RotateSecret`, you can set
+the rotation schedule in `RotationRules` with `AutomaticallyAfterDays` or
+`ScheduleExpression`, but not both" — while the **code** is substrate's reading, AWS
+publishing none for the violation. It is refused on the parameters' presence, following
+`DeleteSecret`'s precedent above and for the same reason: the alternative silently picks one
+of two schedules the caller asked for.
+
+Recorded rather than enforced: the length constraints on `ClientRequestToken` (32–64) and
+`RotationLambdaARN` (≤2048), and the patterns on `Duration` (`[0-9]+h`) and
+`ScheduleExpression`. Substrate does not validate parameter lengths or patterns as a rule,
+and enforcing them at this one operation would refuse a token every sibling operation
+accepts. `RotateImmediately` is recorded on the secret and reported by nothing, which is
+not an omission — the difference AWS describes between `true` and `false` is whether the
+function runs now or at the next window, and no function runs — but the state snapshot is
+itself an observable under replay and time-travel inspection, so the intent survives.
+
+`AWS::SecretsManager::RotationSchedule` passes the template's rotation function and
+schedule through. It sent `SecretId` alone, which stopped being merely thin once the
+refusal above existed: a template naming a `RotationLambdaARN` would have been refused for
+naming none. The `ClientRequestToken` a deploy has no caller to supply is derived from the
+account, Region, stack name and logical ID, so a redeploy sends the same token rather than a
+fresh one. `HostedRotationLambda`'s `RotationLambdaName` is composed into a function ARN in
+the deploying account and Region — **substrate's reading**, and the narrowest available: a
+hosted rotation lambda is a function CloudFormation creates through a nested stack, which
+substrate does not do, so nothing exists at that ARN. What the pass-through buys is a
+deployable template instead of a failed resource.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::SecretsManager::Secret | SecretArn | |
+| AWS::SecretsManager::RotationSchedule | the secret's ARN | Passes `RotationLambdaARN`, `RotationRules` and `RotateImmediatelyOnUpdate` through to `RotateSecret` with a derived `ClientRequestToken` |
 
 ### Cost
 

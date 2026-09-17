@@ -59,8 +59,12 @@ func smMemberNames(members map[string]json.RawMessage) []string {
 
 // smSecretIDOperations is every operation that takes a SecretId, with a body naming an absent secret.
 //
-// All nine resolve the identifier, load the record and refuse through [smSecretNotFound] before
-// reading any other parameter, which is why each body carries only what its shape requires.
+// Eight of the nine resolve the identifier, load the record and refuse through [smSecretNotFound]
+// before reading any other parameter, which is why each body carries only what its shape requires.
+// RotateSecret is the exception since #952: it validates ClientRequestToken's presence first, so its
+// body carries a token — without one it would be refused with InvalidParameterException and this test
+// would assert nothing about the absent secret it is named for. The ordering itself is asserted in
+// secretsmanager_rotation_test.go rather than smuggled in here.
 var smSecretIDOperations = []struct {
 	name string
 	body func(secretID string) map[string]any
@@ -81,8 +85,15 @@ var smSecretIDOperations = []struct {
 	{"UntagResource", func(id string) map[string]any {
 		return map[string]any{"SecretId": id, "TagKeys": []string{"env"}}
 	}},
-	{"RotateSecret", func(id string) map[string]any { return map[string]any{"SecretId": id} }},
+	{"RotateSecret", func(id string) map[string]any {
+		return map[string]any{"SecretId": id, "ClientRequestToken": smRotationToken}
+	}},
 }
+
+// smRotationToken is a ClientRequestToken of the shape AWS's own samples use — a UUID, which is what
+// "the CLI or SDK generates a random UUID for you" produces — reused wherever a test needs a token but
+// is not about the token.
+const smRotationToken = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 func TestSMErrorStatus_AnAbsentSecretIsAlways400(t *testing.T) {
 	ts := smTagServer(t)
@@ -163,7 +174,13 @@ func TestSMDescribeMembers_RotationEnabledIsNullUntilRotationIsRequested(t *test
 	require.Contains(t, before, "RotationEnabled", "the member is present, not omitted")
 	assert.Equal(t, "null", string(before["RotationEnabled"]))
 
-	status, _, code := smRawCall(t, ts, smTarget, "RotateSecret", map[string]any{"SecretId": arn})
+	// The token and the function ARN are what #952 requires of any successful rotation; the subject here
+	// is still RotationEnabled's null-then-true, and both refusals have their own cases.
+	status, _, code := smRawCall(t, ts, smTarget, "RotateSecret", map[string]any{
+		"SecretId":           arn,
+		"ClientRequestToken": smRotationToken,
+		"RotationLambdaARN":  "arn:aws:lambda:us-east-1:" + taggingTestAccount + ":function:rotator",
+	})
 	require.Empty(t, code, "RotateSecret")
 	require.Equal(t, http.StatusOK, status)
 
@@ -193,14 +210,19 @@ func TestSMDescribeMembers_TheUnmodeledPublishedMembersStayAbsent(t *testing.T) 
 
 	// API_DescribeSecret's Response Syntax has twenty-one members. These are the ones substrate holds
 	// no state for, and their absence is correct under the same sentence rather than a gap — asserted so
-	// that modeling one later has to come with a decision about how it is reported. DeletedDate,
-	// LastAccessedDate and RotationRules carry AWS's explicit "this field is omitted"; LastRotatedDate
-	// and NextRotationDate carry its "returns null", so if either is ever modeled it belongs with
-	// RotationEnabled rather than here.
+	// that modeling one later has to come with a decision about how it is reported. DeletedDate and
+	// LastAccessedDate carry AWS's explicit "this field is omitted"; LastRotatedDate and NextRotationDate
+	// carry its "returns null", so if either is ever modeled it belongs with RotationEnabled rather than
+	// here.
+	//
+	// RotationLambdaARN and RotationRules left this list in #952 — they are modeled now, and this
+	// secret's never having been rotated is why they are still absent from it. Their conditional
+	// presence, and RotationRules' own "if the secret never had rotation turned on, this field is
+	// omitted", are asserted in secretsmanager_rotation_test.go, which can rotate and re-describe.
 	for _, member := range []string{
 		"DeletedDate", "ExternalSecretRotationMetadata", "ExternalSecretRotationRoleArn",
 		"LastAccessedDate", "LastRotatedDate", "NextRotationDate", "OwningService", "PrimaryRegion",
-		"ReplicationStatus", "RotationLambdaARN", "RotationRules", "Type", "VersionIdsToStages",
+		"ReplicationStatus", "Type", "VersionIdsToStages",
 	} {
 		assert.NotContains(t, members, member,
 			"%s is a published member substrate holds no value for, so it is not reported", member)

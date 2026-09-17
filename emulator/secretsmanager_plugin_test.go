@@ -175,6 +175,13 @@ func TestSMPlugin_ListSecrets(t *testing.T) {
 	assert.Len(t, secretList, 3)
 }
 
+// TestSMPlugin_RotateSecret asserts the nominal rotation path.
+//
+// The call now carries a ClientRequestToken and a RotationLambdaARN, which is not a test being made
+// more elaborate: a bare RotateSecret answered 200 before #952 and answers 400 after it, because AWS
+// refuses to enable rotation on a secret with no rotation function and because a raw HTTP caller must
+// generate the token itself. Both refusals are asserted in secretsmanager_rotation_test.go; what is
+// asserted here is that the success this test was always about still succeeds.
 func TestSMPlugin_RotateSecret(t *testing.T) {
 	srv := newSMTestServer(t)
 
@@ -184,7 +191,9 @@ func TestSMPlugin_RotateSecret(t *testing.T) {
 	})
 
 	resp := smRequest(t, srv, "RotateSecret", map[string]interface{}{
-		"SecretId": "rotate-secret",
+		"SecretId":           "rotate-secret",
+		"ClientRequestToken": "11111111-2222-3333-4444-555555555555",
+		"RotationLambdaARN":  "arn:aws:lambda:us-east-1:123456789012:function:rotator",
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
