@@ -105,11 +105,14 @@ var kmsAlgorithmMembers = []string{
 // reported and AWS does not publish.
 //
 // Each is absent for a reason recorded in kms_key_metadata.go — three need a custom or external key
-// store, two need an EXTERNAL origin, one needs a replica, one needs the PendingReplicaDeletion state,
-// one needs a key material identity (#978) — and RotationEnabled is here because API_KeyMetadata does not
-// publish it at all, which is #971. Adding sixteen members from that page is exactly when someone
-// working from the struct rather than the page would put it back, so the guard against that sits beside
-// the guard for the eight.
+// store, two need an EXTERNAL origin, one needs a replica, one needs the PendingReplicaDeletion state —
+// and RotationEnabled is here because API_KeyMetadata does not publish it at all, which is #971. Adding
+// sixteen members from that page is exactly when someone working from the struct rather than the page
+// would put it back, so the guard against that sits beside the guard for the eight.
+//
+// CurrentKeyMaterialId left this list with #978, which gave substrate a key material identity. It is now
+// reported for a symmetric encryption key and absent for every other spec, which is a condition rather
+// than an absence — TestKMSKeyMaterialID_OnlyASymmetricEncryptionKeyReportsOne asserts both halves.
 var kmsUnreachableMetadataMembers = []string{
 	"CloudHsmClusterId",
 	"CustomKeyStoreId",
@@ -118,7 +121,6 @@ var kmsUnreachableMetadataMembers = []string{
 	"ValidTo",
 	"MultiRegionConfiguration",
 	"PendingDeletionWindowInDays",
-	"CurrentKeyMaterialId",
 	"RotationEnabled",
 }
 

@@ -331,18 +331,22 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	keyID := generateKMSKeyID()
 	arn := kmsKeyARN(ctx.Region, ctx.AccountID, keyID)
 	key := &KMSKey{
-		KeyID:        keyID,
-		ARN:          arn,
-		Description:  input.Description,
-		KeyUsage:     keyUsage,
-		KeySpec:      keySpec,
-		KeyState:     "Enabled",
-		Enabled:      true,
-		MultiRegion:  input.MultiRegion,
-		Tags:         input.Tags,
-		AccountID:    ctx.AccountID,
-		Region:       ctx.Region,
-		CreationDate: p.tc.Now(),
+		KeyID:       keyID,
+		ARN:         arn,
+		Description: input.Description,
+		KeyUsage:    keyUsage,
+		KeySpec:     keySpec,
+		// Minted for every key rather than only for the symmetric ones that report it, so the value exists
+		// the moment a later operation or key spec becomes able to observe it. Whether it reaches the wire
+		// is [kmsReportsKeyMaterialID]'s decision, at the six sites that render it.
+		KeyMaterialID: kmsKeyMaterialID(arn),
+		KeyState:      "Enabled",
+		Enabled:       true,
+		MultiRegion:   input.MultiRegion,
+		Tags:          input.Tags,
+		AccountID:     ctx.AccountID,
+		Region:        ctx.Region,
+		CreationDate:  p.tc.Now(),
 	}
 
 	goCtx := context.Background()
@@ -1344,6 +1348,12 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	}
 
 	ciphertext := kmsEncryptStub(keyID, plaintext)
+	// Three members, and deliberately no KeyMaterialId. Encrypt is the one operation in the crypto set
+	// whose Response Syntax does not publish one — Decrypt, ReEncrypt and both GenerateDataKey* operations
+	// all do, and #978 added it to all four — so it is named here to keep a later sweep over "the
+	// operations that report key material" from adding a fifth site that AWS does not have. The asymmetry
+	// is AWS's and is not obviously intentional: Encrypt names the key material it used no more than
+	// Decrypt names the material that produced the ciphertext it was handed.
 	out := map[string]interface{}{
 		"KeyId":               key.ARN,
 		"CiphertextBlob":      string(ciphertext),
@@ -1372,7 +1382,14 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 // GrantTokens, and the DryRun/DryRunModifiers pair — the last of which is why CiphertextBlob is
 // published as Required: No, since it "is required in all cases except when DryRun is true and
 // DryRunModifiers is set to IGNORE_CIPHERTEXT". Substrate requires it always, which is correct for
-// every request it can answer. EncryptionContext is #979 and KeyMaterialId is #978.
+// every request it can answer. EncryptionContext is #979.
+//
+// KeyMaterialId is reported, and it is read from the key rather than from the ciphertext — which is what
+// makes it worth asserting. AWS glosses it as "the identifier of the key material used to decrypt the
+// ciphertext", so comparing it against DescribeKey's CurrentKeyMaterialId is how a caller learns that
+// the material which decrypted its data is the material the key currently holds. A value derived from
+// the ciphertext would answer that comparison by construction. See [kmsReportsKeyMaterialID] for the
+// symmetric-encryption-key condition, which this operation's own page states.
 func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		CiphertextBlob      string `json:"CiphertextBlob"`
@@ -1433,6 +1450,7 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		"Plaintext":           base64.StdEncoding.EncodeToString(plaintext),
 		"EncryptionAlgorithm": algorithm,
 	}
+	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
@@ -1517,6 +1535,12 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		"Plaintext":      plaintextB64,
 		"CiphertextBlob": string(ciphertext),
 	}
+	// KeyMaterialId, added by #978. This page states no key-type condition on the member — it bounds it
+	// only by the unmodelled Recipient parameter — because the operation already requires a symmetric
+	// encryption key. Substrate applies the condition anyway; [kmsReportsKeyMaterialID] records why, and
+	// the short version is that substrate's usage check still admits an RSA key here — #988 — so reporting
+	// unconditionally would invent a value for a response AWS cannot produce.
+	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	_ = dataKeyBytes
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -1563,6 +1587,11 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 		"KeyId":          key.ARN,
 		"CiphertextBlob": string(ciphertext),
 	}
+	// KeyMaterialId, added by #978. Its gloss here is the shortest of the five — "the identifier of the
+	// key material used to encrypt the data key", with no condition at all — because this operation takes
+	// no Recipient parameter and so has not even that caveat. Held to the same condition as the other
+	// four for the reason [kmsReportsKeyMaterialID] gives.
+	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
@@ -1607,7 +1636,12 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 // Four request members remain unmodelled and are recorded rather than absent: DryRun, GrantTokens and
 // the source and destination EncryptionContext pair, the last of which is #979 — and it is what makes
 // this operation's context handling non-trivial, since it *reads* one context and *writes* the other.
-// Two response members remain: SourceKeyMaterialId and DestinationKeyMaterialId, which are #978.
+// #978 added the last two response members, SourceKeyMaterialId and DestinationKeyMaterialId, and this
+// is the operation that makes them worth having: they are the only place two key material identities
+// appear in one response, so a caller can see that the data moved between two distinct materials rather
+// than being re-encrypted under the one it started with. Each is conditioned on its own key — AWS gives
+// them separate glosses, one naming "the original encryption" and the other the reencryption — so a
+// ReEncrypt out of an asymmetric key and into a symmetric one reports the destination member alone.
 func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		CiphertextBlob                 string `json:"CiphertextBlob"`
@@ -1700,6 +1734,10 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		"SourceEncryptionAlgorithm":      sourceAlgorithm,
 		"DestinationEncryptionAlgorithm": destAlgorithm,
 	}
+	// Each material ID from its own key, which is the whole content of the assertion: reporting both from
+	// one key, or either from the wrong one, would still produce two well-formed 64-hex values.
+	kmsPutKeyMaterialID(out, "SourceKeyMaterialId", sourceKey)
+	kmsPutKeyMaterialID(out, "DestinationKeyMaterialId", destKey)
 	return kmsJSONResponse(http.StatusOK, out)
 }
 

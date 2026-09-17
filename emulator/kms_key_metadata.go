@@ -279,12 +279,55 @@ func kmsKeyMetadata(key *KMSKey) map[string]interface{} {
 	// [kmsKeyOriginAWSKMS] records as unreachable. MultiRegionConfiguration is published "only when the
 	// value of the MultiRegion field is True" and substrate stores that flag but models no replica, so it
 	// would have to report a primary with an empty ReplicaKeys list — a shape that describes a
-	// multi-Region key nothing can replicate. CurrentKeyMaterialId needs a key material identity, which is
-	// #978.
+	// multi-Region key nothing can replicate.
 	if key.KeyState == kmsKeyStatePendingDeletion {
 		metadata["DeletionDate"] = key.DeletionDate.Unix()
 	}
+	// CurrentKeyMaterialId, on the condition its own gloss publishes rather than on the field being set.
+	// See [kmsReportsKeyMaterialID] for why that condition reduces to one key spec here.
+	kmsPutKeyMaterialID(metadata, "CurrentKeyMaterialId", key)
 	return metadata
+}
+
+// kmsPutKeyMaterialID sets a key-material-ID member, or leaves it absent when the key reports none.
+//
+// One helper for all six members, under five different names across five operations, for the reason
+// [kmsKeyMetadata]'s own preamble gives for being shared: AWS publishes one identity and the sites that
+// report it must not disagree about when it exists. Five names for one value is precisely the shape in
+// which a condition gets applied at four sites and forgotten at the fifth.
+func kmsPutKeyMaterialID(out map[string]interface{}, member string, key *KMSKey) {
+	if !kmsReportsKeyMaterialID(key) {
+		return
+	}
+	out[member] = key.KeyMaterialID
+}
+
+// kmsReportsKeyMaterialID reports whether a key's material identity is observable, and it answers for all
+// six members that carry it rather than for KeyMetadata alone.
+//
+// AWS states the condition four different ways across five pages, and they agree on the substance.
+// API_KeyMetadata confines CurrentKeyMaterialId to keys that "are present for symmetric encryption keys
+// with AWS_KMS or EXTERNAL origin"; Decrypt's KeyMaterialId "is present only when the operation uses a
+// symmetric encryption KMS key"; ReEncrypt's two members each name the symmetric encryption key on their
+// own side. Substrate's only origin is [kmsKeyOriginAWSKMS], so the origin half is always satisfied and
+// what remains is the key spec — and "symmetric encryption key" is narrower than "symmetric key", since
+// an HMAC key is symmetric and encrypts nothing. [kmsSymmetricDefaultKeySpec] is the one spec that
+// answers to it, which is why this reads as a single comparison.
+//
+// GenerateDataKey and GenerateDataKeyWithoutPlaintext are the two whose pages state no such condition:
+// the first bounds its member only by the Recipient parameter, the second not at all. Both are held to
+// the same condition anyway, because both operations *require* a symmetric encryption key at AWS, so a
+// page with no condition and a page conditioned on the key type describe the same responses. Substrate
+// does not yet refuse an asymmetric key at either operation — its usage check accepts an RSA key with
+// KeyUsage ENCRYPT_DECRYPT, which is #988 — so the unconditional reading would put a material ID on a
+// response AWS cannot produce, inventing a value for a state that only exists because of that defect.
+// Omitting there is the honest-empty reading #827 established, and it is a workaround: once #988 refuses
+// the request, this condition stops carrying those two sites and becomes a guard at them.
+//
+// A key with no stored material ID is treated as having none rather than reporting an empty member,
+// which is the same reading and matters for a key written directly into state by a test.
+func kmsReportsKeyMaterialID(key *KMSKey) bool {
+	return key.KeySpec == kmsSymmetricDefaultKeySpec && key.KeyMaterialID != ""
 }
 
 // kmsPutAlgorithms sets an algorithm-list member, or leaves it absent when the list is empty.

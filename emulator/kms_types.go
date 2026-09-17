@@ -1,7 +1,9 @@
 package emulator
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -104,6 +106,30 @@ type KMSKey struct {
 	// KeySpec is the key spec: SYMMETRIC_DEFAULT, RSA_2048, etc.
 	KeySpec string `json:"KeySpec"`
 
+	// KeyMaterialID identifies the key material this key encrypts and decrypts with, minted once at
+	// CreateKey by [kmsKeyMaterialID] and never changed.
+	//
+	// Stored rather than derived at each read site, and that is the whole point of #978: AWS's member is
+	// named CurrentKeyMaterialId, and "current" is only meaningful against material that can change.
+	// Six response members across five operations report this one value — KeyMetadata's
+	// CurrentKeyMaterialId, Decrypt's KeyMaterialId, both GenerateDataKey* operations' KeyMaterialId,
+	// and ReEncrypt's SourceKeyMaterialId and DestinationKeyMaterialId — so a caller can compare what
+	// Decrypt reports against what DescribeKey reports and learn that one key decrypted the data. A
+	// value each site computed for itself would satisfy that comparison by construction and prove
+	// nothing about the key.
+	//
+	// Nothing rotates it. Substrate mints one material per key and rotation mints no more, which is the
+	// reading [KMSKey.RotationEnabledDate] already records — rotation is a schedule reported to a caller
+	// rather than an event that fires, ListKeyRotations and RotateKeyOnDemand are unimplemented, and a
+	// second material identity nothing can list or ask for would be a value no call could reach. So
+	// "current" is true here in the trivial sense: it is the only material the key has ever had. Making
+	// rotation mint new material means implementing ListKeyRotations alongside it, so that the
+	// non-current identities Decrypt is documented to still accept are observable.
+	//
+	// Empty for a key written before the field existed, which the render sites treat as absent rather
+	// than reporting an empty member.
+	KeyMaterialID string `json:"KeyMaterialId,omitempty"`
+
 	// KeyState is the state: Enabled, [kmsKeyStateDisabled] or [kmsKeyStatePendingDeletion]. AWS
 	// publishes five more — PendingImport, PendingReplicaDeletion, Unavailable, Creating and
 	// Updating — that substrate never writes.
@@ -202,6 +228,28 @@ type KMSTag struct {
 func generateKMSKeyID() string {
 	h := randomHex(32)
 	return fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+}
+
+// kmsKeyMaterialID mints the identifier of a key's key material from the key's own ARN.
+//
+// AWS constrains the value tightly: API_KeyMetadata gives CurrentKeyMaterialId a fixed length of 64 and
+// the pattern ^[a-f0-9]+$, as do the five operation-level members that report the same identity. A
+// SHA-256 digest is exactly 64 lowercase hex characters, so hex.EncodeToString of one satisfies both
+// without truncation or re-encoding — the reason [cfnDeterministicUUID] reaches for the same hash and
+// then has to reshape it, where this does not.
+//
+// Deriving rather than drawing from crypto/rand is #856's rule applied to a new minter rather than
+// deferred with the old ones: the ARN already carries the account, the Region and the key ID, so two
+// keys never share a material ID and one key's ID does not depend on how many keys preceded it. The
+// derivation adds no nondeterminism of its own; it inherits exactly the determinism the key ID has, and
+// becomes fully deterministic the day #856 makes key IDs so.
+//
+// The domain-separation prefix is not decoration. Nothing else in the tree hashes a KMS key ARN today,
+// but a bare digest of an ARN is the obvious thing for a later minter to reach for, and two identities
+// that must differ colliding on one hash is not a failure any test would think to look for.
+func kmsKeyMaterialID(arn string) string {
+	sum := sha256.Sum256([]byte("kms-key-material:" + arn))
+	return hex.EncodeToString(sum[:])
 }
 
 // kmsKeyARN constructs a KMS key ARN.
