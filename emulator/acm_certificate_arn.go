@@ -41,10 +41,11 @@ package emulator
 //   - A well-formed certificate ARN with no record is ResourceNotFoundException/400, per the
 //     description quoted above.
 //
-// What is deliberately left alone: an unparseable request body still answers
+// What #921 deliberately left alone, and #950 settled: an unparseable request body answered
 // InvalidParameterException. That is a protocol-level failure rather than a member-constraint
 // violation, so its code belongs to ACM's common errors rather than to any one operation's list,
-// and settling it is a separate question from this one.
+// and settling it was a separate question. It is settled in [acmInvalidBody], which confirmed that
+// sentence's guess.
 //
 // AccessDeniedException is also published at 400 by ACM while substrate answers it at 403. That is
 // not fixed here: the 403 comes from the central authorization check every service shares, and
@@ -160,6 +161,33 @@ func acmInvalidARN(arn, reason string) *AWSError {
 	return &AWSError{
 		Code:       "InvalidArnException",
 		Message:    fmt.Sprintf("the ARN %q does not refer to an ACM certificate: %s", arn, reason),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// acmInvalidBody reports that a request body would not decode.
+//
+// ValidationError/400, from ACM's common-errors page rather than from any operation's own list, and
+// this is the one refusal in the plugin where that is the right provenance. The six sites answered
+// InvalidParameterException, which ACM publishes on only **three** of the six guarded operations —
+// RequestCertificate, AddTagsToCertificate and RemoveTagsFromCertificate — and omits from
+// DescribeCertificate, DeleteCertificate and ListTagsForCertificate. Answering it everywhere leaves
+// three sites reporting a code their own operation does not publish (#950's defect relocated);
+// answering it only where published makes one failure produce two codes inside one plugin.
+//
+// [acmValidationError]'s ValidationException is not the answer either, near as the name is: it is
+// published on five of the six and **not** on RequestCertificate, so it has the same problem one
+// operation smaller. The two codes sitting side by side in this file is therefore deliberate. A
+// CertificateArn breaking a published constraint is ValidationException, because every operation
+// taking a certificate publishes it; a body that would not parse belongs to no operation, so it takes
+// the code from the page that belongs to no operation.
+//
+// It takes no argument so that encoding/json's own text cannot reach a caller; see
+// [kinesisInvalidBody] for the same rule.
+func acmInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "the request body is not valid JSON",
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

@@ -269,41 +269,142 @@ changed where IAM's code, message and status come from and left the shape alone.
 
 An unimplemented operation is refused before a plugin sees it. A body that arrives at a
 real operation and then fails to decode is the plugin's own refusal, and it was the
-largest single source of unpublished error codes in the tree: **46 sites across the
-services audited so far answered a code that appears nowhere in their service's
-documentation** — not on an operation page, not on the common-errors page
+largest single source of unpublished error codes in the tree. **110 sites in fourteen
+services answered a code their own operation does not publish** — in most cases a code
+that appears nowhere in the service's documentation at all — and all 110 are corrected
 ([#923](https://github.com/scttfrdmn/substrate/issues/923),
-[#950](https://github.com/scttfrdmn/substrate/issues/950)).
+[#1003](https://github.com/scttfrdmn/substrate/issues/1003),
+[#950](https://github.com/scttfrdmn/substrate/issues/950)). Three further services — MSK,
+CloudWatch and Bedrock Runtime — had the right code and the wrong message, and kept the
+code.
 
-The answer is now `ValidationError` at **400**, and it comes from the service's own
-common-errors page: "The input doesn't meet the required format or constraints. Check
-that all required parameters are included and that values are valid."
+Every one of the 110 already answered HTTP **400**, and 400 is what every published
+counterpart carries, so this whole class was invisible to #923's status audit. It is a
+code-string and message defect throughout.
 
-### Why the code has to come from the common-errors page
+### The rule: a per-operation code where one covers every guarded site, otherwise the common page
 
-A body that will not parse belongs to no single operation. Substrate cannot know which
-operation the caller meant beyond the `X-Amz-Target` header, and it certainly cannot know
-which of that operation's parameters was wrong — nothing was decoded. Every affected
-operation page ends its own Errors section by deferring to the common page, and for
-Systems Manager the deferral is not a convenience but the only route: all twelve guarded
-operations were read, and each publishes only narrow resource-specific 400s —
-`ParameterNotFound`, `InvalidKeyId`, `InvalidResourceType`, `HierarchyLevelLimitExceeded`
-and the like — plus `InternalServerError` at 500. Not one of them describes a request that
-could not be read at all.
+There is no single answer, because AWS does not give one. The rule the audit settled on,
+applied uniformly:
 
-### That page is AWS boilerplate, which is what makes the answer transfer
+1. If **every** operation carrying a guard publishes the same input-validation code in its
+   own Errors section, use that code.
+2. Otherwise fall back to the service's **common-errors page**, which is where an error
+   belonging to no single operation belongs.
+
+Step 1 is preferred because a per-operation code is a stronger citation: the page that
+receives the request names it. Step 2 exists because a body that will not parse belongs to
+no operation — substrate cannot know which operation the caller meant beyond the
+`X-Amz-Target` header or the path, and it certainly cannot know which parameter was wrong,
+since nothing was decoded.
+
+The rule is why the table below is not one column of one code, and why two services under
+one reference can legitimately differ: Budgets and Cost Explorer share
+`aws-cost-management/latest/APIReference/CommonErrors.html`, but Budgets publishes
+`InvalidParameterException` on all five of its guarded operations and Cost Explorer
+publishes no validation code on any of its three, so Budgets takes step 1 and Cost Explorer
+step 2.
+
+It is also why Firehose loses `InvalidArgumentException` **even at the one site that
+publishes it**. A missing `DeliveryStreamName` is one condition, and answering it with two
+different codes depending on which operation received it is the failure mode a uniform
+choice exists to avoid.
+
+### The inventory
+
+| Service | Sites | Answered | Answers now | Provenance |
+|---|---|---|---|---|
+| Step Functions | 15 | `InvalidRequest` | `ValidationError` / 400 | Common page. `ValidationException` is published on only 5 of the 15 |
+| Kinesis | 16 parse + 3 member | `InvalidParameterException` | `InvalidArgumentException` / 400 | All 16 operation pages |
+| EventBridge | 7 parse + 6 member | `InvalidParameterException` | `ValidationError` / 400 | Common page. EventBridge publishes no validation code on any guarded operation |
+| Systems Manager | 12 | `InvalidRequest` ×10, `SerializationException` ×2 | `ValidationError` / 400 | Common page. None of the 12 publishes one |
+| SageMaker | 6 parse + 4 conflated | `InvalidParameterValue` | `ValidationError` / 400 | Common page. 0 of 6 publish any validation error |
+| ACM | 6 | `InvalidParameterException` | `ValidationError` / 400 | Common page. `InvalidParameterException` is on 3 of 6, `ValidationException` on 5 of 6 |
+| Lambda | 4 parse + 3 member | `ValidationException` | `InvalidParameterValueException` / 400 | All 4 operation pages |
+| Firehose | 3 parse + 3 member | `MalformedData`, `InvalidArgumentException` | `ValidationError` / 400 | Common page. `InvalidArgumentException` is on 1 of 3 |
+| EFS | 4 | `MalformedData` | `BadRequest` / 400 | All 4 operation pages. **No common-errors page exists** |
+| Service Quotas | 3 parse + 1 member | `SerializationException`, `ValidationException` | `IllegalArgumentException` / 400 | All 4 operation pages |
+| Budgets | 5 | `MalformedData` | `InvalidParameterException` / 400 | All 5 operation pages |
+| Cost Explorer | 3 | `MalformedData` | `ValidationError` / 400 | Common page. None of the 3 publishes a validation code |
+| SES v2 | 1 parse + 3 member | `MalformedData`, `BadRequest` | `BadRequestException` / 400 | All 5 operation pages |
+| Batch | 2 of 8 | `InvalidParameterValue` | `ClientException` / 400 | All operation pages. **No common-errors page exists** |
+| Bedrock Runtime | 2 | `ValidationException` (code correct) | `ValidationException` / 400, unchanged | Both operation pages |
+| MSK | 2 parse + 9 member | `BadRequest`, message leaking | `BadRequest` / 400, unchanged | **Nothing published** — see below |
+| CloudWatch | 1 | `SerializationException`, message leaking | unchanged | Substrate's reading — see the CloudWatch section |
+
+The **Sites** column counts places in the source, not operations, and the two numbers differ
+wherever handlers share a decoder. Service Quotas' three parse sites are reached from **five**
+operations, because `sqUnmarshal` serves three of them; MSK's eleven from **eleven**. The wire
+tests are written per *operation* rather than per site, since an operation is what a caller
+can reach, which is why `invalid_body_inventory_test.go` names five Service Quotas cases
+against the three counted here.
+
+Fourteen services were audited and found **already correct**, and are listed here so they
+are not re-derived: Cognito Identity Provider (28 sites), Secrets Manager (11), ECR (15),
+ECS (15), CloudWatch Logs (10), Athena (7), API Gateway (6), API Gateway v2 (5), Cognito
+Identity (5), Resource Groups Tagging (3), Bedrock (2), EventBridge Scheduler (2), EMR
+Serverless (1), HealthOmics (1).
+
+### That the common page is AWS boilerplate is what makes step 2 transfer
 
 Step Functions', Systems Manager's and KMS's common-errors pages are **byte-identical**:
 the same fifteen entries in the same order with the same statuses. The code is spelled
-**`ValidationError`**, with no `Exception` suffix. So the finding at one service is a
-finding at the others, rather than a coincidence to re-derive per plugin.
+**`ValidationError`**, with no `Exception` suffix — "The input doesn't meet the required
+format or constraints. Check that all required parameters are included and that values are
+valid." The same entry, with the same status and the same gloss, is what EventBridge's,
+SageMaker's, ACM's, Firehose's and Cost Management's pages publish, so a finding at one
+service transfers rather than being a coincidence to re-derive per plugin.
 
-### Two near misses, and why neither is the answer
+One page is not the boilerplate and is worth naming, because it is why a service was
+verified operation by operation rather than by transfer: **Secrets Manager's common-errors
+page has 24 entries, not fifteen**. Its eleven sites were each checked, and each was
+already correct.
+
+### Three services publish no common-errors page at all
+
+EFS, Batch and API Gateway v2 have no fifteen-entry page to fall back to — EFS's
+`CommonErrors` link redirects to the user guide's index, and Batch's and API Gateway v2's do
+not resolve to one either. For all three, step 1 was the only route available, and in all
+three it was open: EFS publishes `BadRequest` at 400 on all four guarded operations
+("Returned if the request is malformed or contains an error such as an invalid parameter
+value or a missing required parameter"), Batch publishes `ClientException`, and API Gateway
+v2's five sites were already correct.
+
+This is the strongest argument for preferring step 1 in general. A rule that depends on a
+page three services do not have is a rule with three holes in it.
+
+### One service publishes nothing to check against
+
+MSK is the single row above whose code could not be verified against anything, and it kept
+what it had. Three sources would normally settle it and each is absent:
+
+- There is no common-errors page.
+- The operation pages carry **no Errors section** — `clusters.html` documents response codes
+  only, and the `Error` schema it names has members `{message, invalidParameter}`, with no
+  `Code` member, so nothing on the page states a code string a caller could match on.
+- `CreateClusterV2`, one of the two operations carrying a guard, **has no documentation
+  page**.
+
+So `BadRequest` stays, recorded as substrate's reading rather than presented as modelled,
+the same treatment CloudWatch's `SerializationException` gets. Inventing a code on no
+evidence would be worse than keeping one that has at least been shipped. The status is not
+in doubt: 400 is what every site already answered and what the response codes on
+`clusters.html` give a client error. If MSK ever publishes an Errors section, this is the
+one row in the table that should be revisited.
+
+### Two near misses at Step Functions, and why neither is the answer
 
 | Candidate | Published | Declined because |
 |---|---|---|
 | `ValidationException` | Step Functions publishes it at 400 on **five** of the fifteen operations that carry a parse guard | Answering it everywhere leaves ten sites reporting a code their own operation does not publish — the same defect relocated. Answering it at only five makes one failure produce two codes inside one plugin. |
 | `MalformedHttpRequestException` | On the common page at 400 | Its published scope is the transport layer: "the request body can't be processed. This typically happens when the request body can't be decompressed using the specified content encoding algorithm." A body that arrived intact and then failed to parse is not that. |
+
+ACM is the same shape one operation smaller, and it is why that plugin carries two codes
+side by side on purpose. `ValidationException` is published on five of ACM's six guarded
+operations and **not** on `RequestCertificate`; `InvalidParameterException` is on only
+three. So a `CertificateArn` breaking a published constraint answers `ValidationException`,
+because every operation taking a certificate publishes it, while a body that would not parse
+belongs to no operation and takes the code from the page that belongs to no operation.
 
 **The trap worth naming: an error mentioned in prose is not an error a shape publishes.**
 Five Systems Manager pages name `ValidationException` in prose — "if the specified name
@@ -313,24 +414,109 @@ Four Step Functions pages do the same for the Distributed Map note. A reader who
 for the word finds a pattern the reference does not actually publish, which is how the
 wrong code survives a careful reading.
 
+**And the trap that vindicated checking every guarded operation rather than a
+representative one: Firehose.** `InvalidArgumentException` at 400 is published for
+`CreateDeliveryStream` — the operation anyone would check first — and for neither of the
+other two. `DescribeDeliveryStream` publishes exactly one error,
+`ResourceNotFoundException`, and `DeleteDeliveryStream` two, `ResourceInUseException` and
+`ResourceNotFoundException`. Applying the obvious replacement from the representative page
+would have been wrong at two of three sites, which is this whole defect relocated.
+
 ### The message describes the request, not the emulator
 
-Two Systems Manager sites — `SendCommand` and `GetCommandInvocation` — passed
-`encoding/json`'s own error text through as the message, so a caller was told which Go
-struct field failed to unmarshal by an endpoint that is meant to look like AWS. The
-message is now substrate's: "the request body is not valid JSON". Nothing a caller can
-act on was lost, because the only actionable fact is that the body was not JSON.
+**Twenty-two sites, across eight services, passed `encoding/json`'s own error text through
+as the message**, so a caller was told which Go struct field failed to unmarshal by an
+endpoint that is meant to look like AWS. Service Quotas passed it **bare**, with no prefix
+at all; EFS, Firehose, SES v2, Budgets, Cost Explorer, MSK and CloudWatch prefixed it with
+"invalid JSON body: " or "invalid JSON: ". The message is now substrate's: "the request body
+is not valid JSON". Nothing a caller can act on was lost, because the only actionable fact
+is that the body was not JSON.
 
-### Why a green suite held 46 wrong codes
+CloudWatch is the one place where a decoder's text is still appended, and the distinction
+is deliberate. Its CBOR arm reports `cborDecode`'s message, which is substrate's own and
+describes the wire — "cbor: 3 trailing byte(s) after the top-level item" — so it is useful
+to the caller who wrote those bytes. Its JSON arm no longer appends anything, because
+`encoding/json`'s text describes Go.
 
-Every test that builds a request from a Go value is structurally incapable of reaching
-these guards: `json.Marshal` produces valid JSON by construction. The only way in is to
-hand the server bytes, which is what the suite now does — one case per guarded operation,
-asserting **the status and the code together**, since a decoded error struct carries only
-the code and a consumer's retry logic branches on the status.
+### A parse failure is not a missing member
+
+Five sites conflated the two, testing `if err != nil || body.X == ""` and reporting the
+missing member for both — four in SageMaker and one in Bedrock Runtime's
+`CreateModelInvocationJob`. They are split, because the two conditions call for different
+fixes by the caller: one sends different bytes, the other adds a member, and telling a
+caller their `jobName` is missing when their JSON is truncated sends them to look at the
+wrong thing.
+
+The remaining conflated sites, in Athena and Secrets Manager, are recorded here rather than
+changed. There the required member is the only member the handler reads, so the two answers
+coincide, and splitting them would add a branch that cannot change what a caller does.
+
+### Why a green suite held all of them
+
+Every test that builds a request from a Go value is structurally incapable of reaching these
+guards: `json.Marshal` produces valid JSON by construction. The only way in is to hand the
+server bytes. Nothing in the suite did, at any of the seventeen services, which is exactly
+why the whole class survived — and why, when 110 codes were corrected, **exactly one
+existing test failed**: the Service Quotas case that had asserted `SerializationException`
+deliberately.
+
+The suite now sends bytes: one case per guarded operation, asserting **the status and the
+code together**, since a decoded error struct carries only the code and a consumer's retry
+logic branches on the status. Each table names every operation that carries a guard rather
+than a representative sample, because the defect was per-site duplication of one literal and
+the assertion that matters is that no site was missed.
+`emulator/invalid_body_inventory_test.go` carries **66 guarded operations in fourteen services**,
+plus **35 member-complaint sites in nine** (below), and `emulator/invalid_body_code_test.go` the
+Step Functions and Systems Manager sites #1003 fixed.
+
+Two of the 66 needed a resource to exist first, which is worth recording because it is the one
+way a guard can be present, correct and still untested. Lambda's `AddPermission` and
+`TagResource` look up the function **before** they parse the body, so on an empty emulator both
+answer `ResourceNotFoundException`/404 and never reach the guard at all. The two sites are
+therefore only reachable with a function in place, and a test that did not create one would
+have reported success while asserting nothing.
+
+**Which of the two answers AWS gives is unverified**, and the ordering is left as it stands
+rather than changed on a guess. A case is available either way: a caller naming a function that
+does not exist arguably wants to hear that rather than that their JSON is malformed, while a
+REST-JSON frontend that deserializes a request before dispatching it would refuse the body
+first and never reach the lookup. No Lambda page states the precedence, and it is not
+observable from the published Errors sections, both of which list the two codes without
+ordering them. Filed as [#1006](https://github.com/scttfrdmn/substrate/issues/1006) rather
+than settled here, because #950's rule is about *which code* a guard answers, not about which
+guard runs first — and if the body is refused first the pattern is not Lambda's alone, so it is
+an inventory rather than two moved lines.
+
+**The member-complaint half of the inventory is covered the same way**, in
+`TestMemberComplaintAnswersThePublishedCode` — every site in the *"+ N member"* column above,
+which is to say every site whose code #950 corrected that is *not* a parse guard. These are the
+easier half to leave unverified: a parse guard is one literal per handler, while these are
+scattered complaints about a missing member or a malformed identifier, and the whole point of
+correcting them was that one plugin must not answer two codes for one class of caller error.
+They send `{}` rather than a truncated body, deliberately — `{}` *parses*, so it travels past
+the parse guard and reaches the member check underneath, where an unparseable body would have
+stopped one line earlier — and they assert the message alongside the code, because once every
+site in a service answers one code the message is the only thing distinguishing them.
+
+**Five of those guards cannot be reached by any request, and are recorded rather than tested.**
+`parseKafkaOperation` and `parseSESv2Operation` both open by trimming a trailing slash, so a
+request naming an empty path parameter collapses onto the collection route one case earlier in
+the same switch: `GET /v1/clusters/` dispatches `ListClusters`, not `DescribeCluster` with an
+empty ARN. That makes MSK's `describeCluster`, `deleteCluster` and `describeClusterV2` checks
+and SES v2's `getEmailIdentity` and `deleteEmailIdentity` checks dead code — their codes are
+corrected for consistency with their siblings, but nothing can observe them. MSK's
+`getBootstrapBrokers` and `listNodes` escape only because a literal segment follows the ARN, so
+the empty parameter is interior rather than trailing and `/v1/clusters//nodes` reaches them.
+`parseEFSOperation` does **not** trim, which is why all nine of EFS's equivalent guards are
+reachable and covered — two routers in one tree answering differently on the same input class,
+which is the part worth fixing and is filed as
+[#1009](https://github.com/scttfrdmn/substrate/issues/1009). Whether AWS itself answers a
+validation error, a 404, or the collection operation for a trailing slash is unverified, and
+MSK is the weakest service in the tree to settle that from documentation for the reasons given
+below.
 
 **One service is outside this rule by design.** CloudWatch speaks Smithy RPC v2 CBOR, and
-its refusal names the modeled shape rather than a code from a common-errors page; neither
+its refusal names the modelled shape rather than a code from a common-errors page; neither
 the protocol nor the CloudWatch model names a shape for an undecodable body, so it answers
 `SerializationException` at 400 as substrate's own choice. See the CloudWatch section.
 
@@ -10857,12 +11043,18 @@ ACM's own operations and the tagging API's resolver run the same validation, so 
 an ARN the other refuses. The tagging API renders its refusal as a `FailedResourcesMap` entry
 rather than an error response, so the shapes differ and the decision does not.
 
-Two answers are deliberately left as they are. An unparseable request body still answers
-`InvalidParameterException`, because that is a protocol-level failure whose code belongs to ACM's
-common errors rather than to any one operation's published list. And ACM publishes
-`AccessDeniedException` at **400** while substrate answers it at **403**, from the central
-authorization check every service shares — moving it for one service would have the emulator answer
-two statuses for one decision, so it is recorded here rather than changed.
+The unparseable-body case was left open by #921 and settled by
+[#950](https://github.com/scttfrdmn/substrate/issues/950), which confirmed that deferral's guess: it
+is a protocol-level failure whose code belongs to ACM's common errors rather than to any one
+operation's published list, so it answers `ValidationError`/400 from that page. All six sites
+previously answered `InvalidParameterException`, which ACM publishes on only three of the six. See
+*A request body that will not parse* above for why `ValidationException` is not the answer either,
+near as the name is, and why the two codes now sit side by side in this plugin on purpose.
+
+One answer is deliberately left as it is. ACM publishes `AccessDeniedException` at **400** while
+substrate answers it at **403**, from the central authorization check every service shares — moving
+it for one service would have the emulator answer two statuses for one decision, so it is recorded
+here rather than changed.
 
 ### CloudFormation resource types
 
@@ -11411,8 +11603,13 @@ Kinesis reference pages is published at HTTP **400** — the only 500 in the ser
 `ResourceNotFoundException` at 404 and `ResourceInUseException` at 409. Both are now 400, as
 [#910](https://github.com/scttfrdmn/substrate/issues/910) and
 [#912](https://github.com/scttfrdmn/substrate/issues/912) established for Step Functions. The
-`InvalidParameterException` still answered by each handler's body-decode guard is published by Kinesis
-nowhere at all; that mismatch is [#950](https://github.com/scttfrdmn/substrate/issues/950)'s.
+`InvalidParameterException` each handler's body-decode guard answered is published by Kinesis nowhere
+at all — not on an operation page, not on the common-errors page, not even in prose — and
+[#950](https://github.com/scttfrdmn/substrate/issues/950) corrected all nineteen sites to
+`InvalidArgumentException`/400, which **all sixteen** guarded operation pages publish: *"A specified
+parameter exceeds its restrictions, is not supported, or can't be used. For more information, see the
+returned message."* `ValidationException`, which four of those pages also carry, is not the answer:
+its gloss is specific to capacity mode. So nothing in the plugin answers the old code any longer.
 
 **`GetRecords`' page contradicts itself, and the contradiction is recorded rather than resolved.** It
 publishes `StreamARN` and no `StreamName`, because its stream is implied by the required

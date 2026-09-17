@@ -303,7 +303,15 @@ func batchDeterministicUUID(ctx *RequestContext, resource, name string) string {
 
 // batchClientError returns the ClientException Batch reports for a bad request.
 // Every Batch operation documents exactly two errors, ClientException (400) and
-// ServerException (500), so a parameter complaint is a ClientException.
+// ServerException (500), so a parameter complaint is a ClientException. Batch also
+// publishes no common-errors page — the link its pages print redirects to the
+// reference index — so those two are the whole published set and there is no
+// fallback to consider.
+//
+// #950 found the file contradicting this comment: SubmitJob and DescribeJobs
+// bypassed the constructor and answered InvalidParameterValue, which appears on
+// none of the ten Batch pages. Both now route through here, so every Batch
+// refusal for an unusable request reports one code.
 func batchClientError(message string) *AWSError {
 	return &AWSError{Code: "ClientException", Message: message, HTTPStatus: http.StatusBadRequest}
 }
@@ -553,7 +561,7 @@ func (p *BatchPlugin) submitJob(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		JobDefinition string `json:"jobDefinition"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, batchClientError("the request body is not valid JSON")
 	}
 	if body.JobName == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "jobName is required", HTTPStatus: http.StatusBadRequest}
@@ -596,7 +604,7 @@ func (p *BatchPlugin) describeJobs(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		Jobs []string `json:"jobs"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+		return nil, batchClientError("the request body is not valid JSON")
 	}
 
 	goCtx := context.Background()

@@ -74,8 +74,15 @@ func cwNormalizeInput(req *AWSRequest) error {
 		doc = decoded
 
 	case WireJSONRPC:
+		// The decode error is deliberately not appended, unlike the CBOR arm above.
+		// cborDecode's messages are substrate's own and describe the wire ("cbor: 3
+		// trailing byte(s) after the top-level item"), so they are useful to the caller
+		// who wrote those bytes; encoding/json's describe Go ("cannot unmarshal string
+		// into Go value of type map[string]interface {}"), which names an implementation
+		// detail of the emulator and no AWS service would ever say. #950 removed that
+		// text from 17 refusals across six services and this is the last of them.
 		if err := json.Unmarshal(req.Body, &doc); err != nil {
-			return cwSerializationError("the request body is not well-formed JSON: " + err.Error())
+			return cwSerializationError("the request body is not well-formed JSON")
 		}
 
 	case WireQuery:

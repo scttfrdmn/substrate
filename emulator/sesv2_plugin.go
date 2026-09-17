@@ -96,11 +96,11 @@ func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSReques
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, sesv2InvalidBody()
 		}
 	}
 	if input.EmailIdentity == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "EmailIdentity is required", HTTPStatus: http.StatusBadRequest}
+		return nil, sesv2BadRequest("EmailIdentity is required")
 	}
 
 	goCtx := context.Background()
@@ -207,8 +207,10 @@ func (p *SESv2Plugin) listEmailIdentities(reqCtx *RequestContext, req *AWSReques
 }
 
 func (p *SESv2Plugin) getEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, identityName string) (*AWSResponse, error) {
+	// TODO(#1009): unreachable. parseSESv2Operation trims a trailing slash, so
+	// GET /v2/email/identities/ collapses onto the ListEmailIdentities arm.
 	if identityName == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "identity name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, sesv2BadRequest("identity name is required")
 	}
 	goCtx := context.Background()
 	key := "identity:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + identityName
@@ -227,8 +229,10 @@ func (p *SESv2Plugin) getEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, id
 }
 
 func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, identityName string) (*AWSResponse, error) {
+	// TODO(#1009): unreachable. DELETE /v2/email/identities/ trims to /v2/email/identities, which
+	// matches no arm, so the request answers unknownRouteError before reaching this handler.
 	if identityName == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "identity name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, sesv2BadRequest("identity name is required")
 	}
 	goCtx := context.Background()
 	key := "identity:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + identityName

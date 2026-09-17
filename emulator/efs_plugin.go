@@ -83,7 +83,7 @@ func (p *EFSPlugin) createFileSystem(reqCtx *RequestContext, req *AWSRequest) (*
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, efsInvalidBody()
 		}
 	}
 
@@ -189,7 +189,7 @@ func (p *EFSPlugin) describeFileSystems(reqCtx *RequestContext, req *AWSRequest,
 
 func (p *EFSPlugin) updateFileSystem(reqCtx *RequestContext, req *AWSRequest, fsID string) (*AWSResponse, error) {
 	if fsID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "FileSystemId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("FileSystemId is required")
 	}
 
 	var input struct {
@@ -225,7 +225,7 @@ func (p *EFSPlugin) updateFileSystem(reqCtx *RequestContext, req *AWSRequest, fs
 
 func (p *EFSPlugin) deleteFileSystem(reqCtx *RequestContext, _ *AWSRequest, fsID string) (*AWSResponse, error) {
 	if fsID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "FileSystemId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("FileSystemId is required")
 	}
 	goCtx := context.Background()
 	key := "filesystem:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + fsID
@@ -247,11 +247,11 @@ func (p *EFSPlugin) createAccessPoint(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, efsInvalidBody()
 		}
 	}
 	if input.FileSystemID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "FileSystemId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("FileSystemId is required")
 	}
 
 	apID := generateEFSAccessPointID()
@@ -350,7 +350,7 @@ func (p *EFSPlugin) describeAccessPoints(reqCtx *RequestContext, req *AWSRequest
 
 func (p *EFSPlugin) deleteAccessPoint(reqCtx *RequestContext, _ *AWSRequest, apID string) (*AWSResponse, error) {
 	if apID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "AccessPointId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("AccessPointId is required")
 	}
 	goCtx := context.Background()
 	key := "accesspoint:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + apID
@@ -371,11 +371,11 @@ func (p *EFSPlugin) createMountTarget(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, efsInvalidBody()
 		}
 	}
 	if input.FileSystemID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "FileSystemId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("FileSystemId is required")
 	}
 
 	mtID := generateEFSMountTargetID()
@@ -467,7 +467,7 @@ func (p *EFSPlugin) describeMountTargets(reqCtx *RequestContext, req *AWSRequest
 
 func (p *EFSPlugin) deleteMountTarget(reqCtx *RequestContext, _ *AWSRequest, mtID string) (*AWSResponse, error) {
 	if mtID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "MountTargetId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("MountTargetId is required")
 	}
 	goCtx := context.Background()
 	key := "mounttarget:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + mtID
@@ -499,13 +499,13 @@ func (p *EFSPlugin) deleteMountTarget(reqCtx *RequestContext, _ *AWSRequest, mtI
 
 func (p *EFSPlugin) tagResource(reqCtx *RequestContext, req *AWSRequest, resourceID string) (*AWSResponse, error) {
 	if resourceID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "ResourceId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("ResourceId is required")
 	}
 	var input struct {
 		Tags []EFSTag `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "MalformedData", Message: "invalid JSON body: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, efsInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -517,7 +517,7 @@ func (p *EFSPlugin) tagResource(reqCtx *RequestContext, req *AWSRequest, resourc
 
 func (p *EFSPlugin) listTagsForResource(reqCtx *RequestContext, _ *AWSRequest, resourceID string) (*AWSResponse, error) {
 	if resourceID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "ResourceId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("ResourceId is required")
 	}
 	goCtx := context.Background()
 	tags, err := p.loadEFSTags(goCtx, reqCtx, resourceID)
@@ -532,7 +532,7 @@ func (p *EFSPlugin) listTagsForResource(reqCtx *RequestContext, _ *AWSRequest, r
 
 func (p *EFSPlugin) untagResource(reqCtx *RequestContext, req *AWSRequest, resourceID string) (*AWSResponse, error) {
 	if resourceID == "" {
-		return nil, &AWSError{Code: "BadRequest", Message: "ResourceId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, efsBadRequest("ResourceId is required")
 	}
 	tagKeysParam := req.Params["tagKeys"]
 	var keys []string
@@ -586,7 +586,7 @@ func (p *EFSPlugin) mergeEFSTags(goCtx context.Context, reqCtx *RequestContext, 
 		return p.state.Put(goCtx, efsNamespace, key, updated)
 	}
 
-	return &AWSError{Code: "BadRequest", Message: "Unknown resource ID prefix for " + resourceID, HTTPStatus: http.StatusBadRequest}
+	return efsBadRequest("Unknown resource ID prefix for " + resourceID)
 }
 
 func (p *EFSPlugin) loadEFSTags(goCtx context.Context, reqCtx *RequestContext, resourceID string) ([]EFSTag, error) {
@@ -622,7 +622,7 @@ func (p *EFSPlugin) loadEFSTags(goCtx context.Context, reqCtx *RequestContext, r
 		return ap.Tags, nil
 	}
 
-	return nil, &AWSError{Code: "BadRequest", Message: "Unknown resource ID prefix for " + resourceID, HTTPStatus: http.StatusBadRequest}
+	return nil, efsBadRequest("Unknown resource ID prefix for " + resourceID)
 }
 
 // mergeEFSTagSlice applies add and remove operations to an []EFSTag slice.

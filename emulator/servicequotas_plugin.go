@@ -203,10 +203,10 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(accountID string, req 
 		DesiredValue float64 `json:"DesiredValue"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, sqInvalidBody()
 	}
 	if input.ServiceCode == "" || input.QuotaCode == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "ServiceCode and QuotaCode are required", HTTPStatus: http.StatusBadRequest}
+		return nil, sqIllegalArgument("ServiceCode and QuotaCode are required")
 	}
 
 	id := generateSQSMessageID() // reuse UUID generator
@@ -298,7 +298,7 @@ func (p *ServiceQuotasPlugin) getRequestedServiceQuotaChange(accountID string, r
 		RequestID string `json:"RequestId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, sqInvalidBody()
 	}
 
 	qi, err := p.loadIncrease(context.Background(), accountID, input.RequestID)
@@ -376,13 +376,27 @@ func sqUnmarshal(body []byte, out interface{}) *AWSError {
 		return nil
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return &AWSError{
-			Code:       "SerializationException",
-			Message:    err.Error(),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return sqInvalidBody()
 	}
 	return nil
+}
+
+// sqInvalidBody reports that a request body would not decode.
+//
+// #950 found this file contradicting itself: five sites answered a code that appears
+// on none of the four Service Quotas pages, while [sqIllegalArgument] below already
+// documented IllegalArgumentException as "the code the model declares for it on every
+// Service Quotas operation". It does — ListServiceQuotas, GetServiceQuota,
+// RequestServiceQuotaIncrease and GetRequestedServiceQuotaChangeHistory all publish
+// IllegalArgumentException at HTTP 400, glossed "Invalid input was provided." So a
+// body that will not parse is one, and nothing is left answering the other.
+//
+// The message was the worse half. All five sites passed err.Error() through **bare**,
+// with no prefix at all, so a caller was handed encoding/json's own text — which Go
+// struct field failed to unmarshal — by an endpoint whose whole purpose is to look
+// like AWS.
+func sqInvalidBody() *AWSError {
+	return sqIllegalArgument("the request body is not valid JSON")
 }
 
 // sqJSONResponse creates a JSON AWSResponse with the given status and body.

@@ -493,6 +493,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Eighty-three more sites in twelve services answered an error code their own operation does not
+  publish, for a request body that would not parse — and twenty-two of them handed the caller
+  `encoding/json`'s error text as the message** (#950). This is the rest of the class the entry below
+  opened at Step Functions and Systems Manager, taken to every remaining service in the tree.
+  Twenty-nine services were inventoried operation by operation rather than by sample: twelve carried a
+  wrong code, fourteen were already correct, and three — MSK, CloudWatch and Bedrock Runtime — had the
+  right code and a wrong message. The fourteen are named in `docs/services.md` so they are not
+  re-derived.
+
+  Every one of the eighty-three already answered HTTP **400**, and 400 is what every published
+  counterpart carries. So the whole class was invisible to #923's status audit — it is a code-string
+  defect throughout, and the status half of the pass changed nothing.
+
+  **There is no single answer, because AWS does not give one.** The rule applied uniformly: use a
+  per-operation code where **every** guarded operation publishes the same one, and fall back to the
+  service's common-errors page only where none does. A per-operation code is the stronger citation,
+  since the page that receives the request names it; the common page is where an error belonging to no
+  operation belongs. Step 1 settled Kinesis (`InvalidArgumentException`, all sixteen pages), Lambda
+  (`InvalidParameterValueException`, all four), EFS (`BadRequest`, all four), Service Quotas
+  (`IllegalArgumentException`, all four), Budgets (`InvalidParameterException`, all five), SES v2
+  (`BadRequestException`, all five) and Batch (`ClientException`). Step 2 settled EventBridge,
+  SageMaker, ACM, Firehose and Cost Explorer, each of which publishes no validation code on any guarded
+  operation.
+
+  The rule is why two services under one reference legitimately differ. Budgets and Cost Explorer share
+  a common-errors page, but Budgets publishes `InvalidParameterException` on all five of its guarded
+  operations and Cost Explorer publishes nothing on any of its three — so they answer two different
+  codes, and that is the rule working rather than an inconsistency. It is also why **Firehose loses
+  `InvalidArgumentException` even at the one site that publishes it**: a missing `DeliveryStreamName` is
+  one condition, and answering it with two codes depending on which operation received it is the failure
+  mode a uniform choice exists to avoid.
+
+  **Firehose is also the service that vindicated checking every guarded operation rather than a
+  representative one.** `InvalidArgumentException` is published for `CreateDeliveryStream` — the page
+  anyone would open first — and for neither of the other two, which publish only
+  `ResourceNotFoundException` and `ResourceInUseException`. Taking the obvious replacement from the
+  representative page would have been wrong at two of three sites, which is this defect relocated.
+
+  **Three services have no common-errors page at all** — EFS, Batch and API Gateway v2. EFS's
+  `CommonErrors` link redirects to the user guide's index and the other two do not resolve to one either,
+  so for all three step 1 was the only route available. It was open in all three, which is the strongest
+  argument for preferring it: a rule that depends on a page three services do not have is a rule with
+  three holes in it.
+
+  **One service publishes nothing to check against, and kept what it had.** MSK has no common-errors
+  page, its operation pages carry **no Errors section** (`clusters.html` documents response codes only,
+  and the `Error` schema it names has members `{message, invalidParameter}` with no `Code` member at
+  all), and `CreateClusterV2` — one of the two operations carrying a guard — has no documentation page.
+  So `BadRequest` stays, recorded as substrate's reading rather than presented as modelled, the same
+  treatment CloudWatch's `SerializationException` already gets. Inventing a code on no evidence would be
+  worse than keeping one that has at least shipped. Its eleven sites now route through one constructor,
+  so the code cannot come to differ between the operation that creates a cluster and the one that
+  describes it.
+
+  **Twenty-two sites, across eight services, passed `encoding/json`'s own error text through as the
+  message**, so a caller was told which Go struct field failed to unmarshal by an endpoint whose whole
+  purpose is to look like AWS. Service Quotas passed it bare, with no prefix at all; EFS, Firehose,
+  SES v2, Budgets, Cost Explorer, MSK and CloudWatch prefixed it. All twenty-two now report *"the request
+  body is not valid JSON"*. CloudWatch's CBOR arm is the one place a decoder's message is still appended,
+  deliberately: `cborDecode`'s text is substrate's own and describes the wire — *"cbor: 3 trailing byte(s)
+  after the top-level item"* — which is useful to the caller who wrote those bytes, where
+  `encoding/json`'s describes Go.
+
+  **Five sites conflated a parse failure with a missing member** — `if err != nil || body.X == ""` —
+  four in SageMaker and one in Bedrock Runtime's `CreateModelInvocationJob`, whose code was already
+  right. They are split, because the two conditions call for different fixes by the caller: one sends
+  different bytes, the other adds a member, and telling a caller their `jobName` is missing when their
+  JSON is truncated sends them to look at the wrong thing. Athena's and Secrets Manager's conflated
+  sites are recorded in `docs/services.md` rather than changed, because there the required member is the
+  only member the handler reads and the two answers coincide.
+
+  Two files that recorded an open question now record its answer. `acm_certificate_arn.go`'s preamble
+  said an unparseable body's code *"belongs to ACM's common errors rather than to any one operation's
+  list"* and left settling it to a later pass; that guess was right, and all six sites answer
+  `ValidationError`/400. `ValidationException` is not the answer either, near as the name is — ACM
+  publishes it on five of the six guarded operations and not on `RequestCertificate` — which is why that
+  plugin now carries two codes side by side on purpose. And `batchClientError`'s doc comment claimed
+  every Batch refusal for an unusable request went through it, while `SubmitJob` and `DescribeJobs`
+  bypassed it to answer `InvalidParameterValue`, a code on none of the ten Batch pages; both now route
+  through it, so the comment is true.
+
+  **Why a green suite held all 110 of them.** A test that builds its request from a Go value is
+  structurally incapable of reaching a parse guard, because `json.Marshal` produces valid JSON by
+  construction — and nothing in the suite handed the server bytes, at any of the seventeen services
+  involved. When 110 codes were corrected, **exactly one existing test failed**: the Service Quotas case
+  that had asserted `SerializationException` deliberately, and whose neighbour two functions below
+  already documented `IllegalArgumentException` as *"the code the model declares for it on every Service
+  Quotas operation"*. The suite now sends bytes, one case per guarded operation, asserting the status and
+  the code together and that the message names no Go type.
+
+  The **member-complaint half** of the inventory — every corrected site that is not a parse guard — is
+  covered the same way, at 35 sites in nine services. Those cases send `{}` rather than a truncated body,
+  because `{}` parses and so travels past the parse guard to the member check underneath, and they assert
+  the message alongside the code: once every site in a service answers one code, the message is the only
+  thing that distinguishes them. **Five of those guards cannot be reached by any request and are recorded
+  rather than tested.** `parseKafkaOperation` and `parseSESv2Operation` both trim a trailing slash, so a
+  request naming an empty path parameter collapses onto the collection route — `GET /v1/clusters/`
+  dispatches `ListClusters`, not `DescribeCluster` with an empty ARN — which makes MSK's
+  `describeCluster`, `deleteCluster` and `describeClusterV2` checks and SES v2's `getEmailIdentity` and
+  `deleteEmailIdentity` checks dead code. Their codes are corrected for consistency with their siblings,
+  but nothing can observe them, and each now says so at the line a reader would look. MSK's
+  `getBootstrapBrokers` and `listNodes` escape only because a literal segment follows the ARN;
+  `parseEFSOperation` does not trim at all, which is why all nine of EFS's equivalent guards are
+  reachable. Two routers answering differently on one input class is filed as #1009 rather than settled
+  here, since whether AWS answers a validation error, a 404 or the collection operation for a trailing
+  slash is unverified.
+
 - **Twenty-seven Step Functions and Systems Manager sites answered an error code their own service does
   not publish, for a request body that would not parse** (part of #950). Fifteen Step Functions handlers
   and ten Systems Manager ones answered `InvalidRequest`; the remaining two Systems Manager handlers —
