@@ -190,6 +190,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret although their pages publish the same cause (#956).
 
 ### Removed
+- **KMS `DescribeKey`'s `RotationEnabled`, a member `KeyMetadata` does not publish** (#971).
+  `API_KeyMetadata` publishes twenty-six members and `RotationEnabled` is not among them — the string
+  does not occur on the page at all — yet substrate rendered it inside every `DescribeKey` response.
+  This is #765's failure mode aimed at a response member rather than at state: a consumer could branch
+  on `DescribeKey().KeyMetadata.RotationEnabled` against the emulator, pass, and then read an absent
+  field from AWS. Rotation state is observable through `GetKeyRotationStatus`, which is the operation
+  AWS publishes it on, and the test asserts the member's absence against **raw JSON** both before and
+  after enabling rotation — a decoded struct cannot distinguish an omitted member from a `false` one —
+  then asserts rotation state is still readable, so the removal is shown to have removed a duplicate
+  route rather than the only one.
+
+  Restoring the member under any name would be worse than the original defect, because the rules the
+  real operation carries — the symmetric-only restriction, the key-state refusals, the documented
+  `false` while a key is pending deletion — belong to `GetKeyRotationStatus` and would all be bypassed.
+  The opposite direction, the sixteen `KeyMetadata` members substrate does not answer, is #974.
+
+  Compatibility: a caller reading `DescribeKey`'s `KeyMetadata.RotationEnabled` must call
+  `GetKeyRotationStatus` and read `KeyRotationEnabled` instead.
+
 - **Secrets Manager's `ListTagsForResource`, an operation AWS does not publish** (#929). The Secrets
   Manager API publishes twenty-three operations and that is not among them; a secret's tags are read
   through `DescribeSecret`, which is the read path substrate's own tagging tests already used. The name
@@ -202,6 +221,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **KMS `EnableKeyRotation` discarded `RotationPeriodInDays`** (#964). The handler decoded `KeyId` and
+  nothing else, so a caller could set a custom rotation period, receive `200`, and find no trace of it
+  anywhere. Discarding the value would have been defensible if it were write-only — a plugin has no
+  rotation to schedule and no key material to replace — but `API_GetKeyRotationStatus` publishes
+  `RotationPeriodInDays` as a **response** element with the identical Valid Range of 90 to 2560, and a
+  range stated at both ends of a round trip is a value AWS expects a caller to write and read back. The
+  period is now range-checked, stored, and reported; `GetKeyRotationStatus` also gained the `KeyId`
+  member it never answered, as the **bare key ID** whichever of the four forms the caller used, since
+  the element is glossed only *"identifies the specified symmetric encryption KMS key"* with none of the
+  *"Amazon Resource Name (key ARN)"* wording `ScheduleKeyDeletion` and `ReEncrypt` use for theirs, and
+  the page's sample renders a bare ID.
+
+  Three decisions here are substrate's. The refusal for an out-of-range period is `ValidationError`/400
+  from `CommonErrors`, reached exactly as #963's waiting-period check reaches it and deliberately reused
+  rather than re-argued: none of `API_EnableKeyRotation`'s seven errors describes a parameter value out
+  of range, and two range violations in one plugin answering two different codes would be the divergence
+  #923 exists to prevent. `UnsupportedOperationException` is the near miss and is declined — its gloss
+  describes an inadmissible parameter or resource, such as an asymmetric key (#972), not an admissible
+  parameter carrying a number out of range. The range is checked **before** the key is resolved, so a bad
+  period against an absent key reports the value that is wrong on the face of the request. And an omitted
+  period resets the stored value to 365 on **every** call rather than only the first, because AWS states
+  the default unconditionally while documenting the parameter as able to *"modify the rotation period of a
+  key that you previously enabled automatic key rotation on"*; the opposite, more intuitive reading is
+  pinned against a failing test so a later change to it is deliberate.
+
+  The member decodes into a `*int` where `ScheduleKeyDeletion`'s `PendingWindowInDays` stays an `int`,
+  and the asymmetry is the point: `0` is below the published minimum of 90, so collapsing an explicit
+  zero into the default would accept a value AWS refuses and report a period the caller never asked for.
+  `DisableKeyRotation` leaves the stored period alone — AWS documents no clearing — but
+  `GetKeyRotationStatus` stops reporting it while rotation is off, per #827's honest-empty rule.
+
+  Not fixed here, and filed rather than assumed: `NextRotationDate` needs the date rotation was enabled,
+  which nothing stores, and a key pending deletion reports its stored status where AWS documents `false`
+  (both #973); `OnDemandRotationStartDate` is blocked on the unimplemented `RotateKeyOnDemand`; and the
+  symmetric-only and AWS-managed-key restrictions, both `UnsupportedOperationException`/400, are #972.
+  A wrong claim this release inherited is also corrected on the record: `GetKeyRotationStatus`'s
+  deliberate lack of a key-state guard was justified by the page publishing neither
+  `DisabledException` nor `KMSInvalidStateException`, and it publishes the second. The decision survives
+  on better grounds — the page documents an *answer* for a pending-deletion key, and an operation that
+  documents an answer for a state is not refusing that state.
+
+  Compatibility: an out-of-range `RotationPeriodInDays` now answers `ValidationError`/400 where it
+  previously answered `200`, and `GetKeyRotationStatus` gains `KeyId` and `RotationPeriodInDays`.
+
 - **KMS's five cryptographic operations, two of which refused no key state at all** (#961). `Encrypt`,
   `Decrypt`, `GenerateDataKey`, `GenerateDataKeyWithoutPlaintext` and `ReEncrypt` share one row in the
   developer guide's *Key states of AWS KMS keys* table and each carries the *"must be in a compatible key

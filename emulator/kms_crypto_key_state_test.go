@@ -36,12 +36,17 @@ import (
 // The recovery test at the end is the guard against a refusal that is really a broken key: it walks a
 // key back out of pending deletion and shows all five working again.
 
-// kmsCryptoRefusal posts one operation and returns the status, the error code **and the message**.
+// kmsRefusal posts one operation and returns the status, the error code **and the message**.
 //
 // [decodeAWSResponse] deliberately drops the message — "which is prose", as its own comment says — and
-// for every other KMS test that is right. It is not right here: assertion 3 above is *about* the
-// message, because the code alone cannot carry two remedies when AWS admits one code for both states.
-func kmsCryptoRefusal(t *testing.T, ts *emulator.TestServer, op string, body map[string]any) (int, string, string) {
+// for most KMS tests that is right. It is not right here: assertion 3 above is *about* the message,
+// because the code alone cannot carry two remedies when AWS admits one code for both states.
+//
+// Named for the refusal rather than for these five operations because #964's rotation-period tests need
+// the same three values for the same kind of reason — a range violation has to name the range, or a
+// caller cannot discover it — and one helper is better than two that differ only in which operation
+// they post.
+func kmsRefusal(t *testing.T, ts *emulator.TestServer, op string, body map[string]any) (int, string, string) {
 	t.Helper()
 
 	resp := signedRequest(t, ts, kmsTarget, taggingTestAccount, op, body)
@@ -122,7 +127,7 @@ func TestKMSCryptographicOperations_ADisabledKeyIsRefused(t *testing.T) {
 
 	for _, op := range kmsCryptoOperations {
 		t.Run(op.name, func(t *testing.T) {
-			gotStatus, gotCode, message := kmsCryptoRefusal(t, ts, op.name, op.body(keyID, ciphertext))
+			gotStatus, gotCode, message := kmsRefusal(t, ts, op.name, op.body(keyID, ciphertext))
 			assert.Equal(t, "DisabledException", gotCode, "%s against a disabled key", op.name)
 			assert.Equal(t, http.StatusBadRequest, gotStatus, "%s against a disabled key", op.name)
 			assert.Contains(t, message, "not enabled", "%s names why it refused", op.name)
@@ -145,7 +150,7 @@ func TestKMSCryptographicOperations_AKeyPendingDeletionIsRefused(t *testing.T) {
 
 	for _, op := range kmsCryptoOperations {
 		t.Run(op.name, func(t *testing.T) {
-			gotStatus, gotCode, message := kmsCryptoRefusal(t, ts, op.name, op.body(keyID, ciphertext))
+			gotStatus, gotCode, message := kmsRefusal(t, ts, op.name, op.body(keyID, ciphertext))
 			assert.Equal(t, "KMSInvalidStateException", gotCode, "%s against a key pending deletion", op.name)
 			assert.Equal(t, http.StatusBadRequest, gotStatus, "%s against a key pending deletion", op.name)
 			assert.Contains(t, message, "PendingDeletion", "%s names the state it refused", op.name)
@@ -176,9 +181,9 @@ func TestKMSCryptographicOperations_TheTwoStatesAreDistinguishable(t *testing.T)
 	kmsScheduleDeletion(t, ts, pendingKeyID, 0)
 
 	plaintext := base64.StdEncoding.EncodeToString([]byte("secret"))
-	_, disabledCode, disabledMessage := kmsCryptoRefusal(t, ts, "Encrypt",
+	_, disabledCode, disabledMessage := kmsRefusal(t, ts, "Encrypt",
 		map[string]any{"KeyId": disabledKeyID, "Plaintext": plaintext})
-	_, pendingCode, pendingMessage := kmsCryptoRefusal(t, ts, "Encrypt",
+	_, pendingCode, pendingMessage := kmsRefusal(t, ts, "Encrypt",
 		map[string]any{"KeyId": pendingKeyID, "Plaintext": plaintext})
 
 	assert.NotEqual(t, disabledCode, pendingCode,
@@ -219,7 +224,7 @@ func TestKMSReEncrypt_TheSourceKeyIsGuardedToo(t *testing.T) {
 
 			tc.disable(t, ts, sourceKeyID)
 
-			status, code, _ := kmsCryptoRefusal(t, ts, "ReEncrypt", map[string]any{
+			status, code, _ := kmsRefusal(t, ts, "ReEncrypt", map[string]any{
 				"CiphertextBlob":   ciphertext,
 				"DestinationKeyId": destKeyID,
 			})
@@ -242,7 +247,7 @@ func TestKMSReEncrypt_TheDestinationKeyIsStillGuarded(t *testing.T) {
 
 	kmsScheduleDeletion(t, ts, destKeyID, 0)
 
-	status, code, _ := kmsCryptoRefusal(t, ts, "ReEncrypt", map[string]any{
+	status, code, _ := kmsRefusal(t, ts, "ReEncrypt", map[string]any{
 		"CiphertextBlob":   ciphertext,
 		"DestinationKeyId": destKeyID,
 	})
@@ -272,7 +277,7 @@ func TestKMSReEncrypt_TheSourceIsCheckedBeforeTheDestination(t *testing.T) {
 
 	kmsScheduleDeletion(t, ts, sourceKeyID, 0)
 
-	status, code, _ := kmsCryptoRefusal(t, ts, "ReEncrypt", map[string]any{
+	status, code, _ := kmsRefusal(t, ts, "ReEncrypt", map[string]any{
 		"CiphertextBlob":   ciphertext,
 		"DestinationKeyId": kmsAbsentKeyID,
 	})
@@ -336,7 +341,7 @@ func TestKMSCryptographicOperations_TheRecoveryPathRestoresAllFive(t *testing.T)
 	require.Empty(t, code, "CancelKeyDeletion")
 	require.Equal(t, http.StatusOK, status, "CancelKeyDeletion")
 
-	_, midCode, _ := kmsCryptoRefusal(t, ts, "Encrypt", map[string]any{
+	_, midCode, _ := kmsRefusal(t, ts, "Encrypt", map[string]any{
 		"KeyId":     keyID,
 		"Plaintext": base64.StdEncoding.EncodeToString([]byte("secret")),
 	})

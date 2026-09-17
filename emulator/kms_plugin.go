@@ -377,17 +377,32 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, kmsNotFound("Key not found")
 	}
 
+	// RotationEnabled is deliberately absent, and its absence is the point of #971. API_KeyMetadata
+	// publishes 26 members and RotationEnabled is not one of them — the string does not appear on the page
+	// at all. Substrate rendered it here until #971, which meant a caller could read rotation state off
+	// DescribeKey against the emulator and get nothing back from AWS: a green test for code that cannot
+	// work, which is #765's failure mode aimed at a response member.
+	//
+	// Rotation state is observable through GetKeyRotationStatus alone. That is why AWS has a separate
+	// operation for a single boolean, and why API_EnableKeyRotation points a caller at
+	// GetKeyRotationStatus rather than here. Restoring the member as a convenience would also hand a
+	// caller a route to rotation state that bypasses the rules the real one carries, such as the
+	// pending-deletion answer in #973.
+	//
+	// Sixteen published members are still missing from this map, five of which AWS would always send for a
+	// key substrate can create — AWSAccountId, KeyManager, Origin, EncryptionAlgorithms and the deprecated
+	// CustomerMasterKeySpec. That is the same shape failing to match the same page in the other direction,
+	// and it is #974.
 	metadata := map[string]interface{}{
-		"KeyId":           key.KeyID,
-		"Arn":             key.ARN,
-		"Description":     key.Description,
-		"KeyUsage":        key.KeyUsage,
-		"KeySpec":         key.KeySpec,
-		"KeyState":        key.KeyState,
-		"Enabled":         key.Enabled,
-		"MultiRegion":     key.MultiRegion,
-		"RotationEnabled": key.RotationEnabled,
-		"CreationDate":    key.CreationDate.Unix(),
+		"KeyId":        key.KeyID,
+		"Arn":          key.ARN,
+		"Description":  key.Description,
+		"KeyUsage":     key.KeyUsage,
+		"KeySpec":      key.KeySpec,
+		"KeyState":     key.KeyState,
+		"Enabled":      key.Enabled,
+		"MultiRegion":  key.MultiRegion,
+		"CreationDate": key.CreationDate.Unix(),
 	}
 	// Emitted on the key state rather than on the field being non-zero, because that is the condition
 	// API_KeyMetadata publishes: "this value is present only when the KMS key is scheduled for
@@ -711,11 +726,41 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 		return nil, kmsNotFound("Key not found")
 	}
 	// No key-state guard, deliberately: see [kmsKeyStateError], which its seven callers use and this one
-	// must not. Reading whether rotation is on is permitted in every state substrate can
-	// produce, and API_GetKeyRotationStatus publishes neither DisabledException nor
-	// KMSInvalidStateException.
+	// must not. Reading whether rotation is on is permitted in every state substrate can produce, and
+	// API_GetKeyRotationStatus does not publish DisabledException at all.
+	//
+	// It *does* publish KMSInvalidStateException, which an earlier version of this comment denied; the
+	// claim was wrong and is corrected here rather than left standing, since it was the stated reason for
+	// not guarding. The decision it was defending survives the correction, on better grounds: the page
+	// spells out what a pending-deletion key answers, and it is a value rather than a refusal — "While a
+	// KMS key is pending deletion, its key rotation status is false and AWS KMS does not rotate the key
+	// material." An operation that documents an answer for a state cannot also be refusing that state, so
+	// the published KMSInvalidStateException belongs to the states substrate never writes (Creating,
+	// Updating, Unavailable), and guarding here would invent a refusal AWS does not have.
+	//
+	// Substrate reports the stored setting in every state, so that documented false is *not* modeled yet
+	// — a key pending deletion still reports true here. That is #973, along with the restore-on-cancel
+	// behavior the same paragraph describes.
+	//
+	// KeyId is the bare key ID, not the ARN. The response element is glossed only "Identifies the
+	// specified symmetric encryption KMS key", with none of the "Amazon Resource Name (key ARN)" wording
+	// that API_ScheduleKeyDeletion and API_ReEncrypt use for their KeyId elements, and the page's sample
+	// response renders "1234abcd-12ab-34cd-56ef-1234567890ab". Where AWS distinguishes the two forms this
+	// precisely, echoing the caller's own input would be the wrong answer for an alias or an ARN.
 	out := map[string]interface{}{
+		"KeyId":              key.KeyID,
 		"KeyRotationEnabled": key.RotationEnabled,
+	}
+	// Emitted only when rotation is on. AWS documents no answer for a key that has never rotated, and a
+	// "number of days between each automatic rotation" is not a fact about a key with no rotations — so
+	// this is substrate's reading, and the honest-empty one #827 established. The stored period is kept
+	// across a DisableKeyRotation regardless (see [KMSKey.RotationPeriodInDays]); what changes is whether
+	// it is reported, not whether it is remembered.
+	//
+	// NextRotationDate is the third member this could carry and does not: it needs the date rotation was
+	// enabled, which nothing stores. #973.
+	if key.RotationEnabled && key.RotationPeriodInDays > 0 {
+		out["RotationPeriodInDays"] = key.RotationPeriodInDays
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -770,12 +815,36 @@ func kmsKeyStateError(key *KMSKey) *AWSError {
 	return nil
 }
 
+// enableKeyRotation turns on automatic rotation and records the period it will use.
+//
+// RotationPeriodInDays is a pointer so that an absent member and an explicit 0 are different requests.
+// The distinction is load-bearing: absent means "use the default", which AWS puts at 365, while 0 is a
+// value the caller chose and it is below the published minimum of 90, so it is refused. A plain int
+// would collapse the two and silently accept 0 as 365 — the defect #964 describes, reintroduced one
+// level down.
+//
+// The period is not validated against the *stored* one, because AWS documents the parameter as able to
+// "modify the rotation period of a key that you previously enabled automatic key rotation on". A second
+// call is a legitimate change rather than a conflict, and a second call that omits the member resets the
+// period to the default; see [kmsDefaultRotationPeriodInDays] for why that reading is taken and pinned
+// rather than the more intuitive "leave what was there".
 func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		KeyID string `json:"KeyId"`
+		KeyID                string `json:"KeyId"`
+		RotationPeriodInDays *int   `json:"RotationPeriodInDays"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
+	}
+	// Validated before the key is even resolved, because a range violation does not depend on the key
+	// and answering NotFoundException for a request that is malformed regardless would tell the caller
+	// to fix the wrong thing.
+	period := kmsDefaultRotationPeriodInDays
+	if input.RotationPeriodInDays != nil {
+		period = *input.RotationPeriodInDays
+		if period < kmsMinRotationPeriodInDays || period > kmsMaxRotationPeriodInDays {
+			return nil, kmsInvalidRotationPeriod(period)
+		}
 	}
 	goCtx := context.Background()
 	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
@@ -796,6 +865,7 @@ func (p *KMSPlugin) enableKeyRotation(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, stateErr
 	}
 	key.RotationEnabled = true
+	key.RotationPeriodInDays = period
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms enableKeyRotation saveKey: %w", err)
 	}
