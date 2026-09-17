@@ -9685,6 +9685,38 @@ key with one of those has no admissible value for the older member. **Substrate 
 there**, which is a reading rather than a match: AWS documents no answer for the case,
 and the alternative puts a value outside the member's own published set on the wire.
 
+#### The deprecated name is a request parameter too
+
+`CustomerMasterKeySpec` appears in `API_CreateKey`'s **Request Parameters** as well, and
+substrate decoded only the response half
+([#985](https://github.com/scttfrdmn/substrate/issues/985)). A caller on an SDK old
+enough to still send the deprecated name asked for `RSA_4096` and got a symmetric key —
+the quietest failure available, a `200` with a complete `KeyMetadata` whose own
+`CustomerMasterKeySpec` read `SYMMETRIC_DEFAULT`, contradicting the value it was sent.
+It is now decoded and honoured, and every rule of the section above applies to the spec
+it names, since those rules are keyed on the resolved spec rather than on which member
+carried it.
+
+Two things AWS does not document, both substrate's reading and both refused rather than
+resolved:
+
+| Request | Substrate answers | Why |
+|---------|-------------------|-----|
+| `CustomerMasterKeySpec` outside its own 13 — `ML_DSA_44`, say | `ValidationError`/400, naming the member and its set, and pointing at `KeySpec` | The request-side half of the omission above: neither direction puts a value outside the member's own published set on the wire. The message must name the set, because the value *is* a good key spec and a bare refusal would send the caller hunting a typo that is not there |
+| Both members sent with **different** values | `ValidationError`/400, naming both values | AWS documents no answer for the conflict; what it documents is that the two members *"have the same value"*, so a request in which they disagree is not one the page describes. Substrate cannot tell which was meant, which is why it refuses instead of choosing |
+
+The two rejected alternatives are worth recording because both look reasonable. A
+**precedence rule** — the newer member wins — discards half of a contradictory request
+silently, which is the failure mode this issue exists to remove rather than relocate.
+**Resolving by JSON member order** makes the answer depend on something no caller
+controls meaningfully. Equal values are accepted: an SDK migrating between the two names
+may send both, and that is a caller agreeing with itself.
+
+The code is `ValidationError` in both rows, the same one every other malformed-member
+refusal on this operation answers. That is deliberate rather than incidental — two codes
+for one class of defect on one operation is what #977's analysis warned against, and this
+member joins that decision rather than introducing a second.
+
 #### The ten members that stay absent
 
 Six are unreachable for reasons already given above (`KeyManager` covers one, `Origin`
