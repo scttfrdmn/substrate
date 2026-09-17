@@ -1,0 +1,135 @@
+package emulator
+
+// Step Functions error construction: one helper per published code, so a code's HTTP status is
+// decided once rather than at each call site that answers it.
+//
+// The file exists for the reason kms_errors.go does, and the finding that produced it is the same
+// one: **fifteen sites answered InvalidRequest for a request body that would not parse, and that
+// string appears nowhere in Step Functions' documentation** — not on an operation page, not on
+// CommonErrors.html. A caller matching on it matched something no SDK models. Twelve of the fifteen
+// were in stepfunctions_plugin.go and three in stepfunctions_tags.go, one per handler, each with its
+// own copy of the same literal (#950).
+//
+// The replacement is ValidationError at 400, from CommonErrors.html: "The input doesn't meet the
+// required format or constraints. Check that all required parameters are included and that values
+// are valid." It has to come from the common page because a body that will not parse belongs to no
+// single operation — the fifteen sites span fifteen operations — and every one of those fifteen
+// pages ends its own Errors section by deferring to that page.
+//
+// The wider finding of #950, recorded here because it is what makes the KMS fix transfer rather than
+// coincide: that fifteen-entry page is AWS boilerplate shared across services. Step Functions',
+// Systems Manager's and KMS's are byte-identical, in the same order and with the same statuses, and
+// the code is spelled **ValidationError** with no "Exception" suffix.
+//
+// Two near misses, both declined, and the first is the one this service has and KMS did not:
+//
+//   - ValidationException. Step Functions really does publish it, at 400, glossed "The input does
+//     not satisfy the constraints specified by an AWS service" — but on only **five** of the fifteen
+//     operations that carry a parse guard: CreateStateMachine, UpdateStateMachine,
+//     DeleteStateMachine, StartExecution and StopExecution. The other ten do not list it, so
+//     answering it everywhere would leave ten sites reporting a code their own operation does not
+//     publish, which is the defect above relocated rather than fixed, and answering it at only five
+//     would make one failure produce two codes inside one plugin. Four pages compound the trap by
+//     naming ValidationException in *prose* without listing it as an error — "if you provide a
+//     qualified state machine ARN that refers to a Distributed Map state, the request fails with
+//     ValidationException" — so the pattern a reader infers from the prose is not what the Errors
+//     sections publish.
+//
+//   - MalformedHttpRequestException, on CommonErrors.html at 400, is declined for the reason
+//     [kmsInvalidBody] declines it: its published scope is the transport layer — "this typically
+//     happens when the request body can't be decompressed using the specified content encoding
+//     algorithm" — and a body that arrived intact and then failed to parse is not that.
+//
+// Every refusal here is 400. That is worth stating because two of them replaced a 404: no Step
+// Functions endpoint answers 404 for a resource that does not exist, so the status carries nothing a
+// caller can branch on and the code is the whole signal (#910).
+//
+// Messages are substrate's throughout, except where a helper quotes AWS's own gloss because it is
+// already the whole of what the refusal has to say.
+
+import (
+	"net/http"
+)
+
+// sfnInvalidBody reports that a request body could not be parsed as JSON.
+//
+// ValidationError at 400, for the reasons this file's preamble gives. It takes no argument for
+// [kmsInvalidBody]'s reason: encoding/json's error text describes the emulator's own decoder rather
+// than anything a caller can act on, and the actionable fact — that the body was not JSON — is what
+// the message states. Two Systems Manager sites answered err.Error() before #950 and leaked exactly
+// that; see [ssmInvalidBody].
+func sfnInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "the request body is not valid JSON",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnInvalidArnError reports that an ARN is not one this operation accepts.
+//
+// TagResource, UntagResource and ListTagsForResource each publish InvalidArn — "The provided
+// Amazon Resource Name (ARN) is not valid." — at HTTP 400.
+func sfnInvalidArnError(arn string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidArn",
+		Message:    "The provided Amazon Resource Name (ARN) is not valid: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnResourceNotFoundError reports that the resource a resolved ARN addresses does not exist.
+//
+// The status is 400, not 404. All three tagging operations publish ResourceNotFound — "Could not
+// find the referenced resource." — with "HTTP Status Code: 400", which is unusual enough to be
+// worth stating: this path answered 404 before, so a consumer branching on the status rather than
+// the code saw something no AWS Step Functions endpoint returns.
+func sfnResourceNotFoundError(arn string) *AWSError {
+	return &AWSError{
+		Code:       "ResourceNotFound",
+		Message:    "Could not find the referenced resource: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnStateMachineDoesNotExist reports that a well-formed ARN names no state machine.
+//
+// API_DescribeStateMachine, API_UpdateStateMachine, API_StartExecution, API_StartSyncExecution and
+// API_ListExecutions each publish StateMachineDoesNotExist — "The specified state machine does not
+// exist." — at HTTP 400. The status is the part substrate had wrong: it answered 404, which no Step
+// Functions endpoint returns, so a consumer branching on the status rather than the code saw
+// something AWS never sends. #910 established the same correction for the tagging operations'
+// ResourceNotFound.
+func sfnStateMachineDoesNotExist(arn string) *AWSError {
+	return &AWSError{
+		Code:       "StateMachineDoesNotExist",
+		Message:    "The specified state machine does not exist: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnActivityDoesNotExist reports that a well-formed ARN names no activity.
+//
+// API_DescribeActivity publishes ActivityDoesNotExist — "The specified activity does not exist." —
+// at HTTP 400, and it is one of only two errors on that page. See [sfnStateMachineDoesNotExist] for
+// the status.
+func sfnActivityDoesNotExist(arn string) *AWSError {
+	return &AWSError{
+		Code:       "ActivityDoesNotExist",
+		Message:    "The specified activity does not exist: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnExecutionDoesNotExist reports that a well-formed ARN names no execution.
+//
+// API_DescribeExecution, API_GetExecutionHistory and API_StopExecution each publish
+// ExecutionDoesNotExist — "The specified execution does not exist." — at HTTP 400. See
+// [sfnStateMachineDoesNotExist] for the status.
+func sfnExecutionDoesNotExist(arn string) *AWSError {
+	return &AWSError{
+		Code:       "ExecutionDoesNotExist",
+		Message:    "The specified execution does not exist: " + arn,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}

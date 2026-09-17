@@ -44,7 +44,6 @@ package emulator
 // it asked for, the defect this file exists to end.
 
 import (
-	"net/http"
 	"strings"
 )
 
@@ -183,46 +182,4 @@ func sfnParseExecutionARN(arn string) (sfnARNTarget, *AWSError) {
 		return sfnARNTarget{}, sfnInvalidArnError(arn)
 	}
 	return target, nil
-}
-
-// sfnStateMachineDoesNotExist reports that a well-formed ARN names no state machine.
-//
-// API_DescribeStateMachine, API_UpdateStateMachine, API_StartExecution, API_StartSyncExecution and
-// API_ListExecutions each publish StateMachineDoesNotExist — "The specified state machine does not
-// exist." — at HTTP 400. The status is the part substrate had wrong: it answered 404, which no Step
-// Functions endpoint returns, so a consumer branching on the status rather than the code saw
-// something AWS never sends. #910 established the same correction for the tagging operations'
-// ResourceNotFound.
-func sfnStateMachineDoesNotExist(arn string) *AWSError {
-	return &AWSError{
-		Code:       "StateMachineDoesNotExist",
-		Message:    "The specified state machine does not exist: " + arn,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// sfnActivityDoesNotExist reports that a well-formed ARN names no activity.
-//
-// API_DescribeActivity publishes ActivityDoesNotExist — "The specified activity does not exist." —
-// at HTTP 400, and it is one of only two errors on that page. See [sfnStateMachineDoesNotExist] for
-// the status.
-func sfnActivityDoesNotExist(arn string) *AWSError {
-	return &AWSError{
-		Code:       "ActivityDoesNotExist",
-		Message:    "The specified activity does not exist: " + arn,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// sfnExecutionDoesNotExist reports that a well-formed ARN names no execution.
-//
-// API_DescribeExecution, API_GetExecutionHistory and API_StopExecution each publish
-// ExecutionDoesNotExist — "The specified execution does not exist." — at HTTP 400. See
-// [sfnStateMachineDoesNotExist] for the status.
-func sfnExecutionDoesNotExist(arn string) *AWSError {
-	return &AWSError{
-		Code:       "ExecutionDoesNotExist",
-		Message:    "The specified execution does not exist: " + arn,
-		HTTPStatus: http.StatusBadRequest,
-	}
 }

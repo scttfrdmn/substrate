@@ -1,7 +1,6 @@
 package emulator_test
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -32,26 +31,13 @@ import (
 //
 // [signedRequest] takes a Go value and marshals it, so it can only ever produce valid JSON — which
 // is exactly the input the twenty-one guards under test do *not* refuse. The signature has to cover
-// the raw bytes, so the header is computed here rather than reused.
+// the raw bytes, which is what [rawSignedCall] is for; this narrows it to KMS's target and drops the
+// message, which no case here asserts on. The generalisation was #950's, which needed the same thing
+// for twenty-seven more sites in two other services.
 func kmsRawCall(t *testing.T, ts *emulator.TestServer, op string, body []byte) (int, string) {
 	t.Helper()
-
-	creds, ok := ts.CredentialsFor(taggingTestAccount)
-	require.True(t, ok, "a credential for %s", taggingTestAccount)
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/", bytes.NewReader(body))
-	require.NoError(t, err, "build the %s request", op)
-	req.Host = kmsTarget.host
-	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
-	req.Header.Set("X-Amz-Target", kmsTarget.target+"."+op)
-	req.Header.Set("X-Amz-Date", sigV4TestDateTime)
-	req.Header.Set("Authorization", sigV4Header(
-		http.MethodPost, "/", kmsTarget.host, kmsTarget.signingName, "us-east-1", sigV4TestDateTime,
-		body, creds.AccessKeyID, creds.SecretAccessKey))
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err, "post %s", op)
-	return decodeAWSResponse(t, resp, nil)
+	status, code, _ := rawSignedCall(t, ts, kmsTarget, taggingTestAccount, op, body)
+	return status, code
 }
 
 // kmsCall posts one KMS operation and returns the status and error code.

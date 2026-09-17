@@ -260,36 +260,3 @@ func ssmResolveTagTarget(resourceType, resourceID string) (string, *AWSError) {
 	}
 	return resourceID, nil
 }
-
-// ssmInvalidResourceID reports that an identifier names no Systems Manager resource, naming the
-// reason so a caller can tell a wrong service from a wrong resource type from an absent resource.
-//
-// The code is InvalidResourceId, which all three tag operations publish and which is how Systems
-// Manager reports a nonexistent resource — it publishes no distinct not-found code for them. The
-// status is 400, which is what all three reference pages give it: "The resource ID isn't valid. Verify
-// that you entered the correct ID and try again. HTTP Status Code: 400". Systems Manager answers no
-// 404 on any of the three, so the status carries no information a caller can branch on and the code is
-// the whole signal (#933). One helper means one status, which is why it lives here rather than at each
-// call site.
-func ssmInvalidResourceID(id, reason string) *AWSError {
-	return &AWSError{
-		Code:       "InvalidResourceId",
-		Message:    fmt.Sprintf("the resource ID %q is not valid: %s", id, reason),
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// ssmInvalidResourceType reports that a string is not one of AWS's ResourceType values, listing the
-// ones that are.
-//
-// The code and status are AWS's own: InvalidResourceType at 400, published by all three tag
-// operations. The message names the valid values because the reference does, and because a caller who
-// sent "parameter" for "Parameter" has no other way to see the difference.
-func ssmInvalidResourceType(resourceType string) *AWSError {
-	return &AWSError{
-		Code: "InvalidResourceType",
-		Message: fmt.Sprintf("the resource type %q is not valid: valid values are %s",
-			resourceType, strings.Join(ssmResourceTypes, ", ")),
-		HTTPStatus: http.StatusBadRequest,
-	}
-}

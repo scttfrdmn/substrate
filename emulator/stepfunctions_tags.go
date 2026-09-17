@@ -113,32 +113,6 @@ func sfnKeyIsTaggable(key string) bool {
 	}
 }
 
-// sfnInvalidArnError reports that an ARN is not one this operation accepts.
-//
-// TagResource, UntagResource and ListTagsForResource each publish InvalidArn — "The provided
-// Amazon Resource Name (ARN) is not valid." — at HTTP 400.
-func sfnInvalidArnError(arn string) *AWSError {
-	return &AWSError{
-		Code:       "InvalidArn",
-		Message:    "The provided Amazon Resource Name (ARN) is not valid: " + arn,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// sfnResourceNotFoundError reports that the resource a resolved ARN addresses does not exist.
-//
-// The status is 400, not 404. All three tagging operations publish ResourceNotFound — "Could not
-// find the referenced resource." — with "HTTP Status Code: 400", which is unusual enough to be
-// worth stating: this path answered 404 before, so a consumer branching on the status rather than
-// the code saw something no AWS Step Functions endpoint returns.
-func sfnResourceNotFoundError(arn string) *AWSError {
-	return &AWSError{
-		Code:       "ResourceNotFound",
-		Message:    "Could not find the referenced resource: " + arn,
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
 // sfnTagList renders a tag map as AWS's array of Tag objects, ordered by key.
 //
 // AWS's Tag shape is {"key": …, "value": …} and both TagResource's request and
@@ -227,7 +201,7 @@ func (p *StepFunctionsPlugin) tagResource(_ *RequestContext, req *AWSRequest) (*
 		Tags        []map[string]string `json:"tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 	if err := p.mergeTaggedRecord(context.Background(), input.ResourceArn, sfnTagsFromList(input.Tags), nil); err != nil {
 		return nil, err
@@ -241,7 +215,7 @@ func (p *StepFunctionsPlugin) untagResource(_ *RequestContext, req *AWSRequest) 
 		TagKeys     []string `json:"tagKeys"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 	if err := p.mergeTaggedRecord(context.Background(), input.ResourceArn, nil, input.TagKeys); err != nil {
 		return nil, err
@@ -254,7 +228,7 @@ func (p *StepFunctionsPlugin) listTagsForResource(_ *RequestContext, req *AWSReq
 		ResourceArn string `json:"resourceArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidRequest", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+		return nil, sfnInvalidBody()
 	}
 	_, raw, err := p.loadTaggedRecord(context.Background(), input.ResourceArn)
 	if err != nil {

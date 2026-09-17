@@ -96,6 +96,59 @@ func signedRequest(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarge
 	return resp
 }
 
+// rawSignedCall posts body verbatim to a JSON-target service and returns the status, the error code
+// and the message.
+//
+// It exists because [signedRequest] marshals a Go value, and a helper that marshals structurally
+// cannot produce a body that fails to parse — which is why every plugin's json.Unmarshal guard went
+// unexercised for as long as it did, and how 46 sites came to answer a code no SDK models (#923,
+// #950). A test for one of those guards has to hand the server the bytes.
+//
+// The message is returned as well as the code because a guard can be wrong in a second way that the
+// code does not show: two Systems Manager sites passed encoding/json's own error text through, so the
+// body named the emulator's decoder and the Go type it was unmarshalling into.
+func rawSignedCall(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget,
+	account, op string, body []byte,
+) (status int, code, message string) {
+	t.Helper()
+
+	creds, ok := ts.CredentialsFor(account)
+	if !ok {
+		t.Fatalf("no credential registered for account %s", account)
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build %s request: %v", op, err)
+	}
+	req.Host = tgt.host
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", tgt.target+"."+op)
+	req.Header.Set("X-Amz-Date", sigV4TestDateTime)
+	req.Header.Set("Authorization", sigV4Header(
+		http.MethodPost, "/", tgt.host, tgt.signingName, "us-east-1", sigV4TestDateTime, body,
+		creds.AccessKeyID, creds.SecretAccessKey))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s as %s: %v", op, account, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s body: %v", op, err)
+	}
+	var errShape struct {
+		Type    string `json:"__type"`
+		Message string `json:"message"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &errShape); unmarshalErr != nil {
+		t.Fatalf("decode %s response %s: %v", op, raw, unmarshalErr)
+	}
+	return resp.StatusCode, errShape.Type, errShape.Message
+}
+
 // sigV4Header computes a valid SigV4 Authorization header for a request to path
 // with the host and x-amz-date headers signed.
 //
