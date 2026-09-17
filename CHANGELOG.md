@@ -493,6 +493,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Fifteen Kinesis operations refused the form AWS recommends, because substrate decoded no
+  `StreamARN` anywhere** (#966). Every operation but `CreateStream` and `ListStreams` publishes
+  `StreamARN` beside `StreamName`, both `Required: No`, under a Note that is byte-identical on all
+  fifteen pages: *"you must use either the `StreamARN` or the `StreamName` parameter, or both. It is
+  recommended that you use the `StreamARN` input parameter when you invoke this API."* Substrate
+  declared `StreamName` alone in fifteen separate request structs, so a caller sending only the ARN
+  reached an empty-name guard and was refused — under `InvalidParameterException`, a code Kinesis
+  publishes nowhere at all. The recommended form was the one form that could not work, which is what an
+  AWS SDK client constructed from an ARN sends, and what a CloudFormation `Ref`, a Lambda event-source
+  mapping and an IAM policy resource all carry.
+
+  **The account and Region now come from the ARN rather than the request context.** An ARN naming
+  another account's or another Region's stream addresses that stream, and one naming nothing there
+  reports it absent instead of quietly serving the caller's own same-named one. Every key a request
+  touches is derived from that single resolution — the stream record, its per-shard records, and its
+  entry in the `ListStreams` index — so a cross-account `UpdateShardCount`, `MergeShards` or
+  `AddTagsToStream` writes to the target rather than copying it into the caller's namespace, and a
+  cross-account `DeleteStream` removes the target's index entry rather than the caller's. One parser
+  serves all fifteen operations and takes no `*RequestContext` at all, and the three state helpers now
+  take a resolved target instead of one, so a handler cannot reach the caller's own account by accident:
+  the compiler enforces what a convention would only ask for. That is the arrangement #826 established
+  for SQS and DynamoDB, #845 for the tagging resolver, #918 for CloudFront, #922 for KMS, #925 for SNS
+  and #912 for Step Functions.
+
+  The **Resource Groups Tagging API's** kinesis arm goes through the same parser, so the two cannot
+  disagree about which stream an ARN names or where its tags live. It is stricter than before as a
+  result: an ARN whose account segment is not twelve digits, or whose partition does not begin `aws`, is
+  now refused rather than resolved to a key nothing is written at.
+
+  What the published pattern `arn:aws.*:kinesis:.*:\d{12}:stream/\S+` states is enforced and no more. A
+  remaining `/` in the resource portion means the ARN names a **consumer**, which substrate does not
+  model, so it is refused — the test the tagging arm has applied since it was written.
+  `StreamName`'s own `[a-zA-Z0-9_.-]+` class is deliberately **not** applied to the name inside an ARN,
+  because nothing applies it on `CreateStream` either: applying it only here would make a stream
+  substrate itself lets a caller create unaddressable by its own ARN. An ARN with an **empty Region** is
+  well-formed under the pattern's `.*`, so it resolves to a key nothing is written at and reports the
+  stream absent rather than being refused for its shape — the decision #912 recorded for an express
+  execution ARN.
+
+  Two members that **disagree** are refused with `InvalidArgumentException`/400, which is substrate's
+  reading: no Kinesis page says what happens when `StreamARN` and `StreamName` name different streams,
+  and serving either of them is how a caller's bug stays hidden. Only the *name* segments are compared —
+  an ARN whose account or Region differ from the caller's is not a disagreement but the whole point of
+  the change. A request carrying **neither** member is likewise refused, replacing the old "StreamName is
+  required" guard, and the code moves with it: `InvalidArgumentException` is published on all fifteen
+  operations. The `InvalidParameterException` still answered by each handler's body-decode guard is
+  #950's.
+
+  `GetRecords` is the one page publishing `StreamARN` and **no** `StreamName`, because its stream is
+  implied by the required `ShardIterator` — and it carries the same boilerplate Note anyway, naming a
+  parameter the same page does not document. That contradiction is AWS's, and it is recorded rather than
+  resolved: substrate follows the shape, and since an iterator already carries the account and Region its
+  stream was resolved in, a supplied `StreamARN` is checked against it and one naming a different stream
+  is refused rather than ignored. `StreamId` is left undecoded on all fifteen pages, as
+  *"Not Implemented. Reserved for future use."*
+
+  **`ResourceNotFoundException` moves from HTTP 404 to 400 and `ResourceInUseException` from 409 to
+  400.** Every error on every one of the seventeen Kinesis reference pages is published at "HTTP Status
+  Code: 400"; the service's only 500 is `InternalFailureException`, which substrate does not raise. A
+  consumer branching on the status rather than the code saw something no Kinesis endpoint sends. #910 and
+  #912 established the same correction for Step Functions.
+
+  `docs/services.md` now records which forms each operation accepts, replacing #954's note that
+  *"`StreamARN` is not accepted, so a stream must be named"*, and lists the five implemented operations
+  the table had omitted: `UpdateShardCount`, `MergeShards`, `SplitShard`, `EnableEnhancedMonitoring` and
+  `DisableEnhancedMonitoring`.
 - **Eleven Step Functions operations resolved an ARN to the caller's own resource instead of the one the
   ARN named** (#912). `DescribeStateMachine`, `UpdateStateMachine`, `DeleteStateMachine`,
   `StartExecution`, `StartSyncExecution`, `ListExecutions`, `DescribeActivity`, `DeleteActivity`,
