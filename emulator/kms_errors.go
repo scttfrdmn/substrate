@@ -47,6 +47,7 @@ package emulator
 import (
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // kmsNotFound reports that a KeyId, an alias or a destination key names nothing KMS holds.
@@ -189,6 +190,85 @@ func kmsInvalidRotationPeriod(days int) *AWSError {
 		Message: fmt.Sprintf(
 			"RotationPeriodInDays is %d, which is outside the valid range of %d to %d",
 			days, kmsMinRotationPeriodInDays, kmsMaxRotationPeriodInDays),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsIncorrectKey reports that a caller named a key that is not the one which encrypted the ciphertext.
+//
+// IncorrectKeyException at 400, published on API_Decrypt and API_ReEncrypt and glossed identically on
+// both: "the request was rejected because the specified KMS key cannot decrypt the data. The KeyId in a
+// Decrypt request and the SourceKeyId in a ReEncrypt request must identify the same KMS key that was
+// used to encrypt the ciphertext."
+//
+// It is the one refusal in #969's set that AWS attaches a code to, which is why that issue put it
+// first: the two algorithm members add a rendered value, while this adds an outcome a caller's error
+// path can be tested against. Both operations describe the member as a constraint rather than a
+// selector — "if you identify a different KMS key, the operation throws an IncorrectKeyException" —
+// and substrate decoded neither, so a caller that named the wrong key was silently given the right
+// one, which is the opposite of what the member exists for.
+//
+// Both key ARNs are named because the whole content of the refusal is that two identifiers differ, and
+// a caller holding a ciphertext it did not create has no other way to learn which key it needs.
+func kmsIncorrectKey(namedARN, ciphertextARN string) *AWSError {
+	return &AWSError{
+		Code: "IncorrectKeyException",
+		Message: fmt.Sprintf(
+			"the KMS key %q cannot decrypt this ciphertext, which was encrypted under %q",
+			namedARN, ciphertextARN),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsUnknownEncryptionAlgorithm reports an encryption algorithm outside the published set.
+//
+// ValidationError at 400, the same reading [kmsInvalidPendingWindow] records and reached the same way:
+// a member carrying a value the enum does not contain is a malformed request, none of the four
+// operation pages that publish these members gives a code for it, and CommonErrors.html is therefore
+// where it has to land.
+//
+// InvalidKeyUsageException is the near miss and is not chosen here, though it is chosen by
+// [kmsIncompatibleEncryptionAlgorithm] for the neighboring case. Its gloss is about an algorithm
+// "incompatible with the type of key material in the KMS key (KeySpec)", which presupposes an algorithm
+// AWS recognizes; a misspelling is incompatible with every key spec and says nothing about the key.
+// The set is listed in the message so a caller can see what it should have sent.
+func kmsUnknownEncryptionAlgorithm(member, algorithm string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"%s is %q, which is not one of %s",
+			member, algorithm, strings.Join(kmsEncryptionAlgorithms, ", ")),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsIncompatibleEncryptionAlgorithm reports a published encryption algorithm that the named key's key
+// spec does not admit.
+//
+// InvalidKeyUsageException at 400, published on API_Encrypt, API_Decrypt and API_ReEncrypt. This is the
+// second of the two bullets in its gloss, verbatim: "the encryption algorithm or signing algorithm
+// specified for the operation is incompatible with the type of key material in the KMS key (KeySpec)".
+// The code is published rather than substrate's reading, and the mapping is exact.
+//
+// The first bullet — "the KeyUsage value of the KMS key is incompatible with the API operation" — is
+// **not** answered anywhere in this package, and is #977. The two are one error code with two causes,
+// so a caller matching on the code alone cannot tell them apart; the message names the key spec, which
+// is the half this one is about.
+//
+// The key spec and the admissible set are both in the message because the refusal is otherwise
+// unactionable: a caller that sent SYMMETRIC_DEFAULT to an RSA key needs to be told the key is RSA, and
+// one that sent RSAES_OAEP_SHA_256 to an ECC key needs to be told that no encryption algorithm is
+// admissible at all — which is what an empty set here means.
+func kmsIncompatibleEncryptionAlgorithm(key *KMSKey, member, algorithm string) *AWSError {
+	permitted := "no encryption algorithm"
+	if admissible := kmsEncryptionAlgorithmsByKeySpec[key.KeySpec]; len(admissible) > 0 {
+		permitted = strings.Join(admissible, ", ")
+	}
+	return &AWSError{
+		Code: "InvalidKeyUsageException",
+		Message: fmt.Sprintf(
+			"%s is %q, which the KMS key %q does not support: its key spec %q supports %s",
+			member, algorithm, key.KeyID, key.KeySpec, permitted),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
