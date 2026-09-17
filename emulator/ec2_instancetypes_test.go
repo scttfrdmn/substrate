@@ -459,9 +459,18 @@ func TestEC2_DescribeInstanceTypeOfferings_InstanceTypeFilter(t *testing.T) {
 			},
 		},
 		{
-			name:      "a mid-string wildcard",
-			values:    map[string]string{"Filter.1.Name": "instance-type", "Filter.1.Value.1": "*.24xlarge"},
-			wantTypes: []string{"c5.24xlarge", "c5a.24xlarge", "m5.24xlarge", "m5a.24xlarge", "r5.24xlarge"},
+			// Six of the eleven matches are accelerated families, which is what #896
+			// widening the catalog added here: p4d and p4de are whole families of one
+			// 24xlarge, and g5, g6, inf1 and inf2 each carry one. The general-purpose
+			// five were the whole answer while the accelerated families held one size
+			// each.
+			name:   "a mid-string wildcard",
+			values: map[string]string{"Filter.1.Name": "instance-type", "Filter.1.Value.1": "*.24xlarge"},
+			wantTypes: []string{
+				"c5.24xlarge", "c5a.24xlarge", "g5.24xlarge", "g6.24xlarge",
+				"inf1.24xlarge", "inf2.24xlarge", "m5.24xlarge", "m5a.24xlarge",
+				"p4d.24xlarge", "p4de.24xlarge", "r5.24xlarge",
+			},
 		},
 		{
 			// EC2 documents API filter values as case-sensitive.
