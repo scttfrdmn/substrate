@@ -1481,3 +1481,17 @@ func S3PrefixRateDefaultsForTest() (read, write float64) {
 
 // DefaultQuotaRulesForTest returns the built-in rate limits.
 func DefaultQuotaRulesForTest() map[string]RateRule { return defaultQuotaRules() }
+
+// CFNDecodeRecordTagsForTest wraps cfnDecodeRecordTags, which reads the tag member off a stored
+// record for #764's stack-tag propagation.
+//
+// Exported because one of the shapes it has to read is unreachable through the deploy path.
+// Reconciliation only compares against an existing tag set on a *second* deployment, and the one
+// record in the tree spelling its members `TagKey`/`TagValue` belongs to a KMS key, whose
+// `UpdateStack` mints a new key rather than reusing the one a caller could have tagged — so the
+// reconciliation never sees the record whose shape is at issue. The end-to-end assertion for the
+// same defect goes through an ECS service, whose identity does survive an update; this covers the
+// spelling that one cannot reach (#819).
+func CFNDecodeRecordTagsForTest(member []byte) map[string]string {
+	return cfnDecodeRecordTags(member)
+}

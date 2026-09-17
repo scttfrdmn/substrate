@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // The stamp beyond EC2 (#765).
@@ -13,8 +14,9 @@ import (
 // queue and every ELBv2 resource carried none of the three `aws:cloudformation:*` keys, and a
 // policy or a cost-allocation assertion keyed on the stack name saw nothing on them.
 //
-// #819 then added the nine types in [cfnRegionalStampKinds], on the same test: a stamp counts
-// as landed only when it reads back through the *owning service's own* tag call.
+// #819 then added the nine types in [cfnRegionalStampKinds], and a further twelve once #835 gave
+// their services a [mergeResourceTags] arm — all on the same test: a stamp counts as landed only
+// when it reads back through the *owning service's own* tag call.
 //
 // The resolvers here are keyed on [DeployedResource.Type] rather than on the physical ID's
 // shape, because outside EC2 a physical ID is a bare name with no prefix to switch on — a
@@ -74,9 +76,96 @@ func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnSt
 			namespace: sqsNamespace,
 			stateKey:  "queue:" + accountID + "/" + dr.PhysicalID,
 		}, true
+	case "AWS::CloudFront::Distribution":
+		// [cfDistKey] carries no Region, because CloudFront is global and the distribution's own
+		// ARN has an empty Region field — which is also why the table above cannot hold this one.
+		return cfnStampTarget{
+			namespace: cloudfrontNamespace,
+			stateKey:  cfDistKey(accountID, dr.PhysicalID),
+		}, true
+	case "AWS::SSM::Parameter":
+		// `PutParameter` gives a name its leading "/" before storing it (`ssm_plugin.go:167`), and
+		// [ssmParameterStateKey] keeps that slash inside the key — so the record sits at
+		// `parameter:<account>/<region>//app/db`, with the doubled separator that function
+		// documents. The deployer's physical ID is the template's `Name` unnormalized, so the same
+		// two lines the deployer already applies before building the ARN (`cfn_deployer.go:4238`,
+		// #827) are what make this key the one `ListTagsForResource` loads.
+		name := dr.PhysicalID
+		if !strings.HasPrefix(name, "/") {
+			name = "/" + name
+		}
+		return cfnStampTarget{
+			namespace: ssmNamespace,
+			stateKey:  ssmParameterStateKey(accountID, region, name),
+		}, true
+	case "AWS::KMS::Key", "AWS::KMS::ReplicaKey":
+		// The physical ID is the key *ARN* (`cfn_deployer.go:3973`), while [kmsKeyStateKey] keys on
+		// the bare key ID — so the table's shape would build `key:<account>/<region>/arn:aws:kms:…`.
+		// A replica key deploys through the same function and only relabels its type (`:4031`).
+		return cfnStampARNTarget(dr, kmsResolveARN, cfnStampTarget{
+			namespace: kmsNamespace,
+			stateKey:  kmsKeyStateKey(accountID, region, dr.PhysicalID),
+		})
+	case "AWS::SecretsManager::Secret":
+		// The physical ID is the secret ARN (`cfn_deployer.go:4075`), and [smSecretStateKey] keys on
+		// the name. Recoverable exactly, because substrate mints no random `-xxxxxx` suffix
+		// (`secretsmanager_tags.go:43`).
+		return cfnStampARNTarget(dr, smResolveARN, cfnStampTarget{
+			namespace: secretsManagerNamespace,
+			stateKey:  smSecretStateKey(accountID, region, dr.PhysicalID),
+		})
+	case "AWS::SNS::Topic":
+		// The physical ID is the topic ARN (`cfn_deployer.go:4305`), and [snsTopicStateKey] keys on
+		// the name.
+		return cfnStampARNTarget(dr, snsResolveARN, cfnStampTarget{
+			namespace: snsNamespace,
+			stateKey:  snsTopicStateKey(accountID, region, dr.PhysicalID),
+		})
+	case "AWS::ECS::Service", "AWS::ECS::TaskDefinition":
+		// Neither can be a table line, which is what #819's own note predicted wrongly:
+		// [ecsTagStateKey] builds a *four*-segment key, `service:<account>/<region>/<cluster>/<name>`
+		// and `taskdef:<account>/<region>/<family>/<revision>`, and neither the cluster nor the
+		// revision appears in the physical ID. Both are in the ARN, which the deployer records
+		// (`cfn_resources_v21.go:196`, `:241`), so the ARN is what resolves — through ECS's own
+		// function, so the two cannot disagree about which record a task definition names.
+		if ns, key, ok := ecsTagStateKey(dr.ARN); ok {
+			return cfnStampTarget{namespace: ns, stateKey: key}, true
+		}
+		// A task definition's physical ID *is* its ARN, so a stored record that carries one
+		// without the other still resolves.
+		if ns, key, ok := ecsTagStateKey(dr.PhysicalID); ok {
+			return cfnStampTarget{namespace: ns, stateKey: key}, true
+		}
+		return cfnStampTarget{}, false
 	default:
 		return cfnStampTarget{}, false
 	}
+}
+
+// cfnStampARNTarget resolves a physical ID that is an ARN through the owning service's own ARN
+// resolver, falling back to the given identifier-keyed target when it is not one.
+//
+// The service's resolver rather than a second parser here, for the reason
+// [cfnResolveStampTarget] gives about `resolveARN`: the record the service's own tag call loads is
+// the record the stamp has to land in, and the only way the two cannot disagree is to call the
+// same function. Each of the three already returns exactly the namespace and key its plugin
+// writes — see [kmsResolveARN], [smResolveARN] and [snsResolveARN].
+//
+// The fallback is not dead code. Each of the three deploy paths leaves the physical ID as the bare
+// name or ID when the create response carries no ARN, and
+// [StackDeployer.reconcileStackTags] may substitute a `DeployedResource` recorded by an earlier
+// run, which for SNS is a shape `cfn_delete.go:77` still normalizes upward today. A fallback key
+// that names no record fails loudly through `errTagResourceNotFound` rather than landing a tag
+// somewhere unread, which is the failure mode #826 taught this file to avoid.
+func cfnStampARNTarget(
+	dr DeployedResource,
+	resolve func(string) (ns, key string, err error),
+	fallback cfnStampTarget,
+) (cfnStampTarget, bool) {
+	if ns, key, err := resolve(dr.PhysicalID); err == nil {
+		return cfnStampTarget{namespace: ns, stateKey: key}, true
+	}
+	return fallback, true
 }
 
 // cfnRegionalStampKind names the state record one CFN resource type's tags live in, for a
@@ -90,9 +179,9 @@ type cfnRegionalStampKind struct {
 }
 
 // cfnRegionalStampKinds are the CFN resource types whose tag record is keyed
-// `<prefix>:<account>/<region>/<physical-id>` — #819's group 3a.
+// `<prefix>:<account>/<region>/<physical-id>` — #819's group 3.
 //
-// They are one table rather than eleven `switch` arms because they share one key shape: each
+// They are one table rather than fifteen `switch` arms because they share one key shape: each
 // owning plugin builds its key from `reqCtx.AccountID + "/" + reqCtx.Region` and the same
 // identifier the deployer already records as the physical ID. Lambda and DynamoDB joined the
 // table with #943, which gave their keys the same shape — before it a function's key carried
@@ -106,33 +195,40 @@ type cfnRegionalStampKind struct {
 // the stamp merges into the concrete record the service persists and the merge semantics are
 // the ones a `TagResources` call gets. Second, the deployer already sets
 // [DeployedResource.PhysicalID] to *exactly* the identifier the plugin keys on: a state
-// machine, an ECR repository, an ECS cluster, a Kinesis stream and a Glue database are named by
-// the template (falling back to the logical ID); an RDS instance and an ElastiCache cluster
-// carry their own identifier property; and an EFS file system and access point take the
-// `fs-`/`fsap-` ID out of the create response, which is what EFS's `ListTagsForResource` path
-// segment names them by. A Lambda function and a DynamoDB table are named by the template's
-// `FunctionName`/`TableName` (falling back to the logical ID), which is what
-// [lambdaFunctionStateKey] and [DynamoDBPlugin.tableStateKey] key on.
+// machine, an activity, an ECR repository, an ECS cluster, a Kinesis stream, a Glue database, an
+// RDS cluster and an RDS subnet group are named by the template (falling back to the logical ID);
+// an RDS instance and an ElastiCache cluster carry their own identifier property; and an EFS file
+// system and access point take the `fs-`/`fsap-` ID out of the create response, which is what
+// EFS's `ListTagsForResource` path segment names them by. A Lambda function and a DynamoDB table
+// are named by the template's `FunctionName`/`TableName` (falling back to the logical ID), which is
+// what [lambdaFunctionStateKey] and [DynamoDBPlugin.tableStateKey] key on. An ACM certificate is
+// the odd one: its physical ID is the certificate ARN, and [acmCertKey]'s last segment is the whole
+// ARN by design (`acm_types.go:53`), so the two agree without parsing anything.
 //
-// The first condition is what holds the rest of #819's group 3 out rather than a judgement about
-// which service matters: KMS, Secrets Manager, SNS, a Step Functions activity, an RDS cluster or
-// subnet group, ACM, CloudFront and SSM all keep tag state, but none has a [mergeResourceTags] arm
-// that reaches it — so a stamp would have nowhere to land, and `TagResources` cannot reach them
-// either. One defect with two symptoms, filed as
-// [#835](https://github.com/scttfrdmn/substrate/issues/835). Two of them cannot be tagged through
-// their own service at all — an RDS cluster and an RDS subnet group — because its ARN resolver has
-// no arm for either kind, so they need that fixing first; and where an arm's namespace *is* in
-// [mergeResourceTags] it may unmarshal one sibling unconditionally — `statesNamespace` assumes a
-// state machine even for an `activity:` key, `rdsNamespace` a DB instance — which is why adding
-// them is that issue's work and not a line here.
+// The first condition, not a judgement about which service matters, is what held the rest of #819's
+// group 3 out until #835 closed: KMS, Secrets Manager, SNS, a Step Functions activity, an RDS
+// cluster or subnet group, ACM, CloudFront and SSM all kept tag state that no [mergeResourceTags]
+// arm reached, so a stamp had nowhere to land and `TagResources` could not reach them either — one
+// defect with two symptoms. Every one of those arms now exists and merges raw JSON behind a
+// colon-terminated guard, so the sibling-truncation worry that made `statesNamespace` unsafe for an
+// `activity:` key and `rdsNamespace` unsafe for anything but a DB instance is gone too.
 //
-// **ECS's service and task definition are no longer in that group and are held out for a different
-// reason.** [mergeResourceTags]' `ecsNamespace` arm merges through [ecsMergeRecordTags], which
-// treats the record as raw JSON rather than as a cluster, so all four ECS kinds are reachable by
-// `TagResources` and by a stamp alike. What they lack is an entry in [cfnRegionalStampKinds] — a
-// table line, not a writer — because the deployer's physical ID for those two types has not been
-// checked against the identifier `ecsTagStateKey` keys on, which is the second of the two
-// conditions above and the one that cannot be inferred (#867).
+// **Seven of the twelve are in [cfnResolveStampTarget]'s switch rather than here, and in every case
+// because the second condition fails**: the physical ID is not the identifier the plugin keys on.
+// A KMS key's, a secret's and a topic's physical ID is an ARN where the key holds a bare ID or name;
+// CloudFront's key carries no Region; an SSM parameter's name needs its leading slash; and ECS's
+// service and task definition are keyed on four segments, one of which — the cluster, and the
+// revision — appears only in the ARN. That last pair corrects a prediction this comment used to
+// carry, that they lacked "a table line, not a writer": a table line is exactly what they cannot
+// have.
+//
+// **`AWS::Config::ConfigRule` remains out, and it is the one genuine writer gap left.** Config's
+// tags are a side-car whose whole document *is* the tag map (`cfgsvcTagsKey`,
+// `configservice_types.go:221`), so neither [mergeRecordStringMapTags] nor
+// [mergeRecordTagListTags] fits — both look for a tag member inside a record — and
+// [mergeResourceTags] has no `configServiceNamespace` arm to hold one. `cfgsvcSaveTags` also
+// deletes the document when it empties, so there is usually no record to merge into at all. See
+// #819 for what a Config arm would have to be.
 var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::StepFunctions::StateMachine": {namespace: statesNamespace, prefix: "statemachine"},
 	"AWS::ECR::Repository":             {namespace: ecrNamespace, prefix: "ecrrepo"},
@@ -145,6 +241,12 @@ var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::Glue::Database":              {namespace: glueNamespace, prefix: "database"},
 	"AWS::Lambda::Function":            {namespace: lambdaNamespace, prefix: "function"},
 	"AWS::DynamoDB::Table":             {namespace: dynamodbNamespace, prefix: "table"},
+
+	// The four #835 unblocked whose physical ID already *is* the identifier the plugin keys on.
+	"AWS::StepFunctions::Activity":         {namespace: statesNamespace, prefix: "activity"},
+	"AWS::CertificateManager::Certificate": {namespace: acmNamespace, prefix: "cert"},
+	"AWS::RDS::DBCluster":                  {namespace: rdsNamespace, prefix: "dbcluster"},
+	"AWS::RDS::DBSubnetGroup":              {namespace: rdsNamespace, prefix: "dbsubnetgroup"},
 }
 
 // cfnELBStampableTypes are the ELBv2 CFN types whose records substrate keeps tags on.

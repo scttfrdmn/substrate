@@ -136,7 +136,10 @@ func cfnPropagateRecordStackTags(
 // combinations rather than switching on the namespace keeps this from acquiring a second copy of
 // [cfnResolveStampTarget]'s table, which is the copy that could drift. `S3Bucket` spells the
 // member `"tags"` and Lambda's, SQS's and DynamoDB's records spell it `"Tags"`; ECS keeps a
-// `[]ECSTag` and EFS a `[]EFSTag` where the rest keep a `map[string]string` (#819). A record
+// `[]ECSTag`, EFS a `[]EFSTag` and KMS a `[]KMSTag` where the rest keep a `map[string]string`
+// (#819). Getting that third list shape wrong is not merely a missing read: a KMS key whose tags
+// read back as `nil` looks to [cfnStackTagChanges] like a resource carrying none, so a caller's own
+// tag of the same name is overwritten and a removed stack tag is never removed. A record
 // carrying neither member — or one whose tags are in a shape neither decode reaches — reads as
 // untagged, which is what an absent tag set is, rather than failing the whole reconciliation.
 func cfnRecordTags(state StateManager, target cfnStampTarget) (map[string]string, bool, error) {
@@ -177,13 +180,17 @@ func cfnDecodeRecordTags(member json.RawMessage) map[string]string {
 		return asMap
 	}
 
-	// Both casings, because ECS marshals `key`/`value` and EFS `Key`/`Value`. One struct with
-	// four members rather than two decode attempts: the pair that is absent decodes as empty.
+	// Three spellings, because ECS marshals `key`/`value`, EFS `Key`/`Value`, and KMS
+	// `TagKey`/`TagValue` — which is AWS's own member naming for [KMSTag] and not substrate's
+	// invention. One struct with six members rather than three decode attempts: the pairs that are
+	// absent decode as empty.
 	var asList []struct {
 		LowerKey   string `json:"key"`
 		LowerValue string `json:"value"`
 		UpperKey   string `json:"Key"`
 		UpperValue string `json:"Value"`
+		TagKey     string `json:"TagKey"`
+		TagValue   string `json:"TagValue"`
 	}
 	if err := json.Unmarshal(member, &asList); err != nil {
 		return nil
@@ -193,6 +200,9 @@ func cfnDecodeRecordTags(member json.RawMessage) map[string]string {
 		key, value := tag.UpperKey, tag.UpperValue
 		if key == "" {
 			key, value = tag.LowerKey, tag.LowerValue
+		}
+		if key == "" {
+			key, value = tag.TagKey, tag.TagValue
 		}
 		if key != "" {
 			out[key] = value

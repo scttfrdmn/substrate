@@ -50,8 +50,8 @@ type cfnStampFixture struct {
 	dynamodb *emulator.DynamoDBPlugin
 	elb      *emulator.ELBPlugin
 
-	// The eight #819 added, owning nine CFN resource types between them — EFS answers for both
-	// a file system and an access point.
+	// The eight #819's first half added, owning nine CFN resource types between them — EFS
+	// answers for both a file system and an access point.
 	states      *emulator.StepFunctionsPlugin
 	ecr         *emulator.ECRPlugin
 	ecs         *emulator.ECSPlugin
@@ -61,15 +61,25 @@ type cfnStampFixture struct {
 	kinesis     *emulator.KinesisPlugin
 	glue        *emulator.GluePlugin
 
+	// The six #819's second half added, owning seven more types — KMS answers for both a key and
+	// a replica key. ECS, RDS and Step Functions gained a second and third type each without
+	// gaining a plugin, which is why six plugins cover twelve new types.
+	kms            *emulator.KMSPlugin
+	secretsmanager *emulator.SecretsManagerPlugin
+	sns            *emulator.SNSPlugin
+	ssm            *emulator.SSMPlugin
+	acm            *emulator.ACMPlugin
+	cloudfront     *emulator.CloudFrontPlugin
+
 	state emulator.StateManager
 }
 
 // newCFNStampFixture builds the fixture over the given state, so a test that also needs an
 // AuthController can share one store with it. A nil state gets a fresh one.
 //
-// Fourteen plugins rather than the two #746 needed: #765 widened the stamp past EC2 and #819
-// widened it again, and the criterion both work to is that each tag is readable through the
-// owning service's own call — which means the plugin that owns the record has to be here to
+// Twenty plugins rather than the two #746 needed: #765 widened the stamp past EC2 and #819
+// widened it twice more, and the criterion all three work to is that each tag is readable through
+// the owning service's own call — which means the plugin that owns the record has to be here to
 // answer it.
 func newCFNStampFixture(t *testing.T, state emulator.StateManager) *cfnStampFixture {
 	t.Helper()
@@ -162,6 +172,15 @@ func newCFNStampFixtureWithLogger(
 	kinesisPlugin := cfnStampRegister(t, registry, &emulator.KinesisPlugin{}, state, logger, tc)
 	gluePlugin := cfnStampRegister(t, registry, &emulator.GluePlugin{}, state, logger, tc)
 
+	// #819's second half. Six more through the same registrar, and for the same reason: each of
+	// the six needs the shared clock and nothing else.
+	kmsPlugin := cfnStampRegister(t, registry, &emulator.KMSPlugin{}, state, logger, tc)
+	smPlugin := cfnStampRegister(t, registry, &emulator.SecretsManagerPlugin{}, state, logger, tc)
+	snsPlugin := cfnStampRegister(t, registry, &emulator.SNSPlugin{}, state, logger, tc)
+	ssmPlugin := cfnStampRegister(t, registry, &emulator.SSMPlugin{}, state, logger, tc)
+	acmPlugin := cfnStampRegister(t, registry, &emulator.ACMPlugin{}, state, logger, tc)
+	cfPlugin := cfnStampRegister(t, registry, &emulator.CloudFrontPlugin{}, state, logger, tc)
+
 	return &cfnStampFixture{
 		deployer:    emulator.NewStackDeployer(registry, store, state, tc, logger, costs),
 		ec2:         ec2Plugin,
@@ -178,7 +197,15 @@ func newCFNStampFixtureWithLogger(
 		rds:         rdsPlugin,
 		kinesis:     kinesisPlugin,
 		glue:        gluePlugin,
-		state:       state,
+
+		kms:            kmsPlugin,
+		secretsmanager: smPlugin,
+		sns:            snsPlugin,
+		ssm:            ssmPlugin,
+		acm:            acmPlugin,
+		cloudfront:     cfPlugin,
+
+		state: state,
 	}
 }
 
