@@ -110,6 +110,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report a rotation nobody started. The operation's other half, the answer for a key pending deletion, is
   under **Fixed**.
 
+- **Sixteen of `KeyMetadata`'s 26 members, from one builder shared by `CreateKey` and `DescribeKey`**
+  (#974). `DescribeKey` answered 10 and `CreateKey` answered 9 from a second map of its own. Five of the
+  absent members are ones AWS sends on every call for a plain customer symmetric key — `AWSAccountId`,
+  `KeyManager`, `Origin`, `EncryptionAlgorithms` and the deprecated `CustomerMasterKeySpec` — so a
+  consumer reading any of them got a missing field from substrate where AWS always has a value. That is
+  #765's failure mode aimed at a response shape, and it is #971 read from the other side: that issue
+  removed the one member substrate emitted and AWS does not publish, and this one adds the members AWS
+  publishes and substrate did not emit. Nothing here is a simulation — three of the five are constants
+  for every key substrate can create and the other two are functions of `KeySpec` and `KeyUsage`, both
+  of which the key already carried, so every member added is a value substrate already knew and withheld.
+
+  **The builder is shared because AWS shares the shape**, the type's page naming `CreateKey`,
+  `DescribeKey` and `ReplicateKey` as the three operations that answer it. Substrate's two hand-built
+  maps had already drifted: #963 added `DeletionDate` to `DescribeKey`'s and left `CreateKey`'s alone, so
+  two operations disagreed about one documented type — the defect class #952 catalogues — and neither
+  operation's own test could see it, because each asserted its own response against the page rather than
+  against the other. A test now compares the two responses member by member on raw bytes. `ReplicateKey`
+  is unimplemented; when it arrives it must build from the same place rather than grow a third map.
+
+  Three of the new members are constants and each records a limit rather than a simplification:
+  `KeyManager` is `CUSTOMER` because substrate mints no AWS managed key, which is also why
+  `EnableKeyRotation`'s AWS-managed restriction is unreachable rather than unenforced; `Origin` is
+  `AWS_KMS` because substrate implements neither `ImportKeyMaterial` nor any custom key store, which is
+  why `ExpirationModel`, `ValidTo` and `XksKeyConfiguration` stay absent too; and `AWSAccountId` is the
+  key's own account rather than the caller's, a difference only a cross-account `DescribeKey` separates,
+  so that is the call the test makes.
+
+  The four algorithm members are mutually exclusive, each naming a `KeyUsage` as its presence condition,
+  and their contents come from the developer guide's key spec reference — the same table #969 read for
+  encryption, extended to the six RSA signing algorithms, `ECC_NIST_EDWARDS25519`'s two, the ML-DSA
+  specs' shared `ML_DSA_SHAKE_256`, the HMAC bijection AWS explains with "the length of the key
+  determines the MAC algorithm", and `ECDH` for the NIST curves and `SM2`. **`KeyAgreementAlgorithms`'
+  condition is substrate's reading**: the other three publish one and this member publishes none at all,
+  so following their pattern is the narrowest reading available — reporting `ECDH` on a NIST-curve
+  *signing* key, whose spec does admit it, would tell a caller `DeriveSharedSecret` was available on a
+  key AWS reserves for `Sign`. An empty list is omitted rather than sent as `[]`, because #977 lets a
+  key carry a usage and a spec AWS would never pair and an empty array would claim the key supports no
+  algorithms, which AWS never says about a key it accepted.
+
+  **`CustomerMasterKeySpec` is answered, and omitted outside its own enum.** AWS still sends it — "the
+  `KeySpec` and `CustomerMasterKeySpec` fields have the same value… to avoid breaking changes, AWS KMS
+  supports both fields" — so dropping it as obsolete would omit a member AWS sends. But its enum is
+  narrower than `KeySpec`'s, 13 values against 17, and the four specs added since the deprecation appear
+  only under `KeySpec`. A key with one of those has no admissible value for the older member, and
+  substrate omits it there; AWS documents no answer for the case, so that is a reading, and the
+  alternative puts a value outside the member's own published set on the wire. Ten members stay absent
+  and all ten are asserted absent by a test, `RotationEnabled` included — adding sixteen members from a
+  page is exactly when someone working from the struct would put #971's member back.
+
 ### Changed
 - **Kinesis's `ListTagsForStream` pages its tags** (#954). The operation publishes both halves of a
   cursor over the tag key and substrate read neither: `Limit` and `ExclusiveStartTagKey` were decoded by

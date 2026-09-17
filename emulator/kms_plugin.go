@@ -300,11 +300,14 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if len(req.Body) > 0 {
 		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // optional body
 	}
+	// Both defaults are AWS's, and both are now named rather than spelled: the usage decides which
+	// algorithm list the key's metadata carries and the spec decides its contents, so the two literals
+	// that used to sit here were load-bearing in a way nothing at this line said.
 	if input.KeyUsage == "" {
-		input.KeyUsage = "ENCRYPT_DECRYPT"
+		input.KeyUsage = kmsKeyUsageEncryptDecrypt
 	}
 	if input.KeySpec == "" {
-		input.KeySpec = "SYMMETRIC_DEFAULT"
+		input.KeySpec = kmsSymmetricDefaultKeySpec
 	}
 
 	keyID := generateKMSKeyID()
@@ -338,19 +341,10 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("kms createKey saveKeyIDs: %w", err)
 	}
 
-	out := map[string]interface{}{
-		"KeyMetadata": map[string]interface{}{
-			"KeyId":        key.KeyID,
-			"Arn":          key.ARN,
-			"Description":  key.Description,
-			"KeyUsage":     key.KeyUsage,
-			"KeySpec":      key.KeySpec,
-			"KeyState":     key.KeyState,
-			"Enabled":      key.Enabled,
-			"MultiRegion":  key.MultiRegion,
-			"CreationDate": key.CreationDate.Unix(),
-		},
-	}
+	// The same builder DescribeKey uses, because AWS answers the same shape from both — see
+	// kms_key_metadata.go's preamble. Before #974 this was a nine-member map of its own and DescribeKey's
+	// was a ten-member one, so the two operations already disagreed about DeletionDate.
+	out := map[string]interface{}{"KeyMetadata": kmsKeyMetadata(key)}
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
@@ -389,35 +383,13 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	// caller a route to rotation state that bypasses the rules the real one carries, such as the
 	// pending-deletion answer in #973.
 	//
-	// Sixteen published members are still missing from this map, five of which AWS would always send for a
-	// key substrate can create — AWSAccountId, KeyManager, Origin, EncryptionAlgorithms and the deprecated
-	// CustomerMasterKeySpec. That is the same shape failing to match the same page in the other direction,
-	// and it is #974.
-	metadata := map[string]interface{}{
-		"KeyId":        key.KeyID,
-		"Arn":          key.ARN,
-		"Description":  key.Description,
-		"KeyUsage":     key.KeyUsage,
-		"KeySpec":      key.KeySpec,
-		"KeyState":     key.KeyState,
-		"Enabled":      key.Enabled,
-		"MultiRegion":  key.MultiRegion,
-		"CreationDate": key.CreationDate.Unix(),
-	}
-	// Emitted on the key state rather than on the field being non-zero, because that is the condition
-	// API_KeyMetadata publishes: "this value is present only when the KMS key is scheduled for
-	// deletion, that is, when its KeyState is PendingDeletion". Added by #963 — before it the deletion
-	// date ScheduleKeyDeletion computed reached the caller once and was never stored, so DescribeKey
-	// could not report when a pending key was due to go.
-	//
-	// PendingDeletionWindowInDays, the adjacent member, is deliberately absent: the page confines it to
-	// KeyState PendingReplicaDeletion, which only a multi-Region primary that still has replicas
-	// reaches and substrate never writes. Its range is 1-365, not ScheduleKeyDeletion's 7-30, so the
-	// two are different members and reporting the waiting period under it would be wrong twice over.
-	if key.KeyState == kmsKeyStatePendingDeletion {
-		metadata["DeletionDate"] = key.DeletionDate.Unix()
-	}
-	out := map[string]interface{}{"KeyMetadata": metadata}
+	// The other sixteen published members were missing from this map until #974, five of which AWS sends
+	// for every key substrate can create — AWSAccountId, KeyManager, Origin, EncryptionAlgorithms and the
+	// deprecated CustomerMasterKeySpec. That was the same shape failing to match the same page in the
+	// other direction. The builder they moved into is shared with CreateKey, which is what keeps the two
+	// operations from disagreeing about one shape again; kms_key_metadata.go records which members stay
+	// absent and what would have to exist for each to be reachable.
+	out := map[string]interface{}{"KeyMetadata": kmsKeyMetadata(key)}
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
