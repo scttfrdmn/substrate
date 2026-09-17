@@ -515,7 +515,10 @@ func TestTaggingSM_TheMergePreservesTheRestOfTheRecord(t *testing.T) {
 func TestTaggingSM_GetResourcesReportsTheSecretAndNothingElse(t *testing.T) {
 	ts := smTagServer(t)
 	first := smCreateSecret(t, ts, "alpha", map[string]string{"env": "prod"})
-	second := smCreateSecret(t, ts, "beta", nil)
+	// Tagged at creation, because GetResources reports what has been tagged and a secret that never was
+	// is absent by rule (#938). It carries a different tag from the first so the two are not
+	// interchangeable in a failure message.
+	second := smCreateSecret(t, ts, "beta", map[string]string{"env": "dev"})
 
 	// An exact-set match rather than a membership check, because that is the only form that catches a
 	// scanner using a bare "secret" prefix: the namespace also holds "secret_names:{acct}/{region}"

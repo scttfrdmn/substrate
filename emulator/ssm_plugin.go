@@ -204,6 +204,15 @@ func (p *SSMPlugin) putParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if existing != nil && len(param.Tags) == 0 {
 		param.Tags = existing.Tags
 	}
+	// PutParameter builds a whole new record rather than editing the stored one, so it is the instance
+	// of the gap [taggingEverTagged]'s file documents: an overwrite that carries no tags would drop the
+	// previously-tagged flag and make the parameter never-tagged again. Carried forward unconditionally,
+	// and combined with this request's own tags, because either side alone is enough to have tagged it
+	// (#938).
+	if existing != nil {
+		param.EverTagged = existing.EverTagged
+	}
+	param.EverTagged = taggingEverTagged(param.EverTagged, 0, len(param.Tags))
 	// Sorted so a parameter tagged at creation and one tagged afterwards through AddTagsToResource
 	// report their tags in the same order (#932, on the rule #862 established).
 	sortTagsByKey(param.Tags, func(t SSMTag) string { return t.Key })
@@ -669,6 +678,7 @@ func (p *SSMPlugin) addTagsToResource(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, ssmInvalidResourceID(input.ResourceID, "no such parameter")
 	}
 
+	param.EverTagged = taggingEverTagged(param.EverTagged, len(param.Tags), len(input.Tags))
 	tagMap := make(map[string]string, len(param.Tags))
 	for _, t := range param.Tags {
 		tagMap[t.Key] = t.Value
@@ -717,6 +727,8 @@ func (p *SSMPlugin) removeTagsFromResource(ctx *RequestContext, req *AWSRequest)
 	if param == nil {
 		return nil, ssmInvalidResourceID(input.ResourceID, "no such parameter")
 	}
+
+	param.EverTagged = taggingEverTagged(param.EverTagged, len(param.Tags), 0)
 
 	removeSet := make(map[string]bool, len(input.TagKeys))
 	for _, k := range input.TagKeys {

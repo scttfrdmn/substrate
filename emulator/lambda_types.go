@@ -70,6 +70,9 @@ type LambdaFunction struct {
 	// ZipStored indicates whether the deployment ZIP bytes are held in state.
 	// False when the function was created via S3 reference (not directly uploaded).
 	ZipStored bool `json:"ZipStored,omitempty"`
+
+	// EverTagged records that this function has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // LambdaPermissionStatement is a single statement in a Lambda resource policy.

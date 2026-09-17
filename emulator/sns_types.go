@@ -24,6 +24,9 @@ type SNSTopic struct {
 
 	// Region is the AWS region where the topic resides.
 	Region string `json:"Region"`
+
+	// EverTagged records that this topic has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // SNSTag is a key-value tag for SNS resources.

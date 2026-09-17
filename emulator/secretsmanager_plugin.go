@@ -629,6 +629,7 @@ func (p *SecretsManagerPlugin) tagResource(ctx *RequestContext, req *AWSRequest)
 	for _, t := range secret.Tags {
 		tagMap[t.Key] = t.Value
 	}
+	secret.EverTagged = taggingEverTagged(secret.EverTagged, len(secret.Tags), len(input.Tags))
 	for _, t := range input.Tags {
 		tagMap[t.Key] = t.Value
 	}
@@ -680,6 +681,8 @@ func (p *SecretsManagerPlugin) untagResource(ctx *RequestContext, req *AWSReques
 	if !secret.DeletionDate.IsZero() {
 		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
+
+	secret.EverTagged = taggingEverTagged(secret.EverTagged, len(secret.Tags), 0)
 
 	removeSet := make(map[string]bool, len(input.TagKeys))
 	for _, k := range input.TagKeys {

@@ -13,6 +13,9 @@ type ECSCluster struct {
 	Tags        []ECSTag `json:"tags,omitempty"`
 	AccountID   string   `json:"AccountID"`
 	Region      string   `json:"Region"`
+
+	// EverTagged records that this cluster has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ECSTag is a key-value tag for ECS resources.
@@ -38,6 +41,9 @@ type ECSTaskDefinition struct {
 	RegisteredAt            EpochSeconds  `json:"registeredAt"`
 	AccountID               string        `json:"AccountID"`
 	Region                  string        `json:"Region"`
+
+	// EverTagged records that this task definition has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ECSService holds persisted state for an ECS service.
@@ -55,6 +61,9 @@ type ECSService struct {
 	ClusterName    string       `json:"clusterName"`
 	AccountID      string       `json:"AccountID"`
 	Region         string       `json:"Region"`
+
+	// EverTagged records that this service has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ECSTask holds persisted state for an ECS task.
@@ -71,4 +80,7 @@ type ECSTask struct {
 	Tags              []ECSTag     `json:"tags,omitempty"`
 	AccountID         string       `json:"AccountID"`
 	Region            string       `json:"Region"`
+
+	// EverTagged records that this task has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }

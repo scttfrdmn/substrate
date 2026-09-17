@@ -275,6 +275,17 @@ func TestSFNTags_GetResourcesReportsBothStepFunctionsTypes(t *testing.T) {
 	smARN := createStateMachine(t, ts, "orders")
 	actARN := createActivity(t, ts, "fulfill")
 
+	// Tagged through Step Functions' own TagResource, because GetResources reports what has been
+	// tagged and a resource that never was is absent by rule (#938). Tagging here rather than at
+	// creation also keeps this test's subject the scanner rather than CreateStateMachine's tags
+	// member.
+	for _, arn := range []string{smARN, actARN} {
+		sfnTagOK(t, ts, "TagResource", map[string]any{
+			"resourceArn": arn,
+			"tags":        sfnTagListBody(map[string]string{"env": "test"}),
+		})
+	}
+
 	arns := getResourcesARNs(t, ts, "states")
 	for _, want := range []string{smARN, actARN} {
 		found := false

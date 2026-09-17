@@ -26,6 +26,9 @@ type IAMUser struct {
 	PasswordLastUsed    *time.Time         `json:"PasswordLastUsed,omitempty"`
 	Tags                []IAMTag           `json:"Tags,omitempty"`
 	PermissionsBoundary *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
+
+	// EverTagged records that this user has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // IAMRole represents an AWS IAM role entity.
@@ -49,6 +52,9 @@ type IAMRole struct {
 	// so there is no value that means "never". A record written before #816 reads back
 	// with it nil, which is the same thing a never-assumed role is.
 	RoleLastUsed *IAMRoleLastUsed `json:"RoleLastUsed,omitempty"`
+
+	// EverTagged records that this role has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // IAMRoleLastUsed records when and where an IAM role was last assumed.

@@ -1107,7 +1107,10 @@ func (p *SNSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, snsTopicNotFound(resourceARN)
 	}
 
-	for _, tag := range snsTagParams(req.Params) {
+	added := snsTagParams(req.Params)
+	t.EverTagged = taggingEverTagged(t.EverTagged, len(t.Tags), len(added))
+
+	for _, tag := range added {
 		// Replace an existing value rather than appending a second entry for the key. AWS states
 		// "if the tag key already exists, the tag value is replaced".
 		found := false
@@ -1158,6 +1161,8 @@ func (p *SNSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if t == nil {
 		return nil, snsTopicNotFound(resourceARN)
 	}
+
+	t.EverTagged = taggingEverTagged(t.EverTagged, len(t.Tags), 0)
 
 	removeKeys := make(map[string]bool)
 	for _, key := range snsTagKeyParams(req.Params) {

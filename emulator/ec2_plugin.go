@@ -3115,6 +3115,7 @@ func ec2ApplyTagsToResource(
 	if raw, ok := resource["tags"]; ok {
 		_ = json.Unmarshal(raw, &existing)
 	}
+	tagsBefore := len(existing)
 
 	if remove {
 		// Build set of keys to remove.
@@ -3142,6 +3143,17 @@ func ec2ApplyTagsToResource(
 				existing = append(existing, t)
 			}
 		}
+	}
+
+	// Stamped on the raw record, because this one writer serves every taggable EC2 type and never
+	// decodes a concrete struct. Only the instance record is scanned by the tagging API, so only its
+	// type carries the field; the member is inert on the others. See [taggingEverTagged] (#938).
+	added := 0
+	if !remove {
+		added = len(tags)
+	}
+	if err := taggingStampRecordEverTagged(resource, tagsBefore, added); err != nil {
+		return fmt.Errorf("ec2 applyTagsToResource %s: %w", id, err)
 	}
 
 	tagsRaw, _ := json.Marshal(existing)

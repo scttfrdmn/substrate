@@ -1133,6 +1133,10 @@ func ecsMergeRecordTags(raw []byte, addTags map[string]string, removeKeys []stri
 		}
 	}
 
+	if err := taggingStampRecordEverTagged(record, len(existing), len(addTags)); err != nil {
+		return nil, fmt.Errorf("stamp ECS record: %w", err)
+	}
+
 	merged, err := json.Marshal(mergeECSTags(existing, addTags, removeKeys))
 	if err != nil {
 		return nil, fmt.Errorf("marshal ECS record tags: %w", err)

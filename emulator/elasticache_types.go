@@ -36,6 +36,9 @@ type ElastiCacheCacheCluster struct {
 	Region string `json:"Region"`
 	// CreatedAt is the time the cluster was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// EverTagged records that this cache cluster has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ElastiCacheReplicationGroup represents an Amazon ElastiCache replication group.

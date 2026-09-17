@@ -889,6 +889,7 @@ func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn str
 	if unmarshalErr := json.Unmarshal(req.Body, &body); unmarshalErr != nil {
 		return nil, lambdaInvalidBody()
 	}
+	fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), len(body.Tags))
 	if fn.Tags == nil {
 		fn.Tags = make(map[string]string)
 	}
@@ -906,6 +907,7 @@ func (p *LambdaPlugin) untagResource(ctx *RequestContext, req *AWSRequest, arn s
 	if err != nil {
 		return nil, err
 	}
+	fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), 0)
 	if fn.Tags != nil {
 		if keys, ok := req.Params["tagKeys"]; ok {
 			for _, k := range strings.Split(keys, ",") {

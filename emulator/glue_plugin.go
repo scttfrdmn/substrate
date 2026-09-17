@@ -1065,6 +1065,9 @@ func (p *GluePlugin) mergeGlueTags(goCtx context.Context, ns, key string, addTag
 			}
 		}
 	}
+	if err := taggingStampRecordAnyEverTagged(obj, len(existingTags), len(addTags)); err != nil {
+		return fmt.Errorf("glue mergeGlueTags: %w", err)
+	}
 	merged := mergeStringMap(existingTags, addTags, removeKeys)
 	obj["Tags"] = merged
 

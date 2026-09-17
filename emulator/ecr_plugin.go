@@ -891,6 +891,7 @@ func (p *ECRPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 
+	repo.EverTagged = taggingEverTagged(repo.EverTagged, len(repo.Tags), len(body.Tags))
 	if repo.Tags == nil {
 		repo.Tags = make(map[string]string)
 	}
@@ -923,6 +924,7 @@ func (p *ECRPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, err
 	}
 
+	repo.EverTagged = taggingEverTagged(repo.EverTagged, len(repo.Tags), 0)
 	for _, k := range body.TagKeys {
 		delete(repo.Tags, k)
 	}

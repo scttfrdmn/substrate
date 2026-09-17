@@ -27,6 +27,9 @@ type S3Bucket struct {
 
 	// Tags holds optional user-defined key-value tags on the bucket.
 	Tags map[string]string `json:"tags"`
+
+	// EverTagged records that this bucket has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // S3Object holds metadata for an emulated S3 object. The object body is

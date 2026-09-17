@@ -45,6 +45,9 @@ type ACMCertificate struct {
 
 	// Region is the AWS region where the certificate is stored.
 	Region string `json:"Region"`
+
+	// EverTagged records that this certificate has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // acmCertKey returns the state key for an ACM certificate.

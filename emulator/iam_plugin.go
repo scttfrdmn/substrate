@@ -2492,6 +2492,7 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if resp := iamCheckTagLimit(merged); resp != nil {
 		return resp, nil
 	}
+	user.EverTagged = taggingEverTagged(user.EverTagged, len(user.Tags), len(params.Tags))
 	user.Tags = merged
 
 	raw, err := json.Marshal(user)
@@ -2541,6 +2542,7 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			http.StatusNotFound), nil
 	}
 
+	user.EverTagged = taggingEverTagged(user.EverTagged, len(user.Tags), 0)
 	user.Tags = iamRemoveTagKeys(user.Tags, params.TagKeys, iamTagKeysCaseInsensitive)
 
 	raw, err := json.Marshal(user)
@@ -2630,6 +2632,7 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if resp := iamCheckTagLimit(merged); resp != nil {
 		return resp, nil
 	}
+	role.EverTagged = taggingEverTagged(role.EverTagged, len(role.Tags), len(params.Tags))
 	role.Tags = merged
 
 	raw, err := json.Marshal(role)
@@ -2679,6 +2682,7 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 			http.StatusNotFound), nil
 	}
 
+	role.EverTagged = taggingEverTagged(role.EverTagged, len(role.Tags), 0)
 	role.Tags = iamRemoveTagKeys(role.Tags, params.TagKeys, iamTagKeysCaseInsensitive)
 
 	raw, err := json.Marshal(role)

@@ -23,6 +23,9 @@ type ECRRepository struct {
 	RepositoryPolicy string            `json:"RepositoryPolicy,omitempty"`
 	AccountID        string            `json:"AccountID"`
 	Region           string            `json:"Region"`
+
+	// EverTagged records that this repository has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 // ECRImage holds metadata for an image stored in an ECR repository.
