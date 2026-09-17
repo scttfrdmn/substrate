@@ -518,7 +518,7 @@ func TestABAC_Lambda_ResourceTag(t *testing.T) {
 		Tags:         map[string]string{"Env": "prod"},
 	}
 	fnRaw, _ := json.Marshal(fn)
-	require.NoError(t, state.Put(context.Background(), "lambda", "function:prod-func", fnRaw))
+	require.NoError(t, state.Put(context.Background(), "lambda", "function:123456789012/us-east-1/prod-func", fnRaw))
 
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)
@@ -543,7 +543,7 @@ func TestABAC_DynamoDB_ResourceTag(t *testing.T) {
 		Tags:        map[string]string{"Tier": "premium"},
 	}
 	tblRaw, _ := json.Marshal(tbl)
-	require.NoError(t, state.Put(context.Background(), "dynamodb", "table:123456789012/orders", tblRaw))
+	require.NoError(t, state.Put(context.Background(), "dynamodb", "table:123456789012/us-east-1/orders", tblRaw))
 
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)

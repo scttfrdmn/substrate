@@ -41,6 +41,14 @@ type lambdaCodeTestWorld struct {
 	state    emulator.StateManager
 }
 
+// lambdaCodeStateKey names the record a deployed function's configuration or package lives
+// under, for the default identity every deploy in this file runs as. The account and Region
+// are part of the key since #943, so a test reading state directly has to say which
+// account's and Region's record it means.
+func lambdaCodeStateKey(prefix, name string) string {
+	return prefix + ":123456789012/us-east-1/" + name
+}
+
 func newLambdaCodeTestWorld(t *testing.T) *lambdaCodeTestWorld {
 	t.Helper()
 	cfg := emulator.DefaultConfig()
@@ -411,7 +419,7 @@ func TestLambdaCodeSize_CFNInlineZipFile(t *testing.T) {
 	// The package is the archive CloudFormation would have built: one entry, named
 	// for the runtime. Asserting on the stored bytes rather than only on the size is
 	// what distinguishes a real ZIP from any string of the right length.
-	raw, err := w.state.Get(context.Background(), "lambda", "function_zip:cfn-inline")
+	raw, err := w.state.Get(context.Background(), "lambda", lambdaCodeStateKey("function_zip", "cfn-inline"))
 	require.NoError(t, err)
 	require.NotEmpty(t, raw, "an inline package is staged for execution")
 	assert.Equal(t, size, int64(len(raw)), "CodeSize is the archive's length")
@@ -442,7 +450,7 @@ func TestLambdaCodeSize_CFNInlineZipFileNodeRuntime(t *testing.T) {
 	_, err := w.deployer.Deploy(context.Background(), tmpl, "node-stack", nil)
 	require.NoError(t, err)
 
-	raw, err := w.state.Get(context.Background(), "lambda", "function_zip:cfn-node")
+	raw, err := w.state.Get(context.Background(), "lambda", lambdaCodeStateKey("function_zip", "cfn-node"))
 	require.NoError(t, err)
 	require.NotEmpty(t, raw)
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
@@ -469,7 +477,7 @@ func TestLambdaCodeSize_CFNS3Source(t *testing.T) {
 
 	// Nothing is staged for execution — the bytes were never fetched — and that is a
 	// separate and correct fact from knowing the size.
-	raw, err := w.state.Get(context.Background(), "lambda", "function_zip:cfn-s3")
+	raw, err := w.state.Get(context.Background(), "lambda", lambdaCodeStateKey("function_zip", "cfn-s3"))
 	require.NoError(t, err)
 	assert.Empty(t, raw, "an S3 package is not fetched, only sized")
 }
@@ -558,7 +566,7 @@ func TestLambdaCodeSize_CFNRequestBodyCarriesCode(t *testing.T) {
 	_, err := w.deployer.Deploy(context.Background(), cfnS3LambdaTemplate, "body-stack", nil)
 	require.NoError(t, err)
 
-	raw, err := w.state.Get(context.Background(), "lambda", "function:cfn-s3")
+	raw, err := w.state.Get(context.Background(), "lambda", lambdaCodeStateKey("function", "cfn-s3"))
 	require.NoError(t, err) //nolint:testifylint // the deploy above is asserted separately.
 	require.NotEmpty(t, raw)
 	var fn map[string]any

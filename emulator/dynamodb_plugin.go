@@ -111,24 +111,24 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 
 // --- State helpers -----------------------------------------------------------
 
-func (p *DynamoDBPlugin) tableStateKey(accountID, tableName string) string {
-	return "table:" + accountID + "/" + tableName
+func (p *DynamoDBPlugin) tableStateKey(accountID, region, tableName string) string {
+	return "table:" + accountID + "/" + region + "/" + tableName
 }
 
-func (p *DynamoDBPlugin) tableNamesKey(accountID string) string {
-	return "table_names:" + accountID
+func (p *DynamoDBPlugin) tableNamesKey(accountID, region string) string {
+	return "table_names:" + accountID + "/" + region
 }
 
-func (p *DynamoDBPlugin) itemStateKey(accountID, tableName, itemKey string) string {
-	return "item:" + accountID + "/" + tableName + "/" + itemKey
+func (p *DynamoDBPlugin) itemStateKey(accountID, region, tableName, itemKey string) string {
+	return "item:" + accountID + "/" + region + "/" + tableName + "/" + itemKey
 }
 
-func (p *DynamoDBPlugin) itemKeysStateKey(accountID, tableName string) string {
-	return "item_keys:" + accountID + "/" + tableName
+func (p *DynamoDBPlugin) itemKeysStateKey(accountID, region, tableName string) string {
+	return "item_keys:" + accountID + "/" + region + "/" + tableName
 }
 
-func (p *DynamoDBPlugin) loadTable(ctx context.Context, accountID, tableName string) (*DynamoDBTable, error) {
-	data, err := p.state.Get(ctx, dynamodbNamespace, p.tableStateKey(accountID, tableName))
+func (p *DynamoDBPlugin) loadTable(ctx context.Context, accountID, region, tableName string) (*DynamoDBTable, error) {
+	data, err := p.state.Get(ctx, dynamodbNamespace, p.tableStateKey(accountID, region, tableName))
 	if err != nil {
 		return nil, fmt.Errorf("dynamodb loadTable state.Get: %w", err)
 	}
@@ -142,16 +142,16 @@ func (p *DynamoDBPlugin) loadTable(ctx context.Context, accountID, tableName str
 	return &tbl, nil
 }
 
-func (p *DynamoDBPlugin) saveTable(ctx context.Context, accountID string, tbl *DynamoDBTable) error {
+func (p *DynamoDBPlugin) saveTable(ctx context.Context, accountID, region string, tbl *DynamoDBTable) error {
 	data, err := json.Marshal(tbl)
 	if err != nil {
 		return fmt.Errorf("dynamodb saveTable marshal: %w", err)
 	}
-	return p.state.Put(ctx, dynamodbNamespace, p.tableStateKey(accountID, tbl.TableName), data)
+	return p.state.Put(ctx, dynamodbNamespace, p.tableStateKey(accountID, region, tbl.TableName), data)
 }
 
-func (p *DynamoDBPlugin) loadTableNames(ctx context.Context, accountID string) ([]string, error) {
-	data, err := p.state.Get(ctx, dynamodbNamespace, p.tableNamesKey(accountID))
+func (p *DynamoDBPlugin) loadTableNames(ctx context.Context, accountID, region string) ([]string, error) {
+	data, err := p.state.Get(ctx, dynamodbNamespace, p.tableNamesKey(accountID, region))
 	if err != nil {
 		return nil, fmt.Errorf("dynamodb loadTableNames: %w", err)
 	}
@@ -165,17 +165,17 @@ func (p *DynamoDBPlugin) loadTableNames(ctx context.Context, accountID string) (
 	return names, nil
 }
 
-func (p *DynamoDBPlugin) saveTableNames(ctx context.Context, accountID string, names []string) error {
+func (p *DynamoDBPlugin) saveTableNames(ctx context.Context, accountID, region string, names []string) error {
 	sort.Strings(names)
 	data, err := json.Marshal(names)
 	if err != nil {
 		return fmt.Errorf("dynamodb saveTableNames marshal: %w", err)
 	}
-	return p.state.Put(ctx, dynamodbNamespace, p.tableNamesKey(accountID), data)
+	return p.state.Put(ctx, dynamodbNamespace, p.tableNamesKey(accountID, region), data)
 }
 
-func (p *DynamoDBPlugin) loadItemKeys(ctx context.Context, accountID, tableName string) ([]string, error) {
-	data, err := p.state.Get(ctx, dynamodbNamespace, p.itemKeysStateKey(accountID, tableName))
+func (p *DynamoDBPlugin) loadItemKeys(ctx context.Context, accountID, region, tableName string) ([]string, error) {
+	data, err := p.state.Get(ctx, dynamodbNamespace, p.itemKeysStateKey(accountID, region, tableName))
 	if err != nil {
 		return nil, fmt.Errorf("dynamodb loadItemKeys: %w", err)
 	}
@@ -189,16 +189,16 @@ func (p *DynamoDBPlugin) loadItemKeys(ctx context.Context, accountID, tableName 
 	return keys, nil
 }
 
-func (p *DynamoDBPlugin) saveItemKeys(ctx context.Context, accountID, tableName string, keys []string) error {
+func (p *DynamoDBPlugin) saveItemKeys(ctx context.Context, accountID, region, tableName string, keys []string) error {
 	data, err := json.Marshal(keys)
 	if err != nil {
 		return fmt.Errorf("dynamodb saveItemKeys marshal: %w", err)
 	}
-	return p.state.Put(ctx, dynamodbNamespace, p.itemKeysStateKey(accountID, tableName), data)
+	return p.state.Put(ctx, dynamodbNamespace, p.itemKeysStateKey(accountID, region, tableName), data)
 }
 
-func (p *DynamoDBPlugin) loadItem(ctx context.Context, accountID, tableName, itemKey string) (map[string]*AttributeValue, error) {
-	data, err := p.state.Get(ctx, dynamodbNamespace, p.itemStateKey(accountID, tableName, itemKey))
+func (p *DynamoDBPlugin) loadItem(ctx context.Context, accountID, region, tableName, itemKey string) (map[string]*AttributeValue, error) {
+	data, err := p.state.Get(ctx, dynamodbNamespace, p.itemStateKey(accountID, region, tableName, itemKey))
 	if err != nil {
 		return nil, fmt.Errorf("dynamodb loadItem: %w", err)
 	}
@@ -212,16 +212,16 @@ func (p *DynamoDBPlugin) loadItem(ctx context.Context, accountID, tableName, ite
 	return item, nil
 }
 
-func (p *DynamoDBPlugin) saveItem(ctx context.Context, accountID, tableName, itemKey string, item map[string]*AttributeValue) error {
+func (p *DynamoDBPlugin) saveItem(ctx context.Context, accountID, region, tableName, itemKey string, item map[string]*AttributeValue) error {
 	data, err := json.Marshal(item)
 	if err != nil {
 		return fmt.Errorf("dynamodb saveItem marshal: %w", err)
 	}
-	return p.state.Put(ctx, dynamodbNamespace, p.itemStateKey(accountID, tableName, itemKey), data)
+	return p.state.Put(ctx, dynamodbNamespace, p.itemStateKey(accountID, region, tableName, itemKey), data)
 }
 
-func (p *DynamoDBPlugin) deleteItemByKey(ctx context.Context, accountID, tableName, itemKey string) error {
-	return p.state.Delete(ctx, dynamodbNamespace, p.itemStateKey(accountID, tableName, itemKey))
+func (p *DynamoDBPlugin) deleteItemByKey(ctx context.Context, accountID, region, tableName, itemKey string) error {
+	return p.state.Delete(ctx, dynamodbNamespace, p.itemStateKey(accountID, region, tableName, itemKey))
 }
 
 // extractPrimaryKey extracts the PK and SK values from an item given the table's key schema.
@@ -307,7 +307,7 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, &AWSError{Code: "ValidationException", Message: "TableName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	existing, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	existing, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -385,16 +385,16 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		tbl.LatestStreamARN = tableARN + "/stream/" + now.UTC().Format("2006-01-02T15:04:05.999")
 	}
 
-	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+	if err := p.saveTable(context.Background(), ctx.AccountID, ctx.Region, tbl); err != nil {
 		return nil, fmt.Errorf("dynamodb createTable saveTable: %w", err)
 	}
 
-	names, err := p.loadTableNames(context.Background(), ctx.AccountID)
+	names, err := p.loadTableNames(context.Background(), ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
 	names = append(names, input.TableName)
-	if err := p.saveTableNames(context.Background(), ctx.AccountID, names); err != nil {
+	if err := p.saveTableNames(context.Background(), ctx.AccountID, ctx.Region, names); err != nil {
 		return nil, fmt.Errorf("dynamodb createTable saveTableNames: %w", err)
 	}
 
@@ -410,7 +410,7 @@ func (p *DynamoDBPlugin) loadTableForTagging(ctx *RequestContext, resourceARN st
 	if tableName == "" {
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Invalid ResourceArn: " + resourceARN, HTTPStatus: http.StatusBadRequest}
 	}
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, tableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -438,7 +438,7 @@ func (p *DynamoDBPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWS
 	for _, t := range input.Tags {
 		tbl.Tags[t.Key] = t.Value
 	}
-	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+	if err := p.saveTable(context.Background(), ctx.AccountID, ctx.Region, tbl); err != nil {
 		return nil, fmt.Errorf("dynamodb tagResource saveTable: %w", err)
 	}
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{})
@@ -459,7 +459,7 @@ func (p *DynamoDBPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*A
 	for _, k := range input.TagKeys {
 		delete(tbl.Tags, k)
 	}
-	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+	if err := p.saveTable(context.Background(), ctx.AccountID, ctx.Region, tbl); err != nil {
 		return nil, fmt.Errorf("dynamodb untagResource saveTable: %w", err)
 	}
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{})
@@ -500,7 +500,7 @@ func (p *DynamoDBPlugin) deleteTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -509,20 +509,20 @@ func (p *DynamoDBPlugin) deleteTable(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	// Delete all items.
-	itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+	itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
 	for _, ik := range itemKeys {
-		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, input.TableName, ik)
+		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	}
-	_ = p.state.Delete(context.Background(), dynamodbNamespace, p.itemKeysStateKey(ctx.AccountID, input.TableName))
+	_ = p.state.Delete(context.Background(), dynamodbNamespace, p.itemKeysStateKey(ctx.AccountID, ctx.Region, input.TableName))
 
 	// Delete table.
-	_ = p.state.Delete(context.Background(), dynamodbNamespace, p.tableStateKey(ctx.AccountID, input.TableName))
+	_ = p.state.Delete(context.Background(), dynamodbNamespace, p.tableStateKey(ctx.AccountID, ctx.Region, input.TableName))
 
 	// Remove from names.
-	names, err := p.loadTableNames(context.Background(), ctx.AccountID)
+	names, err := p.loadTableNames(context.Background(), ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +532,7 @@ func (p *DynamoDBPlugin) deleteTable(ctx *RequestContext, req *AWSRequest) (*AWS
 			newNames = append(newNames, n)
 		}
 	}
-	if err := p.saveTableNames(context.Background(), ctx.AccountID, newNames); err != nil {
+	if err := p.saveTableNames(context.Background(), ctx.AccountID, ctx.Region, newNames); err != nil {
 		return nil, fmt.Errorf("dynamodb deleteTable saveTableNames: %w", err)
 	}
 
@@ -550,7 +550,7 @@ func (p *DynamoDBPlugin) describeTable(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +559,7 @@ func (p *DynamoDBPlugin) describeTable(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	// Refresh item count.
-	itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+	itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	tbl.ItemCount = int64(len(itemKeys))
 	tbl.TableSizeBytes = tbl.ItemCount * 100
 
@@ -582,7 +582,7 @@ func (p *DynamoDBPlugin) listTables(ctx *RequestContext, req *AWSRequest) (*AWSR
 		limit = 100
 	}
 
-	names, err := p.loadTableNames(context.Background(), ctx.AccountID)
+	names, err := p.loadTableNames(context.Background(), ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +624,7 @@ func (p *DynamoDBPlugin) updateTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +639,7 @@ func (p *DynamoDBPlugin) updateTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		tbl.ProvisionedThroughput = *input.ProvisionedThroughput
 	}
 
-	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+	if err := p.saveTable(context.Background(), ctx.AccountID, ctx.Region, tbl); err != nil {
 		return nil, fmt.Errorf("dynamodb updateTable: %w", err)
 	}
 
@@ -663,7 +663,7 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +678,7 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	ik := dynamodbItemKey(pkVal, skVal)
 
 	// Load old item for condition checking and ReturnValues.
-	oldItem, err := p.loadItem(context.Background(), ctx.AccountID, input.TableName, ik)
+	oldItem, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	if err != nil {
 		return nil, err
 	}
@@ -695,18 +695,18 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 
 	// Save new item.
-	if err := p.saveItem(context.Background(), ctx.AccountID, input.TableName, ik, input.Item); err != nil {
+	if err := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik, input.Item); err != nil {
 		return nil, fmt.Errorf("dynamodb putItem saveItem: %w", err)
 	}
 
 	// Update item keys list if new.
 	if oldItem == nil {
-		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 		if err != nil {
 			return nil, err
 		}
 		itemKeys = append(itemKeys, ik)
-		if err := p.saveItemKeys(context.Background(), ctx.AccountID, input.TableName, itemKeys); err != nil {
+		if err := p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName, itemKeys); err != nil {
 			return nil, fmt.Errorf("dynamodb putItem saveItemKeys: %w", err)
 		}
 	}
@@ -716,7 +716,7 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if oldItem == nil {
 		eventName = "INSERT"
 	}
-	p.appendStreamRecord(context.Background(), ctx.AccountID, input.TableName, eventName, oldItem, input.Item)
+	p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, eventName, oldItem, input.Item)
 
 	result := map[string]interface{}{}
 	if input.ReturnValues == "ALL_OLD" && oldItem != nil {
@@ -737,7 +737,7 @@ func (p *DynamoDBPlugin) getItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -751,7 +751,7 @@ func (p *DynamoDBPlugin) getItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	ik := dynamodbItemKey(pkVal, skVal)
 
-	item, err := p.loadItem(context.Background(), ctx.AccountID, input.TableName, ik)
+	item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	if err != nil {
 		return nil, err
 	}
@@ -777,7 +777,7 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -791,7 +791,7 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	ik := dynamodbItemKey(pkVal, skVal)
 
-	oldItem, err := p.loadItem(context.Background(), ctx.AccountID, input.TableName, ik)
+	oldItem, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	if err != nil {
 		return nil, err
 	}
@@ -808,11 +808,11 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	if oldItem != nil {
-		if err := p.deleteItemByKey(context.Background(), ctx.AccountID, input.TableName, ik); err != nil {
+		if err := p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik); err != nil {
 			return nil, fmt.Errorf("dynamodb deleteItem: %w", err)
 		}
 		// Remove from item keys.
-		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 		if err != nil {
 			return nil, err
 		}
@@ -822,11 +822,11 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 				newKeys = append(newKeys, k)
 			}
 		}
-		if err := p.saveItemKeys(context.Background(), ctx.AccountID, input.TableName, newKeys); err != nil {
+		if err := p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName, newKeys); err != nil {
 			return nil, fmt.Errorf("dynamodb deleteItem saveItemKeys: %w", err)
 		}
 		// Append stream record.
-		p.appendStreamRecord(context.Background(), ctx.AccountID, input.TableName, "REMOVE", oldItem, nil)
+		p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, "REMOVE", oldItem, nil)
 	}
 
 	result := map[string]interface{}{}
@@ -850,7 +850,7 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -864,7 +864,7 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	ik := dynamodbItemKey(pkVal, skVal)
 
-	item, err := p.loadItem(context.Background(), ctx.AccountID, input.TableName, ik)
+	item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	if err != nil {
 		return nil, err
 	}
@@ -898,17 +898,17 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
-	if err := p.saveItem(context.Background(), ctx.AccountID, input.TableName, ik, item); err != nil {
+	if err := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik, item); err != nil {
 		return nil, fmt.Errorf("dynamodb updateItem saveItem: %w", err)
 	}
 
 	if isNew {
-		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 		if err != nil {
 			return nil, err
 		}
 		itemKeys = append(itemKeys, ik)
-		if err := p.saveItemKeys(context.Background(), ctx.AccountID, input.TableName, itemKeys); err != nil {
+		if err := p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName, itemKeys); err != nil {
 			return nil, fmt.Errorf("dynamodb updateItem saveItemKeys: %w", err)
 		}
 	}
@@ -918,7 +918,7 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if isNew {
 		updateEventName = "INSERT"
 	}
-	p.appendStreamRecord(context.Background(), ctx.AccountID, input.TableName, updateEventName, oldItem, item)
+	p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, updateEventName, oldItem, item)
 
 	result := map[string]interface{}{}
 	switch input.ReturnValues {
@@ -955,7 +955,7 @@ func (p *DynamoDBPlugin) batchGetItem(ctx *RequestContext, req *AWSRequest) (*AW
 	responses := make(map[string][]map[string]*AttributeValue)
 
 	for tableName, tableReq := range input.RequestItems {
-		tbl, err := p.loadTable(context.Background(), ctx.AccountID, tableName)
+		tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -969,7 +969,7 @@ func (p *DynamoDBPlugin) batchGetItem(ctx *RequestContext, req *AWSRequest) (*AW
 				continue
 			}
 			ik := dynamodbItemKey(pkVal, skVal)
-			item, err := p.loadItem(context.Background(), ctx.AccountID, tableName, ik)
+			item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
 			if err != nil || item == nil {
 				continue
 			}
@@ -1001,7 +1001,7 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 	}
 
 	for tableName, requests := range input.RequestItems {
-		tbl, err := p.loadTable(context.Background(), ctx.AccountID, tableName)
+		tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -1016,14 +1016,14 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 					return nil, err
 				}
 				ik := dynamodbItemKey(pkVal, skVal)
-				existing, _ := p.loadItem(context.Background(), ctx.AccountID, tableName, ik)
-				if err := p.saveItem(context.Background(), ctx.AccountID, tableName, ik, writeReq.PutRequest.Item); err != nil {
+				existing, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
+				if err := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, writeReq.PutRequest.Item); err != nil {
 					return nil, fmt.Errorf("dynamodb batchWriteItem put: %w", err)
 				}
 				if existing == nil {
-					itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, tableName)
+					itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName)
 					itemKeys = append(itemKeys, ik)
-					_ = p.saveItemKeys(context.Background(), ctx.AccountID, tableName, itemKeys)
+					_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName, itemKeys)
 				}
 			} else if writeReq.DeleteRequest.Key != nil {
 				_, pkVal, _, skVal, err := extractPrimaryKey(writeReq.DeleteRequest.Key, tbl.KeySchema)
@@ -1031,17 +1031,17 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 					return nil, err
 				}
 				ik := dynamodbItemKey(pkVal, skVal)
-				existing, _ := p.loadItem(context.Background(), ctx.AccountID, tableName, ik)
+				existing, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
 				if existing != nil {
-					_ = p.deleteItemByKey(context.Background(), ctx.AccountID, tableName, ik)
-					itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, tableName)
+					_ = p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
+					itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName)
 					newKeys := make([]string, 0, len(itemKeys))
 					for _, k := range itemKeys {
 						if k != ik {
 							newKeys = append(newKeys, k)
 						}
 					}
-					_ = p.saveItemKeys(context.Background(), ctx.AccountID, tableName, newKeys)
+					_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName, newKeys)
 				}
 			}
 		}
@@ -1078,7 +1078,7 @@ func (p *DynamoDBPlugin) transactGetItems(reqCtx *RequestContext, req *AWSReques
 			continue
 		}
 		g := ti.Get
-		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, g.TableName)
+		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, g.TableName)
 		if err != nil {
 			return nil, err
 		}
@@ -1089,7 +1089,7 @@ func (p *DynamoDBPlugin) transactGetItems(reqCtx *RequestContext, req *AWSReques
 		if err != nil {
 			return nil, err
 		}
-		item, err := p.loadItem(context.Background(), reqCtx.AccountID, g.TableName, dynamodbItemKey(pkVal, skVal))
+		item, err := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, g.TableName, dynamodbItemKey(pkVal, skVal))
 		if err != nil {
 			return nil, err
 		}
@@ -1192,7 +1192,7 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 			continue
 		}
 
-		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, tableName)
+		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -1204,7 +1204,7 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		if keyErr != nil {
 			return nil, keyErr
 		}
-		currentItem, loadErr := p.loadItem(context.Background(), reqCtx.AccountID, tableName, dynamodbItemKey(pkVal, skVal))
+		currentItem, loadErr := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, tableName, dynamodbItemKey(pkVal, skVal))
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -1237,7 +1237,7 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		switch {
 		case ti.Put != nil:
 			put := ti.Put
-			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, put.TableName)
+			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1249,23 +1249,23 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 				return nil, err
 			}
 			ik := dynamodbItemKey(pkVal, skVal)
-			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, put.TableName, ik)
-			if err := p.saveItem(context.Background(), reqCtx.AccountID, put.TableName, ik, put.Item); err != nil {
+			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, ik)
+			if err := p.saveItem(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, ik, put.Item); err != nil {
 				return nil, fmt.Errorf("transactWriteItems put saveItem: %w", err)
 			}
 			if old == nil {
-				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, put.TableName)
-				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, put.TableName, append(keys, ik))
+				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName)
+				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, append(keys, ik))
 			}
 			eventName := "MODIFY"
 			if old == nil {
 				eventName = "INSERT"
 			}
-			p.appendStreamRecord(context.Background(), reqCtx.AccountID, put.TableName, eventName, old, put.Item)
+			p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, eventName, old, put.Item)
 
 		case ti.Update != nil:
 			upd := ti.Update
-			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, upd.TableName)
+			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1277,7 +1277,7 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 				return nil, err
 			}
 			ik := dynamodbItemKey(pkVal, skVal)
-			item, _ := p.loadItem(context.Background(), reqCtx.AccountID, upd.TableName, ik)
+			item, _ := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, ik)
 			isNew := item == nil
 			if isNew {
 				item = make(map[string]*AttributeValue)
@@ -1291,18 +1291,18 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 					return nil, &AWSError{Code: "ValidationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 				}
 			}
-			if err := p.saveItem(context.Background(), reqCtx.AccountID, upd.TableName, ik, item); err != nil {
+			if err := p.saveItem(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, ik, item); err != nil {
 				return nil, fmt.Errorf("transactWriteItems update saveItem: %w", err)
 			}
 			if isNew {
-				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, upd.TableName)
-				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, upd.TableName, append(keys, ik))
+				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName)
+				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, append(keys, ik))
 			}
-			p.appendStreamRecord(context.Background(), reqCtx.AccountID, upd.TableName, "MODIFY", old, item)
+			p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, "MODIFY", old, item)
 
 		case ti.Delete != nil:
 			del := ti.Delete
-			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, del.TableName)
+			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1314,20 +1314,20 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 				return nil, err
 			}
 			ik := dynamodbItemKey(pkVal, skVal)
-			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, del.TableName, ik)
+			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, ik)
 			if old != nil {
-				if err := p.deleteItemByKey(context.Background(), reqCtx.AccountID, del.TableName, ik); err != nil {
+				if err := p.deleteItemByKey(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, ik); err != nil {
 					return nil, fmt.Errorf("transactWriteItems delete: %w", err)
 				}
-				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, del.TableName)
+				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName)
 				newKeys := make([]string, 0, len(keys))
 				for _, k := range keys {
 					if k != ik {
 						newKeys = append(newKeys, k)
 					}
 				}
-				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, del.TableName, newKeys)
-				p.appendStreamRecord(context.Background(), reqCtx.AccountID, del.TableName, "REMOVE", old, nil)
+				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, newKeys)
+				p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, "REMOVE", old, nil)
 			}
 		}
 	}
@@ -1352,7 +1352,7 @@ func (p *DynamoDBPlugin) scan(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1360,7 +1360,7 @@ func (p *DynamoDBPlugin) scan(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + input.TableName, HTTPStatus: http.StatusBadRequest}
 	}
 
-	itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+	itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1383,7 +1383,7 @@ func (p *DynamoDBPlugin) scan(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	scannedCount := 0
 
 	for i := startIdx; i < len(itemKeys); i++ {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, input.TableName, itemKeys[i])
+		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, itemKeys[i])
 		if err != nil || item == nil {
 			continue
 		}
@@ -1444,7 +1444,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1468,7 +1468,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 
 	// Load all item keys.
-	itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, input.TableName)
+	itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1476,7 +1476,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	// Filter items matching PK (and SK condition if present).
 	var matchingKeys []string
 	for _, ik := range itemKeys {
-		item, loadErr := p.loadItem(context.Background(), ctx.AccountID, input.TableName, ik)
+		item, loadErr := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 		if loadErr != nil || item == nil {
 			continue
 		}
@@ -1515,8 +1515,8 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	forward := input.ScanIndexForward == nil || *input.ScanIndexForward
 	if sortKey != "" {
 		sort.Slice(matchingKeys, func(i, j int) bool {
-			itemI, _ := p.loadItem(context.Background(), ctx.AccountID, input.TableName, matchingKeys[i])
-			itemJ, _ := p.loadItem(context.Background(), ctx.AccountID, input.TableName, matchingKeys[j])
+			itemI, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, matchingKeys[i])
+			itemJ, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, matchingKeys[j])
 			if itemI == nil || itemJ == nil {
 				return false
 			}
@@ -1548,7 +1548,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	scannedCount := 0
 
 	for i, ik := range matchingKeys {
-		item, loadErr := p.loadItem(context.Background(), ctx.AccountID, input.TableName, ik)
+		item, loadErr := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 		if loadErr != nil || item == nil {
 			continue
 		}
@@ -1605,7 +1605,7 @@ func (p *DynamoDBPlugin) updateTimeToLive(ctx *RequestContext, req *AWSRequest) 
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1619,7 +1619,7 @@ func (p *DynamoDBPlugin) updateTimeToLive(ctx *RequestContext, req *AWSRequest) 
 		tbl.TTLAttribute = ""
 	}
 
-	if err := p.saveTable(context.Background(), ctx.AccountID, tbl); err != nil {
+	if err := p.saveTable(context.Background(), ctx.AccountID, ctx.Region, tbl); err != nil {
 		return nil, fmt.Errorf("dynamodb updateTimeToLive: %w", err)
 	}
 
@@ -1639,7 +1639,7 @@ func (p *DynamoDBPlugin) describeTimeToLive(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1700,6 +1700,11 @@ type DynamoDBStreamCursor struct {
 	// AccountID is the owning account.
 	AccountID string `json:"accountId"`
 
+	// Region is the Region whose copy of the table the iterator reads. A table name is unique
+	// only within a Region (#943), so an iterator that carried only the account could be
+	// redeemed against another Region's ring buffer.
+	Region string `json:"region"`
+
 	// Sequence is the position in the ring buffer (next to read).
 	Sequence int64 `json:"sequence"`
 
@@ -1707,8 +1712,8 @@ type DynamoDBStreamCursor struct {
 	IterType string `json:"iteratorType"`
 }
 
-func (p *DynamoDBPlugin) streamRecordsKey(accountID, tableName string) string {
-	return "stream_records:" + accountID + "/" + tableName
+func (p *DynamoDBPlugin) streamRecordsKey(accountID, region, tableName string) string {
+	return "stream_records:" + accountID + "/" + region + "/" + tableName
 }
 
 // appendStreamRecord adds a CDC record to a table's stream ring buffer if
@@ -1716,15 +1721,15 @@ func (p *DynamoDBPlugin) streamRecordsKey(accountID, tableName string) string {
 // that main item operations never fail due to stream problems.
 func (p *DynamoDBPlugin) appendStreamRecord(
 	ctx context.Context,
-	accountID, tableName, eventName string,
+	accountID, region, tableName, eventName string,
 	oldImage, newImage map[string]*AttributeValue,
 ) {
-	tbl, err := p.loadTable(ctx, accountID, tableName)
+	tbl, err := p.loadTable(ctx, accountID, region, tableName)
 	if err != nil || tbl == nil || tbl.LatestStreamARN == "" {
 		return // streams not enabled
 	}
 
-	rk := p.streamRecordsKey(accountID, tableName)
+	rk := p.streamRecordsKey(accountID, region, tableName)
 	data, _ := p.state.Get(ctx, dynamodbNamespace, rk)
 	var records []DynamoDBStreamRecord
 	if data != nil {
@@ -1766,7 +1771,7 @@ func (p *DynamoDBPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWS
 	var streams []map[string]string
 
 	if input.TableName != "" {
-		tbl, err := p.loadTable(context.Background(), ctx.AccountID, input.TableName)
+		tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 		if err != nil {
 			return nil, err
 		}
@@ -1780,9 +1785,9 @@ func (p *DynamoDBPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWS
 			}
 		}
 	} else {
-		names, _ := p.loadTableNames(context.Background(), ctx.AccountID)
+		names, _ := p.loadTableNames(context.Background(), ctx.AccountID, ctx.Region)
 		for _, name := range names {
-			tbl, err := p.loadTable(context.Background(), ctx.AccountID, name)
+			tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, name)
 			if err != nil || tbl == nil || tbl.LatestStreamARN == "" {
 				continue
 			}
@@ -1849,7 +1854,7 @@ func (p *DynamoDBPlugin) getShardIterator(ctx *RequestContext, req *AWSRequest) 
 	switch input.ShardIteratorType {
 	case "LATEST":
 		// Start after the last record.
-		rk := p.streamRecordsKey(ctx.AccountID, tableName)
+		rk := p.streamRecordsKey(ctx.AccountID, ctx.Region, tableName)
 		data, _ := p.state.Get(context.Background(), dynamodbNamespace, rk)
 		var records []DynamoDBStreamRecord
 		if data != nil {
@@ -1871,6 +1876,7 @@ func (p *DynamoDBPlugin) getShardIterator(ctx *RequestContext, req *AWSRequest) 
 	cursor := DynamoDBStreamCursor{
 		TableName: tableName,
 		AccountID: ctx.AccountID,
+		Region:    ctx.Region,
 		Sequence:  startSeq,
 		IterType:  input.ShardIteratorType,
 	}
@@ -1915,7 +1921,7 @@ func (p *DynamoDBPlugin) getRecords(ctx *RequestContext, req *AWSRequest) (*AWSR
 		})
 	}
 
-	rk := p.streamRecordsKey(cursor.AccountID, cursor.TableName)
+	rk := p.streamRecordsKey(cursor.AccountID, cursor.Region, cursor.TableName)
 	data, _ := p.state.Get(context.Background(), dynamodbNamespace, rk)
 	var allRecords []DynamoDBStreamRecord
 	if data != nil {
@@ -3352,7 +3358,7 @@ func (p *DynamoDBPlugin) executePartiQLStatement(
 		}
 	}
 
-	tbl, err := p.loadTable(context.Background(), ctx.AccountID, tableName)
+	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -3479,14 +3485,14 @@ func (p *DynamoDBPlugin) partiQLSelect(
 	whereClause string,
 	_ []*AttributeValue,
 ) ([]map[string]*AttributeValue, error) {
-	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []map[string]*AttributeValue
 	for _, k := range keys {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, tbl.TableName, k)
+		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
 		if err != nil || item == nil {
 			continue
 		}
@@ -3523,13 +3529,13 @@ func (p *DynamoDBPlugin) partiQLInsert(
 	}
 	ik := dynamodbItemKey(pkVal, skVal)
 
-	if err := p.saveItem(context.Background(), ctx.AccountID, tbl.TableName, ik, item); err != nil {
+	if err := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, ik, item); err != nil {
 		return nil, fmt.Errorf("partiQL insert saveItem: %w", err)
 	}
-	keys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	keys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
 	keys = append(keys, ik)
-	_ = p.saveItemKeys(context.Background(), ctx.AccountID, tbl.TableName, keys)
-	p.appendStreamRecord(context.Background(), ctx.AccountID, tbl.TableName, "INSERT", nil, item)
+	_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, keys)
+	p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "INSERT", nil, item)
 	return nil, nil
 }
 
@@ -3539,13 +3545,13 @@ func (p *DynamoDBPlugin) partiQLUpdate(
 	whereClause, setClause string,
 	_ []*AttributeValue,
 ) ([]map[string]*AttributeValue, error) {
-	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, k := range keys {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, tbl.TableName, k)
+		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
 		if err != nil || item == nil {
 			continue
 		}
@@ -3567,10 +3573,10 @@ func (p *DynamoDBPlugin) partiQLUpdate(
 				}
 			}
 		}
-		if saveErr := p.saveItem(context.Background(), ctx.AccountID, tbl.TableName, k, item); saveErr != nil {
+		if saveErr := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k, item); saveErr != nil {
 			return nil, fmt.Errorf("partiQL update saveItem: %w", saveErr)
 		}
-		p.appendStreamRecord(context.Background(), ctx.AccountID, tbl.TableName, "MODIFY", oldItem, item)
+		p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "MODIFY", oldItem, item)
 	}
 	return nil, nil
 }
@@ -3581,14 +3587,14 @@ func (p *DynamoDBPlugin) partiQLDelete(
 	whereClause string,
 	_ []*AttributeValue,
 ) ([]map[string]*AttributeValue, error) {
-	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, tbl.TableName)
+	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
 	if err != nil {
 		return nil, err
 	}
 
 	remaining := keys[:0]
 	for _, k := range keys {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, tbl.TableName, k)
+		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
 		if err != nil || item == nil {
 			remaining = append(remaining, k)
 			continue
@@ -3600,9 +3606,9 @@ func (p *DynamoDBPlugin) partiQLDelete(
 				continue
 			}
 		}
-		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, tbl.TableName, k)
-		p.appendStreamRecord(context.Background(), ctx.AccountID, tbl.TableName, "REMOVE", item, nil)
+		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
+		p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "REMOVE", item, nil)
 	}
-	_ = p.saveItemKeys(context.Background(), ctx.AccountID, tbl.TableName, remaining)
+	_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, remaining)
 	return nil, nil
 }

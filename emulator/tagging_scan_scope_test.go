@@ -533,10 +533,11 @@ func TestTaggingScanScope_AResourceIsReportedOnlyInItsOwnRegion(t *testing.T) {
 //
 // It runs over every service rather than only the three scanners that narrowed by nothing, because
 // the scope is now held by one filter over the reported ARN and the point is that no scanner can opt
-// out of it. Two resources are created with different names: an S3 bucket name is globally unique,
-// and a Lambda function's state key is "function:{name}" with no account in it, so two accounts
-// creating one name would collide in state rather than be reported to the wrong caller. That
-// collision is the write-side residue of this issue and is filed as #943.
+// out of it. Two resources are created with different names, which an S3 bucket still requires —
+// a bucket name is globally unique, so two accounts cannot create one. Lambda and DynamoDB needed
+// it too until #943, whose keys carried no account and no Region respectively, so two accounts
+// creating one function name collided in state rather than being reported to the wrong caller;
+// [TestTaggingKeyScope_TwoAccountsHoldOneFunctionName] is that case asserted directly.
 func TestTaggingScanScope_AResourceIsReportedOnlyToItsOwnAccount(t *testing.T) {
 	for _, svc := range scanScopeServices {
 		t.Run(svc.name, func(t *testing.T) {

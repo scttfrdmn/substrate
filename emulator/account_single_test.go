@@ -264,7 +264,7 @@ func TestSingleAccount_ServicesAgreeOnTheAccount(t *testing.T) {
 				":cloudformation:us-east-1:"+account+":stack/"+stack+"/")
 
 			// 3. An account-prefixed state key, written by one service and read by
-			// another. A DynamoDB table is written under "table:{account}/{name}";
+			// another. A DynamoDB table is written under "table:{account}/{region}/{name}";
 			// the tagging API lists that prefix and reports the ARN the table
 			// carries. Both halves have to agree with the account above, or the
 			// table is created and then unreachable.

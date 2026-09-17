@@ -493,6 +493,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Tags` member instead.
 
 ### Fixed
+- **Two accounts could not each hold a Lambda function named `orders`, and one account could not hold a
+  DynamoDB table named `orders` in two Regions** (#943). A function's state key was `function:{name}` and a
+  table's was `table:{account}/{name}`, so the second create in either pair found the first's record and was
+  refused — `ResourceConflictException`/409 for the function, `ResourceInUseException`/400 for the table.
+  Neither caller had done anything AWS forbids. Deploying one stack to two Regions is the ordinary case, not
+  an exotic one, and it did not work. Both key families are now `{kind}:{account}/{region}/{name}`, which is
+  the shape Glue, Timestream and AppSync already used and the shape CloudFormation's tag stamper keys on —
+  so both types could also leave the stamper's two hand-written `switch` arms and join its table.
+
+  **The two halves rest on different provenance, and the release notes say so.** DynamoDB's is quoted:
+  `API_CreateTable`'s description reads *"In an AWS account, table names must be unique within each Region.
+  That is, you can have two tables with same name if you create the tables in different Regions"*, and the
+  code the old key produced is on the same page — `ResourceInUseException`, first cause *"[y]ou attempted to
+  recreate an existing table"*, HTTP 400. Lambda's is **the weaker of the two and an inference rather than a
+  quotation**: `API_CreateFunction` states nothing about the scope a function name is unique within, and the
+  whole of the argument is that the `FunctionArn` it hands back is patterned
+  `arn:…:lambda:{region}:{account}:function:{name}`, so the identifier AWS mints qualifies the name by both.
+  An identifier that carries a scope is not an identifier of something outside it — the same reasoning the
+  ARN-format argument gave for SQS in #826 and DynamoDB in #845, recorded as substrate's reading.
+
+  **Three sibling keys moved with the function key, because qualifying only `function:` would have opened a
+  new leak.** A function's resource policy, its stored zip and its event-invoke configuration were keyed on
+  the bare name, so two accounts' same-named functions would have shared one policy, one code payload and
+  one invoke configuration — an `AddPermission` in one account granting access on the other's function.
+  Every key family in both services now carries the full scope, and `ListFunctions` is scoped to the
+  caller's own account and Region rather than scanning every key.
+
+  **One behaviour changed that no key required.** A Lambda event source mapping can name a queue in one
+  account and a function in another, and the poller invoked the function using the *event source's* account
+  and Region. That was already wrong and was invisible while the function key carried neither; the invoke
+  now resolves the function in the account and Region its own `FunctionARN` names.
+
+  **No stored state needs migrating, and that is a fact rather than a decision.** `NewMemoryStateManager`
+  is the only `StateManager` in non-test code and the server constructs it unconditionally — a SQLite
+  backend is deferred to #2 — so a key lives for one process and nothing is written under the old shape for
+  a later run to fail to find. The rename is same-process and needs no compatibility path. `docs/services.md`
+  records that, so that when a persistent backend arrives the note saying a key-shape change stops being
+  free is already on the record.
+
 - **A Kinesis stream could hold three hundred tags, so `ListTagsForStream` answered an array longer than
   its own published maximum** (#965). `API_AddTagsToStream` states two different limits *inside a single
   parameter entry*: the `Tags` member's description reads *"A set of up to 50 key-value pairs to use to

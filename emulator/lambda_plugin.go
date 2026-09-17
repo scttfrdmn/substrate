@@ -259,7 +259,8 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	// Check for existing function.
-	existing, err := p.state.Get(context.Background(), lambdaNamespace, "function:"+body.FunctionName)
+	existing, err := p.state.Get(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, body.FunctionName))
 	if err != nil {
 		return nil, fmt.Errorf("lambda createFunction state.Get: %w", err)
 	}
@@ -326,7 +327,8 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 			fn.CodeSize = int64(len(decoded))
 			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
-			_ = p.state.Put(context.Background(), lambdaNamespace, "function_zip:"+body.FunctionName, decoded)
+			_ = p.state.Put(context.Background(), lambdaNamespace,
+				lambdaZipStateKey(ctx.AccountID, ctx.Region, body.FunctionName), decoded)
 		}
 	} else if body.Code.S3Bucket != "" {
 		// The bytes are not staged for execution — that is what ZipStored records and
@@ -345,7 +347,8 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	if err != nil {
 		return nil, fmt.Errorf("lambda createFunction marshal: %w", err)
 	}
-	if err := p.state.Put(context.Background(), lambdaNamespace, "function:"+body.FunctionName, data); err != nil {
+	if err := p.state.Put(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, body.FunctionName), data); err != nil {
 		return nil, fmt.Errorf("lambda createFunction state.Put: %w", err)
 	}
 
@@ -357,8 +360,8 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	return lambdaJSONResponse(http.StatusCreated, buildFunctionConfig(fn))
 }
 
-func (p *LambdaPlugin) getFunction(_ *RequestContext, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(name)
+func (p *LambdaPlugin) getFunction(ctx *RequestContext, name string) (*AWSResponse, error) {
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -396,8 +399,8 @@ func (p *LambdaPlugin) getFunction(_ *RequestContext, name string) (*AWSResponse
 	})
 }
 
-func (p *LambdaPlugin) updateFunctionCode(_ *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(name)
+func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +429,8 @@ func (p *LambdaPlugin) updateFunctionCode(_ *RequestContext, req *AWSRequest, na
 			fn.CodeSize = int64(len(decoded))
 			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
-			_ = p.state.Put(context.Background(), lambdaNamespace, "function_zip:"+name, decoded)
+			_ = p.state.Put(context.Background(), lambdaNamespace,
+				lambdaZipStateKey(ctx.AccountID, ctx.Region, name), decoded)
 		}
 	case body.S3Bucket != "":
 		// The bytes are not staged for execution — that is what ZipStored records and
@@ -447,11 +451,11 @@ func (p *LambdaPlugin) updateFunctionCode(_ *RequestContext, req *AWSRequest, na
 		fn.CodeSha256 = lambdaCodeSha256([]byte(body.ImageURI))
 	}
 
-	return p.saveFunctionAndRespond(fn, http.StatusOK)
+	return p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
 }
 
-func (p *LambdaPlugin) updateFunctionConfiguration(_ *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(name)
+func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -493,28 +497,36 @@ func (p *LambdaPlugin) updateFunctionConfiguration(_ *RequestContext, req *AWSRe
 	fn.RevisionID = generateLambdaRevisionID()
 	fn.LastModified = p.tc.Now()
 
-	return p.saveFunctionAndRespond(fn, http.StatusOK)
+	return p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
 }
 
-func (p *LambdaPlugin) deleteFunction(_ *RequestContext, name string) (*AWSResponse, error) {
-	existing, err := p.state.Get(context.Background(), lambdaNamespace, "function:"+name)
+func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, name string) (*AWSResponse, error) {
+	existing, err := p.state.Get(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, name))
 	if err != nil {
 		return nil, fmt.Errorf("lambda deleteFunction state.Get: %w", err)
 	}
 	if existing == nil {
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Function not found: " + name, HTTPStatus: http.StatusNotFound}
 	}
-	if err := p.state.Delete(context.Background(), lambdaNamespace, "function:"+name); err != nil {
+	if err := p.state.Delete(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, name)); err != nil {
 		return nil, fmt.Errorf("lambda deleteFunction state.Delete: %w", err)
 	}
 	// Also delete policy and invoke config.
-	_ = p.state.Delete(context.Background(), lambdaNamespace, "function_policy:"+name)
-	_ = p.state.Delete(context.Background(), lambdaNamespace, "function_invoke_config:"+name)
+	_ = p.state.Delete(context.Background(), lambdaNamespace,
+		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name))
+	_ = p.state.Delete(context.Background(), lambdaNamespace,
+		lambdaInvokeConfigStateKey(ctx.AccountID, ctx.Region, name))
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
-func (p *LambdaPlugin) listFunctions(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	keys, err := p.state.List(context.Background(), lambdaNamespace, "function:")
+func (p *LambdaPlugin) listFunctions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Scoped to the caller's own account and Region: ListFunctions "returns a list of Lambda
+	// functions", and a function belongs to one account in one Region, so a scan over every
+	// key would report another account's (#943).
+	keys, err := p.state.List(context.Background(), lambdaNamespace,
+		lambdaFunctionKeyPrefix(ctx.AccountID, ctx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("lambda listFunctions state.List: %w", err)
 	}
@@ -621,7 +633,7 @@ func lambdaLogTail(req *AWSRequest, fn LambdaFunction, requestID string, errored
 }
 
 func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(name)
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -658,7 +670,8 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 	// Load stored ZIP bytes (nil for Image-type functions).
 	var zipBytes []byte
 	if fn.ZipStored {
-		zipBytes, _ = p.state.Get(context.Background(), lambdaNamespace, "function_zip:"+name)
+		zipBytes, _ = p.state.Get(context.Background(), lambdaNamespace,
+			lambdaZipStateKey(ctx.AccountID, ctx.Region, name))
 	}
 
 	result, funcErr, execErr := p.executor.Execute(context.Background(), fn, zipBytes, payload)
@@ -680,8 +693,8 @@ func (p *LambdaPlugin) invokeAsync(_ string) (*AWSResponse, error) {
 	}, nil
 }
 
-func (p *LambdaPlugin) addPermission(_ *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(name)
+func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +716,7 @@ func (p *LambdaPlugin) addPermission(_ *RequestContext, req *AWSRequest, name st
 	}
 
 	// Load existing policy or create new one.
-	policy, loadErr := p.loadPolicy(name)
+	policy, loadErr := p.loadPolicy(ctx.AccountID, ctx.Region, name)
 	if loadErr != nil {
 		return nil, loadErr
 	}
@@ -736,7 +749,8 @@ func (p *LambdaPlugin) addPermission(_ *RequestContext, req *AWSRequest, name st
 	if marshalErr != nil {
 		return nil, fmt.Errorf("lambda addPermission marshal: %w", marshalErr)
 	}
-	if putErr := p.state.Put(context.Background(), lambdaNamespace, "function_policy:"+name, policyData); putErr != nil {
+	if putErr := p.state.Put(context.Background(), lambdaNamespace,
+		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name), policyData); putErr != nil {
 		return nil, fmt.Errorf("lambda addPermission state.Put: %w", putErr)
 	}
 
@@ -744,12 +758,12 @@ func (p *LambdaPlugin) addPermission(_ *RequestContext, req *AWSRequest, name st
 	return lambdaJSONResponse(http.StatusCreated, map[string]json.RawMessage{"Statement": stmtData})
 }
 
-func (p *LambdaPlugin) removePermission(_ *RequestContext, name, statementID string) (*AWSResponse, error) {
-	if _, err := p.loadFunction(name); err != nil {
+func (p *LambdaPlugin) removePermission(ctx *RequestContext, name, statementID string) (*AWSResponse, error) {
+	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
 		return nil, err
 	}
 
-	policy, err := p.loadPolicy(name)
+	policy, err := p.loadPolicy(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -775,19 +789,20 @@ func (p *LambdaPlugin) removePermission(_ *RequestContext, name, statementID str
 	if err != nil {
 		return nil, fmt.Errorf("lambda removePermission marshal: %w", err)
 	}
-	if err := p.state.Put(context.Background(), lambdaNamespace, "function_policy:"+name, policyData); err != nil {
+	if err := p.state.Put(context.Background(), lambdaNamespace,
+		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name), policyData); err != nil {
 		return nil, fmt.Errorf("lambda removePermission state.Put: %w", err)
 	}
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
-func (p *LambdaPlugin) getPolicy(_ *RequestContext, name string) (*AWSResponse, error) {
-	if _, err := p.loadFunction(name); err != nil {
+func (p *LambdaPlugin) getPolicy(ctx *RequestContext, name string) (*AWSResponse, error) {
+	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
 		return nil, err
 	}
 
-	policy, err := p.loadPolicy(name)
+	policy, err := p.loadPolicy(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
@@ -802,8 +817,8 @@ func (p *LambdaPlugin) getPolicy(_ *RequestContext, name string) (*AWSResponse, 
 	return lambdaJSONResponse(http.StatusOK, map[string]string{"Policy": string(policyJSON)})
 }
 
-func (p *LambdaPlugin) putFunctionEventInvokeConfig(_ *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	if _, err := p.loadFunction(name); err != nil {
+func (p *LambdaPlugin) putFunctionEventInvokeConfig(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
+	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
 		return nil, err
 	}
 
@@ -822,7 +837,8 @@ func (p *LambdaPlugin) putFunctionEventInvokeConfig(_ *RequestContext, req *AWSR
 	if marshalErr != nil {
 		return nil, fmt.Errorf("lambda putFunctionEventInvokeConfig marshal: %w", marshalErr)
 	}
-	if putErr := p.state.Put(context.Background(), lambdaNamespace, "function_invoke_config:"+name, data); putErr != nil {
+	if putErr := p.state.Put(context.Background(), lambdaNamespace,
+		lambdaInvokeConfigStateKey(ctx.AccountID, ctx.Region, name), data); putErr != nil {
 		return nil, fmt.Errorf("lambda putFunctionEventInvokeConfig state.Put: %w", putErr)
 	}
 
@@ -833,9 +849,16 @@ func (p *LambdaPlugin) putFunctionEventInvokeConfig(_ *RequestContext, req *AWSR
 
 // findFunctionByARN returns the LambdaFunction whose FunctionArn matches arn.
 // Returns ResourceNotFoundException when no match is found.
+//
+// The scan is narrowed to the account and Region the ARN itself names, not the caller's:
+// an ARN naming another account's function must resolve that account's function or none,
+// which is the rule #826 established for the tagging resolver. A malformed ARN narrows to
+// nothing and so answers ResourceNotFoundException, which is what a scan for an ARN no
+// record carries already answered (#943).
 func (p *LambdaPlugin) findFunctionByARN(arn string) (*LambdaFunction, error) {
 	ctx := context.Background()
-	names, err := p.state.List(ctx, lambdaNamespace, "function:")
+	acct, region := lambdaARNScope(arn)
+	names, err := p.state.List(ctx, lambdaNamespace, lambdaFunctionKeyPrefix(acct, region))
 	if err != nil {
 		return nil, fmt.Errorf("lambda findFunctionByARN list: %w", err)
 	}
@@ -855,7 +878,7 @@ func (p *LambdaPlugin) findFunctionByARN(arn string) (*LambdaFunction, error) {
 	return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Function not found: " + arn, HTTPStatus: http.StatusNotFound}
 }
 
-func (p *LambdaPlugin) tagResource(_ *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
+func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
 	fn, err := p.findFunctionByARN(arn)
 	if err != nil {
 		return nil, err
@@ -872,13 +895,13 @@ func (p *LambdaPlugin) tagResource(_ *RequestContext, req *AWSRequest, arn strin
 	for k, v := range body.Tags {
 		fn.Tags[k] = v
 	}
-	if _, saveErr := p.saveFunctionAndRespond(*fn, http.StatusOK); saveErr != nil {
+	if _, saveErr := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, *fn, http.StatusOK); saveErr != nil {
 		return nil, saveErr
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/json"}, Body: nil}, nil
 }
 
-func (p *LambdaPlugin) untagResource(_ *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
+func (p *LambdaPlugin) untagResource(ctx *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
 	fn, err := p.findFunctionByARN(arn)
 	if err != nil {
 		return nil, err
@@ -890,13 +913,13 @@ func (p *LambdaPlugin) untagResource(_ *RequestContext, req *AWSRequest, arn str
 			}
 		}
 	}
-	if _, saveErr := p.saveFunctionAndRespond(*fn, http.StatusOK); saveErr != nil {
+	if _, saveErr := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, *fn, http.StatusOK); saveErr != nil {
 		return nil, saveErr
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/json"}, Body: nil}, nil
 }
 
-func (p *LambdaPlugin) listTags(_ *RequestContext, arn string) (*AWSResponse, error) {
+func (p *LambdaPlugin) listTags(ctx *RequestContext, arn string) (*AWSResponse, error) {
 	fn, err := p.findFunctionByARN(arn)
 	if err != nil {
 		return nil, err
@@ -910,8 +933,9 @@ func (p *LambdaPlugin) listTags(_ *RequestContext, arn string) (*AWSResponse, er
 
 // --- Helpers ---------------------------------------------------------------
 
-func (p *LambdaPlugin) loadFunction(name string) (LambdaFunction, error) {
-	data, err := p.state.Get(context.Background(), lambdaNamespace, "function:"+name)
+func (p *LambdaPlugin) loadFunction(accountID, region, name string) (LambdaFunction, error) {
+	data, err := p.state.Get(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(accountID, region, name))
 	if err != nil {
 		return LambdaFunction{}, fmt.Errorf("lambda loadFunction state.Get: %w", err)
 	}
@@ -925,8 +949,9 @@ func (p *LambdaPlugin) loadFunction(name string) (LambdaFunction, error) {
 	return fn, nil
 }
 
-func (p *LambdaPlugin) loadPolicy(name string) (*LambdaResourcePolicy, error) {
-	data, err := p.state.Get(context.Background(), lambdaNamespace, "function_policy:"+name)
+func (p *LambdaPlugin) loadPolicy(accountID, region, name string) (*LambdaResourcePolicy, error) {
+	data, err := p.state.Get(context.Background(), lambdaNamespace,
+		lambdaPolicyStateKey(accountID, region, name))
 	if err != nil {
 		return nil, fmt.Errorf("lambda loadPolicy state.Get: %w", err)
 	}
@@ -940,12 +965,13 @@ func (p *LambdaPlugin) loadPolicy(name string) (*LambdaResourcePolicy, error) {
 	return &policy, nil
 }
 
-func (p *LambdaPlugin) saveFunctionAndRespond(fn LambdaFunction, status int) (*AWSResponse, error) {
+func (p *LambdaPlugin) saveFunctionAndRespond(accountID, region string, fn LambdaFunction, status int) (*AWSResponse, error) {
 	data, err := json.Marshal(fn)
 	if err != nil {
 		return nil, fmt.Errorf("lambda saveFunctionAndRespond marshal: %w", err)
 	}
-	if err := p.state.Put(context.Background(), lambdaNamespace, "function:"+fn.FunctionName, data); err != nil {
+	if err := p.state.Put(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(accountID, region, fn.FunctionName), data); err != nil {
 		return nil, fmt.Errorf("lambda saveFunctionAndRespond state.Put: %w", err)
 	}
 	return lambdaJSONResponse(status, buildFunctionConfig(fn))
@@ -1527,9 +1553,16 @@ func (p *LambdaPlugin) pollAndInvoke(esm ESMConfig) {
 		return
 	}
 
-	// Derive Lambda function name from ARN.
+	// Derive the function's name, account and Region from its own ARN:
+	// arn:aws:lambda:{region}:{account}:function:{name}. The invoke context has to carry the
+	// *function's* account and Region rather than the event source's, because since #943 the
+	// state key the invoke resolves is built from them, and a mapping can name a queue in one
+	// account and a function in another.
 	fnParts := strings.Split(esm.FunctionARN, ":")
-	fnName := fnParts[len(fnParts)-1]
+	if len(fnParts) < 7 {
+		return
+	}
+	fnRegion, fnAcct, fnName := fnParts[3], fnParts[4], fnParts[6]
 
 	// Invoke Lambda.
 	invokeReq := &AWSRequest{
@@ -1541,8 +1574,8 @@ func (p *LambdaPlugin) pollAndInvoke(esm ESMConfig) {
 	}
 	invokeCtx := &RequestContext{
 		RequestID: generateRequestID(),
-		AccountID: acct,
-		Region:    region,
+		AccountID: fnAcct,
+		Region:    fnRegion,
 		Timestamp: time.Now(),
 		Metadata:  make(map[string]interface{}),
 	}

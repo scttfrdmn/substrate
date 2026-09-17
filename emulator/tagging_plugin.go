@@ -417,15 +417,16 @@ func (p *TaggingPlugin) scanS3Buckets(_ context.Context, reqCtx *RequestContext)
 
 // scanLambdaFunctions lists the caller's functions.
 //
-// It narrows by nothing, because the key is "function:{name}" — neither the account nor the Region is
-// in it, and a function name is unique per account per Region only, so this key cannot tell two
-// callers' functions of one name apart in the first place. Both halves of the scope come from the
-// function's own ARN through [taggingResourceInScope], which is enough for the read side; the write
-// side has the same blindness in resolveARN's lambda arm and needs the key change this does not make
-// (#943).
-func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, _ *RequestContext) ([]resourceTagMapping, error) {
+// Narrowed by both halves of the scope, because since #943 [lambdaFunctionStateKey] carries both:
+// the key was "function:{name}" until then and could not tell two callers' functions of one name
+// apart at all, so the scan had to narrow by nothing and rely on [taggingResourceInScope] reading
+// the scope back off the function's own ARN. That check still runs — it is what makes a
+// ResourceTypeFilter and a malformed record answer alike — but the scan no longer loads another
+// account's or Region's record to reject it.
+func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, lambdaNamespace, "function:")
+	keys, err := p.state.List(goCtx, lambdaNamespace,
+		lambdaFunctionKeyPrefix(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("list lambda functions: %w", err)
 	}
@@ -479,12 +480,14 @@ func (p *TaggingPlugin) scanSQSQueues(_ context.Context, reqCtx *RequestContext)
 
 // scanDynamoDBTables lists the caller's tables.
 //
-// Account-qualified but not Region-qualified, because [tableStateKey] carries no Region — it is the
-// one Tier-2 key that cannot express the whole scope. The Region half comes from the table's own ARN
-// through [taggingResourceInScope] (#937).
+// Qualified by both account and Region, since #943 gave [DynamoDBPlugin.tableStateKey] the Region
+// it had been missing — it was account-qualified only, the one regional key that could not express
+// the whole scope, and the Region half came from the table's own ARN through
+// [taggingResourceInScope] (#937). That check still runs; the scan simply no longer loads another
+// Region's record in order to reject it.
 func (p *TaggingPlugin) scanDynamoDBTables(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	prefix := "table:" + reqCtx.AccountID + "/"
+	prefix := "table:" + reqCtx.AccountID + "/" + reqCtx.Region + "/"
 	keys, err := p.state.List(goCtx, dynamodbNamespace, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list dynamodb tables: %w", err)
@@ -1480,11 +1483,17 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		// function:{name}:{alias}, which are lexically identical — only whether the suffix is
 		// numeric tells them apart, and AWS does not resolve the ambiguity. Tags belong to
 		// the function, so there is nothing a qualified ARN could correctly address here.
+		//
+		// The account and Region come from the ARN rather than from the caller's request
+		// context, as they do for the SQS, IAM and EC2 arms. Until #943 neither was in the key
+		// at all, so an ARN naming another account's or another Region's function resolved to
+		// the caller's own same-named one and a TagResources against it wrote there — the
+		// #826 defect, in the arm whose key shape hid it.
 		name, ok := strings.CutPrefix(resource, "function:")
 		if !ok || strings.Contains(name, ":") {
 			return "", "", unsupportedTagResource("Lambda %q is not an unqualified function ARN", resource)
 		}
-		return lambdaNamespace, "function:" + name, nil
+		return lambdaNamespace, lambdaFunctionStateKey(parts[4], parts[3], name), nil
 
 	case "sqs":
 		// arn:aws:sqs:{region}:{acct}:{name}
@@ -1506,16 +1515,18 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		// table: AWS documents an index as table/{name}/index/{index} and a stream as
 		// table/{name}/stream/{label}, both sharing this prefix.
 		//
-		// The account comes from the ARN. Taking it from the caller's request context meant an
-		// ARN naming another account's table tagged the caller's own same-named table, and
-		// UntagResources stripped tags from it — the defect #826 fixed for the SQS arm above,
-		// in the one arm that pass missed. The resolver no longer receives a request context at
-		// all, so no arm can reach for the caller's account again.
+		// The account and Region both come from the ARN. Taking the account from the caller's
+		// request context meant an ARN naming another account's table tagged the caller's own
+		// same-named table, and UntagResources stripped tags from it — the defect #826 fixed for
+		// the SQS arm above, in the one arm that pass missed. The resolver no longer receives a
+		// request context at all, so no arm can reach for the caller's account again. The Region
+		// was not in the key until #943, so until then the same substitution happened across
+		// Regions within one account and nothing here could prevent it.
 		name, ok := strings.CutPrefix(resource, "table/")
 		if !ok || strings.Contains(name, "/") {
 			return "", "", unsupportedTagResource("DynamoDB %q is not a table ARN", resource)
 		}
-		return dynamodbNamespace, "table:" + parts[4] + "/" + name, nil
+		return dynamodbNamespace, "table:" + parts[4] + "/" + parts[3] + "/" + name, nil
 
 	case "ec2":
 		// arn:aws:ec2:{region}:{acct}:instance/{id}
