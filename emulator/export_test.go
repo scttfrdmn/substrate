@@ -1408,3 +1408,50 @@ func CheckReplayGatesForTest(p ReplayPipeline, reqCtx *RequestContext, req *AWSR
 // [FaultController.GetConfig] directly, rather than only through the replay that calls
 // it (#833).
 func RewindFaultsForTest(f *FaultController) { f.rewindForReplay() }
+
+// ReplayBodyDifference is one difference from a response-body comparison, in the
+// shape a test asserts on: the [EventDifference.Field] the replay engine would
+// record and the two values.
+type ReplayBodyDifference struct {
+	// Field is the value bodyDifferenceField renders for the difference's path.
+	Field string
+
+	// Expected is the value the recorded body carries.
+	Expected interface{}
+
+	// Actual is the value the replayed body carries.
+	Actual interface{}
+}
+
+// CompareResponseBodiesForTest compares two response bodies the way replay
+// verification does and returns the differences.
+//
+// Exported because the comparison is worth testing on a pair of bodies rather than
+// only through a whole replay: the normalisation policy #817 asks to have stated —
+// JSON member order ignored, XML indentation ignored, collection order and every
+// minted identifier reported — is a claim about specific pairs of documents, and a
+// recording cannot be made to contain most of them on demand.
+func CompareResponseBodiesForTest(recorded, replayed []byte) []ReplayBodyDifference {
+	diffs := responseBodyDifferences(&AWSResponse{Body: recorded}, &AWSResponse{Body: replayed})
+	out := make([]ReplayBodyDifference, 0, len(diffs))
+	for _, d := range diffs {
+		out = append(out, ReplayBodyDifference{
+			Field:    bodyDifferenceField(d.path),
+			Expected: d.expected,
+			Actual:   d.actual,
+		})
+	}
+	return out
+}
+
+// ReplayBodyDiffLimitForTest is the per-body cap on reported differences, so a test
+// asserting the truncation marker does not restate the constant.
+func ReplayBodyDiffLimitForTest() int { return replayBodyDiffLimit }
+
+// ReplayBodyDiffTruncatedForTest is the Actual value of the difference appended when
+// a comparison stops at the cap.
+func ReplayBodyDiffTruncatedForTest() string { return replayBodyDiffTruncated }
+
+// ReplayBodyMemberAbsentForTest is the value reported for a side that has no member,
+// element or attribute at a path.
+func ReplayBodyMemberAbsentForTest() string { return bodyMemberAbsent }

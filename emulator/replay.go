@@ -122,7 +122,10 @@ type ReplayResults struct {
 	// Duration is the wall-clock time taken for the replay run.
 	Duration time.Duration
 
-	// Differences lists divergences between original and replayed responses.
+	// Differences lists divergences between original and replayed responses:
+	// the status code, the error, the state hash before and after, and every
+	// difference inside the response body, each located by its path within that
+	// body (see [bodyDifferenceField]). One event can contribute several.
 	Differences []*EventDifference
 
 	// StateValid reports whether all state hash checks passed.
@@ -141,7 +144,18 @@ type EventDifference struct {
 	// Sequence is the event's position in the stream.
 	Sequence int64
 
-	// Field names the response or state field that diverged.
+	// Operation is the AWS API operation the diverging event invoked.
+	//
+	// Recorded so that a difference names the call that produced it without the
+	// reader having to look the sequence number back up in the stream. EventID
+	// carries the operation too, but only as one field of a minted composite
+	// (see generateEventID), which is not something a report should be parsing
+	// (#817).
+	Operation string
+
+	// Field names the response or state field that diverged. A body comparison
+	// reports "response_body" followed by the path within the body; see
+	// [bodyDifferenceField].
 	Field string
 
 	// Expected is the value recorded in the original event.
@@ -384,6 +398,16 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 // A replay writes no events, so a refusal here is compared against the recording
 // rather than recorded, and it counts in [ReplayResults.FailedEvents] — which means
 // "returned an error", not "diverged", exactly as it does for a recorded plugin error.
+//
+// # What is compared once the request has been re-executed
+//
+// Four comparisons, each recording its own [EventDifference]: the state hash before
+// the event and after it (when [ReplayConfig.ValidateState] is set and the recording
+// carries one), the error, the status code, and the response body — the last through
+// [ReplayEngine.recordBodyDifferences], which names the path within the body that
+// diverged (#817). Response *headers* are not compared; a difference in one is not
+// something any plugin can produce independently of the body or the status today,
+// and comparing them would report the Content-Length of a body already reported.
 func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *ActiveReplay) (bool, error) {
 	if event.Request == nil {
 		replay.Results.SkippedEvents++
@@ -416,6 +440,7 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 			replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
 				EventID:      event.ID,
 				Sequence:     event.Sequence,
+				Operation:    event.Operation,
 				Field:        "state_hash_before",
 				Expected:     event.StateHashBefore,
 				Actual:       actual,
@@ -457,6 +482,7 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
 			EventID:      event.ID,
 			Sequence:     event.Sequence,
+			Operation:    event.Operation,
 			Field:        "error",
 			Expected:     event.Error,
 			Actual:       nil,
@@ -464,23 +490,27 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		})
 	}
 
-	if event.Response != nil && resp != nil && resp.StatusCode != event.Response.StatusCode {
-		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
-			EventID:      event.ID,
-			Sequence:     event.Sequence,
-			Field:        "status_code",
-			Expected:     event.Response.StatusCode,
-			Actual:       resp.StatusCode,
-			Significance: "major",
-		})
+	if event.Response != nil && resp != nil {
+		if resp.StatusCode != event.Response.StatusCode {
+			replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
+				EventID:      event.ID,
+				Sequence:     event.Sequence,
+				Operation:    event.Operation,
+				Field:        "status_code",
+				Expected:     event.Response.StatusCode,
+				Actual:       resp.StatusCode,
+				Significance: "major",
+			})
+		}
+		r.recordBodyDifferences(replay, event, resp)
 	}
-	// TODO(#817): deep-compare response bodies.
 
 	if r.config.ValidateState && event.StateHashAfter != "" {
 		if actual := r.computeStateHash(ctx); actual != event.StateHashAfter {
 			replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
 				EventID:      event.ID,
 				Sequence:     event.Sequence,
+				Operation:    event.Operation,
 				Field:        "state_hash_after",
 				Expected:     event.StateHashAfter,
 				Actual:       actual,
@@ -506,6 +536,7 @@ func (r *ReplayEngine) recordErrorDifference(replay *ActiveReplay, event *Event,
 		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
 			EventID:      event.ID,
 			Sequence:     event.Sequence,
+			Operation:    event.Operation,
 			Field:        "error",
 			Expected:     nil,
 			Actual:       err.Error(),
@@ -517,9 +548,44 @@ func (r *ReplayEngine) recordErrorDifference(replay *ActiveReplay, event *Event,
 		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
 			EventID:      event.ID,
 			Sequence:     event.Sequence,
+			Operation:    event.Operation,
 			Field:        "error_message",
 			Expected:     event.Error,
 			Actual:       err.Error(),
+			Significance: "major",
+		})
+	}
+}
+
+// recordBodyDifferences compares the replayed response body against the recorded
+// one and records each divergence with the path it was found at.
+//
+// Every body divergence is "major", not "critical". The critical band is reserved
+// for a replay that reached a different *outcome* than the recording — a different
+// state, or a refusal that became a success — because those make a passing test
+// meaningless. A body difference is a divergence in what the recording reported,
+// which is what this comparison exists to surface, and marking it critical would
+// leave no band above it for the outcome divergences that are strictly worse.
+//
+// The comparison is unconditional rather than gated behind a [ReplayConfig] flag.
+// A flag defaulting to off would recreate exactly the hole #833 closed — a replay
+// that verifies less than the reader assumes and says nothing about it — and a
+// flag defaulting to on is a flag nobody sets. Note that it runs whether or not
+// [ReplayConfig.ValidateState] is set, because a state hash cannot see a body at
+// all: the divergence a read-only operation can produce is invisible to it.
+//
+// See [responseBodyDifferences] for the normalisation policy, and in particular
+// for why an identifier minted during the recording is reported rather than masked
+// (#856).
+func (r *ReplayEngine) recordBodyDifferences(replay *ActiveReplay, event *Event, resp *AWSResponse) {
+	for _, diff := range responseBodyDifferences(event.Response, resp) {
+		replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
+			EventID:      event.ID,
+			Sequence:     event.Sequence,
+			Operation:    event.Operation,
+			Field:        bodyDifferenceField(diff.path),
+			Expected:     diff.expected,
+			Actual:       diff.actual,
 			Significance: "major",
 		})
 	}

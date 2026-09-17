@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,8 +170,26 @@ func TestReplayPipeline_ReproducesAnAuthorizationRefusal(t *testing.T) {
 	assert.Zero(t, results.SkippedEvents, "every recorded event carries a request")
 	assert.Equal(t, 1, results.FailedEvents,
 		"the refused CreateBucket is the one event that returned an error; FailedEvents means that, not diverged")
-	assert.Empty(t, results.Differences,
-		"the replay refused the same request with the same message, so nothing diverged")
+	// The refusal itself diverged in nothing: same step, same message, same status.
+	assert.Empty(t, replayDifferencesOn(results, "error"),
+		"the replay refused the same request the recording refused")
+	assert.Empty(t, replayDifferencesOn(results, "error_message"),
+		"the replay refused it with the same message, which is what makes the ARN-based principal load-bearing")
+	assert.Empty(t, replayDifferencesOn(results, "status_code"),
+		"no event answered a different status")
+
+	// What does diverge is the two earlier events' bodies, and it is the honest
+	// report of #856 rather than a failure of this replay: CreateUser's UserId and
+	// CreateAccessKey's AccessKeyId and SecretAccessKey are minted from crypto/rand,
+	// so a replay produces three values the recording cannot predict. #817's body
+	// comparison reports them by path instead of normalising them away, precisely
+	// because masking a minted identifier would report a reproduced run that was not
+	// one. Every difference in this stream is one of those.
+	for _, diff := range results.Differences {
+		assert.True(t, strings.HasPrefix(diff.Field, "response_body/"),
+			"unexpected difference outside a response body: %s = %v vs %v",
+			diff.Field, diff.Expected, diff.Actual)
+	}
 
 	assert.Equal(t, http.StatusNotFound, replayHeadBucketStatus(t, ts, bucket),
 		"a replay that authorized nothing would have created the bucket the recording refused")
