@@ -401,17 +401,17 @@ func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, re
 			return replicationGroupToXML(rg), true
 		})
 
-	// The NotFound fault is decided on the *page*, and pagination cannot make it fire for a
-	// group that exists: the filter runs inside the record callback, so a non-matching record
-	// answers ok=false and consumes no page slot. A single-ID filter therefore always lands on
-	// page one however far into the listing the record sorts, which is the ordering trap #916
-	// names — it is closed by construction rather than by the two checks being ordered.
-	if filterID != "" && len(page) == 0 {
-		return nil, &AWSError{
-			Code:       "ReplicationGroupNotFoundFault",
-			Message:    "ReplicationGroup " + filterID + " not found.",
-			HTTPStatus: http.StatusNotFound,
-		}
+	// API_DescribeReplicationGroups publishes ReplicationGroupNotFoundFault/404. This was the only
+	// one of the six describes to answer its published fault until #1020 gave the other five theirs;
+	// it now goes through the shared [queryMarkerFilterNotFound], which carries the argument that
+	// pagination cannot make the fault fire for a group that exists, and which keeps six operations
+	// from answering one condition six ways.
+	if fault := queryMarkerFilterNotFound(filterID, len(page) > 0, queryMarkerFault{
+		Code:       "ReplicationGroupNotFoundFault",
+		Kind:       "ReplicationGroup",
+		HTTPStatus: http.StatusNotFound,
+	}); fault != nil {
+		return nil, fault
 	}
 
 	type result struct {
@@ -600,6 +600,19 @@ func (p *ElastiCachePlugin) describeCacheSubnetGroups(reqCtx *RequestContext, re
 			return cacheSubnetGroupToXML(sg), true
 		})
 
+	// API_DescribeCacheSubnetGroups publishes CacheSubnetGroupNotFoundFault as its only error, and
+	// at **400** rather than the 404 the other four #1020 sites use — the one status outlier among
+	// the six, which is why [queryMarkerFault] carries a status at all. This is the same page whose
+	// silence about a malformed cursor [parseQueryMarker] records: it publishes this fault and
+	// nothing else.
+	if fault := queryMarkerFilterNotFound(filterName, len(page) > 0, queryMarkerFault{
+		Code:       "CacheSubnetGroupNotFoundFault",
+		Kind:       "CacheSubnetGroup",
+		HTTPStatus: http.StatusBadRequest,
+	}); fault != nil {
+		return nil, fault
+	}
+
 	type result struct {
 		CacheSubnetGroups []xmlCacheSubnetGroupItem `xml:"CacheSubnetGroups>CacheSubnetGroup"`
 		Marker            string                    `xml:"Marker,omitempty"`
@@ -712,6 +725,19 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 			}
 			return cacheParamGroupToXML(pg), true
 		})
+
+	// API_DescribeCacheParameterGroups publishes CacheParameterGroupNotFound/404, glossed "The
+	// requested cache parameter group name does not refer to an existing cache parameter group"
+	// (#1020). It also publishes InvalidParameterValue/400, which is the code
+	// [parseQueryMarker] and [queryMaxRecords] already answer here for an unusable cursor — so this
+	// operation is one of the three whose refusals are all sourced from its own page.
+	if fault := queryMarkerFilterNotFound(filterName, len(page) > 0, queryMarkerFault{
+		Code:       "CacheParameterGroupNotFound",
+		Kind:       "CacheParameterGroup",
+		HTTPStatus: http.StatusNotFound,
+	}); fault != nil {
+		return nil, fault
+	}
 
 	type result struct {
 		CacheParameterGroups []xmlCacheParamGroupItem `xml:"CacheParameterGroups>CacheParameterGroup"`

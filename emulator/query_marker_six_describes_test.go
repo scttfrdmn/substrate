@@ -51,8 +51,12 @@ type sixDescribeOp struct {
 	idElement string
 	idPrefix  string
 	// notFoundCode and notFoundStatus are the fault a single-record filter answers for a record
-	// that does not exist. notFoundCode is "" at the five operations that publish such a fault
-	// but do not yet answer it, which is #1020 rather than #916.
+	// that does not exist. All six carry one since #1020; five were "" under #916, which is why
+	// the guard below is driven off the table rather than written per operation.
+	//
+	// Both are spelled per operation because AWS's are, and the two disagreements are the
+	// content of the assertion: three codes carry a `Fault` suffix and three do not, and
+	// DescribeCacheSubnetGroups publishes 400 where the other five publish 404.
 	notFoundCode   string
 	notFoundStatus int
 	// filterParam is the single-resource filter parameter the operation publishes.
@@ -90,10 +94,12 @@ var sixDescribeOps = []sixDescribeOp{
 				"DBInstanceIdentifier": "pg-source",
 			}
 		},
-		describe:    "DescribeDBSnapshots",
-		idElement:   "DBSnapshotIdentifier",
-		idPrefix:    "pg-snap-",
-		filterParam: "DBSnapshotIdentifier",
+		describe:       "DescribeDBSnapshots",
+		idElement:      "DBSnapshotIdentifier",
+		idPrefix:       "pg-snap-",
+		notFoundCode:   "DBSnapshotNotFound",
+		notFoundStatus: http.StatusNotFound,
+		filterParam:    "DBSnapshotIdentifier",
 	},
 	{
 		name:      "RDS DescribeDBSubnetGroups",
@@ -108,10 +114,12 @@ var sixDescribeOps = []sixDescribeOp{
 				"DBSubnetGroupDescription": "paging",
 			}
 		},
-		describe:    "DescribeDBSubnetGroups",
-		idElement:   "DBSubnetGroupName",
-		idPrefix:    "pg-dbsn-",
-		filterParam: "DBSubnetGroupName",
+		describe:       "DescribeDBSubnetGroups",
+		idElement:      "DBSubnetGroupName",
+		idPrefix:       "pg-dbsn-",
+		notFoundCode:   "DBSubnetGroupNotFoundFault",
+		notFoundStatus: http.StatusNotFound,
+		filterParam:    "DBSubnetGroupName",
 	},
 	{
 		name:      "RDS DescribeDBParameterGroups",
@@ -127,10 +135,12 @@ var sixDescribeOps = []sixDescribeOp{
 				"Description":            "paging",
 			}
 		},
-		describe:    "DescribeDBParameterGroups",
-		idElement:   "DBParameterGroupName",
-		idPrefix:    "pg-dbpg-",
-		filterParam: "DBParameterGroupName",
+		describe:       "DescribeDBParameterGroups",
+		idElement:      "DBParameterGroupName",
+		idPrefix:       "pg-dbpg-",
+		notFoundCode:   "DBParameterGroupNotFound",
+		notFoundStatus: http.StatusNotFound,
+		filterParam:    "DBParameterGroupName",
 	},
 	{
 		name:      "ElastiCache DescribeReplicationGroups",
@@ -167,10 +177,12 @@ var sixDescribeOps = []sixDescribeOp{
 				"CacheSubnetGroupDescription": "paging",
 			}
 		},
-		describe:    "DescribeCacheSubnetGroups",
-		idElement:   "CacheSubnetGroupName",
-		idPrefix:    "pg-ecsn-",
-		filterParam: "CacheSubnetGroupName",
+		describe:       "DescribeCacheSubnetGroups",
+		idElement:      "CacheSubnetGroupName",
+		idPrefix:       "pg-ecsn-",
+		notFoundCode:   "CacheSubnetGroupNotFoundFault",
+		notFoundStatus: http.StatusBadRequest,
+		filterParam:    "CacheSubnetGroupName",
 	},
 	{
 		name:      "ElastiCache DescribeCacheParameterGroups",
@@ -186,10 +198,12 @@ var sixDescribeOps = []sixDescribeOp{
 				"Description":               "paging",
 			}
 		},
-		describe:    "DescribeCacheParameterGroups",
-		idElement:   "CacheParameterGroupName",
-		idPrefix:    "pg-ecpg-",
-		filterParam: "CacheParameterGroupName",
+		describe:       "DescribeCacheParameterGroups",
+		idElement:      "CacheParameterGroupName",
+		idPrefix:       "pg-ecpg-",
+		notFoundCode:   "CacheParameterGroupNotFound",
+		notFoundStatus: http.StatusNotFound,
+		filterParam:    "CacheParameterGroupName",
 	},
 }
 
@@ -472,13 +486,17 @@ func TestSixDescribesFilterPastPageOneStillAnswersTheRecord(t *testing.T) {
 // page, which is the pairing that would break if the filter and the fault were ordered wrongly
 // against each other.
 //
-// It is driven off the table rather than written against DescribeReplicationGroups, the only one
-// of the six that answers a fault today, so that the five #1020 covers come under the same guard
-// as they gain one rather than needing a test written per operation. Those five publish a fault
-// their handler does not answer — a filtered request for a record that does not exist gets an
-// empty 200 — which is a defect about a request's result rather than about how a listing is
-// paged, so it is #1020 rather than part of #916, following the reasoning #887 used for keeping
-// MaxRecords out of its own diff.
+// It was driven off the table rather than written against DescribeReplicationGroups, which was
+// the only one of the six answering a fault under #916, so that the five #1020 covers came under
+// the same guard as they gained one rather than each needing a test written for it. Those five
+// published a fault their handler did not answer — a filtered request for a record that does not
+// exist got an empty 200 — which is a defect about a request's result rather than about how a
+// listing is paged, so it was #1020 rather than part of #916, following the reasoning #887 used
+// for keeping MaxRecords out of its own diff.
+//
+// Since #1020 every row carries a fault, and the count at the end asserts that rather than
+// merely that some row does: a row that lost its fault, or a seventh operation added to the table
+// without one, is the shape this file exists to catch.
 func TestSixDescribesNotFoundSurvivesPagination(t *testing.T) {
 	var guarded int
 	for _, op := range sixDescribeOps {
@@ -504,7 +522,101 @@ func TestSixDescribesNotFoundSurvivesPagination(t *testing.T) {
 			}
 		})
 	}
-	if guarded == 0 {
-		t.Fatal("no operation in the table answers a NotFound fault; the guard has nothing to assert")
+	if guarded != len(sixDescribeOps) {
+		t.Fatalf("%d of %d operations answer a NotFound fault; every one of the six publishes one (#1020)",
+			guarded, len(sixDescribeOps))
+	}
+}
+
+// TestSixDescribesEmptyListingIsNotAFault is the assertion that keeps the five faults #1020 added
+// from being five refusals of a legitimate request.
+//
+// The fault belongs to the *filter*, per every gloss on the six pages — "DBSnapshotIdentifier
+// doesn't refer to an existing DB snapshot", not "there are no DB snapshots" — so a listing with
+// no records at all is an empty 200 with no Marker. This is the assertion a check written as
+// `len(page) == 0` without the filter test would break, and it would break it on the very first
+// call a fresh emulator serves.
+func TestSixDescribesEmptyListingIsNotAFault(t *testing.T) {
+	for _, op := range sixDescribeOps {
+		t.Run(op.name, func(t *testing.T) {
+			ts := op.newServer(t)
+
+			resp := op.request(t, ts, map[string]string{"Action": op.describe})
+			body := op.body(t, resp)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("an empty listing answered status %d; body: %s", resp.StatusCode, body)
+			}
+			page := queryMarkerXMLPage(t, body, op.idElement)
+			if len(page.IDs) != 0 {
+				t.Errorf("empty listing reported %v", page.IDs)
+			}
+			if page.Marker != "" {
+				t.Errorf("empty listing carries Marker %q, want none", page.Marker)
+			}
+		})
+	}
+}
+
+// TestDescribeDBSnapshotsInstanceFilterIsNotAFault pins the one place the fault's scope is
+// narrower than "the page came back empty".
+//
+// DescribeDBSnapshots publishes two single-resource filters and a fault for only one of them.
+// DBInstanceIdentifier's constraint — "if supplied, must match the identifier of an existing
+// DBInstance" — has no Errors entry, and DBSnapshotNotFound's gloss names DBSnapshotIdentifier
+// alone, so neither an unknown instance nor a snapshot that exists under a different instance is
+// a statement that the snapshot does not exist. Both are empty 200s, and the fault still fires
+// for a snapshot identifier that names nothing.
+//
+// The middle case is the one a `len(page) == 0` check gets wrong: the snapshot exists, the caller
+// named it correctly, and the answer would claim it does not exist.
+func TestDescribeDBSnapshotsInstanceFilterIsNotAFault(t *testing.T) {
+	op := sixDescribeOps[0]
+	if op.describe != "DescribeDBSnapshots" {
+		t.Fatalf("table order changed: sixDescribeOps[0] is %s", op.describe)
+	}
+	ts := op.newServer(t)
+	ids := createSixDescribeRecords(t, op, ts, 3)
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+		want   int
+	}{
+		{
+			name:   "an instance that does not exist",
+			params: map[string]string{"DBInstanceIdentifier": "no-such-instance"},
+			want:   http.StatusOK,
+		},
+		{
+			name: "a snapshot that exists under another instance",
+			params: map[string]string{
+				"DBSnapshotIdentifier": ids[0],
+				"DBInstanceIdentifier": "no-such-instance",
+			},
+			want: http.StatusOK,
+		},
+		{
+			name:   "a snapshot that does not exist",
+			params: map[string]string{"DBSnapshotIdentifier": op.idPrefix + "absent"},
+			want:   http.StatusNotFound,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]string{"Action": op.describe}
+			for k, v := range tc.params {
+				params[k] = v
+			}
+			resp := op.request(t, ts, params)
+			body := op.body(t, resp)
+			if resp.StatusCode != tc.want {
+				t.Fatalf("status %d, want %d; body: %s", resp.StatusCode, tc.want, body)
+			}
+			if tc.want == http.StatusOK && strings.Contains(body, op.notFoundCode) {
+				t.Errorf("a 200 reports %s: %s", op.notFoundCode, body)
+			}
+			if tc.want == http.StatusOK && len(queryMarkerXMLPage(t, body, op.idElement).IDs) != 0 {
+				t.Errorf("the instance filter matched a record it should not: %s", body)
+			}
+		})
 	}
 }

@@ -967,9 +967,11 @@ paging is the ordering trap the issue names: a filter applied *after* a page is 
 an empty page, or a `NotFound` fault, for a record that exists and merely sorts late. It cannot
 happen here, because the filter runs inside `queryMarkerPage`'s record callback and a non-matching
 record consumes no page slot: a filtered listing is one record long however deep into the
-unfiltered listing the record sits. `DescribeReplicationGroups` is the one of the six that answers
-a `NotFound` fault today, and its fault is therefore decided on a page that cannot be empty for a
-group that exists. Both properties are asserted rather than left to the reasoning.
+unfiltered listing the record sits. `DescribeReplicationGroups` was the one of the six answering a
+`NotFound` fault when this landed — all six do since
+[#1020](https://github.com/scttfrdmn/substrate/issues/1020) — and its fault is therefore decided on
+a page that cannot be empty for a group that exists. Both properties are asserted rather than left
+to the reasoning.
 
 `DescribeDBSnapshots` is the one of the six with more than one filter to order against — it also
 publishes `DBInstanceIdentifier`, `DbiResourceId`, `SnapshotType`, `IncludePublic`,
@@ -977,14 +979,73 @@ publishes `DBInstanceIdentifier`, `DbiResourceId`, `SnapshotType`, `IncludePubli
 `Filters.Filter.N` as **"Not currently supported"**, a parameter AWS declares and refuses to
 honour, so substrate ignoring it matches the page rather than diverging from it.
 
-**What this does not fix.** Five of the six publish a NotFound fault their handler does not
-answer: a filtered request naming a resource that does not exist gets an empty `200` instead of
+**What this did not fix.** Five of the six published a NotFound fault their handler did not
+answer: a filtered request naming a resource that does not exist got an empty `200` instead of
 `DBSnapshotNotFound` / 404, `DBSubnetGroupNotFoundFault` / 404, `DBParameterGroupNotFound` / 404,
 `CacheSubnetGroupNotFoundFault` / 400 or `CacheParameterGroupNotFound` / 404. That is a defect
-about a request's *result*, not about how a listing is cut into pages, so it is
-[#1020](https://github.com/scttfrdmn/substrate/issues/1020) rather than part of this change — the
-same reason `MaxRecords` was kept out of the cursor fix above. Note the ElastiCache subnet-group
-fault is 400 where the other four are 404, which its page states explicitly.
+about a request's *result*, not about how a listing is cut into pages, so it was
+[#1020](https://github.com/scttfrdmn/substrate/issues/1020) rather than part of that change — the
+same reason `MaxRecords` was kept out of the cursor fix above. It is fixed below.
+
+### A single-resource filter that names nothing answers the published fault
+
+[#1020](https://github.com/scttfrdmn/substrate/issues/1020). Each of the six describes above
+publishes exactly one single-resource filter and a NotFound fault to go with it, and five of the
+six answered an empty `200` for a filter that matched nothing. A consumer's error path for a
+resource that has been deleted — the branch every retry and every "create if absent" depends on —
+was therefore dead code that first executed against real AWS.
+
+The fault belongs to the **filter**, not to the listing. Every gloss says so, naming the parameter
+rather than the collection: "`DBSnapshotIdentifier` doesn't refer to an existing DB snapshot",
+"`DBSubnetGroupName` doesn't refer to an existing DB subnet group", "The requested cache subnet
+group name does not refer to an existing cache subnet group". So an unfiltered listing with no
+records is still an empty `200`, which is asserted separately — a check written as "the page came
+back empty" would refuse the first call a fresh emulator serves.
+
+| Page | Code | Status |
+|---|---|---|
+| `API_DescribeDBSnapshots` | `DBSnapshotNotFound` | 404 |
+| `API_DescribeDBSubnetGroups` | `DBSubnetGroupNotFoundFault` | 404 |
+| `API_DescribeDBParameterGroups` | `DBParameterGroupNotFound` | 404 |
+| `API_DescribeReplicationGroups` | `ReplicationGroupNotFoundFault` | 404 |
+| `API_DescribeCacheSubnetGroups` | `CacheSubnetGroupNotFoundFault` | **400** |
+| `API_DescribeCacheParameterGroups` | `CacheParameterGroupNotFound` | 404 |
+
+Nothing in that table is substrate's reading; each row is its own page's Errors section. Two
+disagreements in it are AWS's and are reproduced rather than tidied: three codes carry a `Fault`
+suffix and three do not, and the ElastiCache subnet-group fault is **400** where the other five are
+404. A sweep that made either uniform would break a consumer matching on the code, which is why
+both are asserted per operation rather than derived from a shared constant.
+
+All six now go through one helper, `queryMarkerFilterNotFound`, including
+`DescribeReplicationGroups`, which already answered its fault inline. One condition in one place is
+the same argument the shared cursor rests on, and it is what keeps the six from drifting into six
+readings of one sentence.
+
+**Pagination cannot make the fault fire for a record that exists**, and that is closed by
+construction rather than by ordering two checks. The filter runs inside the record callback, so a
+non-matching record consumes no page slot; at most one record can match a single-resource filter;
+and the published minimum `MaxRecords` is 20. A filtered page therefore never truncates and never
+carries a `Marker`.
+
+One case is **substrate's reading**: a caller that sends both a `Marker` and a filter naming a
+record at or before that marker gets the fault, because the cursor skipped the record. No page says
+anything about combining a cursor with a single-resource filter, and substrate reads a `Marker` as
+naming a position in the listing — so such a request asked about a stretch of records that does not
+include its own, and the fault is the honest answer to the request as asked.
+
+`DescribeDBSnapshots` is the one operation whose fault is narrower than "the filtered page is
+empty", because it publishes two single-resource filters and a fault for only one of them.
+`DBInstanceIdentifier` carries the constraint "if supplied, must match the identifier of an existing
+DBInstance" and **no Errors entry**, so an instance that does not exist is an empty `200`. The case
+that decides the implementation is a snapshot that exists under a *different* instance: the caller
+named its snapshot correctly, so `DBSnapshotNotFound` would be a false statement, and substrate
+tracks whether the snapshot identifier matched independently of the instance filter.
+
+One AWS slip is recorded rather than followed: `API_DescribeDBParameterGroups` constrains its
+`DBParameterGroupName` to "the name of an existing **DBClusterParameterGroup**", which is a
+different resource described by a different operation. The Errors gloss — "`DBParameterGroupName`
+doesn't refer to an existing DB parameter group" — is the statement substrate implements.
 
 ### Two more cursors published and unread, outside EC2
 
@@ -12886,17 +12947,17 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | StopDBInstance | |
 | RebootDBInstance | |
 | CreateDBSnapshot | |
-| DescribeDBSnapshots | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DescribeDBSnapshots | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSnapshotIdentifier` for a snapshot that does not exist answers `DBSnapshotNotFound` / 404; a `DBInstanceIdentifier` that names no instance stays an empty `200`, because only the snapshot filter has a published fault — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
 | DeleteDBSnapshot | |
 | RestoreDBInstanceFromDBSnapshot | |
 | CreateDBCluster | |
 | DescribeDBClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
 | DeleteDBCluster | |
 | CreateDBSubnetGroup | |
-| DescribeDBSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DescribeDBSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSubnetGroupName` for a group that does not exist answers `DBSubnetGroupNotFoundFault` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
 | DeleteDBSubnetGroup | |
 | CreateDBParameterGroup | |
-| DescribeDBParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DescribeDBParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBParameterGroupName` for a group that does not exist answers `DBParameterGroupNotFound` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
 | DeleteDBParameterGroup | |
 | ListTagsForResource | `TagList` sorted by key — see below |
 | AddTagsToResource | |
@@ -12999,14 +13060,14 @@ RDS db.t3.micro on-demand: $0.017 per hour (approximate for testing purposes).
 | ModifyCacheCluster | |
 | DeleteCacheCluster | |
 | CreateReplicationGroup | |
-| DescribeReplicationGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DescribeReplicationGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `ReplicationGroupId` for a group that does not exist answers `ReplicationGroupNotFoundFault` / 404, now through the same helper as the other five — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
 | ModifyReplicationGroup | |
 | DeleteReplicationGroup | |
 | CreateCacheSubnetGroup | |
-| DescribeCacheSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does **not** publish although its two ElastiCache siblings do — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DescribeCacheSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does **not** publish although its two ElastiCache siblings do — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `CacheSubnetGroupName` for a group that does not exist answers `CacheSubnetGroupNotFoundFault` / **400**, the one status outlier among the six — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
 | DeleteCacheSubnetGroup | |
 | CreateCacheParameterGroup | |
-| DescribeCacheParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it) |
+| DescribeCacheParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `CacheParameterGroupName` for a group that does not exist answers `CacheParameterGroupNotFound` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
 | DeleteCacheParameterGroup | |
 | ListTagsForResource | |
 | AddTagsToResource | |

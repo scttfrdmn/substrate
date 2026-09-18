@@ -105,6 +105,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   condition and no observable behaviour there depends on it. The test that pinned the omission asserts
   the refusal instead.
 
+- **Five RDS and ElastiCache describes answer the NotFound fault their own page publishes, instead of an
+  empty `200`** (#1020). `DescribeDBSnapshots`, `DescribeDBSubnetGroups`, `DescribeDBParameterGroups`,
+  `DescribeCacheSubnetGroups` and `DescribeCacheParameterGroups` each publish exactly one
+  single-resource filter and one fault to go with it, and each answered an empty list for a filter that
+  matched nothing. `DescribeReplicationGroups` was the only one of the six that refused. So a consumer's
+  error path for a resource that has been deleted — the branch every retry loop and every "create if
+  absent" depends on — was dead code here and first executed against real AWS.
+
+  **Nothing about the five refusals is substrate's reading.** Each code and status is its own page's
+  Errors section: `DBSnapshotNotFound`/404, `DBSubnetGroupNotFoundFault`/404,
+  `DBParameterGroupNotFound`/404, `CacheSubnetGroupNotFoundFault`/**400** and
+  `CacheParameterGroupNotFound`/404. Two disagreements in that set are AWS's and are reproduced rather
+  than tidied — three codes carry a `Fault` suffix and three do not, and the ElastiCache subnet-group
+  fault is 400 where the other five are 404 — because a sweep that made either uniform would break a
+  consumer matching on the code. Both are asserted per operation.
+
+  **The fault belongs to the filter, not to the listing**, which every gloss states by naming the
+  parameter: *"`DBSnapshotIdentifier` doesn't refer to an existing DB snapshot"*. An unfiltered listing
+  with no records is still an empty `200`, and that is asserted separately, because a check written as
+  "the page came back empty" would refuse the first call a fresh emulator serves.
+
+  All six now go through one helper, `queryMarkerFilterNotFound`, including the
+  `DescribeReplicationGroups` site that already refused inline — one condition in one place, the same
+  argument the shared cursor rests on. Pagination cannot make the fault fire for a record that exists:
+  the filter runs inside the record callback, at most one record can match, and the published minimum
+  `MaxRecords` is 20, so a filtered page never truncates. The one case that *is* substrate's reading is
+  a request carrying both a `Marker` and a filter for a record at or before it; the cursor skipped the
+  record, no page says anything about combining the two, and a `Marker` names a position in the listing.
+
+  **`DescribeDBSnapshots` needed a narrower test than "the page is empty".** It publishes two
+  single-resource filters and a fault for only one: `DBInstanceIdentifier` carries a constraint and no
+  Errors entry, so an unknown instance stays an empty `200`. The deciding case is a snapshot that exists
+  under a *different* instance — the caller named its snapshot correctly, so claiming it does not exist
+  would be false — and the handler tracks whether the snapshot identifier matched independently of the
+  instance filter. One AWS slip is recorded rather than followed: `API_DescribeDBParameterGroups`
+  constrains its name parameter to an existing **DBClusterParameterGroup**, a different resource
+  entirely, so the Errors gloss is what substrate implements.
+
+  Two existing tests had pinned the defect as intended behaviour, each with a comment saying the
+  describe "returns empty list, not error" after a delete; both now assert the published fault, and
+  `TestSixDescribesNotFoundSurvivesPagination` asserts that **all six** rows of its table carry one
+  rather than that some row does.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
