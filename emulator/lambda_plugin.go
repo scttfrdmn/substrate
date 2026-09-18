@@ -84,6 +84,12 @@ func (p *LambdaPlugin) Shutdown(_ context.Context) error {
 // function recreated under the same name after a reset would be invoked in the
 // previous run's container, running the previous run's code. Dropping a warm
 // container is always safe: the next invocation starts a fresh one.
+//
+// That last paragraph described a defect as well as a reason, and scoping it to the
+// reset boundary was half a fix (#1035): two ordinary API calls in one run reach the
+// same stale container, with no reset involved. The other half is
+// [LambdaPlugin.evictWarmContainer], called by the three operations that can leave a
+// running container holding code or configuration the function no longer has.
 func (p *LambdaPlugin) ResetForRun(_ context.Context) error {
 	p.stopAllPollers()
 
@@ -91,6 +97,40 @@ func (p *LambdaPlugin) ResetForRun(_ context.Context) error {
 		p.executor.DrainPool()
 	}
 	return nil
+}
+
+// evictWarmContainer drops the warm container a function's later invocations would
+// otherwise reuse, after an operation that changed what that container should be running.
+//
+// Three operations call it, and the boundary between them and the rest of the plugin is what
+// the container is started from rather than what the API publishes as mutable:
+//
+//   - `UpdateFunctionCode` — the container was started with the old ZIP mounted at
+//     /var/task (`startZIPContainer`) or the old image URI in its `docker run`
+//     (`startImageContainer`). Nothing about a running container follows the new bytes.
+//   - `UpdateFunctionConfiguration` — `Runtime` chooses the image through [runtimeToImage],
+//     `Handler` is passed as both an environment variable and the container's command
+//     argument, and every entry of `Environment` is a `-e` flag. All three are fixed at
+//     `docker run` time on both paths. `MemorySize` and `Timeout` reach no container at all,
+//     so they are the two members that would not need this; the eviction is unconditional
+//     anyway, because deciding per-member means comparing against a [containerHandle] that
+//     stores none of them, and a needless restart costs one cold start where a missed one
+//     serves the wrong answer.
+//   - `DeleteFunction` — the ARN is derived from account, Region and name, so a function
+//     recreated under the same name inherits the dead one's pool entry. This is the
+//     name-derived-key trap #903 fixed for pollers, on the live path.
+//
+// `PublishVersion` and the alias operations are deliberately absent: substrate's pool is
+// keyed by the unqualified function ARN and its invoke path resolves a qualifier to the same
+// function record, so neither changes what a container should be running.
+//
+// The nil check is not defensive — the executor is absent whenever Docker execution is not
+// configured, which includes every test run in CI.
+func (p *LambdaPlugin) evictWarmContainer(accountID, region, name string) {
+	if p.executor == nil {
+		return
+	}
+	p.executor.Evict(lambdaFunctionARN(region, accountID, name))
 }
 
 // stopAllPollers closes every event-source-mapping stop channel and forgets it,
@@ -494,7 +534,14 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 		fn.CodeSha256 = lambdaCodeSha256([]byte(body.ImageURI))
 	}
 
-	return p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
+	resp, err := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	// After the write, not before: a save that failed stored no new code, so the warm container is
+	// still running what the function has. The eviction follows the state change it is about (#1035).
+	p.evictWarmContainer(ctx.AccountID, ctx.Region, name)
+	return resp, nil
 }
 
 func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
@@ -544,7 +591,14 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 	fn.RevisionID = generateLambdaRevisionID()
 	fn.LastModified = p.tc.Now()
 
-	return p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
+	resp, err := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	// Handler, Runtime and Environment are fixed at `docker run` time; see
+	// [LambdaPlugin.evictWarmContainer] for why this is unconditional rather than per-member (#1035).
+	p.evictWarmContainer(ctx.AccountID, ctx.Region, name)
+	return resp, nil
 }
 
 func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, name string) (*AWSResponse, error) {
@@ -560,11 +614,22 @@ func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, name string) (*AWSRes
 		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, name)); err != nil {
 		return nil, fmt.Errorf("lambda deleteFunction state.Delete: %w", err)
 	}
-	// Also delete policy and invoke config.
+	// Also delete policy, invoke config and the uploaded deployment package.
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
 		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name))
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
 		lambdaInvokeConfigStateKey(ctx.AccountID, ctx.Region, name))
+	// The ZIP outlived every other trace of the function before #1035, so the bytes of every deleted
+	// function accumulated for the life of the process. No stale read followed from it — the invoke
+	// path is gated on ZipStored, which a function recreated under the same name sets for itself — so
+	// this was a leak rather than a wrong answer, and it is released here because a deployment package
+	// is part of the function AWS says this operation deletes.
+	_ = p.state.Delete(context.Background(), lambdaNamespace,
+		lambdaZipStateKey(ctx.AccountID, ctx.Region, name))
+
+	// The pool is keyed by an ARN derived from the name, so a function recreated under this one would
+	// otherwise be invoked in the deleted function's container (#1035).
+	p.evictWarmContainer(ctx.AccountID, ctx.Region, name)
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 

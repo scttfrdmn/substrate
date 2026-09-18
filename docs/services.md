@@ -5243,6 +5243,55 @@ worth comparing.
 forwarded as the API spells them, and each goes through the template's `Ref` and
 pseudo-parameter resolution like every other property.
 
+### Which operations drop a warm container
+
+This applies only when Docker execution is configured. Without it there is no executor
+and no pool, which is the default and every CI run.
+
+A warm container is pooled by **function ARN alone**, and the handle records no code
+identity — no `CodeSha256`, no `RevisionId`, no image URI — so nothing in the invoke
+path can notice that a container is running code the function no longer has. Until
+[#1035](https://github.com/scttfrdmn/substrate/issues/1035) only a shutdown, a state
+reset and the idle TTL ever dropped an entry, and the TTL measures **idle** time, so a
+function invoked in a loop kept its stale container indefinitely: `GetFunction` reported
+the new `CodeSha256` while `Invoke` returned the previous code's output, and the response
+a caller was asserting on was the stale one.
+
+Three operations now drop the container for the function they name, and the line between
+them and the rest of the plugin is what a container is started from rather than what the
+API publishes as mutable:
+
+| Operation | Why |
+|-----------|-----|
+| `UpdateFunctionCode` | The old package is mounted into the container, or the old image URI is baked into its `docker run` |
+| `UpdateFunctionConfiguration` | `Runtime` chooses the image, `Handler` is both an environment variable and the container's command argument, and each `Environment` entry is a `-e` flag — all fixed at start |
+| `DeleteFunction` | The ARN is derived from account, Region and name, so a function recreated under the same name would inherit the dead one's entry |
+
+`MemorySize` and `Timeout` are the two `UpdateFunctionConfiguration` members that reach
+no container at all, so they would not need the eviction. It happens anyway:
+distinguishing them means comparing five members against a handle that stores none of
+them, and dropping a container costs one cold start where keeping a stale one serves the
+wrong answer. The eviction is **per ARN** — one function's update leaves every other
+function's container alone — and it runs **after** the write, so a refused update
+disturbs nothing.
+
+`PublishVersion` and the alias operations do not drop a container: the pool is keyed by
+the unqualified ARN and the invoke path resolves a qualifier to the same function record,
+so neither changes what a container should be running.
+
+`DeleteFunction` also releases the stored deployment package, which it did not before
+#1035. No stale read followed from that — the invoke path is gated on whether a package
+is staged, which a recreated function sets for itself — so it was a leak rather than a
+wrong answer.
+
+**A caveat on all of the above:** substrate writes a ZIP package into the mounted
+directory without extracting it, so the runtime interface never finds a module tree and
+no container down that path runs a caller's handler at all. Per this repository's scope
+boundary, running a Lambda's code is out of scope; whether the path should therefore be
+documented as inert or completed is
+[#1079](https://github.com/scttfrdmn/substrate/issues/1079). The invalidation above is
+about container *identity*, which is observable either way.
+
 ### Cost
 
 Lambda invocations: $0.0000002 per request.

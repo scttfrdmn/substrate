@@ -254,6 +254,28 @@ func InjectPoolEntryForTest(e *LambdaExecutor, arn, containerID string) {
 // IsDockerAvailableForTest exposes LambdaExecutor.isDockerAvailable for tests.
 func (e *LambdaExecutor) IsDockerAvailableForTest() bool { return e.isDockerAvailable() }
 
+// WarmPoolARNsForTest returns the function ARNs the executor still believes it holds a
+// container for, sorted.
+//
+// This is the accessor that makes #1035's invalidation assertable without Docker. Whether an
+// invoke runs the new code is only observable with a container actually running, which CI has
+// not got; whether the *pool entry* survived an `UpdateFunctionCode` is the bookkeeping the
+// fix consists of, and it is observable either way. Same reasoning as
+// [RDSActiveContainerCountForTest], which #903 added for the same reason.
+//
+// ARNs rather than a count, because the point of per-ARN eviction is that it drops one
+// function's entry and not another's — a count cannot tell those apart.
+func WarmPoolARNsForTest(e *LambdaExecutor) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	arns := make([]string, 0, len(e.pool))
+	for arn := range e.pool {
+		arns = append(arns, arn)
+	}
+	sort.Strings(arns)
+	return arns
+}
+
 // ShutdownLambdaPluginForTest calls LambdaPlugin.Shutdown for coverage.
 func ShutdownLambdaPluginForTest(p *LambdaPlugin, ctx context.Context) error {
 	return p.Shutdown(ctx)

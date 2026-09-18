@@ -338,12 +338,64 @@ func (e *LambdaExecutor) DrainPool() {
 	}
 }
 
-// stopContainer stops a single container and removes its temp directory.
+// Evict stops the warm container for one function ARN and drops its pool entry, doing
+// nothing when that function has no warm container.
+//
+// This is the granularity [LambdaExecutor.DrainPool] is not: the pool is keyed by function
+// ARN alone and [containerHandle] records no code identity at all, so the only way substrate
+// can tell that a container is running code the function no longer has is for the operation
+// that changed the code to say so (#1035). `UpdateFunctionCode` on one function must not
+// throw away every other function's container.
+//
+// Dropping a warm container is always safe — the next invocation starts a fresh one — so
+// this reports nothing and never fails a caller's request. A container that cannot be
+// stopped is logged and its pool entry is dropped regardless, because leaving the entry
+// would mean serving the stale code the eviction exists to prevent.
+//
+// The container is stopped outside the lock, following DrainPool: `docker stop` blocks for
+// as long as the container takes to exit, and holding e.mu across it would stall every
+// concurrent invoke of every other function.
+func (e *LambdaExecutor) Evict(functionARN string) {
+	e.mu.Lock()
+	h, ok := e.pool[functionARN]
+	if ok {
+		delete(e.pool, functionARN)
+	}
+	e.mu.Unlock()
+	if !ok {
+		return
+	}
+	if err := e.stopContainer(h); err != nil {
+		e.logger.Warn("lambda executor: evict container for a changed function",
+			"arn", functionARN, "id", h.containerID, "err", err)
+	}
+}
+
+// stopContainer stops a single container, removes it, and removes its temp directory.
+//
+// `docker rm` follows the `stop`, which is what #903 taught [RDSExecutor] and what this did
+// not do until #1035: a stopped container still holds its name, its writable layer and its
+// port reservation on the host, and it outlives the process rather than the executor. That
+// matters more now than it did, because eviction is no longer only the idle TTL and
+// shutdown — a caller updating one function's code in a loop would otherwise leave one dead
+// container per call.
+//
+// The stop error is the one returned, since it is the failure a caller can act on; a remove
+// that fails after a successful stop is logged. Both are attempted regardless of the other's
+// outcome, because a container that refused to stop is still worth removing.
 func (e *LambdaExecutor) stopContainer(h *containerHandle) error {
-	cmd := exec.Command("docker", "stop", h.containerID)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	err := cmd.Run()
+	stopCmd := exec.Command("docker", "stop", h.containerID)
+	stopCmd.Stdout = io.Discard
+	stopCmd.Stderr = io.Discard
+	err := stopCmd.Run()
+
+	rmCmd := exec.Command("docker", "rm", "-f", h.containerID)
+	rmCmd.Stdout = io.Discard
+	rmCmd.Stderr = io.Discard
+	if rmErr := rmCmd.Run(); rmErr != nil && err == nil {
+		e.logger.Warn("lambda executor: remove container", "id", h.containerID, "err", rmErr)
+	}
+
 	if h.tempDir != "" {
 		_ = os.RemoveAll(h.tempDir)
 	}

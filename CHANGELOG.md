@@ -254,6 +254,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code as a missing refusal.
 
 ### Fixed
+- **A warm Lambda container outlived the code it was started from, so `UpdateFunctionCode` then
+  `Invoke` ran the previous code** (#1035). The executor pools a container by **function ARN alone**
+  and its handle records no code identity at all — no `CodeSha256`, no `RevisionId`, no image URI — so
+  nothing in the invoke path could notice the mismatch. Only a shutdown, a state reset and the idle TTL
+  ever dropped an entry, and the TTL measures **idle** time, so a function invoked in a loop kept its
+  stale container indefinitely: `GetFunction` reported the new digest while `Invoke` returned the old
+  code's output, and the response a caller was asserting on was the stale one. `DeleteFunction` then
+  `CreateFunction` under the same name was the same defect from the other direction, since the ARN is
+  derived from the name — the name-derived-key trap #903 fixed for event-source pollers, on the live
+  path.
+
+  #903 fixed the **reset** half of this and its own comment on `ResetForRun` states the rest of the
+  bug in prose. This is the live-path half, and it needs no reset: two ordinary API calls in one run
+  reach the stale container.
+
+  **Three operations drop the container, and `UpdateFunctionConfiguration` is in scope on evidence
+  rather than by assumption** — the issue left it as a question. `Runtime` chooses the container image,
+  `Handler` is passed as both an environment variable and the container's command argument, and every
+  `Environment` entry is a `-e` flag; all three are fixed at `docker run` time on both the ZIP and the
+  image path. `MemorySize` and `Timeout` reach no container at all, so they are the two members that
+  would not need it. The eviction is unconditional anyway, because deciding per-member means comparing
+  five members against a handle that stores none of them, and a needless cold start is cheaper than a
+  missed one serving the wrong answer. `PublishVersion` and the alias operations are deliberately
+  absent: the pool is keyed by the unqualified ARN and the invoke path resolves a qualifier to the same
+  record, so neither changes what a container should be running.
+
+  The eviction is **per ARN**, not a pool drain: `DrainPool` (#903) would also stop the stale
+  container, and every other function's container with it, for a change to one function's code. It runs
+  **after** the write, so a refused update disturbs nothing, and it drops the pool entry whether or not
+  the container could be stopped — leaving the entry would serve exactly the stale code it exists to
+  prevent.
+
+  Two adjacent leaks go with it. `stopContainer` ran `docker stop` without `docker rm`, so every
+  evicted container stayed on the host as an exited container for the life of the *machine* — the
+  inverse of what #903 taught the RDS executor, and it matters more now that eviction is no longer only
+  the idle TTL. And `DeleteFunction` never released the stored deployment package, so the bytes of
+  every deleted function accumulated; no stale read followed from it, since the invoke path is gated on
+  whether a package is staged and a recreated function sets that for itself, so it was a leak rather
+  than a wrong answer.
+
+  **The issue's fourth criterion — a Docker-gated test that the invoke runs the new code — cannot be
+  met, and that is a finding rather than an omission.** Substrate writes a ZIP package into the mounted
+  directory without extracting it, so the runtime interface finds one archive where it expects a module
+  tree and no container down that path runs a caller's handler whatever the code is. There is no
+  observable difference between old and new code to assert on. That is consistent with this
+  repository's scope boundary, which puts running a Lambda's code out of scope; whether the path should
+  therefore be documented as inert or completed is filed as #1079. The invalidation itself is asserted
+  on container identity, which is observable without Docker.
+
 - **`TagResources` was the one way to put a resource over its own service's tag quota, and it spanned
   four services rather than the one the issue named** (#1000). EC2, ELBv2, IAM and Kinesis each enforce a
   published per-resource tag quota of fifty on their **own** tagging operations, and all four are
