@@ -358,16 +358,27 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 		})
 	}
 
-	// A parsable body naming an absent function must still be a 404: the reorder moved the lookup, it did
-	// not remove it. Without this, deleting the lookup outright would leave every assertion above green.
-	t.Run("AddPermission/absentFunctionStillNotFound", func(t *testing.T) {
-		status, code, _ := rawUnsignedCall(t, ts, host, "",
-			"/2015-03-31/functions/absent-fn/policy",
-			[]byte(`{"StatementId":"s1","Action":"lambda:InvokeFunction","Principal":"s3.amazonaws.com"}`))
-		assert.Equal(t, "ResourceNotFoundException", code,
-			"a well-formed request for a function that does not exist is still a 404")
-		assert.Equal(t, http.StatusNotFound, status, "AddPermission answers 404 past its parse guard")
-	})
+	// A parsable body naming an absent function must still be a 404 on **both** operations: the reorder
+	// moved each lookup, it did not remove either. Without these, deleting a lookup outright would leave
+	// every assertion above green — and they are asserted per operation rather than once because the two
+	// use different lookups, loadFunction and findFunctionByARN, so one can regress without the other.
+	for _, tc := range []struct {
+		op, path, body string
+	}{
+		{
+			op:   "AddPermission",
+			path: "/2015-03-31/functions/absent-fn/policy",
+			body: `{"StatementId":"s1","Action":"lambda:InvokeFunction","Principal":"s3.amazonaws.com"}`,
+		},
+		{op: "TagResource", path: "/2015-03-31/tags/" + absentARN, body: `{"Tags":{"env":"prod"}}`},
+	} {
+		t.Run(tc.op+"/absentFunctionStillNotFound", func(t *testing.T) {
+			status, code, _ := rawUnsignedCall(t, ts, host, "", tc.path, []byte(tc.body))
+			assert.Equalf(t, "ResourceNotFoundException", code,
+				"%s: a well-formed request for a function that does not exist is still a 404", tc.op)
+			assert.Equalf(t, http.StatusNotFound, status, "%s answers 404 past its parse guard", tc.op)
+		})
+	}
 }
 
 // memberCase is one complaint about a member or an identifier, as opposed to a body that will not parse.
