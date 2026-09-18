@@ -941,6 +941,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a guard unreachable, which is a coverage fact rather than a fidelity opinion. `docs/services.md`
   replaces its "the ordering is left as it stands" note with the split stated as a split.
 
+- **`GetTopicAttributes` stops reporting an invented `SubscriptionsCount` and derives the four
+  attributes AWS publishes as facts about the topic** (#993). The handler answered a
+  `SubscriptionsCount` member that appears nowhere on `API_GetTopicAttributes` — not in the attribute
+  list, not in the sample response, not in any SDK's shape — hardcoded to `"0"`, and reported none of the
+  three subscription counts the page does publish. So a caller reading the attribute AWS documents got
+  nothing back, and a caller reading the invented one got a constant no writer ever touched: the #914
+  class (a member name AWS's shape does not have) crossed with the #847 class (a count read from a field
+  nothing writes). `Owner` was missing too, where AWS's own three-entry sample carries it.
+
+  Four attributes are now derived on every read — `TopicArn`, `Owner`, `SubscriptionsConfirmed` and
+  `SubscriptionsPending` — and the remaining twelve published names are reported only if `CreateTopic` or
+  `SetTopicAttributes` stored them. **`SubscriptionsPending` is `0` as a fact rather than a placeholder:**
+  substrate implements no `ConfirmSubscription`, and `Subscribe` hands back a real subscription ARN
+  rather than the `"pending confirmation"` string `API_Subscribe` documents for one awaiting it, so every
+  subscription this emulator mints is confirmed the moment `Subscribe` returns and the split is decidable
+  rather than guesswork.
+
+  **`SubscriptionsDeleted` is omitted rather than reported as `0`, and that is substrate's reading.**
+  `Unsubscribe` deletes the record and filters both indexes rather than tombstoning, and
+  `SNSSubscription` carries no status, so nothing tracks a deletion. A monotonic counter incremented in
+  `Unsubscribe` would have been three lines, but the page publishes only *"The number of deleted
+  subscriptions for the topic"* and says nothing about how long a deleted subscription stays counted — so
+  a never-decaying counter would have been an invention in the same shape as the `SubscriptionsCount`
+  this release removes. Omitting the member claims nothing.
+
+  **The count is keyed by the caller's account and Region, which is the one decision here, and the
+  property that decided it is assertable.** The topic record is keyed by the ARN's own account and Region
+  — the rule #925 made structural — while all seven reads and writes of the per-topic subscription index
+  are keyed by the caller's, which `Subscribe` records deliberately: a cross-account subscription is not
+  modeled, and re-keying the indexes would leave `Publish` reading an index the subscriptions are not in.
+  The count follows the index, so `GetTopicAttributes` and `ListSubscriptionsByTopic` read the same
+  entries under the same key and cannot disagree about the same topic; the test asserts both at every
+  step of two `Subscribe` calls and an `Unsubscribe`. Keying the count by the ARN's target instead would
+  have made them disagree by construction — `0` from the count while the list returned the subscriptions.
+
+  **A stored attribute can no longer shadow a derived one**, which reverses the merge order this handler
+  had. `SetTopicAttributes` writes any `AttributeName` into the topic's stored map unchecked, and the
+  stored map was merged *after* the handler's own literals — so a caller could set `TopicArn` and have
+  `GetTopicAttributes` report it, and once the counts became derived could have set
+  `SubscriptionsConfirmed` to any value it liked. The derived members are written last and a test pins
+  the order. That `SetTopicAttributes` accepts a name its own page does not publish — including all five
+  read-only ones — is a separate defect, #1067, and refusing the write is the fix at the right layer;
+  until then the merge order is what stands between a caller and a fabricated subscription count.
+
+  `Policy` stays unmodelled and is now recorded as such: the page publishes it and AWS's sample carries a
+  default policy document, but no SNS operation mints one, so substrate reports a `Policy` only when
+  something stored it — the same shape as KMS's #983. `SignatureVersion` is left alone for the opposite
+  reason, because the page gives its *absence* a meaning: *"If the API response does not include the
+  `SignatureVersion` attribute, it means that the `SignatureVersion` for the topic has value 1."*
+  Assertions read the raw XML entry keys as an ordered slice rather than a decoded map — not because a
+  map cannot tell an absent key from one carrying `"0"` (it can; the constant survived because no test
+  read the attribute at all) but because a map cannot see a duplicated `<entry>`, which is the failure
+  mode the new merge order could have introduced.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

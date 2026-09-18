@@ -394,16 +394,28 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	t, _, err := p.requireTopic(context.Background(), req.Params["TopicArn"])
+	goCtx := context.Background()
+	t, target, err := p.requireTopic(goCtx, req.Params["TopicArn"])
 	if err != nil {
 		return nil, err
 	}
 
-	attrs := map[string]string{
-		"TopicArn":           t.ARN,
-		"SubscriptionsCount": "0",
-	}
+	// The stored attributes go in first and the derived ones over the top, which is the reverse of the
+	// order this handler used before #993. setTopicAttributes writes any AttributeName a caller sends
+	// into this map unchecked, so merging it last let a stored TopicArn shadow the real one — and would
+	// have let a stored SubscriptionsConfirmed shadow the derived count, making the emulator report a
+	// subscription count of the caller's choosing. A derived member is a fact about the topic, so it
+	// wins. (That SetTopicAttributes accepts a name its own page does not publish is a separate defect,
+	// #1067; once it refuses one, this ordering is defense in depth rather than the only guard.)
+	attrs := make(map[string]string, len(t.Attributes)+len(snsDerivedTopicAttributeNames))
 	for k, v := range t.Attributes {
+		attrs[k] = v
+	}
+	derived, err := p.derivedTopicAttributes(goCtx, ctx, t, target.Name)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range derived {
 		attrs[k] = v
 	}
 
