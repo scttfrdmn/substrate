@@ -39,9 +39,18 @@ const kmsKeyManagerCustomer = "CUSTOMER"
 // AWS glosses it "when this value is AWS_KMS, AWS KMS created the key material", against EXTERNAL for
 // imported material and AWS_CLOUDHSM / EXTERNAL_KEY_STORE for a custom key store. Substrate implements
 // neither ImportKeyMaterial nor any custom key store, so no request can produce a key with another
-// origin. Three further members hang off that: ExpirationModel and ValidTo are published "only when
-// Origin is EXTERNAL", and XksKeyConfiguration only for an external key store, so all three are
-// unreachable for the same reason rather than three separate omissions.
+// origin.
+//
+// Since #984 that is true **by construction rather than by omission**, which is a stronger statement and
+// the reason this constant is still a constant. CreateKey decodes Origin and refuses every published value
+// but this one, so a stored key with another origin is unreachable through substrate's own API — where
+// before it was merely unreachable because nothing read the member. [kmsResolveKeyOrigin] holds the
+// refusal and records why it is a refusal rather than a model.
+//
+// Three further members hang off that: ExpirationModel and ValidTo are published "only when Origin is
+// EXTERNAL", and XksKeyConfiguration only for an external key store, so all three are unreachable for the
+// same reason rather than three separate omissions — and now for the same construction, since the request
+// that would make them reachable is refused with a code API_CreateKey publishes.
 const kmsKeyOriginAWSKMS = "AWS_KMS"
 
 // The four key usages AWS publishes, which select which algorithm list a key's metadata carries.
@@ -275,8 +284,9 @@ func kmsKeyMetadata(key *KMSKey) map[string]interface{} {
 	//
 	// Five more members stay absent for reasons of the same kind, and they are listed here rather than
 	// left to be rediscovered. CloudHsmClusterId, CustomKeyStoreId and XksKeyConfiguration need a custom
-	// or external key store; ExpirationModel and ValidTo are published only for an EXTERNAL origin, which
-	// [kmsKeyOriginAWSKMS] records as unreachable. MultiRegionConfiguration is published "only when the
+	// or external key store; ExpirationModel and ValidTo are published only for an EXTERNAL origin. Since
+	// #984 all five are unreachable because CreateKey refuses the request that would produce them, not
+	// because nothing reads the parameter — see [kmsKeyOriginAWSKMS]. MultiRegionConfiguration is published "only when the
 	// value of the MultiRegion field is True" and substrate stores that flag but models no replica, so it
 	// would have to report a primary with an empty ReplicaKeys list — a shape that describes a
 	// multi-Region key nothing can replicate.

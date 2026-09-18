@@ -296,9 +296,15 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		KeySpec     string `json:"KeySpec"`
 		// The deprecated name for KeySpec, decoded because AWS still accepts it as a request parameter
 		// and #985 found that ignoring it silently handed an older-SDK caller a symmetric key.
-		CustomerMasterKeySpec string   `json:"CustomerMasterKeySpec"`
-		MultiRegion           bool     `json:"MultiRegion"`
-		Tags                  []KMSTag `json:"Tags"`
+		CustomerMasterKeySpec string `json:"CustomerMasterKeySpec"`
+		// The three key-material parameters, decoded because #984 found all three accepted and discarded:
+		// a caller asking for a key with no key material was handed a fully usable one. What substrate
+		// does not model is refused rather than stored — see [kmsResolveKeyOrigin].
+		Origin           string   `json:"Origin"`
+		CustomKeyStoreID string   `json:"CustomKeyStoreId"`
+		XksKeyID         string   `json:"XksKeyId"`
+		MultiRegion      bool     `json:"MultiRegion"`
+		Tags             []KMSTag `json:"Tags"`
 	}
 	// The body stays optional — CreateKey has no required parameter, and an empty request creates the
 	// symmetric encryption key the operation's first guidance section describes — but a body that is present
@@ -325,6 +331,14 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	// anything is written — a key spec and a key usage are permanent once the key exists.
 	keySpec, keyUsage, awsErr := kmsResolveKeySpecAndUsage(requestedKeySpec, input.KeyUsage)
 	if awsErr != nil {
+		return nil, awsErr
+	}
+	// The key material's origin, last of the three resolutions and for the reason [kmsResolveKeyOrigin]
+	// records: every condition AWS states about Origin is stated in terms of a key spec, so the spec has to
+	// be settled first even though the conditions are unreachable under the refusal this returns. It
+	// resolves nothing onto the key — substrate creates its own key material, so the only origin a stored
+	// key can have is AWS_KMS, and anything else is refused here rather than discarded (#984).
+	if awsErr := kmsResolveKeyOrigin(input.Origin, input.CustomKeyStoreID, input.XksKeyID); awsErr != nil {
 		return nil, awsErr
 	}
 
@@ -1298,7 +1312,7 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 // context is recorded only under a symmetric encryption key, and note that the response publishes no
 // EncryptionContext member at all: what a caller gets back is the blob that carries it.
 //
-// Two request members remain unmodelled and each is recorded rather than silently absent: DryRun and
+// Two request members remain unmodeled and each is recorded rather than silently absent: DryRun and
 // GrantTokens are seedable-outcome and authorization surface substrate has no equivalent of. Plaintext's
 // published length range, 1-4096, is likewise unenforced, as are the smaller per-spec maxima AWS
 // publishes for the asymmetric specs.
@@ -1387,7 +1401,7 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 // only form of the check that is right cross-account, which is a case AWS explicitly supports here
 // ("Cross-account use: Yes").
 //
-// Three members are still unmodelled and are recorded rather than absent: Recipient (an Nitro enclave
+// Three members are still unmodeled and are recorded rather than absent: Recipient (an Nitro enclave
 // attestation document, which has no substrate counterpart and drives CiphertextForRecipient),
 // GrantTokens, and the DryRun/DryRunModifiers pair — the last of which is why CiphertextBlob is
 // published as Required: No, since it "is required in all cases except when DryRun is true and
@@ -1581,7 +1595,7 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		"CiphertextBlob": string(ciphertext),
 	}
 	// KeyMaterialId, added by #978. This page states no key-type condition on the member — it bounds it
-	// only by the unmodelled Recipient parameter — because the operation already requires a symmetric
+	// only by the unmodeled Recipient parameter — because the operation already requires a symmetric
 	// encryption key. Substrate applies the condition anyway; [kmsReportsKeyMaterialID] records why, and
 	// the short version is that substrate's usage check still admits an RSA key here — #988 — so reporting
 	// unconditionally would invent a value for a response AWS cannot produce.
@@ -1692,7 +1706,7 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 // *changes* a ciphertext's context, which is what AWS documents it for, and the two members are
 // independent in exactly the way the two algorithm members are.
 //
-// Two request members remain unmodelled and are recorded rather than absent: DryRun and GrantTokens.
+// Two request members remain unmodeled and are recorded rather than absent: DryRun and GrantTokens.
 // #978 added the last two response members, SourceKeyMaterialId and DestinationKeyMaterialId, and this
 // is the operation that makes them worth having: they are the only place two key material identities
 // appear in one response, so a caller can see that the data moved between two distinct materials rather

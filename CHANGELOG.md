@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`CreateKey` decodes `Origin`, `CustomKeyStoreId` and `XksKeyId`, and refuses what substrate does
+  not model rather than discarding it** (#984). All three members were accepted and thrown away, so
+  `CreateKey` with `Origin: "EXTERNAL"` — the first call of every key-import workflow — answered `200`
+  with `Origin: "AWS_KMS"`, `KeyState: "Enabled"` and `Enabled: true`. A consumer got a fully usable
+  key where AWS answers one in `PendingImport` that no cryptographic operation will touch, so the
+  workflow passed at step one and failed at step two, where `GetParametersForImport` turns out not to
+  exist either. That is #765's failure mode spread across three calls: the emulator agreed with a
+  request it did not understand.
+
+  Substrate models neither imported key material nor a custom key store, and per CLAUDE.md's boundary
+  that is defensible — the key material itself is resource-internal. **The request parameters are
+  not**, so the choice was between modelling them, refusing them, and what substrate was doing.
+  Accepting a parameter and discarding it is the worst of the three, because it is the only one a
+  caller cannot detect.
+
+  **The refusal is two refusals, and they carry different codes**, because they answer different
+  questions about whether the caller did anything wrong — and both are `400`, so the code is the only
+  thing that can say which. An `Origin` outside the published four, and an `XksKeyId` sent with any
+  origin but `EXTERNAL_KEY_STORE`, are refused with `ValidationError`/400: both are refusals real KMS
+  would also make, the second on the page's own sentence *"it is not valid for KMS keys with any other
+  `Origin` value"*. A published `Origin` that is not `AWS_KMS`, and any `CustomKeyStoreId`, are refused
+  with `UnsupportedOperationException`/400 — published on `API_CreateKey` and glossed *"a specified
+  parameter is not supported or a specified resource is not valid for this operation"* — because real
+  KMS honours those requests and substrate does not. The message says so, since a consumer whose import
+  workflow stops here needs to know it has reached a boundary of the emulator rather than written a bad
+  request. Collapsing the two would leave a caller unable to tell a typo from a scope boundary: one is
+  fixed by editing the request, the other by not testing that path here.
+
+  `CustomKeyStoreNotFoundException` is the near miss for the store parameter and is deliberately not
+  used, although `API_CreateKey` publishes it: it says *no store has this ID*, which invites the caller
+  to create one, and `CreateCustomKeyStore` does not exist either — so the caller would loop.
+
+  Three consequences are recorded rather than implemented, because a constraint no request can reach is
+  not enforcement and writing one implies the parameter is modelled: `CustomKeyStoreId`'s 1–64 length,
+  `XksKeyId`'s 1–128 length and pattern, and the spec-dependent conditions on `Origin` itself. The
+  resolver is nevertheless ordered after the key spec resolves, so that whichever of those is ever
+  modelled has a resolved spec to read. And five of the `KeyMetadata` members #974 recorded as absent —
+  `ExpirationModel`, `ValidTo`, `CloudHsmClusterId`, `CustomKeyStoreId`, `XksKeyConfiguration` — are now
+  unreachable **by construction** rather than because nothing read the parameter, which is a stronger
+  statement and the reason `Origin` remains a constant.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
