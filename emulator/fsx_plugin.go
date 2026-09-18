@@ -126,11 +126,7 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{
-				Code:       "InvalidRequest",
-				Message:    "invalid JSON body: " + err.Error(),
-				HTTPStatus: http.StatusBadRequest,
-			}
+			return nil, fsxInvalidBody()
 		}
 	}
 	if input.FileSystemType == "" {
@@ -212,7 +208,9 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 		FileSystemIDs []string `json:"FileSystemIds"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, fsxInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -283,11 +281,7 @@ func (p *FSxPlugin) deleteFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{
-				Code:       "InvalidRequest",
-				Message:    "invalid JSON body: " + err.Error(),
-				HTTPStatus: http.StatusBadRequest,
-			}
+			return nil, fsxInvalidBody()
 		}
 	}
 	if input.FileSystemID == "" {

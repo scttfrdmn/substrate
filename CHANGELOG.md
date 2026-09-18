@@ -254,6 +254,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code as a missing refusal.
 
 ### Fixed
+- **The last sixty sites refuse a body that will not parse, and four of them were answering a code
+  their service does not publish** (#1007, third slice — closes the issue). Twenty-three files spelled
+  the refusal as an inline `&AWSError{…}` literal at every site instead of through a constructor, and
+  that is why this slice is the one that found wrong codes: a code repeated inline twenty-six times is a
+  code no reviewer ever sees twice on one screen, so a borrowed one survives indefinitely. The sixty
+  refusals now go through twenty-one constructors collected in `emulator/invalid_body_refusals.go`, on the
+  reasoning that the thing under review is one decision repeated twenty-one times — *which code does this
+  service publish for a body that will not parse?* — and a reviewer reading them side by side can see a
+  borrowed code that a reviewer reading one plugin cannot. That is how the four below were found. The
+  other two of the twenty-three files needed no constructor: OpenSearch's refusal is not an `AWSError` at
+  all, and Batch already had `batchClientError`.
+
+  **RAM answered `MalformedQueryString`/400, a code absent from RAM entirely**; it is published at
+  **404** on the Query-protocol page and describes the URL query string, not a body. **CloudTrail
+  answered `InvalidParameterCombinationException`/400**, which means two parameters that cannot be used
+  together and is not published on `LookupEvents` at all — a body that will not parse yields no
+  parameters to combine. **Glue answered `InvalidParameterValueException`/400**, absent from its Common
+  Errors page, from `CreateDatabase`/`GetTables`/`StartJobRun`, and from all thirty-six
+  `AWSGlueException` subclasses; Glue publishes `InvalidInputException`, *"The input provided was not
+  valid."*, on every operation page. **FSx answered a bare `InvalidRequest`/400**, absent from its
+  Common Errors page, from `DescribeFileSystems`, and from all thirty-five `AmazonFSxException`
+  subclasses — it is an **Amazon S3** code, the likely provenance of the mistake. FSx publishes
+  `BadRequest`/400; its Java class is `BadRequestException` but the wire code carries no suffix, so the
+  file's no-suffix instinct was right and only the stem was wrong.
+
+  All four replacements are the code the service itself publishes. Where the choice was between an
+  operation page and the common-errors list — RAM and CloudTrail both publish `InvalidParameterException`
+  on the operation — the common code wins on a stated ground: an operation page normally outranks the
+  common list, but not when the code it publishes describes a *different condition*. Naming a parameter
+  for a body that never deserialized sends the caller to inspect a value substrate never read.
+
+  **Only these four changed a code, and then the correction had to spread past the sixty sites.**
+  Correcting the new sites alone would have left RAM, CloudTrail, Glue, FSx and WAFv2 each answering *two
+  different codes for the identical caller error* — the one-plugin-two-codes split #950 removed, and a
+  direct violation of the invariant the inventory test states. So the forty-six pre-existing body-parse
+  guards in those five services were folded in as well (RAM 1, CloudTrail 6, Glue 26, FSx 2, WAFv2 11),
+  found by matching their `"invalid JSON"` message text rather than by hand. That also removed forty-six
+  `err.Error()` leaks into the message, since every one of them reported the decoder's own wording.
+
+  What still answers the old code is the **required-member** class, not the body-parse one: Glue's
+  `DatabaseInput.Name` check and three `resolveGlueARN` failures, FSx's `FileSystemId` check, and six
+  WAFv2 `WAFInvalidParameterException` required-member literals — the last inconsistent with WAFv2's own
+  #755 reading, under which an omitted member is `ValidationError`. Those are #950 items, filed
+  separately; changing them here would have merged a code decision per operation into a mechanical sweep.
+
+  **WAFv2 is a judgement recorded rather than a correction.** Its `WAFInvalidParameterException` *is*
+  published at 400, so unlike the four above it is not sourced from nowhere; the body-parse sites answer
+  `ValidationError`/400 because substrate already drew this line and tested it. From #755,
+  `wafv2_createipset_validation_test.go` records that an omitted required member is `ValidationError`
+  while a present-but-invalid *value* is `WAFInvalidParameterException` — and a body that will not parse
+  yields no members at all. AWS glosses the latter *"AWS WAF didn't recognize a parameter in the
+  request"*, all four published examples concern a value that was read, and it carries `Field`,
+  `Parameter` and `Reason` members substrate cannot truthfully fill for a request that never
+  deserialized. `WAFInvalidRequestException` does not exist.
+
+  **DynamoDB's `SerializationException` is kept although no AWS reference publishes it**, and that is
+  recorded rather than silently relied on. It is absent from the Common Errors page, the developer
+  guide's error list, `Programming.LowLevelAPI.html` and DynamoDB's model; the only AWS-published uses
+  of the name are a Lambda client-side helper and a Smithy Kotlin serde class. On the wire it arrives
+  under the Coral namespace (`com.amazon.coral.service#SerializationException`) rather than DynamoDB's
+  own `com.amazonaws.dynamodb.v20120810#`, because the protocol layer rejects the body before the
+  request reaches the service — which is why the service never documents it. It is retained for wire
+  fidelity, since an SDK's retry classifier reads the code it receives and not the one the page omits.
+  Its provenance is observed behaviour, not the API model. **OpenSearch's three sites are not an AWS
+  control-plane API at all** but the domain's own REST search API, so the refusal is not an `AWSError`:
+  `json_parse_exception`/400, following the file's convention of the engine's lowercased exception name,
+  with engine behaviour as the stated provenance.
+
+  **A structural finding that outlives this issue: AWS has consolidated the JSON-protocol Common Errors
+  boilerplate.** The RAM, CloudTrail, DynamoDB, Glue, FSx and WAFv2 pages are now byte-identical
+  fifteen-code lists, distinct from EC2's longer Query-protocol list. The shared list publishes
+  `ValidationError`/400 — note `ValidationError`, not `ValidationException` — and its only body-scoped
+  code, `MalformedHttpRequestException`/400, is about decompression and content-encoding rather than
+  JSON syntax. Any code in the tree sourced from a per-service Common Errors page before the
+  consolidation may now cite a page that no longer says it; filed as its own sweep.
+
+  **Which tail sites must still answer 200 for an absent body was measured, not reasoned.** Every tail
+  operation was called with no body and the ones answering 200 were listed; fourteen of them are what
+  their page publishes and are now pinned by `TestInvalidBodyLeavesAnAbsentBodyAlone`. Nine more answer
+  200 where their page marks a member `Required: Yes`, so they are deliberately **not** pinned: SSO's
+  three account-assignment operations, `ListIdentityPools` and `ListUserPools` (`MaxResults`), Glue
+  `GetTables` (`DatabaseName`), WAFv2 `ListWebACLs` and `ListIPSets` (`Scope`), and DynamoDB `GetRecords`
+  (`ShardIterator`). Asserting the tree's current answer there would have pinned a defect as a
+  requirement. They are the missing-required-member class and are filed separately.
+
+  **The issue's "no bare `_ =`" criterion needed a script, because `errcheck` cannot state it.** To
+  errcheck, a bare `_ = json.Unmarshal(req.Body, …)` and a `//nolint:errcheck` carrying a written reason
+  are the same construct: the assignment is explicit, so the error is "handled". Telling those two apart
+  is the entire point, so it is enforced by `scripts/check-discarded-unmarshal.sh` and
+  `make discarded-unmarshal-check`, in the shape `scripts/check-doc-versions.sh` established. Its
+  allowlist is keyed by file and every entry must carry its reason, because the reason is what is being
+  reviewed — an allowlist without one is a suppression. It holds exactly one entry, the retained
+  `sqs_messageattributes.go` discard. The check flags all sixty sites on the pre-change tree and passes
+  on this one.
 - **Twenty more sites refuse a body that will not parse, in the twelve services whose own
   `*InvalidBody()` constructor already held the answer** (#1007, second slice). Lambda (4), Step Functions
   (3), KMS (2), SES v2 (2), Firehose (2), and one each in EventBridge, EFS, Systems Manager, Service

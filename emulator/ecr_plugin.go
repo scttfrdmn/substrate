@@ -196,7 +196,9 @@ func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (
 		RepositoryNames []string `json:"repositoryNames"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, ecrInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()

@@ -134,7 +134,9 @@ func (p *RedshiftDataPlugin) describeStatement(reqCtx *RequestContext, req *AWSR
 		ID string `json:"Id"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, redshiftDataInvalidBody()
+		}
 	}
 
 	stmt, err := p.loadStatement(reqCtx.AccountID, reqCtx.Region, input.ID)
@@ -160,7 +162,9 @@ func (p *RedshiftDataPlugin) getStatementResult(reqCtx *RequestContext, req *AWS
 		ID string `json:"Id"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, redshiftDataInvalidBody()
+		}
 	}
 
 	stmt, err := p.loadStatement(reqCtx.AccountID, reqCtx.Region, input.ID)

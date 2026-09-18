@@ -230,7 +230,11 @@ func (p *EMRServerlessPlugin) startJobRun(ctx *RequestContext, req *AWSRequest, 
 	var body struct {
 		Name string `json:"name"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, emrInvalidBody()
+		}
+	}
 
 	runID := generateEMRServerlessRunID()
 	arn := fmt.Sprintf("arn:aws:emr-serverless:%s:%s:/applications/%s/jobruns/%s",

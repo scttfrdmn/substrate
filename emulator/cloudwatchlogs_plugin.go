@@ -170,7 +170,9 @@ func (p *CloudWatchLogsPlugin) describeLogGroups(ctx *RequestContext, req *AWSRe
 		Limit              int    `json:"limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cwlInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -470,7 +472,9 @@ func (p *CloudWatchLogsPlugin) describeLogStreams(ctx *RequestContext, req *AWSR
 		Limit               int    `json:"limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cwlInvalidBody()
+		}
 	}
 	if body.LogGroupName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
@@ -620,7 +624,9 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 		Limit         int    `json:"limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cwlInvalidBody()
+		}
 	}
 	if body.LogGroupName == "" || body.LogStreamName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName and logStreamName are required", HTTPStatus: http.StatusBadRequest}
@@ -702,7 +708,9 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 		Limit          int      `json:"limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cwlInvalidBody()
+		}
 	}
 	if body.LogGroupName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}

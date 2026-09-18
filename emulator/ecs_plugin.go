@@ -218,7 +218,9 @@ func (p *ECSPlugin) describeClusters(ctx *RequestContext, req *AWSRequest) (*AWS
 		Clusters []string `json:"clusters"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, ecsInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -450,7 +452,9 @@ func (p *ECSPlugin) listTaskDefinitions(ctx *RequestContext, req *AWSRequest) (*
 		FamilyPrefix string `json:"familyPrefix"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, ecsInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -760,7 +764,9 @@ func (p *ECSPlugin) listServices(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		Cluster string `json:"cluster"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, ecsInvalidBody()
+		}
 	}
 	if body.Cluster == "" {
 		body.Cluster = "default"
@@ -970,7 +976,9 @@ func (p *ECSPlugin) listTasks(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		Cluster string `json:"cluster"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, ecsInvalidBody()
+		}
 	}
 	if body.Cluster == "" {
 		body.Cluster = "default"

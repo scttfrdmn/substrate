@@ -308,7 +308,11 @@ func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest)
 		MaxResults int    `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, athenaInvalidBody()
+		}
+	}
 
 	goCtx := context.Background()
 	idsKey := "query_ids:" + ctx.AccountID + "/" + ctx.Region
@@ -473,7 +477,11 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 		MaxResults int    `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, athenaInvalidBody()
+		}
+	}
 
 	goCtx := context.Background()
 	namesKey := "workgroup_names:" + ctx.AccountID + "/" + ctx.Region

@@ -635,7 +635,11 @@ func (p *BatchPlugin) terminateJob(ctx *RequestContext, req *AWSRequest, jobID s
 		JobID  string `json:"jobId"`
 		Reason string `json:"reason"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, batchClientError("the request body is not valid JSON")
+		}
+	}
 	if jobID == "" {
 		jobID = body.JobID
 	}

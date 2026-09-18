@@ -510,7 +510,11 @@ func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, ap
 		Description string `json:"description"`
 	}
 	// Ignore decode error — description is optional and body may be empty.
-	_ = json.Unmarshal(req.Body, &input)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, appsyncInvalidBody()
+		}
+	}
 
 	keyID := generateAppSyncAPIKeyID()
 	key := AppSyncAPIKey{
