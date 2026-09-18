@@ -10485,8 +10485,8 @@ Resource Groups Tagging API operations are free.
 | Operation | Notes |
 |-----------|-------|
 | CreateTopic | Decodes `Tags`, in either published spelling |
-| GetTopicAttributes | |
-| SetTopicAttributes | |
+| GetTopicAttributes | Four attributes derived, the rest passed through as stored |
+| SetTopicAttributes | Any attribute name is accepted and stored |
 | DeleteTopic | |
 | ListTopics | Base64 pagination token |
 | Subscribe | Supports lambda, sqs, http, https, email protocols |
@@ -10638,6 +10638,76 @@ it that way is **substrate's reading**, corroborated by `API_Unsubscribe` publis
 the same code and carrying no such sentence — AWS states idempotence where it means
 it. A malformed ARN is still `InvalidParameter`/400: idempotence licenses a topic
 that does not exist, not a string that is not an ARN.
+
+### Which attributes GetTopicAttributes reports
+
+`API_GetTopicAttributes` publishes sixteen attribute names, and substrate's answer
+splits in two: four are **derived** from state on every read, and the rest are
+reported only if `CreateTopic` or `SetTopicAttributes` stored them.
+
+| Attribute | Substrate's answer |
+|-----------|--------------------|
+| `TopicArn` | Derived — the ARN the record is keyed by |
+| `Owner` | Derived — the account segment of that ARN, matching the page's sample |
+| `SubscriptionsConfirmed` | Derived — the length of the per-topic subscription index |
+| `SubscriptionsPending` | Derived — always `0`; see below |
+| `SubscriptionsDeleted` | **Not reported**; see below |
+| `Policy` | Stored only; substrate mints no default topic policy |
+| `DeliveryPolicy`, `EffectiveDeliveryPolicy`, `DisplayName`, `SignatureVersion`, `TracingConfig`, `KmsMasterKeyId` | Stored only |
+| `ArchivePolicy`, `BeginningArchiveTime`, `ContentBasedDeduplication`, `FifoTopic` | Stored only (FIFO) |
+
+Until #993 none of that was true. The handler reported a **`SubscriptionsCount`**
+member that appears nowhere on the page — not in the attribute list, not in the
+sample response, not in any SDK's shape — hardcoded to `"0"`, and reported none of
+the three subscription counts AWS does publish. So a caller reading the attribute AWS
+documents got nothing back and a caller reading the invented one got a constant no
+writer ever touched.
+
+**`SubscriptionsPending` is always `0`, and that is a fact rather than a placeholder.**
+Substrate implements no `ConfirmSubscription`, and `Subscribe` hands back a real
+subscription ARN rather than the `"pending confirmation"` string `API_Subscribe`
+documents for a subscription awaiting confirmation. Every subscription this emulator
+mints is therefore confirmed the moment `Subscribe` returns, so the confirmed/pending
+split is decidable rather than guesswork.
+
+**`SubscriptionsDeleted` is omitted rather than reported as `0`.** `Unsubscribe`
+deletes the subscription record and filters both indexes rather than tombstoning it,
+and `SNSSubscription` carries no status, so nothing tracks a deletion. A monotonic
+counter incremented in `Unsubscribe` would be cheap, but the page publishes only
+*"The number of deleted subscriptions for the topic"* and says nothing about how long
+a deleted subscription stays counted — so a never-decaying counter would be
+substrate's invention rather than its reading of the page. Omitting the member claims
+nothing, which is the honest-empty rule. That choice is **substrate's**.
+
+**`SubscriptionsConfirmed` is keyed by the caller's account and Region**, not by the
+ARN's. The topic record is keyed by the ARN's own account and Region — the rule #925
+made structural — while every read and write of the per-topic subscription index is
+keyed by the caller's, which `Subscribe` records deliberately: a cross-account
+subscription is not modeled, and re-keying the indexes would leave `Publish` reading
+an index the subscriptions are not in. The count follows the index, because that
+makes `GetTopicAttributes` and `ListSubscriptionsByTopic` read the same entries under
+the same key and so unable to disagree about the same topic. Keying the count by the
+ARN's target instead would have made them disagree by construction: `0` from the
+count while the list returned the subscriptions.
+
+**A derived attribute cannot be shadowed by a stored one.** `SetTopicAttributes`
+accepts any `AttributeName` and stores it unchecked, and the handler used to merge
+the stored map *after* its own literals — so a caller could set `TopicArn` and have
+`GetTopicAttributes` report it, and once the counts became derived could have set
+`SubscriptionsConfirmed` to any value it liked. The derived members are written last
+for that reason. That `SetTopicAttributes` accepts a name its own page does not
+publish — including the five read-only ones — is a separate defect, #1067; once it
+refuses one, this ordering becomes defence in depth rather than the only guard.
+
+**`Policy` is unmodelled, not omitted by accident.** The page publishes it and AWS's
+sample response carries a default policy document naming eight actions, but no SNS
+operation mints one, so substrate reports a `Policy` only when something stored it.
+This is the same shape as KMS's #983 — a default resource policy that no operation
+creates — and is recorded here rather than answered with an invented document.
+`SignatureVersion` is the one attribute whose absence the page gives a meaning:
+*"If the API response does not include the `SignatureVersion` attribute, it means that
+the `SignatureVersion` for the topic has value 1."* Not inventing it is what the page
+asks for.
 
 ### CloudFormation resource types
 
