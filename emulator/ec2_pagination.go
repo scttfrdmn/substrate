@@ -16,13 +16,14 @@ import (
 //
 // Sixteen is audited rather than estimated, and this comment used to say "roughly twenty" —
 // #1024's docs criterion, since an estimate invites the reader to assume the sweep was complete.
-// #917 converted seven of the sixteen and #1024 converts the remaining nine, in three parts by
-// published range. DescribeInstanceStatus, DescribeSpotPriceHistory and DescribeFleets — the three
-// whose pages publish no range at all — were the first part, and the five publishing a floor of
-// five are the second: DescribeInternetGateways, DescribeNatGateways, DescribeRouteTables,
-// DescribeInstanceTypes and DescribeInstanceTypeOfferings. DescribeLaunchTemplates alone remains,
-// and it is a third part rather than a sixth row of the second because its page is the one whose
-// floor is not five. docs/services.md lists the range each publishes.
+// #917 converted seven of the sixteen and #1024 the remaining nine, in three parts by published
+// range. DescribeInstanceStatus, DescribeSpotPriceHistory and DescribeFleets — the three whose pages
+// publish no range at all — were the first part; the five publishing a floor of five were the
+// second: DescribeInternetGateways, DescribeNatGateways, DescribeRouteTables, DescribeInstanceTypes
+// and DescribeInstanceTypeOfferings; and DescribeLaunchTemplates was a third part of its own rather
+// than a sixth row of the second, because its page is the one whose floor is not five. **No routed
+// describe publishing both parameters implements neither any longer.** docs/services.md lists the
+// range each publishes.
 //
 // What AWS publishes about the mechanism is stated once, in Query-Requests.html → Pagination,
 // rather than per operation:
@@ -56,9 +57,10 @@ import (
 // API_DescribeInstanceStatus, API_DescribeSpotPriceHistory and API_DescribeFleets from #1024 —
 // each saying only "The maximum number of items to return for this request", type Integer, no
 // minimum and no maximum. Three of #917's nine publish "Valid Range: Minimum value of 5. Maximum
-// value of 1000." and two state a range in prose; of #1024's remaining six, five publish a floor
-// of five ([ec2MinPublishedMaxResults]) and DescribeLaunchTemplates alone publishes 1 to 200.
-// Substrate does not borrow 5–1000 from the siblings, per #671: only what the API model states.
+// value of 1000." and two state a range in prose; of #1024's six, five publish a floor of five
+// ([ec2MinPublishedMaxResults]) and DescribeLaunchTemplates alone publishes 1 to 200
+// ([ec2MinLaunchTemplateResults]). Substrate does not borrow 5–1000 from the siblings, per #671:
+// only what the API model states.
 //
 // The floor of one is therefore **substrate's reading**, and it is the one bound the published
 // pagination rule forces. A caller is told to "continue to call the action until nextToken is
@@ -82,9 +84,9 @@ const ec2NoMaxResultsCeiling = 0
 // fact is one fact, not eight that happen to agree.
 //
 // It is not the family's floor, only these eight pages': DescribeLaunchTemplates and
-// DescribeLaunchTemplateVersions publish 1, GetSpotPlacementScores publishes 10
-// ([ec2SPSMinMaxResults]), DescribeTags' own floor doubles as that operation's default page size
-// ([ec2MinTagResults]), and the seven pages publishing no range at all use
+// DescribeLaunchTemplateVersions publish 1 ([ec2MinLaunchTemplateResults]), GetSpotPlacementScores
+// publishes 10 ([ec2SPSMinMaxResults]), DescribeTags' own floor doubles as that operation's default
+// page size ([ec2MinTagResults]), and the seven pages publishing no range at all use
 // [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling] instead.
 const ec2MinPublishedMaxResults = 5
 
@@ -101,6 +103,25 @@ const ec2MinPublishedMaxResults = 5
 const (
 	ec2MaxPublishedMaxResults1000 = 1000
 	ec2MaxPublishedMaxResults100  = 100
+)
+
+// ec2MinLaunchTemplateResults and ec2MaxLaunchTemplateResults are the range both launch-template
+// pages publish: 1 to 200.
+//
+// API_DescribeLaunchTemplates states it twice — "Valid Range: Minimum value of 1. Maximum value of
+// 200." and, in prose, "This value can be between 1 and 200" — and
+// API_DescribeLaunchTemplateVersions states the prose sentence alone. One pair serves both because
+// each page publishes the range itself, so neither operation is borrowing the other's bound, which is
+// the distinction #671 turns on: the floor of one here is published, where the same floor at the
+// seven pages carrying no range at all is substrate's reading ([ec2MinUnpublishedMaxResults]).
+//
+// The ceiling has a second job at DescribeLaunchTemplateVersions, which pages at it when a request
+// names no MaxResults. That is that operation's default and not a published one — its sibling reads
+// an absent MaxResults as the whole listing, per [ec2MaxResults] — so the two uses are the same
+// number for different reasons and both are stated at their call sites.
+const (
+	ec2MinLaunchTemplateResults = 1
+	ec2MaxLaunchTemplateResults = 200
 )
 
 // ec2MaxResults reads MaxResults against the range minResults..maxResults, where a maxResults

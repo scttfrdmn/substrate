@@ -34,19 +34,6 @@ const (
 	ec2LTVersionDefault = "$default"
 )
 
-// ec2MaxLaunchTemplateVersionResults is the upper bound on
-// DescribeLaunchTemplateVersions' MaxResults, per its API reference ("Valid
-// values: Minimum value of 1. Maximum value of 200").
-const ec2MaxLaunchTemplateVersionResults = 200
-
-// ec2MinLaunchTemplateVersionResults is the lower bound on the same parameter, from the same
-// sentence.
-//
-// It is one where DescribeTags' floor is five, which is why #917's shared [ec2MaxResults] takes
-// the range as arguments: the bounds are per operation, and four of the pages it covers publish
-// none at all.
-const ec2MinLaunchTemplateVersionResults = 1
-
 // ec2ResolveTemplateVersion returns the version of lt that spec names.
 //
 // An empty spec resolves to the template's *default* version, not its latest. That
@@ -568,16 +555,18 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 	}
 	filters := extractEC2Filters(req.Params)
 
-	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinLaunchTemplateVersionResults, ec2MaxLaunchTemplateVersionResults)
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinLaunchTemplateResults, ec2MaxLaunchTemplateResults)
 	if awsErr != nil {
 		return nil, awsErr
 	}
 	// Naming no MaxResults pages at the published maximum rather than answering the whole
 	// listing, which is DescribeTags' default too and is kept for the same reason (#917): this
 	// page publishes no unpaginated default, and paging at 200 is the behavior the operation
-	// shipped with.
+	// shipped with. Its sibling DescribeLaunchTemplates reads an absent MaxResults as the whole
+	// listing instead (#1024) — the two pages share a published range and not a default, because
+	// neither publishes one and each keeps what it shipped with.
 	if maxResults == 0 {
-		maxResults = ec2MaxLaunchTemplateVersionResults
+		maxResults = ec2MaxLaunchTemplateResults
 	}
 	offset, awsErr := ec2NextTokenOffset(req.Params)
 	if awsErr != nil {
