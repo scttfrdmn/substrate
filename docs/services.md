@@ -1727,6 +1727,61 @@ and identifiers a consumer wrote the template to get.
 deletes by it, so a template that wires its resources together needs no change —
 and two stacks from one template can now be torn down independently.
 
+### `PhysicalResourceId` is the stored identifier, and is *not* per type
+
+`Ref` is resolved [per resource type](#what-ref-returns). `PhysicalResourceId` is
+not, and the asymmetry is deliberate (#837). The three operations that report it —
+`DescribeStackResources`, `DescribeStackEvents` and `DescribeStackResourceDrifts` —
+all report the identifier substrate stored when it deployed the resource: a bucket or
+role name, a VPC or instance ID, a generated name from the table above. Nothing is
+derived at render time.
+
+The question this settles was raised by #827, which made `Ref` per-type and scoped
+`PhysicalResourceId` out. The natural inference — `Ref`'s documented value differs by
+type, so `PhysicalResourceId`'s probably does too — **does not survive checking the
+API reference**, and that is the whole of the reason:
+
+- `API_StackResource` publishes **one** description for every type: *"The name or
+  unique identifier that corresponds to a physical instance ID of a resource
+  supported by CloudFormation."* `Type: String`, `Required: No`. There is no per-type
+  `PhysicalResourceId` documented anywhere in the API reference, the way each type's
+  Template Reference page documents its own `Ref`.
+- The one type AWS names explicitly it names on `API_DescribeStackResources`: *"for an
+  Amazon Elastic Compute Cloud (EC2) instance, `PhysicalResourceId` corresponds to
+  the `InstanceId`."* That is a name-or-ID, and it is what substrate already stores.
+- The only worked values AWS publishes are that page's own sample response —
+  `MyStack_DB1` and `MyStack_ASG1`. Generated **names**, not ARNs.
+
+So a per-type `PhysicalResourceId` would be substrate inventing a divergence AWS does
+not publish, which is the opposite of what #827 did: `Ref` was made per-type *because*
+AWS documents it per type. **A per-type audit is therefore not deferred — it has no
+citable source to be conducted against**, and that is recorded here rather than left
+as an open question.
+
+The round trip AWS describes does work: the value the describes report is accepted
+back by `DescribeStackResources`' own `PhysicalResourceId` selector, which is the use
+the page puts it to (*"You can pass the EC2 `InstanceId` to `DescribeStackResources`
+to find which stack the instance belongs to"*). Naming both it and `StackName` in one
+request is a `ValidationError`, as published. `DescribeStackResource` (singular) and
+`ListStackResources` are **not implemented**.
+
+Two arguments for keeping the stored value were made when this was filed and are
+corrected here rather than repeated, because both were checkable and neither held
+(#819):
+
+- **A redeploy does not recognise a resource by its physical ID.** It matches on
+  logical ID, and recognition of an unchanged resource is `clearUnchangedRedeploys`,
+  whose reason the physical ID cannot be the key is that a refused create returns
+  none at all.
+- **Not *every* tag state key is composed from the physical ID.** The four ELBv2
+  types find their record by ARN and bypass the stamp's target resolver entirely.
+
+What does still hold is that most `aws:cloudformation:*` tag state keys *are* composed
+from it, which is why the stored value is the one thing a later change must leave
+alone: derive at render time if a type ever needs a different reported value, and the
+safety rule is that a stored identifier may change only if no tag state key is
+composed from it and it is stable across a redeploy.
+
 ### DeleteStack deletes the stack's resources
 
 `DeleteStack` sweeps the resources the stack deployed before removing the stack
