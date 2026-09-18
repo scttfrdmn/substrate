@@ -647,6 +647,47 @@ func kmsInvalidKeyUsageForOperation(key *KMSKey) *AWSError {
 	}
 }
 
+// kmsInvalidKeySpecForDataKey reports that GenerateDataKey or GenerateDataKeyWithoutPlaintext named a key
+// whose spec cannot wrap a data key.
+//
+// InvalidKeyUsageException at 400, and **the code is substrate's reading of an unsplit bullet rather than a
+// published rule**, which is the one thing about this refusal worth stating twice. Neither of the gloss's
+// two bullets describes this condition exactly: the key's KeyUsage *is* ENCRYPT_DECRYPT, which is what the
+// operation wants, and the operation specifies no encryption algorithm for the second bullet to find
+// incompatible. What is wrong is the KeySpec alone, which the second bullet names as its subject by a route
+// it does not describe.
+//
+// It is still the right answer, on three grounds. It is the only code either page publishes about a key
+// being the wrong kind for the operation — the other eight are two 500s, a grant token, a dry run, a key
+// state, a disabled key, a missing key and an internal error. The restriction it enforces is published
+// four times over between the two pages (see [kmsDataKeyKeySpecError]). And the wrap these operations
+// perform has a fixed algorithm: substrate records SYMMETRIC_DEFAULT into the blob because that is the only
+// thing a symmetric encryption key uses, so the second bullet does fit on the reading that the operation
+// specifies an algorithm implicitly — an RSA key spec is incompatible with the algorithm this operation
+// must use, which is the bullet's sentence with the member elided.
+//
+// The message names the **key spec**, where [kmsInvalidKeyUsageForOperation]'s names the key usage, and
+// that division is what a caller matching on the shared code has to read to tell the two apart. Naming the
+// usage here would be actively wrong: the usage is the one thing about such a key that is correct.
+//
+// It names GenerateDataKeyPair too, because a refusal whose remedy is a different operation is otherwise
+// unactionable — AWS's own text sends an asymmetric caller there ("to generate an asymmetric data key pair,
+// use the GenerateDataKeyPair or GenerateDataKeyPairWithoutPlaintext operation"). Substrate implements
+// neither, and says so in the message rather than only in docs/services.md, because this refusal is the
+// one place a caller is standing when it needs to know: being sent to an operation that answers
+// unknownActionError would be worse than being told the truth here.
+func kmsInvalidKeySpecForDataKey(key *KMSKey) *AWSError {
+	return &AWSError{
+		Code: "InvalidKeyUsageException",
+		Message: fmt.Sprintf(
+			"the KMS key %q has key spec %q, and this operation requires a symmetric encryption KMS key, "+
+				"whose key spec is %s; an asymmetric key wraps no data key, and GenerateDataKeyPair, which "+
+				"AWS directs such a caller to, is not implemented",
+			key.KeyID, key.KeySpec, kmsSymmetricDefaultKeySpec),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsInvalidBody reports that a request body could not be parsed as JSON.
 //
 // The code is ValidationError at 400, from CommonErrors.html, which is where a failure that belongs

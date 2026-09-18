@@ -329,12 +329,18 @@ func kmsPutKeyMaterialID(out map[string]interface{}, member string, key *KMSKey)
 // GenerateDataKey and GenerateDataKeyWithoutPlaintext are the two whose pages state no such condition:
 // the first bounds its member only by the Recipient parameter, the second not at all. Both are held to
 // the same condition anyway, because both operations *require* a symmetric encryption key at AWS, so a
-// page with no condition and a page conditioned on the key type describe the same responses. Substrate
-// does not yet refuse an asymmetric key at either operation — its usage check accepts an RSA key with
-// KeyUsage ENCRYPT_DECRYPT, which is #988 — so the unconditional reading would put a material ID on a
-// response AWS cannot produce, inventing a value for a state that only exists because of that defect.
-// Omitting there is the honest-empty reading #827 established, and it is a workaround: once #988 refuses
-// the request, this condition stops carrying those two sites and becomes a guard at them.
+// page with no condition and a page conditioned on the key type describe the same responses.
+//
+// **At those two sites the condition is now a guard rather than a path**, and the change is #988's. Until
+// it landed, substrate's own check tested the key usage rather than the spec, so an RSA key with KeyUsage
+// ENCRYPT_DECRYPT reached both responses and the unconditional reading would have put a 64-hex material ID
+// on a response AWS cannot produce — a value invented for a state that existed only because of that defect.
+// Omitting it was the honest-empty reading #827 established, and it was explicitly a workaround.
+// [kmsDataKeyKeySpecError] now refuses that request outright, so every key reaching either response
+// satisfies this function and no observable behavior there depends on it. It is kept at those two sites
+// rather than removed for the reason this whole helper exists: five names for one value is the shape in
+// which a condition gets applied at four sites and forgotten at the fifth, and a key written directly into
+// state by a test can still reach them.
 //
 // A key with no stored material ID is treated as having none rather than reporting an empty member,
 // which is the same reading and matters for a key written directly into state by a test.

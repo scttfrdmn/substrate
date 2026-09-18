@@ -54,13 +54,20 @@ import (
 // — every key it accepts has a non-empty algorithm list, by the same equivalence this table rests on —
 // and [kmsPutAlgorithms]' empty-list branch becomes a guard rather than a path.
 //
-// # KeyUsage at the cryptographic operations
+// # KeyUsage and KeySpec at the cryptographic operations
 //
 // InvalidKeyUsageException's gloss has two bullets. #969 implemented the second, an algorithm the key's
 // spec does not admit. [kmsKeyUsageError] is the first — "for encrypting, decrypting, re-encrypting, and
 // generating data keys, the KeyUsage must be ENCRYPT_DECRYPT" — and it is not covered by the second, which
 // is why the two are separate issues: RSA_2048 admits RSAES_OAEP_SHA_256 whatever the key's usage is, so
 // an Encrypt against an RSA *signing* key passed every check substrate had.
+//
+// [kmsDataKeyKeySpecError] is #988, and it is a third thing that code answers, at two of the five
+// operations only. The two GenerateDataKey* operations require a symmetric *encryption* key, so a key that
+// passes both bullets — ENCRYPT_DECRYPT usage, no algorithm member to be incompatible with — is still
+// refused there for its spec alone. That the same code carries all three is AWS's design and not a
+// collision; what it costs is that a caller cannot tell them apart by code, which is why each of the three
+// messages leads with the member the refusal is about.
 
 // kmsKeySpecs is the published set of key specs, in the order API_CreateKey lists them.
 //
@@ -260,6 +267,57 @@ func kmsResolveRequestKeySpec(keySpec, deprecated string) (string, *AWSError) {
 func kmsKeyUsageError(key *KMSKey) *AWSError {
 	if key.KeyUsage != kmsKeyUsageEncryptDecrypt {
 		return kmsInvalidKeyUsageForOperation(key)
+	}
+	return nil
+}
+
+// kmsDataKeyKeySpecError reports the refusal GenerateDataKey and GenerateDataKeyWithoutPlaintext owe a key
+// that is not a symmetric encryption key, or nil when the key can wrap a data key.
+//
+// It exists because [kmsKeyUsageError] is not this check and cannot be made into it. That one tests the
+// usage, and an RSA_2048 key with KeyUsage ENCRYPT_DECRYPT is a pair AWS publishes and CreateKey must
+// accept — so until #988 both operations handed such a caller a wrapped data key and a 200, where AWS
+// states the requirement four times over. API_GenerateDataKey's description: "to generate a data key,
+// specify the symmetric encryption KMS key that will be used to encrypt the data key. You cannot use an
+// asymmetric KMS key to encrypt data keys." Its KeyId gloss, and API_GenerateDataKeyWithoutPlaintext's
+// verbatim: "specifies the symmetric encryption KMS key that encrypts the data key. You cannot specify an
+// asymmetric KMS key or a KMS key in a custom key store."
+//
+// The plural in "data **keys**" is load-bearing and is why this is not a condition on Encrypt as well. The
+// corresponding sentence there is about *data*, and an RSA encryption key encrypts data perfectly well —
+// [kmsCheckEncryptionAlgorithmForKey] is the only thing Encrypt owes such a key. The two operations that
+// call this take no EncryptionAlgorithm member at all, which is the observable form of the same rule: AWS
+// gives the caller no way to name an asymmetric algorithm because no asymmetric key belongs here.
+//
+// **Both operations call it, and the helper is shared for that reason rather than for brevity.** #961
+// found GenerateDataKeyWithoutPlaintext refusing *nothing* while its four siblings each refused
+// something, which is precisely what a per-site check invites; the two pages publish the identical
+// restriction and the identical nine errors, so one guard on one of them would be a new instance of that
+// defect.
+//
+// **It runs after [kmsKeyUsageError] and before [kmsKeyStateError]**, and both halves of that are
+// deliberate. Usage first, because a request naming a signing key is wrong about the operation rather
+// than about the key material, and that refusal is uniform across all five cryptographic operations
+// where this one is uniform across two. Key state after, following [kmsRotationKeySpecError]'s argument
+// exactly: a key spec is permanent — "you can't change the KeySpec after the KMS key is created" — while
+// a key state is transient and has a remedy, so answering the state first would tell a caller that
+// enabling the key makes the call succeed, which for an RSA key is false however many times it retries.
+//
+// [kmsIsSymmetricEncryptionKey] is the predicate rather than a `!isAsymmetric` test, because "symmetric
+// encryption key" is narrower than "symmetric key" and the four HMAC specs are the difference. Those four
+// are unreachable here — an HMAC key's usage is GENERATE_VERIFY_MAC, so [kmsKeyUsageError] refuses it
+// first, and #977 will not pair the spec with ENCRYPT_DECRYPT at all — so sharing the predicate buys no
+// behavior here and is still right: it keeps one published condition in one place, which is the argument
+// [kmsReportsKeyMaterialID] makes one level up about the same predicate. Four specs are reachable, being
+// the four that admit ENCRYPT_DECRYPT: SYMMETRIC_DEFAULT, which passes, and RSA_2048, RSA_3072, RSA_4096
+// and SM2, which do not.
+//
+// The custom-key-store half of AWS's sentence needs no code of its own: since #984 no stored key can have
+// an origin other than [kmsKeyOriginAWSKMS], because CreateKey refuses the request that would produce one.
+// It would be a second condition here the day a custom key store becomes modelable.
+func kmsDataKeyKeySpecError(key *KMSKey) *AWSError {
+	if !kmsIsSymmetricEncryptionKey(key) {
+		return kmsInvalidKeySpecForDataKey(key)
 	}
 	return nil
 }
