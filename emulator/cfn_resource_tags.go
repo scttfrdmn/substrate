@@ -300,8 +300,10 @@ func cfnStampResourceTags(
 	for _, t := range tags {
 		add[t.Key] = t.Value
 	}
+	// skipTagQuota: every key here carries the `aws:` prefix, which the services that publish a
+	// per-resource tag quota exclude from the count (#1000, and [taggingCheckTagQuota]).
 	if err := mergeResourceTags(
-		context.Background(), state, target.namespace, target.stateKey, add, nil,
+		context.Background(), state, target.namespace, target.stateKey, add, nil, skipTagQuota,
 	); err != nil {
 		return true, fmt.Errorf("stamp %s %s: %w", dr.Type, dr.PhysicalID, err)
 	}

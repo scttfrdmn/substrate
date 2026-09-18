@@ -254,6 +254,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code as a missing refusal.
 
 ### Fixed
+- **`TagResources` was the one way to put a resource over its own service's tag quota, and it spanned
+  four services rather than the one the issue named** (#1000). EC2, ELBv2, IAM and Kinesis each enforce a
+  published per-resource tag quota of fifty on their **own** tagging operations, and all four are
+  reachable through the Resource Groups Tagging API, whose shared merge consulted none of them. So a
+  caller could tag a resource past its quota through one API and then find the owning service's own
+  operation refusing every further add — a resource in a state substrate's own reference says cannot
+  exist, reached through substrate's own API. `API_TagResources` states the rule itself (*"Each resource
+  can have up to 50 tags"*), so enforcing it here needed no borrowing from the four services by analogy.
+
+  **This corrects two claims substrate shipped in #965's own record.** The v0.118.0 CHANGELOG entry and
+  `docs/services.md` both said Kinesis was substrate's first per-resource tag quota for any service and
+  that the shared merge covered sixteen services. Both were wrong when written: EC2
+  (`TagLimitExceeded`/400), ELBv2 (`TooManyTags`/400) and IAM (`LimitExceeded`/**409**) each had one
+  already, all three have a tagging-API arm, and the merge covers twenty-three arms. Kinesis was the
+  fourth quota, not the first, which is also why this fix is four times the size the issue expected.
+  Both statements are corrected in place rather than quietly superseded.
+
+  **Each service's own checker is called rather than a shared count**, because the four disagree in ways
+  a shared count would have to flatten: the four codes are four different strings, IAM answers 409 where
+  the other three answer 400, and EC2 and ELBv2 exclude `aws:`-prefixed keys from the count on their own
+  published statement (*"[t]ags with the aws: prefix do not count against your tags per resource
+  limit"*) where no IAM or Kinesis page says anything of the kind. That last divergence is recorded
+  rather than unified, since unifying it would mean overruling one of the four pages; it is unobservable
+  through this API either way, because a reserved key is refused upstream.
+
+  The refusal carries **the owning service's own code**, not one of the two `FailureInfo` enumerates.
+  That member publishes "Valid Values: `InternalServiceException` | `InvalidParameterException`" and, in
+  the same breath, that it "can also include any valid error code returned by the AWS service that hosts
+  the resource that the ARN key represents" — offering `AccessDeniedException`, which is in neither
+  enumerated value, as its example. The prose is the half that fits: neither enumerated code says *this
+  resource is full*, and `InternalServiceException` tells the caller it is "safe to retry", which is the
+  same wrong answer #939 moved the not-found case off. Every other failure still reports an enumerated
+  code, because for those the enumeration loses nothing.
+
+  The count is over the post-merge key set, so a rewrite of a key a resource already carries still
+  succeeds at the quota; `UntagResources` is never checked, since a removal only shrinks the key set,
+  which also leaves a resource written over a quota before this change reportable and removable rather
+  than untouchable. A refusal writes nothing, checked before the merge per #965, and is one entry in the
+  `FailedResourcesMap`, so the other ARNs in the same request are tagged. The nineteen arms whose
+  services publish no quota substrate models are unaffected: SQS's page states a 50-tag limit that
+  `TagQueue` does not enforce either, and enforcing it here alone would make substrate's two tagging
+  APIs disagree in the opposite direction from the defect being fixed. Neither CloudFormation writer
+  sharing this merge enforces the quota — the stamp writes only `aws:`-prefixed keys, and nothing
+  published says what CloudFormation does when propagating a stack's tags would exceed a resource's
+  quota, so that gap is filed as #1077 rather than guessed.
+
 - **The last sixty sites refuse a body that will not parse, and four of them were answering a code
   their service does not publish** (#1007, third slice — closes the issue). Twenty-three files spelled
   the refusal as an inline `&AWSError{…}` literal at every site instead of through a constructor, and
@@ -2918,12 +2964,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the offending key, the current count and the limit, because a caller whose one bad tag is among fifty
   cannot act on a message that will not say which.
 
-  This is substrate's first per-resource tag quota for any service, and the Resource Groups Tagging API
-  does not enforce it: that path merges tags for sixteen services through one helper, and refusing there
-  needs the per-resource `FailedResourcesMap` semantics `TagResources` publishes. So a caller can still
-  push a stream past fifty tags through `TagResources` — filed as #1000 rather than half-done here —
-  after which `AddTagsToStream` refuses every further add, which is the right answer for a stream over
-  quota however it got there.
+  The Resource Groups Tagging API does not enforce it: that path merges tags through one helper that
+  consults no quota, and refusing there needs the per-resource `FailedResourcesMap` semantics
+  `TagResources` publishes. So a caller can still push a stream past fifty tags through `TagResources` —
+  filed as #1000 rather than half-done here — after which `AddTagsToStream` refuses every further add,
+  which is the right answer for a stream over quota however it got there. (**Corrected in #1000**: two
+  claims in this paragraph as first published were wrong. This was not substrate's first per-resource tag
+  quota for any service — EC2, ELBv2 and IAM each enforced one already, and all three are reachable
+  through the tagging API — and the shared merge covers twenty-three services, not sixteen.)
 
 - **Fifteen Kinesis operations refused the form AWS recommends, because substrate decoded no
   `StreamARN` anywhere** (#966). Every operation but `CreateStream` and `ListStreams` publishes

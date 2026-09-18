@@ -1134,6 +1134,24 @@ func TaggingResolveARNForTest(state StateManager, arn string) (ns, key string, e
 	return (&TaggingPlugin{state: state}).resolveARN(arn)
 }
 
+// MergeResourceTagsForTest wraps mergeResourceTags with the quota mode chosen by the caller, the
+// tagging API's and the CloudFormation deployer's shared tag writer.
+//
+// It is exported so a test can assert that the two modes differ on the same record, which is the one
+// claim the wire cannot make: both deployer call sites pass skipTagQuota, and no CloudFormation
+// template in the tree brings a resource near a tag quota, so nothing over the wire distinguishes a
+// gate scoped to the tagging API from one that is simply absent (#1000).
+func MergeResourceTagsForTest(
+	state StateManager, ns, key string,
+	addTags map[string]string, removeKeys []string, enforceQuota bool,
+) error {
+	mode := skipTagQuota
+	if enforceQuota {
+		mode = enforceTagQuota
+	}
+	return mergeResourceTags(context.Background(), state, ns, key, addTags, removeKeys, mode)
+}
+
 // ELBResourceKindFromARNForTest wraps elbResourceKindFromARN, which classifies an ELBv2 ARN as
 // one of the four taggable kinds.
 //
